@@ -956,8 +956,27 @@ def _fixture_kill_group_members(group, signum, anchors, leader=None):
         pending = None
 
         def close_held():
+            # QA12 codex major 2: every held hop closes even when an
+            # earlier close raises; each close runs in its own try and the
+            # FIRST failure re-raises only after all of them ran, so one
+            # raising close cannot strand a later hop's descriptor. A
+            # pending cancellation is re-raised at once (the structural
+            # guard shape: cancellations always propagate, fix 2y codex
+            # F3) -- the hops it leaves unclosed are the price of never
+            # delaying a cancellation. The census-verify hop-close model
+            # probes the ordinary path with a release-then-raise close on
+            # the first hop.
+            first = None
             for pinned in held:
-                os.close(pinned)
+                try:
+                    os.close(pinned)
+                except BaseException as exc:
+                    if isinstance(exc, _PENDING_CANCELLATIONS):
+                        raise
+                    if first is None:
+                        first = exc
+            if first is not None:
+                raise first
 
         try:
             hop, depth = member, 0

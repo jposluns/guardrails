@@ -2448,7 +2448,19 @@ def _self_test_runtime_supervisor_unit(tmp):
     # name sent from a later fork's child branch (a different process) --
     # so no scanned driver can launder a file-read or foreign number into
     # a handoff; new senders route through _pidfd_handoff_fork_send, which
-    # can only ever send the pid its own os.fork() just returned. Aliased
+    # can only ever send the pid its own os.fork() just returned. QA12
+    # (claude m2) widens the recognized child-branch spellings -- the
+    # accepted shape set is exactly `q == 0` / `0 == q` / `not q` bodies
+    # and the ORELSE of `q != 0` / `0 != q` / bare `q` -- and adds the
+    # interleaved-fork rule: ANY later fork binding on the send's own path
+    # between the target's fork and the send revokes the licence, because
+    # the send then also runs in that later fork's child whether or not a
+    # recognized branch follows. QA12 (claude m1) also treats
+    # emit._fixture_pidfd exactly like a bare os.pidfd_open (an unproved
+    # opener; aliases included), and a whole-file SCM_RIGHTS sweep below
+    # requires socket.send_fds/sendmsg to appear ONLY inside
+    # _pidfd_handoff_send, the leg-1j misuse fixture, and (in
+    # _opf_emit.py) _fixture_send_subject. Aliased
     # spellings that would dodge the name
     # match -- getattr(os, "kill"), k = os.kill, po = os.pidfd_open -- are
     # refused, except an alias bound in a scope that patch.object-replaces
@@ -2471,7 +2483,8 @@ def _self_test_runtime_supervisor_unit(tmp):
     host_tree = ast.parse(Path(__file__).read_bytes())
 
     def scan_scope(scope, owner, total, faults=faults):
-        aliasable = ("kill", "killpg", "pthread_kill", "pidfd_open")
+        aliasable = ("kill", "killpg", "pthread_kill", "pidfd_open",
+                     "_fixture_pidfd")
         bindings, calls, nested, aliases = {}, [], [], []
         arguments = scope.args
         for argument in (tuple(getattr(arguments, "posonlyargs", ()))
@@ -2507,17 +2520,40 @@ def _self_test_runtime_supervisor_unit(tmp):
                     and value.func.id == "_pidfd_handoff_fork_send"))
 
         def child_branch(test):
-            # `if <fork-bound name> == 0:` is the fork CHILD's branch: code
-            # there runs in a DIFFERENT process, whose own child a name the
-            # enclosing process fork-bound never is (QA11 codex blocker).
-            if (isinstance(test, ast.Compare) and isinstance(test.left, ast.Name)
-                    and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)
-                    and len(test.comparators) == 1
-                    and isinstance(test.comparators[0], ast.Constant)
-                    and test.comparators[0].value == 0
-                    and fork_bound(test.left.id, test.lineno)):
-                return test.left.id
-            return None
+            # The fork CHILD's branch, for the ordinary spellings (QA11
+            # codex blocker; widened QA12 claude m2): the child runs the
+            # BODY of `q == 0` / `0 == q` / `not q` and the ORELSE of
+            # `q != 0` / `0 != q` / bare `q`. Code in a child branch runs
+            # in a DIFFERENT process, whose own child a name the enclosing
+            # process fork-bound never is. The accepted shape set is
+            # exactly these six spellings; anything else (a walrus, a
+            # boolean composite, a comparison through a temporary) is NOT
+            # recognized -- the interleaved-fork rule below and the
+            # sender's own kernel proof are the backstop. Returns
+            # (name, branch) with branch "body" or "orelse", or None.
+            def forked_name(node, lineno=test.lineno):
+                if isinstance(node, ast.Name) and fork_bound(node.id, lineno):
+                    return node.id
+                return None
+
+            if isinstance(test, ast.Compare) and len(test.ops) == 1 \
+                    and len(test.comparators) == 1:
+                left, right = test.left, test.comparators[0]
+                name = None
+                if isinstance(right, ast.Constant) and right.value == 0:
+                    name = forked_name(left)
+                elif isinstance(left, ast.Constant) and left.value == 0:
+                    name = forked_name(right)
+                if name is not None and isinstance(test.ops[0], ast.Eq):
+                    return name, "body"
+                if name is not None and isinstance(test.ops[0], ast.NotEq):
+                    return name, "orelse"
+                return None
+            if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                name = forked_name(test.operand)
+                return None if name is None else (name, "body")
+            name = forked_name(test)
+            return None if name is None else (name, "orelse")
 
         def collect(items, generation):
             for item in items:
@@ -2556,9 +2592,13 @@ def _self_test_runtime_supervisor_unit(tmp):
                 if isinstance(item, ast.If):
                     branch = child_branch(item.test)
                     if branch is not None:
+                        _name, which = branch
+                        child_generation = generation + (item.lineno,)
                         collect(ast.iter_child_nodes(item.test), generation)
-                        collect(item.body, generation + (item.lineno,))
-                        collect(item.orelse, generation)
+                        collect(item.body, child_generation
+                                if which == "body" else generation)
+                        collect(item.orelse, child_generation
+                                if which == "orelse" else generation)
                         continue
                 collect(ast.iter_child_nodes(item), generation)
 
@@ -2620,26 +2660,47 @@ def _self_test_runtime_supervisor_unit(tmp):
                                   "it cannot prove is its own; route it through "
                                   "_kill_proved_child or a proved pidfd (QA9 claude F1)"
                                   .format(owner, named, call.lineno))
-            elif named == "pidfd_open" and not total \
+            elif named in ("pidfd_open", "_fixture_pidfd") and not total \
                     and not (call.args and allowed(call.args[0], call.lineno)):
-                faults.append("{} opens an unproved pidfd (line {}) on a pid liveness alone "
+                # emit._fixture_pidfd is a bare opener too: laundering a
+                # file-read number through it (directly or as the fd
+                # argument of a send) is the QA12 claude m1 route.
+                faults.append("{} opens an unproved pidfd ({}, line {}) on a pid liveness alone "
                               "cannot authenticate; take the descriptor from the forking "
                               "parent instead (_pidfd_handoff_recv, D-385-PIDFD-HANDOFF; "
-                              "QA9 codex blocker 1)".format(owner, call.lineno))
+                              "QA9 codex blocker 1, QA12 claude m1)".format(
+                                  owner, named, call.lineno))
             elif named == "_pidfd_handoff_send":
                 target = call.args[1] if len(call.args) > 1 else None
-                if total or not (isinstance(target, ast.Name)
-                                 and fork_bound(target.id, call.lineno)
-                                 and fork_generation(target.id, call.lineno)
-                                 == generation):
+                licensed = (not total and isinstance(target, ast.Name)
+                            and fork_bound(target.id, call.lineno)
+                            and fork_generation(target.id, call.lineno)
+                            == generation)
+                if licensed:
+                    bound_at = max(entry for entry
+                                   in bindings.get(target.id, ())
+                                   if entry[0] < call.lineno)[0]
+                    for entries in bindings.values():
+                        for entry_lineno, kind, entry_generation in entries:
+                            if (kind == "fork"
+                                    and entry_generation == generation
+                                    and bound_at < entry_lineno
+                                    < call.lineno):
+                                # QA12 claude m2 (interleaved fork): a later
+                                # fork on the send's own path means the send
+                                # also runs in that fork's CHILD -- a
+                                # different process -- whether or not a
+                                # recognized child branch follows it.
+                                licensed = False
+                if not licensed:
                     faults.append(
                         "{} hands a pid to _pidfd_handoff_send (line {}) that "
-                        "is not a fork-bound, un-waited name of the same fork "
-                        "generation; only a pid os.fork() just returned to "
-                        "THIS process may be handed off -- route anything "
-                        "else through _pidfd_handoff_fork_send (QA11 codex "
-                        "blocker, D-385-PIDFD-HANDOFF)".format(
-                            owner, call.lineno))
+                        "is not the NEWEST fork-bound, un-waited name of the "
+                        "same fork generation; only a pid os.fork() just "
+                        "returned to THIS process may be handed off -- route "
+                        "anything else through _pidfd_handoff_fork_send "
+                        "(QA11 codex blocker, QA12 claude m2, "
+                        "D-385-PIDFD-HANDOFF)".format(owner, call.lineno))
         for inner in nested:
             scan_scope(inner, owner, total, faults)
 
@@ -2650,12 +2711,102 @@ def _self_test_runtime_supervisor_unit(tmp):
             scan_scope(node, node.name, node.name in (
                 "_self_test_runtime_supervisor_unit", "_kill_proved_child"))
 
-    # QA11 codex blocker: the handoff-send licence is itself pinned. Each
-    # flagged probe scope launders a pid into _pidfd_handoff_send -- a
-    # constant, a reaped (waited) fork child, and a sibling sent from a
-    # LATER fork's child branch (a different process, whose own child the
-    # sibling is not) -- and the straight fork-and-send control must stay
-    # clean, so weakening the licence in either direction turns this red.
+    # QA12 (orchestrator ruling 1): SCM_RIGHTS stays inside the handoff.
+    # Sweep BOTH runtime-probe source files, module scope and every
+    # function, for socket.send_fds/sendmsg calls, and refuse any outside
+    # the licensed sender scopes: _pidfd_handoff_send (the one checking
+    # sender) and _pidfd_handoff_misuse_send (the leg-1j wire-shape
+    # fixture, whose every message feeds a receiver the test requires to
+    # refuse) here, and _fixture_send_subject in _opf_emit.py (the
+    # guardian's receipt send; its descriptor is the guardian's own
+    # subject pidfd). Like the rest of this check, a tripwire over
+    # ordinary spellings, NOT a proof: a computed getattr, an aliased
+    # module, or a raw send from an UNSWEPT file can dodge it -- that
+    # residual is disclosed in the handoff docstrings, not closed.
+    def scm_sweep(tree, filename, licensed_senders, faults=faults):
+        def walk(node, owner):
+            for inner in ast.iter_child_nodes(node):
+                inner_owner = owner
+                if isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    inner_owner = inner.name
+                if isinstance(inner, ast.Call):
+                    called = inner.func.attr \
+                        if isinstance(inner.func, ast.Attribute) \
+                        else getattr(inner.func, "id", "")
+                    if called in ("send_fds", "sendmsg") \
+                            and owner not in licensed_senders:
+                        faults.append(
+                            "{}:{} sends descriptors outside the licensed "
+                            "handoff senders ({}, line {}): SCM_RIGHTS stays "
+                            "inside _pidfd_handoff_send (QA12 orchestrator "
+                            "ruling 1)".format(
+                                filename, owner, called, inner.lineno))
+                walk(inner, inner_owner)
+        walk(tree, "<module>")
+
+    scm_sweep(host_tree, "opf.py",
+              {"_pidfd_handoff_send", "_pidfd_handoff_misuse_send"})
+    scm_sweep(ast.parse(Path(__file__).resolve().with_name(
+        "_opf_emit.py").read_bytes()), "_opf_emit.py",
+        {"_fixture_send_subject"})
+    # The sweep is itself pinned: a probe scope with a raw send must flag,
+    # and the licensed sender scope must stay clean.
+    sweep_probe = []
+    scm_sweep(ast.parse(
+        "def helper(peer, fd):\n"
+        "    import socket\n"
+        "    socket.send_fds(peer, [b'1'], [fd])\n"), "probe",
+        {"_pidfd_handoff_send"}, sweep_probe)
+    if not any("send_fds" in fault for fault in sweep_probe):
+        faults.append("the SCM_RIGHTS sweep did not flag a raw send_fds "
+                      "probe: the QA12 sweep is not load-bearing")
+    sweep_probe = []
+    scm_sweep(ast.parse(
+        "def _pidfd_handoff_send(conn, pid):\n"
+        "    import socket\n"
+        "    socket.send_fds(conn, [b'1'], [1])\n"), "probe",
+        {"_pidfd_handoff_send"}, sweep_probe)
+    if sweep_probe:
+        faults.append("the SCM_RIGHTS sweep flagged the licensed sender "
+                      "scope: {}".format(sweep_probe))
+
+    # QA12 claude m1: the emit._fixture_pidfd laundering route is pinned
+    # like a bare pidfd_open -- an unproved argument is flagged, a
+    # fork-bound one stays licensed.
+    pidfd_probe = []
+    scan_scope(ast.parse(
+        "def _watchdog_probe(note):\n"
+        "    n = int(Path(note).read_text())\n"
+        "    signal.pidfd_send_signal(emit._fixture_pidfd(n),\n"
+        "                             signal.SIGKILL)\n").body[0],
+        "fixture-pidfd-probe", False, pidfd_probe)
+    if not any("unproved pidfd" in fault for fault in pidfd_probe):
+        faults.append("the emit._fixture_pidfd laundering probe was not "
+                      "flagged (QA12 claude m1): found {}".format(
+                          pidfd_probe))
+    pidfd_probe = []
+    scan_scope(ast.parse(
+        "def _watchdog_probe(note):\n"
+        "    p = os.fork()\n"
+        "    if p == 0:\n"
+        "        os._exit(0)\n"
+        "    fd = emit._fixture_pidfd(p)\n"
+        "    os.close(fd)\n").body[0],
+        "fixture-pidfd-control", False, pidfd_probe)
+    if pidfd_probe:
+        faults.append("the fork-bound emit._fixture_pidfd control was "
+                      "flagged: {}".format(pidfd_probe))
+
+    # QA11 codex blocker / QA12 claude m2: the handoff-send licence is
+    # itself pinned. Each flagged probe scope launders a pid into
+    # _pidfd_handoff_send -- a constant, a reaped (waited) fork child, a
+    # sibling sent from a LATER fork's child branch in each recognized
+    # spelling (`q == 0`, `0 == q`, `not q`, the orelse of `q != 0` and of
+    # bare `q`), a sibling sent with NO branch at all after an interleaved
+    # fork, and one sent after a child branch that falls through -- while
+    # the straight fork-and-send control and a control whose extra fork
+    # happens only inside the FIRST fork's child branch must stay clean,
+    # so weakening the licence in either direction turns this red.
     handoff_probes = (
         ("constant", "def _watchdog_probe(peer):\n"
                      "    _pidfd_handoff_send(peer, 123)\n", True),
@@ -2668,11 +2819,51 @@ def _self_test_runtime_supervisor_unit(tmp):
                        "    q = os.fork()\n"
                        "    if q == 0:\n"
                        "        _pidfd_handoff_send(peer, p)\n", True),
+        ("reversed-eq", "def _watchdog_probe(peer):\n"
+                        "    p = os.fork()\n"
+                        "    q = os.fork()\n"
+                        "    if 0 == q:\n"
+                        "        _pidfd_handoff_send(peer, p)\n", True),
+        ("negated", "def _watchdog_probe(peer):\n"
+                    "    p = os.fork()\n"
+                    "    q = os.fork()\n"
+                    "    if not q:\n"
+                    "        _pidfd_handoff_send(peer, p)\n", True),
+        ("else-child", "def _watchdog_probe(peer):\n"
+                       "    p = os.fork()\n"
+                       "    q = os.fork()\n"
+                       "    if q != 0:\n"
+                       "        pass\n"
+                       "    else:\n"
+                       "        _pidfd_handoff_send(peer, p)\n", True),
+        ("truthy-else", "def _watchdog_probe(peer):\n"
+                        "    p = os.fork()\n"
+                        "    q = os.fork()\n"
+                        "    if q:\n"
+                        "        pass\n"
+                        "    else:\n"
+                        "        _pidfd_handoff_send(peer, p)\n", True),
+        ("bare-interleaved", "def _watchdog_probe(peer):\n"
+                             "    p = os.fork()\n"
+                             "    q = os.fork()\n"
+                             "    _pidfd_handoff_send(peer, p)\n", True),
+        ("after-child-pass", "def _watchdog_probe(peer):\n"
+                             "    p = os.fork()\n"
+                             "    q = os.fork()\n"
+                             "    if q == 0:\n"
+                             "        pass\n"
+                             "    _pidfd_handoff_send(peer, p)\n", True),
         ("fork-bound", "def _watchdog_probe(peer):\n"
                        "    p = os.fork()\n"
                        "    if p == 0:\n"
                        "        os._exit(0)\n"
                        "    _pidfd_handoff_send(peer, p)\n", False),
+        ("child-branch-fork", "def _watchdog_probe(peer):\n"
+                              "    p = os.fork()\n"
+                              "    if p == 0:\n"
+                              "        r = os.fork()\n"
+                              "        os._exit(0)\n"
+                              "    _pidfd_handoff_send(peer, p)\n", False),
     )
     for probe_name, probe_source, must_flag in handoff_probes:
         probe_faults = []
@@ -3160,6 +3351,41 @@ def _kill_proved_child(pid, sig=None, pidfd=None):
             os.close(fd)
 
 
+def _child_subreaper_flag():
+    """Read PR_GET_CHILD_SUBREAPER (prctl option 37, Linux). Returns True
+    when this process is a child subreaper, False when it is not, None when
+    the flag cannot be read; the caller that needs the NEGATIVE (the
+    handoff sender) treats None as a refusal, never as proof."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        flag = ctypes.c_int(0)
+        if libc.prctl(37, ctypes.byref(flag), 0, 0, 0) != 0:
+            return None
+        return bool(flag.value)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def _close_every(closes):
+    """Run EVERY close step even when an earlier one raises (QA12 codex
+    major 2: a multi-descriptor cleanup whose first close fails must not
+    strand the later descriptors). Each step runs in its own try; the FIRST
+    failure is re-raised only after every step ran, so one raising close
+    can neither skip nor hide a later one. Census-exception leg 1n probes
+    every position with a release-then-raise close and requires the first
+    of two injected failures to be the one re-raised."""
+    first = None
+    for close in closes:
+        try:
+            close()
+        except BaseException as exc:
+            if first is None:
+                first = exc
+    if first is not None:
+        raise first
+
+
 def _pidfd_handoff_pair():
     """One SOCK_SEQPACKET socketpair per handoff (D-385-PIDFD-HANDOFF, QA11
     codex major): datagram framing makes one message one handoff -- stream
@@ -3169,19 +3395,55 @@ def _pidfd_handoff_pair():
     return socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 
 
+def _pidfd_handoff_misuse_send(peer, messages):
+    """DELIBERATELY malformed wire shapes for the handoff self-tests
+    (census-exception leg 1j). Each message is (buffers, fds) and is sent
+    raw with socket.send_fds; every receiver of these messages is required
+    by its leg to REFUSE them, so this helper proves nothing and licenses
+    nothing. It exists so the SCM_RIGHTS sweep in
+    _self_test_runtime_supervisor_unit can require that raw descriptor
+    sends appear ONLY here and in _pidfd_handoff_send (QA12 orchestrator
+    ruling 1): a raw send_fds elsewhere in these files is refused by that
+    sweep, while a raw send from code OUTSIDE the swept files remains
+    possible -- that residual is disclosed in the handoff docstrings, not
+    closed."""
+    import socket
+    for buffers, fds in messages:
+        socket.send_fds(peer, buffers, fds)
+
+
 def _pidfd_handoff_send(conn, pid):
-    """Forking-parent side of the pidfd handoff (D-385-PIDFD-HANDOFF): call
+    """Sender side of the pidfd handoff (D-385-PIDFD-HANDOFF): call
     IMMEDIATELY after os.fork() returned `pid`, before ANY wait on it. An
     un-reaped child's pid cannot be reused, so the pidfd opened HERE is bound
-    to the true child, and SCM_RIGHTS preserves that binding across the
-    socketpair. QA11 (codex blocker): that convention is now ENFORCED in the
-    kernel -- before anything is sent, waitid(P_PIDFD, fd, WEXITED|WNOHANG|
-    WNOWAIT), the same proof _kill_proved_child uses, must answer for the
-    descriptor. ECHILD means the target is NOT this process's own un-reaped
-    child (a parent, a sibling, a reaped or foreign pid) and the handoff is
+    to that child, and SCM_RIGHTS preserves that binding across the
+    socketpair. What this sender ENFORCES is exactly what the kernel can
+    prove, no stronger (QA12 orchestrator ruling 1). Two checks run before
+    anything is sent:
+    (1) this process must NOT be a child subreaper (PR_GET_CHILD_SUBREAPER
+    zero; an unreadable flag refuses too): a subreaper ADOPTS orphaned
+    descendants, so a waitable child of a subreaper may be an adopted
+    process it never forked (QA12 codex blocker 1, the adopted-child
+    reproduction);
+    (2) waitid(P_PIDFD, fd, WEXITED|WNOHANG|WNOWAIT), the same proof
+    _kill_proved_child uses, must answer for the descriptor (QA11 codex
+    blocker). ECHILD means the target is NOT even a waitable child (a
+    parent, a sibling, a reaped or foreign pid).
+    Together these establish that the target is a CURRENT waitable child of
+    a non-subreaper -- a process this sender forked itself, with one
+    residual the kernel cannot exclude, DISCLOSED here: waitid also answers
+    for a ptrace TRACEE, so a sender tracing a non-child would pass both
+    checks (nothing in these files calls ptrace). A holder of the sending
+    endpoint can also skip this helper entirely with a raw socket.send_fds:
+    the SCM_RIGHTS sweep in _self_test_runtime_supervisor_unit refuses that
+    spelling anywhere in the swept files outside this function and the
+    leg-1j misuse fixture, and beyond those files the endpoints of every
+    handoff are the test's OWN fixture processes -- a static code-review
+    boundary, not a runtime adversary. On either refused check the handoff is
     REFUSED: the descriptor is closed, NOTHING is sent, and the refusal is a
     loud AssertionError, so a misbehaving holder of the sending endpoint
-    cannot launder an arbitrary number into a descriptor. An un-reaped
+    cannot launder an arbitrary number into a descriptor THROUGH THIS
+    HELPER. An un-reaped
     zombie child still passes the proof on purpose: its pid is still pinned
     and the RECEIVER refuses the exited target loudly. The numeric pid rides
     along as DISCLOSURE (for /proc state reads and messages); the receiver
@@ -3194,6 +3456,12 @@ def _pidfd_handoff_send(conn, pid):
             and hasattr(os, "WNOWAIT")):
         conn.send(payload)
         return False
+    if _child_subreaper_flag() is not False:
+        raise AssertionError(
+            "pidfd handoff refused at the sender: this process is (or cannot "
+            "prove it is not) a child subreaper, so a waitable child may be "
+            "an ADOPTED orphan it never forked (QA12 codex blocker 1); "
+            "nothing is sent")
     fd = os.pidfd_open(int(pid), 0)
     try:
         try:
@@ -3217,14 +3485,26 @@ def _pidfd_handoff_fork_send(conn, child_main):
     never returns (it must end the process itself; a fall-through or raise
     exits 125). The parent sends the descriptor immediately -- before any
     wait could unpin the number -- and returns the child's pid, which the
-    AST pin licences exactly like a fork-bound name."""
+    AST pin licences exactly like a fork-bound name. A send that refuses or
+    fails must not leave the child this helper just forked running with no
+    owner (QA12 claude m4): `pid` is fork-bound and un-waited exactly here,
+    so the numeric SIGKILL is licensed, and the child is reaped before the
+    send failure propagates."""
+    import signal
     pid = os.fork()
     if pid == 0:
         try:
             child_main()
         finally:
             os._exit(125)
-    _pidfd_handoff_send(conn, pid)
+    try:
+        _pidfd_handoff_send(conn, pid)
+    except BaseException:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        finally:
+            os.waitpid(pid, 0)
+        raise
     return pid
 
 
@@ -3234,13 +3514,24 @@ def _pidfd_handoff_recv(conn, note):
     pinned only the TARGET, so an intermediate /proc hop could exit, be
     reaped and have its number recycled beneath the anchor mid-walk,
     splicing an unrelated target into an accepted chain -- QA10 codex
-    blocker / claude m1). The ONLY way a self-test accepts a signal target
-    it did not fork itself is a descriptor the target's FORKING PARENT
-    opened on its own direct child immediately after fork -- a provenance
-    _pidfd_handoff_send now PROVES with waitid before sending (QA11) --
-    and passed here with SCM_RIGHTS over a SOCK_SEQPACKET socketpair
+    blocker / claude m1). The ONLY sanctioned route by which a self-test
+    accepts a signal target it did not fork itself is a descriptor passed
+    here with SCM_RIGHTS over a SOCK_SEQPACKET socketpair
     (_pidfd_handoff_pair), whose datagram framing makes one message one
-    handoff. Returns (pid, fd); the pid is disclosure only -- /proc state
+    handoff. What each side establishes is stated at kernel strength and no
+    stronger (QA12 orchestrator ruling 1): THIS receiver validates the
+    DESCRIPTOR's identity (a pidfd, naming the disclosed pid, its process
+    still alive), never who opened or sent it; the SENDER's own checks
+    (_pidfd_handoff_send: not a child subreaper, and waitid answering for
+    the descriptor) establish that its target was a current waitable child
+    of a non-subreaper -- its own fork, up to the disclosed ptrace-tracee
+    residual there. A holder of the sending endpoint that bypasses
+    _pidfd_handoff_send with a raw socket.send_fds is NOT detected here:
+    inside the swept files the SCM_RIGHTS sweep in
+    _self_test_runtime_supervisor_unit refuses that spelling, and beyond
+    them the endpoints of every handoff are the test's OWN fixture
+    processes -- a static code-review boundary, not a runtime adversary.
+    Returns (pid, fd); the pid is disclosure only -- /proc state
     reads and messages -- NEVER a signal target. The receiver OWNS `conn`:
     it is closed exactly once, in a finally, on every path, refusals
     included, and a close that itself raises can no longer strand what was
@@ -3248,7 +3539,13 @@ def _pidfd_handoff_recv(conn, note):
     the failure propagates). Fails closed with AssertionError naming
     `note`, every received descriptor closed and NOTHING signalled, when:
     the transport is not SOCK_SEQPACKET; no message arrives within the
-    bound; the sender closed without a message; the message was truncated
+    bound; the sender closed without a message; the sender's first message
+    was EMPTY while the peer was still open (QA12 codex minor 3: an empty
+    SEQPACKET record from a live peer is a MESSAGE, refused as one; once
+    POLLHUP is set this kernel leaves an empty record queued before the
+    close and plain EOF indistinguishable -- recv answers zero bytes with
+    no flags for both, and AF_UNIX SOCK_SEQPACKET sets no MSG_EOR -- so
+    that shape reads as EOF, a disclosed residual); the message was truncated
     in data or control (descriptors past the receive room included --
     MSG_CTRUNC is REFUSED, never ignored, QA11 codex major); the message
     carries any descriptor count but exactly one; the payload is not a
@@ -3257,9 +3554,11 @@ def _pidfd_handoff_recv(conn, note):
     may disclose only the handed-off process's own number); the
     descriptor's process has ALREADY EXITED (the pidfd polls readable) --
     a dead target takes no signal and the refusal is loud, never
-    swallowed; or a SECOND message is already queued behind the first
-    (one message is one handoff; only EOF may follow, and the socket is
-    closed here, so a later message can never be read)."""
+    swallowed; or a SECOND message is already queued behind the first --
+    an EMPTY one from a still-open peer included (QA12 codex minor 3),
+    with the same POLLHUP-set residual as above -- (one message is one
+    handoff; only EOF may follow, and the socket is closed here, so a
+    later message can never be read)."""
     import select
     import socket
 
@@ -3276,7 +3575,8 @@ def _pidfd_handoff_recv(conn, note):
                        "socketpair (one message is one handoff)")
             poller = select.poll()
             poller.register(conn.fileno(), select.POLLIN)
-            if not poller.poll(30000):
+            events = poller.poll(30000)
+            if not events:
                 refuse("no handoff message arrived within the bound")
             message, fds, flags, _addr = socket.recv_fds(conn, 256, 8)
             received.extend(fds)
@@ -3284,8 +3584,17 @@ def _pidfd_handoff_recv(conn, note):
                 refuse("the handoff message was truncated (control or data): "
                        "it carried more than one message's room for "
                        "descriptors or payload")
-            if not message:
-                refuse("the forking parent closed without a handoff message")
+            if not message and not received:
+                # QA12 codex minor 3: with the peer still open (no POLLHUP)
+                # a zero-byte read is a genuine EMPTY message and is refused
+                # as one. With POLLHUP set this kernel cannot tell an empty
+                # record queued before the close from plain EOF (no MSG_EOR
+                # on AF_UNIX SOCK_SEQPACKET), so that shape reads as the
+                # sender closing -- the disclosed residual.
+                if events[0][1] & select.POLLHUP:
+                    refuse("the forking parent closed without a handoff "
+                           "message")
+                refuse("the forking parent sent an EMPTY handoff message")
             if len(received) != 1:
                 refuse("the forking parent passed {} descriptors, not exactly "
                        "one".format(len(received)))
@@ -3317,10 +3626,16 @@ def _pidfd_handoff_recv(conn, note):
                        "exited".format(pid))
             poller = select.poll()
             poller.register(conn.fileno(), select.POLLIN)
-            if poller.poll(0):
+            events = poller.poll(0)
+            if events:
                 more, more_fds, _mflags, _maddr = socket.recv_fds(conn, 256, 8)
                 received.extend(more_fds)
-                if more or more_fds:
+                if more or more_fds or not events[0][1] & select.POLLHUP:
+                    # QA12 codex minor 3: an empty read with the peer still
+                    # open (no POLLHUP) is a second MESSAGE, refused like
+                    # any other; with POLLHUP set an empty read is EOF (or
+                    # the indistinguishable empty-record-then-close
+                    # residual the docstring discloses).
                     refuse("a second handoff message followed the first; "
                            "one message is one handoff")
         except BaseException:
@@ -6572,11 +6887,6 @@ def _watchdog_completion_case(mode):
             guardian = os.fork()
             if guardian == 0:
                 try:
-                    import ctypes
-                    libc = ctypes.CDLL(None, use_errno=True)
-                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-                        os._exit(125)
-
                     def leader_main():
                         os.setsid()
                         grandchild = os.fork()
@@ -6590,8 +6900,18 @@ def _watchdog_completion_case(mode):
                         os._exit(0)
 
                     # Fork-and-send (QA11 codex blocker): only the pid the
-                    # helper itself just forked can enter the handoff.
+                    # helper itself just forked can enter the handoff. The
+                    # subreaper flag is set strictly AFTER the handoff (QA12
+                    # codex blocker 1: the sender refuses from a subreaper;
+                    # the flag matters only when a descendant is orphaned
+                    # LATER, well after this send), and a failing prctl
+                    # reaps the already-forked leader before exiting.
                     leader = _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    import ctypes
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                        _kill_proved_child(leader)
+                        os._exit(125)
                     bound = time.monotonic() + 30
                     while not opened.exists():  # the caller holds the pidfd now
                         if time.monotonic() >= bound:
@@ -6634,10 +6954,13 @@ def _watchdog_completion_case(mode):
             except BaseException:
                 # QA11 claude m3: a failing await after the handoff closes
                 # the received descriptor and the socket instead of
-                # stranding them.
+                # stranding them; QA12 codex major 2: through _close_every,
+                # so a raising close cannot skip the later one.
+                closes = []
                 if fd is not None:
-                    os.close(fd)
-                handoff.close()
+                    closes.append(lambda held=fd: os.close(held))
+                closes.append(handoff.close)
+                _close_every(closes)
                 raise
             recorded.clear()
             with patch.object(os, "killpg", rec_killpg), \
@@ -6729,11 +7052,6 @@ def _watchdog_completion_case(mode):
             guardian = os.fork()
             if guardian == 0:
                 try:
-                    import ctypes
-                    libc = ctypes.CDLL(None, use_errno=True)
-                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-                        os._exit(125)
-
                     def leader_main():
                         os.setsid()
                         grandchild = os.fork()
@@ -6747,8 +7065,18 @@ def _watchdog_completion_case(mode):
                         os._exit(0)
 
                     # Fork-and-send (QA11 codex blocker): only the pid the
-                    # helper itself just forked can enter the handoff.
-                    _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    # helper itself just forked can enter the handoff. The
+                    # subreaper flag is set strictly AFTER the handoff (QA12
+                    # codex blocker 1: the sender refuses from a subreaper;
+                    # the flag matters only when a descendant is orphaned
+                    # LATER, well after this send), and a failing prctl
+                    # reaps the already-forked leader before exiting.
+                    leader = _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    import ctypes
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                        _kill_proved_child(leader)
+                        os._exit(125)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -6774,10 +7102,13 @@ def _watchdog_completion_case(mode):
             except BaseException:
                 # QA11 claude m3: a failing await after the handoff closes
                 # the received descriptor and the socket instead of
-                # stranding them.
+                # stranding them; QA12 codex major 2: through _close_every,
+                # so a raising close cannot skip the later one.
+                closes = []
                 if fd is not None:
-                    os.close(fd)
-                handoff.close()
+                    closes.append(lambda held=fd: os.close(held))
+                closes.append(handoff.close)
+                _close_every(closes)
                 raise
             member_calls = []
             real_members = emit._fixture_kill_group_members
@@ -6913,11 +7244,6 @@ def _watchdog_completion_case(mode):
             guardian = os.fork()
             if guardian == 0:
                 try:
-                    import ctypes
-                    libc = ctypes.CDLL(None, use_errno=True)
-                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-                        os._exit(125)
-
                     def leader_main():
                         os.setsid()
                         grandchild = os.fork()
@@ -6944,8 +7270,18 @@ def _watchdog_completion_case(mode):
                         os._exit(0)
 
                     # Fork-and-send (QA11 codex blocker): only the pid the
-                    # helper itself just forked can enter the handoff.
-                    _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    # helper itself just forked can enter the handoff. The
+                    # subreaper flag is set strictly AFTER the handoff (QA12
+                    # codex blocker 1: the sender refuses from a subreaper;
+                    # the flag matters only when a descendant is orphaned
+                    # LATER, well after this send), and a failing prctl
+                    # reaps the already-forked leader before exiting.
+                    leader = _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    import ctypes
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                        _kill_proved_child(leader)
+                        os._exit(125)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -6966,10 +7302,13 @@ def _watchdog_completion_case(mode):
             except BaseException:
                 # QA11 claude m3: a failing await after the handoff closes
                 # the received descriptor and the socket instead of
-                # stranding them.
+                # stranding them; QA12 codex major 2: through _close_every,
+                # so a raising close cannot skip the later one.
+                closes = []
                 if leader_fd is not None:
-                    os.close(leader_fd)
-                handoff.close()
+                    closes.append(lambda held=leader_fd: os.close(held))
+                closes.append(handoff.close)
+                _close_every(closes)
                 raise
             return guardian, leader, leader_fd, grandchild, cue, forked_file
 
@@ -7238,6 +7577,72 @@ def _watchdog_completion_case(mode):
             "a pinned hop that exited before the walk's end was not refused "
             "by the final liveness poll: the member must be SKIPPED, "
             "nothing signalled", outcome, modelled_sent)
+
+        # Leg 6 (QA12 codex major 2, close_held): a held-hop close that
+        # RELEASES its descriptor and then RAISES must not strand the later
+        # hops. Modelled chain member -> hop one -> hop two -> anchor (pipe
+        # read ends stand in for the pidfds): the FIRST hop's close is a
+        # release-then-raise probe, and EVERY opened stand-in -- the second
+        # hop and the member's own descriptor included -- must still close
+        # exactly once, with the first failure propagating and nothing
+        # signalled. A close_held reverted to a bare close loop strands the
+        # second hop and turns this red.
+        chain_member, chain_hop_one, chain_hop_two = 4194297, 4194298, 4194299
+        chain = {chain_member: chain_hop_one, chain_hop_one: chain_hop_two,
+                 chain_hop_two: anchor}
+
+        def chain_stat_fields(target):
+            target = int(target)
+            if target in chain:
+                return [b"S", str(chain[target]).encode("ascii"),
+                        str(chain_member).encode("ascii")]
+            return None
+
+        model_fds = {}
+        chain_pipes = []
+
+        def chain_pidfd(target):
+            read_end, write_end = os.pipe()
+            chain_pipes.append(write_end)
+            model_fds[int(target)] = read_end
+            return read_end
+
+        closed = []
+        real_close = os.close
+
+        def releasing_close(target_fd):
+            real_close(target_fd)
+            closed.append(target_fd)
+            if target_fd == model_fds.get(chain_hop_one):
+                raise OSError(5, "injected release-then-raise hop close")
+
+        hop_sent = []
+        try:
+            with patch.object(emit, "_fixture_stat_fields",
+                              chain_stat_fields), \
+                    patch.object(emit, "_fixture_pidfd", chain_pidfd), \
+                    patch.object(os, "listdir",
+                                 lambda path=".": [str(chain_member)]), \
+                    patch.object(os, "close", releasing_close), \
+                    patch.object(signal, "pidfd_send_signal",
+                                 lambda target_fd, signum, *args:
+                                     hop_sent.append((target_fd, signum))):
+                try:
+                    emit._fixture_kill_group_members(
+                        chain_member, signal.SIGKILL, {anchor})
+                except OSError as exc:
+                    assert "release-then-raise hop close" in str(exc), exc
+                else:
+                    raise AssertionError(
+                        "the raising hop close was swallowed")
+        finally:
+            for write_end in chain_pipes:
+                real_close(write_end)
+        assert sorted(closed) == sorted(model_fds.values()), (
+            "a later hop or the member stand-in was stranded by the "
+            "raising close", closed, model_fds)
+        assert hop_sent == [], (
+            "the raising hop close let a signal through", hop_sent)
     elif mode == "census-exception":
         import socket
         import time
@@ -7293,19 +7698,24 @@ def _watchdog_completion_case(mode):
             guardian = os.fork()
             if guardian == 0:
                 try:
-                    import ctypes
-                    libc = ctypes.CDLL(None, use_errno=True)
-                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-                        os._exit(125)
-
                     def leader_main():
                         os.setsid()
                         time.sleep(3600)
                         os._exit(0)
 
                     # Fork-and-send (QA11 codex blocker): only the pid the
-                    # helper itself just forked can enter the handoff.
-                    _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    # helper itself just forked can enter the handoff. The
+                    # subreaper flag is set strictly AFTER the handoff (QA12
+                    # codex blocker 1: the sender refuses from a subreaper;
+                    # the flag matters only when a descendant is orphaned
+                    # LATER, well after this send), and a failing prctl
+                    # reaps the already-forked leader before exiting.
+                    leader = _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    import ctypes
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                        _kill_proved_child(leader)
+                        os._exit(125)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -7341,10 +7751,16 @@ def _watchdog_completion_case(mode):
                 # refused handoff, or a leader that never took its group:
                 # every descriptor this pair holds is closed once, here,
                 # and an un-received handoff is released with its socket.
+                # QA12 codex major 2: the closes run through _close_every,
+                # so one close that raises can no longer skip the later
+                # ones; legs 1k and 1m census this unwind on both sides of
+                # the receive (pidfds AND the handoff socket).
+                closes = []
                 if leader_fd is not None:
-                    os.close(leader_fd)
-                os.close(guardian_fd)
-                handoff.close()
+                    closes.append(lambda held=leader_fd: os.close(held))
+                closes.append(lambda: os.close(guardian_fd))
+                closes.append(handoff.close)
+                _close_every(closes)
                 raise
             return guardian, guardian_fd, leader, leader_fd
 
@@ -7455,19 +7871,36 @@ def _watchdog_completion_case(mode):
         assert _kill_proved_child(bystander), \
             "the leg-1g hygiene refused the bystander"
 
-        # Leg 1h (D-385-PIDFD-HANDOFF, fail closed): a handed-off descriptor
-        # whose process has ALREADY EXITED is refused loudly -- no signal is
-        # sent through it and the refusal is a named error, never a
-        # swallowed one. This test is the forking parent here: the handoff
-        # is opened on its own un-reaped child, whose pid the zombie still
-        # pins, and the RECEIVER must still refuse the dead target.
-        departed = os.fork()
-        if departed == 0:
-            os._exit(0)
+        # Leg 1h (D-385-PIDFD-HANDOFF, fail closed; reshaped by QA12 codex
+        # blocker 1: this case process is a child SUBREAPER, from which the
+        # sender now refuses, so a dedicated NON-subreaper sender child --
+        # the fork subreaper flag is not inherited -- forks the departed
+        # target itself and pins its zombie until the receiver has
+        # refused): a handed-off descriptor whose process has ALREADY
+        # EXITED is refused loudly -- no signal is sent through it and the
+        # refusal is a named error, never a swallowed one. The zombie's pid
+        # stays pinned by its un-reaped state for the whole receive.
+        hold_read, hold_write = os.pipe()
         handoff, handoff_peer = _pidfd_handoff_pair()
-        await_state(departed, ("Z",), "the departed child never became a zombie")
-        assert _pidfd_handoff_send(handoff_peer, departed), \
-            "the exited-target handoff was not sent"
+        sender = os.fork()
+        if sender == 0:
+            try:
+                handoff.close()
+                os.close(hold_write)
+                departed = os.fork()
+                if departed == 0:
+                    os._exit(0)
+                await_state(departed, ("Z",),
+                            "the departed child never became a zombie")
+                if not _pidfd_handoff_send(handoff_peer, departed):
+                    os._exit(123)
+                handoff_peer.close()
+                os.read(hold_read, 1)  # hold the zombie until the refusal
+                os.waitpid(departed, 0)
+                os._exit(0)
+            except BaseException:
+                os._exit(125)
+        os.close(hold_read)
         handoff_peer.close()
         sent = []
         with patch.object(signal, "pidfd_send_signal",
@@ -7483,7 +7916,10 @@ def _watchdog_completion_case(mode):
                 raise AssertionError("an exited handoff target was accepted")
         assert "already exited" in named and "leg-1h" in named, named
         assert sent == [], ("the exited handoff target was signalled", sent)
-        os.waitpid(departed, 0)
+        os.write(hold_write, b"g")
+        os.close(hold_write)
+        waited, raw = os.waitpid(sender, 0)
+        assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
 
         # Leg 1i (QA11 codex BLOCKER): the SENDER proves, in the kernel,
         # that the pid it was handed is its OWN un-reaped child before
@@ -7547,8 +7983,12 @@ def _watchdog_completion_case(mode):
         # descriptor's own process; an over-long payload; a data-only
         # message queued BEFORE the descriptor message (SEQPACKET framing:
         # the first message is judged alone and refused, never
-        # concatenated); and a SECOND complete handoff queued behind an
-        # accepted first one.
+        # concatenated); a SECOND complete handoff queued behind an
+        # accepted first one; an empty payload riding a real descriptor;
+        # and -- QA12 codex minor 3 -- an EMPTY message from a still-open
+        # peer, first and second, each a refused MESSAGE, never EOF. Every
+        # raw wire shape goes through _pidfd_handoff_misuse_send, the one
+        # scope besides the sender the SCM_RIGHTS sweep licences.
         probe_kid = os.fork()
         if probe_kid == 0:
             time.sleep(3600)
@@ -7586,30 +8026,65 @@ def _watchdog_completion_case(mode):
         third = os.pidfd_open(probe_kid)
         pipe_read, pipe_write = os.pipe()
         plain_a, plain_b = socket.socketpair()
-        crafted(lambda peer: socket.send_fds(
-            peer, [payload], [first, second]), "passed 2 descriptors")
-        crafted(lambda peer: socket.send_fds(
-            peer, [payload], [first, second, third]), "passed 3 descriptors")
-        crafted(lambda peer: socket.send_fds(
-            peer, [payload], [first] * 9), "truncated")
-        crafted(lambda peer: socket.send_fds(
-            peer, [payload], [pipe_read]), "is not a pidfd")
-        crafted(lambda peer: socket.send_fds(
-            peer, [payload], [plain_a.fileno()]), "is not a pidfd")
-        crafted(lambda peer: socket.send_fds(
-            peer, [str(other_kid).encode("ascii")], [first]),
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [first, second])]), "passed 2 descriptors")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [first, second, third])]),
+            "passed 3 descriptors")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [first] * 9)]), "truncated")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [pipe_read])]), "is not a pidfd")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [plain_a.fileno()])]), "is not a pidfd")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([str(other_kid).encode("ascii")], [first])]),
             "but the descriptor's process is")
-        crafted(lambda peer: socket.send_fds(
-            peer, [b"9" * 24], [first]), "over-long for a pid")
-        crafted(lambda peer: (peer.send(b"999"),
-                              socket.send_fds(peer, [payload], [first])),
-                "passed 0 descriptors")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([b"9" * 24], [first])]), "over-long for a pid")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([b""], [first])]), "is not a pid")
+        crafted(lambda peer: (peer.send(b"999"), _pidfd_handoff_misuse_send(
+            peer, [([payload], [first])])), "passed 0 descriptors")
+        crafted(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [first]), ([payload], [third])]),
+            "a second handoff message followed the first")
 
-        def double_handoff(peer):
-            socket.send_fds(peer, [payload], [first])
-            socket.send_fds(peer, [payload], [third])
+        def refused_open_peer(prime, fragment, note):
+            # QA12 codex minor 3: the peer stays OPEN across the receive,
+            # so a zero-byte read cannot be EOF -- it is an empty MESSAGE
+            # and must be refused as one, nothing signalled and no
+            # descriptor stranded. (Queued ahead of a CLOSE instead, an
+            # empty record and EOF are indistinguishable on this kernel --
+            # the docstring's disclosed residual -- so these two cases are
+            # exactly the distinguishable ones.)
+            pair_recv, pair_send = _pidfd_handoff_pair()
+            prime(pair_send)
+            pair_send.send(b"")
+            empty_sent = []
+            with patch.object(signal, "pidfd_send_signal",
+                              lambda target_fd, signum, *args:
+                                  empty_sent.append((target_fd, signum))):
+                try:
+                    _pid, empty_fd = _pidfd_handoff_recv(pair_recv, note)
+                except AssertionError as exc:
+                    named = str(exc)
+                else:
+                    os.close(empty_fd)
+                    raise AssertionError(
+                        "an empty message from a still-open peer was "
+                        "accepted as EOF: " + note)
+            assert fragment in named and note in named, (fragment, named)
+            assert empty_sent == [], (note, empty_sent)
+            pair_send.close()
 
-        crafted(double_handoff, "a second handoff message followed the first")
+        refused_open_peer(lambda peer: None,
+                          "sent an EMPTY handoff message",
+                          "the leg-1j empty first message")
+        refused_open_peer(lambda peer: _pidfd_handoff_misuse_send(
+            peer, [([payload], [first])]),
+            "a second handoff message followed the first",
+            "the leg-1j empty second message")
         os.close(first)
         os.close(second)
         os.close(third)
@@ -7659,10 +8134,36 @@ def _watchdog_completion_case(mode):
             if collected == 0:
                 break
 
+        # QA12 claude m4 / codex major 2: hold references to BOTH handoff
+        # socket ends across the unwind -- without a held reference a
+        # dropped handler close is hidden by reference-count collection
+        # the moment the unwound frame dies (the round-12 MA mutant
+        # survived exactly that way) -- and require both closed: the peer
+        # end by frozen_pair's own try, the receiver end by the HANDLER,
+        # because this leg's fault fires BEFORE the receive, so
+        # _pidfd_handoff_recv never owned the socket.
+        held_pairs = []
+        real_pair = _pidfd_handoff_pair
+
+        def holding_pair():
+            pair = real_pair()
+            held_pairs.append(pair)
+            return pair
+
         baseline = live_pidfds()
         with tempfile.TemporaryDirectory(prefix="opf-fdleak-") as directory:
-            with patch.object(Path, "exists", frozen_await_fault):
-                refuses(RuntimeError, lambda: frozen_pair(Path(directory)))
+            pair_globals = _pidfd_handoff_fork_send.__globals__
+            pair_globals["_pidfd_handoff_pair"] = holding_pair
+            try:
+                with patch.object(Path, "exists", frozen_await_fault):
+                    refuses(RuntimeError, lambda: frozen_pair(Path(directory)))
+            finally:
+                pair_globals["_pidfd_handoff_pair"] = real_pair
+            assert held_pairs, "the holder saw no handoff pair"
+            assert all(end.fileno() == -1
+                       for pair in held_pairs for end in pair), (
+                "the pre-receive unwind left a handoff socket open",
+                [[end.fileno() for end in pair] for pair in held_pairs])
             assert live_pidfds() == baseline, (
                 "the failing await stranded a descriptor",
                 live_pidfds(), baseline)
@@ -7685,18 +8186,40 @@ def _watchdog_completion_case(mode):
                 assert _kill_proved_child(int(orphan)), \
                     "the leg-1k hygiene refused the reparented leader"
 
-        # Leg 1l (QA11 codex major 3, receiver path): a conn.close() that
+        # Leg 1l (QA11 codex major 3, receiver path; reshaped by QA12 codex
+        # blocker 1: the send comes from a dedicated NON-subreaper sender
+        # child, which forks the victim itself, sends, DISCLOSES the
+        # victim's pid over a pipe for the hygiene kill below -- never for
+        # a signal: the hygiene routes through _kill_proved_child once the
+        # victim has reparented to this subreaper case process -- and
+        # exits): a conn.close() that
         # itself raises after a successful receive must not strand the
         # received pidfd: every received descriptor is closed before the
         # close failure propagates, pinned by the same live-pidfd census.
-        victim = os.fork()
-        if victim == 0:
-            time.sleep(3600)
-            os._exit(0)
+        victim_read, victim_write = os.pipe()
         handoff, handoff_peer = _pidfd_handoff_pair()
-        assert _pidfd_handoff_send(handoff_peer, victim), \
-            "the leg-1l handoff was not sent"
+        sender = os.fork()
+        if sender == 0:
+            try:
+                handoff.close()
+                os.close(victim_read)
+                victim = os.fork()
+                if victim == 0:
+                    time.sleep(3600)
+                    os._exit(0)
+                if not _pidfd_handoff_send(handoff_peer, victim):
+                    os._exit(123)
+                handoff_peer.close()
+                os.write(victim_write, str(victim).encode("ascii"))
+                os._exit(0)
+            except BaseException:
+                os._exit(125)
+        os.close(victim_write)
         handoff_peer.close()
+        waited, raw = os.waitpid(sender, 0)
+        assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
+        victim = int(os.read(victim_read, 16))
+        os.close(victim_read)
 
         class _CloseFault:
             def __init__(self, inner):
@@ -7717,6 +8240,188 @@ def _watchdog_completion_case(mode):
             live_pidfds(), baseline)
         assert _kill_proved_child(victim), \
             "the leg-1l hygiene refused the victim"
+
+        # Leg 1m (QA12 claude m4): an await failing AFTER the leader
+        # descriptor was received unwinds frozen_pair with EVERY resource
+        # closed -- the received leader pidfd and the handoff SOCKET
+        # included, the two closes leg 1k's pre-receive fault never
+        # reaches (its fault fires before the receive, so the socket and
+        # leader closes there were untested). This census counts open
+        # sockets as well as pidfds, so a frozen_pair cleanup that drops
+        # EITHER close turns it red.
+        def live_handoff_resources():
+            found = []
+            for name in os.listdir("/proc/self/fd"):
+                try:
+                    link = os.readlink("/proc/self/fd/" + name)
+                except OSError:
+                    continue  # the listing's own descriptor, or a racing close
+                if link == "anon_inode:[pidfd]" or link.startswith("socket:["):
+                    found.append(int(name))
+            return sorted(found)
+
+        # Earlier legs' model leaders reparent HERE once their guardians
+        # exit (this case process is a subreaper); collect them so the
+        # model guardian below is this process's only child.
+        while True:
+            try:
+                collected, _raw = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if collected == 0:
+                break
+
+        def pgid_await_fault(target):
+            raise RuntimeError("injected pgid await failure")
+
+        # The pair is created through a recorder that KEEPS a reference to
+        # both socket objects: a dropped handoff.close() would otherwise be
+        # hidden by reference-count collection the moment the unwound frame
+        # dies (QA12 claude m4: the round-12 MA mutant survived exactly
+        # that way), so the closed state is asserted on the held objects
+        # (fileno() == -1) as well as by the /proc census.
+        created_pairs = []
+        real_pair = _pidfd_handoff_pair
+
+        def recording_pair():
+            pair = real_pair()
+            created_pairs.append(pair)
+            return pair
+
+        baseline = live_handoff_resources()
+        with tempfile.TemporaryDirectory(prefix="opf-fdleak2-") as directory:
+            pair_globals = _pidfd_handoff_fork_send.__globals__
+            pair_globals["_pidfd_handoff_pair"] = recording_pair
+            try:
+                with patch.object(os, "getpgid", pgid_await_fault):
+                    refuses(RuntimeError, lambda: frozen_pair(Path(directory)))
+            finally:
+                pair_globals["_pidfd_handoff_pair"] = real_pair
+            assert created_pairs, "the recorder saw no handoff pair"
+            assert all(end.fileno() == -1
+                       for pair in created_pairs for end in pair), (
+                "the post-receive unwind left a handoff socket open",
+                [[end.fileno() for end in pair] for pair in created_pairs])
+            assert live_handoff_resources() == baseline, (
+                "the post-receive unwind stranded a descriptor or socket",
+                live_handoff_resources(), baseline)
+            # Hygiene, exactly as in leg 1k: the model guardian froze with
+            # its leader alive; the ownership proofs license both kills.
+            mine = Path("/proc/self/task", str(os.getpid()),
+                        "children").read_text(encoding="ascii").split()
+            assert len(mine) == 1, (
+                "the post-receive leak leg expected exactly the model "
+                "guardian as a child", mine)
+            guardian = int(mine[0])
+            orphans = Path("/proc", str(guardian), "task", str(guardian),
+                           "children").read_text(encoding="ascii").split()
+            assert _kill_proved_child(guardian), \
+                "the leg-1m hygiene refused the frozen guardian"
+            for orphan in orphans:
+                assert _kill_proved_child(int(orphan)), \
+                    "the leg-1m hygiene refused the reparented leader"
+
+        # Leg 1n (QA12 codex major 2): _close_every -- the one route for
+        # every multi-descriptor cleanup above -- closes EVERY descriptor
+        # even when an earlier close RELEASES its number and then RAISES
+        # (a probe at each position), and with TWO failures it re-raises
+        # the FIRST only after all closes ran.
+        for fault_positions in ((0,), (1,), (2,), (0, 2)):
+            probe_reads = []
+            probe_writes = []
+            for _ in range(3):
+                read_end, write_end = os.pipe()
+                probe_reads.append(read_end)
+                probe_writes.append(write_end)
+            probe_closed = []
+
+            def releasing_close(target_fd, fault):
+                os.close(target_fd)
+                probe_closed.append(target_fd)
+                if fault:
+                    raise OSError(
+                        5, "release-then-raise close at " + str(target_fd))
+
+            try:
+                _close_every([
+                    (lambda held=target_fd, fault=(position in
+                                                   fault_positions):
+                        releasing_close(held, fault))
+                    for position, target_fd in enumerate(probe_reads)])
+            except OSError as exc:
+                first_faulted = probe_reads[fault_positions[0]]
+                assert str(first_faulted) in str(exc), (
+                    "the FIRST close failure was not the one re-raised",
+                    fault_positions, str(exc))
+            else:
+                raise AssertionError(
+                    "the probe's close failure did not propagate")
+            assert probe_closed == probe_reads, (
+                "a raising close skipped a later close",
+                fault_positions, probe_closed, probe_reads)
+            for write_end in probe_writes:
+                os.close(write_end)
+
+        # Leg 1o (QA12 codex blocker 1): the sender REFUSES from a child
+        # SUBREAPER outright -- this case process is one (QA8), and a
+        # subreaper's waitable child may be an ADOPTED orphan it never
+        # forked (codex's adopted-child reproduction), which waitid alone
+        # cannot distinguish from its own fork. The child here IS this
+        # process's own fork, and the sender still refuses: the licence
+        # rests on the provable negative, never on the lucky case. Nothing
+        # reaches the wire, the receiver fails closed on EOF, and the
+        # child survives untouched for the hygiene kill.
+        own = os.fork()
+        if own == 0:
+            time.sleep(3600)
+            os._exit(0)
+        handoff, handoff_peer = _pidfd_handoff_pair()
+        sent = []
+        with patch.object(signal, "pidfd_send_signal",
+                          lambda target_fd, signum, *args:
+                              sent.append((target_fd, signum))):
+            try:
+                _pidfd_handoff_send(handoff_peer, own)
+            except AssertionError as exc:
+                named = str(exc)
+            else:
+                raise AssertionError(
+                    "a child-subreaper sender was allowed to hand off")
+            assert "child subreaper" in named, named
+            handoff_peer.close()
+            try:
+                _pid, own_fd = _pidfd_handoff_recv(
+                    handoff, "the leg-1o subreaper-sender handoff")
+            except AssertionError as exc:
+                named = str(exc)
+            else:
+                os.close(own_fd)
+                raise AssertionError("the refused handoff still delivered")
+        assert "closed without a handoff message" in named \
+            and "leg-1o" in named, named
+        assert sent == [], ("the refused handoff was signalled", sent)
+        assert state(own) in ("S", "R"), (
+            "the refused handoff's child did not survive untouched",
+            state(own))
+        assert _kill_proved_child(own), "the leg-1o hygiene refused its child"
+
+        # Leg 1p (QA12 claude m4): a send that refuses must not leave the
+        # child _pidfd_handoff_fork_send just forked running (or rotting)
+        # with no owner. From this subreaper case process the send refuses
+        # outright (leg 1o), so the helper must kill AND reap its own fork
+        # before the refusal propagates: the children census is identical
+        # before and after.
+        handoff, handoff_peer = _pidfd_handoff_pair()
+        before = Path("/proc/self/task", str(os.getpid()),
+                      "children").read_text(encoding="ascii").split()
+        refuses(AssertionError, lambda: _pidfd_handoff_fork_send(
+            handoff_peer, lambda: os._exit(0)))
+        after = Path("/proc/self/task", str(os.getpid()),
+                     "children").read_text(encoding="ascii").split()
+        assert after == before, (
+            "the refused fork-and-send stranded its child", before, after)
+        handoff_peer.close()
+        handoff.close()
 
         # Leg 2: at the _escalate tier the guardian SIGKILL survives the
         # same failure, the kill that DID run is recorded ("partial",
