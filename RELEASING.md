@@ -92,7 +92,11 @@ signed; the independently published digest is the authenticated reference.
      --qa-path <QA object>` must exit 0 before the merge, and the release-delta gate
      (`python3 tools/check_release_delta.py`) must exit 0 with its `release-delta: POST-RELEASE` status
      line, which it prints only when the head changes nothing but the post-release paths from the
-     tagged commit. Merge without rewriting the gated commit (no
+     tagged commit. The gate judges the repository found from the physical location of the running
+     gate file, and by design it refuses (exit 2) a tree that is not a git checkout but has a `.git`
+     entry or a git-directory name (`HEAD`, `objects`, `refs`, `commondir`, `gitdir`) in its
+     ancestry; the message names the directory and the entry it found. Merge without rewriting the
+     gated commit (no
      squash or rebase), so the commit post-tag certified lands unchanged and its parent stays the tagged
      commit.
    - 6b. Tag key. Only after 6a has merged, record `tag = "vX.Y.Z"` in that release's `changelog.toml`

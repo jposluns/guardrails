@@ -220,6 +220,8 @@ def _stage1_repository_in_ancestry(*dirs):
     damaged BARE repository is still a repository; QA round-8 codex blocker 2 / claude F2), OR an
     lstat there fails with anything other than not-found (fail-closed). The walk does not stop at a
     filesystem boundary or a ceiling directory, because git may be told to cross them.
+    Returns None for absence, else a non-empty description naming the directory and the entry
+    found (or the path whose lstat failed), so the exit-2 refusal can say why (QA round-9 claude m2).
     DISCLOSED RESIDUAL (the accepted fail-closed cost): this over-refuses by design. A genuine
     non-git tree whose lexical or physical ancestry carries one of those names (an unrelated `refs`
     directory or `HEAD` file, say) is cannot-evaluate, exit 2, never the single-stage path."""
@@ -231,16 +233,35 @@ def _stage1_repository_in_ancestry(*dirs):
                 for name in (".git",) + _GIT_DIR_MARKERS:
                     try:
                         os.lstat(os.path.join(d, name))
-                        return True
+                        return "directory {} carries a {!r} entry".format(d, name)
                     except FileNotFoundError:
                         pass
-                    except OSError:
-                        return True
+                    except OSError as exc:
+                        return "{} is unreadable ({})".format(os.path.join(d, name), exc)
                 parent = os.path.dirname(d)
                 if parent == d:
                     break
                 d = parent
-    return False
+    return None
+
+
+def _stage1_gate_paths():
+    """(gate root, inspection directories) for the RUNNING gate file (QA round-9 codex blocker /
+    claude B1, extending D-397-DISCOVERY-SUPERSET). The gate root is derived ONLY from the PHYSICAL
+    path of the file actually executing: os.path.realpath of the raw launch path joined to the cwd
+    resolves each symlink before the `..` that follows it, as the kernel does, and follows a
+    symlinked gate FILE. abspath erases `link/..` as text, so a root derived from it can name a
+    directory the gate does not live in. The lexical forms (abspath of __file__, the raw __file__
+    and sys.argv[0] joined to the cwd, un-normalized) are ADDITIONAL inputs to the superset walk
+    only, never the root. Raises OSError when the cwd or the path cannot be resolved."""
+    cwd = os.getcwd()
+    raw = os.path.join(cwd, __file__)
+    physical = os.path.realpath(raw)
+    dirs = [os.path.dirname(physical), os.path.dirname(raw),
+            os.path.dirname(os.path.abspath(__file__))]
+    if sys.argv and sys.argv[0]:
+        dirs.append(os.path.dirname(os.path.join(cwd, sys.argv[0])))
+    return os.path.dirname(os.path.dirname(physical)), tuple(dirs)
 
 
 def _stage1_no_committed_state(repo, launch=()):
@@ -282,20 +303,31 @@ def _stage1_main():
     attested release to defend, and the genesis and delta branches judge the checkout by design).
     Any OTHER git failure (QA round-6 codex blocker 1 / claude 3: dubious ownership, a corrupt
     HEAD, bad config, git not launchable) is exit 2 HERE, before any checkout module is imported:
-    a git failure is never permission to execute checkout code."""
+    a git failure is never permission to execute checkout code. The gate root is the PHYSICAL
+    root of the running file (_stage1_gate_paths, QA round 9), never a lexical normalization."""
     import shutil
     import tempfile
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        repo, launch = _stage1_gate_paths()
+    except OSError as exc:
+        print("error: stage-1 re-execution: cannot resolve the physical path of the running gate "
+              "({}); no checkout code runs; fail-closed".format(exc), file=sys.stderr)
+        return 2
     try:
         proc = _stage1_git(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
         if proc.returncode != 0:
-            if _stage1_no_committed_state(repo, (os.path.dirname(os.path.abspath(__file__)),)):
+            if _stage1_no_committed_state(repo, launch):
                 return None
-            print("error: stage-1 re-execution: git cannot resolve HEAD ({}) and no probe "
-                  "positively established an absent committed state; a refused or damaged "
-                  "repository is cannot-evaluate and runs no checkout code; fail-closed".format(
+            found = _stage1_repository_in_ancestry(repo, *launch)
+            print("error: stage-1 re-execution: git cannot resolve HEAD ({}) at the gate root {} "
+                  "and no probe positively established an absent committed state ({}); a refused "
+                  "or damaged repository is cannot-evaluate and runs no checkout code; "
+                  "fail-closed".format(
                       proc.stderr.decode("utf-8", "replace").strip()[:200]
-                      or "rc={}".format(proc.returncode)), file=sys.stderr)
+                      or "rc={}".format(proc.returncode), repo,
+                      ("refused because " + found) if found else
+                      "no .git entry or git-directory marker on the inspected ancestry; git "
+                      "itself refused"), file=sys.stderr)
             return 2
     except OSError as exc:
         print("error: stage-1 re-execution: cannot launch git ({}); the committed state cannot be "
@@ -1917,9 +1949,12 @@ def _head_commit_or_none(root):
     except GateError:
         if _no_committed_state(root):
             return None
-        raise GateError("git cannot resolve HEAD and no probe positively established an absent "
-                        "committed state; a refused or damaged repository is cannot-evaluate, "
-                        "never routed to a checkout-judged branch")
+        found = _stage1_repository_in_ancestry(str(root))
+        raise GateError("git cannot resolve HEAD at {} and no probe positively established an "
+                        "absent committed state ({}); a refused or damaged repository is "
+                        "cannot-evaluate, never routed to a checkout-judged branch".format(
+                            root, ("refused because " + found) if found else
+                            "git itself refused"))
 
 
 def _committed_post_release_state(root, head_oid):
@@ -3818,7 +3853,7 @@ def _post_release_e2e(tmp, failures, only=None):
     # the discriminator target is proven valid; then each attack must leave that verdict unchanged.
     # With the round-5 fix reverted each attack flips to exit 0 (verified out-of-tree; see report).
     labelR5 = "(R5 launch) the stage-1 committed re-execution and committed routing"
-    if _sel("(R5 ") or _sel("(R6 ") or _sel("(R7 ") or _sel("(R8 "):
+    if _sel("(R5 ") or _sel("(R6 ") or _sel("(R7 ") or _sel("(R8 ") or _sel("(R9 "):
         r5 = _extract_to("post-release-r5")
         if r5 is None or not _pin_fixture_version(r5, failures):
             return False
@@ -4111,8 +4146,12 @@ def _post_release_e2e(tmp, failures, only=None):
         label8b = "(R8 damaged bare ancestor) a bare ancestor with a corrupt HEAD fails closed"
         label8v = ("(R8 ancestor variants) dangling, looping and unreadable ancestor .git entries "
                    "fail closed; an unborn ancestor HEAD still reaches the checkout gate")
+        label9p = ("(R9 physical gate root) a symlink followed by `..`, or a symlinked gate file, "
+                   "never hides the gate's physical repository")
+        label9u = ("(R9 unsearchable ancestor) an ancestor without search permission fails "
+                   "closed through the OSError branch")
         if (_sel(label7a) or _sel(label7g) or _sel(label7n) or _sel(label8s) or _sel(label8b)
-                or _sel(label8v)):
+                or _sel(label8v) or _sel(label9p) or _sel(label9u)):
             gate_bytes7 = (r5 / "tools" / "check_release_delta.py").read_bytes()
 
             def _mini_gate7(base_):
@@ -4122,11 +4161,11 @@ def _post_release_e2e(tmp, failures, only=None):
                 (proj_ / "tools" / "_gen_common.py").write_text(_R6_TRIP, encoding="utf-8")
                 return proj_
 
-            def _gate_cli7(label_, proj_, want_rc, want_msg, cwd_=None):
+            def _gate_cli7(label_, proj_, want_rc, want_msg, cwd_=None, argv_=None):
                 try:
                     proc_ = subprocess.run(
                         [sys.executable, "-I", "-B",
-                         str(proj_ / "tools" / "check_release_delta.py")],
+                         argv_ or str(proj_ / "tools" / "check_release_delta.py")],
                         cwd=str(cwd_ or proj_), capture_output=True, env=env, timeout=600)
                 except (OSError, subprocess.TimeoutExpired) as exc:
                     failures.append("fixture setup ({}): could not run the gate CLI ({})".format(
@@ -4136,6 +4175,17 @@ def _post_release_e2e(tmp, failures, only=None):
                 if proc_.returncode != want_rc or want_msg not in out_:
                     failures.append("{}: expected exit {} with {!r} (got rc={}: {})".format(
                         label_, want_rc, want_msg, proc_.returncode, out_.strip()[-300:]))
+                elif (want_msg != "(R6 checkout import, must never run)"
+                      and "(R6 checkout import, must never run)" in out_):
+                    failures.append("{}: the checkout tripwire ran: {}".format(
+                        label_, out_.strip()[-300:]))
+
+            def _marker_free_base7():
+                import tempfile as _tempfile7b
+                for cand_ in (tmp, Path(_tempfile7b.gettempdir()), Path("/var/tmp")):
+                    if not _stage1_repository_in_ancestry(str(cand_)):
+                        return cand_
+                return None
 
         if _sel(label7a):
             anc7 = tmp / "r7-corrupt-ancestor"
@@ -4256,15 +4306,20 @@ def _post_release_e2e(tmp, failures, only=None):
             unr8 = v8 / "unreadable"
             proju8 = _mini_gate7(unr8)
             _g(unr8, "init", "-q")
-            for tag8, proj8 in (("dangling .git symlink", projv8), ("symlink loop", projl8)):
+            # QA round-9 claude m1: the symlink-loop and chmod-0 cases are REGRESSION PINS, not
+            # discriminators: lstat of the entry itself succeeds whatever it points at or its mode,
+            # so they pass on the plain presence check. The fail-closed OSError branch is driven
+            # by (R9 unsearchable ancestor), which goes red with that branch removed.
+            for tag8, proj8 in (("dangling .git symlink", projv8),
+                                ("symlink loop, regression pin", projl8)):
                 _gate_cli7("{} [{}]".format(label8v, tag8), proj8, 2,
                            "no probe positively established")
                 _refuse8("{} [{}]".format(label8v, tag8), proj8)
             os.chmod(unr8 / ".git", 0)
             try:
-                _gate_cli7(label8v + " [unreadable .git]", proju8, 2,
+                _gate_cli7(label8v + " [chmod-0 .git, regression pin]", proju8, 2,
                            "no probe positively established")
-                _refuse8(label8v + " [unreadable .git]", proju8)
+                _refuse8(label8v + " [chmod-0 .git, regression pin]", proju8)
             finally:
                 os.chmod(unr8 / ".git", 0o755)
             unb8 = v8 / "unborn"
@@ -4275,6 +4330,118 @@ def _post_release_e2e(tmp, failures, only=None):
                                 "unborn ancestor HEAD as the absent committed state")
             _gate_cli7(label8v + " [unborn HEAD]", projn8, 0,
                        "(R6 checkout import, must never run)")
+
+        # ---- QA round 9 (codex blocker / claude B1): the gate root is the PHYSICAL path of the
+        # running file. Each fixture sits under a marker-free base, so the lexical (abspath) form
+        # of every attack path names a repository-free directory; only the physical path reaches
+        # the damaged or healthy ancestor repository. With the root and the walk derived from
+        # abspath(__file__) (the ce8b18e3 code) every attack row goes red with the tripwire firing.
+        if _sel(label9p):
+            import shutil as _shutil9
+            import tempfile as _tempfile9
+            base9 = _marker_free_base7()
+            if base9 is None:
+                failures.append(label9p + ": no marker-free temp path exists for the lexical "
+                                "decoy (fixture-env)")
+            else:
+                p9 = Path(_tempfile9.mkdtemp(prefix="aiqt-r9-physical-", dir=str(base9)))
+                try:
+                    stub9 = "(R9 committed stage-2 copy ran)"
+                    for kind9 in ("damaged", "healthy"):
+                        # codex: alias -> anc/sub; alias/../project/tools is lexically the
+                        # repository-free decoy project/tools beside alias, physically
+                        # anc/project/tools.
+                        c9 = p9 / ("codex-" + kind9)
+                        anc9 = c9 / "anc"
+                        _mini_gate7(anc9)
+                        (anc9 / "sub").mkdir()
+                        (c9 / "project" / "tools").mkdir(parents=True)
+                        os.symlink(str(anc9 / "sub"), str(c9 / "alias"))
+                        if kind9 == "damaged":
+                            _g(anc9, "init", "-q")
+                            (anc9 / ".git" / "HEAD").write_bytes(b"garbage\n")
+                            want9 = (2, "no probe positively established")
+                        else:
+                            (anc9 / "tools").mkdir()
+                            (anc9 / "tools" / "check_release_delta.py").write_text(
+                                "print(" + repr(stub9) + ")\n", encoding="utf-8")
+                            _git_init_commit(anc9, "r9 healthy ancestor")
+                            want9 = (0, stub9)
+                        rel9 = os.path.join("alias", "..", "project", "tools",
+                                            "check_release_delta.py")
+                        _gate_cli7("{} [codex {}: alias/../project, relative]".format(
+                            label9p, kind9), c9, want9[0], want9[1], cwd_=c9, argv_=rel9)
+                        _gate_cli7("{} [codex {}: alias/../project, absolute]".format(
+                            label9p, kind9), c9, want9[0], want9[1], cwd_=Path("/"),
+                            argv_=os.path.join(str(c9), rel9))
+                    # claude B1: dmg/ damaged; plain/link -> dmg/x/project/tools; plain2/tools/
+                    # check_release_delta.py is a symlink to the damaged repository's gate.
+                    d9 = p9 / "claude"
+                    dmg9 = d9 / "dmg"
+                    projd9 = _mini_gate7(dmg9 / "x")
+                    _g(dmg9, "init", "-q")
+                    (dmg9 / ".git" / "HEAD").write_bytes(b"garbage\n")
+                    plain9 = d9 / "plain"
+                    plain9.mkdir()
+                    os.symlink(str(projd9 / "tools"), str(plain9 / "link"))
+                    (d9 / "plain2" / "tools").mkdir(parents=True)
+                    os.symlink(str(projd9 / "tools" / "check_release_delta.py"),
+                               str(d9 / "plain2" / "tools" / "check_release_delta.py"))
+                    for tag9, argv9, cwd9 in (
+                            ("claude: link/../tools from cwd=plain",
+                             os.path.join("link", "..", "tools", "check_release_delta.py"),
+                             plain9),
+                            ("claude: the same absolute from cwd=/",
+                             os.path.join(str(plain9), "link", "..", "tools",
+                                          "check_release_delta.py"), Path("/")),
+                            ("claude: symlinked gate file",
+                             str(d9 / "plain2" / "tools" / "check_release_delta.py"),
+                             d9 / "plain2")):
+                        _gate_cli7("{} [{}]".format(label9p, tag9), projd9, 2,
+                                   "no probe positively established", cwd_=cwd9, argv_=argv9)
+                    # claude m2: the refusal names the directory and the entry it found.
+                    _gate_cli7(label9p + " [refusal names the marker]", projd9, 2,
+                               "directory {} carries a '.git' entry".format(dmg9))
+                    # Marker-free control: the same `..`-after-symlink shape with no repository
+                    # anywhere still reaches the checkout gate by design.
+                    n9 = p9 / "control"
+                    _mini_gate7(n9 / "real")
+                    (n9 / "real" / "sub").mkdir()
+                    os.symlink(str(n9 / "real" / "sub"), str(n9 / "alias"))
+                    _gate_cli7(label9p + " [marker-free control: alias/../project]", n9, 0,
+                               "(R6 checkout import, must never run)", cwd_=n9,
+                               argv_=os.path.join("alias", "..", "project", "tools",
+                                                  "check_release_delta.py"))
+                finally:
+                    _shutil9.rmtree(p9, ignore_errors=True)
+
+        # QA round-9 claude m1: an lstat that fails with something other than not-found (an
+        # ancestor directory without search permission answers EACCES) must read as PRESENT. With
+        # the fail-closed `except OSError` branch reduced to `pass`, the walk steps over the
+        # unsearchable directory to a marker-free ancestry and answers absence: red.
+        if _sel(label9u):
+            import shutil as _shutil9u
+            import tempfile as _tempfile9u
+            base9u = _marker_free_base7()
+            if os.geteuid() == 0:
+                print("SKIP {}: running as root, directory search permission is not enforced "
+                      "(the OSError branch is unreachable this way)".format(label9u))
+            elif base9u is None:
+                failures.append(label9u + ": no marker-free temp path exists (fixture-env)")
+            else:
+                u9 = Path(_tempfile9u.mkdtemp(prefix="aiqt-r9-unsearchable-", dir=str(base9u)))
+                try:
+                    (u9 / "locked" / "inner").mkdir(parents=True)
+                    os.chmod(u9 / "locked", 0o600)
+                    try:
+                        found9 = _stage1_repository_in_ancestry(str(u9 / "locked" / "inner"))
+                    finally:
+                        os.chmod(u9 / "locked", 0o700)
+                    if not found9 or "unreadable" not in found9:
+                        failures.append(label9u + ": an ancestor without search permission must "
+                                        "fail closed as present (got {!r})".format(found9))
+                finally:
+                    _shutil9u.rmtree(u9, ignore_errors=True)
 
         # ---- QA round-7 claude F3: a repo-config core.fsmonitor hook is attacker-chosen code and
         # must never run on the checkout-judged branches either. gen_manifest.git_tracked (the one
@@ -4484,13 +4651,20 @@ def _drift_child_failures(returncode, out, err):
     if returncode != 0:
         failures.append("(R6 drift) the advisory child failed rc={}: {}".format(
             returncode, err.strip()[-300:]))
+    # EXACTLY ONE record (QA round-9 codex minor): a duplicate, identical or contradictory, and a
+    # malformed record anywhere are failures no other record can erase; order never decides.
+    records = [line for line in out.splitlines() if "DRIFT-STATES" in line]
+    if len(records) != 1:
+        failures.append("(R6 drift) the advisory child must report exactly one DRIFT-STATES record "
+                        "(got {}); a duplicate or a malformed extra record is never resolved by "
+                        "order".format(len(records)))
+        return failures
     states = None
-    for line in out.splitlines():
-        if line.startswith("DRIFT-STATES "):
-            try:
-                states = json.loads(line[len("DRIFT-STATES "):])
-            except ValueError:
-                states = None
+    if records[0].startswith("DRIFT-STATES "):
+        try:
+            states = json.loads(records[0][len("DRIFT-STATES "):])
+        except ValueError:
+            states = None
     if not isinstance(states, dict):
         failures.append("(R6 drift) the advisory child reported no structured per-path states "
                         "(DRIFT-STATES); empty or truncated output never reads as clean")
@@ -4512,6 +4686,24 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     from _git_fixture_env import scrub_git_environment
     scrub_git_environment()
     failures = []
+
+    # QA round-9 codex minor: the drift consumer requires EXACTLY ONE DRIFT-STATES record. A
+    # duplicate (identical or contradictory) and a malformed record are failures that a later
+    # record cannot erase; with the pre-fix last-record-wins loop all three sequences read clean.
+    import json as _json9
+    good9 = dict((path_, want_) for path_, want_, _msg in _DRIFT_CHILD_EXPECT)
+    bad9 = dict(good9)
+    bad9["fifo.txt"] = "match"
+    rec9 = "DRIFT-STATES " + _json9.dumps(good9, sort_keys=True)
+    if _drift_child_failures(0, "UNCHECKED big.txt\n" + rec9 + "\n", ""):
+        failures.append("(R9 drift record) a single valid DRIFT-STATES record must be accepted")
+    for tag9, lines9 in (
+            ("duplicate-identical", [rec9, rec9]),
+            ("bad-then-good", ["DRIFT-STATES " + _json9.dumps(bad9, sort_keys=True), rec9]),
+            ("malformed-then-good", ["DRIFT-STATES (not json", rec9])):
+        if not _drift_child_failures(0, "UNCHECKED big.txt\n" + "\n".join(lines9) + "\n", ""):
+            failures.append("(R9 drift record) {}: more than one DRIFT-STATES record must fail; "
+                            "a later record never erases an earlier one".format(tag9))
 
     # F-TOML-BARE-VALUEERROR-CLASS: a predecessor TOML carrying an over-long integer literal (a BARE
     # ValueError) or a 1200-deep nested array (a RecursionError) must fail closed as GateError at the
