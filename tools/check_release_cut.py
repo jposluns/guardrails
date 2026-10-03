@@ -1739,8 +1739,13 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "false positive: a self-test leg's hygiene close; no try in the function closes it again"),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "fake", "", 1,
      _CS_LEGS.format("types.SimpleNamespace stand-in")),
-    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "fd", "", 9, _CS_LEGS.format("pidfd")),
-    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "guardian_fd", "", 6, _CS_LEGS.format("pidfd")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "fd", "", 10, _CS_LEGS.format("pidfd")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "guardian_fd", "", 9,
+     _CS_LEGS.format("pidfd (os.pidfd_open, or frozen_pair's, which closes its own on a refused handoff and "
+                     "otherwise hands it to the one leg that closes it)")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "handoff_peer", "", 2,
+     _CS_LEGS.format("socket.socketpair end (a socket object: its first close() sets its fileno to -1, so a "
+                     "repeat would close no descriptor)")),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "leader_fd", "", 1, _CS_LEGS.format("pidfd")),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "subject_fd", "", 2,
      _CS_LEGS.format("pidfd (or, for fake.subject_pidfd, a fresh types.SimpleNamespace stand-in's field), the "

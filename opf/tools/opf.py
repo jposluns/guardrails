@@ -2678,6 +2678,17 @@ def _self_test_runtime_report_channel(tmp):
     read_fd = report_r.fileno()
     report_w.close()
     raw = b""
+
+    def reopens(path, flags):
+        """Whether the /proc fd entry `path` reopens; a reopened descriptor is closed once, here, and a
+        failing close propagates rather than passing for a refused reopen."""
+        try:
+            opened = os.open(path, flags)
+        except OSError:
+            return False
+        os.close(opened)
+        return True
+
     try:
         # QA8 claude M1 pin + m4: find the gated module (it waits on the gate for up
         # to 30 s), then require (a) the supervisor's fd table to be unlistable by
@@ -2724,27 +2735,15 @@ def _self_test_runtime_report_channel(tmp):
                     faults.append("the module's output fd {} is {}, not a socket: a same-uid "
                                   "process could reopen it through /proc and drain a failing "
                                   "module's output into a clean report".format(stream_fd, target))
-                try:
-                    opened = os.open(fd_entry, os.O_RDONLY)
-                    os.close(opened)
+                if reopens(fd_entry, os.O_RDONLY):
                     faults.append("the module's output fd {} could be reopened through /proc"
                                   .format(stream_fd))
-                except OSError:
-                    pass
-        try:
-            opened = os.open("/proc/{}/fd/{}".format(proc.pid, write_fd), os.O_WRONLY)
-            os.close(opened)
+        if reopens("/proc/{}/fd/{}".format(proc.pid, write_fd), os.O_WRONLY):
             faults.append("the supervisor report write-end could be reopened through /proc/<pid>/fd, so "
                           "a concurrent run could forge its report")
-        except OSError:
-            pass
-        try:
-            opened = os.open("/proc/self/fd/{}".format(read_fd), os.O_RDONLY)
-            os.close(opened)
+        if reopens("/proc/self/fd/{}".format(read_fd), os.O_RDONLY):
             faults.append("the report reader end could be reopened through /proc/<pid>/fd, so a "
                           "concurrent run could drain or forge the report")
-        except OSError:
-            pass
         gate.write_text("go", encoding="ascii")
         parts = []
         while True:
@@ -3105,7 +3104,9 @@ def _pidfd_handoff_recv(conn, note):
     opened on its own direct child immediately after fork and passed here
     with SCM_RIGHTS (socket.send_fds / socket.recv_fds). Returns
     (pid, fd); the pid is disclosure only -- /proc state reads and
-    messages -- NEVER a signal target. Fails closed with AssertionError
+    messages -- NEVER a signal target. The receiver OWNS `conn`: it is
+    closed exactly once, in a finally, on every path, refusals included.
+    Fails closed with AssertionError
     naming `note`, every received descriptor closed and NOTHING signalled,
     when: no message arrives within the bound; the sender closed without a
     message; the message carries no descriptor (or more than one); the
@@ -3121,11 +3122,14 @@ def _pidfd_handoff_recv(conn, note):
         raise AssertionError("pidfd handoff refused ({}): {}; nothing is "
                              "signalled".format(note, reason))
 
-    poller = select.poll()
-    poller.register(conn.fileno(), select.POLLIN)
-    if not poller.poll(30000):
-        refuse((), "no handoff message arrived within the bound")
-    message, fds, _flags, _addr = socket.recv_fds(conn, 64, 1)
+    try:
+        poller = select.poll()
+        poller.register(conn.fileno(), select.POLLIN)
+        if not poller.poll(30000):
+            refuse((), "no handoff message arrived within the bound")
+        message, fds, _flags, _addr = socket.recv_fds(conn, 64, 1)
+    finally:
+        conn.close()
     if not message:
         refuse(fds, "the forking parent closed without a handoff message")
     if len(fds) != 1:
@@ -6417,7 +6421,6 @@ def _watchdog_completion_case(mode):
             # it with SCM_RIGHTS; the numeric pid is disclosure only, never
             # a signal target.
             leader, fd = _pidfd_handoff_recv(handoff, "the model leader")
-            handoff.close()
             await_file(grandchild_file, "the model grandchild never appeared")
             grandchild = int(grandchild_file.read_text(encoding="ascii"))
             scratch = Path(directory, "opened.tmp")
@@ -6549,7 +6552,6 @@ def _watchdog_completion_case(mode):
 
             handoff_peer.close()
             leader, fd = _pidfd_handoff_recv(handoff, "the leg-7 leader")
-            handoff.close()
             await_file(grandchild_file, "the leg-7 grandchild never appeared")
             grandchild = int(grandchild_file.read_text(encoding="ascii"))
             await_file(frozen_file, "the leg-7 guardian never froze")
@@ -6727,7 +6729,6 @@ def _watchdog_completion_case(mode):
                     os._exit(125)
             handoff_peer.close()
             leader, leader_fd = _pidfd_handoff_recv(handoff, "the model leader")
-            handoff.close()
             await_file(grandchild_file, "the model grandchild never appeared")
             grandchild = int(grandchild_file.read_text(encoding="ascii"))
             await_file(frozen_file, "the model guardian never froze")
@@ -7008,9 +7009,17 @@ def _watchdog_completion_case(mode):
             # intermittent "fixture was accepted" flake (fix 16,
             # QA37 claude). Hand the pair out only once the leader
             # holds its own group.
-            leader, leader_fd = _pidfd_handoff_recv(handoff, "the model leader")
-            handoff.close()
-            await_pgid(leader, "the model leader never took its own group")
+            leader_fd = None
+            try:
+                leader, leader_fd = _pidfd_handoff_recv(handoff, "the model leader")
+                await_pgid(leader, "the model leader never took its own group")
+            except BaseException:
+                # A refused handoff or a leader that never took its group:
+                # every descriptor this pair holds is closed once, here.
+                if leader_fd is not None:
+                    os.close(leader_fd)
+                os.close(guardian_fd)
+                raise
             return guardian, guardian_fd, leader, leader_fd
 
         # Leg 1: the held-pidfd subject SIGKILL survives a raising census;
@@ -7093,7 +7102,6 @@ def _watchdog_completion_case(mode):
         sender = os.fork()
         if sender == 0:
             try:
-                handoff.close()
                 handoff_peer.send(str(bystander).encode("ascii"))
                 os._exit(0)
             except BaseException:
@@ -7104,14 +7112,15 @@ def _watchdog_completion_case(mode):
                           lambda target_fd, signum, *args:
                               sent.append((target_fd, signum))):
             try:
-                _pidfd_handoff_recv(handoff, "the leg-1g proofless handoff")
+                _pid, proofless_fd = _pidfd_handoff_recv(
+                    handoff, "the leg-1g proofless handoff")
             except AssertionError as exc:
                 named = str(exc)
             else:
+                os.close(proofless_fd)
                 raise AssertionError("a descriptor-less handoff was accepted")
         assert "passed 0 descriptors" in named and "leg-1g" in named, named
         assert sent == [], ("the descriptor-less handoff was signalled", sent)
-        handoff.close()
         waited, raw = os.waitpid(sender, 0)
         assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
         assert state(bystander) in ("S", "R"), (
@@ -7139,14 +7148,15 @@ def _watchdog_completion_case(mode):
                           lambda target_fd, signum, *args:
                               sent.append((target_fd, signum))):
             try:
-                _pidfd_handoff_recv(handoff, "the leg-1h exited target")
+                _pid, departed_fd = _pidfd_handoff_recv(
+                    handoff, "the leg-1h exited target")
             except AssertionError as exc:
                 named = str(exc)
             else:
+                os.close(departed_fd)
                 raise AssertionError("an exited handoff target was accepted")
         assert "already exited" in named and "leg-1h" in named, named
         assert sent == [], ("the exited handoff target was signalled", sent)
-        handoff.close()
         os.waitpid(departed, 0)
 
         # Leg 2: at the _escalate tier the guardian SIGKILL survives the
