@@ -83,16 +83,27 @@ except ModuleNotFoundError:  # Python < 3.11
 # few stdlib imports above this block shadowable by files planted beside this one; CI launches with
 # -I, which keeps the script directory off sys.path.
 
-def _stage1_git(repo, args, input_bytes=None):
+def _stage1_git(repo, args, input_bytes=None, c_locale=False):
     """The stage-1 pinned git funnel: the inherited GIT_* environment scrubbed; replace objects,
     grafts, the commit-graph cache and core.fsmonitor all disabled on EVERY call (QA round-5
     reproduction (c): a repo-config fsmonitor hook is attacker-chosen code and must never run
-    mid-gate; plumbing object reads apply no clean/smudge filter)."""
+    mid-gate; plumbing object reads apply no clean/smudge filter). QA round-6 (codex blocker 2):
+    GIT_NO_LAZY_FETCH=1 is set AFTER the scrub (the scrub would otherwise drop an inherited copy)
+    and protocol.allow=never is pinned on the argv, so a promisor/partial-clone repository can
+    never start a lazy fetch (and with it core.sshCommand, a remote helper, or a credential
+    helper) while stage 1 reads objects: a missing object is a refusal, never a transport.
+    `c_locale` pins LC_ALL=C (which gettext honors over LANGUAGE) for the one caller that matches
+    a git MESSAGE, the no-repository probe, so a localized message cannot defeat the match.
+    Raises OSError when git cannot be launched (callers map it to exit 2; QA round-6 claude 3:
+    never a traceback)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     env["GIT_GRAFT_FILE"] = os.devnull
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    if c_locale:
+        env["LC_ALL"] = "C"
     return subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
-                           "-c", "core.fsmonitor=false",
+                           "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
                            "-C", repo, *args], capture_output=True, env=env, input=input_bytes)
 
 
@@ -190,17 +201,60 @@ def _stage1_materialize(repo, commit_oid, dest):
         os.chmod(target, 0o755 if mode == "100755" else 0o644)
 
 
+def _stage1_no_committed_state(repo):
+    """True ONLY when a positive probe establishes that NO COMMITTED STATE exists, the sole
+    condition under which the single-stage checkout gate may run (QA round-6 codex blocker 1 /
+    claude 3). Either (a) NOT A GIT REPOSITORY: git's own discovery refusal under a pinned C
+    locale names no repository AND no `.git` entry exists at the gate root (a present `.git` entry
+    that git cannot use, e.g. a corrupt HEAD that fails discovery, is a DAMAGED repository and
+    never a fallback); or (b) an UNBORN HEAD: the repository resolves, HEAD is a symbolic ref to a
+    refs/ branch, and `git show-ref --verify` answers exactly "missing" (rc 1) for that branch.
+    Every other git failure (dubious ownership, bad config, a corrupt object store, a detached or
+    corrupt HEAD) returns False and the caller exits 2 without importing any checkout module.
+    Raises OSError when git cannot be launched (the caller maps it to exit 2)."""
+    probe = _stage1_git(repo, ["rev-parse", "--git-dir"], c_locale=True)
+    if probe.returncode != 0:
+        err = probe.stderr.decode("utf-8", "replace")
+        return ("not a git repository" in err
+                and not os.path.lexists(os.path.join(repo, ".git")))
+    sym = _stage1_git(repo, ["symbolic-ref", "--quiet", "HEAD"])
+    if sym.returncode != 0:
+        return False
+    try:
+        ref = sym.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return False
+    if not ref.startswith("refs/"):
+        return False
+    return _stage1_git(repo, ["show-ref", "--verify", "--quiet", ref]).returncode == 1
+
+
 def _stage1_main():
-    """Returns the final exit code, or None to fall through to the single-stage checkout gate (no
-    committed state exists: not a git repository, or an unborn branch; there is then no committed
-    revision to certify and no attested release to defend, and the genesis and delta branches judge
-    the checkout by design)."""
+    """Returns the final exit code, or None to fall through to the single-stage checkout gate ONLY
+    when _stage1_no_committed_state POSITIVELY establishes that no committed state exists (not a
+    git repository, or an unborn branch; there is then no committed revision to certify and no
+    attested release to defend, and the genesis and delta branches judge the checkout by design).
+    Any OTHER git failure (QA round-6 codex blocker 1 / claude 3: dubious ownership, a corrupt
+    HEAD, bad config, git not launchable) is exit 2 HERE, before any checkout module is imported:
+    a git failure is never permission to execute checkout code."""
     import shutil
     import tempfile
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    proc = _stage1_git(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
-    if proc.returncode != 0:
-        return None
+    try:
+        proc = _stage1_git(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+        if proc.returncode != 0:
+            if _stage1_no_committed_state(repo):
+                return None
+            print("error: stage-1 re-execution: git cannot resolve HEAD ({}) and no probe "
+                  "positively established an absent committed state; a refused or damaged "
+                  "repository is cannot-evaluate and runs no checkout code; fail-closed".format(
+                      proc.stderr.decode("utf-8", "replace").strip()[:200]
+                      or "rc={}".format(proc.returncode)), file=sys.stderr)
+            return 2
+    except OSError as exc:
+        print("error: stage-1 re-execution: cannot launch git ({}); the committed state cannot be "
+              "evaluated and no checkout code runs; fail-closed".format(exc), file=sys.stderr)
+        return 2
     head = proc.stdout.decode("ascii", "replace").strip()
     if not _stage1_is_oid(head):
         print("error: stage-1 re-execution: git rev-parse HEAD returned no full object id; "
@@ -317,14 +371,20 @@ def _substitution_free_env():
     _index_materialized_tree and gen_manifest.git_tracked use), so an inherited GIT_DIR cannot point the
     reads at a decoy repository and GIT_OBJECT_DIRECTORY / GIT_ALTERNATE_OBJECT_DIRECTORIES cannot
     overlay a forged object store; dropping a GIT_ variable can at most make a read FAIL (a refusal,
-    e.g. trust supplied only through GIT_CONFIG_*), never substitute a byte."""
+    e.g. trust supplied only through GIT_CONFIG_*), never substitute a byte. QA round-6 (codex
+    blocker 2): GIT_NO_LAZY_FETCH=1 is set AFTER the scrub, so a promisor/partial-clone repository
+    can never start a lazy fetch (and with it core.sshCommand, a remote helper, or a credential
+    helper) while the gate reads objects: a missing object is a refusal (SchemaError/GateError,
+    exit 2), never a transport; the _git/_git_raw launches additionally pin
+    -c protocol.allow=never, belt-and-braces."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     env["GIT_GRAFT_FILE"] = os.devnull
+    env["GIT_NO_LAZY_FETCH"] = "1"
     return env
 
 
-def _git(root, args, binary=False):
+def _git(root, args, binary=False, c_locale=False):
     """THE substitution-free read funnel for every git read this gate makes (rev-parse, cat-file, show,
     ls-tree, the ls-tree/diff-index --cached/ls-files drift advisory, worktree list; _git_raw is its
     diff-tree/merge-base twin): replace
@@ -341,11 +401,16 @@ def _git(root, args, binary=False):
     attacker-chosen code. No funneled call reads working-tree content through git (`git status` and
     `git diff-index HEAD` would also run clean filters, and status the post-index-change hook; see
     _warn_checkout_drift)."""
+    env = _substitution_free_env()
+    if c_locale:
+        # LC_ALL=C (honored by gettext over LANGUAGE) for the ONE caller that matches a git
+        # MESSAGE, _no_committed_state's no-repository probe: a localized message cannot defeat it.
+        env["LC_ALL"] = "C"
     try:
         return subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
-                               "-c", "core.fsmonitor=false",
+                               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
                                "-C", str(root), *args],
-                              capture_output=True, text=not binary, env=_substitution_free_env())
+                              capture_output=True, text=not binary, env=env)
     except OSError as exc:
         raise GateError("git is not available: {}".format(exc))
 
@@ -852,6 +917,7 @@ def _index_materialized_tree(dest, label):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_NO_LAZY_FETCH"] = "1"
     for argv in (["init", "-q"], ["add", "--force", "-A"]):
         try:
             proc = subprocess.run(["git", "-C", str(dest), *argv], capture_output=True, env=env)
@@ -1022,7 +1088,7 @@ def _git_raw(root, args):
     refusal-capable conveniences, never the accepting authority for ancestry."""
     try:
         return subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
-                               "-c", "core.fsmonitor=false",
+                               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
                                "-C", str(root), *args],
                               capture_output=True, env=_substitution_free_env())
     except OSError as exc:
@@ -1128,6 +1194,68 @@ def _head_tree_diff(root, commit):
     return set(changed)
 
 
+# The drift advisory's per-file size cap (QA round-6 codex major 4): a tracked checkout file whose
+# fstat size exceeds this many bytes is NEVER read; it is reported as UNCHECKED instead, and the
+# verdict is unaffected either way (the advisory never gates).
+_DRIFT_ADVISORY_SIZE_CAP = 100 * 1024 * 1024
+
+
+def _drift_entry_state(root, path_b, committed_symlink, want):
+    """Compare ONE tracked path's checkout bytes against HEAD's blob id `want` for the advisory,
+    following NO symlink anywhere on the path (QA round-6 codex majors 3/4 / claude 2): every
+    directory component is opened from a root descriptor with O_NOFOLLOW | O_DIRECTORY (a
+    symlinked parent is ELOOP, classified as drift, so no byte outside the root is ever read); the
+    final file is opened with O_NOFOLLOW | O_NONBLOCK (a FIFO or device swapped in cannot block
+    the open); the opened DESCRIPTOR is fstat'ed and must be a regular file (the check binds to
+    what was actually opened, closing the lstat-then-read race); the hash streams in bounded 1 MiB
+    chunks (never a whole-file read); and a regular file over _DRIFT_ADVISORY_SIZE_CAP bytes
+    (100 MiB) is never read at all. A committed-symlink entry is compared via readlink on the
+    directory descriptor, with no open. Returns "match", "drift", or "unchecked"; OSError,
+    ValueError, and MemoryError all classify as drift (the advisory never raises)."""
+    import hashlib
+    import stat
+    algo = hashlib.sha1 if len(want) == 40 else hashlib.sha256
+    dfd, fd = None, None
+    try:
+        parts = path_b.split(b"/")
+        dfd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        for comp in parts[:-1]:
+            nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            os.close(dfd)
+            dfd = nfd
+        name = parts[-1]
+        if committed_symlink:
+            data = os.readlink(name, dir_fd=dfd)
+            digest = algo(b"blob " + str(len(data)).encode("ascii") + b"\x00" + data).hexdigest()
+            return "match" if digest == want else "drift"
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return "drift"
+        if st.st_size > _DRIFT_ADVISORY_SIZE_CAP:
+            return "unchecked"
+        h = algo(b"blob " + str(st.st_size).encode("ascii") + b"\x00")
+        remaining = st.st_size
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1 << 20))
+            if not chunk:
+                return "drift"  # the file shrank mid-read: not HEAD's bytes
+            h.update(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            return "drift"  # the file grew mid-read
+        return "match" if h.hexdigest() == want else "drift"
+    except (OSError, ValueError, MemoryError):
+        return "drift"
+    finally:
+        for fd_ in (fd, dfd):
+            if fd_ is not None:
+                try:
+                    os.close(fd_)
+                except OSError:
+                    pass
+
+
 def _warn_checkout_drift(root):
     """ADVISORY ONLY, never part of the verdict (QA round-3 codex R3-3). The post-release branch judges
     HEAD's COMMITTED objects exclusively: every byte it reads comes through the substitution-free funnel
@@ -1142,7 +1270,10 @@ def _warn_checkout_drift(root):
     skip-worktree, an executable-bit change under core.filemode=false, or an untracked file hidden by
     .git/info/exclude or a .gitignore (codex R3-3's reproductions), and it compares raw bytes, so a
     checkout whose smudge filter or line-ending conversion rewrote a file is reported as drift. A git
-    failure is likewise only a note.
+    failure is likewise only a note. Content comparison is delegated to _drift_entry_state (QA
+    round-6 codex majors 3/4 / claude 2): a no-follow descriptor walk from the root, an fstat-bound
+    regular-file requirement on the opened descriptor, bounded chunked hashing, and tracked files
+    over _DRIFT_ADVISORY_SIZE_CAP bytes (100 MiB) reported as UNCHECKED rather than read.
     WHY NO WORKTREE-COMPARING GIT CALL (QA round 5, reproduction (c) and its siblings): `git status`
     refreshes the index, so it RUNS repo-configured code mid-gate: the core.fsmonitor program, the clean
     filter of any stat-dirty tracked file (a filter.<driver>.clean named by .gitattributes or
@@ -1151,8 +1282,6 @@ def _warn_checkout_drift(root):
     filter on a racily clean file. So git here only lists objects and paths (ls-tree, diff-index
     --cached, ls-files --others), none of which reads working-tree content, and the content comparison
     is done in Python (the self-test case "(R5 filter/hook)" plants all three and fails if any runs)."""
-    import hashlib
-    import stat
     proc_t = _git(root, ["ls-tree", "-r", "-z", "--full-tree", "HEAD"], binary=True)
     proc_s = _git(root, ["diff-index", "--cached", "--name-only", "-z", "HEAD"], binary=True)
     proc_u = _git(root, ["ls-files", "-z", "--others", "--exclude-standard"], binary=True)
@@ -1162,6 +1291,7 @@ def _warn_checkout_drift(root):
         return
     entries = set(rec.decode("utf-8", "replace")
                   for rec in (proc_s.stdout + b"\0" + proc_u.stdout).split(b"\0") if rec)
+    unchecked = []
     for rec in proc_t.stdout.split(b"\0"):
         meta, tab, path_b = rec.partition(b"\t")
         fields = meta.split(b" ")
@@ -1169,29 +1299,21 @@ def _warn_checkout_drift(root):
             continue
         path_s = path_b.decode("utf-8", "replace")
         want = fields[2].decode("ascii", "replace")
-        try:
-            # lstat first: a tracked path replaced by a FIFO, device or symlink is drift, never read
-            # (a blocking read would hang the gate).
-            q = root / os.fsdecode(path_b)
-            mode_ = os.lstat(q).st_mode
-            if fields[0] == b"120000" and stat.S_ISLNK(mode_):
-                data = os.fsencode(os.readlink(q))
-            elif fields[0] != b"120000" and stat.S_ISREG(mode_):
-                data = q.read_bytes()
-            else:
-                entries.add(path_s)
-                continue
-        except (OSError, ValueError):
+        state = _drift_entry_state(root, path_b, fields[0] == b"120000", want)
+        if state == "drift":
             entries.add(path_s)
-            continue
-        algo = hashlib.sha1 if len(want) == 40 else hashlib.sha256
-        if algo(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest() != want:
-            entries.add(path_s)
+        elif state == "unchecked":
+            unchecked.append(path_s)
     entries = sorted(entries)
     if entries:
         print("post-release advisory: the index, working tree, or untracked files differ from HEAD "
               "({} entr{}, e.g. {}); the verdict certifies the COMMITTED revision only, never this "
               "checkout".format(len(entries), "y" if len(entries) == 1 else "ies", entries[:5]),
+              file=sys.stderr)
+    if unchecked:
+        print("post-release advisory: {} tracked file(s) over the {}-byte advisory size cap were "
+              "left UNCHECKED for drift (e.g. {}); the verdict reads committed objects only, never "
+              "this checkout".format(len(unchecked), _DRIFT_ADVISORY_SIZE_CAP, sorted(unchecked)[:5]),
               file=sys.stderr)
 
 
@@ -1694,15 +1816,48 @@ def _genesis_structural(root):
 
 # --- run --------------------------------------------------------------------------------------------
 
+def _no_committed_state(root):
+    """The stage-2 twin of _stage1_no_committed_state (QA round-6 codex blocker 1 / claude 3): True
+    ONLY when a positive probe establishes that no committed state exists. Either (a) NOT A GIT
+    REPOSITORY: git's own discovery refusal under a pinned C locale names no repository AND no
+    `.git` entry exists at the root (a present `.git` entry git cannot use, e.g. a corrupt HEAD
+    that fails discovery, is a DAMAGED repository, never a fallback); or (b) an UNBORN HEAD: the
+    repository resolves, HEAD is a symbolic ref to a refs/ branch, and `git show-ref --verify`
+    answers exactly "missing" (rc 1) for it. Every other git failure (dubious ownership, bad
+    config, a corrupt object store, a detached or corrupt HEAD) returns False: cannot-evaluate."""
+    probe = _git(root, ["rev-parse", "--git-dir"], binary=True, c_locale=True)
+    if probe.returncode != 0:
+        err = probe.stderr.decode("utf-8", "replace")
+        return ("not a git repository" in err
+                and not os.path.lexists(os.path.join(str(root), ".git")))
+    sym = _git(root, ["symbolic-ref", "--quiet", "HEAD"], binary=True)
+    if sym.returncode != 0:
+        return False
+    try:
+        ref = sym.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return False
+    if not ref.startswith("refs/"):
+        return False
+    return _git(root, ["show-ref", "--verify", "--quiet", ref]).returncode == 1
+
+
 def _head_commit_or_none(root):
-    """HEAD's commit id through the pinned funnel, or None when no committed state exists (not a git
-    repository, or an unborn branch). Routing uses this to decide whether there IS a committed state
-    to certify: a repository carrying an attested release row necessarily has a resolvable HEAD, so
-    an unresolvable HEAD never diverts a committed post-release state to a checkout-judged branch."""
+    """HEAD's commit id through the pinned funnel, or None ONLY when _no_committed_state POSITIVELY
+    establishes that none exists (not a git repository, or an unborn branch). Routing uses this to
+    decide whether there IS a committed state to certify: a repository carrying an attested release
+    row necessarily has a resolvable HEAD, so an unresolvable HEAD never diverts a committed
+    post-release state to a checkout-judged branch. Any OTHER git failure (QA round-6 codex blocker
+    1: dubious ownership, a corrupt HEAD, bad config) re-raises as GateError, exit 2: a git failure
+    is never a license to judge the checkout."""
     try:
         return _rev_parse(root, "HEAD^{commit}")
     except GateError:
-        return None
+        if _no_committed_state(root):
+            return None
+        raise GateError("git cannot resolve HEAD and no probe positively established an absent "
+                        "committed state; a refused or damaged repository is cannot-evaluate, "
+                        "never routed to a checkout-judged branch")
 
 
 def _committed_post_release_state(root, head_oid):
@@ -3601,7 +3756,7 @@ def _post_release_e2e(tmp, failures, only=None):
     # the discriminator target is proven valid; then each attack must leave that verdict unchanged.
     # With the round-5 fix reverted each attack flips to exit 0 (verified out-of-tree; see report).
     labelR5 = "(R5 launch) the stage-1 committed re-execution and committed routing"
-    if _sel("(R5 "):
+    if _sel("(R5 ") or _sel("(R6 "):
         r5 = _extract_to("post-release-r5")
         if r5 is None or not _pin_fixture_version(r5, failures):
             return False
@@ -3815,6 +3970,67 @@ def _post_release_e2e(tmp, failures, only=None):
             if _regen_fixture_manifest(r5, "post-release-r5 accepted", failures, env) \
                     and _commit_all(r5, "R5 accepted state"):
                 _cli5_expect(label5s, 0, "release-delta: POST-RELEASE")
+
+        # ---- QA round-6 codex blocker 1 / claude 3: a git FAILURE is never the single-stage
+        # fallback. Each case damages the repository (or removes git from PATH) and plants a
+        # checkout tools/_gen_common.py tripwire that fakes a pass if ANY checkout module is
+        # imported: the gate must exit 2 from stage 1 with the tripwire inert. Only a positively
+        # identified absent committed state (no repository with no .git entry, or an unborn HEAD)
+        # may reach the checkout imports.
+        _R6_TRIP = ("import os\n"
+                    "print(" + repr(_FAKE_PASS + " (R6 checkout import, must never run)") + ")\n"
+                    "os._exit(0)\n")
+
+        label6h = "(R6 corrupt HEAD) a damaged repository fails closed, never the checkout fallback"
+        if _sel(label6h) and _r5_stale():
+            head6 = r5 / ".git" / "HEAD"
+            orig_head6 = head6.read_bytes()
+            gc6 = r5 / "tools" / "_gen_common.py"
+            orig_gc6 = gc6.read_bytes()
+            gc6.write_text(_R6_TRIP, encoding="utf-8")
+            head6.write_bytes(b"garbage, neither a ref nor an object id\n")
+            try:
+                _cli5_expect(label6h, 2, "no probe positively established")
+            finally:
+                head6.write_bytes(orig_head6)
+                gc6.write_bytes(orig_gc6)
+
+        label6b = "(R6 bad config) a config parse failure fails closed, never the checkout fallback"
+        if _sel(label6b) and _r5_stale():
+            cfg6 = r5 / ".git" / "config"
+            orig_cfg6 = cfg6.read_bytes()
+            gc6 = r5 / "tools" / "_gen_common.py"
+            orig_gc6 = gc6.read_bytes()
+            gc6.write_text(_R6_TRIP, encoding="utf-8")
+            cfg6.write_bytes(orig_cfg6 + b"\n[broken\n")
+            try:
+                _cli5_expect(label6b, 2, "no probe positively established")
+            finally:
+                cfg6.write_bytes(orig_cfg6)
+                gc6.write_bytes(orig_gc6)
+
+        label6g = "(R6 no git) git absent from PATH is a clean exit 2, never a traceback"
+        if _sel(label6g) and _r5_stale():
+            empty6 = tmp / "r6-empty-path"
+            empty6.mkdir(exist_ok=True)
+            _cli5_expect(label6g, 2, "cannot launch git", extra_env={"PATH": str(empty6)})
+
+        label6i = "(R6 stage2 -I) a PYTHONPATH sitecustomize keyed to the stage-2 launch never fires"
+        if _sel(label6i) and _r5_stale():
+            # QA round-6 claude 1: the (R5 PYTHONPATH) sitecustomize fires only for VALIDATOR
+            # children, so removing -I from the stage-1 child launch went undetected. This payload
+            # fires exactly for check_release_delta.py launched with --stage2-tree: with -I on the
+            # stage-1 child it never runs; without it, stage 2 fakes a pass and the case goes red.
+            site6 = tmp / "r6-sitecustomize"
+            site6.mkdir(exist_ok=True)
+            (site6 / "sitecustomize.py").write_text(
+                "import os, sys\n"
+                "_a0 = sys.argv[0] if sys.argv else ''\n"
+                "if _a0.endswith('check_release_delta.py') and '--stage2-tree' in sys.argv:\n"
+                "    print(" + repr(_FAKE_PASS + " (R6 sitecustomize, must never run)") + ")\n"
+                "    os._exit(0)\n", encoding="utf-8")
+            _cli5_expect(label6i, 2, "head manifest freshness",
+                         extra_env={"PYTHONPATH": str(site6)})
 
 
     # ---- QA round-5 claude m2: the per-object re-hash covers a commit, tree and tag, not only a blob -
@@ -4853,6 +5069,130 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             # by the invented `subject`, left unconsumed, so a PATCH became an undispositioned MAJOR) and the
             # format-version case PASSES exit 0 (finding 1: the loader never validated format-version). Both
             # now behave (0 and 2). Skipped with a printed note where git or archive is unavailable.
+            # ---- QA round-6 codex blocker 1 / claude 3: a git REFUSAL is never the checkout
+            # path. Simulated dubious-ownership refusals (a real safe.directory refusal needs a
+            # foreign-OWNED repository, which an unprivileged self-test cannot create and the
+            # funnels' GIT_* scrub makes uninjectable by environment; the end-to-end members of
+            # the class, a corrupt HEAD, a bad config and a PATH without git, run as real CLI
+            # launches in _post_release_e2e): the funnels are patched to answer rc=128 with git's
+            # dubious-ownership refusal, and stage 1 and the routing must each fail closed.
+            label6d = "(R6 dubious) a dubious-ownership refusal fails closed, never the fallback"
+            _dubious6 = subprocess.CompletedProcess(
+                ["git"], 128, b"",
+                b"fatal: detected dubious ownership in repository at '/r6'\n")
+            _real_s1g = _stage1_git
+            globals()["_stage1_git"] = lambda *_a, **_k: _dubious6
+            try:
+                err6 = io.StringIO()
+                with redirect_stderr(err6):
+                    rc6 = _stage1_main()
+            finally:
+                globals()["_stage1_git"] = _real_s1g
+            if rc6 != 2 or "no probe positively established" not in err6.getvalue():
+                failures.append("{}: stage 1 must exit 2 on a dubious-ownership refusal (got "
+                                "{!r}); a git failure is never permission to run checkout "
+                                "code".format(label6d, rc6))
+            _real_g6 = _git
+            globals()["_git"] = lambda *_a, **_k: _dubious6
+            try:
+                try:
+                    got6 = _head_commit_or_none(tmp / "r6-dubious")
+                    failures.append("{}: routing must raise GateError on a dubious-ownership "
+                                    "refusal, got {!r}".format(label6d, got6))
+                except GateError as exc6:
+                    if "no probe positively established" not in str(exc6):
+                        failures.append("{}: wrong GateError: {}".format(label6d, exc6))
+            finally:
+                globals()["_git"] = _real_g6
+
+            if _git_available():
+                # ---- QA round-6 codex majors 3/4 / claude 2: the drift advisory reads nothing it
+                # must not. The outside copy behind the symlinked parent carries the COMMITTED
+                # bytes, so the pre-fix follow-and-read concluded "clean"; the no-follow walk
+                # classifies the path as drift without ever reading outside the root. A FIFO
+                # swapped in is drift via the descriptor-bound regular-file check (no blocking
+                # open), and an over-cap sparse file is reported UNCHECKED, never read.
+                dr6 = tmp / "r6-drift"
+                (dr6 / "lnkdir").mkdir(parents=True)
+                (dr6 / "lnkdir" / "leaf.txt").write_text("leaf bytes\n", encoding="utf-8")
+                (dr6 / "fifo.txt").write_text("fifo bytes\n", encoding="utf-8")
+                (dr6 / "big.txt").write_text("big bytes\n", encoding="utf-8")
+                _git_init_commit(dr6, "r6 drift fixture")
+                outside6 = tmp / "r6-drift-outside"
+                outside6.mkdir()
+                (outside6 / "leaf.txt").write_text("leaf bytes\n", encoding="utf-8")
+                shutil.rmtree(dr6 / "lnkdir")
+                os.symlink(outside6, dr6 / "lnkdir")
+                os.unlink(dr6 / "fifo.txt")
+                os.mkfifo(dr6 / "fifo.txt")
+                os.unlink(dr6 / "big.txt")
+                with open(dr6 / "big.txt", "wb") as bf6:
+                    bf6.truncate(_DRIFT_ADVISORY_SIZE_CAP + 1)
+                err6d = io.StringIO()
+                with redirect_stderr(err6d):
+                    _warn_checkout_drift(dr6)
+                out6d = err6d.getvalue()
+                if "lnkdir/leaf.txt" not in out6d:
+                    failures.append("(R6 drift symlink-parent): a symlinked parent directory must "
+                                    "be drift WITHOUT following it (the outside copy carries the "
+                                    "committed bytes, so a follow-and-read reports clean)")
+                if "fifo.txt" not in out6d:
+                    failures.append("(R6 drift FIFO): a FIFO swapped in for a tracked file must "
+                                    "be drift (descriptor-bound regular-file check)")
+                if "UNCHECKED" not in out6d or "big.txt" not in out6d:
+                    failures.append("(R6 drift cap): a tracked file over the advisory size cap "
+                                    "must be reported UNCHECKED, never read")
+
+                # ---- QA round-6 codex blocker 2: a promisor repository's missing object is a
+                # refusal, never a lazy-fetch transport; the marker sshCommand must never run.
+                label6p = "(R6 promisor) a missing object never starts a lazy fetch"
+                for where6, env6 in (("funnel env", _substitution_free_env()),
+                                     ("_release_schema env",
+                                      _release_schema._substitution_free_env())):
+                    if env6.get("GIT_NO_LAZY_FETCH") != "1":
+                        failures.append("{}: {} does not pin GIT_NO_LAZY_FETCH=1".format(
+                            label6p, where6))
+                senv6 = _selftest_env()
+                psrc6 = tmp / "r6-promisor-src"
+                psrc6.mkdir()
+                (psrc6 / "payload.txt").write_text("promisor payload\n", encoding="utf-8")
+                _git_init_commit(psrc6, "promisor source")
+                subprocess.run(["git", "-C", str(psrc6), "config", "uploadpack.allowfilter",
+                                "true"], capture_output=True, env=senv6)
+                pro6 = tmp / "r6-promisor"
+                cl6 = subprocess.run(["git", "clone", "-q", "--no-checkout",
+                                      "--filter=blob:none", "file://" + str(psrc6), str(pro6)],
+                                     capture_output=True, env=senv6)
+                if cl6.returncode != 0:
+                    failures.append("fixture setup ({}): partial clone failed ({}); coverage "
+                                    "that did not run FAILS the self-test".format(
+                                        label6p,
+                                        cl6.stderr.decode("utf-8", "replace").strip()[:200]))
+                else:
+                    mark6 = tmp / "r6-ssh-ran.marker"
+                    ssh6 = tmp / "r6-ssh.sh"
+                    ssh6.write_text("#!/bin/sh\n: > " + str(mark6) + "\nexit 1\n",
+                                    encoding="utf-8")
+                    ssh6.chmod(0o755)
+                    for k6, v6 in (("remote.origin.url", "ssh://r6.invalid/none"),
+                                   ("core.sshCommand", str(ssh6))):
+                        subprocess.run(["git", "-C", str(pro6), "config", k6, v6],
+                                       capture_output=True, env=senv6)
+                    h6 = subprocess.run(["git", "-C", str(pro6), "rev-parse", "HEAD"],
+                                        capture_output=True, env=senv6
+                                        ).stdout.decode("ascii", "replace").strip()
+                    try:
+                        _release_schema.verified_path_blob(pro6, h6, "payload.txt")
+                        failures.append("{}: the missing blob was READ; a promisor fetch must "
+                                        "never satisfy a gate read".format(label6p))
+                    except SchemaError as exc6p:
+                        if "missing" not in str(exc6p):
+                            failures.append("{}: expected a missing-object refusal, got: "
+                                            "{}".format(label6p, exc6p))
+                    if mark6.exists():
+                        failures.append("{}: the core.sshCommand marker RAN; a lazy fetch "
+                                        "started a transport mid-read".format(label6p))
+
             if _git_available():
                 real_ran = _real_pack_e2e(tmp, failures)
                 post_ran = _post_release_e2e(tmp, failures)
@@ -4920,7 +5260,13 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                       "every -I child, and the accepted state re-executing to exit 0) and the "
                       "per-object re-hash refusing a forged commit, tree and tag (not only a blob), "
                       "and the verified ancestry walk refusing a forged intermediate commit, "
-                      "each hold; and the replayed "
+                      "each hold; the QA round-6 fail-closed launch (a corrupt HEAD, a bad config "
+                      "and a missing git each exit 2 from stage 1 with a checkout tripwire inert; "
+                      "a simulated dubious-ownership refusal fails closed in stage 1 and in "
+                      "routing), the no-follow bounded drift advisory (a symlinked parent, a "
+                      "swapped-in FIFO, and an over-cap UNCHECKED file), the promisor lazy-fetch "
+                      "refusal (GIT_NO_LAZY_FETCH pinned, no transport, no sshCommand), and the "
+                      "stage-2 sitecustomize isolation hold; and the replayed "
                       "pre-row gate "
                       "(round-2 B1: an undispositioned later release exits 1 after its row lands, with its "
                       "pre-row control; a malformed genesis tree exits 2) holds) hold") if post_ran else \

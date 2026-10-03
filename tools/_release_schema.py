@@ -645,6 +645,13 @@ def _substitution_free_env():
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     env["GIT_GRAFT_FILE"] = os.devnull
+    # QA round-6 (codex blocker 2): set AFTER the scrub (the scrub would otherwise drop an inherited
+    # copy), GIT_NO_LAZY_FETCH=1 forbids on-demand object fetching in a promisor/partial-clone
+    # repository, so a MISSING object is answered as missing (a refusal upstream) and no transport,
+    # and with it no core.sshCommand, remote helper, or credential helper, can start mid-read. The
+    # launches additionally pin -c protocol.allow=never, belt-and-braces: even a git too old to honor
+    # the variable refuses every transport protocol outright.
+    env["GIT_NO_LAZY_FETCH"] = "1"
     return env
 
 
@@ -674,7 +681,7 @@ def _cat_file_batch_typed(root, shas):
         return {}
     try:
         proc = subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
-                               "-c", "core.fsmonitor=false",
+                               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
                                "-C", str(root), "cat-file", "--batch"],
                               input=("\n".join(uniq) + "\n").encode("ascii"), capture_output=True,
                               env=_substitution_free_env())
@@ -767,7 +774,7 @@ def _resolve_commit_oid(root, commit):
         return commit
     try:
         proc = subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
-                               "-c", "core.fsmonitor=false",
+                               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
                                "-C", str(root), "rev-parse", "--verify", "--quiet",
                                str(commit) + "^{object}"],
                               capture_output=True, env=_substitution_free_env())
