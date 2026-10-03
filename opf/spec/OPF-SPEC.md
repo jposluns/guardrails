@@ -254,7 +254,9 @@ without an inventory, and missing listed files MUST be findings; unreadable or m
 including a path claimed twice, MUST yield cannot-evaluate. The recognized legacy format
 `opf.ingest.evidence-inventory/v1` MUST be refused as the named `legacy-ingest-inventory` finding
 under C-EVIDENCE-ENUM, without migration or rewriting; completed-ingest replay cannot evaluate that
-bundle. A phase inventory MUST NOT substitute for a missing
+bundle. A fresh-only implementation (section 16.1) refuses such an inventory earlier, as
+`unsupported-legacy-state` at admission, and MUST NOT then grade that store under C-EVIDENCE-ENUM.
+A phase inventory MUST NOT substitute for a missing
 `inventory.toml`: such a bundle cannot evaluate. Deleting a whole bundle, inventory and payload
 together, is outside this local snapshot check; independent history is required to detect that
 loss. Inventories assert membership, not authenticated actor history. The contained reader's size
@@ -345,8 +347,16 @@ is ignored for enforcement and recorded as unevaluated, never treated as a base-
 
 A fresh-only implementation (section 16.1) MUST recognize a candidate `manifest.toml` whose base
 table is the retired `[devprocess]` only to refuse that store as `unsupported-older-store`; the
-recognition is not a discovery match. A recognized legacy candidate, and any other zero-match or
-ambiguous outcome, MUST NOT be treated as an absent store that permits initialization or adoption.
+recognition is not a discovery match. For a fresh-only implementation, a recognized legacy
+candidate, an ambiguous outcome, and an input that discovery cannot read or parse are a failed
+discovery of an existing store and MUST NOT be treated as an absent store that permits
+initialization or adoption; a recognized legacy candidate beside a matching store makes the
+outcome ambiguous. A fresh-only implementation MUST NOT treat a zero-match outcome over a present
+`.working/` as authorizing initialization or adoption by itself: where that `.working/` holds no
+recognized legacy candidate, only a section 14 first adoption authorizes initialization there,
+through an investigation that distinguishes first adoption from re-adoption and records a
+digest-stamped inventory, and one approved plan that gives every foreign file a disposition before
+`init-store` (section 14.1).
 
 ### 4.6 Casing convention and rationale
 
@@ -1416,12 +1426,15 @@ exists. Unproven legacy `.archive/` entries MUST remain in place with a standing
 dispositioned.
 
 A base-schema version bump MUST ship a tested, in-place store-schema upgrade (`opf upgrade`) in at
-least one published upgrade-capable implementation (section 16.1), the reference tooling, so every
-store below the new version keeps an upgrade path. Every requirement of this section on an upgrade,
-its deltas, preconditions, report, refusals, and remedies binds an upgrade-capable implementation;
-a fresh-only implementation implements none of them and MUST instead refuse under section 16.1.
-The version ceiling at the end of this section binds every implementation class. The upgrade MUST
-be idempotent. A purely schema-level bump MUST be additive, using atomic replacement of
+least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a
+store below the new version has an upgrade path once that upgrade activates; the path holds only
+within this section's preconditions and refusals and that implementation's disclosed residuals.
+Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and
+remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of
+them and MUST instead refuse under section 16.1. The version ceiling's refusal at the end of this
+section binds every implementation class; its homes-2 recognition binds only an upgrade-capable
+implementation, and a fresh-only implementation refuses that declaration under section 16.1. The
+upgrade MUST be idempotent. A purely schema-level bump MUST be additive, using atomic replacement of
 existing files, create-only writes for new index files, and regeneration of declared views through
 exclusively created temporary files followed by atomic rename. These writes are sequential, with
 recovery scope held in memory, not a durable transaction journal. A homes-generation bump
@@ -1847,9 +1860,10 @@ for the reference tooling `.aiqt/import-archive/<run-id>/`, holding the run's ac
 its evidence inventory in the retained legacy format; substantiation MUST re-read that inventory
 and digest-match every file it enumerates, and a missing, unreadable or digest-mismatched
 item MUST leave the status unsubstantiated, failing closed under section 11.
-A fresh-only implementation (section 16.1) provides none of these legacy readers: it MUST refuse
-such a store under section 16.1, MUST NOT alter its recorded status, and MUST NOT substantiate a
-status from legacy run evidence.
+A fresh-only implementation (section 16.1) provides none of these legacy readers: it MUST refuse,
+under section 16.1, a store that holds a listed legacy-state item, MUST NOT alter its recorded
+status, and MUST NOT substantiate a status from legacy run evidence; a legacy run that leaves no
+listed item is a disclosed residual (section 17).
 Old import and ingest orchestration MUST be retired by staged decoupling only after clean-start
 adoption ships. Required evidence MUST be re-read and digest-matched in its durable home before
 staging reclamation. Reclamation MUST be journaled and idempotent; an unreadable tree MUST hold the
@@ -2057,7 +2071,7 @@ every posture, before any other grading and before any write, the claim of the s
   or table, the supported version, the store location, and the remedy: upgrade the store with an
   upgrade-capable implementation, then retry;
 - as `unsupported-store-generation`, a store whose homes or worklog storage generation differs from
-  the declared one, naming each generation found and supported;
+  the supported one, naming each generation found and supported;
 - as `unsupported-legacy-state`, a store at the supported version that holds legacy state, naming
   each item and its path.
 
@@ -2066,7 +2080,10 @@ Legacy state is this closed list: a clean-series record, active or archived, who
 `partial` or `complete` `import_status` in a store that holds no adoption receipt (sections 11 and
 14.1); an evidence inventory in the legacy format `opf.ingest.evidence-inventory/v1` (section 4.2);
 a `.working/IMPORT-REPORT.md`; and a legacy `.working/imports/` directory (section 4.4). Extending
-the list is a specification change.
+the list is a specification change. The check MUST search the whole `.working/` tree of the store
+repository for each item, its staging, archive, and imported areas included, and MUST read
+`import_status` from the store manifest; a legacy run archive outside `.working/`, for the
+reference tooling `.aiqt/import-archive/`, is reached only through the `import_status` item.
 
 A store declaring a `spec_version` above the supported one is refused under the section 9.2 ceiling.
 An input the check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission.
@@ -2140,10 +2157,13 @@ The gates in this standard are strong where they are strong and say so where the
 - A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not
   authenticated history: a version declaration and the absence of listed legacy state cannot prove
   that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only
-  what it lists. Its refusal leaves a store unchanged but offers no preservation, repair, or
-  continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import
-  history included, needs an upgrade-capable implementation for that store. Until validation tooling
-  ships, a class claim is self-asserted (section 16).
+  what it lists. It does not list a legacy staging run under `.working/staging/import/` or
+  `.working/staging/ingest/` that carries no legacy-format inventory, nor a legacy run archive
+  outside `.working/`, which only the `import_status` item reaches. Its refusal leaves a store
+  unchanged but offers no preservation, repair, or continuity; an adopter whose store holds legacy
+  state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable
+  implementation for that store. Until validation tooling ships, a class claim is self-asserted
+  (section 16).
 
 ## Appendix A: record envelope example
 

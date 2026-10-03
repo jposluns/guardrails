@@ -10,7 +10,10 @@ text, a pinned sentence neutralized by appended text included, stays green under
 entry alone; the self-test's per-section tiling equality turns red on any addition inside a
 tiled section. The live residuals are additions to untiled sections (for example 8.7, 9.1, 10
 and 13), a default-gate run without the self-test, and an addition landed together with a
-matching registry edit, which review of registry changes catches.
+matching registry edit, which review of registry changes catches. Section 9.1 stays untiled
+over its lowercase-may profile rule, but its implementation-class paragraph is pinned sentence
+by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red;
+the rest of 9.1, and additions to it, stay unprotected.
 
 The default entry also runs a section 2 keyword lint over every registered pin: a pin without
 MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D). Residual:
@@ -122,6 +125,7 @@ _CONTRACT = {
         _D('C-EVIDENCE-ENUM reconciles exact membership, directory structure, regular-file types, sizes and digests: every payload file under .working/imported/ and .working/archive/, meaning every file other than a bundle-root inventory, is claimed by exactly one row, and every inventory is itself schema-checked against the shape above rather than claimed.'),
         'Unlisted or unclaimed entries, a bundle without an inventory, and missing listed files MUST be findings; unreadable or malformed inputs, including a path claimed twice, MUST yield cannot-evaluate.',
         'The recognized legacy format opf.ingest.evidence-inventory/v1 MUST be refused as the named legacy-ingest-inventory finding under C-EVIDENCE-ENUM, without migration or rewriting; completed-ingest replay cannot evaluate that bundle.',
+        'A fresh-only implementation (section 16.1) refuses such an inventory earlier, as unsupported-legacy-state at admission, and MUST NOT then grade that store under C-EVIDENCE-ENUM.',
         'A phase inventory MUST NOT substitute for a missing inventory.toml: such a bundle cannot evaluate.',
         _D('Deleting a whole bundle, inventory and payload together, is outside this local snapshot check; independent history is required to detect that loss.'),
         _D('Inventories assert membership, not authenticated actor history.'),
@@ -152,7 +156,8 @@ _CONTRACT = {
         _D('Because the machine subdirectory is observed at each use rather than declared and trusted, renaming it is a directory move with nothing to go stale; the pointer, which does declare a location, is validated at every resolution and fails closed rather than trusting a stale target (section 4.3).'),
         _D('Profiles declared under [profiles.<name>] are enumerated after the base is validated; a profile a tool does not support is ignored for enforcement and recorded as unevaluated, never treated as a base-validation failure (section 9).'),
         'A fresh-only implementation (section 16.1) MUST recognize a candidate manifest.toml whose base table is the retired [devprocess] only to refuse that store as unsupported-older-store; the recognition is not a discovery match.',
-        'A recognized legacy candidate, and any other zero-match or ambiguous outcome, MUST NOT be treated as an absent store that permits initialization or adoption.',
+        'For a fresh-only implementation, a recognized legacy candidate, an ambiguous outcome, and an input that discovery cannot read or parse are a failed discovery of an existing store and MUST NOT be treated as an absent store that permits initialization or adoption; a recognized legacy candidate beside a matching store makes the outcome ambiguous.',
+        'A fresh-only implementation MUST NOT treat a zero-match outcome over a present .working/ as authorizing initialization or adoption by itself: where that .working/ holds no recognized legacy candidate, only a section 14 first adoption authorizes initialization there, through an investigation that distinguishes first adoption from re-adoption and records a digest-stamped inventory, and one approved plan that gives every foreign file a disposition before init-store (section 14.1).',
     ),
     "4.6": (
         _D('Source files are lowercase; deliverables are uppercase.'),
@@ -481,9 +486,9 @@ _CONTRACT = {
         _D('The homes-generation target does not itself change the runtime supported version or init format.'),
         'The migration MUST refuse a store resolved outside the product root until a multi-root coordinator exists.',
         'Unproven legacy .archive/ entries MUST remain in place with a standing finding until dispositioned.',
-        'A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published upgrade-capable implementation (section 16.1), the reference tooling, so every store below the new version keeps an upgrade path.',
+        "A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a store below the new version has an upgrade path once that upgrade activates; the path holds only within this section's preconditions and refusals and that implementation's disclosed residuals.",
         'Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of them and MUST instead refuse under section 16.1.',
-        _D('The version ceiling at the end of this section binds every implementation class.'),
+        _D("The version ceiling's refusal at the end of this section binds every implementation class; its homes-2 recognition binds only an upgrade-capable implementation, and a fresh-only implementation refuses that declaration under section 16.1."),
         'The upgrade MUST be idempotent.',
         'A purely schema-level bump MUST be additive, using atomic replacement of existing files, create-only writes for new index files, and regeneration of declared views through exclusively created temporary files followed by atomic rename.',
         _D('These writes are sequential, with recovery scope held in memory, not a durable transaction journal.'),
@@ -631,7 +636,7 @@ _CONTRACT = {
         'Their evidence inventories and readers remain available; old acceptance records describe those runs and MUST NOT authorize a new adoption or retirement.',
         'A legacy import completed under the pre-1.3.0 contract MUST keep its recorded status, substantiated by its preserved run evidence (section 11); a retrospective approval or receipt MUST NOT be fabricated.',
         "Preserved legacy run evidence is that run's durable archive in its recorded legacy home, for the reference tooling .aiqt/import-archive/<run-id>/, holding the run's acceptance record and its evidence inventory in the retained legacy format; substantiation MUST re-read that inventory and digest-match every file it enumerates, and a missing, unreadable or digest-mismatched item MUST leave the status unsubstantiated, failing closed under section 11.",
-        'A fresh-only implementation (section 16.1) provides none of these legacy readers: it MUST refuse such a store under section 16.1, MUST NOT alter its recorded status, and MUST NOT substantiate a status from legacy run evidence.',
+        'A fresh-only implementation (section 16.1) provides none of these legacy readers: it MUST refuse, under section 16.1, a store that holds a listed legacy-state item, MUST NOT alter its recorded status, and MUST NOT substantiate a status from legacy run evidence; a legacy run that leaves no listed item is a disclosed residual (section 17).',
         'Old import and ingest orchestration MUST be retired by staged decoupling only after clean-start adoption ships.',
         'Required evidence MUST be re-read and digest-matched in its durable home before staging reclamation.',
         'Reclamation MUST be journaled and idempotent; an unreadable tree MUST hold the run.',
@@ -730,10 +735,11 @@ _CONTRACT = {
         'A fresh-only implementation MUST run an admission check in every command that resolves a store, at every posture, before any other grading and before any write, the claim of the single-writer lease (section 5.7) included.',
         'The check MUST compare parsed versions, never strings, and MUST refuse:',
         _D('- as unsupported-older-store, a store whose manifest declares a spec_version below the supported one, or whose base table is the retired [devprocess] (section 4.5), naming the declared version or table, the supported version, the store location, and the remedy: upgrade the store with an upgrade-capable implementation, then retry;'),
-        _D('- as unsupported-store-generation, a store whose homes or worklog storage generation differs from the declared one, naming each generation found and supported;'),
+        _D('- as unsupported-store-generation, a store whose homes or worklog storage generation differs from the supported one, naming each generation found and supported;'),
         _D('- as unsupported-legacy-state, a store at the supported version that holds legacy state, naming each item and its path.'),
         _D('Legacy state is this closed list: a clean-series record, active or archived, whose actor.kind is importer (section 8.6); a declared legacy_fragment type or an LF record (section 8.1); a partial or complete import_status in a store that holds no adoption receipt (sections 11 and 14.1); an evidence inventory in the legacy format opf.ingest.evidence-inventory/v1 (section 4.2); a .working/IMPORT-REPORT.md; and a legacy .working/imports/ directory (section 4.4).'),
         _D('Extending the list is a specification change.'),
+        'The check MUST search the whole .working/ tree of the store repository for each item, its staging, archive, and imported areas included, and MUST read import_status from the store manifest; a legacy run archive outside .working/, for the reference tooling .aiqt/import-archive/, is reached only through the import_status item.',
         _D('A store declaring a spec_version above the supported one is refused under the section 9.2 ceiling.'),
         'An input the check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission.',
         'Each refusal MUST be a fail-closed INVALID finding, never VALID.',
@@ -769,8 +775,20 @@ _CONTRACT = {
         "The token is stable within a base-schema major line; a store-breaking rename MUST ship only with the tested opf upgrade migration (section 9.2), which rewrites the base table and token in place so no existing adopter's manifest is stranded.",
         _D('The retired 1.0.0 token devprocess is recognized by opf upgrade, purely to carry a legacy store forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.'),
         _D('- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not authenticated history: a version declaration and the absence of listed legacy state cannot prove that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only what it lists.'),
+        _D('It does not list a legacy staging run under .working/staging/import/ or .working/staging/ingest/ that carries no legacy-format inventory, nor a legacy run archive outside .working/, which only the import_status item reaches.'),
         _D('Its refusal leaves a store unchanged but offers no preservation, repair, or continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable implementation for that store.'),
         _D('Until validation tooling ships, a class claim is self-asserted (section 16).'),
+    ),
+}
+# Sentence pins in sections the registry does not tile: substring-checked and keyword-linted
+# like _CONTRACT pins, each proven unique and deletion-red by the self-test, but with no
+# per-section tiling equality, so additions there stay green. Section 9.1 stays untiled because
+# its profile rule uses a lowercase "may", which section 2 reads as descriptive.
+_PINNED = {
+    "9.1": (
+        _D('Implementation conformance classes (section 16.1) are defined by the base, not by profiles.'),
+        'A profile MAY require an upgrade-capable implementation, because that adds a requirement.',
+        "A profile, a store manifest field, or a command-line request MUST NOT declare, grant, or relax an implementation's class.",
     ),
 }
 
@@ -793,7 +811,7 @@ def _sections(text):
 def contract_findings(text):
     sections = _sections(text)
     findings = []
-    for section, fragments in _CONTRACT.items():
+    for section, fragments in list(_CONTRACT.items()) + list(_PINNED.items()):
         body = " ".join(sections.get(section, "").replace("`", "").split())
         for fragment in fragments:
             if fragment not in body:
@@ -816,11 +834,12 @@ def contract_findings(text):
 
 
 def keyword_findings(contract=None):
-    # Section 2 keyword lint over every tiled section (the sections the 1.3.0 bump touches).
+    # Section 2 keyword lint over every tiled section (the sections the 1.3.0 bump touches) and
+    # every untiled sentence pin.
     # Section 2 reads a sentence without MUST, MUST NOT, SHOULD or MAY as descriptive, so an
     # unmarked keywordless pin is a requirement that states no requirement. Tiling ties each pin
     # to its spec sentence, so the lint reads the registry.
-    contract = _CONTRACT if contract is None else contract
+    contract = dict(_CONTRACT, **_PINNED) if contract is None else contract
     findings = []
     for section, fragments in contract.items():
         for fragment in fragments:
@@ -2597,7 +2616,7 @@ def _self_test_vectors():
           contract_findings(text.replace("`preview`, `record`", "`preview`", 1)))
     # Each operative section independently discriminates: removing it must fail the drift gate.
     for section, body in _sections(text).items():
-        if section in _CONTRACT:
+        if section in _CONTRACT or section in _PINNED:
             check("spec-flip-" + section, lambda: bool(contract_findings(text.replace(body, "\n", 1))))
     # Whole-section pin tiling, the former 9.2 mechanism extended to every registered section:
     # the ordered pins of each section must concatenate to exactly its normalized body, so
@@ -2629,6 +2648,23 @@ def _self_test_vectors():
             check("spec-pin-flip-" + section + "-" + fragment,
                   lambda f=finding, m=mutated, frag=fragment, nb=normalized_body:
                   nb.count(frag) == 1 and f in contract_findings(m))
+    # Untiled sentence pins: each section stays out of the tiling registry, its normalized
+    # control is green, each pin occurs exactly once, and deleting that occurrence in place turns
+    # the gate red with the pin's own finding.
+    for section, fragments in _PINNED.items():
+        body = _sections(text)[section]
+        normalized_body = " ".join(body.replace("`", "").split())
+        pin_prefix = "spec " + section + " missing contract"
+        control = text.replace(body, "\n\n" + normalized_body + "\n\n", 1)
+        check("spec-pinned-untiled-" + section, lambda s=section: s not in _CONTRACT)
+        check("spec-pin-control-" + section, lambda c=control, p=pin_prefix: not any(
+            f.startswith(p) for f in contract_findings(c)))
+        for fragment in fragments:
+            mutated = text.replace(body, "\n\n" + normalized_body.replace(fragment, "", 1) + "\n\n", 1)
+            finding = pin_prefix + ": " + fragment
+            check("spec-pin-flip-" + section + "-" + fragment,
+                  lambda f=finding, m=mutated, frag=fragment, nb=normalized_body:
+                  nb.count(frag) == 1 and f in contract_findings(m))
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The\s+upgrade\s+MUST\s+be\s+idempotent\.", "", body)
@@ -2652,7 +2688,7 @@ def _self_test_vectors():
         check("keyword-lint-case-{!r}".format(str(fragment)), lambda f=fragment, r=red:
               bool(keyword_findings({"14.2": (f,)})) == r)
     # Stripping any marker, or lowercasing any pin's keywords, turns the lint red on that pin.
-    for section, fragments in _CONTRACT.items():
+    for registry, section, fragments in [(r, s, f) for r in (_CONTRACT, _PINNED) for s, f in r.items()]:
         for index, fragment in enumerate(fragments):
             if isinstance(fragment, _Descriptive):
                 flipped = str(fragment)
@@ -2661,7 +2697,7 @@ def _self_test_vectors():
             else:
                 continue  # an unmarked keywordless pin is already red under spec-keywords
             expected = "spec {} requirement without a section 2 keyword: {}".format(section, flipped)
-            with patch.dict(_CONTRACT, {section: fragments[:index] + (flipped,) + fragments[index + 1:]}):
+            with patch.dict(registry, {section: fragments[:index] + (flipped,) + fragments[index + 1:]}):
                 check("keyword-flip-{}-{}".format(section, index), lambda e=expected: e in keyword_findings())
     # Red on revert: each named fix-5a rewrite (QA5), reverted in the spec together with its pin
     # (the matching registry edit tiling cannot see), turns the keyword lint red; reverted in the

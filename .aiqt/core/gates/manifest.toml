@@ -591,8 +591,11 @@ including in 4.2. Under the default entry alone added text stays green, but the 
 per-section tiling equality turns red on any addition inside a tiled section, so the live
 residuals are additions to untiled sections (for example 8.7, 9.1, 10 and 13), a default-gate
 run without the self-test, and an addition landed together with a matching registry edit,
-which review of registry changes catches. The default entry also runs a section 2 keyword
-lint over every pin of those tiled sections: a pin without MUST, MUST NOT, SHOULD or MAY is red
+which review of registry changes catches. Section 9.1 stays untiled over its lowercase-may
+profile rule, but its implementation-class paragraph is pinned sentence by sentence, each pin
+proven unique and deletion-red by the self-test, so only the rest of 9.1 and additions to it
+stay unprotected. The default entry also runs a section 2 keyword lint over every pin of those
+tiled sections and those untiled pins: a pin without MUST, MUST NOT, SHOULD or MAY is red
 unless the registry marks it descriptive (_D, red once a marked pin gains a keyword); the
 self-test proves synthetic cases, flips every marker and every keyword pin red, and reverts
 named QA5 rewrites red. The lint reads the registry marker, not the meaning, so a requirement
