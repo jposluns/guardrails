@@ -42,10 +42,13 @@ signed; the independently published digest is the authenticated reference.
        binary allowed past the portability text scan).
      - d. `.aiqt/core/ownership.toml`: the `[checkout]` `binary` list (the version-numbered zip is a
        tracked binary artefact).
-     - e. `docs/evidence.md`: the install-page sentence ("The chat skill now served from the install page
-       is <version>, ...") must name the new skill version; `gen_skill.py --check` verifies that sentence
-       against the declared skill version and reports a stale, duplicated or missing one (or a missing
-       page) as drift. After editing it, regenerate the site with `python3 tools/gen_site.py` (otherwise
+     - e. `docs/evidence.md`: the install-page sentence must name the new skill version. The page must
+       mention "served from the" exactly once (any case, comments and markup included), in the one plain
+       canonical sentence "served from the install page is <version>" on one line, with no markup, link,
+       entity or comment in it, and the version followed only by a space, `<`, the line end or a
+       sentence-final `.`. `gen_skill.py --check` verifies that sentence against the declared skill version
+       and reports any other mention (styled, linked, commented, capitalized or a second sentence), a stale
+       or missing sentence, or a missing page as drift. After editing it, regenerate the site with `python3 tools/gen_site.py` (otherwise
        `gen_site.py --check` reports `drift: site/evidence.html`).
    Then run `python3 tools/gen_skill.py`. The generator never deletes a file: this first run refuses
    (exit 2) and names the stale prior-version `aiqt-skill-<old>.zip`. Remove it yourself with
@@ -58,7 +61,11 @@ signed; the independently published digest is the authenticated reference.
    `python3 tools/gen_install.py` to repoint the install-page
    download button at the new versioned filename. Finally, set the `Version X.Y.Z` line in the three
    hand-written condensations (`site/downloads/aiqt-instructions-8k.txt`, `-5k.txt`, `-1_5k.txt`) and
-   re-bless them with `python3 tools/check_sized_instructions.py --update`.
+   re-bless them with `python3 tools/check_sized_instructions.py --update`. Then run every
+   `tools/gen_*.py` generator, with `python3 tools/gen_manifest.py` last: besides the generators named
+   above, the bump also changes the outputs of `python3 tools/gen_renderers.py` (`.aiqt/core/renderers.toml`)
+   and `python3 tools/gen_gensrc.py` (`.aiqt/gensrc.json`). Finally run each generator with `--check`
+   (again `gen_manifest.py --check` last); every one must exit 0.
 2. Compute. From the repository root on the frozen tree, run
    `sha256sum site/downloads/aiqt-skill-<skill version>.zip site/downloads/aiqt-instructions.txt` (the one
    version-numbered zip present under `site/downloads/`). These two files are the release artifacts (the

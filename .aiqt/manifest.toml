@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1327390df10627348f528f02bb23cd8a1310437288999923b4e3b18761785cd8"
+tree-sha256 = "3a16f46e3aa66a6f96d44dab03ef84985ac1052dcf7f3bbfe047ccd0f99a9e70"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -122,7 +122,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2952
-sha256 = "819a1394aa8c2879fbf34fa60095d58445887e339bd702365c8a1ecc8ea264c3"
+sha256 = "aa36eac4cda2f6dd74e53c2e2e91fcf4601aae96dcdcb739f887acc307f1247b"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2326,8 +2326,8 @@ sha256 = "68c58a0a2af9e5c5b36fc21b24745ba134e2ef09fd1761ff340c99cba57ae3b8"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 7917
-sha256 = "d0ed2794153198d39cbef79c4ef058e5354520647a084ad4573a2f70922e9cc8"
+bytes = 8657
+sha256 = "dbc5e1629b302bccd1bbce67612149ee46390aded0933c196ed1267e1de59280"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -2386,8 +2386,8 @@ sha256 = "48ce5a41ca2d7798185d08a1f4a08c828bbbe4849e9686ccb226184f69492628"
 
 [[sources]]
 path = "docs/evidence.md"
-bytes = 5388
-sha256 = "2808107ba1c7e766ab0be6db6966f222f488aa39403c754b0760bdac1942f741"
+bytes = 5387
+sha256 = "29be9e1733805d6540b53dff4f53da825e962168a988320d0a7926d6af00a114"
 
 [[sources]]
 path = "docs/examples.md"
@@ -3041,8 +3041,8 @@ sha256 = "e2801bd1f85fd2730cb614e2145971478d9698bee0acc99f4f057dbbf1a37f13"
 
 [[sources]]
 path = "site/evidence.html"
-bytes = 9240
-sha256 = "ea121479c808124e9bc34bd9af0577cb8ae8fc82d8a2abf0aa757a6f1d95eba8"
+bytes = 9239
+sha256 = "e65178cebf5bd5ad74004096bb77bb69e07154b0d986060f44008b0028b998b1"
 
 [[sources]]
 path = "site/examples.html"
@@ -3511,8 +3511,8 @@ sha256 = "99c16ff5708470fb2580288d592513d1206c4284976fa7b61307758a38c39bcd"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 105133
-sha256 = "1acc2d0455e70680a9326b90ccff603abc7220fa86a406c272906128ee195939"
+bytes = 120040
+sha256 = "b02a706ceaa52965d36800acd1a0cf92c5219a8c21075297314c1288642c63ee"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"
