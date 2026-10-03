@@ -525,7 +525,10 @@ reading, and it blocks activation until the maintainer resolves it.
     journaled transaction under the full section 8.8 operation sequence. Its allowed delta is the
     `create` delta plus exactly one `transition` delta for the predecessor, with no `proposed_from`,
     and it appends one lifecycle worklog entry per changed record (section 6.2, "one entry per
-    change"). The predecessor then holds an unqualified terminal state, not a `/proposed` one, so no
+    change") in the forms of section 8.8: `opf-record create <ID> current` for the new handoff and
+    `opf-record transition <ID> current -> superseded` for the predecessor, the entry the open point
+    22 gates match when the validator grades the predecessor's move as the pending cannot-evaluate.
+    The predecessor then holds an unqualified terminal state, not a `/proposed` one, so no
     ratification or rejection follows. An assistant or automation actor's move of the predecessor
     would have to land `superseded/proposed`, so that actor cannot complete the supersession in the
     act. The writer refuses an assistant or automation replacement before anything is written,
@@ -535,7 +538,13 @@ reading, and it blocks activation until the maintainer resolves it.
     reason, this prompt's reading is that no handoff leaves `current` outside that operation:
     `transition` refuses a handoff's `current` > `superseded` move for every actor, naming the
     maintainer-performed replacement, and a plain `create` refuses a handoff while a clean handoff
-    authored by a non-importer actor is `current`. When no such handoff is `current`, any actor may
+    authored by a non-importer actor is `current`. That leaves no way to retire a handoff without a
+    successor, though section 8.5's table lists `current` > `superseded` for the handoff. This
+    prompt's reading is that a move to `superseded` with no superseding record is not an operation
+    the specification defines, since section 8.4 says "the superseding record MUST link
+    `supersedes`" and that move has no superseding record; disclose that a handoff leaves `current`
+    only by being replaced (step 14), and ask the maintainer to rule on it with the rest of this
+    point. When no such handoff is `current`, any actor may
     `create` one, since entering `current`, the initial state, is not a terminal transition. Ask the
     maintainer to rule on this before you enable the operation. The same-act rule is the handoff's
     alone. Of a contribution, section 8.5 says only "A re-send MUST be a new record linking
@@ -755,7 +764,9 @@ reading, and it blocks activation until the maintainer resolves it.
         to confirm it with the ruling. Section 8.8 points the same way when it says "So `transition`
         also refuses to decide a record that a pending_decision not at unqualified `decided` already
         supersedes", which assumes that a pending_decision not yet decided, such as an `open` one,
-        can carry a `supersedes` link, and only `create` can write it there. If the maintainer
+        can carry a `supersedes` link. `create` is one way to write it there; the legacy importer
+        or a canonical hand edit could also leave such a link, and that sentence may address those
+        cases instead, so it supports this reading without settling it. If the maintainer
         chooses reading 1 but reads "its own chain" as the connected component, which already holds
         PD-4 through its link to PD-1, or rules that `create` may not write a `supersedes` link,
         under which nothing takes PD-1 out of current authority, since PD-1 is not a chain head
@@ -891,12 +902,18 @@ Implement resolution exactly as sections 4.3 (The pointer), 4.4 (The machine sto
   ambiguity, and reads no deeper there (end of section 4.2).
 - `.opf.local.toml` is never committed and is ignored by version control; the committed pointer
   must be safe to publish (section 4.3). Section 4.3 states that but names no check and no writer
-  for it, so this prompt's choice is this: the step 6 validator reports a finding when
-  `.opf.local.toml` is in the product repository's index or at its `HEAD`, which the step 14
-  pre-commit check and the step 13 CI gate therefore block, and your report asks the maintainer to
-  add an ignore rule for it. No OPF operation writes that rule: the only ignore file the
-  specification has init and upgrade render is `.working/.gitignore` (section 4.2), which does not
-  cover the product root.
+  for it, so this prompt's choice is this: the step 6 validator reports a finding when the
+  snapshot it evaluates holds `.opf.local.toml` at the product root. That snapshot is the product
+  repository's git index for a run on the working tree and for the step 14 pre-commit check, which
+  evaluates the staged snapshot, and the checked-out revision for the step 13 CI gate; the
+  pre-commit check and the CI gate therefore block it. The validator never reports it because an
+  earlier commit, `HEAD` included, holds the file, so the commit that removes a committed override
+  is not blocked by the defect it removes. The remedy is `git rm --cached .opf.local.toml`, which
+  keeps the file on disk, and an ignore rule for it, committed together; your report asks the
+  maintainer for both. No OPF operation writes that rule. Section 4.2 has init and upgrade render
+  one ignore file, `.working/.gitignore`, and only at homes 2 ("Homes-2 init and upgrade MUST render
+  this managed block into `.working/.gitignore`"); at homes 1, this prompt's target, they render
+  none, and that file would not cover the product root in any case.
 
 Acceptance checks:
 
@@ -904,8 +921,6 @@ Acceptance checks:
   exists at the product root.
 - Two subdirectories with valid manifests give cannot-evaluate; renaming the machine
   subdirectory still resolves.
-- With `.opf.local.toml` staged in the product repository, the validator reports a finding naming
-  it; with the file present, untracked and ignored, it reports none for it.
 - A manifest with a mistyped `standard` value is not discovered, and the result is cannot-evaluate,
   not an empty store (section 17, Residual coverage disclosures); its message does not name
   `opf init`. A repository with no pointer and no `.working/` gives the message that names
@@ -1132,7 +1147,8 @@ containment.
   gitignore fallback (section 5.1, Always a git repository). How it treats the views that init
   leaves unstaged, and the files and views that the step 8 upgrade creates and must not stage, is
   open point 20, whose reading names the only exceptions.
-- A tracked `.opf.local.toml` is a finding (step 2; this prompt's choice, not a check the
+- An `.opf.local.toml` that the snapshot under test holds is a finding, judged on that snapshot
+  alone and never on `HEAD` or an earlier commit (step 2; this prompt's choice, not a check the
   specification names).
 - Transition legality compares the store with the prior committed snapshot (section 8.8, item 7);
   which commit that is, is open point 22, whose reading is the store repository's `HEAD`, read at
@@ -1143,7 +1159,11 @@ containment.
   Section 8.8, item 7 lets the validator "grade that change cannot-evaluate until the change is
   committed" and says "`opf doctor` itself is unchanged and still reports it until then"; report
   that pending kind distinctly, naming the record and its from and to statuses, so the gates below
-  can recognize it.
+  can recognize it. Where a later acceptance check says that a writer operation's final validation
+  is valid, it also passes when that validation reports nothing but this pending kind, for exactly
+  the record and the from and to statuses the operation has just written, since section
+  8.8 says the verb exits 0 "when the change is recorded and the store is doctor-VALID (or carries
+  only the pending cannot-evaluate of item 7)".
 - Section 8.2 says "Uniqueness, counter high-water, contiguity and no-deletion checks MUST evaluate
   each series independently", so run each of them per series, the clean and imported records and the
   clean and imported worklog apart. No deletion compares with the prior committed snapshot as
@@ -1221,6 +1241,10 @@ Acceptance checks, each as an automated test over a throwaway store the test bui
   missing an imported leaf each produce a finding or cannot-evaluate, and a valid store built from
   sections 4 and 9, with its views rendered by step 5, produces valid.
 - A truncated TOML file produces cannot-evaluate (exit 2), never valid.
+- With `.opf.local.toml` staged in the product repository, the validator reports a finding naming
+  it; with the file present, untracked and ignored, it reports none for it. With a commit at `HEAD`
+  that holds the file, `git rm --cached .opf.local.toml` and an ignore rule for it, not yet
+  committed, leave the validator reporting no finding for it, though `HEAD` still holds it.
 - The no-store mode exits 2 on a repository with no store.
 - A valid store in a repository whose `HEAD` is unborn produces valid; a `HEAD` reference that
   does not resolve produces cannot-evaluate.
@@ -1323,8 +1347,8 @@ Acceptance checks:
   clean-state check refuse, naming the integration-base route; during a merge in progress whose
   store paths carry neither, the check passes.
 - The standalone render write mode refuses and writes nothing while the lease is held by another
-  run; render nested inside a writer operation proceeds under that operation's held lease without
-  taking a second one.
+  run. Render nested inside another operation's sequence is checked with the first operations that
+  run it: the step 8 upgrade and remedy writer, and the step 10 writer.
 
 ### Step 8: the store upgrade to 1.3.0 (`opf upgrade`)
 
@@ -1573,6 +1597,8 @@ Acceptance checks, over synthetic fixtures the test builds:
   view-omitting fixture gains no `DECISIONS.md`, every existing record and high-water value is
   kept, no `init.toml` is created, and the validator reports valid.
 - Running the upgrade a second time on each result is a verified no-op.
+- An upgrade that reaches 1.3.0, and a remedy writer operation that exits 0, each render under the
+  lease that operation holds without taking a second one (step 7).
 - A held lease, a dirty planned destination, a manifest carrying a comment, a `spec_version`
   above 1.3.0, a populated file at an imported leaf path, and a fixture holding a legacy
   importer-authored clean record without `created_at` (cannot-evaluate until open point 25 is
@@ -1603,7 +1629,8 @@ Acceptance checks, over synthetic fixtures the test builds:
   synthetic and importer-authored), each graded under the reading the maintainer ruled; until the
   ruling, report these checks as not run and step 8 as not passed. Each remedy runs as a maintainer,
   through your step 8 writer under open point 21's grading, and each of its operations exits 0 with
-  its final validation valid; the test commits after each operation. Under reading 1: shape A
+  its final validation valid (or carrying only the pending cannot-evaluate of step 6 for that
+  operation's own transition); the test commits after each operation. Under reading 1: shape A
   upgrades to 1.3.0 with no repair offered, the validator reporting valid, and the report naming
   PD-2 as ceasing to be current and PD-1 as becoming current in its place. Shape B refuses before
   any write, naming PD-1, PD-2, PD-3, open point 28 and the remedy, and writes nothing; on that
@@ -1879,11 +1906,13 @@ Acceptance checks:
   open point 23 operation is implemented: a maintainer's replacement of a committed `current`
   handoff exits 0, and the one transaction leaves the new handoff at `current` linking `supersedes`
   to the old one, the old one at unqualified `superseded` with no `proposed_from`, exactly one
-  `current` handoff, one lifecycle worklog entry per changed record, and a final validation that
-  reports valid. Killing the process between journal write and publication leaves the store, after
-  reconciliation, at its prestate or at that poststate, never with only one of the two handoffs
-  changed. An assistant's or automation's replacement of the same handoff refuses, names the
-  maintainer-performed replacement, and writes nothing, the old handoff still `current`.
+  `current` handoff, one lifecycle worklog entry per changed record in the forms open point 23
+  names, and a final validation that reports valid or only the pending cannot-evaluate (step 6) for
+  the old handoff's move from `current` to `superseded`. Killing the process between journal write
+  and publication leaves the store, after reconciliation, at its prestate or at that poststate,
+  never with only one of the two handoffs changed. An assistant's or automation's replacement of the
+  same handoff refuses, names the maintainer-performed replacement, and writes nothing, the old
+  handoff still `current`.
 - An assistant re-send of a `sent` contribution: the assistant's `transition` lands the old record
   at `superseded/proposed` with `proposed_from = "sent"` and exits 0; after the test commits it,
   the assistant's `create` of the new contribution linking `supersedes` to it refuses, names the
@@ -1921,17 +1950,21 @@ Acceptance checks:
   point 25's interim reading. On a shape A store with a new maintainer-authored pending_decision at
   `open` committed, a maintainer's `transition` of that new record to unqualified `decided` with a
   `supersedes` link to PD-2: under reading 1 it refuses and writes nothing, since the chain would
-  then hold two current resolutions; under reading 2 it exits 0 with its final validation valid, the
-  new record the chain's one current resolution, unless the maintainer has ruled that a `supersedes`
-  target is an operand, in which case it refuses and writes nothing and step 8 is already blocked.
-  On a shape B store, under either reading, a maintainer's `create` of PD-4 at `open` with a
-  `supersedes` link to PD-1 exits 0 with its final validation valid and PD-3 the one current
-  resolution; after the test commits it, a maintainer's `transition` of PD-4 to unqualified
-  `decided` with a `supersedes` link to PD-3 exits 0 with its final validation valid and PD-4 the
-  one current resolution. Report the ruling with the checks.
+  then hold two current resolutions; under reading 2 it exits 0 with its final validation valid (or
+  carrying only the pending cannot-evaluate of step 6 for that transition), the new record the
+  chain's one current resolution, unless the maintainer has ruled that a `supersedes` target is an
+  operand, in which case it refuses and writes nothing and step 8 is already blocked. On a shape B
+  store, under either reading, a maintainer's `create` of PD-4 at `open` with a `supersedes` link to
+  PD-1 exits 0 with its final validation valid and PD-3 the one current resolution; after the test
+  commits it, a maintainer's `transition` of PD-4 to unqualified `decided` with a `supersedes` link
+  to PD-3 exits 0 with its final validation valid (or carrying only the pending cannot-evaluate of
+  step 6 for that transition) and PD-4 the one current resolution. Report the ruling with the
+  checks.
 - With an assistant's `done/proposed` transition of a backlog item left uncommitted and every other
   file, `worklog.toml` and the views included, committed, a `create` of a finding refuses and writes
   nothing, though none of its planned destinations is dirty (open point 22).
+- Each writer operation that exits 0 renders under the lease it holds without taking a second one
+  (step 7).
 - A final validation failure exits 2 and leaves the planned change in the working tree with
   recovery advice naming the planned paths.
 - Killing the process between journal write and publication leaves the store, after reconciliation,
@@ -2068,6 +2101,8 @@ Acceptance checks:
 - The job fails on a branch that replaces the store with a different valid store, made by a
   separate `opf init`.
 - A broken interpreter path makes the job exit 2, not 0 or 1.
+- The job fails on a branch whose checked-out revision holds `.opf.local.toml`, and passes once a
+  later commit on that branch removes it, though an earlier commit still holds it.
 
 ### Step 14: wiring every supported platform
 
@@ -2160,8 +2195,11 @@ platform." Wire all four, not only the platform you run on.
   the writer refuses an assistant's or automation's replacement under section 8.4 (open point 23).
   This prompt's reading is that a deny rule on the handoff index then forces no operation the writer
   cannot perform, since the `/proposed` rule of section 8.4, not the deny rule, keeps that actor
-  from completing the supersession; disclose that an assistant or automation cannot replace a
-  handoff.
+  from completing the supersession. The deny rule also covers a handoff's move from `current` to
+  `superseded` with no successor, which section 8.5's table lists; under open point 23's reading
+  the specification defines no such operation, so the rule forces no operation there either.
+  Disclose that an assistant or automation cannot replace a handoff, and that a handoff leaves
+  `current` only by a maintainer's replacement.
 - **Residuals to disclose.** Per-clone hook installation and bypass, canonical hand edits, shell or
   interpreter wrapping, same-user tampering, and unverified platform denial (section 14.1), plus
   each platform's own residual, and, under open point 22, that CI does not re-evaluate the
@@ -2180,6 +2218,9 @@ Acceptance checks:
 - For each other platform with a hook, the hook-level probe denies the same two writes and allows
   the sanctioned writer and render paths, and the live probe is reported as run or as not run.
 - The pre-commit check blocks a commit that contains a hand-edited view.
+- The pre-commit check blocks a commit that adds `.opf.local.toml`. With `HEAD` holding the file,
+  it allows the commit that removes it from the index with `git rm --cached` and adds an ignore
+  rule for it.
 - Installed as both hooks, the check stops every `git merge` that would create a merge commit
   without a conflict before it creates that commit, naming `git commit` as the way to conclude it;
   after that stop the merge result is in the index and `MERGE_HEAD` names the merged commit (or, on
@@ -2271,11 +2312,11 @@ maintainer's ruling on an open point, report the ruling with it.
 12. The record writer enforces the `/proposed` rule, the per-type transition table and rules of
     section 8.5 (with the handoff supersession as the maintainer-performed replacement of open point
     23, as ratified, completing the supersession in the same act and refusing an assistant or
-    automation replacement, and the contribution re-send as a `transition` and a `create`, a
-    non-importer predecessor at unqualified `superseded` first, and an importer-authored
-    predecessor left at its recorded state), the resolution and delivery bundles, unqualified `done`
-    only through `done-with-receipt`, the lifecycle worklog entry, the eight-item operation
-    sequence, and exits 0 or 2.
+    automation replacement and a handoff's move to `superseded` with no successor, and the
+    contribution re-send as a `transition` and a `create`, a non-importer predecessor at unqualified
+    `superseded` first, and an importer-authored predecessor left at its recorded state), the
+    resolution and delivery bundles, unqualified `done` only through `done-with-receipt`, the
+    lifecycle worklog entry, the eight-item operation sequence, and exits 0 or 2.
 13. Releases freeze worklog spans; the changelog passes range coverage and freeze; no summary was
     published without the maintainer's curation.
 14. The lease, the clean-state check and the integration-base merge rule are enforced.
