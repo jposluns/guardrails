@@ -90,10 +90,9 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
     - a tab outside a comment (after a key's colon, in a value, or before a `#`): use spaces;
     - spaces before a key, including a whole frontmatter block indented alike (YAML reads that as a
       mapping), or no space after a key's colon (`slug:team-review`): write each `key: value` at column 0;
-    - a hidden or format character (such as U+200B, U+00AD or U+FEFF) other than ZWNJ and ZWJ (U+200C,
-      U+200D), which the grammar allows in free-text values and comment lines, anywhere in the
-      frontmatter, including in a comment line:
-      delete it;
+    - a hidden or format character (such as U+200B, U+00AD or U+FEFF) anywhere in the frontmatter,
+      including in a comment line: delete it (ZWNJ and ZWJ, U+200C and U+200D, are allowed in
+      free-text values and comment lines);
     - a non-ASCII space (U+00A0, U+3000 or any other Unicode space separator) anywhere in a line or
       alone on a line, except after a comment's `#` and inside a detail-trigger or detail-reason
       value (not as its first or last character): use an ASCII space or delete it;
