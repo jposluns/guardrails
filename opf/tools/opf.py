@@ -1522,19 +1522,32 @@ _RUNTIME_SETTLE = 0.05
 _RUNTIME_REAP_SECONDS = 5.0
 _RUNTIME_REAP_ROUNDS = 250
 
-# The per-run supervisor source the runtime probe writes into its scratch directory and runs as a separate
-# process, so the self-test's own process never carries the subreaper flag. The supervisor makes ITSELF a
-# child subreaper (prctl PR_SET_CHILD_SUBREAPER, option 36, Linux) before it spawns the probed module, so
+# The per-run supervisor source the runtime probe passes inline (python3 -I -B -c <source>), so no
+# supervisor file ever exists for a probed module to overwrite or pre-plant, and the self-test's own
+# process never carries the subreaper flag. The supervisor FIRST resets SIGCHLD to SIG_DFL: an inherited
+# SIG_IGN would make the kernel auto-reap its children, so subprocess would read a failing module as
+# rc 0 on ECHILD and a reaped pid could be reused before it is signalled. It then makes ITSELF a child
+# subreaper (prctl PR_SET_CHILD_SUBREAPER, option 36, Linux) before it spawns the probed module, so
 # every orphaned descendant of the module, a setsid'd, non-dumpable or fork-hopping one included,
-# reparents to the supervisor. After the module exits it repeatedly SIGKILLs and reaps exactly the
-# processes it can prove are its own un-reaped children (/proc/self/task/*/children, or where that file
-# is unavailable the ppid field of /proc/<pid>/stat equal to its own pid), in bounded rounds and time. A
-# pid is signalled only while it is an un-reaped child of the supervisor (nothing else reaps it), so pid
-# reuse cannot redirect a kill to an unrelated process. It prints one JSON line: the module's exit
-# status and output, a timeout flag, the survivors (any is a finding) and whether the rounds drained.
-# When prctl fails or no child enumeration is available it says so and the probe reports cannot-evaluate,
-# never a clean pass. Residual: a descendant that escapes the supervisor's subtree by other means (for
-# example a separate privileged launcher that reparents it elsewhere) is not covered.
+# reparents to the supervisor. After the module exits it repeatedly SIGKILLs and reaps the processes it
+# can prove are its own un-reaped children. The census is /proc/self/task/*/children, or where that file
+# is unavailable the ppid field of /proc/<pid>/stat equal to its own pid; a vanished pid is skipped, and
+# a record that is unreadable for any other reason, or malformed, raises, making the run cannot-evaluate,
+# never clean and never a wider kill. Every signal goes through a pidfd (os.pidfd_open) whose target a
+# waitid(P_PIDFD, ..., WNOHANG|WNOWAIT) has just proved to still be the supervisor's own child; there is
+# no numeric kill anywhere, so pid reuse cannot redirect a signal to an unrelated process (the one
+# non-census kill, the module timeout, goes through Popen.kill on the supervisor's own un-reaped direct
+# child, whose pid the kernel cannot reuse while it stays un-reaped). Reaping is waitpid(WNOHANG) inside
+# the round deadline, never a blocking wait: a traced child, whose exit only its tracer can collect,
+# cannot stall the supervisor past its bound, and anything still present when the deadline ends is
+# reported as an undrained survivor, a finding, before the supervisor exits. It prints one JSON line:
+# the module's exit status and output, a timeout flag, the survivors (any is a finding) and whether the
+# rounds drained. When prctl fails, the census is unavailable or untrustworthy, or pidfd signalling is
+# unavailable, it says so and the probe reports cannot-evaluate, never a clean pass and never a numeric
+# fallback kill. Residual: a clean report proves only that the supervisor's own subtree is drained; ANY
+# same-uid process outside that subtree that the module can reach (through /proc/<pid>/fd, a FIFO, a
+# socket, a user daemon, or a launcher that reparents work elsewhere; no privilege is needed, and in a
+# shared-uid worker pool such processes exist) can act for the module after the report.
 _RUNTIME_SUPERVISOR = """\
 import base64
 import json
@@ -1561,18 +1574,62 @@ def _children():
         try:
             with open("/proc/{}/stat".format(entry), "rb") as handle:
                 fields = handle.read().rsplit(b")", 1)[1].split()
-        except (OSError, IndexError):
+        except (FileNotFoundError, ProcessLookupError):
             continue
-        if len(fields) > 1 and fields[1] == me:
+        except OSError as exc:
+            raise OSError("/proc/{}/stat unreadable ({})".format(entry, type(exc).__name__))
+        except IndexError:
+            raise OSError("/proc/{}/stat malformed".format(entry))
+        if len(fields) < 2:
+            raise OSError("/proc/{}/stat malformed".format(entry))
+        if fields[1] == me:
             kids.add(int(entry))
     return kids
 
 
+def _reap(report, reap_seconds, reap_rounds):
+    deadline = time.monotonic() + reap_seconds
+    for _ in range(reap_rounds):
+        kids = _children()
+        if not kids:
+            break
+        for pid in sorted(kids):
+            label = "pid {}".format(pid)
+            if label not in report["survivors"]:
+                report["survivors"].append(label)
+            try:
+                fd = os.pidfd_open(pid, 0)
+            except OSError:
+                continue
+            try:
+                try:
+                    os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                except OSError:
+                    continue
+                try:
+                    signal.pidfd_send_signal(fd, signal.SIGKILL)
+                except OSError:
+                    pass
+            finally:
+                os.close(fd)
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except OSError:
+                pass
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+    if _children():
+        report["drained"] = False
+
+
 def main():
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     timeout, settle = float(sys.argv[1]), float(sys.argv[2])
     reap_seconds, reap_rounds = float(sys.argv[3]), int(sys.argv[4])
-    report = {"subreaper": False, "enumerable": False, "spawn": None, "timeout": False,
-              "rc": None, "stdout": "", "stderr": "", "survivors": [], "drained": True}
+    report = {"subreaper": False, "enumerable": False, "pidfd": False, "census": None,
+              "spawn": None, "timeout": False, "rc": None, "stdout": "", "stderr": "",
+              "survivors": [], "drained": True}
     try:
         import ctypes
         libc = ctypes.CDLL(None, use_errno=True)
@@ -1582,9 +1639,16 @@ def main():
     try:
         _children()
         report["enumerable"] = True
-    except OSError:
-        report["enumerable"] = False
-    if not (report["subreaper"] and report["enumerable"]):
+    except OSError as exc:
+        report["census"] = str(exc)
+    try:
+        probe = os.pidfd_open(os.getpid(), 0)
+        os.close(probe)
+        report["pidfd"] = (hasattr(signal, "pidfd_send_signal")
+                           and hasattr(os, "P_PIDFD") and hasattr(os, "WNOWAIT"))
+    except (AttributeError, OSError):
+        report["pidfd"] = False
+    if not (report["subreaper"] and report["enumerable"] and report["pidfd"]):
         print(json.dumps(report))
         return 0
     stdout = stderr = b""
@@ -1607,26 +1671,11 @@ def main():
     report["stdout"] = base64.b64encode(stdout).decode("ascii")
     report["stderr"] = base64.b64encode(stderr).decode("ascii")
     time.sleep(settle)
-    deadline = time.monotonic() + reap_seconds
-    for _ in range(reap_rounds):
-        kids = _children()
-        if not kids:
-            break
-        for pid in sorted(kids):
-            report["survivors"].append("pid {}".format(pid))
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-            try:
-                os.waitpid(pid, 0)
-            except OSError:
-                pass
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(0.02)
-    if _children():
-        report["drained"] = False
+    try:
+        _reap(report, reap_seconds, reap_rounds)
+    except OSError as exc:
+        report["enumerable"] = False
+        report["census"] = str(exc)
     print(json.dumps(report))
     return 0
 
@@ -1648,7 +1697,8 @@ def _runtime_flag_forms(tree):
     return [[flag] for flag in flags] + [["--self-test", flag] for flag in flags]
 
 
-def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, timeout=_RUNTIME_TIMEOUT):
+def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
+                             timeout=_RUNTIME_TIMEOUT, spy=None):
     """The authority over the self-test argument refusal, by behaviour: run EVERY *.py module in `directory`,
     this host included (`names`, when given, restricts the set; only _self_test_runtime_escape_probe passes
     it), as `python3 -I -B <module> <form>` for each _DISPATCH_REFUSED and _DISPATCH_REFUSED_WORDS form
@@ -1658,12 +1708,19 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, 
     `tmp`, stdin closed, a `timeout` second limit, its own process group (start_new_session) and an
     environment of PATH (os.defpath), HOME, TMPDIR, LC_ALL=C.UTF-8 and _RUNTIME_MARKER (a token naming the
     run; informational only). Each run is supervised by a dedicated child-subreaper process
-    (_RUNTIME_SUPERVISOR, written to `tmp` and run as its own process): _RUNTIME_SETTLE seconds after
-    the module exits, the supervisor SIGKILLs and reaps, in bounded rounds and time, exactly its own
+    (_RUNTIME_SUPERVISOR, passed inline as `python3 -I -B -c <source>`, so no supervisor file exists
+    anywhere for a probed module to overwrite or pre-plant): the supervisor first resets SIGCHLD to
+    SIG_DFL (an inherited SIG_IGN would auto-reap its children, reading a failing module as rc 0 and
+    reopening pid reuse), and _RUNTIME_SETTLE seconds after the module exits it SIGKILLs and reaps, in
+    bounded rounds and time (every wait a WNOHANG poll, so a traced child, whose exit only its tracer
+    can collect, cannot stall it past the deadline; whatever is still present when the deadline ends is
+    reported as an undrained survivor, a finding, before the supervisor exits), exactly its own
     un-reaped children, to which every orphaned descendant of the module (a setsid'd, non-dumpable or
-    fork-hopping one included) has reparented; it never signals a process it cannot prove is its own
-    child, and a host where PR_SET_CHILD_SUBREAPER or the /proc child enumeration is unavailable makes
-    every run a cannot-evaluate discrepancy, never a clean pass. A form passes only if the module
+    fork-hopping one included) has reparented; every signal goes through a pidfd whose target a
+    waitid(P_PIDFD, ..., WNOHANG|WNOWAIT) has just proved to still be the supervisor's own child, never
+    a numeric kill, and a host where PR_SET_CHILD_SUBREAPER, pidfd signalling or the /proc child census
+    is unavailable, or where a census record is unreadable for any reason but a vanished pid, or
+    malformed, makes the run a cannot-evaluate discrepancy, never a clean pass and never a wider kill. A form passes only if the module
     refuses it (exit 2, nothing on stdout, and on stderr
     one line, or for this host exactly its usage text) or does nothing (exit 0, nothing on stdout or stderr),
     and in both cases leaves no process running, its cwd, HOME and TMPDIR empty and `tree` unchanged (default:
@@ -1679,9 +1736,13 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, 
     combination), an environment variable, the date, the network or a file outside its fresh directories is
     unseen; a module that runs a suite silently, writes nothing it can see and exits 0 or 2 passes; a write
     outside the fresh directories and `tree` (the top-level `.git` included; a nested `.git` IS
-    recorded) is unseen; a descendant that escapes the supervisor's subtree by other means (for example
-    a separate privileged launcher that reparents it elsewhere) is unseen unless it writes into `tree`
-    before the tree is compared; and a write by another process during the run may be blamed on a module. Returns the
+    recorded) is unseen; a clean report proves only that the supervisor's own subtree is drained, so ANY
+    same-uid process outside that subtree that the module can reach (through /proc/<pid>/fd, a FIFO, a
+    socket, a user daemon, or a launcher that reparents work elsewhere; no privilege is needed, and in a
+    shared-uid worker pool such processes exist) can act for the module after the report, and is unseen
+    unless it writes into `tree` before the tree is compared; and a write by another process during the run may be blamed on a module. `spy`, when given, is
+    called with (name, argv, token) just before a run's supervisor starts; only
+    _self_test_runtime_escape_probe passes it, to time a decoy against a live run token. Returns the
     list of discrepancies."""
     import base64
     import concurrent.futures
@@ -1714,10 +1775,6 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, 
         runs += [(name, argv) for argv in forms]
     usage = (str(__doc__) + "\n").encode("utf-8")
 
-    supervisor = os.path.abspath(os.path.join(str(tmp), "_opf_runtime_supervisor.py"))
-    with open(supervisor, "w", encoding="utf-8") as handle:
-        handle.write(_RUNTIME_SUPERVISOR)
-
     def child(run):
         name, argv = run
         box = tempfile.mkdtemp(prefix="run-", dir=str(tmp))
@@ -1728,10 +1785,13 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, 
             token = os.path.basename(box)
             env = dict(PATH=os.defpath, HOME=fresh[1], TMPDIR=fresh[2], LC_ALL="C.UTF-8",
                        **{_RUNTIME_MARKER: token})
+            if spy is not None:
+                spy(name, argv, token)
             try:
-                proc = subprocess.Popen([sys.executable, "-I", "-B", supervisor, str(timeout),
-                                         str(_RUNTIME_SETTLE), str(_RUNTIME_REAP_SECONDS),
-                                         str(_RUNTIME_REAP_ROUNDS), sys.executable, "-I", "-B",
+                proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", _RUNTIME_SUPERVISOR,
+                                         str(timeout), str(_RUNTIME_SETTLE),
+                                         str(_RUNTIME_REAP_SECONDS), str(_RUNTIME_REAP_ROUNDS),
+                                         sys.executable, "-I", "-B",
                                          str(directory / name)] + argv, cwd=fresh[0], env=env,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, start_new_session=True)
@@ -1765,10 +1825,11 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, 
         except (ValueError, KeyError, TypeError) as exc:
             return "{} {}: the probe supervisor returned no result ({})".format(
                 name, argv, type(exc).__name__)
-        if not (report.get("subreaper") and report.get("enumerable")):
+        if not (report.get("subreaper") and report.get("enumerable") and report.get("pidfd")):
             return ("cannot evaluate {} {}: the supervisor cannot contain descendants here "
-                    "(PR_SET_CHILD_SUBREAPER or the /proc child enumeration is unavailable)").format(
-                        name, argv)
+                    "(PR_SET_CHILD_SUBREAPER, pidfd signalling or the /proc child census is "
+                    "unavailable{})").format(name, argv,
+                                             "; " + report["census"] if report.get("census") else "")
         if report.get("spawn"):
             return "{} {}: failed to run ({})".format(name, argv, report["spawn"])
         if report.get("timeout"):
@@ -1833,6 +1894,21 @@ _RUNTIME_FIXTURES = (
     ("clean_lib.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
      '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _RUNTIME_USAGE, None),
     ("idle_lib.py", "import sys\n\nVALUE = len(sys.argv)\n", None),
+    # Round-6 claude F1: a module that plants (or overwrites) a would-be supervisor file two levels
+    # above its fresh cwd, where the per-run boxes live. The supervisor source is passed inline, so no
+    # such file is ever read and later runs stay contained: detached.py and its siblings, which sort
+    # and run after this module, pin that their setsid'd writers are still caught.
+    ("a_planter.py", "import os\nimport sys\n\n"
+     "boxes = os.path.dirname(os.path.dirname(os.getcwd()))\n"
+     'target = os.path.join(boxes, "_opf_runtime_supervisor.py")\n'
+     'fake = ("import json\\n"\n'
+     '        "print(json.dumps(dict(subreaper=True, enumerable=True, pidfd=True, census=None,"\n'
+     '        " spawn=None, timeout=False, rc=0, stdout=\'\', stderr=\'\', survivors=[],"\n'
+     '        " drained=True)))\\n")\n'
+     'scratch = target + ".{}".format(os.getpid())\n'
+     'with open(scratch, "w") as handle:\n    handle.write(fake)\n'
+     "os.replace(scratch, target)\n"
+     'if __name__ == "__main__":\n' + _RUNTIME_USAGE, None),
     ("var_guard.py", 'import sys\n\n\ndef cases():\n    print("TEST VECTOR EXECUTED")\n    return 0\n\n\n'
      'IS_MAIN = __name__ == "__main__"\nif IS_MAIN:\n    sys.exit(cases())\n', "neither refused nor idle"),
     ("built_flag.py", 'import sys\n\nFLAG = "--self" + "-test"\n\n\ndef cases():\n'
@@ -1923,6 +1999,142 @@ _RUNTIME_FIXTURES = (
 )
 
 
+def _self_test_runtime_supervisor_unit(tmp):
+    """Unit checks over _RUNTIME_SUPERVISOR, loaded as a module from a file private to this check (the
+    probe itself passes the source inline with `-c`, so no supervisor file exists at probe time). Pins:
+    the source holds no numeric kill (every census signal goes through a pidfd) and resets SIGCHLD to
+    SIG_DFL first thing; the census skips a vanished pid but raises on an unreadable or malformed
+    /proc/<pid>/stat record, so an untrustworthy census can never read as clean; and the reap loop
+    drains a real child within its bound through pidfd signalling with every wait a WNOHANG poll, never
+    a blocking waitpid a traced child could stall. Returns the list of faults."""
+    import importlib.util
+    import signal
+    import time
+    import types
+    faults = []
+    if "os.kill" in _RUNTIME_SUPERVISOR or "killpg" in _RUNTIME_SUPERVISOR:
+        faults.append("the supervisor source holds a numeric kill; every census signal must go through "
+                      "a pidfd it has just proved owns one of its own children")
+    if "signal.signal(signal.SIGCHLD, signal.SIG_DFL)" not in _RUNTIME_SUPERVISOR:
+        faults.append("the supervisor does not reset SIGCHLD to SIG_DFL, so an inherited SIG_IGN would "
+                      "auto-reap its children")
+    base = Path(tmp, "supervisor-unit")
+    os.makedirs(str(base))
+    source = base / "_runtime_supervisor_unit.py"
+    source.write_text(_RUNTIME_SUPERVISOR, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("_runtime_supervisor_unit", str(source))
+    sup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sup)
+    real_os = sup.os
+
+    def shadow(**overrides):
+        copied = {name: getattr(real_os, name) for name in dir(real_os) if not name.startswith("_")}
+        copied.update(overrides)
+        return types.SimpleNamespace(**copied)
+
+    records = {}
+
+    def census_listdir(target):
+        if target == "/proc":
+            return sorted(records)
+        raise OSError("the unit census has no task listing")
+
+    class _Payload:
+        def __init__(self, data):
+            self.data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self):
+            return self.data
+
+    def census_open(target, _mode="r"):
+        data = records[target.split("/")[2]]
+        if isinstance(data, Exception):
+            raise data
+        return _Payload(data)
+
+    me = str(os.getpid()).encode("ascii")
+    sup.os = shadow(listdir=census_listdir)
+    sup.open = census_open
+    try:
+        records["4242"] = ProcessLookupError("vanished")
+        try:
+            if sup._children() != set():
+                faults.append("the census did not skip a vanished pid")
+        except OSError:
+            faults.append("a vanished pid made the census raise instead of being skipped")
+        records["4242"] = b"4242 (comm) S " + me + b" 0 0"
+        try:
+            if sup._children() != {4242}:
+                faults.append("the census did not list a live child of this process")
+        except OSError:
+            faults.append("a well-formed child record made the census raise")
+        for label, data in (("an unreadable", PermissionError("denied")),
+                            ("a malformed", b"no stat fields here")):
+            records["4242"] = data
+            try:
+                sup._children()
+                faults.append("{} /proc stat record gave a clean census instead of raising, so a run "
+                              "with unavailable ownership evidence could read as clean".format(label))
+            except OSError:
+                pass
+    finally:
+        sup.os = real_os
+        del sup.open
+
+    remaining = set()
+    waits = []
+
+    def unit_census():
+        return set(remaining)
+
+    def unit_waitpid(pid, flags):
+        waits.append(flags)
+        done = real_os.waitpid(pid, flags)
+        if done[0] == pid:
+            remaining.discard(pid)
+        return done
+
+    child = os.fork()
+    if child == 0:
+        time.sleep(60)
+        os._exit(1)
+    remaining.add(child)
+    real_children = sup._children
+    report = {"survivors": [], "drained": True}
+    begin = time.monotonic()
+    try:
+        sup._children = unit_census
+        sup.os = shadow(waitpid=unit_waitpid)
+        sup._reap(report, _RUNTIME_REAP_SECONDS, _RUNTIME_REAP_ROUNDS)
+    finally:
+        sup.os = real_os
+        sup._children = real_children
+        try:
+            os.kill(child, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            os.waitpid(child, 0)
+        except OSError:
+            pass
+    took = time.monotonic() - begin
+    if remaining or not report["drained"] or "pid {}".format(child) not in report["survivors"]:
+        faults.append("the reap unit did not drain and report a real child (survivors {}, drained {})"
+                      .format(report["survivors"], report["drained"]))
+    if not waits or any(not flags & os.WNOHANG for flags in waits):
+        faults.append("the reap waited without WNOHANG, so a traced child, whose exit only its tracer "
+                      "can collect, would block the supervisor past its bound")
+    if took > _RUNTIME_REAP_SECONDS + 2:
+        faults.append("the reap unit overran its bound ({:.1f} s)".format(took))
+    return faults
+
+
 def _self_test_runtime_escape_probe(tmp):
     """Run _self_test_runtime_probe over a synthetic tree in `tmp` holding _RUNTIME_FIXTURES: the reviewers'
     reproductions the static checks miss (a variable-guarded main, a constructed flag, a differently named
@@ -1937,14 +2149,20 @@ def _self_test_runtime_escape_probe(tmp):
     module must be named for its reason and the passing ones not at all. Unless this runs as root (to whom
     chmod cannot deny a listing), the tree also holds a directory of mode 0111 that locked.py writes into: the
     probe must name it as a path it cannot evaluate. An absent tree must be unreadable to _runtime_snapshot
-    too. An UNRELATED same-uid process, started outside the probe's subtree with an environment
-    carrying _RUNTIME_MARKER, must survive the whole run unsignalled and unreported: no kill or report
-    is chosen by an environment match, a name match or uid ownership. Direct _runtime_snapshot checks
+    too. TWO UNRELATED same-uid processes, started outside the probe's subtree with environments
+    carrying _RUNTIME_MARKER (one with a token no run ever uses, spanning the whole probe, and one,
+    started by the probe's spy just before the sleeps.py `--selftest` run's supervisor spawns, carrying
+    that live run's ACTUAL token for that run's whole 5 s window), must survive the whole run
+    unsignalled and unreported: no kill or report is chosen by an environment match, an exact-token
+    match, a name match or uid ownership. Direct _runtime_snapshot checks
     then pin the new coverage: the top-level `.git` stays pruned, a nested `.git` is recorded, a
     hardlink swap preserving bytes, mode, size and mtime is a change revealed ONLY by the inode
     identity, and a plant into the nested `.git` with the parent mtimes restored changes nested-`.git`
     paths alone (the former prune-everywhere snapshot recorded none of them, so it missed the plant).
-    Then the mutant: the same probe restricted
+    A rerun over a failing module with the caller's SIGCHLD ignored must still name it (the supervisor
+    resets SIGCHLD to SIG_DFL first thing; an inherited SIG_IGN would auto-reap its children and read
+    the module as rc 0 on ECHILD), and _self_test_runtime_supervisor_unit pins the supervisor's census
+    and reap behaviour directly. Then the mutant: the same probe restricted
     to the modules the static checks select (_self_test_entry_gap exposes, or _dispatch_targets is non-empty)
     must name none of them, so the breadth of the probe, not the static selection, is what catches them. The
     modules are files run as children; nothing is passed to exec or eval. Returns a list of the
@@ -1972,14 +2190,33 @@ def _self_test_runtime_escape_probe(tmp):
                              env=dict(PATH=os.defpath, **{_RUNTIME_MARKER: "run-decoy"}),
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
+    token_decoy = {}
+
+    def spy(name, argv, token):
+        # Round-6 codex 3 / claude F5: a decoy whose marker carries the ACTUAL token of a live run,
+        # started just before that run's supervisor spawns. The sleeps.py `--selftest` run lasts its
+        # whole 5 s timeout, so the decoy is alive and execed for the whole window in which a restored
+        # exact-token environ kill would select it (the old killer's predicate never matched the fixed
+        # `run-decoy` token).
+        if name == "sleeps.py" and argv == ["--selftest"] and "proc" not in token_decoy:
+            token_decoy["proc"] = subprocess.Popen(
+                [sys.executable, "-I", "-B", "-c", "import time; time.sleep(600)"],
+                env=dict(PATH=os.defpath, **{_RUNTIME_MARKER: token}),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     try:
         found = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, timeout=5,
                                          names={name for name, _source, _want in _RUNTIME_FIXTURES}
-                                         - {"locked.py"})
+                                         - {"locked.py"}, spy=spy)
     finally:
         signalled = decoy.poll()
         decoy.kill()
         decoy.wait()
+        tokened = token_decoy.get("proc")
+        token_signalled = tokened.poll() if tokened is not None else None
+        if tokened is not None:
+            tokened.kill()
+            tokened.wait()
     faults = []
     if signalled is not None:
         faults.append("the unrelated same-uid marker-carrying process outside the probe subtree was "
@@ -1987,6 +2224,15 @@ def _self_test_runtime_escape_probe(tmp):
     if any("pid {}".format(decoy.pid) in miss for miss in found):
         faults.append("the unrelated same-uid marker-carrying process outside the probe subtree was "
                       "reported by the probe")
+    if tokened is None:
+        faults.append("the exact-token decoy never started: the spy saw no sleeps.py `--selftest` run")
+    else:
+        if token_signalled is not None:
+            faults.append("the unrelated same-uid process carrying the actual run token was signalled "
+                          "(rc {})".format(token_signalled))
+        if any("pid {}".format(tokened.pid) in miss for miss in found):
+            faults.append("the unrelated same-uid process carrying the actual run token was reported "
+                          "by the probe")
     if locks:
         (directory / "locked").chmod(0o111)
         try:
@@ -2012,6 +2258,25 @@ def _self_test_runtime_escape_probe(tmp):
     restricted = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, names=selected,
                                           timeout=5)
     faults += ["the probe restricted to the static selection still names {}".format(miss) for miss in restricted]
+    # Round-6 codex blocker 1 / claude F2: a caller-inherited ignored SIGCHLD must not blind the probe.
+    # Popen does not restore SIGCHLD, so without the supervisor's own SIG_DFL reset the kernel would
+    # auto-reap its children and the failing module below would read as rc 0 on ECHILD, a clean pass.
+    import signal
+    chld = Path(tmp, "chld")
+    os.makedirs(str(chld))
+    (chld / "fails.py").write_text("import sys\n\nsys.exit(1)\n", encoding="utf-8")
+    previous = signal.getsignal(signal.SIGCHLD)
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        ignored = _self_test_runtime_probe(chld, str(Path(tmp, "boxes")),
+                                           table={"fails.py": _DISPATCH_LIBRARY}, tree=chld,
+                                           timeout=5, names={"fails.py"})
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
+    if not any(miss.startswith("fails.py") and "rc 1" in miss for miss in ignored):
+        faults.append("with SIGCHLD ignored by the caller, a failing module was not named (got {})"
+                      .format("; ".join(ignored[:3]) or "nothing"))
+    faults += _self_test_runtime_supervisor_unit(tmp)
     unit = Path(tmp, "snapunit")
     os.makedirs(str(unit / "sub" / ".git"))
     os.makedirs(str(unit / ".git"))
@@ -3790,8 +4055,14 @@ def _watchdog_completion_case(mode):
 
             # Flip A: without the parent check (and with pdeathsig disarmed, which
             # a post-death arm cannot help anyway) the released orphan runs its
-            # callable: the QA18 codex F3 defect, reproduced.
-            with patch.object(emit, "_fixture_check_parent", lambda expected: None):
+            # callable: the QA18 codex F3 defect, reproduced. The ownership ack is
+            # disarmed too, as in subject-ack's flip: launch_held proves only that
+            # the receipt was SENT, so this leg's SIGKILL can land between the
+            # guardian's receipt send and its ack write, and a subject still gated
+            # on the ack would read EOF and refuse for a reason this flip does not
+            # test (the intermittent completion-subject-orphan failure).
+            with patch.object(emit, "_fixture_check_parent", lambda expected: None), \
+                    patch.object(emit, "_fixture_await_ack", lambda fd: None):
                 child, subject = launch_held(arm=False)
                 os.kill(child.pid, signal.SIGKILL)
                 await_state(child.pid, ("Z",), "the killed guardian did not exit")
