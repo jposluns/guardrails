@@ -198,17 +198,21 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # deny constructors (_deny, whose block result also carries a banner, and every helper that returns a
 # deny constructor's call). Only the single-return leaf constructors (_allow_note, _stop_warn,
 # _dispatcher_fail_open_warn and _deny) spell the {"systemMessage": ...} key; every other declared
-# constructor reaches a result only by returning another constructor's call. Every use of a declared
+# constructor reaches a result only by returning another constructor's call. The hooks self-test
+# (tools/selftest_aiqt_hooks.py, _note_constructor_shape_failures) checks these shapes: a leaf holds its
+# note or deny dict as a literal inside its return through tuple elements only, in a name bound once to
+# that literal and loaded only there, or as the one argument of `print(json.dumps(...))`, with no global
+# or nonlocal statement, and its hookSpecificOutput value is a dict literal; every use of a declared
 # name is the callee of a call that is the direct value of a `return` statement (no assignment,
-# unpacking, subscript, alias, attribute, conditional expression, lambda, comprehension or argument),
-# no declared constructor, HANDLERS entry or main carries a decorator, and main binds a handler's result
-# once and uses its stdout object only in `print(json.dumps(...))` and `is None` tests. So no statement
-# that check scans edits a result into another shape, and each note site is one
-# `return <constructor>(...)` position that the hooks self-test inventories and requires to execute
-# (tools/selftest_aiqt_hooks.py, _note_constructor_shape_failures). That static check guards accidental
-# drift, not adversarial source: a note key assembled at run time, a lookup through getattr or
-# globals(), or a result transformed between the handler and the print by a construct the check does
-# not model (a patched json.dumps, print or sys.stdout, for example) is outside it.
+# unpacking, subscript, alias, attribute, conditional expression, lambda, comprehension or argument); no
+# declared constructor, HANDLERS entry or main carries a decorator; and main holds no global or nonlocal
+# statement, binds a handler's result once and uses its stdout object only in `print(json.dumps(...))`
+# and `is None` tests. Those rules target an edit of a handler's stdout object; the exit code main
+# returns is outside this check. Each note site is one `return <constructor>(...)` position that the
+# hooks self-test inventories and requires to execute. That static check is not a defence against
+# adversarial source: a result transformed, inside or after a constructor, by any construct the scan
+# does not model (a note key assembled at run time, a lookup through getattr or globals(), or a patched
+# json.dumps, print or sys.stdout, for example) is outside it.
 NOTE_CONSTRUCTORS = (
     "_allow_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
