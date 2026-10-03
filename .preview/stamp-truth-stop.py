@@ -227,13 +227,15 @@ carrying agent_id (a subagent's stop). The worker skip writes one warning line t
 stdout, so worker output is not distorted, and on exit 0 stderr reaches only the host's debug log, so the
 skip is logged, not shown); that line is at most 100 characters.
 
-MESSAGES (round 33; round 34; round 35; round 36). Every message is ONE physical line: no newline and no carriage
-return. The block reason's CORE is never shortened and never dropped: BLOCK_PREFIX unchanged (the recovery
-marker that block_cycles counts), then the FIRST violation in report order (the final message first, in line
-order with its elapsed footer last, then earlier messages oldest first), whether it is a timestamp, a status
-stamp, or an elapsed footer, as its literal VERBATIM and WHOLE in a code span (never cut, no ellipsis), and
-its compact offset (+Nm: N minutes AHEAD of the true value; -Nm: N minutes BEHIND), and for a footer also the
-true elapsed, as in `Session elapsed 09:00` +333m, true 03:27; then "; +K more" (the other unresolved
+MESSAGES (round 33; round 34; round 35; round 36; round 37). Every message is ONE physical line: no newline
+and no carriage return. The block reason's CORE is never shortened and never dropped: BLOCK_PREFIX unchanged
+(the recovery marker that block_cycles counts), then the FIRST violation in report order (the final message
+first, in line order with its elapsed footer last, then earlier messages oldest first), whether it is a
+timestamp, a status stamp, or an elapsed footer, as its literal WHOLE in a code span (never cut, no ellipsis;
+a timestamp or status stamp VERBATIM; an elapsed-footer literal verbatim except that each internal whitespace
+run is collapsed to one space (round 37), which keeps a padded footer to one short line), and its compact
+offset (+Nm: N minutes AHEAD of the true value; -Nm: N minutes BEHIND), and for a footer also the true
+elapsed, as in `Session elapsed 09:00` +333m, true 03:27; then "; +K more" (the other unresolved
 violations) whenever K > 0. Then extras in this order, each added only while the whole line stays within a
 soft cap of MSG_CAP (200) characters (an extra that does not fit is SKIPPED, never cut, and the later,
 shorter ones are still tried): the remedy "; run `date`, `date -u`" (or "; run `date -u`" when only that
@@ -1055,6 +1057,8 @@ def check_message(text, ref, start, where, behind):
         try:
             off = _footer_minutes(foot) * MINUTE - true_el
             if true_el >= 0 and (off > ELAPSED_AHEAD_US or -off > behind):
+                # round 37: each internal whitespace run collapsed to one space (documented in MESSAGES), so a
+                # padded footer stays one short line
                 bad.append(f"\"{' '.join(foot.group(0).split())}\" (last elapsed footer in {where}): true elapsed "
                            f"when written was {fmt_elapsed_us(true_el)} ({_minutes(off)})")
         except Exception:
@@ -1675,6 +1679,9 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     UNAVAILABLE); `persist` False (the lock could not be taken: locking unavailable, or no usable private state
     dir) means no state is written by this call. `report` and `diag`: see evaluate()."""
     bad, seen, over = [], set(), [0]  # a bounded report list; `seen` dedupes in O(1); `over` counts the rest
+    # round 37: whether a violation past MAX_REPORTED (never the claim shown) is an elapsed footer or a time AHEAD,
+    # so the elapsed and future-fact extras do not depend on the report truncation
+    over_footer, over_ahead = [False], [False]
 
     def add(vs):
         for v in vs:
@@ -1685,6 +1692,8 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
                 bad.append(v)
             else:
                 over[0] += 1
+                over_footer[0] = over_footer[0] or _is_footer(v)
+                over_ahead[0] = over_ahead[0] or _is_ahead(v)
 
     now_us = to_us(now)
     start_us = to_us(start) if start is not None else None
@@ -1915,11 +1924,12 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     # span, its compact offset, the unresolved count), then the remedy, the future-fact hint, the true elapsed
     # (round 36) and UTC now, each only while the line stays within the soft cap
     more = f"; +{total - 1} more" if total > 1 else ""
-    ahead = any(not v.startswith('"') and " min AHEAD" in v for v in bad)
+    ahead = over_ahead[0] or any(_is_ahead(v) for v in bad)
     # round 36: a wrong footer that is not the claim shown would otherwise get no correction value until a
-    # later block; `date` gives the time, not the elapsed
+    # later block; `date` gives the time, not the elapsed. Round 37: a footer past MAX_REPORTED counts too
     first = next((i for i, v in enumerate(bad) if _first_claim([v]) is not None), None)
-    hidden_footer = el is not None and any(_is_footer(v) for i, v in enumerate(bad) if i != first)
+    hidden_footer = el is not None and (over_footer[0] or any(_is_footer(v) for i, v in enumerate(bad)
+                                                              if i != first))
     return _fit(_claim_line(BLOCK_PREFIX, claim) + more,
                 [REMEDY, HINT if ahead else "", f"; elapsed now {el}" if hidden_footer else "", f"; UTC now {utc}"],
                 MSG_CAP)
@@ -1930,11 +1940,17 @@ def _is_footer(v):
     return v.startswith('"') and '" (last elapsed footer in ' in v
 
 
+def _is_ahead(v):
+    """Whether the violation string `v` is a timestamp or status stamp AHEAD of the clock (not a footer)."""
+    return not v.startswith('"') and " min AHEAD" in v
+
+
 def _first_claim(bad):
     """(literal, compact offset) of the FIRST violation in the violation strings `bad`, in report order (the
     final message first, in line order with its elapsed footer last, then earlier messages oldest first),
-    whether it is a timestamp, a status stamp, or an elapsed footer; the literal is copied verbatim. A footer's
-    offset also names the true elapsed (`+333m, true 03:27`). None when no string has a known shape."""
+    whether it is a timestamp, a status stamp, or an elapsed footer; the literal is copied verbatim from `bad`
+    (a footer's was whitespace-collapsed by check_message, round 37). A footer's offset also names the true
+    elapsed (`+333m, true 03:27`). None when no string has a known shape."""
     for v in bad:
         for kind in ("timestamp ", "status stamp "):
             if v.startswith(kind) and " in " in v:
@@ -4807,6 +4823,45 @@ def _self_test():
             self.assertFalse(_is_footer("timestamp 2099-01-01T00:00Z in x: 5 min AHEAD of when it was written"))
             doc = " ".join(__doc__.split())
             self.assertIn('"; elapsed now HH:MM" (round 36', doc)
+
+        # -- round 37 (codex gpt-6-astra QA round 4 of round 36) --
+        def test_r37_footer_past_max_reported_gets_true_elapsed(self):
+            # codex minor 1: a wrong footer past the MAX_REPORTED truncation never added "; elapsed now"
+            stamps = " ".join(f"2099-01-{d:02d}T00:00Z" for d in range(1, MAX_REPORTED + 1))
+            r = self.final(stamps + "\nSession elapsed 09:00")
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2099-01-01T00:00Z` +38012055m; +{MAX_REPORTED} more"), r)
+            self.assertFalse(any(_is_footer(v) for v in self.report))  # the footer is past the report truncation
+            self.assertIn("; elapsed now 03:27", r)
+            self.assertLessEqual(len(r), MSG_CAP)
+            # not added when only timestamps lie past the truncation
+            self.assertNotIn("elapsed now", self.final(stamps + " 2099-02-01T00:00Z"))
+            # sibling: a time AHEAD past the truncation still carries the future-fact hint (MAX_REPORTED earlier
+            # messages each with a header BEHIND, then one AHEAD)
+            ents = [self.user("go")] + [self.asst(f"[2026-09-23T10:{d:02d}Z] x") for d in range(MAX_REPORTED)]
+            r = self.ev(ents, last_assistant_message="ok")
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23T10:00Z` -465m; +{MAX_REPORTED - 1} more"), r)
+            self.assertNotIn(HINT[1][2:12], r)
+            r = self.ev(ents + [self.asst("2099-01-01T00:00Z")], last_assistant_message="ok")
+            self.assertIn(f"; +{MAX_REPORTED} more", r)
+            self.assertFalse(any(" min AHEAD" in v for v in self.report))  # past the report truncation
+            self.assertIn(HINT[1][2:12], r)
+
+        def test_r37_footer_literal_whitespace_collapsed(self):
+            # codex minor 2: the documented contract states the whitespace exception precisely
+            r = self.final("(session:  9h)")
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `(session: 9h)` +"), r)
+            self.assertIn('"(session: 9h)"', self.report[0])
+            r = self.final("x\nSession \t  elapsed \t 09:00")
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `Session elapsed 09:00` +333m, true 03:27"), r)
+            r = self.final("(session:" + " " * 100000 + "9h)")
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `(session: 9h)` +333m, true 03:27"), r)
+            self.assertLessEqual(len(r), MSG_CAP)
+            # a timestamp's literal is verbatim (no collapsing applies to it)
+            self.assertTrue(self.final("[2099-01-01T00:00:00.123456789+05:30] x").startswith(
+                f"{BLOCK_PREFIX}: `2099-01-01T00:00:00.123456789+05:30` +"))
+            doc = " ".join(__doc__.split())
+            self.assertIn("a timestamp or status stamp VERBATIM; an elapsed-footer literal verbatim except that each "
+                          "internal whitespace run is collapsed to one space (round 37)", doc)
 
         def test_r35_every_message_one_line_never_cut(self):
             # the requirement: no multi-line hook text; the first rejected timestamp and the diagnostic whole
