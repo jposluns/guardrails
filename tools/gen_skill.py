@@ -126,11 +126,12 @@ EVIDENCE_PARTS = ("docs", "evidence.md")
 # mention (stale, styled, linked, commented or capitalized) fails; a capitalized, wrapped or commented
 # canonical sentence, or one with markup or an entity between the phrase and the version, fails; and so do
 # '1.0.6&#45;rc1', '1.0.6.9', '1.0.6-rc1', '**1.0.6**', '1.0.6<span>-rc1</span>', '1.0.6<!---->-rc1' and any
-# other character (a non-ASCII space too) straight after the version. Out of scope, NOT detected: deliberate
-# markup or entities around or inside the phrase or the version, for example 'served <b>from</b> the',
-# 'served&nbsp;from the' or 'served *from* the' (not counted as a mention), '1.0.6.<!---->9' or '1.0.6.<b>9</b>'
-# (a '.' then '<' passes whatever follows the '<'), and a styled whole sentence ('<b>The chat skill now served
-# from the install page is 1.0.6.</b>'); the one canonical sentence passes wherever it sits in the raw text
+# other character (a non-ASCII space too) straight after the version. Out of scope, not reliably detected:
+# deliberate markup or entities around or inside the phrase or the version (some forms pass, for example
+# '1.0.6.<!---->9', 'served <b>from</b> the', 'served&nbsp;from the' or 'served *from* the' (not counted as
+# a mention), and a styled whole sentence ('<b>The chat skill now served from the install page is 1.0.6.</b>');
+# some are refused, for example '**1.0.6**', listed above). The one canonical sentence passes wherever it sits
+# in the raw text
 # (inside a title attribute or a script block too). Known false refusal: the comment test is textual, so a
 # '<!--' earlier on the page inside an attribute value (title="<!--") counts as an open comment and refuses
 # the plain sentence; reword that value.
@@ -1829,6 +1830,7 @@ def self_test_main():
             ("a bold pre-release suffix", cur_line.format(ver + "<b>-rc1</b>")),
             ("a hair space before a trailing component", cur_line.format(ver + "\u200a.9")),
             ("a non-breaking space after the version", cur_line.format(ver + "\u00a0")),
+            ("a hair space after the sentence dot", cur_line.format(ver + ".\u200a9")),
         )
         for label, text in bad_pages:
             ev_md.write_text(text, encoding="utf-8")
@@ -1849,7 +1851,9 @@ def self_test_main():
         for text in (cur_line.format(ver), page_li.format(ver),
                      "The chat skill now served from the install page is {}.\n".format(ver),
                      "<p>The chat skill now served from the install page is {}.</p>\n".format(ver),
-                     "The chat skill now served from the install page is {}".format(ver)):
+                     "The chat skill now served from the install page is {}".format(ver),
+                     "The chat skill now served from the install page is {}\t".format(ver),
+                     "The chat skill now served from the install page is {}\n".format(ver)):
             ev_md.write_text(text, encoding="utf-8")
             code, out = capture(evid, True)
             if code != 0:

@@ -51,8 +51,9 @@ signed; the independently published digest is the authenticated reference.
        only by a space, a tab, the line end or a `.` (that `.` followed only by a space, a tab, the line end
        or `<`; so `1.0.6.9` and `1.0.6<b>-rc1</b>` are refused). A second plain-whitespace mention (stale,
        styled, linked, commented or capitalized) is drift too. Deliberate markup or entities around or inside
-       the phrase or the version are out of its scope and are not detected, for example `1.0.6.<!---->9`,
-       `served <b>from</b> the`, `served&nbsp;from the` or a whole sentence wrapped in `<b>`. Known false
+       the phrase or the version are out of its scope and are not reliably detected (some forms pass, for
+       example `1.0.6.<!---->9`, `served <b>from</b> the`, `served&nbsp;from the` or a whole sentence wrapped
+       in `<b>`; some are refused, for example `**1.0.6**`). Known false
        refusal: a `<!--` earlier on the page, even inside an attribute value such as `title="<!--"`, counts
        as an open comment and refuses the plain sentence; reword that value. After editing it, regenerate the site with `python3 tools/gen_site.py` (otherwise
        `gen_site.py --check` reports `drift: site/evidence.html`).
