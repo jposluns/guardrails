@@ -770,6 +770,8 @@ expected-check-ids = [
   "run/fetch-failure-invariants",
   # ---------- CLI ----------
   "cli/bad-argument-exit2",
+  "cli/bare-is-self-test",
+  "cli/live-needs-option",
   "cli/not-a-repo-exit2",
   "cli/invariants",
 ]

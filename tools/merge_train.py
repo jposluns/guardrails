@@ -3,9 +3,22 @@
 side for the declared GENERATED files only, regenerating and checking them, and refusing everything
 else. It does nothing unless the project commits .aiqt/merge-train.toml on its base branch.
 
-  merge_train.py [--repo DIR] [--pr N]... [--apply]   dry run by default; --apply commits and pushes
+  merge_train.py --dry-run [--repo DIR] [--pr N]...   live dry run: report what --apply would do
+  merge_train.py [--repo DIR] [--pr N]... --apply     live run: commit and push
   merge_train.py --self-test [--red-on-revert]        hermetic fixture self-test (local bare remote, fake gh)
   merge_train.py --execution-report ABS_PATH          the self-test, also writing the executed check ids
+  merge_train.py                                      no arguments: the same hermetic self-test
+
+A live run is selected only by an explicit option (--dry-run, --apply, --repo or --pr; without
+--apply it is a dry run). With no arguments at all the tool runs its hermetic self-test and never
+a live run: tools/merge_train.py is the registered runner of the merge-train-selftest suite, and
+the git-fixture-env config-injection lane launches every suite runner with no arguments, under
+the caller's injected (and deliberately poisoned) git configuration, and requires a hermetic exit
+0, as the other suite runners give. A bare live run could not meet that: it fetches the real
+remote, and its outcome depends on the remote's state (exit 2 while the base tip carries no
+config, then gh and the open PRs once it does). Live runs still read the operator's global and
+system git configuration, unchanged (the threat model below trusts them); a credential helper
+configured there keeps working for the fetch and the push.
 
 The tool NEVER mutates the author's working tree, index, HEAD or any local branch: that capability
 was removed, not guarded (decision D-390-PRIVATE-WORKTREE). Per open PR, in PR-number order, every
@@ -945,12 +958,16 @@ def _run_locked(root, apply, only, reports):
 
 
 def _parse_args(argv):
+    """The live-run options, or None for a usage error (--dry-run and --apply together included)."""
     opts = dict(apply=False, repo=".", prs=[])
+    dry_run = False
     i = 0
     while i < len(argv):
         arg = argv[i]
         if arg == "--apply":
             opts["apply"] = True
+        elif arg == "--dry-run":
+            dry_run = True
         elif arg == "--repo" and i + 1 < len(argv):
             i += 1
             opts["repo"] = argv[i]
@@ -960,19 +977,31 @@ def _parse_args(argv):
         else:
             return None
         i += 1
+    if dry_run and opts["apply"]:
+        return None
     return opts
+
+
+def _mode(argv):
+    """("self-test", kwargs) for the self-test forms, no arguments included (never a live run);
+    ("live", opts) for a live run, which needs an explicit option; ("usage", None) otherwise."""
+    if argv in ([], ["--self-test"], ["--self-test", "--red-on-revert"]):
+        return "self-test", dict(red_on_revert="--red-on-revert" in argv)
+    if len(argv) == 2 and argv[0] == "--execution-report" and os.path.isabs(argv[1]):
+        return "self-test", dict(report_path=argv[1])
+    opts = _parse_args(argv)
+    return ("usage", None) if opts is None else ("live", opts)
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv in (["--self-test"], ["--self-test", "--red-on-revert"]):
-        return self_test(red_on_revert="--red-on-revert" in argv)
-    if len(argv) == 2 and argv[0] == "--execution-report" and os.path.isabs(argv[1]):
-        return self_test(report_path=argv[1])
-    opts = _parse_args(argv)
-    if opts is None:
-        print("usage: merge_train.py [--repo DIR] [--pr N]... [--apply] | --self-test "
-              "[--red-on-revert] | --execution-report ABS_PATH", file=sys.stderr)
+    mode, opts = _mode(argv)
+    if mode == "self-test":
+        return self_test(**opts)
+    if mode == "usage":
+        print("usage: merge_train.py --dry-run [--repo DIR] [--pr N]... | [--repo DIR] [--pr N]... "
+              "--apply | [--self-test [--red-on-revert]] | --execution-report ABS_PATH",
+              file=sys.stderr)
         return 2
     rc, reports, fatal = run_train(opts["repo"], opts["apply"], set(opts["prs"]))
     for report in reports:
@@ -2168,6 +2197,14 @@ def case_cli(tmp):
     proc = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--bogus"],
                           capture_output=True, timeout=60, env=_clean_env())
     check("cli/bad-argument-exit2", proc.returncode, 2)
+    # No arguments must select the self-test, never a live run: the config-injection lane launches
+    # this suite runner bare under poisoned git configuration and requires a hermetic exit 0.
+    check("cli/bare-is-self-test", (_mode([]), _mode(["--self-test"])[0]),
+          (("self-test", dict(red_on_revert=False)), "self-test"))
+    check("cli/live-needs-option",
+          (_mode(["--dry-run"]), _mode(["--apply"])[0], _mode(["--pr", "7"])[0],
+           _mode(["--dry-run", "--apply"])),
+          (("live", dict(apply=False, repo=".", prs=[])), "live", "live", ("usage", None)))
     plain = Path(tmp) / "not-a-repo"
     plain.mkdir()
     audit = len(GIT_AUDIT)
