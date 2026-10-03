@@ -29,8 +29,8 @@ symlink, directory or special file), fails closed, naming the entry for the main
 if tracked, rm if untracked: an interrupted run's leftover temporary file is untracked). A normal run exits 2
 before writing anything; --check exits 1. The generator never deletes a file ANYWHERE: an orphan in the
 reserved site/downloads/aiqt/ tree is likewise named for removal (normal run exit 2 before writing anything,
---check exit 1), never unlinked. Every output, and every input this generator reads itself, is read (and every
-output written) relative to directory descriptors: the repository root is opened ONCE per run, before any
+--check exit 1), never unlinked. Every output, and every input this generator reads itself apart from the rule corpus (see the
+threat model), is read (and every output written) relative to directory descriptors: the repository root is opened ONCE per run, before any
 input is read, and every walk starts from that one descriptor; each parent component
 is opened with O_DIRECTORY|O_NOFOLLOW from it, the temporary file is created O_EXCL|O_NOFOLLOW at the
 parent's descriptor, fsynced, and renamed over the target with os.replace anchored to the same descriptor.
@@ -38,13 +38,15 @@ parent's descriptor, fsynced, and renamed over the target with os.replace anchor
 Threat model (D-399-STATIC-THREAT-MODEL): the generator defends against hostile STATIC tree state, anything a
 hostile commit can plant (a symlink at any component, a hard link, a FIFO or device, a wrong type, an orphan,
 an unknown entry), and fails closed on it: such an entry is refused or named, never read through, written
-through or deleted. That holds for every output and for every input this generator reads itself: LICENSE,
+through or deleted. That holds for every output and for every other input this generator reads: LICENSE,
 skill-source.md, the hooks manifest and the evidence page are each read through the descriptor-anchored reader
-(O_NOFOLLOW on every component, O_NONBLOCK, fstat a regular file), and a hard link at a declared output is
-refused, never read and accepted. The rule corpus is NOT read that way: it is read by gen_rules.load_corpus,
-a shared loader this generator does not change. tools/check_manifest.py refuses a symlinked corpus source
-(exit 2), but neither it nor the loader refuses a FIFO at a corpus path (both block on it): a disclosed gap
-in the shared corpus loading, outside this generator. It does NOT claim defence against a CONCURRENT writer racing the run inside the
+(O_NOFOLLOW on every component, O_NONBLOCK, fstat a regular file with exactly one link), so a hard link at a
+declared output or at one of those four inputs is refused, never read and accepted. The rule corpus is NOT read
+that way: it is read by gen_rules.load_corpus, a shared loader this generator does not change, and then this
+generator's own _rule_body rereads each included rule by plain path (for the source-corpus hash), with no link
+or type check. tools/check_manifest.py refuses a symlinked corpus source (exit 2), but neither it, the loader
+nor _rule_body refuses a FIFO at a corpus path (each blocks on it; load_corpus reaches it first): a disclosed
+gap in the corpus reads, outside the descriptor reader. It does NOT claim defence against a CONCURRENT writer racing the run inside the
 checkout: whoever can write the checkout during the run can rewrite this generator itself. Disclosed
 residual: a held descriptor pins a directory's inode, not its ancestry, so a directory renamed out of the
 repository mid-run, or a file moved onto this run's temporary name during the run, is out of scope.
@@ -112,15 +114,20 @@ ATTRIBUTION_SOURCE_URL = "https://github.com/jposluns/guardrails"
 # it to site/evidence.html); this gate verifies, it never writes there.
 EVIDENCE_PARTS = ("docs", "evidence.md")
 # Canonical form, judged on the RAW page text (comments and markup included), so the gate never models how a
-# styled form renders: the phrase 'served from the' (any case, any whitespace run between its words, so a
-# wrapped line counts) must occur EXACTLY ONCE, and that one occurrence must be the plain canonical sentence
-# 'served from the install page is X.Y.Z' (lower-case, single-spaced, outside an HTML comment) with X.Y.Z the
-# declared version, followed only by the end of the text, whitespace, '<', or a sentence-final '.' that is
-# itself followed by one of those. Any other mention (styled, linked, commented, capitalized, wrapped or a
-# second sentence) fails, and so do '1.0.6&#45;rc1', '1.0.6.9', '1.0.6-rc1' and '**1.0.6**'.
+# styled form renders. What the counter checks: the phrase 'served from the' with plain whitespace between its
+# words (any case, any whitespace run, so a wrapped line counts) must occur EXACTLY ONCE, and that one occurrence
+# must be the plain canonical sentence 'served from the install page is X.Y.Z' (lower-case, single-spaced,
+# outside an HTML comment) with X.Y.Z the declared version, followed only by the end of the text, whitespace, or
+# a sentence-final '.' that is itself followed by the end of the text, whitespace or '<'. A bare '<' straight
+# after the version is refused. So a second such mention (styled, linked, commented, capitalized or wrapped)
+# fails, a styled, capitalized or wrapped canonical sentence fails, and so do '1.0.6&#45;rc1', '1.0.6.9',
+# '1.0.6-rc1', '**1.0.6**', '1.0.6<span>-rc1</span>' and '1.0.6<!---->-rc1'. Deliberate markup INSIDE the
+# phrase is NOT detected: 'served <em>from</em> the', 'served&nbsp;from the' or 'served *from* the' is not
+# counted as a mention, and the one canonical sentence passes wherever it sits in the raw text (inside a title
+# attribute or a script block too). A forgotten bump leaves the stale plain sentence, which is caught.
 _EVIDENCE_MENTION = re.compile(r"served\s+from\s+the", re.I)
 _EVIDENCE_CANON = "served from the install page is "
-_EVIDENCE_VERSION_END = re.compile(r"(?:\Z|\s|<|\.(?:\Z|\s|<))")
+_EVIDENCE_VERSION_END = re.compile(r"(?:\Z|\s|\.(?:\Z|\s|<))")
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -283,7 +290,9 @@ def parse_source_text(text):
 
 def _rule_body(path):
     """The rule body with its YAML frontmatter stripped (same extraction as gen_agents.body_of, without
-    the H1 demotion). Used only for the deterministic source-corpus hash, never rendered into the body."""
+    the H1 demotion). Used only for the deterministic source-corpus hash, never rendered into the body. Read
+    by plain path, with no link or type check (a FIFO here blocks, as it already does in load_corpus): the
+    disclosed corpus gap in the module threat model."""
     text = path.read_text(encoding="utf-8")
     end = text.find("\n---\n", 4)
     return text[end + 5:].strip()
@@ -606,8 +615,8 @@ def _read_output(root_fd, root, path, binary, single_link=False):
     _open_dir_fd from the run's root descriptor and the target with O_NOFOLLOW relative to it, then
     fstat-verified a regular file, so a symlink or non-regular file at the path, or a symlink anywhere on the
     parent walk, is refused with OSError (exit 2), never read through (O_NONBLOCK keeps a FIFO at the name
-    from blocking the open; it is then refused by the fstat check). With single_link (every declared output)
-    a file with more than one hard link is refused too: its bytes are shared with a name outside this
+    from blocking the open; it is then refused by the fstat check). With single_link (every declared output,
+    every _read_input input and the evidence page) a file with more than one hard link is refused too: its bytes are shared with a name outside this
     generator's control, so it is never read and accepted as the output."""
     rel = Path(path).relative_to(root)
     parent_fd = _open_dir_fd(root_fd, rel.parts[:-1], rel.as_posix())
@@ -638,10 +647,11 @@ def _read_output(root_fd, root, path, binary, single_link=False):
 
 def _read_input(root_fd, root, parts):
     """A required input file (LICENSE, skill-source.md, the hooks manifest) as UTF-8 text, read through the
-    descriptor-anchored _read_output, so a link, FIFO, device or other non-regular entry at it, or a link on
-    its parent walk, is refused (OSError, exit 2), never read through or blocked on. An absent input raises
+    descriptor-anchored _read_output with single_link, so a symlink, hard link, FIFO, device or other
+    non-regular entry at it, or a symlink on its parent walk, is refused (OSError, exit 2), never read through,
+    accepted or blocked on. An absent input raises
     FileNotFoundError (exit 2); invalid UTF-8 raises UnicodeDecodeError, a ValueError (exit 2)."""
-    text = _read_output(root_fd, root, root.joinpath(*parts), False)
+    text = _read_output(root_fd, root, root.joinpath(*parts), False, single_link=True)
     if text is None:
         raise FileNotFoundError(errno.ENOENT, "required source is missing", "/".join(parts))
     return text
@@ -984,12 +994,12 @@ def run_gen(root, check):
         # naming the declared skill version (_EVIDENCE_MENTION). A missing page is drift, named;
         # the self-test fixtures carry the page explicitly (_write_fixture), so nothing is skipped for them.
         # Not run when there is no build (absent-corpus transition: no declared version to compare). The page
-        # is read through the same descriptor-anchored reader (a link, FIFO or non-UTF-8 page fails closed,
-        # exit 2).
+        # is read through the same descriptor-anchored reader (a symlink, hard link, FIFO or non-UTF-8 page
+        # fails closed, exit 2).
         evidence_problem = None
         if check and binary:
             want = zip_versioned_version()
-            text = _read_output(root_fd, root, root.joinpath(*EVIDENCE_PARTS), False)
+            text = _read_output(root_fd, root, root.joinpath(*EVIDENCE_PARTS), False, single_link=True)
             evidence_problem = evidence_sentence_problem(text, want)
     except (OSError, UnicodeError) as exc:
         # UnicodeError (UnicodeDecodeError) covers the generated-TARGET reads above (the standalone text
@@ -1017,10 +1027,12 @@ def evidence_sentence_problem(text, want):
     once and that mention is the plain canonical sentence naming want (the rule at _EVIDENCE_MENTION);
     otherwise the drift message naming docs/evidence.md, what was found, and the one sentence to write."""
     canon = _EVIDENCE_CANON + want
-    rule = ("docs/evidence.md must mention 'served from the' exactly once, in the one plain canonical sentence "
-            "'{}' (the declared skill version; lower-case and single-spaced on one line, outside any comment, "
-            "with no markup, link or entity inside it, and the version followed only by whitespace, '<', the "
-            "end of the text or a sentence-final '.')".format(canon))
+    rule = ("docs/evidence.md must mention 'served from the' (counted with plain whitespace between its words) "
+            "exactly once, in the one plain canonical sentence '{}' (the declared skill version; lower-case and "
+            "single-spaced on one line, outside any comment, with no markup, link or entity inside it, and the "
+            "version followed only by whitespace, the end of the text or a sentence-final '.' that is itself "
+            "followed by whitespace, '<' or the end; markup inside the phrase itself is not detected)".format(
+                canon))
     if text is None:
         return "{}, but the page is missing; restore docs/evidence.md".format(rule)
     found = list(_EVIDENCE_MENTION.finditer(text))
@@ -1066,7 +1078,8 @@ def main():
 #  10. the temporary file is created O_EXCL (a collision is retried), the reopen after mkdir is O_NOFOLLOW,
 #      a read never blocks on a FIFO (O_NONBLOCK), an untracked leftover is named with git rm and rm, and
 #      the root is opened once per run (a root path swapped after that open is never followed by any walk),
-#  11. a symlink or FIFO at an input (LICENSE, skill-source.md, the hooks manifest) is refused (exit 2), and a
+#  11. a symlink, hard link or FIFO at an input (LICENSE, skill-source.md, the hooks manifest; a hard link at
+#      the evidence page too) is refused (exit 2), and a
 #      FIFO at one output plus a drifted other output exits 2 having written nothing (the pre-write pass).
 
 _APEX = """---
@@ -1751,9 +1764,9 @@ def self_test_main():
         # The canonical-form rule (round-4 QA, both reviews): the raw page must mention 'served from the'
         # exactly once, in the one plain canonical sentence. Each of these is drift (exit 1) naming the page:
         # a second mention, styled, linked or commented; a styled, capitalized, wrapped or commented current
-        # sentence; and a version followed by anything but whitespace, '<', the end or a sentence-final '.'.
-        # Red if the gate reads only the first mention, counts only plain mentions, strips comments, models
-        # rendering, or relaxes the version's end.
+        # sentence; and a version followed by anything but whitespace, the end or a sentence-final '.'.
+        # Red if the gate reads only the first mention, counts only plain or only lower-case mentions (drops
+        # re.I), strips comments, models rendering, or relaxes the version's end (a bare '<' after it).
         bad_pages = (
             ("a second conflicting sentence", cur_line.format(ver) + cur_line.format("0.0.1")),
             ("a second sentence wrapped across lines", cur_line.format(ver)
@@ -1787,6 +1800,11 @@ def self_test_main():
             ("a non-breaking-space entity before the version",
              "The chat skill now served from the install page is&nbsp;{}.\n".format(ver)),
             ("a capitalized current sentence", "Served from the install page is {}.\n".format(ver)),
+            ("a stale capitalized second sentence beside the current one",
+             cur_line.format(ver) + "Served from the install page is 0.0.1.\n"),
+            ("a span-wrapped pre-release suffix", cur_line.format(ver + "<span>-rc1</span>")),
+            ("an empty-comment pre-release suffix", cur_line.format(ver + "<!---->-rc1")),
+            ("a bold pre-release suffix", cur_line.format(ver + "<b>-rc1</b>")),
         )
         for label, text in bad_pages:
             ev_md.write_text(text, encoding="utf-8")
@@ -1799,13 +1817,14 @@ def self_test_main():
         if code != 1 or "docs/evidence.md" not in out or "missing" not in out:
             failures.append("a missing evidence page expected --check exit 1 naming it missing, got {}\n{}".format(
                 code, out))
-        # Clean: the one plain canonical sentence, its version followed by a space, a sentence-final dot, '<'
-        # or the end of the page, including the current page's own list item.
+        # Clean: the one plain canonical sentence, its version followed by a space, the end of the page or a
+        # sentence-final dot (itself followed by whitespace, '<' or the end), including the current page's own
+        # list item.
         page_li = ('      <li><b style="color:var(--ink)">Version:</b> 1.0.5, the chat-assistant Skill. The chat '
                    'skill now served from the install page is {} under the Apache License 2.0.</li>\n')
         for text in (cur_line.format(ver), page_li.format(ver),
                      "The chat skill now served from the install page is {}.\n".format(ver),
-                     "<p>The chat skill now served from the install page is {}</p>\n".format(ver),
+                     "<p>The chat skill now served from the install page is {}.</p>\n".format(ver),
                      "The chat skill now served from the install page is {}".format(ver)):
             ev_md.write_text(text, encoding="utf-8")
             code, out = capture(evid, True)
@@ -1946,12 +1965,15 @@ def self_test_main():
         # 20. The repository root is opened ONCE per run and EVERY walk starts from that descriptor: the
         #     fixture's root path is swapped for a symlink to an outside look-alike tree right after the run
         #     opens it. The look-alike differs from the real tree once per walk, so a walk that reopens the
-        #     root by path goes red whichever walk it is (round-4 QA): its instructions file is current while
-        #     the real one is drifted (a READER that reopens sees no drift and the real file stays drifted, and
-        #     its LICENSE differs, so an input read that reopens packs the wrong licence); its outputs' inodes
-        #     are recorded (a WRITER that reopens replaces one); an orphan sits in its reserved tree (an ORPHAN
-        #     SCAN that reopens exits 2); and an undeclared entry sits in its site/downloads (an ALLOW-LIST scan
-        #     that reopens exits 2).
+        #     root by path goes red whichever walk it is (round-4 and round-5 QA): its instructions file is
+        #     current while the real one is drifted (an output READER that reopens sees no drift and the real
+        #     file stays drifted); each input this generator reads differs (its LICENSE, its skill-source.md body
+        #     and its hooks-manifest author name, so an input read that reopens renders outside content into
+        #     the real outputs); its outputs' inodes are recorded (a WRITER that reopens replaces one); an
+        #     orphan sits in its reserved tree (an ORPHAN SCAN that reopens exits 2); an undeclared entry sits in
+        #     its site/downloads (an ALLOW-LIST scan that reopens exits 2); and its evidence page names a stale
+        #     version, so a second leg runs --check with the same swap on the now current real tree (the
+        #     EVIDENCE read that reopens reports drift, exit 1).
         rp = tmp / "rootpin"
         rp.mkdir()
         _write_fixture(rp, good_src)
@@ -1961,6 +1983,13 @@ def self_test_main():
         rp_out.joinpath(*RESERVED_PARTS, "outside-orphan.md").write_bytes(b"outside orphan")
         rp_out.joinpath(*ZIP_PARTS[:-1], "outside-entry.txt").write_bytes(b"outside entry")
         rp_out.joinpath(*LICENSE_PARTS).write_text("OUTSIDE LICENSE TEXT\n", encoding="utf-8")
+        rp_out.joinpath(*SKILL_SRC_PARTS).write_text(
+            good_src.replace("Self-test AIQT body.", "OUTSIDE SKILL SOURCE BODY."), encoding="utf-8")
+        rp_out.joinpath(*IDENTITY_MANIFEST_PARTS).write_text(
+            '[plugin]\nauthor-name = "Outside Operator"\nhomepage = "https://outside.test"\n', encoding="utf-8")
+        rp_out.joinpath(*EVIDENCE_PARTS).write_text(
+            "The chat skill now served from the install page is 0.0.1 under the Apache License 2.0.\n",
+            encoding="utf-8")
         rp_inodes = dict(("/".join(p), os.lstat(str(rp_out.joinpath(*p))).st_ino)
                          for p in (INSTRUCTIONS_PARTS, ZIP_PARTS, ZIP_VERSIONED_PARTS, RESERVED_PARTS + ("SKILL.md",)))
         rp_license = rp.joinpath(*LICENSE_PARTS).read_text(encoding="utf-8")
@@ -1982,6 +2011,12 @@ def self_test_main():
         finally:
             globals()["_open_root"] = real_open_root
         rp_real = Path(str(rp) + ".real") if rp_state["done"] else rp
+        for parts in (INSTRUCTIONS_PARTS, RESERVED_PARTS + ("SKILL.md",)):
+            rp_text = rp_real.joinpath(*parts).read_text(encoding="utf-8")
+            for marker in ("OUTSIDE SKILL SOURCE BODY", "Outside Operator"):
+                if marker in rp_text:
+                    failures.append("an input read reopened the root by path and rendered {!r} into {}".format(
+                        marker, "/".join(parts)))
         moved = [p for p, ino in sorted(rp_inodes.items()) if os.lstat(str(rp_out / p)).st_ino != ino]
         if moved:
             failures.append("a walk reopened the root by path and wrote the outside tree ({})\n{}".format(
@@ -1993,6 +2028,21 @@ def self_test_main():
         with zipfile.ZipFile(str(rp_real.joinpath(*ZIP_PARTS))) as rp_zip:
             if rp_zip.read(LICENSE_MEMBER).decode("utf-8") != rp_license:
                 failures.append("an input read reopened the root by path and packed the outside LICENSE")
+        # Second leg, --check with the same swap: the real tree is now current, so exit 0; red if the evidence
+        # read (or any other --check walk) reopens the root and sees the outside tree.
+        if rp_state["done"]:
+            os.unlink(str(rp))
+            os.rename(str(rp_real), str(rp))
+        rp_state["done"] = False
+        globals()["_open_root"] = _swapping_open_root
+        try:
+            code, out = capture(rp, True)
+        finally:
+            globals()["_open_root"] = real_open_root
+        if code != 0:
+            failures.append("with the root pinned once, --check on the current real tree expected exit 0 (red if "
+                            "the evidence read or another walk reopens the root by path), got {}\n{}".format(
+                                code, out))
 
         # 21. Inputs are read through the descriptor reader too (round-4 QA, both reviews): a symlink at
         #     LICENSE, skill-source.md or the hooks manifest, pointing at an outside file, is refused in both
@@ -2018,6 +2068,21 @@ def self_test_main():
                                     "(check={}), got {}\n{}".format("/".join(parts), chk, code, out))
             target.unlink()
             target.write_bytes(original)
+        # A hard link at an input (its other name outside the tree) is refused too, in both modes (exit 2, named
+        # with its link count, the zip unchanged), and at the evidence page under --check. Red if an input or
+        # the evidence page is read without single_link.
+        for parts, modes in ((LICENSE_PARTS, (True, False)), (SKILL_SRC_PARTS, (True, False)),
+                             (IDENTITY_MANIFEST_PARTS, (True, False)), (EVIDENCE_PARTS, (True,))):
+            target = inp.joinpath(*parts)
+            outside_hl = tmp / ("outside-hardlink-" + parts[-1])
+            os.link(str(target), str(outside_hl))
+            for chk in modes:
+                code, out = capture(inp, chk)
+                if (code != 2 or "hard links" not in out or "/".join(parts) not in out
+                        or inp.joinpath(*ZIP_PARTS).read_bytes() != inp_zip):
+                    failures.append("a hard-linked input {} expected exit 2 refusing it with the zip unchanged "
+                                    "(check={}), got {}\n{}".format("/".join(parts), chk, code, out))
+            outside_hl.unlink()
         # A FIFO at LICENSE is refused at once in both modes, never blocking the run; and a FIFO at one output
         # plus a drifted other output makes a normal run exit 2 having written nothing (the pre-write pass;
         # round-4 QA codex 4). Each bounded by a 10 s alarm; red if an input is read by plain path (it blocks)
@@ -2089,7 +2154,8 @@ def self_test_main():
           "entry), including a swap at the write boundary itself; a temporary-name collision is retried "
           "(O_EXCL), a link at a just-created directory is refused (O_NOFOLLOW) and a FIFO output is refused "
           "without blocking (O_NONBLOCK), and the root is opened once per run and no walk reopens it by path; a hard-linked output, and a "
-          "symlink or FIFO at LICENSE, skill-source.md or the hooks manifest, are refused (exit 2); a FIFO at "
+          "symlink, hard link or FIFO at LICENSE, skill-source.md or the hooks manifest, and a hard-linked "
+          "evidence page, are refused (exit 2); a FIFO at "
           "one output plus a drifted other output exits 2 having written nothing; the evidence page must "
           "mention 'served from the' exactly once, in the one plain canonical sentence naming the declared "
           "version (a second, styled, linked, commented, capitalized or wrapped mention, a longer version, a "

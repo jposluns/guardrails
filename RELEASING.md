@@ -43,17 +43,21 @@ signed; the independently published digest is the authenticated reference.
      - d. `.aiqt/core/ownership.toml`: the `[checkout]` `binary` list (the version-numbered zip is a
        tracked binary artefact).
      - e. `docs/evidence.md`: the install-page sentence must name the new skill version. The page must
-       mention "served from the" exactly once (any case, comments and markup included), in the one plain
-       canonical sentence "served from the install page is <version>" on one line, with no markup, link,
-       entity or comment in it, and the version followed only by a space, `<`, the line end or a
-       sentence-final `.`. `gen_skill.py --check` verifies that sentence against the declared skill version
-       and reports any other mention (styled, linked, commented, capitalized or a second sentence), a stale
-       or missing sentence, or a missing page as drift. After editing it, regenerate the site with `python3 tools/gen_site.py` (otherwise
+       mention "served from the" exactly once (any case, comments and markup included, counted with plain
+       whitespace between the three words), in the one plain canonical sentence "served from the install
+       page is <version>" on one line, with no markup, link, entity or comment in it, and the version
+       followed only by a space, the line end or a sentence-final `.` (a `<` may follow that `.`, never the
+       version itself, so `1.0.6<b>-rc1</b>` is refused). `gen_skill.py --check` verifies that sentence
+       against the declared skill version and reports any other plain-whitespace mention (styled, linked,
+       commented, capitalized or a second sentence), a stale or missing sentence, or a missing page as
+       drift. Deliberate markup or an entity inside the phrase itself (`served <b>from</b> the`,
+       `served&nbsp;from the`) is not counted as a mention and so is not detected. After editing it, regenerate the site with `python3 tools/gen_site.py` (otherwise
        `gen_site.py --check` reports `drift: site/evidence.html`).
    Then run `python3 tools/gen_skill.py`. The generator never deletes a file: this first run refuses
    (exit 2) and names the stale prior-version `aiqt-skill-<old>.zip`. Remove it yourself with
    `git rm site/downloads/aiqt-skill-<old>.zip`, then rerun `python3 tools/gen_skill.py`, which repacks
-   both zips (a surviving stale zip stays a `--check` latest-only drift). Note that from the 1.1.1 pack
+   both zips (a surviving stale zip stays a `--check` latest-only drift), and stage the new zip with
+   `git add site/downloads/aiqt-skill-<new>.zip`. Note that from the 1.1.1 pack
    release on, the skill version equals the pack version (see the top of this checklist), so this bump
    happens with each release cut. A bump that misses spot a leaves
    the assertion firing (fail-closed exit 2); a bump that misses spot b, c, or d is caught by the relevant
@@ -61,7 +65,10 @@ signed; the independently published digest is the authenticated reference.
    `python3 tools/gen_install.py` to repoint the install-page
    download button at the new versioned filename. Finally, set the `Version X.Y.Z` line in the three
    hand-written condensations (`site/downloads/aiqt-instructions-8k.txt`, `-5k.txt`, `-1_5k.txt`) and
-   re-bless them with `python3 tools/check_sized_instructions.py --update`. Then run every
+   re-bless them with `python3 tools/check_sized_instructions.py --update`. Before the generator sweep,
+   confirm that both index changes are in place: `git rm site/downloads/aiqt-skill-<old>.zip` and
+   `git add site/downloads/aiqt-skill-<new>.zip`. Otherwise `gen_manifest.py` refuses the untracked binary
+   (exit 2, "is not a tracked in-scope path; fail-closed"). Then run every
    `tools/gen_*.py` generator, with `python3 tools/gen_manifest.py` last: besides the generators named
    above, the bump also changes the outputs of `python3 tools/gen_renderers.py` (`.aiqt/core/renderers.toml`)
    and `python3 tools/gen_gensrc.py` (`.aiqt/gensrc.json`). Finally run each generator with `--check`
