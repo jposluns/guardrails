@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "6c35833e13f6c508db18bfee0b557e9039fa8f554b58c571cee73b262c47e8bd"
+tree-sha256 = "65187da034eda4d4fa72813834f5c0fb77cf15d406247771d9fbe746a2db9e19"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2636,8 +2636,8 @@ sha256 = "b24b4e93b86f4f839cd2d0d0c60ca95f98ec5e6eee558f8574c6f5b702e81f65"
 
 [[sources]]
 path = "opf/tools/_opf_journal.py"
-bytes = 15217
-sha256 = "0992391aaa46a8aa7acc6571f8de330e2eaf9e9dcd0e0173a5124b0215422430"
+bytes = 13543
+sha256 = "d63e80cd4855ba5e7ae973bff8222d07da6a1da80b6c5555120a1b3633b72eff"
 
 [[sources]]
 path = "opf/tools/_opf_manifest_regressions.py"
