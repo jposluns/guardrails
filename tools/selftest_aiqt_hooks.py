@@ -229,21 +229,24 @@ def _note_constructor_shape_failures(path=None):
     Refused, each by its line:
     a missing or non-literal NOTE_CONSTRUCTORS or DENY_CONSTRUCTORS tuple; a declared name that is not
     exactly one top-level function, or that is also defined nested or as a method; a declared note
-    constructor whose body neither holds the note key nor returns another note constructor's call, and a
-    declared deny constructor whose body neither builds the hookSpecificOutput dict nor returns another
-    deny constructor's call; a deny constructor (not also declared a note constructor) that returns a
-    note constructor's call; the note key ("systemMessage" as a string, inside a non-docstring string, or
-    as an attribute or name) anywhere but the body of a LEAF constructor (see _leaf_constructors:
-    _allow_note, _stop_warn and _dispatcher_fail_open_warn, and in _deny only its dict that also carries
-    hookSpecificOutput), and the note key as a keyword anywhere (in a leaf constructor by the keyword rule
-    next, so a keyword is refused there, not counted as building the note); in a leaf constructor, a
-    call to dict or any call carrying a systemMessage or hookSpecificOutput keyword (so the note and deny
-    dicts are dict literals only), a "systemMessage" or "hookSpecificOutput" string that is not a key of
-    a dict literal (so no subscript store, setdefault or dict.fromkeys builds the note), a note or deny
-    dict (a dict literal with a "systemMessage" or "hookSpecificOutput" key) that is not a literal inside
-    its return reached through tuple elements only, nor the value of a one-target assignment, plain or
-    annotated, to a name (not a parameter) bound only there and loaded only inside the return through
-    tuple elements only, nor the one argument of
+    constructor whose body neither holds a dict literal with a "systemMessage" key nor returns another
+    note constructor's call, and a declared deny constructor (not also declared a note constructor) whose
+    body neither holds a dict literal with a "hookSpecificOutput" key nor returns another deny
+    constructor's call (a keyword or a key string outside a dict literal counts as neither); a deny
+    constructor (not also declared a note constructor) that returns a note constructor's call; the note
+    key ("systemMessage" as a string, inside a non-docstring string, or as an attribute or name) anywhere
+    but the body of a LEAF constructor (see _leaf_constructors: _allow_note, _stop_warn and
+    _dispatcher_fail_open_warn, and in _deny only its dict that also carries hookSpecificOutput), and the
+    note key as a keyword anywhere (in a leaf constructor by the keyword rule next; a keyword never
+    counts as building the note or the deny dict in the empty rules above); in a leaf constructor, a call
+    to dict by name or by any attribute named dict (builtins.dict, for example) or any call carrying a
+    systemMessage or hookSpecificOutput keyword (so the note and deny dicts are dict literals only), a
+    "systemMessage" or "hookSpecificOutput" string that is not a key of a dict literal (so no subscript
+    store, setdefault or dict.fromkeys builds the note), a note or deny dict (a dict literal with a
+    "systemMessage" or "hookSpecificOutput" key) that is not a literal inside its return reached through
+    tuple elements only, nor the value of a one-target assignment, plain or annotated, to a name (not a
+    parameter) bound only there and loaded only inside the return through tuple elements only, nor the
+    one argument of
     json.dumps in the expression statement `print(json.dumps(...))` (so a call, subscript, attribute,
     method or other expression applied to the dict or its name is refused), and a hookSpecificOutput
     value in such a dict that is not itself a dict literal; any reference to a declared note or deny
@@ -302,21 +305,21 @@ def _note_constructor_shape_failures(path=None):
                    and isinstance(node.value.func, ast.Name) and node.value.func.id in pool
                    for node in ast.walk(func))
 
+    def builds(func, key):
+        return any(isinstance(node, ast.Dict) and any(
+            isinstance(item, ast.Constant) and item.value == key for item in node.keys)
+            for node in ast.walk(func))
+
     for name in sorted(names):
         func = bodies.get(name)
-        if func is not None and not any(
-                (isinstance(node, ast.Constant) and node.value == "systemMessage")
-                or (isinstance(node, ast.keyword) and node.arg == "systemMessage")
-                for node in ast.walk(func)) and not returns_call(func, names):
+        if func is not None and not builds(func, "systemMessage") and not returns_call(func, names):
             out.append("(note-shape-empty-{}) the declared constructor {} neither builds the note nor returns "
                        "a constructor call".format(name, name))
     for name in sorted(deny_names - names):
         func = bodies.get(name)
         if func is None:
             continue
-        if not any((isinstance(node, ast.Constant) and node.value == "hookSpecificOutput")
-                   or (isinstance(node, ast.keyword) and node.arg == "hookSpecificOutput")
-                   for node in ast.walk(func)) and not returns_call(func, deny_names):
+        if not builds(func, "hookSpecificOutput") and not returns_call(func, deny_names):
             out.append("(note-shape-empty-{}) the declared deny constructor {} neither builds the deny nor "
                        "returns a deny constructor call".format(name, name))
         if returns_call(func, names):
@@ -366,9 +369,11 @@ def _note_constructor_shape_failures(path=None):
         dict_keys = {id(key) for node in ast.walk(func) if isinstance(node, ast.Dict)
                      for key in node.keys if key is not None}
         for node in ast.walk(func):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict":
-                out.append("(note-shape-keyword-L{}) line {} in the leaf constructor {} calls dict(...); a "
-                           "note or deny dict is a dict literal only, never the keyword form".format(
+            if isinstance(node, ast.Call) and (
+                    (isinstance(node.func, ast.Name) and node.func.id == "dict")
+                    or (isinstance(node.func, ast.Attribute) and node.func.attr == "dict")):
+                out.append("(note-shape-keyword-L{}) line {} in the leaf constructor {} calls dict(...) by "
+                           "name or attribute; a note or deny dict is a dict literal only, never the keyword form".format(
                                node.lineno, node.lineno, name))
             elif isinstance(node, ast.keyword) and node.arg in ("systemMessage", "hookSpecificOutput"):
                 out.append("(note-shape-keyword-L{}) line {} in the leaf constructor {} passes {} as a "
@@ -401,6 +406,9 @@ def _note_constructor_shape_failures(path=None):
                 ok = (sum(not isinstance(use.ctx, ast.Load) for use in uses) == 1
                       and all(returned(use) for use in uses if isinstance(use.ctx, ast.Load)))
             if not ok and isinstance(up, ast.Call):
+                # `up.args[0] is node` and `outer.args[0] is up` are implied by the other conditions (the
+                # callee is an Attribute or Name, there are no keywords and exactly one argument), so no
+                # pin can go red on either alone; they stay as a statement of the shape.
                 outer = parent.get(id(up))
                 ok = (isinstance(up.func, ast.Attribute) and up.func.attr == "dumps"
                       and isinstance(up.func.value, ast.Name) and up.func.value.id == "json"
@@ -870,18 +878,24 @@ _LEAF_REFUSED_MUTANTS = {
 
 def _test_note_shape_pins(failures, tmp):
     """(ns-pin-*) Negative controls for _note_constructor_shape_failures: each mutant of the live hook
-    source must be refused under the named tag (a literal note in a non-leaf declared constructor, a
-    deny result bound and edited, unpacked, iterated or reached through an undeclared wrapper, a leaf
-    body given a second return or any _LEAF_REFUSED node type, a deny constructor returning a note
-    constructor's call, a note or deny constructor that builds nothing, a decorated handler, constructor
-    or main, a handler result bound again or edited in main, a main with no HANDLERS binding, a global
-    statement in main, a leaf's note or deny dict passed to a call or method before its return or
-    rebound, a leaf's hookSpecificOutput value that is no dict literal, a leaf building its note by the
-    dict(...) keyword form or by a key string outside a dict literal, each sub-condition of the
-    print(json.dumps(...)) and parameter exclusions, and a nonlocal statement in main), an annotated
-    one-target binding of a leaf's note is accepted as the plain form is, the leaf set must be exactly
-    the four leaf constructors, and the runtime-assembled note key stays an ACCEPTED, DISCLOSED residual:
-    the check passes it and its docstring still says so."""
+    source must be refused under the named tag (a literal note in a non-leaf declared constructor, a deny
+    result bound and edited, unpacked, iterated or reached through an undeclared wrapper, a leaf body
+    given a second return or any _LEAF_REFUSED node type, a deny constructor returning a note
+    constructor's call, a note or deny constructor that builds nothing (a keyword or a key string outside
+    a dict literal counts as building nothing), a decorated handler, constructor or main, a handler
+    result bound again or edited in main, a main with no HANDLERS binding, a global statement in main, a
+    leaf's note or deny dict passed to a call or method before its return or rebound, a leaf's
+    hookSpecificOutput value that is no dict literal, a leaf calling dict by name or by an attribute
+    named dict, a leaf passing systemMessage alone or hookSpecificOutput alone as a keyword, a leaf
+    holding "systemMessage" alone or "hookSpecificOutput" alone as a key string outside a dict literal, a
+    non-leaf deny constructor passing hookSpecificOutput only as a keyword or as a key string outside a
+    dict literal (refused as building no deny dict), a leaf's note bound to its own parameter, and these
+    conditions of the `print(json.dumps(...))` exclusion: the dumps attribute name, the json module name,
+    one dumps argument, no dumps keyword, the print callee name, one print argument, no print keyword and
+    an expression-statement parent; and a nonlocal statement in main), an annotated one-target binding of
+    a leaf's note is accepted as the plain form is, the leaf set must be exactly the four leaf
+    constructors, and the runtime-assembled note key stays an ACCEPTED, DISCLOSED residual: the check
+    passes it and its docstring still says so."""
     source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
     base = tmp / "note-shape-pins"
     base.mkdir()
@@ -895,8 +909,9 @@ def _test_note_shape_pins(failures, tmp):
         if want is None and got:
             failures.append("{}: expected the accepted residual to pass the static check, got {}"
                             .format(label, got))
-        elif want is not None and not any(item.startswith("(" + want) for item in got):
-            failures.append("{}: expected a ({}...) refusal, got {}".format(label, want, got))
+        for tag in (() if want is None else (want,) if isinstance(want, str) else want):
+            if not any(item.startswith("(" + tag) for item in got):
+                failures.append("{}: expected a ({}...) refusal, got {}".format(label, tag, got))
 
     def shape(label, func_name, lines, want):
         judge(label, _shape_mutant(source, func_name, lines), want)
@@ -968,6 +983,16 @@ def _test_note_shape_pins(failures, tmp):
           "note-shape-deny-note-_commit_denial")
     body("(ns-pin-deny-empty) the deny constructor _deny_relative whose body is only `return _allow()` is "
          "refused", "_deny_relative", ["return _allow()"], "note-shape-empty-_deny_relative")
+    body("(ns-pin-deny-empty-keyword) claude's non-leaf _deny_relative passing hookSpecificOutput only as a "
+         "keyword to a helper is refused as building no deny dict", "_deny_relative",
+         ["if field:", '    reason = "QA"',
+          'return (0, _qa_build(hookSpecificOutput={"hookEventName": PRETOOL}), None)'],
+         "note-shape-empty-_deny_relative")
+    body("(ns-pin-deny-empty-string) the non-leaf _deny_relative passing the hookSpecificOutput key string "
+         "to a helper is refused as building no deny dict", "_deny_relative",
+         ["if field:", '    reason = "QA"',
+          'return (0, _qa_build("hookSpecificOutput", {"hookEventName": PRETOOL}), None)'],
+         "note-shape-empty-_deny_relative")
     body("(ns-pin-note-empty) the note constructor _allow_note whose body is only `return _allow()` is "
          "refused", "_allow_note", ["return _allow()"], "note-shape-empty-_allow_note")
     textual("(ns-pin-dispatch-codex) codex's warning_only pop of main's stdout_obj before the print is "
@@ -1057,17 +1082,35 @@ def _test_note_shape_pins(failures, tmp):
          "before its return is refused", "_stop_warn",
          ['note = dict(systemMessage=banner)', 'note.update(_QA_EXTRA)',
           'note.setdefault("systemMessage", banner)', 'return (0, note, None)'], "note-shape-keyword-L")
-    body("(ns-pin-keyword-empty) _allow_note returning dict(systemMessage=message) is refused as the keyword "
-         "form, not as a constructor that builds no note", "_allow_note",
-         ['return (0, dict(systemMessage=message), None)'], "note-shape-keyword-L", ("note-shape-empty-",))
+    body("(ns-pin-keyword-empty) _allow_note returning dict(systemMessage=message) is refused by the "
+         "keyword rule, and also by the empty rule, since a keyword does not count as building the note",
+         "_allow_note", ['return (0, dict(systemMessage=message), None)'],
+         ("note-shape-keyword-L", "note-shape-empty-_allow_note"))
     body("(ns-pin-keyword-call) _deny passing hookSpecificOutput and systemMessage as keywords to a helper "
-         "is refused as the keyword form, not as an empty or non-leaf constructor", "_deny",
+         "is refused by the keyword rule and as building no deny dict, not as a non-leaf constructor",
+         "_deny",
          ['return (0, _qa_build(hookSpecificOutput={"hookEventName": PRETOOL}, systemMessage=banner), None)'],
-         "note-shape-keyword-L", ("note-shape-empty-", "note-shape-leaf-"))
-    body("(ns-pin-keyword-dict) a leaf calling dict(...) at all is refused", "_allow_note",
+         ("note-shape-keyword-L", "note-shape-empty-_deny"), ("note-shape-leaf-",))
+    body("(ns-pin-keyword-note) _allow_note passing only systemMessage as a keyword to a helper is refused "
+         "by the keyword rule", "_allow_note", ['return (0, _qa_build(systemMessage=message), None)'],
+         "note-shape-keyword-L")
+    body("(ns-pin-keyword-deny) _deny passing only hookSpecificOutput as a keyword to a helper is refused by "
+         "the keyword rule", "_deny",
+         ['note = _qa_build(hookSpecificOutput={"hookEventName": PRETOOL})', 'return (0, note, None)'],
+         "note-shape-keyword-L")
+    body("(ns-pin-keyword-dict) a leaf calling the name dict at all is refused", "_allow_note",
          ['_qa = dict(_QA_BASE)', 'return (0, {"systemMessage": message}, None)'], "note-shape-keyword-L")
-    body("(ns-pin-keyform) _allow_note filling an empty literal by subscript is refused", "_allow_note",
-         ['note = {}', 'note["systemMessage"] = message', 'return (0, note, None)'], "note-shape-keyform-L")
+    body("(ns-pin-keyword-dict-attr) a leaf calling an attribute named dict (builtins.dict) is refused",
+         "_allow_note", ['_qa = {"systemMessage": message}', 'note = builtins.dict(_QA_BASE)',
+                         'return (0, note, None)'], "note-shape-keyword-L")
+    body("(ns-pin-keyform) _allow_note filling an empty literal by subscript is refused by the key-string "
+         "rule, and also by the empty rule, since a key string outside a dict literal does not count as "
+         "building the note", "_allow_note",
+         ['note = {}', 'note["systemMessage"] = message', 'return (0, note, None)'],
+         ("note-shape-keyform-L", "note-shape-empty-_allow_note"))
+    body("(ns-pin-keyform-deny) _deny filling an empty literal's hookSpecificOutput by subscript is refused",
+         "_deny", ['note = {}', 'note["hookSpecificOutput"] = {"hookEventName": PRETOOL}',
+                   'return (0, note, None)'], "note-shape-keyform-L")
     body("(ns-pin-annotated) _allow_note binding its note literal by an annotated assignment is accepted as "
          "the plain form is", "_allow_note",
          ['note: dict = {"systemMessage": message}', 'return (0, note, None)'], None)
@@ -1089,6 +1132,12 @@ def _test_note_shape_pins(failures, tmp):
     textual("(ns-pin-escape-expr) the fail-open print bound to a name, not an expression statement, is "
             "refused", fail_open_print, '    _qa_out = print(json.dumps({"systemMessage": (\n',
             "note-shape-escape-L")
+    for tag, line in (("dumps-attr", 'print(json._qa_transform({"systemMessage": "QA"}))'),
+                      ("print-name", '_qa_consume(json.dumps({"systemMessage": "QA"}))'),
+                      ("dumps-arity", 'print(json.dumps({"systemMessage": "QA"}, _QA_EXTRA))'),
+                      ("print-arity", 'print(json.dumps({"systemMessage": "QA"}), _QA_EXTRA)')):
+        body("(ns-pin-escape-{}) codex's fail-open note `{}` is refused".format(tag, line),
+             "_dispatcher_fail_open_warn", [line, "return None"], "note-shape-escape-L")
     textual("(ns-pin-nonlocal-main) a `nonlocal stdout_obj` in main (a syntax-only fixture: ast.parse "
             "accepts it, the compiler would not) is refused",
             "    mode = argv[0] if argv else None\n",
