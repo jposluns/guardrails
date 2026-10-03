@@ -16,7 +16,7 @@ signed; the independently published digest is the authenticated reference.
 
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. After the freeze the release artifacts
-   (the version-numbered `site/downloads/aiqt-skill-1.0.5.zip`, which the site links to, and
+   (the version-numbered `site/downloads/aiqt-skill-<skill version>.zip`, which the site links to, and
    `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
    `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
    byte-identical to the version-numbered copy (both are written from the same bytes, and `gen_skill
@@ -24,11 +24,16 @@ signed; the independently published digest is the authenticated reference.
    release-metadata edits prescribed below (the recorded digests, the evidence fields, and the tag key)
    are the only changes permitted after this point.
 
-   Skill version bump checklist. The skill is independently versioned. The concrete version-numbered
+   Skill version bump checklist. The skill is independently versioned today (skill 1.0.6 under pack
+   release 1.0.5); from the 1.1.1 pack release on, the skill version equals the pack version, and the
+   check that mirrors the two lands with the 1.1.1 cut. Only the latest skill version is served: exactly
+   one version-numbered zip sits under `site/downloads/`, and `gen_skill.py --check` reports a stale or
+   missing one as latest-only drift. The concrete version-numbered
    filename `aiqt-skill-<version>.zip` is spelled as a literal in four places, kept consistent by a
-   fail-closed version-match assertion in `gen_skill.build_outputs` and `gen_skill.py`'s orphan-clean plus
-   `--check` (which flags a stale version-numbered zip), not by true single-sourcing (`versioned_zip_basename` is only the shared
-   filename SHAPE). To bump the skill version, edit all four, then regenerate:
+   fail-closed version-match assertion in `gen_skill.build_outputs` plus `gen_skill.py`'s latest-only
+   refusal and `--check` (each names a stale version-numbered zip; the generator never deletes it), not by
+   true single-sourcing (`versioned_zip_basename` is only the shared
+   filename SHAPE). To bump the skill version, edit all five spots below, then regenerate:
      - a. `.aiqt/core/skill/skill-source.md`: the `meta` `version` (the authoritative source the assertion
        and both generators read).
      - b. `tools/gen_skill.py`: the `ZIP_VERSIONED_PARTS` literal AND its matching `GENSRC_OUTPUTS` target
@@ -37,14 +42,49 @@ signed; the independently published digest is the authenticated reference.
        binary allowed past the portability text scan).
      - d. `.aiqt/core/ownership.toml`: the `[checkout]` `binary` list (the version-numbered zip is a
        tracked binary artefact).
-   Then run `python3 tools/gen_skill.py`, which repacks both zips and orphan-cleans the prior-version
-   `aiqt-skill-<old>.zip` (its `--check` reports that stale zip as drift). A bump that misses spot a leaves
+     - e. `docs/evidence.md`: the install-page sentence must name the new skill version. This check exists
+       to catch a forgotten bump: `gen_skill.py --check` reports a stale or missing plain sentence, or a
+       missing page, as drift. The page must mention "served from the" exactly once (any case, comments and
+       markup included, counted with plain whitespace between the three words), in the one plain canonical
+       sentence "served from the install page is <version>" on one line, lower-case, not inside an HTML
+       comment, with no markup, link or entity between the phrase and the version, and the version followed
+       only by a space, a tab, the line end or a `.` (that `.` followed only by a space, a tab, the line end
+       or `<`; so `1.0.6.9` and `1.0.6<b>-rc1</b>` are refused). A second plain-whitespace mention (stale,
+       styled, linked, commented or capitalized) is drift too. Deliberate markup or entities around or inside
+       the phrase or the version are out of its scope and are not reliably detected (some forms pass, for
+       example `1.0.6.<!---->9`, `served <b>from</b> the`, `served&nbsp;from the` or a whole sentence wrapped
+       in `<b>`; some are refused, for example `**1.0.6**`). Known false
+       refusal: a `<!--` earlier on the page, even inside an attribute value such as `title="<!--"`, counts
+       as an open comment and refuses the plain sentence; reword that value. After editing it, regenerate the site with `python3 tools/gen_site.py` (otherwise
+       `gen_site.py --check` reports `drift: site/evidence.html`).
+   Run the bump in a normal git clone or worktree: `gen_skill.py` refuses (exit 2) any input or output
+   with more than one hard link, so a hard-link-copied checkout (`cp -al`) is refused. For an input
+   (`LICENSE`, `skill-source.md`, the hooks manifest, `docs/evidence.md`) break the link by copying the
+   file and moving the copy over it; never `git rm` an input.
+   Then run `python3 tools/gen_skill.py`. The generator never deletes a file: this first run refuses
+   (exit 2) and names the stale prior-version `aiqt-skill-<old>.zip`. Remove it yourself with
+   `git rm site/downloads/aiqt-skill-<old>.zip`, then rerun `python3 tools/gen_skill.py`, which repacks
+   both zips (a surviving stale zip stays a `--check` latest-only drift), and stage the new zip with
+   `git add site/downloads/aiqt-skill-<new>.zip`. Note that from the 1.1.1 pack
+   release on, the skill version equals the pack version (see the top of this checklist), so this bump
+   happens with each release cut. A bump that misses spot a leaves
    the assertion firing (fail-closed exit 2); a bump that misses spot b, c, or d is caught by the relevant
-   drift or portability gate. Finally, run `python3 tools/gen_install.py` to repoint the install-page
-   download button at the new versioned filename.
+   drift or portability gate; a bump that misses spot e is caught by `gen_skill.py --check`. Next, run
+   `python3 tools/gen_install.py` to repoint the install-page
+   download button at the new versioned filename. Finally, set the `Version X.Y.Z` line in the three
+   hand-written condensations (`site/downloads/aiqt-instructions-8k.txt`, `-5k.txt`, `-1_5k.txt`) and
+   re-bless them with `python3 tools/check_sized_instructions.py --update`. Before the generator sweep,
+   confirm that both index changes are in place: `git rm site/downloads/aiqt-skill-<old>.zip` and
+   `git add site/downloads/aiqt-skill-<new>.zip`. Otherwise `gen_manifest.py` refuses the untracked binary
+   (exit 2, "is not a tracked in-scope path; fail-closed"). Then run every
+   `tools/gen_*.py` generator, with `python3 tools/gen_manifest.py` last: besides the generators named
+   above, the bump also changes the outputs of `python3 tools/gen_renderers.py` (`.aiqt/core/renderers.toml`)
+   and `python3 tools/gen_gensrc.py` (`.aiqt/gensrc.json`). Finally run each generator with `--check`
+   (again `gen_manifest.py --check` last); every one must exit 0.
 2. Compute. From the repository root on the frozen tree, run
-   `sha256sum site/downloads/aiqt-skill-1.0.5.zip site/downloads/aiqt-instructions.txt`. These two files
-   are the 1.0.5 release artifacts (the packaged skill and its instructions), matching the set named in
+   `sha256sum site/downloads/aiqt-skill-<skill version>.zip site/downloads/aiqt-instructions.txt` (the one
+   version-numbered zip present under `site/downloads/`). These two files are the release artifacts (the
+   packaged skill and its instructions), matching the set named in
    the evidence page and the `changelog.toml` reserved-key example. The mapping exports under
    `site/downloads/` (`mappings.csv`, `mappings.json`) are reference data regenerated from the corpus and
    covered by the drift and reference-facts gates, so they are not part of the release-integrity set.

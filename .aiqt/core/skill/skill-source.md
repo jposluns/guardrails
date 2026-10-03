@@ -1,8 +1,8 @@
 === meta ===
 name: aiqt
-version: 1.0.5
+version: 1.0.6
 license: Apache-2.0
-date: 2026-09-15
+date: 2026-10-03
 apex-id: prjint1
 
 === description ===
