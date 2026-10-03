@@ -62,6 +62,15 @@ fail-closed way and names it so the choice is reviewable, per disclose-guard-res
     open): a symlinked store root or a symlinked ancestor of a pointer target is refused
     (CANNOT-EVALUATE), never silently followed off-tree, matching the contained no-follow discipline.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_store.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import collections.abc
 import operator
 import os
@@ -76,10 +85,7 @@ import _journal        # noqa: E402  contained (dir-fd, no-follow) readers + Jou
 import _containment    # noqa: E402  the single race-free-primitive probe
 from _semver import _parse  # noqa: E402  the shipped bare-SemVer parser (major, minor, patch) or None
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: opf/tools/_opf_store.py requires Python 3.11+ (tomllib).")
+import tomllib  # noqa: E402
 
 
 # --- fixed names and vocabularies (spec 4) ------------------------------------------------------------

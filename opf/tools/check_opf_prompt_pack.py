@@ -29,6 +29,15 @@ pack is a later slice. VALID means the manifest agrees with the bytes on disk. I
 authentication, it does not check that a content change also bumped the version, and it does not
 review what the documents say.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_opf_prompt_pack.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import json
 import os

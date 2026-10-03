@@ -9,6 +9,15 @@ for python3), then requires this suite's actual assertion identities and
 reconciles the fixture's recorded calls against the runner's registrations.
 That check proves P0 dispatch, not that the other standalone gates passed.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_opf_init_p0.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import argparse
 import copy
 import hashlib

@@ -83,6 +83,15 @@ hand-built), the same construction _opf_check's own self-test proves VALID. Offl
 launched isolated (-I -B). The tempdir is removed in a finally (test-hermeticity). When git is not on PATH the
 self-test SKIPs clean (a committed HEAD is required for the tracked/prior observations).
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_opf_doctor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import os
 import subprocess
 import sys

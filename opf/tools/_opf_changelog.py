@@ -90,6 +90,15 @@ way and named so the choice is reviewable, per disclose-guard-residuals):
     release-integrity obligation (the store level composes the prior reference), not something a
     single-snapshot facts gate can close. Noted rather than left implied.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_changelog.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import datetime
 import hashlib
 import os

@@ -11,6 +11,15 @@ comments stripped and compared by membership (so a commented-out literal does no
 store path is checked against the store authority's DEFAULT_MACHINE_SUBDIR; and a roster registration
 must appear on an ACTIVE (non-comment) line, with the live gate present in the repo-root runner and CI.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_opf_init_contract.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import re
 import runpy
 import sys

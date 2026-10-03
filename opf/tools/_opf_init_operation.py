@@ -108,6 +108,15 @@ Run: python3 -I -B opf/tools/_opf_init_operation.py --self-test
 Exit: 0 self-test clean; 1 self-test failure; 2 refused precondition (no git binary or containment
 primitive), never a clean skip.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_init_operation.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import base64
 import binascii
 import datetime
@@ -136,10 +145,7 @@ import _opf_store          # noqa: E402
 import _opf_views          # noqa: E402
 from _opf_schema import SUPPORTED_SCHEMA, validate_counters, high_water  # noqa: E402
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    raise SystemExit("error: opf/tools/_opf_init_operation.py requires Python 3.11+ (tomllib)")
+import tomllib  # noqa: E402
 
 # The frozen managed provenance artifact (OPF-INIT-D2B.md "Bootstrap Provenance").
 PROVENANCE_FORMAT = "opf.init.bootstrap/v1"

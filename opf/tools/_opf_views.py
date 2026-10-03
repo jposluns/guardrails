@@ -70,6 +70,15 @@ The `opf render` CLI requires exactly one of `--check | --write` (no default): `
 detection) is IMPLEMENTED and keeps working, while `--write` stays fail-closed until VC-4 composes the gate.
 This is a refusal pending the real composition, never a fabricated gate.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_views.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import html
 import os
@@ -87,10 +96,7 @@ import _opf_release      # noqa: E402  version.toml + worklog.toml validators + 
 import _opf_emit          # noqa: E402  canonical TOML emitter (emit_checked) for the machine projection
 import _optlevel         # noqa: E402  level-0 source parses for the docstring checks
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: opf/tools/_opf_views.py requires Python 3.11+ (tomllib).")
+import tomllib  # noqa: E402
 
 EXIT_OK = 0
 EXIT_DRIFT = 1

@@ -89,6 +89,15 @@ following where sections 6 and 7 leave a gap:
     This unit is that ledger; the release-delta consumer is not built here (build-plan U3 does not assign
     it), and is noted for the finalizer rather than stubbed.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_release.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import json
 import re

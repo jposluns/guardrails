@@ -32,6 +32,15 @@ entirely the observations are all omitted (and `self_test` SKIPs clean, like the
 Stdlib only (`subprocess`, `tomllib`, `shutil`); imports `_opf_check` (for the per-record body digest) and
 `_opf_emit` (for its EmitError). Launched via opf.py under `-I -B`.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_observe.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import os
 import shutil
 import subprocess
@@ -41,10 +50,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the guarded sibling imports below
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: opf/tools/_opf_observe.py requires Python 3.11+ (tomllib).")
+import tomllib  # noqa: E402
 
 import _opf_check   # noqa: E402  the store-integrity engine: its _record_digest + observation-key roster
 import _opf_emit    # noqa: E402  the canonical emitter: EmitError, raised by an out-of-subset record body

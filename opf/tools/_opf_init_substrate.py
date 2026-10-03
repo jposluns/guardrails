@@ -104,6 +104,15 @@ Run: python3 -I -B opf/tools/_opf_init_substrate.py --self-test
 Exit: 0 self-test clean; 1 self-test failure; 2 refused precondition (missing containment
 primitive or git binary, or a fixture base inside a git repository), never a clean skip.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_init_substrate.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import datetime
 import hashlib
 import json

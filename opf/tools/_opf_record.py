@@ -212,6 +212,15 @@ only while it keeps the row schema-valid (a legal-predecessor swap), exactly the
 residual above (spec 5.7's integration-base merge policy remains the control). A transition refuses
 when the clock has not passed the record's recorded timestamps.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_record.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import base64
 import binascii
 import copy
