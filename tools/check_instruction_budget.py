@@ -206,7 +206,8 @@ loader model comes from reading the pinned build's source, and the grammar bound
 for; it is not a proof that the loader agrees on every input inside the grammar. It does not measure
 user-level files (~/.claude/CLAUDE.md and ~/.claude/rules/), which load in every session too; an
 AGENTS.md or other file loaded through the instructionFiles setting rather than an `@` import; CLAUDE.md
-files in other directories (above the repository root or below it), or CLAUDE.local.md; skills, hooks,
+files, .claude/CLAUDE.md files or .claude/rules/ directories in other directories (above the repository
+root or below it, which a session started there also loads), or CLAUDE.local.md; skills, hooks,
 tool definitions, or the system prompt; or loading by a Claude Code version other than the one pinned in
 the budget source. Of each loaded file's header (`Contents of <absolute path> (project instructions,
 checked into the codebase):`, HEADERS) it counts the fixed text and the file's resolved path relative to
