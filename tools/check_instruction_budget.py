@@ -40,8 +40,8 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       way is read with os.readlink (at most MAX_HOPS, so a loop exits 2), and every component and every
       link's own spelling is looked up in its directory before it is followed. Two entries there that can
       name it exit 2 (`Link.txt` beside `link.txt` on the way, though the resolved path no longer shows
-      them), unless all are directories and a later component matches one entry of the directory a
-      case-insensitive file system merges them into. A hop that leaves the repository exits 2.
+      them; `Docs/` beside `docs/` too, whichever the next component names). A hop that leaves the
+      repository exits 2.
   FIXED NAMES. The loader opens CLAUDE.md, `.claude/CLAUDE.md`, and `.claude/rules/` by those exact
       names, and on a case-insensitive file system a case variant of any of them (`claude.md`,
       `.Claude/`, `.claude/claude.md`, `.claude/Rules/`) is what it opens or walks. A case variant of
@@ -109,13 +109,15 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       and the last is a regular file, that file is the import (under exact case, or the case variant the
       loader on a case-insensitive file system reads). When two or more entries of one directory match a
       component (two files or directories that differ only in case, the exact-case one included), the path
-      exits 2: which one a case-insensitive file system holds is ambiguous. Two or more directories
-      matching a component that a later component follows are the one directory such a file system merges
-      them into: the next component is looked up across all of them, and only two matches there exit 2. A
-      component of the Windows 8.3 short name shape (one to six characters other than `.` and `~`, a `~`
-      and a number from 1, and an optional extension of one to three characters, as in `PAYLOA~1.MD`)
-      exits 2: on NTFS with short names enabled it can open a long-named file the gate cannot identify.
-      Prose such as `git diff @~1` or `npm i lodash@~4.17.21` holds no such component and passes. Each target is
+      exits 2: which one a case-insensitive file system holds is ambiguous. Two directories that differ
+      only in case exit 2 even when the next component names an entry of only one of them: such a file
+      system merges them, and the gate does not model what a merged directory's files then load. In an
+      import that begins at the start of a line or after whitespace (_import_start), a component of the
+      Windows 8.3 short name shape (one to six characters other than `.`, a `~` and a number from 1, and
+      an optional extension of one to three characters, as in `PAYLOA~1.MD` or `A~VERY~1.MD`) exits 2: on
+      NTFS with short names enabled it can open a long-named file the gate cannot identify. Prose such as
+      `git diff @~1`, `npm i lodash@~4.17.21` or `git reset --hard HEAD@{1}~1` (an `@` inside a word,
+      which the loader does not read as an import) holds no such import and passes. Each target is
       counted once, recursively through imported files to any depth (a cycle ends), held to the grammar,
       its frontmatter and comments removed as for a counted rule file. An imported file's frontmatter is
       held to the FRONTMATTER grammar and its `paths:` value to the SCOPE grammar (a typed value, nested
@@ -207,7 +209,10 @@ ambiguity is judged on two keys, Unicode NFD then str.casefold, and str.upper, a
 either matches (so the dotless i, and U+037E against `;`, collide): a file system whose folding matches
 neither (an NTFS upcase table that differs from this Python's Unicode data, for example) can still merge
 two names the gate reads as distinct, which is not modelled. A short name set by hand outside the 8.3
-shape is not recognised. The loader's own
+shape is not recognised. Two directories that differ only in case on a path the gate resolves exit 2 even
+where the next component names an entry of only one of them, so a layout a case-insensitive file system
+would load unambiguously can be refused (a known over-refusal). Prose that puts `@` after whitespace before
+a short-name-shaped run, such as `git diff @{u}~1`, is read as an import and exits 2 (another). The loader's own
 120,000-character check
 sums file contents only, so both totals, which include the headers, read a little high against that
 floor. The count is UTF-16 code units, not tokens, so it tracks size, not model cost.
@@ -295,10 +300,10 @@ KEY_RE = re.compile(r"([A-Za-z0-9_-]+):(?: +(.*))?")
 ITEM_RE = re.compile(r" *- +(.*)")
 QUOTED_RE = re.compile(r"\"[^\"]*\"|'[^']*'")
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
-# A Windows 8.3 short name component (`PAYLOA~1.MD`): one to six characters other than `.` and `~`, a `~`
-# and a number, and an optional extension of one to three characters; on NTFS it can open a long-named file.
-# Prose such as `git diff @~1` or `npm i lodash@~4.17.21` holds no such component.
-SHORT_NAME_RE = re.compile(r"[^.~]{1,6}~[1-9][0-9]{0,5}(?:\.[^.]{1,3})?")
+# A Windows 8.3 short name component (`PAYLOA~1.MD`, `A~VERY~1.MD`): one to six characters other than `.`,
+# a `~` and a number, and an optional extension of one to three characters; on NTFS it can open a long-named
+# file. Prose such as `git diff @~1` or `npm i lodash@~4.17.21` holds no such component.
+SHORT_NAME_RE = re.compile(r"[^.]{1,6}~[1-9][0-9]{0,5}(?:\.[^.]{1,3})?")
 # The most symlinks _resolve_checked follows for one path (the Linux limit); one more is a loop.
 MAX_HOPS = 40
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -713,49 +718,43 @@ def _resolve_checked(root, rel, where):
     the resolved repository root one component and one symlink hop at a time, each link read with
     os.readlink, so every spelling on the way is looked at, not only the final resolved path. Before a
     component is followed, every entry of its directory that can name it (_same_name) is collected: two or
-    more are GateError (_case_collision), unless all are real directories and a later component follows;
-    those are the one directory a case-insensitive file system merges them into, and the next component is
-    looked up across all of them. GateError when a hop leaves the repository, when more than MAX_HOPS links
+    more are GateError (_case_collision), directories included, whichever the next component names.
+    GateError when a hop leaves the repository, when more than MAX_HOPS links
     are followed (a loop), when a component is missing or a directory cannot be listed, and when the result
     is not os.path.realpath's (a link naming its target only in another case resolves on one file system
     and not on another)."""
     real_root = os.path.realpath(root)
     prefixes = [Path(real_root).parts, Path(os.path.abspath(root)).parts]
     pending = [part for part in rel.split("/") if part not in ("", ".")]
-    dirs, hops, result = [real_root], 0, real_root
+    hops, result = 0, real_root
     while pending:
         part = pending.pop(0)
         if part == "..":
-            if dirs[0] == real_root:
+            if result == real_root:
                 raise GateError("{} resolves outside the repository; cannot evaluate".format(where))
-            result = os.path.dirname(dirs[0])
-            dirs = [result]
+            result = os.path.dirname(result)
             continue
+        try:
+            names = os.listdir(result)
+        except OSError as exc:
+            raise GateError("{}: cannot list {} ({}); cannot evaluate".format(where, result, exc))
         found = []
-        for directory in dirs:
-            try:
-                names = os.listdir(directory)
-            except OSError as exc:
-                raise GateError("{}: cannot list {} ({}); cannot evaluate".format(where, directory, exc))
-            for name in sorted(names):
-                if _same_name(name, part):
-                    path = os.path.join(directory, name)
-                    try:
-                        found.append((path, os.lstat(path).st_mode))
-                    except OSError as exc:
-                        raise GateError("cannot read {} ({}); cannot evaluate".format(where, exc))
+        for name in sorted(names):
+            if _same_name(name, part):
+                path = os.path.join(result, name)
+                try:
+                    found.append((path, os.lstat(path).st_mode))
+                except OSError as exc:
+                    raise GateError("cannot read {} ({}); cannot evaluate".format(where, exc))
         if not found:
             raise GateError("cannot read {}: {} is missing; cannot evaluate".format(
-                where, os.path.join(dirs[0], part)))
-        if len(found) > 1 and pending and all(stat.S_ISDIR(mode) for _, mode in found):
-            dirs = [path for path, _ in found]  # one merged directory: the next component decides
-            continue
+                where, os.path.join(result, part)))
         if len(found) > 1:
             _case_collision([os.path.relpath(path, real_root) for path, _ in found], where)
         found.sort(key=lambda entry: os.path.basename(entry[0]) != part)
         path, mode = found[0]
         if not stat.S_ISLNK(mode):
-            result, dirs = path, [path]
+            result = path
             continue
         hops += 1
         if hops > MAX_HOPS:
@@ -772,7 +771,6 @@ def _resolve_checked(root, rel, where):
             parts, result = parts[len(prefix):], real_root
         else:
             result = os.path.dirname(path)
-        dirs = [result]
         pending = [part for part in parts if part not in ("", ".")] + pending
     if result != os.path.realpath(os.path.join(root, rel)):
         raise GateError("{} resolves to {} when matched case-insensitively but to {} on this file system; "
@@ -981,38 +979,33 @@ def _case_walk(parts, base, where, token):
     (_same_name) in its directory's listing whether or not the exact name is there (under exact case, or
     the variant the loader on a case-insensitive file system reads), or None when a component matches
     nothing. Each directory on the way is listed strictly (_strict) and each entry passed is checked
-    (_entry_mode). Two or more entries matching one component, the exact-case one included, are GateError
-    (which one a case-insensitive file system holds is ambiguous), unless all are directories and a later
-    component follows: those are the one directory such a file system merges them into, and the next
-    component is looked up across all of them."""
-    dirs, entry, mode = [base], base, None
-    for k, part in enumerate(parts):
+    (_entry_mode). Two or more entries matching one component, the exact-case one included and two
+    directories included, are GateError: which one a case-insensitive file system holds, or what a
+    directory it merges from them holds, is ambiguous."""
+    entry, mode = base, None
+    for part in parts:
         matches = []
-        for directory in dirs:
-            for name in sorted(_strict(os.listdir, directory, where, token) or []):
-                if _same_name(name, part):
-                    path = os.path.join(directory, name)
-                    found = _entry_mode(path, where, token)
-                    if found is not None:
-                        matches.append((path, found))
+        for name in sorted(_strict(os.listdir, entry, where, token) or []):
+            if _same_name(name, part):
+                path = os.path.join(entry, name)
+                found = _entry_mode(path, where, token)
+                if found is not None:
+                    matches.append((path, found))
         if not matches:
             return None
-        if len(matches) > 1 and k + 1 < len(parts) and all(stat.S_ISDIR(found) for _, found in matches):
-            dirs = [path for path, _ in matches]  # one merged directory: the next component decides
-            continue
         if len(matches) > 1:
             raise GateError("{}: import @{} has the component {!r}, which matches {} entries "
                             "case-insensitively; which one a case-insensitive file system holds is "
                             "ambiguous; cannot evaluate".format(where, token, part, len(matches)))
         entry, mode = matches[0]
-        dirs = [entry]
     return _regular(entry, mode, where, token)
 
 
-def resolve_candidate(path, base, where, token):
+def resolve_candidate(path, base, where, token, starts_import=True):
     """The regular file `path` names relative to `base` (the real directory of the importing file, as the
     loader resolves it), or None when it is genuinely absent or holds only dot components, found by
-    _case_walk. GateError for a `..` component, a Windows 8.3 short name component (SHORT_NAME_RE), a
+    _case_walk. GateError for a `..` component, a Windows 8.3 short name component (SHORT_NAME_RE) when
+    `starts_import` (the `@` begins an import, _import_start; one inside a word the loader ignores), a
     symlink at any component, an entry that cannot be listed or read, a directory or other entry that is
     not a regular file, and two or more entries matching one component case-insensitively."""
     parts = [part for part in path.split("/") if part not in ("", ".")]
@@ -1022,7 +1015,7 @@ def resolve_candidate(path, base, where, token):
         raise GateError("{}: import @{} has a `..` component; whether the loader resolves it before or after "
                         "a symlink is ambiguous; outside the enumerated grammar, cannot evaluate".format(
                             where, token))
-    if any(SHORT_NAME_RE.fullmatch(part) for part in parts):
+    if starts_import and any(SHORT_NAME_RE.fullmatch(part) for part in parts):
         raise GateError("{}: import @{} has a Windows 8.3 short name component (such as PAYLOA~1.MD); on NTFS it "
                         "can open a long-named file the gate cannot identify; ambiguous, cannot "
                         "evaluate".format(where, token))
@@ -1058,7 +1051,7 @@ def follow_imports(root, origins, findings):
             for path in candidate_paths(run):
                 if os.path.basename(path.rstrip("/")).casefold() in BANNED_FOLDED:
                     banned = True
-                target = resolve_candidate(path, base, here, run)
+                target = resolve_candidate(path, base, here, run, _import_start(source, pos))
                 if target is not None and target not in targets:
                     targets.append(target)
             if any(os.path.basename(t).casefold() in BANNED_FOLDED for t in targets):
@@ -1183,12 +1176,30 @@ def measure(root):
                 findings=findings)
 
 
-def load_budget(root):
-    """The validated budget source. GateError on a missing, unreadable, or malformed file: exactly the
-    four BUDGET_KEYS, positive integer ratchet and ceiling (a bool is refused), an X.Y.Z version, and a
-    lowercase hex SHA-256."""
+def _budget_file(root):
+    """The resolved path of the budget source, checked before anything opens it: inside the repository and,
+    by os.lstat of that resolved path, a regular file. GateError otherwise, so a FIFO or device, inside the
+    repository or out, is never opened."""
+    real = os.path.realpath(root / BUDGET_REL)
+    if not _inside(real, os.path.realpath(root)):
+        raise GateError("{} resolves outside the repository; the gate reads its budget source only from "
+                        "the repository; cannot evaluate".format(BUDGET_REL))
     try:
-        data = tomllib.loads(read_text(root / BUDGET_REL, BUDGET_REL))
+        mode = os.lstat(real).st_mode
+    except OSError as exc:
+        raise GateError("cannot read {} ({})".format(BUDGET_REL, exc))
+    if not stat.S_ISREG(mode):
+        raise GateError("cannot read {}: it is not a regular file; the gate reads its budget source only "
+                        "from a regular file; cannot evaluate".format(BUDGET_REL))
+    return real
+
+
+def load_budget(root):
+    """The validated budget source, opened only after _budget_file. GateError on a missing, unreadable, or
+    malformed file: exactly the four BUDGET_KEYS, positive integer ratchet and ceiling (a bool is refused),
+    an X.Y.Z version, and a lowercase hex SHA-256."""
+    try:
+        data = tomllib.loads(read_text(_budget_file(root), BUDGET_REL))
     # ValueError and RecursionError too: tomllib raises a BARE ValueError on an integer literal past
     # CPython's int-string limit, and a RecursionError on a deeply nested array or inline table.
     except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
@@ -1810,6 +1821,15 @@ def self_test(report_path=None):
         tilde_prose = [_tree(tmp / "tilde-git", outside="Review with `git diff @~1` before pushing.\n"),
                        _tree(tmp / "tilde-npm", rules=_files("a.md", "Pin it: `npm i lodash@~4.17.21`.\n"))]
         check("exit/tilde-prose-not-short-name-0", [_quiet(run, r) for r in tilde_prose], [0, 0])
+        # An 8.3 short name whose base holds a `~` (`A~VERY~1.MD`) is one too.
+        tilde_base = _tree(tmp / "short-tilde-base", block="\n@docs/A~VERY~1.MD\n",
+                           extra=_files("docs/a~very-long-payload.md", big_b))
+        code, err = _stderr_of(run, tilde_base)
+        check("exit/short-name-tilde-in-base-2", (code, "8.3 short name" in err), (2, True))
+        # An `@` inside a word begins no import, so git's reflog ancestry in prose passes.
+        in_word = [_tree(tmp / "in-word-reflog", outside="Undo with `git reset --hard HEAD@{1}~1` first.\n"),
+                   _tree(tmp / "in-word-rule", rules=_files("a.md", "Then `git reset --hard HEAD@{1}~1`.\n"))]
+        check("exit/in-word-at-not-short-name-0", [_quiet(run, r) for r in in_word], [0, 0])
         # A case collision on a symlink met on the way to a target (Link.txt beside link.txt), which the
         # fully resolved path no longer shows, exits 2 at every entry point the loader resolves.
         hop_collisions = []
@@ -1837,17 +1857,48 @@ def self_test(report_path=None):
         check("exit/case-collision-on-symlink-hop-2",
               [(lambda out: (out[0], "differ only in case" in out[1]))(_stderr_of(run, r)) for r in hop_collisions],
               [(2, True)] * 5)
-        # A case collision matters only where it makes the loaded entry ambiguous: a directory beside its
-        # case variant when the next component matches one entry of the two (an import and a rule symlink),
-        # and two names that differ only in case among rule-directory entries that are neither directories
-        # nor `.md` files, pass.
-        merged_import = _tree(tmp / "merged-import", block="\n@docs/a.md\n",
-                              extra=_files("docs/a.md", "s", "Docs/other.txt", "o"))
-        merged_link = _tree(tmp / "merged-link", extra=_files("docs/a.md", "s", "Docs/other.txt", "o"))
-        os.symlink(os.path.join("..", "..", "docs", "a.md"), str(merged_link / RULES_REL / "a.md"))
+        # Two names that differ only in case among rule-directory entries that are neither directories nor
+        # `.md` files load nothing either way and pass.
         other_files = _tree(tmp / "other-files", rules=_files("a.md", "a", "notes.txt", "n", "Notes.txt", "N"))
-        unambiguous = [merged_import, merged_link, other_files]
-        check("exit/case-unambiguous-layouts-0", [_quiet(run, r) for r in unambiguous], [0, 0, 0])
+        check("exit/case-non-rule-entries-0", _quiet(run, other_files), 0)
+        # Two directories that differ only in case exit 2 on every path the gate resolves, whichever the next
+        # component names: an import (and an import's own import), a rule symlink, CLAUDE.md, `.claude/CLAUDE.md`,
+        # a rule directory and the rules base, through a `..` or a relative link after the pair too. The merged
+        # directory a case-insensitive file system makes is not modelled (the first two pass there: an
+        # over-refusal).
+        dir_pairs = []
+        dotdot = ("Docs/sub/k.txt", "k", "docs/sub/k.txt", "k")
+        for case, block, files, links in (
+                ("import", "\n@docs/a.md\n", _files("docs/a.md", "s", "Docs/other.txt", "o"), ()),
+                ("link", "", _files("docs/a.md", "s", "Docs/other.txt", "o"),
+                 ((RULES_REL + "/a.md", "../../docs/a.md"),)),
+                ("import-chain", "\n@docs/a.md\n", _files("docs/a.md", "@y.md\n", "Docs/y.md", big_b), ()),
+                ("import-chain-sub", "\n@docs/a.md\n",
+                 _files("docs/a.md", "see @sub/y.md\n", "Docs/sub/y.md", big_b), ()),
+                ("import-chain-dot-claude", "",
+                 _files(DOT_CLAUDE_REL, "@x/a.md\n", ".claude/x/a.md", "@y.md\n", ".claude/X/y.md", big_b), ()),
+                ("dotdot-rule-file", "", _files(*dotdot, "Docs/x.md", "s", "docs/x.md", big_b),
+                 ((RULES_REL + "/a.md", "../../Docs/sub/../x.md"),)),
+                ("dotdot-claude-md", "", _files(*dotdot, "Docs/x.md", gen_claude.BEGIN + gen_claude.END,
+                                                "docs/x.md", big_b + gen_claude.BEGIN + gen_claude.END),
+                 ((CLAUDE_REL, "Docs/sub/../x.md"),)),
+                ("dotdot-rules-base", "", _files(*dotdot, "Docs/r/b.md", "s", "docs/r/b.md", big_b),
+                 ((RULES_REL, "../Docs/sub/../r"),)),
+                ("relative-rule-file", "", _files("Docs/x.md", big_b, "docs/x.md", "s"),
+                 (("docs/lnk", "x.md"), (RULES_REL + "/a.md", "../../docs/lnk"))),
+                ("relative-dot-claude-md", "", _files("Docs/x.md", big_b, "docs/x.md", "s"),
+                 (("docs/lnk", "x.md"), (DOT_CLAUDE_REL, "../docs/lnk"))),
+                ("relative-rule-dir", "", _files("Docs/rr/b.md", big_b, "docs/rr/b.md", "s"),
+                 (("docs/lnk", "rr"), (RULES_REL + "/sub", "../../docs/lnk")))):
+            pair = _tree(tmp / ("dir-pair-" + case), block=block, extra=files)
+            for rel, target in links:
+                if (pair / rel).is_dir():
+                    os.rmdir(str(pair / rel))
+                elif (pair / rel).exists():
+                    os.unlink(str(pair / rel))
+                os.symlink(target, str(pair / rel))
+            dir_pairs.append(pair)
+        check("exit/case-variant-directory-pair-2", [_quiet(run, r) for r in dir_pairs], [2] * 11)
         # Names an upcase table or a normalizing file system merges, which str.casefold alone keeps apart (a
         # dotless i, U+037E against `;`), collide too.
         folds = [_tree(tmp / "fold-dotless-import", block="\n@docs/file.md\n",
@@ -1873,6 +1924,16 @@ def self_test(report_path=None):
             fixed_fifos.append(fixed)
         check("exit/fixed-file-checked-before-open-2", [_opened_fifo(run, r) for r in fixed_fifos],
               [(2, False)] * 4)
+        # The budget source too: linked to a FIFO outside the repository or inside it, it is never opened.
+        budget_fifos = []
+        for case, target in (("budget-out", "../../../fixed-outside/fifo"), ("budget-in", "../../fifo")):
+            linked = _tree(tmp / case)
+            if case == "budget-in":
+                os.mkfifo(str(linked / "fifo"))
+            os.unlink(str(linked / BUDGET_REL))
+            os.symlink(target, str(linked / BUDGET_REL))
+            budget_fifos.append(linked)
+        check("exit/budget-checked-before-open-2", [_opened_fifo(run, r) for r in budget_fifos], [(2, False)] * 2)
 
         # The enumerated grammar: a character outside it anywhere in a measured file, a non-ASCII import
         # token, a `..` component or a symlink on an import path, and a directory or unreadable target exit 2;
@@ -2105,27 +2166,42 @@ def self_test(report_path=None):
         check("revert/fifo-read-never-blocks-red",
               (_blocks(read_text, fifo / RULES_REL / "a.md"), _blocks(blocking.read_text, fifo / RULES_REL / "a.md")),
               (False, True))
-        no_short = _mutant(tmp, "    if any(SHORT_NAME_RE.fullmatch(part) for part in parts):\n", "    if False:\n")
+        no_short = _mutant(tmp, "    if starts_import and any(SHORT_NAME_RE.fullmatch(part) for part in parts):\n",
+                           "    if False:\n")
         check("revert/windows-short-name-red", (_quiet(run, shortname), _quiet(no_short.run, shortname)), (2, 0))
-        any_tilde = _mutant(tmp, "SHORT_NAME_RE.fullmatch(part)", "SHORT_NAME_RE.search(part)",
-                            'SHORT_NAME_RE = re.compile(r"[^.~]{1,6}~[1-9][0-9]{0,5}(?:\\.[^.]{1,3})?")',
+        any_tilde = _mutant(tmp, "if starts_import and any(SHORT_NAME_RE.fullmatch(part)",
+                            "if any(SHORT_NAME_RE.search(part)",
+                            'SHORT_NAME_RE = re.compile(r"[^.]{1,6}~[1-9][0-9]{0,5}(?:\\.[^.]{1,3})?")',
                             'SHORT_NAME_RE = re.compile(r"~\\d", re.ASCII)')
         check("revert/tilde-prose-not-short-name-red",
               ([_quiet(run, r) for r in tilde_prose], [_quiet(any_tilde.run, r) for r in tilde_prose]),
               ([0, 0], [2, 2]))
+        no_tilde_base = _mutant(tmp, 'SHORT_NAME_RE = re.compile(r"[^.]{1,6}~', 'SHORT_NAME_RE = re.compile(r"[^.~]{1,6}~')
+        check("revert/short-name-tilde-in-base-red", (_quiet(run, tilde_base), _quiet(no_tilde_base.run, tilde_base)),
+              (2, 0))
+        every_at = _mutant(tmp, "    if starts_import and any(SHORT_NAME_RE", "    if any(SHORT_NAME_RE")
+        check("revert/in-word-at-not-short-name-red",
+              ([_quiet(run, r) for r in in_word], [_quiet(every_at.run, r) for r in in_word]), ([0, 0], [2, 2]))
         final_only = _mutant(tmp, "        if len(found) > 1:\n",
                              "        if len(found) > 1 and not all(stat.S_ISLNK(mode) for _, mode in found):\n")
         check("revert/case-collision-on-symlink-hop-red",
               ([_quiet(run, r) for r in hop_collisions], [_quiet(final_only.run, r) for r in hop_collisions]),
               ([2] * 5, [0] * 5))
-        unmerged = [_mutant(tmp, "        if len(matches) > 1 and k + 1 < len(parts) and all(stat.S_ISDIR(found) "
-                                 "for _, found in matches):\n", "        if False:\n"),
-                    _mutant(tmp, "        if len(found) > 1 and pending and all(stat.S_ISDIR(mode) for _, mode in "
-                                 "found):\n", "        if False:\n"),
-                    _off(tmp, "_walked")]
-        check("revert/case-unambiguous-layouts-red",
-              ([_quiet(run, r) for r in unambiguous],
-               [_quiet(mutant.run, r) for mutant, r in zip(unmerged, unambiguous)]), ([0, 0, 0], [2, 2, 2]))
+        check("revert/case-non-rule-entries-red", (_quiet(run, other_files), _quiet(_off(tmp, "_walked").run, other_files)),
+              (0, 2))
+        # A directory pair read as one spelling (the exact one, as a case-sensitive file system does) undercounts.
+        one_spelling = _mutant(
+            tmp, "        if len(matches) > 1:\n",
+            "        if len(matches) > 1 and all(stat.S_ISDIR(found) for _, found in matches):\n"
+            "            matches = [m for m in matches if os.path.basename(m[0]) == part] or matches[:1]\n"
+            "        if len(matches) > 1:\n",
+            "        if len(found) > 1:\n",
+            "        if len(found) > 1 and all(stat.S_ISDIR(mode) for _, mode in found):\n"
+            "            found = [f for f in found if os.path.basename(f[0]) == part] or found[:1]\n"
+            "        if len(found) > 1:\n")
+        check("revert/case-variant-directory-pair-red",
+              ([_quiet(run, r) for r in dir_pairs], [_quiet(one_spelling.run, r) for r in dir_pairs]),
+              ([2] * 11, [0] * 11))
         casefold_only = _mutant(tmp, 'return unicodedata.normalize("NFD", name).casefold(), name.upper()',
                                 "return name.casefold(), name.casefold()")
         check("revert/case-collision-upper-and-nfd-folds-red",
@@ -2137,6 +2213,10 @@ def self_test(report_path=None):
         check("revert/fixed-file-checked-before-open-red",
               ([_opened_fifo(run, r) for r in fixed_fifos], [_opened_fifo(open_first.run, r) for r in fixed_fifos]),
               ([(2, False)] * 4, [(2, True)] * 4))
+        budget_first = _mutant(tmp, "read_text(_budget_file(root), BUDGET_REL)", "read_text(root / BUDGET_REL, BUDGET_REL)")
+        check("revert/budget-checked-before-open-red",
+              ([_opened_fifo(run, r) for r in budget_fifos], [_opened_fifo(budget_first.run, r) for r in budget_fifos]),
+              ([(2, False)] * 2, [(2, True)] * 2))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2171,8 +2251,9 @@ def self_test(report_path=None):
           "quoted commas in a flow list read, .claude/CLAUDE.md and its imports counted, a modelled header "
           "counted per loaded file naming its resolved path, case variants of the fixed names exit 2, case "
           "ambiguity at any import component, at every symlink hop and in case-colliding rule entries exit 2 "
-          "while unambiguous merged directories and non-rule entries pass, upper and NFD folds collide, "
-          "`@~1` prose passes, CLAUDE.md and .claude/CLAUDE.md checked before they are opened, a non-regular rule "
+          "and two directories differing only in case exit 2 on every resolved path while non-rule entries pass, "
+          "upper and NFD folds collide, `@~1` and in-word `@` prose pass and a `~` in a short name's base exits 2, "
+          "CLAUDE.md, .claude/CLAUDE.md and the budget source checked before they are opened, a non-regular rule "
           "file and a Windows 8.3 short name import exit 2 and no read blocking, an "
           "imported file's scope held to the grammar, and the budget source "
           "describing PACK); execution set "
