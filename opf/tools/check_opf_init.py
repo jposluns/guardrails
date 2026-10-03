@@ -139,8 +139,9 @@ def _suite_isolated(invoke):
                 }
                 if not good(_opf_store.validate_manifest(docs[_opf_store.MANIFEST_NAME])):
                     return False
-                namespaces = (frozenset(_opf_store.BASELINE_TYPES.values())
-                              | frozenset(_opf_store.IMPORTER_TYPES.values()))
+                # Spec 8.1: a fresh store carries no legacy_fragment (LF) counter, so the
+                # baseline roster is exact and any importer namespace is a finding.
+                namespaces = frozenset(_opf_store.BASELINE_TYPES.values())
                 high, findings = _opf_schema.validate_counters(
                     docs[_opf_check.COUNTERS_NAME], known_namespaces=namespaces)
                 if findings or high != {namespace: 0 for namespace in namespaces}:
