@@ -199,9 +199,11 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # deny constructor's call). Only the single-return leaf constructors (_allow_note, _stop_warn,
 # _dispatcher_fail_open_warn and _deny) spell the {"systemMessage": ...} key; every other declared
 # constructor reaches a result only by returning another constructor's call. The hooks self-test
-# (tools/selftest_aiqt_hooks.py, _note_constructor_shape_failures) checks these shapes: a leaf holds its
-# note or deny dict as a literal inside its return through tuple elements only, in a name bound once to
-# that literal and loaded only there, or as the one argument of `print(json.dumps(...))`, with no global
+# (tools/selftest_aiqt_hooks.py, _note_constructor_shape_failures) checks these shapes: a leaf builds its
+# note or deny dict only as a dict literal (no dict(...) call, no systemMessage or hookSpecificOutput
+# keyword, and neither key string other than as a key of a dict literal) and holds that literal inside
+# its return through tuple elements only, in a name bound once to that literal (a plain or annotated
+# assignment) and loaded only there, or as the one argument of `print(json.dumps(...))`, with no global
 # or nonlocal statement, and its hookSpecificOutput value is a dict literal; every use of a declared
 # name is the callee of a call that is the direct value of a `return` statement (no assignment,
 # unpacking, subscript, alias, attribute, conditional expression, lambda, comprehension or argument); no
