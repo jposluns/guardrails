@@ -201,37 +201,58 @@ def _stage1_materialize(repo, commit_oid, dest):
         os.chmod(target, 0o755 if mode == "100755" else 0o644)
 
 
-def _stage1_dotgit_in_ancestry(repo):
-    """True when a `.git` entry (directory, file or symlink; lstat, so a dangling symlink or a
-    gitfile naming a missing gitdir still counts) exists at the gate root or ANY ancestor up to the
-    filesystem root (QA round-7 codex blocker). Git discovery searches ancestor directories, and a
-    DAMAGED ancestor repository (a corrupt .git/HEAD, a .git file whose gitdir is missing) makes
-    discovery fail with the very "not a git repository" wording true absence produces, so absence
-    may be concluded only when no `.git` entry exists anywhere discovery would have searched. Any
-    lstat failure other than a clean does-not-exist counts as PRESENT: fail-closed."""
-    d = os.path.abspath(repo)
-    while True:
-        try:
-            os.lstat(os.path.join(d, ".git"))
-            return True
-        except FileNotFoundError:
-            pass
-        except OSError:
-            return True
-        parent = os.path.dirname(d)
-        if parent == d:
-            return False
-        d = parent
+# The entries whose presence marks a directory as a git directory in its own right (a bare
+# repository, a linked-worktree admin directory, a separate gitdir): git's discovery accepts such a
+# directory directly, with no `.git` entry beneath it (QA round-8 codex blocker 2 / claude F2).
+_GIT_DIR_MARKERS = ("HEAD", "objects", "refs", "commondir", "gitdir")
 
 
-def _stage1_no_committed_state(repo):
+def _stage1_repository_in_ancestry(*dirs):
+    """False ONLY when an inspection that is a SUPERSET of git's own repository discovery finds
+    nothing (D-397-DISCOVERY-SUPERSET, QA round 8); the ONE helper both absence predicates use. For
+    every directory given, BOTH its lexical ancestry (os.path.abspath) and its physical ancestry
+    (os.path.realpath) are walked up to `/`: `git -C` changes into the directory, so discovery
+    walks the PHYSICAL ancestors, and a symlinked launch path past a damaged ancestor otherwise
+    read as absence (QA round-8 codex blocker 1 / claude F1). A directory counts as PRESENT when a
+    `.git` entry exists there in any form (directory, file or symlink; lstat, so a dangling symlink,
+    a symlink loop or a gitfile naming a missing gitdir counts; QA round-7 codex blocker), OR the
+    directory itself carries any git-directory marker (HEAD, objects, refs, commondir, gitdir: a
+    damaged BARE repository is still a repository; QA round-8 codex blocker 2 / claude F2), OR an
+    lstat there fails with anything other than not-found (fail-closed). The walk does not stop at a
+    filesystem boundary or a ceiling directory, because git may be told to cross them.
+    DISCLOSED RESIDUAL (the accepted fail-closed cost): this over-refuses by design. A genuine
+    non-git tree whose lexical or physical ancestry carries one of those names (an unrelated `refs`
+    directory or `HEAD` file, say) is cannot-evaluate, exit 2, never the single-stage path."""
+    seen = set()
+    for start in dirs:
+        for d in (os.path.abspath(start), os.path.realpath(start)):
+            while d not in seen:
+                seen.add(d)
+                for name in (".git",) + _GIT_DIR_MARKERS:
+                    try:
+                        os.lstat(os.path.join(d, name))
+                        return True
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        return True
+                parent = os.path.dirname(d)
+                if parent == d:
+                    break
+                d = parent
+    return False
+
+
+def _stage1_no_committed_state(repo, launch=()):
     """True ONLY when a positive probe establishes that NO COMMITTED STATE exists, the sole
     condition under which the single-stage checkout gate may run (QA round-6 codex blocker 1 /
     claude 3). Either (a) NOT A GIT REPOSITORY: git's own discovery refusal under a pinned C
-    locale names no repository AND no `.git` entry exists at the gate root OR ANY ANCESTOR up to
-    the filesystem root (QA round-7 codex blocker: git discovery searches ancestors, so a present
-    `.git` entry git cannot use ANYWHERE on that walk, e.g. a corrupt ancestor .git/HEAD or an
-    ancestor .git file naming a missing gitdir, is a DAMAGED repository and never a fallback); or
+    locale names no repository AND _stage1_repository_in_ancestry, a SUPERSET of git discovery
+    over the lexical and physical ancestry of the gate root and of each `launch` directory, finds
+    nothing (QA rounds 7 and 8: a `.git` entry or git-directory marker git cannot use ANYWHERE on
+    those walks, e.g. a corrupt ancestor .git/HEAD, an ancestor .git file naming a missing gitdir,
+    a bare ancestor with a corrupt HEAD, or any of these behind a symlinked launch path, is a
+    DAMAGED repository and never a fallback); or
     (b) an UNBORN HEAD: the repository resolves, HEAD is a symbolic ref to a
     refs/ branch, and `git show-ref --verify` answers exactly "missing" (rc 1) for that branch.
     Every other git failure (dubious ownership, bad config, a corrupt object store, a detached or
@@ -241,7 +262,7 @@ def _stage1_no_committed_state(repo):
     if probe.returncode != 0:
         err = probe.stderr.decode("utf-8", "replace")
         return ("not a git repository" in err
-                and not _stage1_dotgit_in_ancestry(repo))
+                and not _stage1_repository_in_ancestry(repo, *launch))
     sym = _stage1_git(repo, ["symbolic-ref", "--quiet", "HEAD"])
     if sym.returncode != 0:
         return False
@@ -268,7 +289,7 @@ def _stage1_main():
     try:
         proc = _stage1_git(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
         if proc.returncode != 0:
-            if _stage1_no_committed_state(repo):
+            if _stage1_no_committed_state(repo, (os.path.dirname(os.path.abspath(__file__)),)):
                 return None
             print("error: stage-1 re-execution: git cannot resolve HEAD ({}) and no probe "
                   "positively established an absent committed state; a refused or damaged "
@@ -1243,7 +1264,9 @@ def _drift_entry_state(root, path_b, committed_symlink, want):
     chunks (never a whole-file read); and a regular file over _DRIFT_ADVISORY_SIZE_CAP bytes
     (100 MiB) is never read at all. A committed-symlink entry is compared via readlink on the
     directory descriptor, with no open. Returns "match", "drift", or "unchecked"; OSError,
-    ValueError, and MemoryError all classify as drift (the advisory never raises)."""
+    ValueError, and MemoryError all classify as drift (the advisory never raises). In the
+    self-test only the `..` input and ./big.txt DISCRIMINATE the component refusal (QA round-8
+    claude F4); the empty-component inputs are regression pins, already drift without it."""
     import hashlib
     import stat
     algo = hashlib.sha1 if len(want) == 40 else hashlib.sha256
@@ -1857,10 +1880,10 @@ def _genesis_structural(root):
 def _no_committed_state(root):
     """The stage-2 twin of _stage1_no_committed_state (QA round-6 codex blocker 1 / claude 3): True
     ONLY when a positive probe establishes that no committed state exists. Either (a) NOT A GIT
-    REPOSITORY: git's own discovery refusal under a pinned C locale names no repository AND no
-    `.git` entry exists at the root OR ANY ANCESTOR up to the filesystem root (QA round-7 codex
-    blocker, via _stage1_dotgit_in_ancestry: discovery searches ancestors, so a damaged ancestor
-    repository git cannot use is never a fallback); or (b) an UNBORN HEAD: the
+    REPOSITORY: git's own discovery refusal under a pinned C locale names no repository AND
+    _stage1_repository_in_ancestry, the same SUPERSET of git discovery over the root's lexical and
+    physical ancestry, finds nothing (QA rounds 7 and 8: a damaged ancestor repository, bare or
+    not, git cannot use is never a fallback); or (b) an UNBORN HEAD: the
     repository resolves, HEAD is a symbolic ref to a refs/ branch, and `git show-ref --verify`
     answers exactly "missing" (rc 1) for it. Every other git failure (dubious ownership, bad
     config, a corrupt object store, a detached or corrupt HEAD) returns False: cannot-evaluate."""
@@ -1868,7 +1891,7 @@ def _no_committed_state(root):
     if probe.returncode != 0:
         err = probe.stderr.decode("utf-8", "replace")
         return ("not a git repository" in err
-                and not _stage1_dotgit_in_ancestry(str(root)))
+                and not _stage1_repository_in_ancestry(str(root)))
     sym = _git(root, ["symbolic-ref", "--quiet", "HEAD"], binary=True)
     if sym.returncode != 0:
         return False
@@ -3795,7 +3818,7 @@ def _post_release_e2e(tmp, failures, only=None):
     # the discriminator target is proven valid; then each attack must leave that verdict unchanged.
     # With the round-5 fix reverted each attack flips to exit 0 (verified out-of-tree; see report).
     labelR5 = "(R5 launch) the stage-1 committed re-execution and committed routing"
-    if _sel("(R5 ") or _sel("(R6 ") or _sel("(R7 "):
+    if _sel("(R5 ") or _sel("(R6 ") or _sel("(R7 ") or _sel("(R8 "):
         r5 = _extract_to("post-release-r5")
         if r5 is None or not _pin_fixture_version(r5, failures):
             return False
@@ -4083,7 +4106,13 @@ def _post_release_e2e(tmp, failures, only=None):
                    "fails closed, never the fallback")
         label7n = ("(R7 no repository) a root with no .git in any ancestor still reaches the "
                    "checkout gate")
-        if _sel(label7a) or _sel(label7g) or _sel(label7n):
+        label8s = ("(R8 symlinked launch) a damaged ancestor reached through a symlinked absolute "
+                   "launch path fails closed, never the fallback")
+        label8b = "(R8 damaged bare ancestor) a bare ancestor with a corrupt HEAD fails closed"
+        label8v = ("(R8 ancestor variants) dangling, looping and unreadable ancestor .git entries "
+                   "fail closed; an unborn ancestor HEAD still reaches the checkout gate")
+        if (_sel(label7a) or _sel(label7g) or _sel(label7n) or _sel(label8s) or _sel(label8b)
+                or _sel(label8v)):
             gate_bytes7 = (r5 / "tools" / "check_release_delta.py").read_bytes()
 
             def _mini_gate7(base_):
@@ -4093,12 +4122,12 @@ def _post_release_e2e(tmp, failures, only=None):
                 (proj_ / "tools" / "_gen_common.py").write_text(_R6_TRIP, encoding="utf-8")
                 return proj_
 
-            def _gate_cli7(label_, proj_, want_rc, want_msg):
+            def _gate_cli7(label_, proj_, want_rc, want_msg, cwd_=None):
                 try:
                     proc_ = subprocess.run(
                         [sys.executable, "-I", "-B",
                          str(proj_ / "tools" / "check_release_delta.py")],
-                        cwd=str(proj_), capture_output=True, env=env, timeout=600)
+                        cwd=str(cwd_ or proj_), capture_output=True, env=env, timeout=600)
                 except (OSError, subprocess.TimeoutExpired) as exc:
                     failures.append("fixture setup ({}): could not run the gate CLI ({})".format(
                         label_, exc))
@@ -4133,12 +4162,13 @@ def _post_release_e2e(tmp, failures, only=None):
             import tempfile as _tempfile7
             base7 = None
             for cand7 in (tmp, Path(_tempfile7.gettempdir()), Path("/var/tmp")):
-                if not _stage1_dotgit_in_ancestry(str(cand7)):
+                if not _stage1_repository_in_ancestry(str(cand7)):
                     base7 = cand7
                     break
             if base7 is None:
-                failures.append(label7n + ": every candidate temp path has a .git ancestor; the "
-                                "true no-repository control needs a .git-free path (fixture-env)")
+                failures.append(label7n + ": every candidate temp path has a .git entry or a "
+                                "git-directory marker on its lexical or physical ancestry; the "
+                                "true no-repository control needs a marker-free path (fixture-env)")
             else:
                 nr7 = Path(_tempfile7.mkdtemp(prefix="aiqt-r7-norepo-", dir=str(base7)))
                 try:
@@ -4146,6 +4176,105 @@ def _post_release_e2e(tmp, failures, only=None):
                                "(R6 checkout import, must never run)")
                 finally:
                     _shutil7.rmtree(nr7, ignore_errors=True)
+
+        # ---- QA round 8 (D-397-DISCOVERY-SUPERSET): absence holds only when an inspection that
+        # is a SUPERSET of git discovery finds nothing. Each case plants the checkout tripwire;
+        # the CLI must exit 2 from stage 1 and BOTH absence predicates must refuse. (R8 symlinked
+        # launch) carries codex blocker 1 and claude F1 reproductions A and B: `git -C` walks the
+        # PHYSICAL ancestry, so with the realpath walk removed each goes red with the tripwire
+        # firing. (R8 damaged bare ancestor) carries codex blocker 2 and claude F2 reproduction D:
+        # a bare repository keeps its markers in its own directory with no .git entry, so with the
+        # marker check removed it goes red. (R8 ancestor variants) keeps the dangling-symlink,
+        # symlink-loop and unreadable .git ancestors fail-closed and the unborn ancestor HEAD on
+        # the positively identified absent path (verified out-of-tree; see the round-8 report).
+        def _refuse8(label_, path_):
+            if _stage1_no_committed_state(str(path_)) or _no_committed_state(Path(str(path_))):
+                failures.append(label_ + ": both absence predicates must refuse (a damaged "
+                                "repository on the lexical or physical ancestry)")
+
+        if _sel(label8s):
+            s8 = tmp / "r8-symlinked-launch"
+            (s8 / "elsewhere").mkdir(parents=True)
+            ca8 = s8 / "codex-anc"
+            projc8 = _mini_gate7(ca8)
+            _g(ca8, "init", "-q")
+            (ca8 / ".git" / "HEAD").write_bytes(b"garbage\n")
+            os.symlink(str(projc8), str(s8 / "alias"))
+            aa8 = s8 / "claude-a"
+            proja8 = _mini_gate7(aa8 / "sub")
+            _g(aa8, "init", "-q")
+            (aa8 / ".git" / "HEAD").write_bytes(b"garbage, neither a ref nor an object id\n")
+            os.symlink(str(aa8 / "sub"), str(s8 / "elsewhere" / "link"))
+            bb8 = s8 / "claude-b"
+            _mini_gate7(bb8 / "sub")
+            (bb8 / ".git").write_text("gitdir: " + str(bb8 / "missing-gitdir") + "\n",
+                                      encoding="utf-8")
+            os.symlink(str(bb8 / "sub"), str(s8 / "elsewhere" / "link2"))
+            for tag8, via8, cwd8 in (
+                    ("codex alias", s8 / "alias", None),
+                    ("claude A", s8 / "elsewhere" / "link" / "project", None),
+                    ("claude A, cwd=project", s8 / "elsewhere" / "link" / "project", proja8),
+                    ("claude B gitfile", s8 / "elsewhere" / "link2" / "project", None)):
+                lab8 = "{} [{}]".format(label8s, tag8)
+                _gate_cli7(lab8, via8, 2, "no probe positively established", cwd8)
+                _refuse8(lab8, via8)
+
+        if _sel(label8b):
+            b8 = tmp / "r8-bare-ancestor"
+            src8 = b8 / "src"
+            src8.mkdir(parents=True)
+            (src8 / "f.txt").write_text("one commit\n", encoding="utf-8")
+            _git_init_commit(src8, "r8 bare source")
+            bare8 = b8 / "bare2.git"
+            if _g(b8, "clone", "-q", "--bare", str(src8), str(bare8)).returncode != 0:
+                failures.append("fixture setup ({}): could not clone the bare ancestor".format(
+                    label8b))
+            else:
+                projd8 = _mini_gate7(bare8)
+                _gate_cli7(label8b + " [claude D control: valid bare ancestor with a commit]",
+                           projd8, 2, "carries no tools/check_release_delta.py")
+                (bare8 / "HEAD").write_bytes(b"garbage\n")
+                _gate_cli7(label8b + " [claude D: same bare ancestor, HEAD corrupted]", projd8, 2,
+                           "no probe positively established")
+                _refuse8(label8b + " [claude D]", projd8)
+            ebare8 = b8 / "empty-bare"
+            _g(b8, "init", "-q", "--bare", str(ebare8))
+            proje8 = _mini_gate7(ebare8)
+            (ebare8 / "HEAD").write_bytes(b"garbage\n")
+            _gate_cli7(label8b + " [codex: initialized bare, HEAD garbage]", proje8, 2,
+                       "no probe positively established")
+            _refuse8(label8b + " [codex]", proje8)
+
+        if _sel(label8v):
+            v8 = tmp / "r8-variants"
+            dang8 = v8 / "dangling"
+            projv8 = _mini_gate7(dang8)
+            os.symlink(str(dang8 / "nowhere"), str(dang8 / ".git"))
+            loop8 = v8 / "loop"
+            projl8 = _mini_gate7(loop8)
+            os.symlink(str(loop8 / ".git"), str(loop8 / ".git"))
+            unr8 = v8 / "unreadable"
+            proju8 = _mini_gate7(unr8)
+            _g(unr8, "init", "-q")
+            for tag8, proj8 in (("dangling .git symlink", projv8), ("symlink loop", projl8)):
+                _gate_cli7("{} [{}]".format(label8v, tag8), proj8, 2,
+                           "no probe positively established")
+                _refuse8("{} [{}]".format(label8v, tag8), proj8)
+            os.chmod(unr8 / ".git", 0)
+            try:
+                _gate_cli7(label8v + " [unreadable .git]", proju8, 2,
+                           "no probe positively established")
+                _refuse8(label8v + " [unreadable .git]", proju8)
+            finally:
+                os.chmod(unr8 / ".git", 0o755)
+            unb8 = v8 / "unborn"
+            projn8 = _mini_gate7(unb8)
+            _g(unb8, "init", "-q")
+            if not (_stage1_no_committed_state(str(projn8)) and _no_committed_state(projn8)):
+                failures.append(label8v + " [unborn HEAD]: both predicates must still identify an "
+                                "unborn ancestor HEAD as the absent committed state")
+            _gate_cli7(label8v + " [unborn HEAD]", projn8, 0,
+                       "(R6 checkout import, must never run)")
 
         # ---- QA round-7 claude F3: a repo-config core.fsmonitor hook is attacker-chosen code and
         # must never run on the checkout-judged branches either. gen_manifest.git_tracked (the one
@@ -4325,6 +4454,54 @@ def self_test_main():
     scrub_git_environment()
     with fixture_git_lifecycle():
         return _self_test_main_isolated()
+
+
+# The drift-advisory fixture's expected per-path states, keyed by EXACT tracked path.
+_DRIFT_CHILD_EXPECT = (
+    ("lnkdir/leaf.txt", "drift", "(R6 drift symlink-parent): a symlinked parent directory must be "
+     "drift WITHOUT following it (the outside copy carries the committed bytes, so a "
+     "follow-and-read reports clean)"),
+    ("lnkfile.txt", "drift", "(R7 drift symlink-final): a tracked FILE swapped for a symlink to an "
+     "outside copy of the committed bytes must be drift (the final open's O_NOFOLLOW pin)"),
+    ("fifo.txt", "drift", "(R6 drift FIFO): a FIFO swapped in for a tracked file must be drift "
+     "(descriptor-bound regular-file check)"),
+    ("emptyfifo.txt", "drift", "(R7 drift empty-blob FIFO): a FIFO swapped in for an EMPTY "
+     "committed blob must be drift (S_ISREG on the opened descriptor: size 0 hashes to the empty "
+     "blob)"),
+    ("big.txt", "unchecked", "(R6 drift cap): a tracked file over the advisory size cap must be "
+     "reported UNCHECKED, never read"),
+)
+
+
+def _drift_child_failures(returncode, out, err):
+    """The drift-advisory child's result consumer (QA round-8 codex minor / claude F3). It judges
+    the child's STRUCTURED per-path states (the DRIFT-STATES line: every _drift_entry_state result
+    the advisory computed, keyed by exact path) and never a substring of the advisory text: that
+    text prints at most 5 entries (`e.g.`), and a substring test lets 'emptyfifo.txt' satisfy a
+    'fifo.txt' expectation. Returns the list of failures (empty when every expectation holds)."""
+    import json
+    failures = []
+    if returncode != 0:
+        failures.append("(R6 drift) the advisory child failed rc={}: {}".format(
+            returncode, err.strip()[-300:]))
+    states = None
+    for line in out.splitlines():
+        if line.startswith("DRIFT-STATES "):
+            try:
+                states = json.loads(line[len("DRIFT-STATES "):])
+            except ValueError:
+                states = None
+    if not isinstance(states, dict):
+        failures.append("(R6 drift) the advisory child reported no structured per-path states "
+                        "(DRIFT-STATES); empty or truncated output never reads as clean")
+        return failures
+    for path, want, msg in _DRIFT_CHILD_EXPECT:
+        if states.get(path) != want:
+            failures.append("{} (state {!r}, expected {!r})".format(msg, states.get(path), want))
+    if "UNCHECKED" not in out:
+        failures.append("(R6 drift cap): the advisory text must report the over-cap file "
+                        "UNCHECKED")
+    return failures
 
 
 def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent classification cases
@@ -5306,16 +5483,25 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                 with open(dr6 / "big.txt", "wb") as bf6:
                     bf6.truncate(_DRIFT_ADVISORY_SIZE_CAP + 1)
                 child7 = (
-                    "import importlib.util, io, sys\n"
+                    "import importlib.util, io, json, sys\n"
                     "from contextlib import redirect_stderr\n"
                     "sys.path.insert(0, {tools!r})\n"
                     "spec = importlib.util.spec_from_file_location('crd_r7_drift', {gate!r})\n"
                     "mod = importlib.util.module_from_spec(spec)\n"
                     "spec.loader.exec_module(mod)\n"
+                    "states = {{}}\n"
+                    "real = mod._drift_entry_state\n"
+                    "def rec(root, path_b, committed_symlink, want):\n"
+                    "    st = real(root, path_b, committed_symlink, want)\n"
+                    "    states[path_b.decode('utf-8', 'replace')] = st\n"
+                    "    return st\n"
+                    "mod._drift_entry_state = rec\n"
                     "buf = io.StringIO()\n"
                     "with redirect_stderr(buf):\n"
                     "    mod._warn_checkout_drift(mod.Path({root!r}))\n"
-                    "sys.stdout.write(buf.getvalue())\n").format(
+                    "sys.stdout.write(buf.getvalue())\n"
+                    "sys.stdout.write('DRIFT-STATES ' + json.dumps(states, sort_keys=True) + "
+                    "'\\n')\n").format(
                         tools=str(Path(__file__).resolve().parent),
                         gate=str(Path(__file__).resolve()), root=str(dr6))
                 try:
@@ -5327,35 +5513,16 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                                     "300s on a FIFO open; the O_NONBLOCK pin on the final open is "
                                     "missing (a NAMED failure, never a hung suite)")
                 if drift7 is not None:
-                    out6d = drift7.stdout.decode("utf-8", "replace")
-                    if drift7.returncode != 0:
-                        failures.append("(R6 drift) the advisory child failed rc={}: {}".format(
-                            drift7.returncode,
-                            drift7.stderr.decode("utf-8", "replace").strip()[-300:]))
-                    if "lnkdir/leaf.txt" not in out6d:
-                        failures.append("(R6 drift symlink-parent): a symlinked parent directory "
-                                        "must be drift WITHOUT following it (the outside copy "
-                                        "carries the committed bytes, so a follow-and-read "
-                                        "reports clean)")
-                    if "lnkfile.txt" not in out6d:
-                        failures.append("(R7 drift symlink-final): a tracked FILE swapped for a "
-                                        "symlink to an outside copy of the committed bytes must "
-                                        "be drift (the final open's O_NOFOLLOW pin)")
-                    if "fifo.txt" not in out6d:
-                        failures.append("(R6 drift FIFO): a FIFO swapped in for a tracked file "
-                                        "must be drift (descriptor-bound regular-file check)")
-                    if "emptyfifo.txt" not in out6d:
-                        failures.append("(R7 drift empty-blob FIFO): a FIFO swapped in for an "
-                                        "EMPTY committed blob must be drift (S_ISREG on the "
-                                        "opened descriptor: size 0 hashes to the empty blob)")
-                    if "UNCHECKED" not in out6d or "big.txt" not in out6d:
-                        failures.append("(R6 drift cap): a tracked file over the advisory size "
-                                        "cap must be reported UNCHECKED, never read")
+                    failures.extend(_drift_child_failures(
+                        drift7.returncode, drift7.stdout.decode("utf-8", "replace"),
+                        drift7.stderr.decode("utf-8", "replace")))
                 # QA round-7 claude F1: a `..` component must never walk out of the root. The
                 # outside file carries exactly the bytes its blob id names, so the pre-fix walk
                 # READ it and answered match; the component refusal answers drift. `.` is pinned
-                # via the over-cap file (pre-fix answer unchecked, never drift); empty components
-                # are refused the same way.
+                # via the over-cap file (pre-fix answer unchecked, never drift). QA round-8 claude
+                # F4: of the component inputs only `..` and ./big.txt DISCRIMINATE the refusal.
+                # big.txt/ and a//b.txt are regression pins only, NOT evidence for it: without the
+                # refusal they already answer drift (ENOTDIR, ENOENT; an empty name never opens).
                 import hashlib as _hl7
                 outside_b7 = b"outside bytes, committed copy\n"
                 (outside6 / "outside.txt").write_bytes(outside_b7)
@@ -5365,10 +5532,14 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                                       want7) != "drift":
                     failures.append("(R7 drift dotdot): a `..` path component must be refused as "
                                     "drift; the walk read a file OUTSIDE the root")
-                for bad7 in (b"./big.txt", b"big.txt/", b"a//b.txt"):
+                if _drift_entry_state(dr6, b"./big.txt", False, want7) != "drift":
+                    failures.append("(R7 drift component) b'./big.txt': a `.` path component "
+                                    "must be refused as drift (without the refusal the over-cap "
+                                    "file answers unchecked)")
+                for bad7 in (b"big.txt/", b"a//b.txt"):
                     if _drift_entry_state(dr6, bad7, False, want7) != "drift":
-                        failures.append("(R7 drift component) {!r}: an empty or `.` path "
-                                        "component must be refused as drift".format(bad7))
+                        failures.append("(R7 drift empty component, regression pin) {!r}: an "
+                                        "empty path component must be drift".format(bad7))
 
                 # ---- QA round-7 claude F3, asserted directly on the two tracked-set enumerators
                 # the checkout-judged branches consume: gen_manifest.git_tracked and
@@ -5522,11 +5693,15 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                       "a simulated dubious-ownership refusal fails closed in stage 1 and in "
                       "routing; and round 7: a corrupt ancestor .git/HEAD and a dangling ancestor "
                       ".git file each exit 2 with the tripwire inert while the no-.git-anywhere "
-                      "control still reaches the checkout gate), the no-follow bounded drift "
+                      "control still reaches the checkout gate; and round 8: a damaged ancestor "
+                      "reached through a symlinked launch path, a bare ancestor with a corrupt "
+                      "HEAD, and dangling, looping and unreadable ancestor .git entries each exit "
+                      "2 with the tripwire inert while an unborn ancestor HEAD still reaches the "
+                      "checkout gate), the no-follow bounded drift "
                       "advisory (a symlinked parent, a swapped-in FIFO, an over-cap UNCHECKED "
                       "file; and round 7: a final-component symlink to an outside committed copy, "
-                      "an empty-blob FIFO, a refused dot-dot/dot/empty component, a child-bounded "
-                      "FIFO open, and the fsmonitor pins held on the genesis route and on "
+                      "an empty-blob FIFO, a refused dot-dot/dot component, per-path drift "
+                      "states judged by exact name, a child-bounded FIFO open, and the fsmonitor pins held on the genesis route and on "
                       "git_tracked/_index_materialized_tree), the promisor lazy-fetch "
                       "refusal (GIT_NO_LAZY_FETCH pinned, no transport, no sshCommand), and the "
                       "stage-2 sitecustomize isolation hold; and the replayed "
