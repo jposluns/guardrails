@@ -7858,15 +7858,17 @@ def gensrc_guard(data):
     correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES, fail-closed (round-2 finding
     8): a corrupted registry must not silently disable the generated-artefact protection, so a cannot-read of
     a PRESENT .aiqt/gensrc.json is a cannot-evaluate resolved to the safe (deny) outcome for this protective
-    guard. The remaining cannot-evaluate branches (see _gensrc_fail_ask: a malformed/empty/list/bool
-    tool_name, a control-char payload field, no session cwd, a non-git session, an outside-repo target, an
-    unresolvable target, a containment fault) are NOT confirmed generated-artefact edits, have no
-    "edit the source" action to name, and are outside any expected coverage, so they ALLOW with an
-    informational note rather than block a legitimate edit; a genuinely-ABSENT registry is likewise the inert
-    ALLOW (adopters author their own). The CI generated-artefact drift gate remains the authoritative
-    backstop. Besides a confirmed registry match, the guard denies fail-closed in exactly three cases: a
-    missing tool_name (the shared fail-closed contract), a PRESENT-but-unreadable/malformed registry, and a
-    mis-wired event (a hard block, exit 2). The repo root is the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
+    guard. The remaining cannot-evaluate branches (each routed through _gensrc_fail_ask: an unreadable
+    tool_name (an empty string, a list, a bool), a non-dict tool_input, a missing or unreadable file_path, a
+    control character in file_path, no session cwd, a non-git session, an unresolvable target or repo root, a
+    target outside the repo or a containment fault, a registry entry that cannot be resolved for containment)
+    are NOT confirmed generated-artefact edits, have no "edit the source" action to name, and are outside any
+    expected coverage, so they ALLOW with an informational note rather than block a legitimate edit; a
+    genuinely-ABSENT registry is likewise the inert ALLOW (adopters author their own). The CI
+    generated-artefact drift gate remains the authoritative backstop. Besides a confirmed registry match, the
+    guard denies fail-closed in exactly three cases: a missing tool_name (the shared fail-closed contract), a
+    PRESENT-but-unreadable/malformed registry, and a mis-wired event (a hard block, exit 2). The repo root is
+    the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
     _gen_common.repo_root, which falls back to cwd and would fabricate a root)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gensrc_guard wired to unexpected event {!r}; failing closed"

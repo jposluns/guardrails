@@ -5259,9 +5259,12 @@ def _main_isolated():
                 decision = stdout_obj.get("hookSpecificOutput", {}).get("permissionDecision")
                 if decision in ("allow", "ask", "deny"):
                     return decision
-                # An _allow_note: a systemMessage with NO permissionDecision is an informational allow.
-                if "hookSpecificOutput" not in stdout_obj and "systemMessage" in stdout_obj:
-                    return "allow"
+                # An _allow_note: a systemMessage with NO permissionDecision is an informational allow. It is
+                # "allow-note", DISTINCT from the silent "allow" (code 0, no stdout), so a case expected to
+                # allow with a note fails if the handler regresses to a silent allow, and vice versa.
+                note = stdout_obj.get("systemMessage")
+                if "hookSpecificOutput" not in stdout_obj and isinstance(note, str) and note:
+                    return "allow-note"
                 return "unexpected"
             return "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
 
@@ -5354,9 +5357,9 @@ def _main_isolated():
         gexpect("(gs-f) Edit a kind=block target allows (block exclusion)", "allow",
                 tool="Edit", file_path=os.path.join(gr, "CLAUDE.md"), cwd=gr)
         # ALLOW: component-boundary and equality matching (fails under a raw string prefix).
-        gexpect("(gs-g1) Write gen-extra/ does not match the gen/ tree", "allow",
+        gexpect("(gs-g1) Write gen-extra/ does not match the gen/ tree, so it allows", "allow",
                 tool="Write", file_path=os.path.join(gr, "gen-extra", "x.md"), cwd=gr)
-        gexpect("(gs-g2) Write GEN.md.bak does not match the GEN.md file", "allow",
+        gexpect("(gs-g2) Write GEN.md.bak does not match the GEN.md file, so it allows", "allow",
                 tool="Write", file_path=os.path.join(gr, "GEN.md.bak"), cwd=gr)
         # ALLOW: an absent registry is inert (repo2 has no .aiqt/gensrc.json).
         gexpect("(gs-h) an absent registry is the inert ALLOW", "allow",
@@ -5381,25 +5384,25 @@ def _main_isolated():
         # fail-closed treatment of a present-but-unreadable registry, not to a path match (gr3 has no match
         # for GEN.md when the registry is unreadable). Under the old allow-note it was "allow".
         # ALLOW with a note: an unresolved repo root (a plain non-git cwd).
-        gexpect("(gs-j) a non-git cwd (unresolved root) allows with a note", "allow",
+        gexpect("(gs-j) a non-git cwd (unresolved root) allows with a note", "allow-note",
                 tool="Write", file_path=os.path.join(gng, "GEN.md"), cwd=gng)
         # DENY: the shared fail-closed contract (no tool_name); the other fail-closed denies are the
         # present-but-unreadable registry cases (gs-i*, gs-q, ...) and the mis-wired event (gs-s).
         gexpect("(gs-k) a missing tool_name DENIES (fail-closed contract)", "deny",
                 file_path=os.path.join(gr, "GEN.md"), cwd=gr, with_tool=False)
         # ALLOW with a note: no session cwd, so the root cannot be resolved.
-        gexpect("(gs-l) a missing cwd allows with a note (root cannot be resolved)", "allow",
+        gexpect("(gs-l) a missing cwd allows with a note (root cannot be resolved)", "allow-note",
                 tool="Write", file_path=os.path.join(gr, "GEN.md"), with_cwd=False)
         # ALLOW with a note: a target outside the repo cannot be cleared against this repo registry.
-        gexpect("(gs-m) a target outside the repo allows with a note (non-contained)", "allow",
+        gexpect("(gs-m) a target outside the repo allows with a note (non-contained)", "allow-note",
                 tool="Write", file_path=str(tmp / "outside.md"), cwd=gr)
         # ALLOW: Bash is out of scope by design (defensive branch; the matcher excludes it too).
         gexpect("(gs-n) Bash is out of scope (allow)", "allow",
                 tool="Bash", file_path=os.path.join(gr, "GEN.md"), cwd=gr)
         # ALLOW with a note: payload cannot-evaluate cases (non-dict tool_input, missing file_path).
-        gexpect("(gs-o) a non-dict tool_input allows with a note", "allow",
+        gexpect("(gs-o) a non-dict tool_input allows with a note", "allow-note",
                 tool="Write", cwd=gr, tool_input="not-a-dict")
-        gexpect("(gs-p) a missing file_path allows with a note", "allow",
+        gexpect("(gs-p) a missing file_path allows with a note", "allow-note",
                 tool="Write", cwd=gr)
         # DENY: a non-regular-file registry is BAD, never absent (integ-check-fails-closed-on-unreadable).
         # DETERMINISTIC: the registry PATH is a DIRECTORY, so the lstat/S_ISREG probe rejects it as
@@ -5423,11 +5426,11 @@ def _main_isolated():
                             .format(_hb_code))
         # ALLOW with a note: a present-but-unreadable tool_name (empty string, list, bool) cannot be matched
         # (a MISSING tool_name denies instead, gs-k). Was a silent ALLOW (not in _GENSRC_TOOLS). (F-161)
-        gexpect("(gs-t1) an empty-string tool_name allows with a note (unreadable, not a miss)", "allow",
+        gexpect("(gs-t1) an empty-string tool_name allows with a note (unreadable, not a miss)", "allow-note",
                 tool="", file_path=os.path.join(gr, "GEN.md"), cwd=gr)
-        gexpect("(gs-t2) a list tool_name allows with a note (unreadable, not a miss)", "allow",
+        gexpect("(gs-t2) a list tool_name allows with a note (unreadable, not a miss)", "allow-note",
                 tool=[], file_path=os.path.join(gr, "GEN.md"), cwd=gr)
-        gexpect("(gs-t3) a bool tool_name allows with a note (unreadable, not a miss)", "allow",
+        gexpect("(gs-t3) a bool tool_name allows with a note (unreadable, not a miss)", "allow-note",
                 tool=True, file_path=os.path.join(gr, "GEN.md"), cwd=gr)
         # DENY: version:true is a JSON bool, not int 1 (type(True) is bool). Was ALLOW (True == 1). (F-159)
         gs_reg3.write_text(json.dumps({"version": True, "generated": [
@@ -5460,13 +5463,13 @@ def _main_isolated():
                 "finding 8)", "deny", tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
         # ALLOW with a note: a NUL in the PAYLOAD file_path is rejected before realpath. Was an uncaught crash
         # (os.path.realpath raises ValueError on an embedded NUL). (F-160 + F-157)
-        gexpect("(gs-y) a NUL in the payload file_path allows with a note (was a crash-to-deny)", "allow",
+        gexpect("(gs-y) a NUL in the payload file_path allows with a note (was a crash-to-deny)", "allow-note",
                 tool="Write", file_path=os.path.join(gr, "GEN\x00.md"), cwd=gr)
         # ALLOW with a note: a NON-NUL control char (0x1f) in the payload file_path. realpath would NOT raise on it, so
         # only the control-char rejection catches it (guards F-160's independent value). Was a silent ALLOW.
         gexpect("(gs-y2) a non-NUL control char in the payload file_path allows with a note (realpath would not "
                 "reject)",
-                "allow", tool="Write", file_path=os.path.join(gr, "GEN\x1f.md"), cwd=gr)
+                "allow-note", tool="Write", file_path=os.path.join(gr, "GEN\x1f.md"), cwd=gr)
         # DENY: a repo dir name with a TRAILING SPACE: the toplevel is preserved because only git's single
         # trailing-newline terminator is stripped (result.stdout[:-1] when it endswith "\\n", stripping
         # exactly that one \\n), not strip(), so the registry IS found and the registered target DENIES. Was
@@ -5505,7 +5508,7 @@ def _main_isolated():
         try:
             os.path.realpath = _raise_realpath
             gexpect("(gs-ac) an injected realpath fault on the target allows with a note (guarded-realpath branch)",
-                    "allow", tool="Write", file_path=_gs_inj_fp, cwd=gr)
+                    "allow-note", tool="Write", file_path=_gs_inj_fp, cwd=gr)
         finally:
             os.path.realpath = _real_realpath
         _real_commonpath = os.path.commonpath
@@ -5513,7 +5516,7 @@ def _main_isolated():
             os.path.commonpath = _raise_commonpath
             gexpect("(gs-ad) an injected commonpath fault allows with a note (_gensrc_within containment "
                     "'err' branch)",
-                    "allow", tool="Write", file_path=_gs_inj_fp, cwd=gr)
+                    "allow-note", tool="Write", file_path=_gs_inj_fp, cwd=gr)
         finally:
             os.path.commonpath = _real_commonpath
 
