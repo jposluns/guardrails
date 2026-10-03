@@ -16,13 +16,14 @@ signed; the independently published digest is the authenticated reference.
 
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. After the freeze the release artifacts
-   (the version-numbered `site/downloads/aiqt-skill-1.0.5.zip`, which the site links to, and
+   (the version-numbered `site/downloads/aiqt-skill-<version>.zip`, which the site links to, and
    `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
    `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
    byte-identical to the version-numbered copy (both are written from the same bytes, and `gen_skill
    --check` compares each to disk, so they cannot diverge). The
-   release-metadata edits prescribed below (the recorded digests, the evidence fields, and the tag key)
-   are the only changes permitted after this point.
+   release-metadata edits prescribed below (the recorded digests, the evidence fields, the attestation
+   row with its regenerated branch-integrity artifacts, and the tag key) are the only changes permitted
+   after this point.
 
    Skill version bump checklist. The skill is independently versioned. The concrete version-numbered
    filename `aiqt-skill-<version>.zip` is spelled as a literal in four places, kept consistent by a
@@ -43,8 +44,9 @@ signed; the independently published digest is the authenticated reference.
    drift or portability gate. Finally, run `python3 tools/gen_install.py` to repoint the install-page
    download button at the new versioned filename.
 2. Compute. From the repository root on the frozen tree, run
-   `sha256sum site/downloads/aiqt-skill-1.0.5.zip site/downloads/aiqt-instructions.txt`. These two files
-   are the 1.0.5 release artifacts (the packaged skill and its instructions), matching the set named in
+   `sha256sum site/downloads/aiqt-skill-<version>.zip site/downloads/aiqt-instructions.txt`, where
+   `<version>` is the skill version from step 1. These two files are the release artifacts (the packaged
+   skill and its instructions), matching the set named in
    the evidence page and the `changelog.toml` reserved-key example. The mapping exports under
    `site/downloads/` (`mappings.csv`, `mappings.json`) are reference data regenerated from the corpus and
    covered by the drift and reference-facts gates, so they are not part of the release-integrity set.
@@ -62,14 +64,36 @@ signed; the independently published digest is the authenticated reference.
    digest in its proper Checksum field by hand.
 5. Verify. `python3 tools/check_artifact_checksums.py` must report armed and passing, and
    `bash tools/run_all_checks.sh` must be green end to end. Steps 3, 4, and 5 land as one pull request,
-   merged on green.
+   merged on green. Main stays frozen from this merge until step 6a has merged.
+   - 5b. Pre-tag check. Run `python3 tools/check_release_build.py --pre-tag --candidate-sha <full step 5
+     merge SHA> --qa-path <QA object> --qa-sha256 <its SHA-256> --first-pin --evidence <evidence file>`
+     and require exit 0. The QA object and the evidence file live in the maintainer QA store, outside the
+     tree. The first-pin evidence is required for the genesis release (no `[[release]]` row yet in
+     `.aiqt/core/releases.toml`) even without `--first-pin`, and the gate accepts `--evidence` only
+     together with `--first-pin`.
 6. Tag. The release tag is `vX.Y.Z`, where `X.Y.Z` is the release's `changelog.toml` version (for a
-   release at version 1.0.5, the tag is `v1.0.5`); the tag-monotonicity gate requires exactly this `v` + version form. Apply
-   the annotated tag to the step 5 merge commit and push it, then record `tag = "vX.Y.Z"` in that
-   release's `changelog.toml` entry through a second pull request, merged on green before step 7. The
-   tag-monotonicity check arms from the recorded changelog `tag` key, not from the git tag alone, so
-   pushing the git tag without landing the recorded key on the protected branch leaves that check
-   dormant.
+   release at version X.Y.Z, the tag is exactly `vX.Y.Z`); the tag-monotonicity gate requires exactly this
+   `v` + version form. Apply the annotated tag to the step 5 merge commit checked in step 5b and push it.
+   - 6a. Attestation commit. Keep main frozen. Branch from the tag, append one fully attested
+     `[[release]]` row to `.aiqt/core/releases.toml` with every required field (`version`, `tag`,
+     `tag_object_sha`, `commit_sha`, `qa-sha256`, `qa-store-path`, and `attestation-timestamps`), then
+     run `python3 tools/gen_manifest.py`, which regenerates `.aiqt/manifest.toml`,
+     `.aiqt/release/root.txt`, and `.aiqt/release/announce-snippet.txt`. Commit only those four files.
+     `python3 tools/check_release_build.py --post-tag --attestation-commit <full attestation commit SHA>
+     --qa-path <QA object>` must exit 0 before the merge. Merge without rewriting the gated commit (no
+     squash or rebase), so the commit post-tag certified lands unchanged and its parent stays the tagged
+     commit.
+   - 6b. Tag key. Only after 6a has merged, record `tag = "vX.Y.Z"` in that release's `changelog.toml`
+     entry, run `python3 tools/gen_manifest.py`, and land both through a separate pull request, merged on
+     green before step 7. The tag-monotonicity check arms from the recorded changelog `tag` key, not from
+     the git tag alone, so pushing the git tag without landing the recorded key on the protected branch
+     leaves that check dormant.
+   - Why the order is fixed. Post-tag allows the attestation commit to change only the release row and
+     the three regenerated branch-integrity artifacts from the tagged commit; `changelog.toml` is excluded
+     from that attestation delta. A tag-key commit landed between the tag and the attestation row puts
+     `changelog.toml` in the delta, and post-tag fails. The tag key cannot move into the step 5 pull
+     request either: the tag does not exist yet at that point, so the tag-monotonicity check cannot
+     resolve it.
 7. Publish. The public flip is a separate, maintainer-owned step; nothing in steps 1 to 6 depends on it.
 
 ## Note on the evidence "Built from" field

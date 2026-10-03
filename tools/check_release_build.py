@@ -541,6 +541,8 @@ def _recompute_branch_integrity(root, commit_oid):
 
 # The ONLY paths the post-tag attestation commit may change from the tagged candidate (round-8 #4): the
 # appended release row (releases.toml) and the three regenerated branch-integrity artifacts.
+# changelog.toml (the tag key) is deliberately absent: it lands after the attestation commit (RELEASING
+# step 6b), so a tag-key commit between the tag and the attestation row is an out-of-scope delta.
 ALLOWED_ATTESTATION_DELTA = frozenset({RELEASES_REL, MANIFEST_REL, gen_manifest.ROOT_REL,
                                        gen_manifest.SNIPPET_REL})
 
@@ -2318,6 +2320,60 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                             if _run_post_tag_quiet(ac, a_oid, str(a_qa)) != 0:
                                 failures.append("post-tag must validate the regenerated attestation-commit "
                                                 "artifacts, exit 0 (round-7 finding 6)")
+
+                            # (RELEASING steps 6a/6b) THE RELEASE ORDER. The changelog tag key may land only
+                            # AFTER the attestation commit has merged. (i) The old documented order put a
+                            # changelog.toml tag-key commit between the tag and the attestation row, so the
+                            # attestation delta from the tagged candidate includes changelog.toml, which is
+                            # outside ALLOWED_ATTESTATION_DELTA -> post-tag exit 1 naming changelog.toml.
+                            # Mutation: adding changelog.toml to ALLOWED_ATTESTATION_DELTA turns (i) green.
+                            # (ii) The documented order: the tag-key commit on top of the attestation commit
+                            # passes the tag-monotonicity gate against the attestation commit as its base.
+                            tagged_changelog = '[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                            a_row = subprocess.run(["git", "-C", str(ac), "show", a_oid + ":" + RELEASES_REL],
+                                                   capture_output=True, text=True, env=ge).stdout
+                            subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_csha],
+                                           capture_output=True, env=ge)
+                            (ac / "changelog.toml").write_text(tagged_changelog, encoding="utf-8")
+                            old_ok = _regen_fixture_manifest(ac, "old-order tag-key commit", failures, ge)
+                            subprocess.run(["git", "-C", str(ac), "commit", "-q", "-a", "-m",
+                                            "old order: tag key before attestation", "--no-verify"],
+                                           capture_output=True, env=ge)
+                            (ac / RELEASES_REL).write_text(a_row, encoding="utf-8")
+                            old_ok = old_ok and _regen_fixture_manifest(ac, "old-order attestation commit",
+                                                                        failures, ge)
+                            subprocess.run(["git", "-C", str(ac), "commit", "-q", "-a", "-m",
+                                            "old order: attestation row", "--no-verify"],
+                                           capture_output=True, env=ge)
+                            old_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
+                                                     capture_output=True, text=True, env=ge).stdout.strip()
+                            if old_ok:
+                                old_delta = _attestation_delta_findings(ac, a_csha, old_oid)
+                                if (_run_post_tag_quiet(ac, old_oid, str(a_qa)) != 1
+                                        or not any("changelog.toml" in f for f in old_delta)):
+                                    failures.append("(release order) a changelog.toml tag-key commit before the "
+                                                    "attestation row (the old RELEASING order) must make "
+                                                    "post-tag exit 1 with an attestation-delta finding naming "
+                                                    "changelog.toml (RELEASING step 6b)")
+                            subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_oid],
+                                           capture_output=True, env=ge)
+                            (ac / "changelog.toml").write_text(tagged_changelog, encoding="utf-8")
+                            new_ok = _regen_fixture_manifest(ac, "new-order tag-key commit", failures, ge)
+                            subprocess.run(["git", "-C", str(ac), "commit", "-q", "-a", "-m",
+                                            "new order: tag key after attestation", "--no-verify"],
+                                           capture_output=True, env=ge)
+                            if new_ok:
+                                mono = subprocess.run(
+                                    ["python3", str(ac / "tools" / "check_version_monotonicity.py"),
+                                     "--base", a_oid], cwd=str(ac), capture_output=True, text=True, env=ge)
+                                if mono.returncode != 0:
+                                    failures.append("(release order) the tag-key commit on top of the attestation "
+                                                    "commit (RELEASING step 6b) must pass "
+                                                    "check_version_monotonicity --base <attestation commit>, "
+                                                    "exit 0 (got rc={}: {})".format(
+                                                        mono.returncode, (mono.stdout + mono.stderr).strip()))
+                            subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_oid],
+                                           capture_output=True, env=ge)
 
                             # === ROUND-8 archive-based post-tag cases (need a full pack tree for the #2
                             # branch-integrity recompute) ================================================
