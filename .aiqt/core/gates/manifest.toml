@@ -519,15 +519,6 @@ class = "c"
 residue = "It runs _journal.py --self-test directly: four descriptor-helper checks, ported from the retired import engine's self-test, each driving a helper with a patched os primitive and no store, journal or subprocess. C1-osread asserts that _read_fd returns a readable descriptor's bytes (a positive control) and converts a read-time OSError to a JournalError rather than a raw OSError; N2a asserts that _close_fd_quietly returns cleanly on the close error of an already-closed descriptor; N2d asserts that _close_fd_quietly still returns when both closes fail and its stderr diagnostic write itself raises. It asserts these helper contracts only, not the journal's transaction, crash-recovery or locking behaviour, which other suites exercise. Every patched primitive is restored in a finally; the run returns 0 on pass and 1 on a failed check. No undeniable linkage to a single corpus rule is claimed."
 
 [[gate]]
-id = "opf-allocation-direct-selftest"
-script = "opf/tools/_opf_allocation.py"
-rules = []
-platform = "ci"
-default = "block"
-class = "c"
-residue = "It runs _opf_allocation.py --self-test directly over one synthetic inline store in a temporary directory, driven through the real store operation capability and ingest journal writer lock: eleven reservation checks, ported from the retired ingest execution suite. They assert that allocation refuses under the capability alone (journal writer lock required) and after the capability is released, each with counters byte-unchanged; that ids are minted from the live counters in demand order under both locks, with the reservation record published and counters advanced to exactly the minted ids; that a retry with identical bindings reuses the same reservation and mints nothing, including over a counters file rolled back beneath it; that a changed binding or a changed demand refuses and leaves the reservation as it was; that a later run allocates above an earlier reservation under a rolled-back counter; and that a live id above its counter, or a leftover counters temporary, refuses. Coverage is representative over one synthetic store, not the allocator's whole input space or a live adopter store. The run returns 0 on pass, 1 on a failed check and 2 on a harness error. No undeniable linkage to a single corpus rule is claimed."
-
-[[gate]]
 id = "opf-observe-direct-selftest"
 script = "opf/tools/_opf_observe.py"
 rules = []
