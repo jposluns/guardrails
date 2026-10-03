@@ -1529,7 +1529,12 @@ _RUNTIME_REAP_ROUNDS = 250
 # rc 0 on ECHILD and a reaped pid could be reused before it is signalled. It then makes ITSELF a child
 # subreaper (prctl PR_SET_CHILD_SUBREAPER, option 36, Linux) before it spawns the probed module, so
 # every orphaned descendant of the module, a setsid'd, non-dumpable or fork-hopping one included,
-# reparents to the supervisor. After the module exits it repeatedly SIGKILLs and reaps the processes it
+# reparents to the supervisor. It also makes ITSELF non-dumpable (PR_SET_DUMPABLE, option 4, to 0), so
+# a same-uid process can neither list /proc/<sup>/fd nor pidfd_getfd its descriptors whatever Yama's
+# ptrace_scope says, and it carries the module's stdout and stderr over SOCKETPAIRS, never pipes: a
+# pipe end could be reopened through /proc/<pid>/fd by a concurrent same-uid process and drained, so a
+# failing module's output would vanish into a clean-looking report; reopening a socket end that way
+# gives ENXIO (QA8 claude M1/m4). After the module exits it repeatedly SIGKILLs and reaps the processes it
 # can prove are its own un-reaped children. The census is /proc/self/task/*/children, or where that file
 # is unavailable the ppid field of /proc/<pid>/stat equal to its own pid; a vanished pid is skipped, and
 # a record that is unreadable for any other reason, or malformed, raises, making the run cannot-evaluate,
@@ -1553,8 +1558,10 @@ import base64
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -1632,15 +1639,22 @@ def main():
     report_fd = int(sys.argv[1])
     timeout, settle = float(sys.argv[2]), float(sys.argv[3])
     reap_seconds, reap_rounds = float(sys.argv[4]), int(sys.argv[5])
-    report = {"subreaper": False, "enumerable": False, "pidfd": False, "census": None,
-              "spawn": None, "timeout": False, "rc": None, "stdout": "", "stderr": "",
-              "survivors": [], "drained": True}
+    report = {"subreaper": False, "undumpable": False, "enumerable": False, "pidfd": False,
+              "census": None, "spawn": None, "timeout": False, "rc": None, "stdout": "",
+              "stderr": "", "survivors": [], "drained": True}
     try:
         import ctypes
         libc = ctypes.CDLL(None, use_errno=True)
         report["subreaper"] = libc.prctl(36, 1, 0, 0, 0) == 0
+        # PR_SET_DUMPABLE (4) 0: a non-dumpable process's /proc/<pid>/fd is
+        # root-owned and pidfd_getfd against it is refused whatever Yama's
+        # ptrace_scope says, so a same-uid process can neither enumerate nor
+        # copy this supervisor's channel descriptors (QA8 claude m4). Required
+        # like the subreaper flag: failure is cannot-evaluate, never best-effort.
+        report["undumpable"] = libc.prctl(4, 0, 0, 0, 0) == 0
     except (OSError, AttributeError, ValueError):
         report["subreaper"] = False
+        report["undumpable"] = False
     try:
         _children()
         report["enumerable"] = True
@@ -1653,19 +1667,49 @@ def main():
                            and hasattr(os, "P_PIDFD") and hasattr(os, "WNOWAIT"))
     except (AttributeError, OSError):
         report["pidfd"] = False
-    if not (report["subreaper"] and report["enumerable"] and report["pidfd"]):
+    if not (report["subreaper"] and report["undumpable"] and report["enumerable"]
+            and report["pidfd"]):
         _emit(report_fd, report)
         return 0
-    stdout = stderr = b""
+    # The module's stdout and stderr travel over SOCKETPAIRS, never pipes: a
+    # same-uid process could reopen a pipe end through /proc/<pid>/fd and drain a
+    # failing module's output into a clean-looking report, but reopening a socket
+    # end that way gives ENXIO (QA8 claude M1).
+    pairs = {"stdout": socket.socketpair(), "stderr": socket.socketpair()}
     try:
-        proc = subprocess.Popen(sys.argv[6:], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, start_new_session=True)
+        proc = subprocess.Popen(sys.argv[6:], stdin=subprocess.DEVNULL,
+                                stdout=pairs["stdout"][1].fileno(),
+                                stderr=pairs["stderr"][1].fileno(),
+                                start_new_session=True)
     except (OSError, subprocess.SubprocessError) as exc:
         report["spawn"] = type(exc).__name__
         proc = None
+    for key in ("stdout", "stderr"):
+        pairs[key][1].close()
+    gathered = {"stdout": [], "stderr": []}
+    deadline = time.monotonic() + timeout + reap_seconds + 10.0
+
+    def drain(key):
+        sock = pairs[key][0]
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0.0:
+                return
+            sock.settimeout(left)
+            try:
+                piece = sock.recv(65536)
+            except OSError:
+                return
+            if not piece:
+                return
+            gathered[key].append(piece)
+
+    pumps = [threading.Thread(target=drain, args=(key,)) for key in ("stdout", "stderr")]
+    for pump in pumps:
+        pump.start()
     if proc is not None:
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             report["timeout"] = True
             proc.kill()
@@ -1675,17 +1719,23 @@ def main():
                 report["drained"] = False
                 report["survivors"].append(
                     "module pid {} did not exit within {}s of SIGKILL".format(proc.pid, reap_seconds))
-            for stream in (proc.stdout, proc.stderr):
-                stream.close()
         report["rc"] = proc.returncode
-    report["stdout"] = base64.b64encode(stdout).decode("ascii")
-    report["stderr"] = base64.b64encode(stderr).decode("ascii")
     time.sleep(settle)
     try:
         _reap(report, reap_seconds, reap_rounds)
     except OSError as exc:
         report["enumerable"] = False
         report["census"] = str(exc)
+    # The pumps end at EOF (the module and any descendant that inherited a write
+    # end are dead after the reap) or at their deadline (an undrained survivor
+    # still holds a write end); either way the join is bounded and the report
+    # carries what arrived.
+    for pump in pumps:
+        pump.join()
+    for key in ("stdout", "stderr"):
+        pairs[key][0].close()
+    report["stdout"] = base64.b64encode(b"".join(gathered["stdout"])).decode("ascii")
+    report["stderr"] = base64.b64encode(b"".join(gathered["stderr"])).decode("ascii")
     _emit(report_fd, report)
     return 0
 
@@ -1728,8 +1778,8 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
     un-reaped children, to which every orphaned descendant of the module (a setsid'd, non-dumpable or
     fork-hopping one included) has reparented; every signal goes through a pidfd whose target a
     waitid(P_PIDFD, ..., WNOHANG|WNOWAIT) has just proved to still be the supervisor's own child, never
-    a numeric kill, and a host where PR_SET_CHILD_SUBREAPER, pidfd signalling or the /proc child census
-    is unavailable, or where a census record is unreadable for any reason but a vanished pid, or
+    a numeric kill, and a host where PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE 0, pidfd signalling or the
+    /proc child census is unavailable, or where a census record is unreadable for any reason but a vanished pid, or
     malformed, makes the run a cannot-evaluate discrepancy, never a clean pass and never a wider kill. A form passes only if the module
     refuses it (exit 2, nothing on stdout, and on stderr
     one line, or for this host exactly its usage text) or does nothing (exit 0, nothing on stdout or stderr),
@@ -1815,11 +1865,18 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
                 return "{} {}: failed to run ({})".format(name, argv, type(exc).__name__)
             report_w.close()
             # The supervisor returns its report ONLY over this socketpair, never over
-            # its stdout: opening a socket end through /proc/<pid>/fd gives ENXIO, so a
-            # concurrent same-uid run cannot reopen another run's report channel and
-            # forge a clean line into it (QA7 claude M1; a pipe, the former channel,
-            # could be reopened that way). Drain the socket in a thread so a large
-            # report cannot deadlock against communicate() draining the stdio pipes.
+            # its stdout, and the module's own stdout/stderr reach the supervisor over
+            # socketpairs too: opening a socket end through /proc/<pid>/fd gives ENXIO
+            # (a pipe, the former channel for both, could be reopened that way), and
+            # the supervisor is non-dumpable, so a same-uid process can neither list
+            # nor pidfd_getfd its descriptors whatever Yama ptrace_scope says (QA7
+            # claude M1; QA8 claude M1/m4). NOT covered: the supervisor's own
+            # stdout/stderr pipes to this process, and pidfd_getfd against THIS
+            # dumpable test process at Yama ptrace_scope 0; tampering with those can
+            # only turn a pass into a failure (the supervisor's stdout must be empty,
+            # and a drained or garbled report fails the run), never a failure into a
+            # pass. Drain the socket in a thread so a large report cannot deadlock
+            # against communicate() draining the supervisor's stdio pipes.
             collected = {}
 
             def drain():
@@ -1842,8 +1899,11 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.communicate()
-                report_r.close()
+                # Join the pump BEFORE closing report_r: the write end died with the
+                # killed supervisor, so recv reaches EOF and the join is prompt, and
+                # the drain thread never races a reused fd number (QA8 claude nit).
                 pump.join()
+                report_r.close()
                 return "{} {}: the probe supervisor did not finish within {} s".format(name, argv, budget)
             pump.join()
             report_r.close()
@@ -1880,10 +1940,11 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
         except (ValueError, KeyError, TypeError) as exc:
             return "{} {}: the probe supervisor returned no result ({})".format(
                 name, argv, type(exc).__name__)
-        if not (report.get("subreaper") and report.get("enumerable") and report.get("pidfd")):
+        if not (report.get("subreaper") and report.get("undumpable")
+                and report.get("enumerable") and report.get("pidfd")):
             return ("cannot evaluate {} {}: the supervisor cannot contain descendants here "
-                    "(PR_SET_CHILD_SUBREAPER, pidfd signalling or the /proc child census is "
-                    "unavailable{})").format(name, argv,
+                    "(PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE 0, pidfd signalling or the "
+                    "/proc child census is unavailable{})").format(name, argv,
                                              "; " + report["census"] if report.get("census") else "")
         if report.get("spawn"):
             return "{} {}: failed to run ({})".format(name, argv, report["spawn"])
@@ -2055,13 +2116,20 @@ _RUNTIME_FIXTURES = (
 
 
 def _runtime_supervisor_signal_audit(source):
-    """AST audit of the supervisor source (QA7 codex 3 / claude m1 + codex 2). Returns (signals,
-    unbounded_wait): the sorted names of every call that can signal a process by pid -- os.kill,
-    os.killpg, signal.pthread_kill, any module-alias spelling, and a bare name brought in as
-    `from os import kill` or `from signal import pthread_kill` -- and True when a .wait() call carries
-    no timeout. Every census signal must instead go through a pidfd the supervisor has just proved owns
-    one of its own children, and no wait on the module may be unbounded. A textual scan missed an
-    aliased import; this reads the parse tree."""
+    """A TRIPWIRE over the supervisor source for ORDINARY signalling spellings, not a proof of
+    absence (QA7 codex 3 / claude m1 + codex 2; QA8 codex minor / claude m2). Returns (signals,
+    unbounded_wait): the sorted names of every DIRECT call spelled as os.kill, os.killpg or
+    signal.pthread_kill, through any `import os as x` module alias, or as a bare name from
+    `from os import kill`/`killpg` or `from signal import pthread_kill`; and True when a .wait()
+    call carries neither argument nor keyword. It reads the parse tree (a textual scan missed an
+    aliased import), and it does NOT see dynamic or indirect spellings: getattr(os, "kill"),
+    os.__dict__["kill"], an assignment alias (k = os.kill; k(...)), functools.partial(os.kill),
+    ctypes/libc.kill, posix.kill, __import__("os").kill, `from os import *`, a subprocess or
+    os.system kill(1), an unproven pidfd_send_signal, or a wait made unbounded by an explicit
+    None (wait(None), wait(timeout=None), a bare communicate(), os.waitpid(pid, 0)). The
+    behavioural checks are the safeguard: the waitid(P_PIDFD, ..., WNOWAIT) ownership proof
+    pinned by _self_test_runtime_supervisor_unit's proof-removed mutant run, and
+    _kill_proved_child's forged-pid refusal."""
     import ast
     tree = ast.parse(source)
     os_mods = set()
@@ -2109,7 +2177,13 @@ def _self_test_runtime_supervisor_unit(tmp):
     SIG_DFL first thing; the census skips a vanished pid but raises on an unreadable or malformed
     /proc/<pid>/stat record, so an untrustworthy census can never read as clean; and the reap loop
     drains a real child within its bound through pidfd signalling with every wait a WNOHANG poll, never
-    a blocking waitpid a traced child could stall. Returns the list of faults."""
+    a blocking waitpid a traced child could stall. The waitid(P_PIDFD, ..., WNOWAIT) ownership proof is
+    load-bearing: a proof-removed mutant signals a modelled non-child where the committed source sends
+    nothing. _kill_proved_child -- the one route for any self-test signal on a pid from a file or an
+    earlier /proc read -- must refuse a FORGED live non-child pid (no signal recorded) and own this
+    process's own forked child, and an AST pin keeps this check's cleanup and the helper free of
+    numeric kills, so restoring the QA7 reaped-child `os.kill` turns this red (QA8). Returns the list
+    of faults."""
     import importlib.util
     import signal
     import time
@@ -2234,25 +2308,14 @@ def _self_test_runtime_supervisor_unit(tmp):
         sup._children = real_children
         # Clean up the forked child WITHOUT a numeric kill: _reap may already have
         # reaped it, so signalling its pid could hit an unrelated reused process in a
-        # shared-uid pool (QA7 blocker, lab_infra rule). Signal and reap only through a
-        # pidfd that a waitid(WNOWAIT) still proves is our own un-reaped child; ECHILD
-        # (already reaped) or any waitid error means nothing is signalled.
+        # shared-uid pool (QA7 blocker, lab_infra rule). _kill_proved_child signals
+        # and reaps only through a pidfd that a waitid(WNOWAIT) still proves is our
+        # own un-reaped child; ECHILD (already reaped) or any waitid error means
+        # nothing is signalled. The numeric-kill AST pin below keeps this cleanup red
+        # if the pre-fix `os.kill(child, signal.SIGKILL)` ever returns (QA8 claude m3).
         if child_fd is not None:
             try:
-                try:
-                    os.waitid(os.P_PIDFD, child_fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                    proven = True
-                except OSError:
-                    proven = False
-                if proven:
-                    try:
-                        signal.pidfd_send_signal(child_fd, signal.SIGKILL)
-                    except OSError:
-                        pass
-                    try:
-                        os.waitpid(child, 0)
-                    except OSError:
-                        pass
+                _kill_proved_child(child, pidfd=child_fd)
             finally:
                 os.close(child_fd)
     took = time.monotonic() - begin
@@ -2330,6 +2393,57 @@ def _self_test_runtime_supervisor_unit(tmp):
                 faults.append("removing the waitid ownership proof did not change whether a non-child is "
                               "signalled, so the proof is not pinned by this check")
         os.close(gone_fd)
+
+    # QA8 codex blocker (class check): _kill_proved_child is the single route for a
+    # self-test signal whose target pid came from a file or an earlier /proc read.
+    # Feed it a FORGED pid -- a live process that is NOT this process's child (its
+    # own parent) -- and require NO signal: the waitid(P_PIDFD, ..., WNOWAIT) proof
+    # answers ECHILD and the helper refuses. The recorder captures any signal a
+    # proof-less mutant would send; nothing real is ever delivered.
+    forged_sent = []
+    real_send = signal.pidfd_send_signal
+    signal.pidfd_send_signal = lambda fd, sig: forged_sent.append(sig)
+    try:
+        forged_signalled = _kill_proved_child(os.getppid())
+    finally:
+        signal.pidfd_send_signal = real_send
+    if forged_sent or forged_signalled:
+        faults.append("the ownership helper signalled a live pid it could not prove is this "
+                      "process's own child (sent {})".format(forged_sent))
+    probe_kid = os.fork()
+    if probe_kid == 0:
+        time.sleep(60)
+        os._exit(1)
+    if not _kill_proved_child(probe_kid):
+        faults.append("the ownership helper refused this process's own live un-reaped child")
+        try:
+            kid_fd = os.pidfd_open(probe_kid, 0)
+            signal.pidfd_send_signal(kid_fd, signal.SIGKILL)
+            os.close(kid_fd)
+            os.waitpid(probe_kid, 0)
+        except OSError:
+            pass
+
+    # QA8 claude m3: regression pin for the QA7 blocker. Parse this host file and
+    # require that neither this check's cleanup nor the shared helper signals by
+    # numeric pid: restoring the pre-fix `os.kill(child, signal.SIGKILL)` on the
+    # already-reaped child turns this red. Like _runtime_supervisor_signal_audit,
+    # a tripwire over ordinary spellings; the forged-pid run above is the
+    # behavioural safeguard.
+    import ast
+    host_tree = ast.parse(Path(__file__).read_bytes())
+    for node in ast.walk(host_tree):
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                "_self_test_runtime_supervisor_unit", "_kill_proved_child"):
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                func = call.func
+                named = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+                if named in ("kill", "killpg", "pthread_kill"):
+                    faults.append("{} holds a numeric signal call ({}, line {}); the QA7 "
+                                  "reaped-child kill blocker is back".format(
+                                      node.name, named, call.lineno))
     return faults
 
 
@@ -2340,11 +2454,48 @@ def _self_test_runtime_report_channel(tmp):
     inherited report write-end through /proc/<sup>/fd/<n>, and reopen this reader's own read-end through
     /proc/self/fd/<n> -- and require both to fail; then require the genuine report to arrive as exactly
     one JSON line with nothing on the supervisor's stdout. A pipe (the former channel) would let
-    /proc/<pid>/fd reopen it, so reverting the channel to a pipe turns this red. Returns the faults."""
+    /proc/<pid>/fd reopen it, so reverting the channel to a pipe turns this red. QA8 adds: the
+    PROBE's own channel is pinned too (a Popen recorder requires every fd the real probe hands a
+    supervisor through pass_fds to be a socket at spawn time, claude m1); while the gated module is
+    live, the supervisor's fd table must be unlistable by this same-uid process (non-dumpable,
+    PR_SET_DUMPABLE 0, so pidfd_getfd is refused even at Yama ptrace_scope 0; skipped for root,
+    whom /proc never refuses, claude m4); and the module's stdout and stderr must be SOCKETS whose
+    /proc entries cannot be reopened (claude M1) -- a mutant restoring pipes for either channel
+    turns this red. Returns the faults."""
     import json
     import socket
     import subprocess
+    import time
     faults = []
+
+    # QA8 claude m1: pin the PROBE's own report channel, not just this check's.
+    pin_dir = Path(tmp, "chanpin", "opf", "tools")
+    os.makedirs(str(pin_dir))
+    os.makedirs(str(Path(tmp, "chanpin", "boxes")))
+    (pin_dir / "idle.py").write_text("import sys\n\nVALUE = len(sys.argv)\n", encoding="utf-8")
+    handed = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args")
+        if argv and _RUNTIME_SUPERVISOR in argv:
+            for each in kwargs.get("pass_fds", ()):
+                handed.append(stat.S_ISSOCK(os.fstat(each).st_mode))
+        return real_popen(*args, **kwargs)
+
+    subprocess.Popen = recording_popen
+    try:
+        pinned = _self_test_runtime_probe(pin_dir, str(Path(tmp, "chanpin", "boxes")),
+                                          table={"idle.py": _DISPATCH_LIBRARY},
+                                          tree=pin_dir, timeout=10, names={"idle.py"})
+    finally:
+        subprocess.Popen = real_popen
+    faults += ["the channel-pin probe named {}".format(miss) for miss in pinned]
+    if not handed:
+        faults.append("the channel-pin probe launched no supervisor with a passed report fd")
+    elif not all(handed):
+        faults.append("the probe handed its supervisor a non-socket report channel: a pipe "
+                      "end could be reopened through /proc/<pid>/fd and drained or forged")
     directory = Path(tmp, "chan", "opf", "tools")
     os.makedirs(str(directory))
     gate = Path(tmp, "chan", "gate")
@@ -2377,6 +2528,58 @@ def _self_test_runtime_report_channel(tmp):
     report_w.close()
     raw = b""
     try:
+        # QA8 claude M1 pin + m4: find the gated module (it waits on the gate for up
+        # to 30 s), then require (a) the supervisor's fd table to be unlistable by
+        # this same-uid process (non-dumpable; root reads /proc regardless and skips
+        # that leg) and (b) the module's stdout and stderr to be SOCKETS that /proc
+        # cannot reopen. A mutant handing the module pipes turns (b) red: the
+        # readlink names a pipe and the reopen succeeds.
+        module_pid = None
+        bound = time.monotonic() + 25
+        wanted = str(module).encode("utf-8")
+        while module_pid is None and time.monotonic() < bound:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit() or int(entry) == proc.pid:
+                    continue
+                try:
+                    argv_raw = Path("/proc", entry, "cmdline").read_bytes()
+                except OSError:
+                    continue
+                if wanted in argv_raw:
+                    module_pid = int(entry)
+                    break
+            if module_pid is None:
+                time.sleep(0.01)
+        if module_pid is None:
+            faults.append("the gated module never appeared for the channel checks")
+        else:
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                try:
+                    os.listdir("/proc/{}/fd".format(proc.pid))
+                    faults.append("the supervisor's fd table is listable by a same-uid "
+                                  "process: it is not non-dumpable (PR_SET_DUMPABLE 0), so "
+                                  "pidfd_getfd could copy its channel ends at ptrace_scope 0")
+                except OSError:
+                    pass
+            for stream_fd in (1, 2):
+                fd_entry = "/proc/{}/fd/{}".format(module_pid, stream_fd)
+                try:
+                    target = os.readlink(fd_entry)
+                except OSError as exc:
+                    faults.append("the module's output fd {} could not be inspected ({})"
+                                  .format(stream_fd, type(exc).__name__))
+                    continue
+                if not target.startswith("socket:"):
+                    faults.append("the module's output fd {} is {}, not a socket: a same-uid "
+                                  "process could reopen it through /proc and drain a failing "
+                                  "module's output into a clean report".format(stream_fd, target))
+                try:
+                    opened = os.open(fd_entry, os.O_RDONLY)
+                    os.close(opened)
+                    faults.append("the module's output fd {} could be reopened through /proc"
+                                  .format(stream_fd))
+                except OSError:
+                    pass
         try:
             opened = os.open("/proc/{}/fd/{}".format(proc.pid, write_fd), os.O_WRONLY)
             os.close(opened)
@@ -2418,7 +2621,8 @@ def _self_test_runtime_report_channel(tmp):
         report = json.loads(text)
     except ValueError as exc:
         return faults + ["the report-channel report did not parse ({})".format(type(exc).__name__)]
-    if not (report.get("subreaper") and report.get("enumerable") and report.get("pidfd")):
+    if not (report.get("subreaper") and report.get("undumpable")
+            and report.get("enumerable") and report.get("pidfd")):
         return faults  # a host without containment support is not a channel fault
     if report.get("rc") != 0:
         faults.append("the gated module did not exit 0 over the report channel (rc {})".format(
@@ -2668,6 +2872,67 @@ def _aggregator_self_test():
           "{} self_test modules carries the canonical --self-test entry, {} of them required by the registry)".format(
               len(exposers), len(required)))
     return EXIT_OK
+
+
+def _kill_proved_child(pid, sig=None, pidfd=None):
+    """The ONE route for a self-test signal whose target pid came from a file, an earlier
+    /proc read, or any other record that liveness alone cannot authenticate (QA8 codex
+    blocker; lab_infra shared-uid rule): signal `pid` only through a pidfd whose target a
+    waitid(P_PIDFD, ..., WEXITED | WNOHANG | WNOWAIT) has JUST proved is this process's own
+    un-reaped child -- a directly forked one, or a fixture orphan reparented here while this
+    process held PR_SET_CHILD_SUBREAPER (_case_subreaper). ECHILD or any other pidfd or
+    waitid failure means NOTHING is signalled and False is returned, so a forged or recycled
+    pid can never redirect a self-test signal to an unrelated same-uid process. `sig`
+    defaults to SIGKILL; a SIGKILL target is then reaped through the SAME pidfd
+    (waitid(P_PIDFD, ..., WEXITED), race-free against pid reuse). A caller-supplied `pidfd`
+    stays owned (and closed) by the caller; otherwise the fd is opened and closed here.
+    Returns True only when the signal was sent."""
+    import signal as signal_module
+    if sig is None:
+        sig = signal_module.SIGKILL
+    if not (hasattr(os, "pidfd_open") and hasattr(os, "P_PIDFD") and hasattr(os, "WNOWAIT")
+            and hasattr(signal_module, "pidfd_send_signal")):
+        return False
+    fd, opened = pidfd, False
+    if fd is None:
+        try:
+            fd = os.pidfd_open(pid, 0)
+        except OSError:
+            return False
+        opened = True
+    try:
+        try:
+            os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except OSError:
+            return False
+        try:
+            signal_module.pidfd_send_signal(fd, sig)
+        except OSError:
+            return False
+        if sig == signal_module.SIGKILL:
+            try:
+                os.waitid(os.P_PIDFD, fd, os.WEXITED)
+            except OSError:
+                pass
+        return True
+    finally:
+        if opened:
+            os.close(fd)
+
+
+def _case_subreaper():
+    """Make THIS process a child subreaper (PR_SET_CHILD_SUBREAPER, prctl option 36, Linux),
+    so a fixture orphan whose guardian has died reparents HERE and _kill_proved_child's
+    waitid proof can own it. Process-scoped by design: each caller is a dedicated fixture
+    process under _watchdog_regression_self_test. Returns True when the flag was set; on a
+    host without the flag the ownership proofs fail closed (nothing is signalled) and the
+    fixtures' own completion waits name the leftover loudly."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(36, 1, 0, 0, 0) == 0
+    except (OSError, AttributeError, ValueError):
+        return False
 
 
 def _watchdog_timer_case(label, mode):
@@ -3172,6 +3437,15 @@ def _watchdog_completion_case(mode):
     import _opf_emit as emit
     import _optlevel
 
+    # QA8 (codex blocker class): arm PR_SET_CHILD_SUBREAPER so a fixture orphan
+    # (its guardian dead and collected) reparents to THIS case process and
+    # _kill_proved_child's waitid proof can own every hygiene signal below whose
+    # target is not this process itself, a Popen-managed child, or a directly
+    # forked, still-held un-reaped child. The flag is process-scoped by design:
+    # each completion case runs in its own dedicated fixture process under
+    # _watchdog_regression_self_test.
+    _case_subreaper()
+
     command = [sys.executable, "-I", "-B", "-c", "return 0"]
 
     def launch(code="return 0", **kwargs):
@@ -3675,7 +3949,8 @@ def _watchdog_completion_case(mode):
                     children = Path("/proc", str(gpid), "task", str(gpid), "children")
                     subject = int(children.read_text(encoding="ascii").split()[0])
                     await_state(subject, {"Z"}, "subject did not finish after release")
-                    os.kill(gpid, signal.SIGCONT)
+                    assert _kill_proved_child(gpid, signal.SIGCONT), \
+                        "the resume refused: the published guardian pid is not our own child"
                     await_state(gpid, {"Z", None}, "guardian did not exit after resume")
                 finally:
                     gate.set()
@@ -3764,8 +4039,10 @@ def _watchdog_completion_case(mode):
         except ChildProcessError:
             leaked = False
         if leaked:
-            os.kill(leaked_pid, signal.SIGKILL)  # hygiene for the demonstrated leak
-            os.waitpid(leaked_pid, 0)
+            # Hygiene through the ownership proof alone: _kill_proved_child re-proves
+            # the un-reaped child through a pidfd before SIGKILL and reaps through it.
+            assert _kill_proved_child(leaked_pid), \
+                "the leaked fork child could not be proved and killed"
         assert leaked, "the inline flip did not reproduce the interruptible window"
         flip_child.close()
     elif mode == "launch-cancel":
@@ -4398,7 +4675,9 @@ def _watchdog_completion_case(mode):
             assert failures and "could not confirm subject exit" in failures[0], failures
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without its kill"
-            os.kill(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            # Hygiene through the ownership proof alone (QA8): the orphan reparented
+            # to this subreaper case process, so the proof owns it before any signal.
+            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "escalation-subject":
         import time
@@ -4560,7 +4839,12 @@ def _watchdog_completion_case(mode):
         pid, guardian_fd, subject, descendant, sequence, failures = exercise(flip=True)
         assert state(subject) not in dead, "flip: the subject died without its kill step"
         assert "could not confirm subject exit" in failures[0], failures
-        os.killpg(subject, signal.SIGKILL)  # clean up the deliberately-leaked tree
+        # Clean up the deliberately-leaked tree member by member through the
+        # ownership proof (QA8): both orphans reparented to this subreaper case
+        # process; killing the proved subject reparents (and then proves) the
+        # descendant, never a numeric group kill.
+        assert _kill_proved_child(subject), "the flip cleanup refused the orphaned subject"
+        assert _kill_proved_child(descendant), "the flip cleanup refused the orphaned descendant"
         bound = time.monotonic() + 30
         while state(subject) not in dead or state(descendant) not in dead:
             assert time.monotonic() < bound, "the flip cleanup did not complete"
@@ -4657,7 +4941,12 @@ def _watchdog_completion_case(mode):
             subject, grandchild = exercise(flip=True)
             assert state(grandchild) not in (None, "Z"), \
                 "flip: the descendant died without the group kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            # Hygiene through the ownership proof alone (QA8): the reaped subject may
+            # already be gone (the proof then refuses, which is fine); the surviving
+            # descendant has reparented to this subreaper case process and must die.
+            _kill_proved_child(subject)
+            assert _kill_proved_child(grandchild), \
+                "the flip hygiene refused the orphaned descendant"
             await_state(grandchild, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "poll-collected":
         import time
@@ -4758,7 +5047,8 @@ def _watchdog_completion_case(mode):
                         "close() left the poll-collected failure's subject running")
             assert state(descendant) not in (None, "Z"), \
                 "the no-guardian path census-killed the orphaned descendant"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             await_state(descendant, (None, "Z"),
                         "the residual hygiene did not complete")
 
@@ -4806,7 +5096,11 @@ def _watchdog_completion_case(mode):
                 "flip: the subject died without close()'s kill"
             assert state(descendant) not in (None, "Z"), \
                 "flip: the descendant died without close()'s kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            # Hygiene through the ownership proof alone (QA8): both orphans reparented
+            # to this subreaper case process; the proved subject kill reparents (and
+            # then proves) the descendant, never a numeric group kill.
+            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
+            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "close-cancel":
@@ -5424,7 +5718,8 @@ def _watchdog_completion_case(mode):
             closed = close_grace(child)
             assert closed and "guardian failed" in closed[0], closed
             assert "descendants, if any, unaddressed" in closed[0], closed
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             await_state(descendant, (None, "Z"),
                         "the residual hygiene did not complete")
 
@@ -5465,7 +5760,8 @@ def _watchdog_completion_case(mode):
             closed = close_grace(child)
             assert closed and "supervision unresolved" in closed[0], closed
             assert "descendants, if any, unaddressed" in closed[0], closed
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             await_state(descendant, (None, "Z"),
                         "the residual hygiene did not complete")
 
@@ -5479,7 +5775,9 @@ def _watchdog_completion_case(mode):
             assert not closed, closed
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without close()'s kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            # Hygiene through the ownership proof alone (QA8), member by member.
+            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
+            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
 
@@ -5552,7 +5850,8 @@ def _watchdog_completion_case(mode):
                         "the lost-ownership refusal left the subject running")
             assert state(descendant) not in (None, "Z"), \
                 "the lost-ownership path census-killed the orphaned descendant"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             await_state(descendant, (None, "Z"), "the 2b hygiene did not complete")
 
             # Flip: forge the pre-fix write order's post-interruption state
@@ -5565,7 +5864,9 @@ def _watchdog_completion_case(mode):
             assert not closed, closed
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without close()'s kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            # Hygiene through the ownership proof alone (QA8), member by member.
+            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
+            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
 
@@ -5587,7 +5888,9 @@ def _watchdog_completion_case(mode):
             assert "subject tree killed" not in closed[0], closed
             assert state(subject) not in (None, "Z"), \
                 "an unpinned pid-only subject was signalled anyway"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the documented residual
+            # Hygiene through the ownership proof alone (QA8), member by member.
+            assert _kill_proved_child(subject), "the residual hygiene refused the orphaned subject"
+            assert _kill_proved_child(descendant), "the residual hygiene refused the orphaned descendant"
             await_state(subject, (None, "Z"), "the residual hygiene did not complete")
             await_state(descendant, (None, "Z"), "the residual hygiene did not complete")
 
@@ -5607,7 +5910,9 @@ def _watchdog_completion_case(mode):
                 except emit.ChildStatusUnavailable as exc:
                     closed.append(str(exc))
             assert closed and "subject cleanup unverified" not in closed[0], closed
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated blindness
+            # Hygiene through the ownership proof alone (QA8), member by member.
+            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
+            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "unpinned-kill":
@@ -5706,7 +6011,8 @@ def _watchdog_completion_case(mode):
             os.close(fd)
             assert state(descendant) not in (None, "Z"), \
                 "the no-guardian path killed the orphaned descendant"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             await_state(descendant, (None, "Z"),
                         "the leg-1 hygiene did not complete")
 
@@ -5769,7 +6075,8 @@ def _watchdog_completion_case(mode):
             assert recorded and recorded[0] == ("pidfd", fd, signal.SIGSTOP), recorded
             assert state(descendant) not in (None, "Z"), \
                 "an unpinned zombie-leader group was signalled anyway"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             os.waitpid(leader, 0)
             os.close(fd)
             await_state(descendant, (None, "Z"),
@@ -6228,10 +6535,14 @@ def _watchdog_completion_case(mode):
                 "the unaccounted member was signalled anyway")
             await_state(leader, (None, "Z"), "the leader kill never landed")
             os.close(fd)
-            os.kill(grandchild, signal.SIGKILL)  # hygiene for the NAMED member
+            # Release and collect the frozen subreaper guardian FIRST: the NAMED
+            # member then reparents from it to this subreaper case process, and
+            # only the ownership proof licenses its hygiene kill (QA8).
+            release(guardian)
+            assert _kill_proved_child(grandchild), \
+                "the leg-1 hygiene refused the orphaned member"
             await_state(grandchild, (None, "Z"),
                         "the leg-1 hygiene did not complete")
-            release(guardian)
         # Leg 2 (gemini F1): a leader SIGKILL failing with anything but
         # ProcessLookupError NAMES the surviving leader and never claims the
         # tree. The pre-fix code swallowed the failure and, with a clean
@@ -6309,9 +6620,13 @@ def _watchdog_completion_case(mode):
             await_state(leader, (None, "Z"), "the leg-3 leader survived")
             await_state(grandchild, (None, "Z"), "the leg-3 grandchild survived")
             os.close(fd)
-            os.kill(forked, signal.SIGKILL)  # hygiene for the NAMED survivor
-            await_state(forked, (None, "Z"), "the leg-3 hygiene did not complete")
+            # Release and collect the frozen subreaper guardian FIRST: the NAMED
+            # survivor then reparents to this subreaper case process, and only the
+            # ownership proof licenses its hygiene kill (QA8).
             release(guardian)
+            assert _kill_proved_child(forked), \
+                "the leg-3 hygiene refused the orphaned survivor"
+            await_state(forked, (None, "Z"), "the leg-3 hygiene did not complete")
 
         # Leg 4 (maintainer ruling PD-335-TREE-CLAIM-STALL): the "tree"
         # observation needs TWO CONSECUTIVE clean censuses -- a /proc scan
@@ -6779,10 +7094,16 @@ def _watchdog_completion_case(mode):
             assert ("subject SIGKILL attempted through its held "
                     "pidfd") in named, named
             assert "SIGKILL sent" not in named, named
-            os.kill(leader, signal.SIGKILL)  # hygiene for the surviving subject
+            # Hygiene through the ownership proof alone (QA8). Collect the guardian
+            # FIRST (SIGKILLed by the escalate finally; its delivery is asynchronous,
+            # so the proof must not race it): once it is reaped, the surviving frozen
+            # subject has reparented to this subreaper case process and the proof
+            # owns it.
+            os.waitpid(guardian, 0)
+            assert _kill_proved_child(leader), \
+                "the leg-8 hygiene refused the orphaned subject"
             await_state(leader, (None, "Z"),
                         "the leg-8 hygiene did not complete")
-            os.waitpid(guardian, 0)  # SIGKILLed by the escalate finally
             os.close(guardian_fd)
             os.close(leader_fd)
 
