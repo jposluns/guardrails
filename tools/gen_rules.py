@@ -86,7 +86,13 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
     - a YAML-special word or form as a value, such as `on`, `off`, `yes`, `no`, `y`, `n` or `null` in
       any case where a string is expected, `~`, a leading YAML indicator (`&`, `*`, `!`, `>`, `|`, `?`,
       `-`), a ` #` comment after a value, or a number with a leading zero: quote the value or reword it;
-    - a tab outside a comment (after a key's colon, in a value, or before a `#`): use spaces.
+    - a tab outside a comment (after a key's colon, in a value, or before a `#`): use spaces;
+    - spaces before a key, including a whole frontmatter block indented alike (YAML reads that as a
+      mapping), or no space after a key's colon (`slug:team-review`): write each `key: value` at column 0;
+    - a hidden or format character (such as U+200B, U+00AD or U+FEFF) anywhere in the frontmatter,
+      including in a comment line: delete it;
+    - a mapping id outside the id grammar (`A_1`, `"A.5/1"`), or a bare float id that does not print back
+      as itself (`6.70`, `6.0`, `0.00001`): quote a float id (`["6.70"]`) and reword any other id.
   In a renderer that does not read frontmatter, the opening `---` is a thematic break and the frontmatter
   lines are one paragraph, which the closing `---` makes a setext h2; if the last frontmatter line holds
   a `|`, a GFM renderer can read the lines as a table instead. Either way the first text is a frontmatter
@@ -324,8 +330,8 @@ def parse_source(path, adopter=False):
                              "rules: a renderer that does not read frontmatter can show it as a heading)"
                              .format(path.name, raw))
         if raw.startswith(" "):
-            raise ValueError("{}: frontmatter line {!r} is indented (YAML reads it as part of the key "
-                             "above)".format(path.name, raw))
+            raise ValueError("{}: frontmatter line {!r} is indented; the frontmatter grammar requires each "
+                             "key at column 0".format(path.name, raw))
         if ":" not in raw:
             raise ValueError("{}: bad frontmatter line {!r}".format(path.name, raw))
         key, val = raw.split(":", 1)
@@ -697,13 +703,18 @@ _ADOPTER_MODE_CASES = (
     ("adopter-tab-comment", _ADOPTER_MODE_SRC.format(comment="#\treviewed by the platform team\n"),
      "hidden or unassigned character"),
 )
-# Shapes ADOPTER MODE still refuses: a lone CR, a tab before the `#`, and a comment line holding a YAML
-# line break (U+2028), after which YAML would read a key.
+# Shapes ADOPTER MODE still refuses, with a refusal holding the given text: a lone CR, a tab before the
+# `#`, a comment line holding a YAML line break (U+2028), after which YAML would read a key, and a
+# frontmatter block indented alike (YAML reads a mapping; the grammar puts each key at column 0).
 _ADOPTER_MODE_REFUSALS = (
-    ("adopter-lone-cr", _ADOPTER_MODE_SRC.format(comment="").replace("\n", "\r")),
-    ("adopter-tab-before-comment", _ADOPTER_MODE_SRC.format(comment="\t# reviewed\n")),
+    ("adopter-lone-cr", _ADOPTER_MODE_SRC.format(comment="").replace("\n", "\r"), "CR byte"),
+    ("adopter-tab-before-comment", _ADOPTER_MODE_SRC.format(comment="\t# reviewed\n"),
+     "hidden or unassigned character"),
     ("adopter-comment-line-separator",
-     _ADOPTER_MODE_SRC.format(comment="# reviewed\u2028secondary: [TRUST]\n")),
+     _ADOPTER_MODE_SRC.format(comment="# reviewed\u2028secondary: [TRUST]\n"), "hidden or unassigned character"),
+    ("adopter-indented-block", "---\n" + "".join("  " + line + "\n" for line in
+                                                  _ADOPTER_MODE_SRC.format(comment="").split("\n")[1:7])
+     + "---\n# Team review\n\nCore text.\n", "is indented; the frontmatter grammar requires each key at column 0"),
 )
 # Red on revert for ADOPTER MODE: with the guard put back (or, for a refusal, loosened), the placement
 # gate's read of the case flips. (name, case, fixed text, reverted text)
@@ -722,6 +733,58 @@ _ADOPTER_MODE_REVERTS = (
 )
 
 
+# Red on revert for the ADOPTER MODE PyYAML comparison: ADOPTER MODE made to drop a key (the facet line
+# skipped as a comment). (fixed text, reverted text)
+_ADOPTER_DROP_KEY = ('comment = raw.lstrip(" ").startswith("#")',
+                     'comment = raw.lstrip(" ").startswith(("#", "facet") if adopter else "#")')
+
+
+def _yaml_compare(name, mine, theirs, failures):
+    """Append to failures each way PyYAML's frontmatter mapping theirs differs from parse_source's mine,
+    apart from the disclosed float gap. Returns the number of disclosed float-gap ids."""
+    gaps = 0
+    if not isinstance(theirs, dict) or set(mine) != set(theirs):
+        failures.append("{}: keys differ: {} vs {}".format(
+            name, sorted(mine), sorted(theirs) if isinstance(theirs, dict) else repr(theirs)))
+        return 0
+    for key, value in mine.items():
+        other = theirs[key]
+        pairs = list(zip(value, other)) if isinstance(value, list) and isinstance(other, list) and \
+            len(value) == len(other) else [(value, other)]
+        for a, b in pairs:
+            if type(a) is type(b) and a == b:
+                continue
+            if isinstance(a, str) and type(b) is float and _MAP_FLOAT_RE.fullmatch(a) and repr(b) == a:
+                gaps += 1
+                continue
+            failures.append("{}: {}: {!r} here, {!r} to YAML".format(name, key, value, other))
+            break
+    return gaps
+
+
+def _yaml_adopter_agreement(paths):
+    """Check that PyYAML safe_load reads the same frontmatter keys and values as the placement gate's read
+    (parse_source in ADOPTER MODE) for each adopter rule file in paths. YAML is given the frontmatter as
+    raw text, CRLF and comment lines included. Returns the failures, or None when PyYAML is not importable."""
+    try:
+        import yaml
+    except ImportError:
+        return None
+    failures = []
+    for path in paths:
+        found = re.match(r"---\r?\n(.*?\r?\n)---\r?\n", path.read_bytes().decode("utf-8"), re.S)
+        try:
+            mine = parse_source(path, adopter=True)
+        except ValueError as exc:
+            failures.append("{}: refused in ADOPTER MODE: {}".format(path.name, exc))
+            continue
+        if found is None:
+            failures.append("{}: no frontmatter for YAML".format(path.name))
+            continue
+        _yaml_compare(path.name, mine, yaml.safe_load(found.group(1)), failures)
+    return failures
+
+
 def _yaml_agreement(root, tmp):
     """Check that PyYAML safe_load reads the same frontmatter keys and values as parse_source, for every
     live source under root and a deterministic fuzz of accepted values. Returns (failures, live count,
@@ -734,25 +797,8 @@ def _yaml_agreement(root, tmp):
 
     def agree(path, failures):
         text = path.read_text(encoding="utf-8")
-        mine = parse_source(path)
-        theirs = yaml.safe_load(text[4:text.index("\n---\n", 4)])
-        gaps = 0
-        if set(mine) != set(theirs):
-            failures.append("{}: keys differ: {} vs {}".format(path.name, sorted(mine), sorted(theirs)))
-            return 0
-        for key, value in mine.items():
-            other = theirs[key]
-            pairs = list(zip(value, other)) if isinstance(value, list) and isinstance(other, list) and \
-                len(value) == len(other) else [(value, other)]
-            for a, b in pairs:
-                if type(a) is type(b) and a == b:
-                    continue
-                if isinstance(a, str) and type(b) is float and _MAP_FLOAT_RE.fullmatch(a) and repr(b) == a:
-                    gaps += 1
-                    continue
-                failures.append("{}: {}: {!r} here, {!r} to YAML".format(path.name, key, value, other))
-                break
-        return gaps
+        return _yaml_compare(path.name, parse_source(path), yaml.safe_load(text[4:text.index("\n---\n", 4)]),
+                             failures)
 
     failures, gaps, live = [], 0, 0
     src_dir = root / ".aiqt" / "core" / "rules"
@@ -1706,7 +1752,7 @@ def self_test_main():
 
         this = sys.modules[__name__]
         adopter_paths = {}
-        for case, content in [c[:2] for c in _ADOPTER_MODE_CASES] + list(_ADOPTER_MODE_REFUSALS):
+        for case, content in [c[:2] for c in _ADOPTER_MODE_CASES + _ADOPTER_MODE_REFUSALS]:
             adopter_paths[case] = rules / case / _ADOPTER_MODE_REL
             adopter_paths[case].parent.mkdir(parents=True)
             adopter_paths[case].write_bytes(content.encode("utf-8"))
@@ -1721,21 +1767,40 @@ def self_test_main():
                 if strict_text not in str(exc):
                     failures.append("adopter case {}: the strict refusal should say {!r}, got {}".format(
                         case, strict_text, exc))
-        for case, _content in _ADOPTER_MODE_REFUSALS:
-            if placement(this, adopter_paths[case]) is None:
+        for case, _content, refusal_text in _ADOPTER_MODE_REFUSALS:
+            got = placement(this, adopter_paths[case])
+            if got is None:
                 failures.append("adopter case {}: expected the placement gate to refuse it".format(case))
+            elif refusal_text not in got:
+                failures.append("adopter case {}: the refusal should say {!r}, got {}".format(case, refusal_text, got))
         for label, case, old, new in _ADOPTER_MODE_REVERTS:
             try:
                 mutant = _load_reverted(revert_base, "adopter-" + label, old, new)
             except AssertionError as exc:
                 failures.append(str(exc))
                 continue
-            if (placement(mutant, adopter_paths[case]) is None) != (case in dict(_ADOPTER_MODE_REFUSALS)):
+            if (placement(mutant, adopter_paths[case]) is None) != (case in {c[0] for c in _ADOPTER_MODE_REFUSALS}):
                 failures.append("revert adopter-{}: with the guard changed, the placement gate's read of case "
                                 "{} expected to flip".format(label, case))
         agreement = _yaml_agreement(repo_root(), tmp / "adopter-mode")
         if agreement is not None:
             failures.extend("YAML agreement: " + f for f in agreement[0][:20])
+        # The accepted adopter-mode cases read alike to PyYAML in ADOPTER MODE, and the comparison goes red
+        # when ADOPTER MODE is made to drop a key (here, by skipping the facet line as a comment).
+        adopter_accepted = [adopter_paths[c[0]] for c in _ADOPTER_MODE_CASES]
+        adopter_agreement = _yaml_adopter_agreement(adopter_accepted)
+        if adopter_agreement is not None:
+            failures.extend("YAML agreement (adopter mode): " + f for f in adopter_agreement)
+            try:
+                mutant = _load_reverted(revert_base, "adopter-yaml-drop-key", *_ADOPTER_DROP_KEY)
+            except AssertionError as exc:
+                failures.append(str(exc))
+            else:
+                dropped = mutant._yaml_adopter_agreement(adopter_accepted)
+                if len([f for f in dropped if "keys differ" in f]) != len(adopter_accepted):
+                    failures.append("revert adopter-yaml-drop-key: with ADOPTER MODE dropping the facet key, "
+                                    "the PyYAML comparison expected a key difference for each of the {} "
+                                    "adopter-mode case(s), got {!r}".format(len(adopter_accepted), dropped))
 
         for label, old, new, case in _PARSE_REVERTS:
             source = _detail_case_root(revert_base / label, case) / ".aiqt" / "core" / "rules" / \
@@ -1772,8 +1837,9 @@ def self_test_main():
               len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
               len(_ADOPTER_MODE_REFUSALS), len(_ADOPTER_MODE_REVERTS),
               "PyYAML agreement NOT RUN (PyYAML is not importable)" if agreement is None else
-              "PyYAML safe_load reads the same keys and values for {} live source(s) and {} fuzzed "
-              "frontmatter(s) ({} disclosed bare float id(s))".format(*agreement[1:])))
+              "PyYAML safe_load reads the same keys and values for {} live source(s), {} fuzzed "
+              "frontmatter(s) ({} disclosed bare float id(s)) and {} adopter-mode case(s) read in ADOPTER "
+              "MODE (red when ADOPTER MODE drops a key)".format(*agreement[1:], len(_ADOPTER_MODE_CASES))))
     return 0
 
 

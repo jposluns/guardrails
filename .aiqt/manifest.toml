@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c75ffaf1677e90cd36d1b86cbc7c0b7d1304e03cc2158c91b2ab2279421af8d1"
+tree-sha256 = "38e0e1e7bd276e512008c6a0cf7679ec5d86dd579312c68a8539650771b4ec97"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -117,7 +117,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2867
-sha256 = "2c34641f6ef5f4fdedcea68db2a6d8a4ccb771140c963c1269588aa39dca670c"
+sha256 = "1135d86c22a61ac7a4ac58ba7735b5521c17fb4dab28881f0fe901f3d3f2d9f6"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3491,8 +3491,8 @@ sha256 = "2f91e677d1eaf446d6f4f33b754cd6a6d80cd58888a49e8784e9d4898e38c175"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 113210
-sha256 = "629f17df6ad77f4712e871a51c5c61b58447b149d97ff4a312c015df24a3709b"
+bytes = 117467
+sha256 = "83588b3e7510ce518453744caf83bc2e63925288a55476f7b4bbcbcb1f9ee82d"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"
