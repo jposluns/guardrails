@@ -40,9 +40,13 @@ own limit depends on the model; 120,000 is the lowest value it uses, so treat it
 not a fixed limit. The gate prints two totals: PACK, the pack's own share, and SESSION, which adds the
 rest of your `CLAUDE.md` and its imports. Compare SESSION, not PACK, plus your own files under
 `~/.claude/`, such as `~/.claude/CLAUDE.md` and any rules there, against the floor when you check your setup.
-The gate over-counts by design and never under-counts. It counts every HTML comment except a whole line
-comment with blank lines around it. It follows every `@` that could name a file, even one in a code span
-or a comment, so either total can be higher than what Claude Code loads, but never lower.
+The gate reads only an enumerated grammar and exits 2, naming the file and line, on anything outside it: a
+control, format, or Unicode whitespace character other than tab and a line ending; frontmatter that is not
+plain ASCII keys and one-line string values; an `@` import that is not plain ASCII, holds a `..`, or passes
+through a symlink; and an import target it cannot read. Within that grammar it counts every HTML comment
+except a whole line comment with blank lines around it, and it follows every `@` that could name a file,
+even one in a code span or a comment, so either total can be higher than what Claude Code loads. The gate
+models the pinned Claude Code build's loader; it does not run Claude Code.
 
 Do not load `AGENTS.md` into Claude Code as well, whether through the instructionFiles setting or an
 import in `CLAUDE.md`. It carries the same rules as `.claude/rules/`, so every rule would load twice.

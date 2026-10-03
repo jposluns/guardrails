@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1bf94e699a8429927bd60f5e8d181b2e4cf997d97a44bc262e7cf66714a9bc14"
+tree-sha256 = "7c249203955d0625fa5bf0a970b3b83fe80e15faf6495dea66aa5f42fccec389"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2321,8 +2321,8 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 
 [[sources]]
 path = "README.md"
-bytes = 4268
-sha256 = "910f8faffa3ac2264513e79dc14f74d4eb31267e68ac5a236f6aefd41871440b"
+bytes = 4682
+sha256 = "08a56b39d5b11ee7e5c73bc30059a4955dc6f5a70936b479f32439c8c0414934"
 
 [[sources]]
 path = "RELEASING.md"
@@ -3241,8 +3241,8 @@ sha256 = "6be34b5b3fe9f61750b0f006ee4dd01afeb4a45b7dc630ae6183e71d789e3e9e"
 
 [[sources]]
 path = "tools/check_instruction_budget.py"
-bytes = 64834
-sha256 = "9a6dbab0c250d35536d41f745a27bf4b0cffe48fd65000b6c8e5b523e065474c"
+bytes = 84412
+sha256 = "89ebf6f712ab2e96e638ca46a8a7049aed15203e2c2305b30f5f16b9a0ba68be"
 
 [[sources]]
 path = "tools/check_internal_names.py"
@@ -3586,8 +3586,8 @@ sha256 = "c42cfe6ea421a511c3f34f268716511f0c403f7541770105951ba9ffc1cf5a07"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 25666
-sha256 = "c86b816a974d96c8c18e4beced09935d8687ef0eaadbeb866cf9d462ded0fb19"
+bytes = 26753
+sha256 = "353dbf6d84d25f3b62014e3195e0d9c3ff64d247f3f3de4399982324ffc67709"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
