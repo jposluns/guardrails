@@ -595,28 +595,31 @@ def _open_dir_fd(root_fd, rel_parts, target_rel, create=False):
                 nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             except FileNotFoundError:
                 if not create:
-                    os.close(fd)
-                    return None
-                try:
-                    os.mkdir(part, dir_fd=fd)
-                except FileExistsError:
-                    pass  # already there; the O_NOFOLLOW reopen below still refuses a link
-                try:
-                    nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-                except OSError as exc:
-                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                        raise _refusal(target_rel, comp, "directory") from exc
-                    raise
+                    nxt = None
+                else:
+                    try:
+                        os.mkdir(part, dir_fd=fd)
+                    except FileExistsError:
+                        pass  # already there; the O_NOFOLLOW reopen below still refuses a link
+                    try:
+                        nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    except OSError as exc:
+                        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                            raise _refusal(target_rel, comp, "directory") from exc
+                        raise
             except OSError as exc:
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                     raise _refusal(target_rel, comp, "directory") from exc
                 raise
-            os.close(fd)
-            fd = nxt
-        return fd
+            prev, fd = fd, nxt  # held first: a raising close cannot strand nxt, and the handler never closes prev
+            os.close(prev)
+            if fd is None:
+                return None
     except BaseException:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
         raise
+    return fd
 
 
 def _read_output(root_fd, root, path, binary, single_link=False, is_input=False):
@@ -1640,8 +1643,8 @@ def self_test_main():
             return fd
 
         race_fd = _open_root(race)
-        globals()["_open_dir_fd"] = _swapping_walk
         try:
+            globals()["_open_dir_fd"] = _swapping_walk
             _write_output(race_fd, race, instr_r, "generated replacement\n")
         finally:
             globals()["_open_dir_fd"] = real_walk
@@ -1701,9 +1704,9 @@ def self_test_main():
 
         instr_r.write_text("stale local edit\n", encoding="utf-8")
         race_fd = _open_root(race)
-        os.open, os.replace, os.rename = _b_os_open, _b_replace, _b_rename
-        builtins.open, io.open, tempfile.mkstemp = _b_fopen(real_bopen), _b_fopen(real_ioopen), _b_mkstemp
         try:
+            os.open, os.replace, os.rename = _b_os_open, _b_replace, _b_rename
+            builtins.open, io.open, tempfile.mkstemp = _b_fopen(real_bopen), _b_fopen(real_ioopen), _b_mkstemp
             _write_output(race_fd, race, instr_r, "boundary replacement\n")
         except OSError as exc:
             failures.append("the write-boundary swap made the writer fail: {}".format(exc))
@@ -1879,8 +1882,8 @@ def self_test_main():
             return names.pop(0) if names else real_temp_name(name)
 
         coll_fd = _open_root(coll)
-        globals()["_temp_name"] = _colliding_name
         try:
+            globals()["_temp_name"] = _colliding_name
             _write_output(coll_fd, coll, instr_c, "GENERATED\n")
         except OSError as exc:
             failures.append("a temporary-name collision must be retried, not fail: {}".format(exc))
@@ -1913,8 +1916,8 @@ def self_test_main():
                 os.symlink(str(mk_out), path_, dir_fd=dir_fd)
 
         mk_fd = _open_root(mk)
-        os.mkdir = _swapping_mkdir
         try:
+            os.mkdir = _swapping_mkdir
             _write_output(mk_fd, mk, mk.joinpath(*RESERVED_PARTS) / "SKILL.md", "GENERATED\n")
             failures.append("a symlink found at a just-created directory must be refused (OSError)")
         except OSError:

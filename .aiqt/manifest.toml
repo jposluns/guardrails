@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "10a97402274990f43fa50f68bb2dc778eaee770dca71c1537c544bd312504b73"
+tree-sha256 = "08356adc18a69c183b0f72809fa424e6fcf5fe9c01b85372632ac45c5889a8c7"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -122,7 +122,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2952
-sha256 = "be4150b37e67162ba97eaad597709761149dbfd447190493717009fbc33c946f"
+sha256 = "f1fbf3ad90d5f7baa5ecf034c75d069153bbf37d344303c39001894ce4425c2a"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3331,8 +3331,8 @@ sha256 = "5893faf4680c720f09083ecb4aedfdf68e8e54c5bc35a1fed33dd918ddcd64e5"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 144415
-sha256 = "91fa470bab48c2b3601e0be2124420524c996b1cd8e8f3a1bed294b54703efc1"
+bytes = 144956
+sha256 = "88be8469a6c4dc45a53d8f652e1b65f2c19f952b45377abad99d8af79751d5d6"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -3511,8 +3511,8 @@ sha256 = "99c16ff5708470fb2580288d592513d1206c4284976fa7b61307758a38c39bcd"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 129088
-sha256 = "5ab512910486ef2385b655a2a014a81ccac05c8b10187b6998f63e5bb64b149b"
+bytes = 129314
+sha256 = "3644f218ea2f9acfcf33a82373e0e00f685738c034aab9cd320b726437dc8e5d"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"
