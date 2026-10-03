@@ -563,6 +563,7 @@ def _self_test():
     original_lstat = Path.lstat
     original_open = Path.open
     original_builtin_open = builtins.open
+    original_os_open = os.open
     for stage in ("discovery", "selected", "configuration-inspection",
                   "configuration-read", "traversal", "html-read"):
         config = declaration_bytes if stage in ("selected", "configuration-read") else None
@@ -592,6 +593,14 @@ def _self_test():
                     raise PermissionError("injected: " + str(path))
                 return original_builtin_open(path, *args, **kwargs)
 
+            def deny_os_open(path, *args, **kwargs):
+                # The configuration read now goes through _gen_common.read_source_bytes, whose one
+                # descriptor comes from os.open (O_NOFOLLOW|O_NONBLOCK); inject exactly there.
+                if isinstance(path, (str, Path)) and Path(path) == target:
+                    touched.append(path)
+                    raise PermissionError("injected: " + str(path))
+                return original_os_open(path, *args, **kwargs)
+
             original_walk = walk_files
 
             def deny_walk(path, *args, **kwargs):
@@ -603,7 +612,7 @@ def _self_test():
             if stage in ("discovery", "selected", "configuration-inspection"):
                 fault = patch.object(Path, "lstat", deny_lstat)
             elif stage == "configuration-read":
-                fault = patch.object(builtins, "open", deny_builtin_open)
+                fault = patch.object(os, "open", deny_os_open)
             elif stage == "html-read":
                 fault = patch.object(Path, "open", deny_open)
             else:

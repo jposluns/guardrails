@@ -64,33 +64,48 @@ _SPECIAL_KINDS = ((stat.S_ISFIFO, "a FIFO"), (stat.S_ISSOCK, "a socket"), (stat.
 
 
 def precheck_special_files(root):
-    """Refuse a repository tree that holds a special file, before any tool reads from it
-    (D-400-SPECIAL-FILE-PRECHECK). Walk root (os.walk with a raising onerror, never following a symlink,
-    pruning every entry named .git), lstat every entry, and on the first FIFO, socket, block or character
-    device print its path and exit 2 (the gates' fail-closed exit), as on an unlistable directory. A FIFO
-    with no writer blocks any plain read of it forever, so one walk at the common entry point replaces
-    routing every reader of the tree through the non-blocking reader one by one. Runs once per process per
-    root (cached); returns root so a caller can wrap the expression that computes it.
+    """Refuse a repository tree that holds a special file or a hostile symlink, before any tool reads
+    from it (D-400-SPECIAL-FILE-PRECHECK). Walk root (os.walk with a raising onerror, never following a
+    symlink for traversal, pruning every entry named .git), lstat every entry, and on the first FIFO,
+    socket, block or character device print its path and exit 2 (the gates' fail-closed exit), as on an
+    unlistable directory. A FIFO with no writer blocks any plain read of it forever, so one walk at the
+    common entry point replaces routing every reader of the tree through the non-blocking reader one by
+    one. Runs once per process per root (cached); returns root so a caller can wrap the expression that
+    computes it.
 
-    opf/tools/_containment.py carries a copy for the standalone OPF pack, which may not import this module
-    (check_opf_standalone_closure). The two copies behave identically: check_manifest's self-test requires
-    the two functions (docstrings aside) and their two module tables to stay identical.
+    SYMLINK POLICY. Traversal never follows a symlink, but a plain reader downstream would, so every
+    symlink the walk meets is judged by its target: os.stat (which follows the link but never opens, so
+    it cannot block on a FIFO) classifies the target, and the link is refused by name when its target is
+    a special file, is missing (dangling) or unresolvable (a loop), is a DIRECTORY (a symlinked directory
+    is REFUSED rather than walked, the simpler of the two sound choices: this tree ships no directory
+    symlinks, and refusal also closes the route to a target under the pruned .git), or resolves (via
+    os.path.realpath) outside the repository root. A symlink to a regular file inside the root is
+    accepted: its target is itself walked and checked from the root.
 
-    Covered: repo_root() on its real-repository path (the .git ancestor), so each tool that finds its root
-    through it; each gate that accepts an explicit --root, on that root; and, on the root each already uses
-    and before any read, the gates that find their root on their own: check_ci_parity, check_msg_leaks,
-    check_python_floor, check_portability, check_selftest_execution (--suite), check_hooks_preview,
-    check_python_launcher_isolation, check_git_option_table and check_record_sections. The OPF copy covers
-    check_opf_homes (the opf/ subtree) and check_opf_prompt_pack (its pack directory).
-    Not covered, with reasons: check_branch_root (it reads no working-tree file, only the object database
-    through git, and is documented as liftable with no repository-local helper); check_release_cut (its
-    working-tree reads go through working_blob, a non-blocking no-follow open that refuses a non-regular
-    file); the other OPF entry points (opf.py and the check_opf_* gates act on an adopter's store, and
-    opf/tools/run_all_checks.sh runs them only as --self-test on scratch fixtures); the adopter tools whose
-    --root is a product repository (doctor, migrate, pin); helpers that are not gates on this repository
-    and library modules with no entry point; the Path.cwd() fallback of repo_root() when no .git ancestor
-    exists; a special file created after this walk (a concurrent writer); and a vanished entry (skipped).
-    The shared reader (read_source_bytes) stays on the corpus and manifest paths as defence in depth."""
+    This module is invoked directly (python3 -I -B tools/_gen_common.py --precheck) as the FIRST step of
+    .github/workflows/quality.yml and the first line of tools/run_all_checks.sh, which stops on refusal
+    (|| exit 2), so every CI gate and self-test after it runs on a tree this walk already checked.
+    opf/tools/_containment.py carries a copy for the standalone OPF pack, which may not import this
+    module (check_opf_standalone_closure), invoked the same way first in opf/tools/run_all_checks.sh. The
+    two copies behave identically: check_manifest's self-test requires the two functions (docstrings
+    aside) and their two module tables to stay identical, binds each name exactly once per module, and
+    refuses a module-level attribute rebinding (an os.walk swap) in either copy. The per-tool calls
+    (repo_root() on its .git-ancestor path, each gate's --root, the gates that find their root on their
+    own, and the direct calls in .github/check_newtab_contract.py, tools/audit_reference.py and
+    opf/tools/check_opf_init_contract.py) stay for local single-tool runs.
+
+    Not covered, with reasons (residuals): a special file CREATED after this walk, and a symlink
+    RETARGETED after this walk (a concurrent writer; one walk cannot close a race against a hostile
+    co-writer of the tree); a vanished entry (skipped); everything under .git, which this walk prunes
+    (git's own metadata is outside the tools' read set, but git itself reads it, so a FIFO planted at
+    for example .git/config still hangs the gates that invoke git; removing such a plant needs the
+    operator, not a gate); check_branch_root (it reads no working-tree file, only the object database
+    through git); check_release_cut (its working-tree reads go through working_blob, a non-blocking
+    no-follow open that refuses a non-regular file); the adopter tools whose --root is a product
+    repository (doctor, migrate, pin) when run OUTSIDE the runner, on roots the runner never sees; the
+    Path.cwd() fallback of repo_root() when no .git ancestor exists; and library modules with no entry
+    point. The shared reader (read_source_bytes) stays on the corpus and manifest paths as defence in
+    depth."""
     root = Path(root)
     key = os.path.abspath(root)
     if key in _PRECHECKED_ROOTS:
@@ -98,6 +113,11 @@ def precheck_special_files(root):
 
     def _raise(exc):
         raise exc
+
+    def _refuse(path, why):
+        print("error: {}: refused, {}; remove it; fail-closed".format(path, why), file=sys.stderr)
+        raise SystemExit(2)
+    real_root = os.path.realpath(root)
     try:
         for dirpath, dirnames, filenames in os.walk(root, onerror=_raise, followlinks=False):
             dirnames[:] = [d for d in dirnames if d != ".git"]
@@ -111,9 +131,26 @@ def precheck_special_files(root):
                     continue
                 for is_kind, kind in _SPECIAL_KINDS:
                     if is_kind(mode):
-                        print("error: {}: refused, {} in the repository tree (a special file, not a regular "
-                              "file); remove it; fail-closed".format(path, kind), file=sys.stderr)
-                        raise SystemExit(2)
+                        _refuse(path, "{} in the repository tree (a special file, not a regular "
+                                      "file)".format(kind))
+                if stat.S_ISLNK(mode):
+                    try:
+                        target_mode = os.stat(path).st_mode  # follows the link; stat never opens, so it
+                    except FileNotFoundError:                # cannot block on a FIFO target
+                        _refuse(path, "a dangling symlink (its target is missing)")
+                    except OSError as exc:
+                        _refuse(path, "a symlink whose target cannot be resolved ({})".format(exc))
+                    for is_kind, kind in _SPECIAL_KINDS:
+                        if is_kind(target_mode):
+                            _refuse(path, "a symlink to {} (a special file, not a regular "
+                                          "file)".format(kind))
+                    if stat.S_ISDIR(target_mode):
+                        _refuse(path, "a symlink to a directory (the walk never follows a symlink, so "
+                                      "its contents would evade this check)")
+                    real = os.path.realpath(path)
+                    if real != real_root and not real.startswith(real_root + os.sep):
+                        _refuse(path, "a symlink resolving outside the repository root (to "
+                                      "{})".format(real))
     except OSError as exc:
         print("error: cannot walk the repository tree {} ({}); fail-closed".format(root, exc), file=sys.stderr)
         raise SystemExit(2)
@@ -243,3 +280,22 @@ def reconcile(path, new_text, check):
     except (OSError, UnicodeError) as exc:
         print("error: cannot read or write {} ({}); fail-closed".format(path, exc), file=sys.stderr)
         raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    # Runner/CI entry (D-400-SPECIAL-FILE-PRECHECK): precheck the repository tree BEFORE any gate runs.
+    # Usage: python3 -I -B tools/_gen_common.py --precheck
+    # Exit 0 when the walk finds nothing to refuse; exit 2 (fail-closed) on a refusal, on an unknown
+    # argument, or when no .git ancestor locates the repository root.
+    if sys.argv[1:] != ["--precheck"]:
+        print("usage: python3 -I -B tools/_gen_common.py --precheck", file=sys.stderr)
+        raise SystemExit(2)
+    _entry = Path(__file__).resolve()
+    for _anc in _entry.parents:
+        if (_anc / ".git").exists():
+            precheck_special_files(_anc)
+            print("PASS: special-file precheck found nothing to refuse in {}".format(_anc))
+            raise SystemExit(0)
+    print("error: no .git ancestor above {}; cannot locate the repository root; fail-closed".format(_entry),
+          file=sys.stderr)
+    raise SystemExit(2)

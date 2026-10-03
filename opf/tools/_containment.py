@@ -60,21 +60,37 @@ _SPECIAL_KINDS = ((stat.S_ISFIFO, "a FIFO"), (stat.S_ISSOCK, "a socket"), (stat.
 
 
 def precheck_special_files(root):
-    """Refuse an OPF tree that holds a special file, before an OPF tool reads from it
-    (D-400-SPECIAL-FILE-PRECHECK). This is the standalone OPF pack's copy of
+    """Refuse an OPF tree that holds a special file or a hostile symlink, before an OPF tool reads from
+    it (D-400-SPECIAL-FILE-PRECHECK). This is the standalone OPF pack's copy of
     tools/_gen_common.precheck_special_files: the pack may not import tools/ (check_opf_standalone_closure),
     and the two copies behave identically (tools/check_manifest.py's self-test requires the two functions,
-    docstrings aside, and their two module tables to stay identical). Walk root (os.walk with a raising
-    onerror, never following a symlink, pruning every entry named .git), lstat every entry, and on the first
-    FIFO, socket, block or character device print its path and exit 2 (fail-closed), as on an unlistable
-    directory. A FIFO with no writer blocks any plain read of it forever. Runs once per process per root
-    (cached); returns root so a caller can wrap the expression that computes it.
+    docstrings aside, and their two module tables to stay identical, binds each name exactly once per
+    module, and refuses a module-level attribute rebinding in either copy). Walk root (os.walk with a
+    raising onerror, never following a symlink for traversal, pruning every entry named .git), lstat every
+    entry, and on the first FIFO, socket, block or character device print its path and exit 2
+    (fail-closed), as on an unlistable directory. A FIFO with no writer blocks any plain read of it
+    forever. Runs once per process per root (cached); returns root so a caller can wrap the expression
+    that computes it.
 
-    Covered: the two entry points that opf/tools/run_all_checks.sh runs outside --self-test,
-    check_opf_homes (on the opf/ subtree it reads the spec from) and check_opf_prompt_pack (on its pack
-    directory). Not covered, with reasons: opf.py and the other check_opf_* gates (they act on an adopter's
-    store, and run_all_checks.sh runs them only as --self-test on scratch fixtures), a special file created
-    after this walk (a concurrent writer), and a vanished entry (skipped)."""
+    SYMLINK POLICY (same as the tools/ copy). Every symlink the walk meets is judged by its target:
+    os.stat (follows the link, never opens, so it cannot block on a FIFO) classifies it, and the link is
+    refused by name when the target is a special file, is missing (dangling) or unresolvable (a loop), is
+    a DIRECTORY (a symlinked directory is REFUSED rather than walked), or resolves outside the root. A
+    symlink to a regular file inside the root is accepted: the target is walked from the root itself.
+
+    This module is invoked directly (python3 -I -B "$here/_containment.py" --precheck) as the FIRST line
+    of opf/tools/run_all_checks.sh, which stops on refusal (|| exit 2); the root is the nearest .git
+    ancestor (in the authoring repo, the whole repository) or, in a standalone opf/ checkout with no .git
+    ancestor, the opf/ tree itself. Every gate and self-test the runner then runs acts on a tree this walk
+    already checked; the per-tool calls in check_opf_homes (the opf/ subtree), check_opf_prompt_pack (its
+    pack directory) and check_opf_init_contract (the repository root) stay for local single-tool runs.
+    In the authoring repo, tools/run_all_checks.sh and .github/workflows/quality.yml also run the live
+    legs of check_opf_drift, check_opf_doctor, check_opf_init, check_opf_init_contract and
+    check_opf_upgrade; those runs sit behind the runner-level precheck, and apart from
+    check_opf_init_contract their store reads act on an adopter's store (NOT APPLICABLE in this repo).
+    Residuals: a special file created, or a symlink retargeted, after this walk (a concurrent writer); a
+    vanished entry (skipped); and everything under .git, which this walk prunes (git's own reads of its
+    metadata included)."""
     root = Path(root)
     key = os.path.abspath(root)
     if key in _PRECHECKED_ROOTS:
@@ -82,6 +98,11 @@ def precheck_special_files(root):
 
     def _raise(exc):
         raise exc
+
+    def _refuse(path, why):
+        print("error: {}: refused, {}; remove it; fail-closed".format(path, why), file=sys.stderr)
+        raise SystemExit(2)
+    real_root = os.path.realpath(root)
     try:
         for dirpath, dirnames, filenames in os.walk(root, onerror=_raise, followlinks=False):
             dirnames[:] = [d for d in dirnames if d != ".git"]
@@ -95,11 +116,48 @@ def precheck_special_files(root):
                     continue
                 for is_kind, kind in _SPECIAL_KINDS:
                     if is_kind(mode):
-                        print("error: {}: refused, {} in the repository tree (a special file, not a regular "
-                              "file); remove it; fail-closed".format(path, kind), file=sys.stderr)
-                        raise SystemExit(2)
+                        _refuse(path, "{} in the repository tree (a special file, not a regular "
+                                      "file)".format(kind))
+                if stat.S_ISLNK(mode):
+                    try:
+                        target_mode = os.stat(path).st_mode  # follows the link; stat never opens, so it
+                    except FileNotFoundError:                # cannot block on a FIFO target
+                        _refuse(path, "a dangling symlink (its target is missing)")
+                    except OSError as exc:
+                        _refuse(path, "a symlink whose target cannot be resolved ({})".format(exc))
+                    for is_kind, kind in _SPECIAL_KINDS:
+                        if is_kind(target_mode):
+                            _refuse(path, "a symlink to {} (a special file, not a regular "
+                                          "file)".format(kind))
+                    if stat.S_ISDIR(target_mode):
+                        _refuse(path, "a symlink to a directory (the walk never follows a symlink, so "
+                                      "its contents would evade this check)")
+                    real = os.path.realpath(path)
+                    if real != real_root and not real.startswith(real_root + os.sep):
+                        _refuse(path, "a symlink resolving outside the repository root (to "
+                                      "{})".format(real))
     except OSError as exc:
         print("error: cannot walk the repository tree {} ({}); fail-closed".format(root, exc), file=sys.stderr)
         raise SystemExit(2)
     _PRECHECKED_ROOTS.add(key)
     return root
+
+
+if __name__ == "__main__":
+    # Runner entry (D-400-SPECIAL-FILE-PRECHECK): precheck the tree BEFORE any OPF gate runs.
+    # Usage: python3 -I -B opf/tools/_containment.py --precheck
+    # The root is the nearest .git ancestor, so in the authoring repo the whole repository is walked; a
+    # standalone opf/ checkout with no .git ancestor walks the opf/ tree (this file's parents[1]).
+    # Exit 0 when the walk finds nothing to refuse; exit 2 (fail-closed) on a refusal or unknown argument.
+    if sys.argv[1:] != ["--precheck"]:
+        print("usage: python3 -I -B opf/tools/_containment.py --precheck", file=sys.stderr)
+        raise SystemExit(2)
+    _entry = Path(__file__).resolve()
+    _root = _entry.parents[1]
+    for _anc in _entry.parents:
+        if (_anc / ".git").exists():
+            _root = _anc
+            break
+    precheck_special_files(_root)
+    print("PASS: special-file precheck found nothing to refuse in {}".format(_root))
+    raise SystemExit(0)

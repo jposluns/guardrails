@@ -23,6 +23,12 @@ notrun=0
 # names are listed again before RESULT: FAIL; a failing suite never needs a hand re-run to find it.
 failed_names=""
 
+# D-400-SPECIAL-FILE-PRECHECK: ONE walk of the repository tree BEFORE any gate runs. A special file (a
+# FIFO above all: a plain read of a FIFO with no writer blocks forever), a dangling symlink, a symlink
+# to a special file or a directory, or a symlink resolving outside the repository root is refused by
+# name and the run STOPS here with exit 2; every gate and self-test below then acts on a checked tree.
+python3 -I -B tools/_gen_common.py --precheck || exit 2
+
 run_gate() {
   local name="$1"; shift
   echo "--- ${name} ---"

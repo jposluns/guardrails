@@ -18,6 +18,11 @@ failed=0
 # subset never needs a hand re-run to find which gate failed.
 failed_names=""
 
+# D-400-SPECIAL-FILE-PRECHECK: ONE walk of the tree (the nearest .git ancestor, or the standalone opf/
+# tree) BEFORE any gate runs; a special file or a hostile symlink is refused by name and the run STOPS
+# here with exit 2, so no gate or self-test below can block on a plain read of a FIFO.
+python3 -I -B "$here/_containment.py" --precheck || exit 2
+
 run_gate() {
   local name="$1"; shift
   echo "--- ${name} ---"

@@ -43,7 +43,10 @@ invocations cannot be detected if nobody runs the remaining file manually. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
-blocks or the top-level directory-binding line before the first gate, unbalanced
+blocks, the top-level directory-binding line before the first gate, or the reviewed
+special-file-precheck abort line (PRECHECK_ABORT_LINES, top level before the first
+gate; it stops the run, exit 2, on a refused tree so no later gate can block on a
+plain read of a FIFO), unbalanced
 if/fi nesting in the runner, a duplicate else or an empty then or else branch,
 any character outside printable ASCII (0x20-0x7E) plus tab and newline in
 either input file, job content without a job mapping, a run_gate()
@@ -61,9 +64,10 @@ not a blocklist of known-bad spellings. The only recognized [ ] tests are
 if [ "$failed" -ne 0 ]; then, if [ "$notrun" -ne 0 ]; then, and the two exact
 gitleaks lookup lines, so a -v operand (whose subscript can assign), any NAME[...]
 subscript operand, a bare [ ] line, and every unlisted test form are unclassified.
-set -uo pipefail or set -euo pipefail, and the directory-binding
-cd "$(dirname "$0")/.." || exit 2 line, are accepted only at top level before the
-first gate. A bare then or done is never a runner line, and else is accepted only
+set -uo pipefail or set -euo pipefail, the directory-binding
+cd "$(dirname "$0")/.." || exit 2 line, and the special-file-precheck abort line
+(registered as a roster member, so the CI workflow's matching first step keeps set
+parity), are accepted only at top level before the first gate. A bare then or done is never a runner line, and else is accepted only
 inside an open if block that holds at least one then-branch statement and is not
 already in its else branch. Every other assignment, export or echo line must be
 byte-for-byte one of the
@@ -245,6 +249,20 @@ MASKED_REF_EXPRESSIONS = frozenset({
 
 # One repository-local, non-shipped gate; no general .github executable allowance.
 REPO_GATE = ".github/check_newtab_contract.py"
+
+# D-400-SPECIAL-FILE-PRECHECK: the ONE accepted abort line outside the terminal summary
+# blocks and the directory binding, keyed by exact spelling (local runner, and the
+# standalone OPF runner AFTER adapt_standalone_runner rebases "$here/ to "opf/tools/).
+# Each runner runs its precheck FIRST and stops (exit 2) on a refusal, so no later gate
+# can block on a plain read of a FIFO. The line is accepted only at top level before any
+# gate, and it registers the mapped normalized command as a roster member, so the CI
+# workflow's matching first step keeps set parity by construction.
+PRECHECK_ABORT_LINES = dict((
+    ("python3 -I -B tools/_gen_common.py --precheck || exit 2",
+     "tools/_gen_common.py --precheck"),
+    ('python3 -I -B "opf/tools/_containment.py" --precheck || exit 2',
+     "opf/tools/_containment.py --precheck"),
+))
 
 ALLOWLIST = (
     {
@@ -1378,6 +1396,17 @@ def extract_local(text):
             # Only where the real runner puts it: top level, before any gate. A
             # later notrun=0 would clear the NOT RUN state and hide its disclaimer.
             scaffold = not if_stack and not members
+        elif stripped in PRECHECK_ABORT_LINES:
+            # Only where the real runners put it: top level, before any gate
+            # (D-400-SPECIAL-FILE-PRECHECK). The one accepted abort outside the
+            # terminal summaries: it stops the whole run (exit 2) on a refused tree,
+            # so no later gate can block on a plain read of a FIFO. A second
+            # spelling, or one after a gate, stays unclassified. The command is a
+            # roster member, keeping set parity with the CI workflow's first step.
+            scaffold = not if_stack and not members
+            if scaffold:
+                _add_member(members, origins, line_number,
+                            PRECHECK_ABORT_LINES[stripped])
         elif stripped == PATH_APPEND_LINE:
             # Only where the real runner puts it: the HOME guard's then branch,
             # which has just proven HOME non-empty. The guard's else branch
@@ -2507,12 +2536,18 @@ def runner_naming_problems(text, first_only=False):
                 return ["runner stub does not support {!r}".format(command)]
             registered.append((name, " ".join(command[1:])))
             roster.append((name, " ".join(command)))
+        elif raw.strip() in PRECHECK_ABORT_LINES:
+            # The precheck abort line: a stub python3 call with no run_gate header
+            # (D-400-SPECIAL-FILE-PRECHECK); the stub passes it, so the abort stays
+            # un-taken and the roster run continues.
+            roster.append((None, " ".join(raw.strip().split(" ")[:-3])))
         elif tokens[:2] == ["if", "gitleaks"]:
             roster.append(("secrets (gitleaks)", " ".join(tokens[1:-1]).rstrip(";")))
     if not registered:
         return ["runner has no registered gates"]
     expected_calls = [command for name, command in roster]
-    expected_headers = ["--- {} ---".format(name) for name, command in roster]
+    expected_headers = ["--- {} ---".format(name)
+                        for name, command in roster if name is not None]
     scenarios = _naming_scenarios(text)
     problems = []
     workers = 4

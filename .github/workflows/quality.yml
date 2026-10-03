@@ -31,6 +31,12 @@ jobs:
 
       # Each gate runs as its own step so a failure names itself in the UI.
       # No step carries continue-on-error: a gate that cannot fail is decorative.
+      # D-400-SPECIAL-FILE-PRECHECK runs FIRST: one walk refuses a special file (a FIFO above all, whose
+      # plain read with no writer blocks forever) or a hostile symlink by name, so every gate and
+      # self-test below acts on a checked tree. A refusal fails this step (exit 2) and stops the job.
+      - name: Special-file precheck
+        run: python3 -I -B tools/_gen_common.py --precheck
+
       - name: Secrets (project scanner)
         run: python3 -I -B tools/check_secrets.py
 

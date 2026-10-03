@@ -306,6 +306,10 @@ def red_on_revert(source, f):
 RUNNER_PATH_PIN = "readonly PATH\n"
 
 
+# The exact precheck abort line opf/tools/run_all_checks.sh carries before its first
+# run_gate registration (D-400-SPECIAL-FILE-PRECHECK).
+PRECHECK_LINE = 'python3 -I -B "$here/_containment.py" --precheck || exit 2'
+
 def runner_check(expected, text=None, *, fail_own=0):
     import errno
     import fcntl
@@ -365,6 +369,19 @@ def runner_check(expected, text=None, *, fail_own=0):
     roster = []
     try:
         for line in runner.read_text(encoding="utf-8").splitlines():
+            if line.strip() == PRECHECK_LINE:
+                # D-400-SPECIAL-FILE-PRECHECK: the runner's first python3 call is the
+                # tree precheck, outside run_gate; it reaches the same executable
+                # fixture, so the recorded roster carries it in order.
+                roster.append(tuple(os.fsencode(word) for word in
+                                    ("-I", "-B", str(here / "_containment.py"),
+                                     "--precheck")))
+                continue
+            if line.strip().startswith("python3 "):
+                # Any OTHER bare python3 line (including a mutated precheck
+                # spelling) is an unrecognized invocation the fixture would
+                # record outside the roster: refuse before launch.
+                raise ValueError(line)
             if line.lstrip().startswith("run_gate "):
                 words = [word.replace("$here", str(here)) for word in shlex.split(line)]
                 if (any("$" in word for word in words)

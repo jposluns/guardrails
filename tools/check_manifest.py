@@ -369,8 +369,38 @@ def _precheck_copies_problems(gen_text, opf_text):
     """D-400-SPECIAL-FILE-PRECHECK: precheck_special_files in tools/_gen_common.py and its copy in
     opf/tools/_containment.py (the standalone OPF pack may not import tools/) must stay identical: the
     function with its docstring set aside, and the module tables _PRECHECKED_ROOTS and _SPECIAL_KINDS,
-    compared as parsed trees. Returns the problems, empty when the two copies are in step."""
+    compared as parsed trees. Beyond equality of those three parts, each MODULE is held to two shape
+    rules that keep the compared definitions the OPERATIVE ones: each of the three names is bound exactly
+    once anywhere in the module (a later `precheck_special_files = lambda root: root` would silently
+    replace the compared function), and no statement in either module stores to or deletes an ATTRIBUTE
+    anywhere (an `os.walk = ...` rebinding at module level would neuter the walk while the compared trees
+    stay equal; neither module legitimately assigns any attribute). Returns the problems, empty when the
+    two copies are in step."""
     import ast
+
+    guarded = ("precheck_special_files", "_PRECHECKED_ROOTS", "_SPECIAL_KINDS")
+
+    def shape_problems(text, label, problems):
+        bindings = dict.fromkeys(guarded, 0)
+        for sub in ast.walk(ast.parse(text)):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)) \
+                    and sub.id in bindings:
+                bindings[sub.id] += 1
+            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                    and sub.name in bindings:
+                bindings[sub.name] += 1
+            elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                for alias in sub.names:
+                    if (alias.asname or alias.name) in bindings:
+                        bindings[alias.asname or alias.name] += 1
+            elif isinstance(sub, ast.Attribute) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+                problems.append("{} stores to or deletes an attribute ({}.{}), which can rebind a "
+                                "dependency (an os.walk swap) out from under the compared function".format(
+                                    label, getattr(sub.value, "id", "<expr>"), sub.attr))
+        for name, count in bindings.items():
+            if count > 1:
+                problems.append("{} binds {} {} times; a later rebinding would silently replace the "
+                                "compared definition".format(label, name, count))
 
     def parts(text):
         found = {}
@@ -388,8 +418,10 @@ def _precheck_copies_problems(gen_text, opf_text):
                 found[node.targets[0].id] = ast.dump(node.value)
         return found
 
-    gen, opf = parts(gen_text), parts(opf_text)
     problems = []
+    shape_problems(gen_text, "_gen_common", problems)
+    shape_problems(opf_text, "_containment", problems)
+    gen, opf = parts(gen_text), parts(opf_text)
     for name in ("precheck_special_files", "_PRECHECKED_ROOTS", "_SPECIAL_KINDS"):
         if name not in gen or name not in opf:
             problems.append("{} missing from {}".format(
@@ -806,6 +838,14 @@ def _self_test_main_isolated():
         if not _precheck_copies_problems(gen_text, opf_text.replace("raise SystemExit(2)", "raise SystemExit(1)", 1)):
             failures.append("D-400-SPECIAL-FILE-PRECHECK: a changed exit code in the OPF precheck copy was not "
                             "caught by the copy comparison")
+        rebound = opf_text + "\n\nprecheck_special_files = lambda root: root\n"
+        if not _precheck_copies_problems(gen_text, rebound):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a later rebinding of the OPF precheck copy (an "
+                            "appended lambda) was not caught by the copy comparison")
+        swapped = opf_text + "\n\nos.walk = precheck_special_files\n"
+        if not _precheck_copies_problems(gen_text, swapped):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a module-level attribute rebinding (an os.walk "
+                            "swap) in the OPF precheck copy was not caught by the copy comparison")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
