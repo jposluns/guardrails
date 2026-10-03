@@ -123,7 +123,11 @@ example) is not modelled. Every line that names the key is still judged as writt
 included, so script text that names it fails closed, a disclosed over-rejection. The leg checks only
 the python-version input of a setup-python step: an update-environment: false input, or an if:
 condition that skips the step, can leave another interpreter in use by later steps, and is not
-judged. What remains: the inline Python copy is read only by the pin rule, not the grammar, so a
+judged. Further disclosed over-rejections, each failing closed (exit 2): a step whose `-` marker
+stands alone on its line, a matrix or expression pin even when the matrix holds only the floor, and
+a file that opens with a byte-order mark. The line model does not check that one mapping's
+indentation is consistent, so a workflow the YAML specification rejects can pass; it runs no
+interpreter. What remains: the inline Python copy is read only by the pin rule, not the grammar, so a
 multi-line flow value around a pin there is not refused, and its lines are read as written, so a
 Python string escape there (a backslash x73 for s, for example) that hides a uses: or setup-python
 spelling is not decoded (the canonical-copy check in opf/tools/check_opf_doctor.py, which ties that
