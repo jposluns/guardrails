@@ -475,11 +475,23 @@ def _prose_problem(line):
     return None
 
 
+class BodyGrammarError(ValueError):
+    """A rule source the BODY GRAMMAR refuses. It is a ValueError, so every caller that maps a malformed
+    source to a fail-closed exit still does, and it also carries the source name, the refused 1-based line
+    (None when the body has no title line) and the channel the line belongs to ("title" or "body"), so a
+    scanner that enumerates page-bound strings (check_overclaim) can report the refusal as a flagged
+    finding naming the file, line and grammar message instead of raising."""
+
+    def __init__(self, message, name, line, channel):
+        super().__init__(message)
+        self.source, self.line, self.channel = name, line, channel
+
+
 def detail_heading_line(text, name):
     """The 1-based line number of the single accepted `## Detail` split in a rule source's body, or None
     when the source has none. Raises ValueError on each refused layout that RULE SOURCE FORMAT lists,
-    other than the frontmatter keys and the empty detail layer (check_detail). check_clauses derives each
-    clause's layer from it."""
+    other than the frontmatter keys and the empty detail layer (check_detail), as a BodyGrammarError (a
+    ValueError). check_clauses derives each clause's layer from it."""
     first = body_first_line(text, name)
     lines = text.split("\n")
     title = found = None
@@ -491,25 +503,26 @@ def detail_heading_line(text, name):
             title, problem = number, _title_problem(line)
         elif line == DETAIL_HEADING:
             if found is not None:
-                raise ValueError("{}: more than one '{}' line (lines {} and {})".format(
-                    name, DETAIL_HEADING, found, number))
+                raise BodyGrammarError("{}: more than one '{}' line (lines {} and {})".format(
+                    name, DETAIL_HEADING, found, number), name, number, "body")
             found = number
             continue
         else:
             problem = _prose_problem(line)
         if _names_detail(line):
-            raise ValueError("{}: line {}: {!r} reads as Detail but is not the split line '{}'".format(
-                name, number, line, DETAIL_HEADING))
+            raise BodyGrammarError("{}: line {}: {!r} reads as Detail but is not the split line '{}'".format(
+                name, number, line, DETAIL_HEADING), name, number, "title" if number == title else "body")
         if problem is not None:
-            raise ValueError("{}: line {}: {!r} is outside the body grammar ({})".format(
-                name, number, line, problem))
+            raise BodyGrammarError("{}: line {}: {!r} is outside the body grammar ({})".format(
+                name, number, line, problem), name, number, "title" if number == title else "body")
     if title is None:
-        raise ValueError("{}: the body has no title line ('# ' and its text)".format(name))
+        raise BodyGrammarError("{}: the body has no title line ('# ' and its text)".format(name),
+                               name, None, "title")
     if found is None:
         return None
     if found > first and lines[found - 2] != "":
-        raise ValueError("{}: line {}: the '{}' split needs a blank line directly above it".format(
-            name, found, DETAIL_HEADING))
+        raise BodyGrammarError("{}: line {}: the '{}' split needs a blank line directly above it".format(
+            name, found, DETAIL_HEADING), name, found, "body")
     return found
 
 
@@ -1143,7 +1156,7 @@ _DETAIL_CASES = (
     ("r10-element-floats-ok", "map-iso-42001-broad: [6.2, 6.7, 8.1, 10.2, 0.0001]\n" + _TRIGGER,
      _DETAIL_BODY, 0),
     ("r10-element-quoted-escape", 'map-iso-42001-broad: ["a\x5cx41"]\n' + _TRIGGER, _DETAIL_BODY, 2),
-    ("r10-duplicate-key", _TRIGGER + "detail-trigger: writing another fixture\n", _DETAIL_BODY, 2),
+    ("r10-duplicate-field", _TRIGGER + "detail-trigger: writing another fixture\n", _DETAIL_BODY, 2),
     # The BODY GRAMMAR: one case per refused shape (each exits 2); a grammar-title case sets its title
     # through _CASE_FRAME.
     ("grammar-no-title", "", "", 2),
@@ -1564,7 +1577,7 @@ _DETAIL_REVERTS = (
     _revert("fm-r10-element-float-exponent", "r10-element-float-exponent", _FMREPR),
     _revert("fm-r10-element-float-exponent-6", "r10-element-float-exponent-6", _FMREPR),
     _revert("fm-r10-element-quoted-escape", "r10-element-quoted-escape", _FMQUOTED),
-    _revert("fm-r10-duplicate-key", "r10-duplicate-key", _FMDUP),
+    _revert("fm-r10-duplicate-field", "r10-duplicate-field", _FMDUP),
     _revert("body-grammar-no-title", "grammar-no-title", _NOTITLE),
     _revert("body-grammar-title-not-first", "grammar-title-not-first", _TITLE, _PROSE),
     _revert("body-grammar-title-no-space", "grammar-title-no-space", _TSTART),
