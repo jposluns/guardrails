@@ -23,9 +23,13 @@ as a fresh start:
   behaviour and present it as the standard's: follow the procedure in "Where the specification is
   silent or open" below.
 
-Work through the implementation plan in order. Each step ends with acceptance checks; do not start
-the next step until the current step's checks pass, and report any check you could not run as not
-run, never as passed.
+Work through the implementation plan in order. Each step ends with acceptance checks, and each
+check uses only what that step and the steps before it build; no check depends on a later step. Do
+not start the next step until the current step's checks pass, and report any check you could not
+run as not run, never as passed. Until step 8 (initialization) exists, the tests of steps 3 to 7
+build their throwaway stores themselves, from sections 4 and 9 of the specification, with your own
+canonical emitter (step 1) and, from step 5 on, your own renderer; the QUICKSTART notes that a
+store can be built by hand from those sections.
 
 ## Read the specification first
 
@@ -61,13 +65,21 @@ Facts about these sources that shape the work:
   the schema release that follows the specification is normative. Several formats in the
   specification are therefore illustrative, and some details are left open. This prompt lists the
   open points it found; you may find more.
-- Section 4.2 (Layout overview) says the base spec 1.3.0 requirements for adoption and the
-  imported series are a target contract, and that the homes-2 contract (`spec_version = "2.0.0"`,
-  `[opf].homes = 2`) is a separate, later activation. Section 9 (The manifest) says its manifest
-  example describes the 1.3.0 target on legacy homes.
-- The prompt pack manifest at the pinned commit lists no members. The specification uses the
-  prompt pack only for post-adoption import (section 14.1, One approval and completion), which a
-  fresh start does not perform, so you need nothing from it.
+- Section 4.2 (Layout overview) says that the 1.3.0 requirements in sections 4.2, 6.1, 8, 9.2, 11,
+  12 and 14 are a target contract, which does not claim that the reference tooling has activated
+  adoption, imported-series validation or the import writer, and that "Activation MUST include the
+  tested upgrade in section 9.2 and deterministic doctor coverage before a writer accepts the new
+  format". How that applies to a new implementation is open point 21. The same section says the
+  homes-2 contract (`spec_version = "2.0.0"`, `[opf].homes = 2`) is a separate, later activation,
+  and that the section 9 manifest example describes the 1.3.0 target on legacy homes.
+- The prompt pack manifest at the pinned commit (`format = "opf.prompt-pack/v1"`,
+  `version = "0.1.0"`) lists no members. The pack has two roles in the specification, and this
+  fresh start needs neither. Its prompts drive post-adoption import (section 14.1, One approval
+  and completion), which a fresh start does not perform, so there are no import prompts to run.
+  Separately, section 14.1 says every `opf.adoption.plan/v2` plan MUST bind "the version and digest
+  of the prompt pack". This prompt reads section 14 as not requiring an adoption plan for a scaffold
+  with nothing to disposition (open point 14); if the maintainer rules otherwise, the plan binds the
+  `version` and `digest` values of the pinned `pack.toml`.
 - Cite the specification as this prompt does: by file and section heading, for example
   "OPF-SPEC.md, section 8.2 (ID namespaces and counters)".
 
@@ -81,12 +93,14 @@ Facts about these sources that shape the work:
   write to the imported series (`<type>.imported.index.toml`, `worklog.imported.toml`), do not set
   `import_status` to anything but `"none"`, and do not create evidence under `.working/imported/`.
   Pre-existing operational files in your project stay where they are unless the maintainer decides
-  otherwise (see step 7).
+  otherwise (see step 8).
 - Do not claim conformance unless every item of the final conformance checklist passes, and even
   then use only the scoped vocabulary of OPF-SPEC.md, section 16 (Conformance vocabulary and
   claims). Never write an unqualified "OPFiles conformant" or "OPF conformant", and say that the
   claim is self-asserted.
 - Do not present a choice you made in a gap of the specification as a requirement of the standard.
+  A requirement the specification states as MUST is never optional; if this prompt seems to make one
+  optional, follow the specification and report the difference.
 - Do not author records that only a maintainer may author or ratify (see step 13), do not weaken
   the enforcement posture, and do not publish a changelog summary without the maintainer's
   curation.
@@ -102,9 +116,11 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   `spec_version = "1.3.0"` and no `homes` key. Do not declare `homes = 2` or
   `spec_version = "2.0.0"`; both are reserved for a later activation (section 4.2, Layout overview;
   section 9.2, Store schema upgrades). Omit the `[opf].worklog` key or set it to `1`; `2` is
-  reserved and refused (section 9, The manifest). Note that section 9.2 says the 1.2.0 reference
-  validator refuses a 1.3.0 declaration as above its ceiling, so the reference tooling at the pinned
-  commit will not validate your store; that is expected and is not a fault in your store.
+  reserved and refused (section 9, The manifest). Your implementation has no earlier store
+  generation to upgrade, so it accepts only a store declaring 1.3.0 (open point 21). Note that
+  section 9.2 says the 1.2.0 reference validator refuses a 1.3.0 declaration as above its ceiling,
+  so the reference tooling at the pinned commit will not validate your store; that is expected and
+  is not a fault in your store.
 - **Location.** Use the default in-repo store: `.working/` in your project, with the pointer
   `.opf.toml` holding `[store] target = "dir:."` (section 4.3, The pointer; section 5.2, Location
   is a configuration). Relocation (`opf migrate`) is optional and out of this prompt's minimum.
@@ -118,15 +134,24 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   optional and ignored by base-only tooling (section 9.1, Base standard and profiles).
 - **Posture.** `posture = "required"` and `import_status = "none"` (section 11, Enforcement
   posture, "Defaults").
+- **Initialization.** Implement coupled initialization, `opf.init.coupled/v1`, in full (step 8;
+  OPF-INIT-D2B.md). OPF-INIT-D2B.md identifies the older source-only behaviour as
+  `opf.init.source-only/v1` and defines it only as the shipped tooling's existing behaviour, so it
+  cannot be implemented from the specification; do not implement it as a substitute and do not
+  claim that identifier.
+- **Platforms.** Wire all four supported platforms, Claude Code, Codex, Gemini CLI and Cursor,
+  not only the one you run on (step 13; section 14.1).
 
 ## Where the specification is silent or open
 
 The specification leaves the points below open, or states them only as examples. For each one,
 choose the narrowest deterministic behaviour that satisfies every rule the specification does
 state, write the choice in your implementation notes with the section it fills, and ask the
-maintainer to ratify it. Once the store exists, record each open question as a `pending_decision`
-record; only the maintainer records the ruling. In your conformance report, list these choices as
-implementation choices, not as requirements of the standard.
+maintainer to ratify it. Where this prompt proposes a choice, it is labelled as this prompt's
+choice or reading, and it is still yours to confirm. Once the store exists, record each open
+question as a `pending_decision` record; only the maintainer records the ruling. In your
+conformance report, list these choices as implementation choices, not as requirements of the
+standard. None of them makes a stated MUST optional.
 
 1. **Closed schemas per type.** Section 8.3 (The record envelope) says schemas are closed and types
    add their own fields, but the specification names only some type fields: `severity` on a
@@ -156,30 +181,77 @@ implementation choices, not as requirements of the standard.
    10.3 says every generated file opens with a do-not-edit header, and the specification does not
    say how that applies to `VERSION`.
 9. **Release cut.** Sections 6.1, 6.2 and 7.2 define the release row and the freeze, but the
-   command vocabulary in section 1 names no release verb.
+   command vocabulary in section 1 names no release verb. Section 7.1 also makes every released
+   version fall in exactly one non-superseded summary row with exactly one matching heading in
+   `CHANGELOG.md`, so a release row alone fails range coverage until its summary row and heading
+   exist, and the specification does not say how they land together. This prompt's choice: the cut
+   appends the `[[release]]` row, a `working` `[[summary]]` row for that version, and the bare
+   `## <version>` heading with no prose, in one operation, and the maintainer curates the prose
+   before publication (section 7.3).
 10. **Exit codes and flags beyond `opf record`.** Section 8.8 fixes `opf record` at exit 0 or 2,
     and OPF-INIT-D2B.md states when coupled init may exit 0. The reference CI recipe uses 0, 1 and 2
     for `doctor` and `render --check` (step 12). The specification fixes no other flags or exit
     codes.
-11. **Journal location.** Section 8.8, item 6 requires a crash-durable journaled transaction and
-    names only the reference tooling's homes-1 location, which is under `.aiqt/`, an AIQT-owned
-    directory (section 15). Do not use `.aiqt/`. Choose a location, make it machine-local, and
-    record the choice.
+11. **Journal and lock locations.** Section 8.8, item 6 requires a crash-durable journaled
+    transaction and names only the reference tooling's homes-1 location, `.aiqt/record/journal`.
+    OPF-INIT-D2B.md requires an outer mutex and an owned lock but does not say where they live.
+    Section 15 says that in homes 2 `.aiqt/` is AIQT-owned material, not an OPF state home, and
+    section 4.2 places the homes-2 operation lock and coupled-init substrate in the git common
+    directory and the homes-2 journals under `.working/journals/`. On homes 1, `.working/journals/`
+    is not one of the control areas section 4.2 registers (the imported managed leaves,
+    `.working/archive/adoption/<run-id>/`, `.working/archive/moved/` and
+    `.working/imported/<kind>/<run-id>/`), so a journal there would fail path containment. This
+    prompt's choice: keep the journal, the outer mutex and the owned lock in one machine-local
+    directory inside the git common directory, not under `.working/` and not under `.aiqt/`.
 12. **The lease file in an in-repo store.** Section 5.7 (The store consistency contract) defines
     the lease and its contents but does not say whether `lease.toml` is committed in the in-repo
     pattern, or its field names (the QUICKSTART notes call the file illustrative).
 13. **Rotation thresholds.** Section 12 (Rotation, archive, and retention) allows rotation on
     manifest-declared age or size thresholds but names no manifest keys.
-14. **Adoption receipt for an empty start.** Section 14 says adoption ends with an adoption receipt
-    and section 14.1 binds an `opf.adoption.plan/v2` plan, but the specification gives no receipt
-    format and does not say whether `opf init` in a project with nothing to disposition still
-    needs one.
+14. **Adoption receipt and plan for an empty start.** Section 11, "Defaults", names scaffolding and
+    clean-start adoption separately; section 14 attaches the adoption receipt and its outcome-event
+    chain to adoption; section 14.2 says `opf init` MUST refuse undispositioned foreign content.
+    This prompt's reading: a scaffold with nothing to disposition is not an adoption, so it writes
+    no adoption receipt and no `opf.adoption.plan/v2` plan. The specification gives no receipt
+    format in any case; do not invent one.
 15. **The `.working/README.md` deliverable.** Section 4.2 lists it as an "ownership and
     regeneration note" but does not say whether it is a rendered view.
 16. **Worklog entries written by the record verbs.** Section 8.8 fixes the opening line of their
     `detail` but not their `kind`; section 6.2 lets a manifest register more kinds but names no key.
 17. **Initialization formats.** OPF-INIT-D2B.md lists the field names of its plan, outcome and
-    bootstrap formats but not their value types.
+    bootstrap formats in a brace notation, and says that its first slice "freezes these formats
+    only; it does not implement their producers, persistence, or resume consumers". It does not
+    give value types or a file encoding for the plan and outcome; the meaning of `binding`, `sets`,
+    `publication_boundaries` and `recovery_policy`; the Keep fields beyond `operation` and
+    `schema`; what the outer mutex and the owned lock are; or which files belong to the source set
+    S and the view set V. This prompt's choice for the last: every init-created file that is not a
+    rendered view, `CHANGELOG.md` included, is a source; every declared view, `VERSION` included,
+    is a view.
+18. **Canonical TOML serialization.** Section 8.8 (item 2) and section 9.2 require a canonical
+    new-document emitter whose output reproduces a canonical file's bytes, but the specification
+    defines no serialization: key order, quoting, inline versus standard tables, array layout and
+    spacing are all unstated. Open point 4 covers only the `coverage_digest` canonicalization.
+19. **Store identity for CI.** Section 14.1, completion check 4, requires that "the store resolves
+    to the planned identity, and CI asserts store presence and identity so absence cannot pass as
+    NOT-APPLICABLE", but the specification defines no identity value, and the reference CI recipe
+    says "the CI receipt-identity comparison is a later release". This prompt's choice: the
+    identity is the committed pointer's `target` together with the SHA-256 of the discovered
+    machine store's `init.toml`, which coupled init writes once and nothing rewrites, and the
+    expected values are pinned in the CI job definition, outside the store (step 12).
+20. **What "tracked" means right after init.** Section 5.1 makes an untracked or ignored `.working/`
+    tree a hard failure, while OPF-INIT-D2B.md requires init-created sources staged and initial
+    views unstaged with "the whole store is VALID". This prompt's reading: the tracked-store check
+    fails when any path under `.working/` is ignored or any machine-store source file is absent from
+    the git index (staged or committed); a generated view may be absent from the index until the
+    first commit after init.
+21. **Activation for an implementation that starts at 1.3.0.** Section 4.2 says "Activation MUST
+    include the tested upgrade in section 9.2 and deterministic doctor coverage before a writer
+    accepts the new format." This prompt's reading: the deterministic doctor coverage applies in
+    full (step 6 comes before the writer in step 9), and the tested upgrade has no earlier store to
+    act on in a fresh implementation, so your implementation accepts only a store declaring 1.3.0
+    and refuses any other `spec_version` as a fail-closed finding naming the upgrade remedy. If the
+    maintainer rules that the 1.2.0 to 1.3.0 upgrade is required, implement and test it under
+    section 9.2 before step 9.
 
 ## The store you are building
 
@@ -204,8 +276,10 @@ In the default in-repo pattern they are the same repository.
       counters.toml          per-series, per-namespace high-water marks (section 8.2)
       version.toml           release ledger (section 6.1)
       worklog.toml           durable operational record (section 6.2)
+      init.toml              bootstrap provenance of the coupled init (section 9.2)
       <type>.index.toml      one per enabled baseline type except worklog (sections 4.2, 8.1)
-      <type>.imported.index.toml, worklog.imported.toml   empty imported leaves (section 4.2)
+      <type>.imported.index.toml   empty imported leaf, one per enabled type except worklog
+      worklog.imported.toml  the worklog's empty imported leaf (section 4.2)
 ```
 
 Casing is part of the contract (section 4.6, Casing convention and rationale): every file under
@@ -221,7 +295,7 @@ Build the primitives every later step relies on.
 - A TOML reader, and a canonical TOML emitter whose output for an unchanged parsed model
   reproduces the file's bytes exactly. The writers refuse any file that fails this
   byte-reproduction test, such as one carrying comments (section 8.8, Authoring operations, item 2;
-  section 9.2, Store schema upgrades).
+  section 9.2, Store schema upgrades). The serialization itself is yours to fix (open point 18).
 - A clock reader. Every `created_at`, `updated_at`, `date`, `decided_at`, `sent_at`,
   `receipted_at`, lease acquisition time and release date is read from the clock at the event, in
   RFC 3339 UTC (sections 5.7, 6.1, 8.3, 8.8). Never compose or guess a timestamp.
@@ -284,6 +358,9 @@ record).
   `target`, `[deliverables."CHANGELOG.md"]` with `kind = "curated"`, `[archive] period`, and
   `[vendors] registered`. Treat the section 9 example as a guide to the shape: the specification
   says the later schema release is normative.
+- **Providers.** Declare `local-directory` and `generic-git-remote`, which section 5.6 (The
+  provider registry) says "ship as the universal fallbacks", with the handler and roles of the
+  section 9 example. An in-repo store needs no host provider such as `github`.
 - **Enabled types.** The twelve baseline types and their namespaces are in the section 8.1 table:
   backlog_item BI, done DN, worklog WL, finding FN, pending_decision PD, autonomous_decision AD,
   block BL, handoff HO, reference RF, contribution CN, maintainer_decision MD and
@@ -295,28 +372,32 @@ record).
   never reused, and rotation, index rewrites and relocation never touch the file (section 8.2).
   Section 9.2 shows imported counter rows added at zero during the 1.3.0 upgrade; write them at
   zero at initialization so each series has its own value.
-- **version.toml.** `schema = 1`, then append-only, immutable `[[release]]` rows (`version`,
-  `date`, `worklog_span`, `coverage_digest`, and the optional `imported` flag, which a fresh store
-  never sets) and `[[summary]]` rows (`covers`, `status`, `digest`, `superseded_by`). Summary rows
-  hold digests and ranges only, never prose (section 6.1; Appendix B).
+- **version.toml.** `schema = 1`, then append-only, immutable `[[release]]` rows (`version`, the
+  SemVer version string, unique in the ledger; `date`; `worklog_span`; `coverage_digest`; and the
+  optional `imported` flag, which a fresh store never sets) and `[[summary]]` rows (`covers`,
+  `status`, `digest`, `superseded_by`). Summary rows hold digests and ranges only, never prose
+  (section 6.1; Appendix B).
 - **worklog.toml.** `schema = 1`, then `[[entry]]` rows with `id`, `date`, `actor`, `kind`,
   `summary`, optional `detail`, `links` and `refs` (section 8.3, reduced envelope; Appendix C). The
   base kinds are `added`, `changed`, `fixed`, `removed`, `security`, `docs` and `infra`
   (section 6.2). Clean entries carry no `status` key in Appendix C; their status is fixed as
   `recorded` and never takes `/proposed` (section 8.4).
-- **Imported leaves.** Create `<type>.imported.index.toml` for every enabled type and
-  `worklog.imported.toml`, create-only and empty, in the same act that creates the clean index
-  (section 4.2). They stay empty in a fresh store.
+- **Imported leaves.** Create `<type>.imported.index.toml` for every enabled type except
+  `worklog`, and `worklog.imported.toml` for the worklog; section 4.2 says "`worklog` uses
+  `worklog.imported.toml` instead of an imported index". Each is create-only and empty, created in
+  the same act as its clean index or ledger (section 4.2). They stay empty in a fresh store.
 - `version.toml` and `worklog.toml` are always single files written under the store lock, in either
   layout (section 9, storage layout).
 
 Acceptance checks:
 
-- The manifest validates. A wrong `standard` value leaves the store undiscovered, which is
-  cannot-evaluate (section 4.5), and a `spec_version` above your implementation's ceiling is a
-  fail-closed INVALID finding naming the upgrade remedy (section 9.2, last paragraph).
-- Every enabled type has exactly one clean index and one imported leaf; the worklog has its
-  ledger and its imported ledger.
+- The manifest reader accepts this step's manifest. A wrong `standard` value leaves the store
+  undiscovered, which is cannot-evaluate (section 4.5), and a `spec_version` other than 1.3.0 is a
+  fail-closed INVALID finding naming the upgrade remedy (section 9.2, last paragraph; open point
+  21).
+- Every enabled type other than `worklog` has exactly one clean index and one imported index; the
+  worklog has `worklog.toml` and `worklog.imported.toml`, and no `worklog.index.toml` or
+  `worklog.imported.index.toml` exists.
 - counters.toml has a value for every clean and imported namespace of every enabled type.
 
 ### Step 4: record model
@@ -330,7 +411,8 @@ Implement section 8 (Record model) in full for the baseline types.
   and `actor.kind` (`maintainer`, `assistant`, `automation` or `importer`), with optional
   `proposed_from`, `actor.id`, `summary`, `links`, `refs` and registered `x-<vendor>` tables. The
   schema is closed: an unknown key fails validation unless it sits under a registered vendor table
-  (section 8.3; section 8.7, Extensions).
+  (section 8.3; section 8.7, Extensions). `proposed_from` is legal only on a `/proposed` status and
+  only naming a legal predecessor state for the type (section 8.3).
 - **Status grammar.** `state` or `state/proposed`. Each type declares a closed state set with one
   initial state and one or more terminal states (section 8.4, The status grammar). Transitions per
   type are in the section 8.5 table.
@@ -341,6 +423,10 @@ Implement section 8 (Record model) in full for the baseline types.
   terminal: gates and views treat it as unfinished and awaiting ratification. Created-terminal
   factual or ACT types (`reference`, `autonomous_decision`, `maintainer_decision`) carry no
   qualifier (sections 8.4 and 8.8).
+- **Standing authorization.** Section 8.4 lets an adopter declare a standing authorization for a
+  named contribution recipient, and "an absent or malformed declaration MUST fail closed, so gating
+  stays on". This prompt declares none, so every `sent` by an assistant or automation stays gated.
+  The writer never reads such a declaration in any case (section 8.8).
 - **Per-type rules (section 8.5).** Among them: blocked-ness is never stored, it is derived; a
   ratified `done` backlog item has its one-to-one `done` receipt linked `receipt_of`; a
   pending_decision's resolution bundle is all-or-none, with exactly one current effective
@@ -357,52 +443,24 @@ Implement section 8 (Record model) in full for the baseline types.
 - **Actionability.** A backlog item is actionable when it is `open` or `active` and no
   unqualified `active` block scopes it (section 8.5, "Actionability").
 
-Acceptance checks:
+A stored record does not show which actor made its last transition: section 8.8, item 7 says the
+history comparison "sees only the prior snapshot's type and status, which identify neither the
+transitioning actor nor the pre-proposal state". The `/proposed` landing rule is therefore tested
+at the writer, in step 9, not by record validation.
 
-- Validation refuses: an ID in the wrong namespace, an unknown key, a `/proposed` worklog entry, an
-  assistant transition that lands an unqualified terminal or gated state, a maintainer_decision with
-  `actor.kind = "assistant"`, a link with an unknown `rel`, and a terminal record moved back to a
-  working state.
+Acceptance checks, over records and snapshots the test builds:
+
+- Record validation refuses: an ID in the wrong namespace, an unknown key, a `/proposed` worklog
+  entry, a `proposed_from` on a status without `/proposed` or naming an illegal predecessor, a
+  maintainer_decision with `actor.kind = "assistant"`, an open pending_decision carrying any part
+  of its resolution bundle, a link with an unknown `rel`, and, given a prior and a current
+  snapshot, a terminal record moved back to a working state.
 - An assistant-proposed `active/proposed` block does not make its scoped item non-actionable.
 
-### Step 5: the validator (`opf doctor`)
+### Step 5: views and deliverables (`opf render`)
 
-Implement the integrity layer of section 11 (Enforcement posture). Its roster: schema validity of
-what exists; ID uniqueness across active, archive and staging; counter monotonicity (every ID
-within its counter); bidirectional index reconciliation; transition legality and no resurrection;
-the all-or-none resolution bundle; byte drift for every deterministic view, `VERSION` included;
-worklog span tiling and frozen coverage digests; changelog range coverage; changelog freeze; archive
-integrity; the tracked-store requirement against the resolved store; pointer and sync-target
-agreement; unmanaged-path containment; and path containment.
-
-- At `posture = "required"`, an unreadable, unparseable or unresolvable declared input is a
-  failure, never an empty or clean result (section 11).
-- The tracked-store check fails hard on an untracked or ignored `.working/` tree; there is no
-  gitignore fallback (section 5.1, Always a git repository).
-- Transition legality compares the store with the prior committed snapshot (section 8.8, item 7).
-- The imported-series checks named in section 8.3 (C-IMPORTED-SCHEMA, C-IMPORTED-IDS,
-  C-IMPORTED-PROVENANCE, C-IMPORTED-SEGREGATION) and the related C-CONTAINMENT and C-LINKS also run
-  at 1.3.0 (section 4.2). In a fresh store the imported series is empty, so they evaluate empty
-  inputs. Treat a missing imported leaf as a finding: section 4.2 requires init to create every one
-  (this is a reading of that rule, not a check the specification names).
-- Adoption coverage (how much of the project has moved into the store) is a report only, never a
-  gate, at every posture (section 11).
-- Use the outcome vocabulary of the reference CI recipe for this command's exit status: 0 valid,
-  1 finding, 2 cannot-evaluate (`opf-ci.sh` header). Provide a mode, as the recipe's
-  `doctor --require-store` does, in which a repository with no store exits 2, so a removed store
-  cannot pass as not applicable (section 14.1, completion check 4).
-
-Acceptance checks, each as an automated test over a throwaway store:
-
-- A duplicated ID, an ID above its counter, a hand-edited view, a released worklog entry edited
-  after its release, an untracked `.working/`, and a store missing an index each produce a finding
-  or cannot-evaluate, and the fresh valid store produces valid.
-- A truncated TOML file produces cannot-evaluate (exit 2), never valid.
-- The no-store mode exits 2 on a repository with no store.
-
-### Step 6: views and deliverables (`opf render`)
-
-Implement section 10 (Views and deliverables).
+Implement section 10 (Views and deliverables). The validator in step 6 uses this renderer for its
+drift checks, so it comes first.
 
 - Render every view the manifest declares. Composed views use only the closed transform
   vocabulary: filter on declared field predicates, sort on declared keys with ID as the final
@@ -421,63 +479,196 @@ Implement section 10 (Views and deliverables).
   with a short note that it is a curated summary of the worklog, gated on coverage and publication
   freeze (section 10.4).
 - Provide a read-only check that reports drift and a write mode that renders. The reference recipe
-  calls the check `render --check` and reads exit 1 as drift (`opf-ci.sh` header). Write only bytes
-  that have passed the store's gates (section 5.8).
-- Declare at least `WORKLOG.md` (deterministic), `VERSION` (deterministic) and `DECISIONS.toml`
-  (projection). Section 9.2 notes that no composed view is required, but its 1.1.0 upgrade delta
-  adds the `CONTRIBUTIONS.md` and `DECISIONS.toml` view rows, so declaring `CONTRIBUTIONS.md`,
-  `DECISIONS.md` and `BACKLOG.md` as well is the safer reading.
+  calls the check `render --check` and reads exit 1 as drift (`opf-ci.sh` header). The write mode
+  gains its gate in step 6.
+- **Declared views.** Declare `WORKLOG.md` and `VERSION`, both deterministic: section 6.2 says the
+  worklog "generates the deterministic view `.working/WORKLOG.md`", and section 6.1 says `VERSION`
+  is generated from the ledger and drift-gated. Section 9.2 notes that no composed view is
+  required, and the specification names no further minimum. This prompt's choice: also declare
+  the `DECISIONS.toml` projection and the composed `BACKLOG.md`, `DECISIONS.md` and
+  `CONTRIBUTIONS.md`, which the section 9 example and the 1.1.0 upgrade delta in section 9.2
+  declare.
 
-Acceptance checks:
+Acceptance checks, over stores the test builds:
 
 - Rendering twice gives identical bytes, under two different locales and time zones.
 - Editing one byte of a rendered view makes the check report drift (exit 1), and re-rendering
   clears it.
 - A proposed (`/proposed`) record appears in views as awaiting ratification (section 8.4).
 
-### Step 7: fresh initialization (`opf init`)
+### Step 6: the validator (`opf doctor`)
 
-Initialization creates the store sources and pointer for a fresh start.
+Implement the integrity layer of section 11 (Enforcement posture). Its roster: schema validity of
+what exists; ID uniqueness across active, archive and staging; counter monotonicity (every ID
+within its counter); bidirectional index reconciliation; transition legality and no resurrection;
+the all-or-none resolution bundle; byte drift for every deterministic view, `VERSION` included;
+worklog span tiling and frozen coverage digests; changelog range coverage; changelog freeze; archive
+integrity; the tracked-store requirement against the resolved store; pointer and sync-target
+agreement; unmanaged-path containment; and path containment.
 
-- **Preconditions.** The project is a git repository (section 5.1). There is no `.working/`
-  directory (OPF-QUICKSTART.md, "Getting started", says a fresh `opf init` refuses an existing
-  one). Every pre-existing file at a declared view or deliverable destination outside `.working/`,
-  including `VERSION` and `CHANGELOG.md`, needs a disposition first, and init refuses
+- At `posture = "required"`, an unreadable, unparseable or unresolvable declared input is a
+  failure, never an empty or clean result (section 11). `CHANGELOG.md` is a declared input.
+- The tracked-store check fails hard on an untracked or ignored `.working/` tree; there is no
+  gitignore fallback (section 5.1, Always a git repository). How it treats views that init leaves
+  unstaged is open point 20.
+- Transition legality compares the store with the prior committed snapshot (section 8.8, item 7).
+  A prior commit that is needed and cannot be read is cannot-evaluate, never "no change".
+- View drift uses the step 5 renderer for every declared deterministic view and projection,
+  `VERSION` included (sections 10.5 and 11).
+- The four imported-series checks named in section 8.3 (C-IMPORTED-SCHEMA, C-IMPORTED-IDS,
+  C-IMPORTED-PROVENANCE, C-IMPORTED-SEGREGATION) join the roster at 1.3.0 (section 4.2), with
+  C-CONTAINMENT recognizing the imported managed leaves and C-LINKS resolving links over both
+  series (section 8.3). In a fresh store the imported series is empty, so they evaluate empty
+  inputs. Treat a missing imported leaf as a finding: section 4.2 requires init to create every one
+  (this is a reading of that rule, not a check the specification names).
+- On homes 1, path containment recognizes as OPF control area the imported managed leaves,
+  `.working/archive/adoption/<run-id>/`, `.working/archive/moved/` and
+  `.working/imported/<kind>/<run-id>/` (section 4.2, "Activated 1.3.0 tooling MUST register on
+  homes 1 ..."). C-EVIDENCE-ENUM does not run or read anything on homes 1 (section 4.2).
+- The validator reads the record archive under the discovered machine store (section 12): ID
+  uniqueness, the chain rule and archive integrity cover active and archived records together.
+  With no archive tree nothing has rotated; an archive that is present and unreadable or malformed
+  is cannot-evaluate.
+- Adoption coverage (how much of the project has moved into the store) is a report only, never a
+  gate, at every posture (section 11).
+- Use the outcome vocabulary of the reference CI recipe for this command's exit status: 0 valid,
+  1 finding, 2 cannot-evaluate (`opf-ci.sh` header). Provide a mode, as the recipe's
+  `doctor --require-store` does, in which a repository with no store exits 2, so a removed store
+  cannot pass as not applicable (section 14.1, completion check 4).
+- Gate the render write mode: section 5.8 says `opf render` writes "only bytes that have passed the
+  store's gates". This prompt's reading: the write mode refuses while the validator reports a
+  finding or cannot-evaluate on anything other than view drift, which rendering itself remedies.
+
+Acceptance checks, each as an automated test over a throwaway store the test builds:
+
+- A duplicated ID, an ID above its counter, a hand-edited view, a released worklog entry edited
+  after its release, a machine-store source absent from the git index, an ignored path under
+  `.working/`, a store missing an index, and a store missing an imported leaf each produce a
+  finding or cannot-evaluate, and a valid store built from sections 4 and 9, with its views
+  rendered by step 5, produces valid.
+- A truncated TOML file produces cannot-evaluate (exit 2), never valid.
+- The no-store mode exits 2 on a repository with no store.
+- The render write mode refuses on a store with a duplicated ID and writes nothing.
+
+### Step 7: consistency, lease and location
+
+Implement section 5.7 (The store consistency contract) for the in-repo default. Initialization
+(step 8) and the writer (step 9) both depend on it.
+
+- In the in-repo pattern the contract reduces to the lease plus a clean-state check: no conflict
+  markers, no mid-merge state and no concurrent OPF run on the store paths, or refuse.
+- The lease (`lease.toml`, present only while held, carrying the holder, the operation and a
+  clock-read acquisition time) is never seized from a live holder and is reconciled on resume or
+  close. Whether it is committed, and its field names, is open point 12.
+- Store files are never hand-merged: after a merge conflict on a store path, take the integration
+  base's version of the conflicted files and redo the authoring operation, which claims the next ID
+  afresh. Never resolve an ID collision by lowering a counter or reusing an ID.
+- If you later relocate the store, `opf migrate`, `opf sync` and the provider registry
+  (sections 5.4, 5.5 and 5.6) apply in full, including the behind, ahead and divergent rules. They
+  are outside this prompt's minimum; do not relocate without implementing them.
+
+Acceptance checks:
+
+- Taking the lease while it is held refuses and changes nothing; a leftover lease from a dead run
+  is released only through reconciliation, never seized.
+- A conflict marker or a mid-merge state on a store path makes the clean-state check refuse.
+
+### Step 8: fresh initialization (`opf init`)
+
+Initialization creates the store sources and pointer for a fresh start, under the coupled contract
+`opf.init.coupled/v1` of OPF-INIT-D2B.md, which you implement in full.
+
+- **Preconditions.** The project is a git repository and not a bare one (section 5.1;
+  OPF-INIT-D2B-REVIEW.md, row F02). There is no `.working/` directory (OPF-QUICKSTART.md, "Getting
+  started", says a fresh `opf init` refuses an existing one). Neither `.working/` nor any file init
+  would create is ignored by an effective ignore rule: init refuses rather than force it, since
+  section 5.1 makes an ignored `.working/` tree "a hard failure in scaffolding" (review register
+  row F22). Every pre-existing file at a declared view or deliverable destination outside
+  `.working/`, including `VERSION` and `CHANGELOG.md`, needs a disposition first, and init refuses
   undispositioned foreign content (section 14, Adoption, post-adoption import and pre-existing
-  files; section 14.2, Pre-existing files at the store location).
+  files; section 14.2, Pre-existing files at the store location; review register row F17).
 - **If a destination is occupied, or `.working/` exists,** stop and report it to the maintainer.
   The specification's route is adoption under section 14 with one approved plan and a disposition
   per file (`keep`, `move` or `retire`; `migrate` feeds an import, which this fresh start excludes).
   Do not move, overwrite, absorb or delete those files yourself.
 - **If the project's history shows an earlier OPF store,** stop: that is re-adoption, which seeds
-  counters from a pinned ancestral snapshot and never from zero (section 8.2).
-- **What init writes.** The pointer, `manifest.toml` (step 3 values, `posture = "required"`,
-  `import_status = "none"`), `counters.toml` at zero, `version.toml` and `worklog.toml` with no
-  rows, every clean index and imported leaf, and, if you choose, a `CHANGELOG.md` holding only the
-  section 10.4 opening note (section 11, "Defaults", requires the posture and import status
-  values). Then render the declared views.
-- **Provenance.** `.working/toml/init.toml` is optional and never required (section 9.2). Write it
-  only if you implement the coupled contract below; never fabricate it.
-- **Coupled initialization (optional).** OPF-INIT-D2B.md defines the coupled contract
-  `opf.init.coupled/v1`: an exact success sentence, exit 0 only with fresh observations supporting
-  each assertion, the plan, outcome and bootstrap formats, the Keep schema with its canonical JSON
-  rules and fixed limits, and init-created sources staged while views stay unstaged, with no commit
-  created. Its review register, OPF-INIT-D2B-REVIEW.md, records most of those invariants as
-  "specified - not runtime-verified" at the pinned commit. If you implement it, implement all of
-  it and claim it by its format name; otherwise implement a source-only initialization, write no
-  `init.toml`, and do not use the coupled success sentence. The QUICKSTART notes that a fresh store
-  can also be created by hand from sections 4 and 9.
+  counters from a pinned ancestral snapshot and never from zero (section 8.2; review register row
+  F04).
+- **Inventory.** Record a digest-stamped inventory of the project's pre-existing operational files,
+  including the instruction and governance surfaces of each supported assistant platform, as
+  section 14 requires of investigation, and bind it through the init plan's `inventory_digest`
+  (OPF-INIT-D2B.md, "Plan Format"). In a fresh start every entry lies outside the store's
+  destinations and stays where it is, untouched; give each entry a recorded exclusion and ask the
+  maintainer to ratify the list. An entry with neither a disposition nor a recorded exclusion keeps
+  the report at `migration_incomplete` (section 11, "Defaults": "Reports MUST carry
+  `migration_incomplete` while an approved source or detected file remains unresolved").
+- **What init writes.** The init-created sources are the pointer, `manifest.toml` (step 3 values,
+  `posture = "required"`, `import_status = "none"`), `counters.toml` at zero, `version.toml` and
+  `worklog.toml` with no rows, every clean index and imported leaf, `init.toml`, and
+  `CHANGELOG.md` holding only the section 10.4 opening note, in fixed wording that you choose and
+  record. The changelog is required, not optional: section 6.3 says the public changelog "lives at
+  the product repository root as `CHANGELOG.md`", the manifest declares it as a curated
+  deliverable, and at `required` an unreadable or unresolvable declared input is a failure
+  (section 11). With no releases and no summary rows, range coverage and freeze pass on it. Section
+  11, "Defaults", requires the posture and import status values. Then render the declared views,
+  `VERSION` included (open point 8). Which files are sources and which are views is part of open
+  point 17.
+- **Provenance.** Write `.working/toml/init.toml` in the `opf.init.bootstrap/v1` shape. Its
+  `source_digest` covers the enumerated bootstrap source set and excludes `init.toml` itself, and
+  the outer plan digest is computed afterward (OPF-INIT-D2B.md, "Bootstrap Provenance"). Never
+  write provenance for a store this init did not create (section 9.2).
+- **The coupled contract.** Implement all of OPF-INIT-D2B.md:
+  - the plan (`opf.init.plan/v1`) and outcome (`opf.init.outcome/v1`) formats with their listed
+    fields, and the discrete sets S, V, K, E and C with no overlaps; in a fresh start the Keep set
+    K and the existing-file set E are empty;
+  - the Keep schema (operation identifier `opf-init-keep`, `schema = 1`), its canonical JSON
+    representation and `sha256:` digests, and its fixed limits, so that a malformed or over-limit
+    decision input refuses even when there are no Keep decisions;
+  - staging: exactly the init-created source files enter the git index, as exact entries with
+    their validated bytes and modes; no view, no other path, no conflict stage and no
+    intent-to-add entry enters it; unrelated index entries survive; and staging runs no git
+    filter, hook or helper that could transform a payload (review register rows F19, F20 and F21);
+  - views: the initial views are rendered from those sources, match them, and stay unstaged
+    (review register row F30);
+  - no commit is created;
+  - ordering: the final store validation follows the last store write, including the lease
+    removal, while the outer mutex still excludes participating writers (OPF-INIT-D2B.md, "Success
+    wording");
+  - success: exit 0 only with fresh observations supporting each assertion, including the plan's
+    required checks actually executing, and then print exactly the success sentence quoted in
+    OPF-INIT-D2B.md, "Success wording". A missing or failed required check, a disagreement between
+    sources and views, or a failure in finalization or lock release prevents exit 0 and keeps the
+    primary error (review register rows F26 and F27);
+  - resume: a retry after a crash resumes its original operation and plan, never overwrites, and
+    never allocates twice; an existing source counts only when it is byte-identical to its
+    recorded plan payload (review register row F28).
+- **The review register.** OPF-INIT-D2B-REVIEW.md records most of these invariants as "specified -
+  not runtime-verified" at the pinned commit. Treat every row that applies to a fresh start as a
+  requirement your tests must cover, never as evidence that it holds anywhere. Fill the formats'
+  gaps under open point 17.
 
 Acceptance checks:
 
-- In an empty repository, init succeeds, the validator reports valid, and the render check reports
-  no drift.
-- With a pre-existing `.working/`, `VERSION` or `CHANGELOG.md`, init refuses and writes nothing.
+- In an empty git repository, init exits 0 and prints exactly the success sentence. Afterwards,
+  `git diff --cached --name-only` lists exactly the init-created sources, and `git ls-files -s`
+  shows each with the mode and blob of its written bytes; every declared view exists, the render
+  check reports no drift, and no view is in the index; HEAD is unchanged and no commit exists that
+  init created; the validator reports valid; and `CHANGELOG.md` holds only the opening note.
+- A test that records the order of operations shows the lease removal as the last store write,
+  followed by the final validation, with the outer mutex held until that validation ends.
+- An injected failure in finalization or in owned-lock release makes init exit non-zero, report
+  the primary error and withhold the success sentence; so does a required check that fails or does
+  not execute.
+- With a pre-existing `.working/`, `VERSION` or `CHANGELOG.md`, or with `.working/` matched by an
+  ignore rule, init refuses and writes nothing.
 - Running init a second time refuses rather than overwriting.
-- After you commit, `git check-ignore` reports nothing ignored under `.working/` and `git ls-files`
-  lists every store file.
+- A process killed at each publication boundary and then retried resumes its original operation
+  and plan, overwrites nothing, and allocates nothing twice.
+- After you commit, with the maintainer's agreement, `git check-ignore` reports nothing ignored
+  under `.working/`, `git ls-files` lists every store file and view, and the validator reports
+  valid.
 
-### Step 8: the record writer (`opf record`)
+### Step 9: the record writer (`opf record`)
 
 Implement section 8.8 (Authoring operations). Subcommands:
 
@@ -486,9 +677,12 @@ Implement section 8.8 (Authoring operations). Subcommands:
 - `transition`: a checked status change; writes `proposed_from` on an assistant or automation
   landing at `/proposed`, restores it exactly on rejection, removes it on ratification; writes or
   removes the pending_decision resolution bundle and the contribution delivery bundle exactly as
-  section 8.8 states; applies the chain rule over the active index and every archived record.
+  section 8.8 states; applies the chain rule over the active index and every archived record. It
+  refuses to act on, or overwrite, a record whose current row is not schema-valid, `proposed_from`
+  included (section 8.8).
 - `done-with-receipt`: maintainer-only; moves a backlog item to unqualified `done` and creates its
-  `done` receipt in the same act.
+  `done` receipt in the same act. A backlog item reaches unqualified `done` only this way
+  (section 8.8: "A backlog item MUST reach unqualified `done` only through `done-with-receipt`").
 - `worklog-append`: appends one `recorded` entry to the unreleased tail; refuses an entry inside a
   released span and a `detail` that opens with the lifecycle grammar.
 - The `import --batch` mode exists in the specification, but this fresh start does not implement
@@ -502,10 +696,13 @@ Every subcommand follows the eight-item operation sequence of section 8.8: recon
 interrupted transaction first, under the lease; the byte-reproduction precondition; one atomic ID
 claim with the counter advance inside the same transaction; a postcondition that the model diff
 equals exactly the allowed delta, derived from the request and never from the planned rows; clean
-destinations, ignored files included, with the lease held across publication, render and the final
-validation; one crash-durable journaled publication; render, then a full validation that must
-report valid (with the one pending cannot-evaluate for the record and statuses just written); then
-release the lease and report. Leave the change uncommitted: never stage or commit it.
+destinations, ignored files included, with the step 7 lease held across publication, render and the
+final validation; one crash-durable journaled publication (journal location: open point 11);
+render, then a full validation that must report valid (with the one pending cannot-evaluate for the
+record and statuses just written); then release the lease and report. Leave the change
+uncommitted: never stage or commit it. When the final validation fails, leave the change in the
+working tree for review with recovery advice scoped to the planned paths, as section 8.8, item 7
+says; do not roll it back.
 
 Exit status: 0 when the change is recorded and the store validates (or carries only that pending
 cannot-evaluate), 2 on every refusal or cannot-evaluate (section 8.8). The specification names no
@@ -514,22 +711,31 @@ other status for this verb, so treat a post-write validation failure as 2.
 Acceptance checks:
 
 - An assistant `transition` of a backlog item to `done` lands `done/proposed` with
-  `proposed_from = "active"`, creates no receipt, and appends one worklog entry.
+  `proposed_from = "active"`, creates no receipt, and appends one worklog entry. An assistant
+  creating a block lands `active/proposed`, and an assistant send of a contribution lands
+  `sent/proposed`.
+- A `transition` to unqualified `done` refuses for every actor, and `done-with-receipt` refuses an
+  assistant actor.
+- `transition` refuses a record whose row is not schema-valid and leaves it untouched.
+- A final validation failure exits 2 and leaves the planned change in the working tree with
+  recovery advice naming the planned paths.
 - Killing the process between journal write and publication leaves the store, after
   reconciliation, exactly at its prestate or exactly at its poststate, and the next operation
   refuses until that reconciliation is inspected.
 - A file with a comment is refused and left untouched; a held lease refuses; no ID is ever reported
   for a rolled-back transaction.
 
-### Step 9: releases and the changelog
+### Step 10: releases and the changelog
 
 Implement sections 6 (The release triad) and 7 (Changelog gates: range coverage and freeze).
 
-- **Release cut.** Append a `[[release]]` row with a clock-read `date`, the contiguous,
-  non-overlapping `worklog_span` of the entries it covers (`[]` for none), and their
-  `coverage_digest`. From then on those entries are frozen; a correction is a new entry in the
-  unreleased tail linking `corrects` (section 6.2). Re-render `VERSION`. The specification names no
-  verb for this (open point 9); whatever performs it runs under the lease and the step 8 guarantees.
+- **Release cut.** Append a `[[release]]` row with a SemVer `version` not already in the ledger, a
+  clock-read `date`, the contiguous, non-overlapping `worklog_span` of the entries it covers (`[]`
+  for none), and their `coverage_digest`. From then on those entries are frozen; a correction is a
+  new entry in the unreleased tail linking `corrects` (section 6.2). Re-render `VERSION`. The
+  specification names no verb for this, and range coverage needs a summary row and heading for the
+  new version (open point 9); whatever performs the cut runs under the lease and follows the step 9
+  operation sequence.
 - **Drafting.** The machine drafts a summary from the level directly below (release summaries
   from their worklog span; range summaries from the release summaries they replace), using the
   worklog, the ledger and the linked `done` receipts (sections 6.3 and 6.4). The specification
@@ -538,63 +744,75 @@ Implement sections 6 (The release triad) and 7 (Changelog gates: range coverage 
   maintainer curates and publishes. Publishing records the freeze digest of the entry's exact
   bytes, from its heading line up to the next entry heading or end of file, with LF endings, on the
   `[[summary]]` row with `status = "published"` (section 7.2).
+- **Re-publication.** Editing a published entry is a re-publication: the row's digest is updated
+  in the same reviewed change, and a light gate confirms the edited entry still declares the same
+  `covers` and still rests on the same worklog entries, with the coverage digests unchanged
+  (section 7.2). A change to the facts lands as new worklog entries instead.
 - **Headings.** Each entry starts `## <covers>`, optionally with parenthesized dates, where
   `<covers>` is a version, a range `a..b`, or `unreleased`; entries run in descending order with
   the optional unreleased section first (section 6.3; Appendix D).
-- **Gates.** Range coverage: every non-superseded released summary row parses, refers to ledger
-  versions, tiles the ledger with no gap or overlap, and matches exactly one heading (section 7.1).
-  Freeze: every published summary's digest and its releases' coverage digests recompute equal
-  (section 7.2). Rollup supersedes summaries, never worklog entries (sections 6.4 and 6.5).
+- **Gates.** Range coverage (section 7.1): every non-superseded, non-unreleased summary row parses
+  and refers only to ledger versions; those rows tile the ledger with no gap or overlap; every such
+  row has exactly one matching heading; every release-or-range heading matches exactly one such
+  row; and an `## unreleased` heading matches the `covers = "unreleased"` row instead. Freeze: every
+  published summary's digest and its releases' coverage digests recompute equal (section 7.2).
+  Rollup supersedes summaries, never worklog entries (sections 6.4 and 6.5).
 
 Acceptance checks:
 
-- Editing a published entry's prose without updating its digest fails the freeze gate.
+- A release whose `version` already exists in the ledger is refused.
+- After a release cut, the validator reports valid (under your open point 9 choice), and the new
+  release's worklog span is frozen.
+- Editing a published entry's prose without updating its digest fails the freeze gate; a
+  re-publication that changes the entry's `covers` fails.
 - Editing a released worklog entry fails the coverage digest check.
-- Two summary rows covering the same release, or a release with no summary, fail range coverage.
-
-### Step 10: consistency, lease and location
-
-Implement section 5.7 (The store consistency contract) for the in-repo default.
-
-- In the in-repo pattern the contract reduces to the lease plus a clean-state check: no conflict
-  markers, no mid-merge state and no concurrent OPF run on the store paths, or refuse.
-- The lease (`lease.toml`, present only while held, carrying the holder, the operation and a
-  clock-read acquisition time) is never seized from a live holder and is reconciled on resume or
-  close.
-- Store files are never hand-merged: after a merge conflict on a store path, take the integration
-  base's version of the conflicted files and redo the authoring operation, which claims the next ID
-  afresh. Never resolve an ID collision by lowering a counter or reusing an ID.
-- If you later relocate the store, `opf migrate`, `opf sync` and the provider registry
-  (sections 5.4, 5.5 and 5.6) apply in full, including the behind, ahead and divergent rules. They
-  are outside this prompt's minimum; do not relocate without implementing them.
-
-Acceptance checks:
-
-- A second writer started while the lease is held refuses and changes nothing.
-- A conflict marker in a store file makes every writer refuse.
+- Two summary rows covering the same release, a release with no summary, and a heading with no
+  matching row each fail range coverage.
 
 ### Step 11: rotation and archive
 
-Implement section 12 (Rotation, archive, and retention) before the store needs it, or make the
-validator refuse an archive it cannot read. Rotation is relocation to
-`.working/toml/archive/<YYYY>/`, never deletion; each rotation writes that year's `archive.toml`
-enumerating moved IDs and spans; open records, active blocks, unresolved decisions, the current
-handoff and the unreleased worklog tail never rotate; counters are untouched; validation reads
-active and archive together. Section 13 (Tamper evidence) explains how history, frozen digests,
-index reconciliation and archive enumeration combine.
+Implement section 12 (Rotation, archive, and retention) before the store needs it; until then
+nothing rotates, and the step 6 validator already refuses an archive it cannot read.
 
-Acceptance check: after a rotation every gate gives the same answer as before it.
+- Rotation is relocation, never deletion and never ID reuse, to calendar-year buckets
+  `archive/<YYYY>/` inside the discovered machine store (`.working/toml/archive/<YYYY>/` when it is
+  named `toml`; section 4.2 says "the example name `toml` MUST NOT be hardcoded").
+- Only records in unqualified terminal states, other than worklog records, may rotate, so a
+  `/proposed` record stays active. Worklog records rotate only as released, frozen spans. Open
+  records, active blocks, unresolved decisions, the current handoff and the unreleased worklog tail
+  never rotate, and at 1.3.0 the imported series never rotates.
+- Each rotation writes that year's `archive.toml`, enumerating every moved ID (and, for the
+  worklog, every moved span) and its destination. Counters are untouched. Validation confirms that
+  every ID exists in exactly one active or archived location, and coverage gates read active and
+  archive together. Rotation thresholds are open point 13.
+- Section 13 (Tamper evidence) explains how history, frozen digests, index reconciliation and
+  archive enumeration combine.
+
+Acceptance checks:
+
+- After a rotation every gate gives the same answer as before it.
+- A `/proposed` record and an unreleased worklog entry are refused for rotation.
+- An ID present in both the active index and the archive is a finding.
 
 ### Step 12: the CI gate
 
 Write your own CI job, in your project's CI system, with the behaviour of the reference recipe
-(`opf/enforcement/ci/opf-ci.sh`, read only):
+(`opf/enforcement/ci/opf-ci.sh`, read only) plus the store identity check that the recipe leaves
+out. Section 14.1, completion check 4, requires that "CI asserts store presence and identity so
+absence cannot pass as NOT-APPLICABLE"; the recipe says "the CI receipt-identity comparison is a
+later release", so reproducing the recipe alone does not meet that check.
 
-- Run the validator in its no-store-fails mode, then the render drift check, over the checked-out
-  revision, and stop at the first failure.
-- Exit with 0 only when both pass; pass a step's own 1 or 2 through unchanged, and turn any other
-  status (a launch failure, a signal) into 2, so an out-of-vocabulary status is never read as a
-  verdict.
+- Check out enough history to include the prior commit: transition legality compares the store
+  with the prior committed snapshot (section 8.8, item 7). Check out full history, as the reference
+  workflow template does with `fetch-depth: 0`.
+- Run, over the checked-out revision, and stop at the first failure: the validator in its
+  no-store-fails mode; the identity check; then the render drift check.
+- The identity check compares the resolved store's identity with expected values pinned in the CI
+  job definition, outside the store (open point 19). This prompt's choice of statuses: a mismatch
+  exits 1, and an identity that cannot be read exits 2.
+- Exit with 0 only when every step passes; pass a step's own 1 or 2 through unchanged, and turn any
+  other status (a launch failure, a signal) into 2, so an out-of-vocabulary status is never read as
+  a verdict.
 - Write nothing, and mark no step as allowed to fail; the reference workflow template notes that a
   check that cannot fail is decorative.
 
@@ -602,16 +820,25 @@ Acceptance checks:
 
 - The job fails on a branch that deletes `.working/`, on a branch with a hand-edited view, and on a
   branch with a duplicated ID, and passes on a clean branch.
+- The job fails on a branch that replaces the store with a different valid store, made by a
+  separate `opf init`.
 - A broken interpreter path makes the job exit 2, not 0 or 1.
 
-### Step 13: wiring your own assistant session
+### Step 13: wiring every supported platform
 
-Section 14.1 (One approval and completion) sets the enforcement floor that a clean start must meet
-on each supported platform. The supported roster is Claude Code, Codex, Gemini CLI and Cursor.
+Section 14.1 (One approval and completion) sets the enforcement floor: CI checks, staged-snapshot
+pre-commit checks, "a verified deny hook on each supported platform whose official documentation
+confirms denial support", and instructions on a platform without verifiable denial, disclosing
+each platform's residual. It continues: "The supported platform roster is Claude Code, Codex,
+Gemini CLI and Cursor; the pack MUST cover every one of them by one of those two means, per
+platform." Wire all four, not only the platform you run on.
 
-- **Instructions.** Add OPF working rules to your platform's own instructions file (for example
-  `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI, or a rule file
-  under `.cursor/rules/` for Cursor; confirm the file against the platform's official
+- **Pre-commit check.** Run the validator and the render check on the staged snapshot, and
+  disclose that the hook is installed per clone (section 14.1). This git hook is not tied to any
+  one assistant platform.
+- **Instructions, on every platform.** Add OPF working rules to each platform's instructions file
+  (for example `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI, and
+  a rule file under `.cursor/rules/` for Cursor; confirm each file against that platform's official
   documentation, since the specification names platforms, not files). The rules: the store is the
   source of truth and you record before you claim (section 3, "Records first"); write only through
   the record writer, never hand-edit store TOML or a generated view (sections 3 and 4.6); read every
@@ -619,37 +846,59 @@ on each supported platform. The supported roster is Claude Code, Codex, Gemini C
   as `/proposed` for the maintainer to ratify (section 8.4); never author a maintainer_decision,
   never run `done-with-receipt`, never weaken the posture (section 11), and never publish a
   changelog summary (section 7.3); append a worklog entry for each change.
-- **Pre-commit check.** Run the validator and the render check on the staged snapshot, and
-  disclose that the hook is installed per clone (section 14.1).
-- **Deny hook.** Where your platform's official documentation confirms that a hook can deny a tool
-  call, install one that denies direct writes to the store's record series, counters, declared
-  views and evidence, and writes under `.working/archive/adoption/`, while the sanctioned writer
-  and render paths still work (section 14.1, the floor and completion check 5). Verify the denial
-  claim against that documentation. Where the platform has no verifiable denial, rely on the
-  instructions and say so.
+- **Deny hook, per platform.** For each of the four platforms, read its official hook
+  documentation. Where it confirms that a hook can deny a tool call, install a hook that denies
+  direct writes to the store's record series, counters, declared views and evidence, and writes
+  under `.working/archive/adoption/`, while the sanctioned writer and render paths still work
+  (section 14.1, the floor and completion check 5). Denial claims must be verified against the
+  official documentation at build time. Where the documentation does not confirm denial, the
+  instructions file is that platform's means of coverage, and you disclose the residual.
+- **Evidence, per platform.** For each platform, record: the documentation page and section you
+  read and the date you read it; the verdict (verified denial, or instructions only); the paths of
+  its instructions file and hook; its disclosed residual; and its probe results.
+- **Probes.** On the platform you run on, probe live with your own tool calls. For each other
+  platform with a hook, run the hook program directly with the input format its documentation
+  specifies and show that it returns a denial; that shows the hook's decision, not that the
+  platform enforces it, so report it as a hook-level probe and ask the maintainer to run the live
+  probe on that platform. Report a live probe you could not run as not run.
 - **Ordering.** Do not enable a deny rule before the writer can perform every operation the rule
   forces (section 14.1).
 - **Residuals to disclose.** Per-clone hook installation and bypass, canonical hand edits, shell or
-  interpreter wrapping, same-user tampering, and unverified platform denial (section 14.1). Copy the
-  relevant residuals of section 17 into your project's documentation as well.
+  interpreter wrapping, same-user tampering, and unverified platform denial (section 14.1), plus
+  each platform's own residual. Copy the relevant residuals of section 17 into your project's
+  documentation as well.
 
 Acceptance checks:
 
-- A direct edit of an index file by your own tool call is denied (or, without verifiable denial,
-  the residual is written down).
-- `opf record create` and the render write still succeed with the hook active.
+- Each of the four platforms has an evidence record showing a verified deny hook or the
+  instructional fallback with its residual disclosed.
+- On your own platform, a direct edit of an index file and a write under
+  `.working/archive/adoption/` by your own tool call are denied (or, without verifiable denial, the
+  residual is written down), and `opf record create` and the render write still succeed with the
+  hook active.
+- For each other platform with a hook, the hook-level probe denies the same two writes and allows
+  the sanctioned writer and render paths, and the live probe is reported as run or as not run.
 - The pre-commit check blocks a commit that contains a hand-edited view.
 
 ### Step 14: clean-start completion
 
-Run the clean-start completion roster of section 14.1 as your acceptance test, adapted to a fresh
-start with nothing to disposition: authority and freshness; discovery accounting (every
-pre-existing operational file in the project is either outside the store's destinations or
-reported to the maintainer); preservation (not applicable when nothing was retired, and say so);
-operational readiness (the store resolves, CI asserts store presence, the validator reports valid
-and no view drifts on the live tree); wiring (step 13 probes); and retirement readiness (not
-applicable when nothing was retired). Whether an adoption receipt is still required for an empty
-start is open point 14: report it, do not invent a receipt format.
+Section 14.1 defines the clean-start completion check for adoption. Run its roster against your
+fresh start as the acceptance test, adapted only where an item names work that a fresh start does
+not do:
+
+1. Authority and freshness: the roots and destinations still match the init plan.
+2. Discovery accounting: every entry of the step 8 inventory has a recorded exclusion that the
+   maintainer ratified; otherwise the report carries `migration_incomplete` and you do not claim
+   conformance.
+3. Preservation and restore: not applicable when nothing was retired or archived; say so.
+4. Operational readiness: the store resolves to the identity recorded at init, CI asserts store
+   presence and identity (step 12), and on the live tree the validator reports valid and no
+   declared view drifts.
+5. Wiring: the step 13 evidence for all four platforms, with each probe reported as run or not run.
+6. Retirement readiness: not applicable when nothing was retired; say so.
+
+Whether a scaffold needs an adoption receipt is open point 14: report your ratified reading, and do
+not invent a receipt format.
 
 Then write the conformance report described in the checklist below.
 
@@ -664,38 +913,49 @@ test name). Any failed or not-run item means you do not claim conformance.
    `actor.kind = "importer"`, and nothing exists under `.working/imported/`.
 4. `.opf.toml` resolves the store; resolution and discovery fail closed in the step 2 cases.
 5. `manifest.toml` declares `standard = "opf"`, `spec_version = "1.3.0"`, no `homes` key,
-   `layout = "inline"`, `posture = "required"`, and no module enabled.
-6. Every enabled baseline type has a clean index and an imported leaf; `counters.toml` covers every
-   clean and imported namespace; `version.toml` and `worklog.toml` exist with `schema = 1`.
+   `layout = "inline"`, `posture = "required"`, the `local-directory` and `generic-git-remote`
+   providers, and no module enabled.
+6. Every enabled baseline type other than `worklog` has a clean index and an imported index; the
+   worklog has `worklog.toml` and `worklog.imported.toml`; `counters.toml` covers every clean and
+   imported namespace; `version.toml` and `worklog.toml` exist with `schema = 1`; `init.toml` and
+   `CHANGELOG.md` exist.
 7. Every file under the machine store is lowercase; every generated deliverable is uppercase and
    carries the section 10.3 header (the projection as a TOML comment block; `CHANGELOG.md` excepted,
    and `VERSION` as ratified under open point 8).
-8. The validator runs the full section 11 roster plus the imported-series checks, exits 0, 1 or 2
-   as step 5 describes, and fails closed on unreadable input.
+8. The validator runs the full section 11 roster plus the imported-series checks and the homes-1
+   control-area registration, exits 0, 1 or 2 as step 6 describes, and fails closed on unreadable
+   input.
 9. Renders are byte-reproducible and the drift check catches a one-byte edit.
-10. The record writer enforces the `/proposed` rule, the per-type transition table, the resolution
-    and delivery bundles, the lifecycle worklog entry, the eight-item operation sequence, and exits
-    0 or 2.
-11. Releases freeze worklog spans; the changelog passes range coverage and freeze; no summary was
+10. Initialization implements `opf.init.coupled/v1`: exit 0 only on fresh observations, with the
+    exact success sentence; init-created sources staged as exact entries; views unstaged; no commit
+    created; final validation after the lease removal; a finalization or lock-release failure
+    prevents exit 0.
+11. The record writer enforces the `/proposed` rule, the per-type transition table, the resolution
+    and delivery bundles, unqualified `done` only through `done-with-receipt`, the lifecycle
+    worklog entry, the eight-item operation sequence, and exits 0 or 2.
+12. Releases freeze worklog spans; the changelog passes range coverage and freeze; no summary was
     published without the maintainer's curation.
-12. The lease, the clean-state check and the integration-base merge rule are enforced.
-13. Rotation, if implemented, preserves every gate's answer; if not implemented, nothing rotates.
-14. The CI job runs the validator in no-store-fails mode and the render check, with the 0, 1, 2
-    status rule, and no step can pass by failing.
-15. Session wiring is in place on your platform (instructions, pre-commit check, deny hook or a
-    disclosed lack of one), and the section 14.1 residuals are disclosed.
-16. Every open point you filled is listed with your choice and its ratification status.
-17. The conformance statement uses only the section 16 vocabulary, for example
+13. The lease, the clean-state check and the integration-base merge rule are enforced.
+14. Rotation, if implemented, preserves every gate's answer; if not implemented, nothing rotates.
+15. The CI job checks out full history, runs the validator in no-store-fails mode, the store
+    identity check against the pinned identity, and the render check, with the 0, 1, 2 status
+    rule, and no step can pass by failing.
+16. Each of Claude Code, Codex, Gemini CLI and Cursor is covered, with per-platform evidence of a
+    verified deny hook or a disclosed instructional fallback; the pre-commit check is installed;
+    and the section 14.1 residuals are disclosed.
+17. Every open point you filled is listed with your choice and its ratification status.
+18. The conformance statement uses only the section 16 vocabulary, for example
     "`conformant_for_declared_scope` (OPFiles base, spec 1.3.0 on homes 1; self-asserted; profiles:
-    none declared)", and names its scope, its exclusions (relocation, import, adoption of
-    pre-existing files, modules, and any open point you could not settle) and every cannot-evaluate
-    result.
+    none declared)", or `migration_incomplete` while an inventory entry is unresolved, and names
+    its scope, its exclusions (relocation, import, adoption of pre-existing files, modules, and
+    any open point you could not settle) and every cannot-evaluate result.
 
 ## Out of scope for this prompt
 
 Import and the imported-series writer (section 8.8, `import --batch`; section 14.1, post-adoption
 import), adoption of pre-existing files (section 14), migrating an existing release pipeline
 (section 14.3), store relocation and sync (sections 5.4 to 5.6), schema upgrades (section 9.2,
-needed only when your own implementation later bumps its base schema), the homes-2 generation
-(section 4.2), the modules (section 8.5), and profiles (section 9.1). If your project needs any of
-these, read those sections at the same pinned commit and extend the plan, under the same rules.
+needed only when your own implementation later bumps its base schema, or under open point 21), the
+homes-2 generation (section 4.2), the modules (section 8.5), and profiles (section 9.1). If your
+project needs any of these, read those sections at the same pinned commit and extend the plan,
+under the same rules.
