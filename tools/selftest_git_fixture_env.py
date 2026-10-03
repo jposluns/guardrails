@@ -2052,6 +2052,11 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/check_release_delta.py", "_git", ("git",),
      "production gate read funnel (rev-parse/cat-file/ls-tree/show and `worktree list`"
      " reads); read-only by design, and production launches stay unchanged"),
+    ("tools/check_release_delta.py", "_git_raw", ("git",),
+     "production gate read funnel with replace refs and grafts disabled"
+     " (--no-replace-objects plus GIT_GRAFT_FILE pinned to os.devnull; diff-tree and"
+     " merge-base reads for the post-release revision binding, QA round-2); read-only by"
+     " design, and production launches stay unchanged"),
     ("tools/check_release_delta.py", "_index_materialized_tree", ("git",),
      "throwaway-index staging funnel: the loop variable carries exactly `init -q` and"
      " `add --force -A` over a raw-materialized temp tree under a scrubbed env; neither"

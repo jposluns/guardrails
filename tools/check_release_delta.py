@@ -29,8 +29,10 @@ control must not run the gate mis-configured.
 
 Modes: default (genesis mode while releases.toml is zero-row and the manifest declares genesis;
 post-release mode while the changelog head version EQUALS the newest attested release row, accepted only
-when the head differs from that row's commit_sha in nothing but the post-release record paths (RELEASING
-steps 6a/6b; see _post_release_head); whole-surface delta otherwise, where the head version must
+when the head is a fully committed descendant of that row's commit_sha differing from it in nothing but the
+post-release record paths, AND the attested release itself re-passes the exact gate it faced before its row
+was appended (the whole-surface delta from release_rows[-2], or the genesis validation for a first release;
+RELEASING steps 6a/6b; see _post_release_head); whole-surface delta otherwise, where the head version must
 strictly increase over the newest row); --repin --target V (10.4 adopter mode, rollback branch keyed on the
 pin-history match plus wholesale target validation plus recorded authorization); --self-test.
 
@@ -759,59 +761,106 @@ def _claimed_rank(prev_v, head_v):
 
 # --- post-release head (RELEASING steps 6a/6b) -------------------------------------------------------
 
-def _worktree_diff_paths(root, commit):
-    """Every path whose HEAD working-tree entry differs from `commit`'s tree in presence, raw content, or
-    executable bit, over the union of the commit's tree (ls-tree) and the tracked set (ls-files). Working-
-    tree bytes are hashed with hash-object --no-filters, so no clean filter or eol conversion can hide an
-    edit. A non-regular entry (symlink, submodule) or a path git cannot pass on a line is cannot-evaluate."""
-    import stat as _stat
-    proc = _git(root, ["ls-tree", "-r", "-z", "--full-tree", commit], binary=True)
-    if proc.returncode != 0:
-        raise GateError("git ls-tree {} failed: cannot compare the post-release head".format(commit))
-    committed = {}
-    for rec in proc.stdout.split(b"\0"):
-        if not rec:
-            continue
-        meta, path = rec.split(b"\t", 1)
-        mode, _typ, oid = meta.decode("ascii").split(" ")
-        if mode not in ("100644", "100755"):
-            raise GateError("{} carries a non-regular entry {!r} (mode {}); fail-closed".format(
-                commit, path.decode("utf-8", "replace"), mode))
-        committed[path.decode("utf-8")] = (mode, oid)
-    proc = _git(root, ["ls-files", "-z", "--cached", "--full-name"], binary=True)
-    if proc.returncode != 0:
-        raise GateError("git ls-files failed: cannot compare the post-release head")
-    paths = sorted(set(committed) | {p.decode("utf-8") for p in proc.stdout.split(b"\0") if p})
-    changed, present = set(), []
-    for rel in paths:
-        if "\n" in rel:
-            raise GateError("path {!r} cannot be hashed line-wise; fail-closed".format(rel))
-        try:
-            st = os.lstat(root / rel)
-        except FileNotFoundError:
-            changed.add(rel)
-            continue
-        if not _stat.S_ISREG(st.st_mode):
-            raise GateError("working-tree path {} is not a regular file; fail-closed".format(rel))
-        if rel not in committed or bool(st.st_mode & _stat.S_IXUSR) != (committed[rel][0] == "100755"):
-            changed.add(rel)
-        present.append(rel)
+def _git_raw(root, args):
+    """Run git with replacement objects AND commit grafts disabled (--no-replace-objects plus an empty
+    graft file), so the post-release comparison reads the RAW recorded objects: a replace ref or graft that
+    substitutes another tree or parent chain for HEAD or the release commit cannot alter what is compared
+    (QA round-2)."""
+    env = dict(os.environ)
+    env["GIT_GRAFT_FILE"] = os.devnull
     try:
-        proc = subprocess.run(["git", "-C", str(root), "hash-object", "--no-filters", "--stdin-paths"],
-                              input="".join(p + "\n" for p in present).encode("utf-8"), capture_output=True)
+        return subprocess.run(["git", "--no-replace-objects", "-C", str(root), *args],
+                              capture_output=True, env=env)
     except OSError as exc:
         raise GateError("git is not available: {}".format(exc))
-    oids = proc.stdout.decode("ascii").split()
-    if proc.returncode != 0 or len(oids) != len(present):
-        raise GateError("git hash-object failed: cannot compare the post-release head")
-    changed.update(rel for rel, oid in zip(present, oids) if committed.get(rel, (None, None))[1] != oid)
-    return changed
+
+
+def _assert_head_ancestry(root, commit):
+    """HEAD must DESCEND from the newest release row's commit_sha (QA round-2 codex 4 / claude m4): an
+    unrelated head (e.g. an orphan commit carrying an identical tree) must never be certified as the
+    post-release state of a release it does not contain. Raw (no replace objects, no grafts)."""
+    proc = _git_raw(root, ["merge-base", "--is-ancestor", commit, "HEAD"])
+    if proc.returncode != 0:
+        raise GateError("post-release head: the newest release row's commit_sha {} is not an ancestor of "
+                        "HEAD; the head does not descend from the release it claims; fail-closed".format(
+                            commit))
+
+
+def _assert_only_post_release_paths(changed):
+    """Every path differing between the release commit's tree and HEAD's tree must be a post-release record
+    path; anything else is an undeclared release, exit 2."""
+    extra = sorted(set(changed) - POST_RELEASE_PATHS)
+    if extra:
+        raise GateError("post-release head (the head version equals the newest release row) changes {} "
+                        "beyond the post-release paths {}; declare a new version".format(
+                            extra[:5], sorted(POST_RELEASE_PATHS)))
+
+
+def _assert_tree_entry_regular(path, src_mode, dst_mode, status):
+    """A differing tree entry must be an IN-PLACE content edit of a regular non-executable blob
+    (100644 -> 100644, status M): an addition, a deletion, a type change (symlink/gitlink), or any
+    executable-bit or other mode change is exit 2 on EVERY path, allowed or not (QA round-2 codex 3 /
+    claude m2)."""
+    if status != "M" or src_mode != "100644" or dst_mode != "100644":
+        raise GateError("post-release head: {!r} must stay an in-place edit of a regular non-executable "
+                        "blob (100644 -> 100644, status M) relative to the release commit; got status "
+                        "{} mode {} -> {}; fail-closed".format(path, status, src_mode, dst_mode))
+
+
+def _head_tree_diff(root, commit):
+    """Every path whose RAW HEAD TREE entry differs from `commit`'s tree, read entirely from the recorded
+    tree objects (git diff-tree -r -z --no-renames with replacement objects and grafts disabled), never
+    from the working tree, the index, or any path piped line-wise: no smudge/clean filter, checkout
+    conversion, or C-style path quoting (a name starting with a double quote) can hide a committed edit
+    (QA round-2 codex 1 / claude B1, m1). Every differing path must be a post-release record path AND an
+    in-place 100644 -> 100644 modification (_assert_only_post_release_paths, _assert_tree_entry_regular).
+    Returns the changed path set."""
+    proc = _git_raw(root, ["diff-tree", "-r", "-z", "--no-renames", commit, "HEAD"])
+    if proc.returncode != 0:
+        raise GateError("git diff-tree {}..HEAD failed: cannot compare the post-release head".format(commit))
+    fields = proc.stdout.split(b"\0")
+    changed = {}
+    i = 0
+    while i < len(fields) and fields[i]:
+        try:
+            meta = fields[i].decode("ascii")
+            path = fields[i + 1].decode("utf-8")
+            src_mode, dst_mode, _src_oid, _dst_oid, status = meta.lstrip(":").split(" ")
+        except (IndexError, UnicodeDecodeError, ValueError) as exc:
+            raise GateError("malformed git diff-tree record ({}); fail-closed".format(exc))
+        changed[path] = (src_mode, dst_mode, status)
+        i += 2
+    _assert_only_post_release_paths(set(changed))
+    for path in sorted(changed):
+        src_mode, dst_mode, status = changed[path]
+        _assert_tree_entry_regular(path, src_mode, dst_mode, status)
+    return set(changed)
+
+
+def _require_committed_head(root):
+    """The post-release branch certifies the HEAD REVISION, so the index, the working tree, and the
+    untracked set must all equal HEAD (QA round-2 codex 1/2: a staged-only edit or an untracked file never
+    enters a tree comparison and must not ride along under a certified status line). `git status
+    --porcelain=v1 -z --untracked-files=all` must print nothing; anything else is exit 2."""
+    proc = _git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], binary=True)
+    if proc.returncode != 0:
+        raise GateError("git status failed: cannot establish a committed post-release head")
+    if proc.stdout.strip(b"\0"):
+        entries = sorted(rec[3:].decode("utf-8", "replace")
+                         for rec in proc.stdout.split(b"\0") if len(rec) > 3)
+        raise GateError("post-release head: the index, working tree, or untracked files differ from HEAD "
+                        "({} entr{}, e.g. {}); commit or stash them first".format(
+                            len(entries), "y" if len(entries) == 1 else "ies", entries[:5]))
 
 
 def _post_release_changelog_ok(prev_bytes, head_bytes, version):
     """True when the head changelog equals the predecessor's byte for byte, or differs ONLY by one added
-    line `tag = "v<version>"` that lands in the newest [[release]] table (RELEASING step 6b). Any other
-    edit, including a reformat, a comment, another key, or a different tag value, is False."""
+    line `tag = "v<version>"` that lands in the newest [[release]] table as that release's own key
+    (RELEASING step 6b: the line goes immediately after that release's `version` line, BEFORE any sub-table
+    header such as [release.artifacts]). The LINE check (one added line whose removal restores the
+    predecessor bytes) runs first; _changelog_tag_toml_ok then proves the line landed as the NEWEST
+    release's own `tag` key. Any other edit, including a reformat, a comment, another key, or a different
+    tag value, is False."""
     if head_bytes == prev_bytes:
         return True
     want = 'tag = "v{}"'.format(version)
@@ -819,46 +868,241 @@ def _post_release_changelog_ok(prev_bytes, head_bytes, version):
     for i, line in enumerate(lines):
         if line.rstrip("\r\n") != want or "".join(lines[:i] + lines[i + 1:]).encode("utf-8") != prev_bytes:
             continue
-        head, prev = tomllib.loads(head_bytes.decode("utf-8")), tomllib.loads(prev_bytes.decode("utf-8"))
-        newest = dict(head["release"][-1])
-        if newest.pop("tag", None) != "v" + version:
-            return False
-        head["release"][-1] = newest
-        return head == prev
+        return _changelog_tag_toml_ok(prev_bytes, head_bytes, version)
     return False
+
+
+def _changelog_tag_toml_ok(prev_bytes, head_bytes, version):
+    """The PARSED proof behind the step 6b line check: the newest [[release]] table itself carries tag ==
+    "v" + version and, with that one key removed, the head record EQUALS the predecessor's. A textually
+    perfect tag line placed in an OLDER release's table, or inside a sub-table such as [release.artifacts],
+    passes the line check and is rejected ONLY here (QA round-2: the TOML-only catch), so this is factored
+    out for the self-test to discriminate."""
+    head, prev = tomllib.loads(head_bytes.decode("utf-8")), tomllib.loads(prev_bytes.decode("utf-8"))
+    newest = dict(head["release"][-1])
+    if newest.pop("tag", None) != "v" + version:
+        return False
+    head["release"][-1] = newest
+    return head == prev
+
+
+def _assert_release_rows_prefix(prev_releases, release_rows, head_version):
+    """HEAD's releases record must be the release commit's rows plus EXACTLY the newest row: an extra,
+    altered, or reordered prior row is a rewrite of attested history, exit 2 (QA round-2 claude M1)."""
+    if list(prev_releases) != list(release_rows[:-1]):
+        raise GateError("post-release head: {} is not the predecessor's rows plus exactly the newest row "
+                        "{}".format(RELEASES_REL, head_version))
+
+
+def _assert_newest_manifest_binding(newest_manifest, head_version):
+    """The release commit's own manifest must record the newest row's version (QA round-2 claude M1/M4):
+    an anchored release whose manifest disagrees with its release-order row is inconsistent, exit 2."""
+    if newest_manifest.get("release-version") != head_version:
+        raise GateError("predecessor manifest release-version {!r} != release-order row version {!r}; the "
+                        "anchored predecessor is inconsistent".format(
+                            newest_manifest.get("release-version"), head_version))
 
 
 def _post_release_head(root, prev_row, release_rows, head_version):
     """The head version EQUALS the newest attested row (the RELEASING step 6a attestation commit, main
-    after it merges, and the step 6b tag-key commit). Accepted ONLY when the head differs from that row's
-    anchored commit_sha in nothing but POST_RELEASE_PATHS, the head releases record is the predecessor's
-    rows plus exactly this row, changelog.toml adds at most the newest release's tag key, and the HEAD
-    manifest and its derived artifacts are fresh. Anything else raises GateError (exit 2): equal version
-    with any other change is an undeclared release, never a silent pass. Returns the sorted changed paths."""
+    after it merges, and the step 6b tag-key commit). THE ONE AND ONLY RELAXATION over the gate the release
+    faced BEFORE its row was appended is the version-increase requirement (QA round-2 claude B1): every
+    other rejection is preserved, and the whole branch binds to the HEAD REVISION, never to working-tree
+    bytes. Coverage of what the pre-row gate rejected and where each case is still rejected:
+
+      pre-row rejection                            | post-release enforcement
+      -------------------------------------------- | ----------------------------------------------------
+      any change beyond the release commit         | raw tree diff HEAD vs commit_sha (_head_tree_diff,
+                                                   | replace objects/grafts disabled): POST_RELEASE_PATHS
+                                                   | only, with no path-quoting or filter hazard
+      an addition, deletion, type or mode change   | every differing entry must stay 100644 -> 100644
+                                                   | status M (_assert_tree_entry_regular), on every path
+      a staged, dirty, or untracked state          | git status --porcelain=v1 -z --untracked-files=all
+      presented as the head                        | must be empty (_require_committed_head)
+      a head not descending from the release       | git merge-base --is-ancestor commit_sha HEAD, raw
+                                                   | (_assert_head_ancestry)
+      the release's OWN whole-surface delta: the   | _release_checks_at_commit replays the full delta from
+      version increase over ITS predecessor, the   | release_rows[-2] against the newest row's tagged tree
+      strict record schemas, both anchored tree    | with the row's version as head; a finding exits 1 and
+      checks, every classification leg, the        | malformed input exits 2, exactly as before the row
+      disposition sweep, the claimed-bump floor    | existed
+      a malformed FIRST release (the zero-row      | with exactly one row, _release_checks_at_commit runs
+      genesis strict validation)                   | the same genesis checks over the tagged tree
+      a stale or inconsistent HEAD manifest        | _head_manifest_integrity(root) plus the HEAD-byte
+                                                   | version bindings below
+      a changelog edit beyond the newest tag key   | _post_release_changelog_ok over HEAD's COMMITTED bytes
+      a rewritten releases record                  | HEAD's committed rows == the release commit's rows
+                                                   | plus exactly the newest row (_assert_release_rows_prefix)
+
+    Every record read below is from HEAD's or the release commit's COMMITTED bytes (git show), never the
+    working tree (QA round-2 codex 1/2): the committed-state check makes the working tree byte-identical
+    anyway, and a clean/smudge filter cannot substitute bytes in a tree object. Returns (sorted changed
+    paths, replayed-release findings)."""
     commit = prev_row["commit_sha"]
-    changed = _worktree_diff_paths(root, commit)
-    extra = sorted(changed - POST_RELEASE_PATHS)
-    if extra:
-        raise GateError("post-release head (version {} equals the newest release row) changes {} beyond the "
-                        "post-release paths {}; declare a new version".format(
-                            head_version, extra[:5], sorted(POST_RELEASE_PATHS)))
+    head_oid = _rev_parse(root, "HEAD^{commit}")
+    _assert_head_ancestry(root, commit)
+    changed = _head_tree_diff(root, commit)
+    _require_committed_head(root)
+    head_rows = _strict(_release_schema.strict_releases, _show_toml(root, head_oid, RELEASES_REL),
+                        "HEAD " + RELEASES_REL)
+    if head_rows != release_rows:
+        raise GateError("post-release head: the committed {} at HEAD disagrees with the loaded record; "
+                        "fail-closed".format(RELEASES_REL))
+    head_cl_bytes = _show(root, head_oid, CHANGELOG_REL)
+    try:
+        head_cl = tomllib.loads(head_cl_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+        raise GateError("HEAD {} does not parse: {}".format(CHANGELOG_REL, exc))
+    cl_rel = head_cl.get("release", [])
+    if (not isinstance(cl_rel, list) or not cl_rel or not isinstance(cl_rel[-1], dict)
+            or cl_rel[-1].get("version") != head_version):
+        raise GateError("post-release head: the committed {} head version disagrees with the loaded "
+                        "record; fail-closed".format(CHANGELOG_REL))
+    head_man = _show_toml(root, head_oid, MANIFEST_REL)
+    _strict(_release_schema.strict_manifest, head_man, "HEAD " + MANIFEST_REL)
+    if head_man.get("release-version") != head_version:
+        raise GateError("HEAD manifest release-version {!r} != the newest release row version {!r}; "
+                        "fail-closed".format(head_man.get("release-version"), head_version))
     prev_releases = _strict(_release_schema.strict_releases, _show_toml(root, commit, RELEASES_REL),
                             "predecessor " + RELEASES_REL)
-    if list(prev_releases) != list(release_rows[:-1]):
-        raise GateError("post-release head: {} is not the predecessor's rows plus exactly the newest row "
-                        "{}".format(RELEASES_REL, head_version))
-    prev_manifest = _show_toml(root, commit, MANIFEST_REL)
-    _strict(_release_schema.strict_manifest, prev_manifest, "predecessor " + MANIFEST_REL)
-    if prev_manifest.get("release-version") != head_version:
-        raise GateError("predecessor manifest release-version {!r} != release-order row version {!r}; the "
-                        "anchored predecessor is inconsistent".format(prev_manifest.get("release-version"),
-                                                                       head_version))
+    _assert_release_rows_prefix(prev_releases, release_rows, head_version)
+    newest_manifest = _show_toml(root, commit, MANIFEST_REL)
+    _strict(_release_schema.strict_manifest, newest_manifest, "predecessor " + MANIFEST_REL)
+    _assert_newest_manifest_binding(newest_manifest, head_version)
     if CHANGELOG_REL in changed and not _post_release_changelog_ok(
-            _show(root, commit, CHANGELOG_REL), (root / CHANGELOG_REL).read_bytes(), head_version):
+            _show(root, commit, CHANGELOG_REL), head_cl_bytes, head_version):
         raise GateError("post-release head: {} differs from the release commit by more than the newest "
-                        "release's tag = \"v{}\" key; declare a new version".format(CHANGELOG_REL, head_version))
+                        "release's tag = \"v{}\" key; declare a new version".format(CHANGELOG_REL,
+                                                                                    head_version))
     _head_manifest_integrity(root)
-    return sorted(changed)
+    findings = _release_checks_at_commit(root, release_rows, newest_manifest)
+    return sorted(changed), findings
+
+
+def _release_checks_at_commit(root, release_rows, newest_manifest):
+    """THE PRESERVED RELEASE CHECK (QA round-2 claude B1): the post-release head must never certify a
+    release the gate would have rejected before its row was appended, so the release the newest row attests
+    is re-checked here against ITS OWN predecessor, over committed objects only.
+
+    - With two or more rows, the whole-surface delta is replayed from release_rows[-2] against the newest
+      row's tagged commit tree (equal to HEAD outside POST_RELEASE_PATHS, enforced by the caller) with the
+      newest row's version as the head version: predecessor anchoring, the version-increase/claimed rank,
+      every strict record validation on BOTH objects, both authoritative raw-tree checks, every
+      classification leg, the disposition sweep, and the claimed-bump floor. Findings are returned for
+      exit 1; malformed input raises GateError (exit 2), exactly the pre-row verdicts.
+    - With exactly one row, the newest row attests the FIRST release, whose pre-row state was the zero-row
+      genesis path, so the SAME genesis validation runs over the tagged tree: manifest genesis = true, the
+      strict record schemas, renderer-target existence, and the authoritative validators
+      (check_clauses --genesis, gen_renderers --check, gen_manifest --check + check_manifest) over the
+      RAW-materialized tree (_predecessor_tree_checks).
+
+    Head-side records are read from the newest row's COMMIT (git show / raw materialization), never the
+    working tree. Returns the findings list (empty when clean)."""
+    newest = release_rows[-1]
+    n_commit, version = newest["commit_sha"], newest["version"]
+    n_rows = _validate_dispositions_data(_show_toml(root, n_commit, DISPOSITIONS_REL),
+                                         "release commit " + DISPOSITIONS_REL)
+    n_genesis = newest_manifest.get("genesis") is True
+    if len(release_rows) == 1:
+        if not n_genesis:
+            raise GateError("the first attested release's commit " + n_commit + " does not declare "
+                            "genesis = true in its manifest while its own releases record is zero-row "
+                            "(2.5); fail-closed")
+        _strict(_release_schema.strict_order, _show_toml(root, n_commit, ORDER_REL),
+                "release commit " + ORDER_REL)
+        n_renderers = _show_toml(root, n_commit, RENDERERS_REL)
+        _strict(_release_schema.strict_renderers, n_renderers, "release commit " + RENDERERS_REL)
+        _strict(_release_schema.strict_clause_inventory, _show_toml(root, n_commit, CLAUSES_REL),
+                "release commit " + CLAUSES_REL)
+        _strict(_release_schema.strict_id_history, _show_toml(root, n_commit, IDHISTORY_REL),
+                "release commit " + IDHISTORY_REL)
+        _assert_renderer_targets_declared(n_rows, _renderer_ids(n_renderers))
+        _predecessor_tree_checks(root, n_commit, True)
+        return []
+    prev_row = release_rows[-2]
+    _anchor_predecessor(root, prev_row)
+    p_commit = prev_row["commit_sha"]
+    claimed = _claimed_rank(prev_row["version"], version)
+    prev_inv = _strict(_release_schema.strict_clause_inventory, _show_toml(root, p_commit, CLAUSES_REL),
+                       "predecessor " + CLAUSES_REL)
+    head_inv = _strict(_release_schema.strict_clause_inventory, _show_toml(root, n_commit, CLAUSES_REL),
+                       "release commit " + CLAUSES_REL)
+    register = _strict(_release_schema.strict_id_history, _show_toml(root, n_commit, IDHISTORY_REL),
+                       "release commit " + IDHISTORY_REL)
+    _strict(_release_schema.strict_releases, _show_toml(root, p_commit, RELEASES_REL),
+            "predecessor " + RELEASES_REL)
+    _strict(_release_schema.strict_id_history, _show_toml(root, p_commit, IDHISTORY_REL),
+            "predecessor " + IDHISTORY_REL)
+    _strict(_release_schema.strict_order, _show_toml(root, p_commit, ORDER_REL),
+            "predecessor " + ORDER_REL)
+    _strict(_release_schema.strict_order, _show_toml(root, n_commit, ORDER_REL),
+            "release commit " + ORDER_REL)
+    prev_disp = _validate_dispositions_data(_show_toml(root, p_commit, DISPOSITIONS_REL),
+                                            "predecessor " + DISPOSITIONS_REL)
+    prev_manifest = _show_toml(root, p_commit, MANIFEST_REL)
+    _strict(_release_schema.strict_manifest, prev_manifest, "predecessor " + MANIFEST_REL)
+    if prev_manifest.get("release-version") != prev_row["version"]:
+        raise GateError("predecessor manifest release-version {!r} != release-order row version {!r}; the "
+                        "anchored predecessor is inconsistent".format(
+                            prev_manifest.get("release-version"), prev_row["version"]))
+    prev_renderers = _show_toml(root, p_commit, RENDERERS_REL)
+    head_renderers = _show_toml(root, n_commit, RENDERERS_REL)
+    _strict(_release_schema.strict_renderers, prev_renderers, "predecessor " + RENDERERS_REL)
+    _strict(_release_schema.strict_renderers, head_renderers, "release commit " + RENDERERS_REL)
+    _assert_renderer_targets_declared(n_rows, _nongenesis_renderer_target_scope(prev_renderers,
+                                                                                head_renderers))
+    _assert_renderer_targets_declared(prev_disp, _renderer_ids(prev_renderers))
+    _predecessor_tree_checks(root, p_commit, prev_manifest.get("genesis") is True)
+    # The release commit's OWN tree is held to the SAME authoritative validators the live head gets
+    # (check_clauses, gen_renderers --check, gen_manifest --check + check_manifest), raw-materialized.
+    _predecessor_tree_checks(root, n_commit, n_genesis)
+    events, findings = [], []
+    for ev, fs in (clause_text_leg(prev_inv, head_inv, register, n_rows, version),
+                   path_keyset_leg(prev_manifest, newest_manifest),
+                   ownership_leg(_ownership_classes_at(root, p_commit),
+                                 _ownership_classes_at(root, n_commit), n_rows, version),
+                   order_leg(_show(root, p_commit, ORDER_REL), _show(root, n_commit, ORDER_REL)),
+                   renderer_diff(prev_renderers, head_renderers, n_rows, version)):
+        events += ev
+        findings += fs
+    floor = max((e.floor for e in events), default=PATCH)
+    findings += _disposition_findings(events, n_rows, version)
+    if claimed < floor:
+        findings.append("claimed bump {} ({} -> {}) is below the required {} floor".format(
+            BUMP_NAME[claimed], prev_row["version"], version, BUMP_NAME[floor]))
+    return findings
+
+
+def _disposition_findings(events, rows, head_version):
+    """The mis-dated and unconsumed disposition sweep over classified events (round-3 finding 3), shared by
+    the live delta in run() and the post-release replay (_release_checks_at_commit) so they cannot drift.
+    The subjects of the changes DETECTED this release are grouped by the disposition kind that would target
+    them, so a mis-dated row for a current change is caught."""
+    findings = []
+    dispositioned_clause_changes = ("behaviour-neutral", "strengthened", "default-correction",
+                                    "undispositioned-text-change")
+    clause_subjects = set(e.subject for e in events
+                          if e.surface == "clause" and e.change in dispositioned_clause_changes)
+    ownership_subjects = set(e.subject for e in events
+                             if e.surface == "ownership" and e.change in ("weakened", "strengthened"))
+    renderer_subjects = set(e.subject for e in events if e.surface == "renderer")
+    subjects_by_kind = dict((("behaviour-neutral", clause_subjects), ("strengthened", clause_subjects),
+                             ("default-correction", clause_subjects), ("class-change", ownership_subjects),
+                             ("renderer-semantics", renderer_subjects)))
+    for r in rows:
+        if r["_consumed"]:
+            continue
+        if r["id"] in subjects_by_kind.get(r["kind"], set()) and r["release"] != head_version:
+            # A row that names a change detected THIS release but is dated for another release: it was
+            # never consumed (take_row is exact-release) and the head_version sweep cannot see it, so a
+            # mis-dated disposition could otherwise hide behind a coincidentally-adequate bump.
+            findings.append("disposition row (kind {} id {}) is dated {}, not the release under build "
+                            "{}, but names a change detected in this release (mis-dated "
+                            "disposition)".format(r["kind"], r["id"], r["release"], head_version))
+        elif r["release"] == head_version:
+            findings.append("disposition row (kind {} id {}) at {} matches no detected change "
+                            "(unconsumed)".format(r["kind"], r["id"], head_version))
+    return findings
 
 
 # --- genesis structural validation (single-home validators, never re-implemented) -------------------
@@ -980,9 +1224,16 @@ def run(root):
         # only when nothing but the post-release paths changed from that row's commit; otherwise exit 2. A
         # head version BELOW the row, or any non-equal non-increase, still fails at _claimed_rank.
         if head_version == prev_row["version"]:
-            changed = _post_release_head(root, prev_row, release_rows, head_version)
+            changed, pr_findings = _post_release_head(root, prev_row, release_rows, head_version)
+            if pr_findings:
+                print("FAIL: {} release-delta finding(s) (post-release replay of the newest attested "
+                      "release against its own predecessor)".format(len(pr_findings)))
+                for f in pr_findings:
+                    print("  " + f)
+                return 1
             print("release-delta: POST-RELEASE (head version {} equals the newest attested release row {}; "
-                  "the head differs from its commit_sha only in the post-release paths {}); no delta "
+                  "the head differs from its commit_sha only in the post-release paths {}, and the attested "
+                  "release itself re-passes the pre-row gate against its own predecessor); no delta "
                   "computed".format(head_version, prev_row["tag"], changed or "(none)"))
             return 0
         claimed = _claimed_rank(prev_row["version"], head_version)
@@ -1067,29 +1318,7 @@ def run(root):
         print("release-delta: profiles/groups leg NOT APPLICABLE (adopter-experience artifact not "
               "yet defined; arms or fail-closes when it ships)")
         floor = max((e.floor for e in events), default=PATCH)
-        # The subjects of the changes DETECTED this release, grouped by the disposition kind that would
-        # target them, so a mis-dated row for a current change can be caught (round-3 finding 3).
-        clause_subjects = {e.subject for e in events if e.surface == "clause" and e.change in (
-            "behaviour-neutral", "strengthened", "default-correction", "undispositioned-text-change")}
-        ownership_subjects = {e.subject for e in events if e.surface == "ownership"
-                              and e.change in ("weakened", "strengthened")}
-        renderer_subjects = {e.subject for e in events if e.surface == "renderer"}
-        subjects_by_kind = {"behaviour-neutral": clause_subjects, "strengthened": clause_subjects,
-                            "default-correction": clause_subjects, "class-change": ownership_subjects,
-                            "renderer-semantics": renderer_subjects}
-        for r in rows:
-            if r["_consumed"]:
-                continue
-            if r["id"] in subjects_by_kind.get(r["kind"], set()) and r["release"] != head_version:
-                # A row that names a change detected THIS release but is dated for another release: it was
-                # never consumed (take_row is exact-release) and the head_version sweep cannot see it, so a
-                # mis-dated disposition could otherwise hide behind a coincidentally-adequate bump.
-                findings.append("disposition row (kind {} id {}) is dated {}, not the release under build "
-                                "{}, but names a change detected in this release (mis-dated "
-                                "disposition)".format(r["kind"], r["id"], r["release"], head_version))
-            elif r["release"] == head_version:
-                findings.append("disposition row (kind {} id {}) at {} matches no detected change "
-                                "(unconsumed)".format(r["kind"], r["id"], head_version))
+        findings += _disposition_findings(events, rows, head_version)
         if claimed < floor:
             findings.append("claimed bump {} ({} -> {}) is below the required {} floor".format(
                 BUMP_NAME[claimed], prev_row["version"], head_version, BUMP_NAME[floor]))
@@ -2068,78 +2297,304 @@ def _run_capture_root(root):
     return rc, out.getvalue() + err.getvalue()
 
 
-def _post_release_e2e(tmp, failures):
-    """RELEASING steps 6a/6b (PR #397 QA F1): a REAL full-pack release 1.0.0 is committed and tagged, and
-    the working tree is the post-release head whose changelog version EQUALS the newest attested row. (a)
-    the attestation row alone (6a, and main after it merges) and (b) plus the changelog tag key (6b) exit 0
-    with the POST-RELEASE status line; (c) plus any other changed path, (d) a changelog edit other than the
-    tag key, and (e) a head version BELOW the row each exit 2 with their own diagnostic. Without the post-
-    release branch (a) and (b) exit 2 at _claimed_rank. Returns True if it ran, False if skipped."""
+def _post_release_e2e(tmp, failures, only=None):
+    """RELEASING steps 6a/6b (PR #397 QA F1; round-2 full coverage): REAL full-pack fixtures drive run()'s
+    POST-RELEASE branch over COMMITTED heads. The one-row fixture (the first attested release) covers the
+    accepted states (the attestation row alone; the correctly placed tag key over a changelog whose newest
+    release carries a [release.artifacts] sub-table), every revision-binding guard (a committed edit beyond
+    the post-release paths, a smudge-masked committed edit, a committed edit to a path starting with a
+    double quote, a mode-only +x change on EACH post-release path, a deleted post-release path, a
+    staged-only edit, untracked files at the root and under .aiqt/core, a non-descendant head), the stale
+    manifest, the extra prior row, the mis-placed tag key (EOF inside the artifacts table; the exact line in
+    an OLDER release's table, which only the TOML check catches), and the replayed GENESIS validation over a
+    malformed clauses.toml (round-2 B1 reproduction 2). Separate fixtures cover the predecessor-manifest
+    version binding and the two-release replay (B1 reproduction 1: an undispositioned clause edit still
+    exits 1 after its attestation row lands; an altered prior row exits 2). `only` (an iterable of label
+    substrings) runs a subset: the mutant-discrimination driver uses it to show each guard's case failing
+    alone when that guard is removed. Returns True if it ran, False if skipped."""
     env = _selftest_env()
     arch = _archive_head(repo_root())
     if arch is None:
         print("SELF-TEST NOTE: `git archive HEAD` unavailable; the post-release cases were SKIPPED",
               file=sys.stderr)
         return False
-    repo = tmp / "post-release"
-    try:
-        _extract(arch, repo)
-    except Exception as exc:  # noqa: BLE001  a bad archive is a skip, not a false pass
-        print("SELF-TEST NOTE: could not extract the archive ({}); post-release cases SKIPPED".format(exc),
-              file=sys.stderr)
+
+    def _sel(label):
+        return only is None or any(s in label for s in only)
+
+    def _extract_to(name):
+        repo_ = tmp / name
+        try:
+            _extract(arch, repo_)
+        except Exception as exc:  # noqa: BLE001  a bad archive is a skip, not a false pass
+            print("SELF-TEST NOTE: could not extract the archive ({}); post-release cases SKIPPED".format(
+                exc), file=sys.stderr)
+            return None
+        return repo_
+
+    def _g(repo_, *args):
+        return subprocess.run(["git", "-C", str(repo_), *args], capture_output=True, env=env)
+
+    def _gout(repo_, *args):
+        return _g(repo_, *args).stdout.decode("utf-8").strip()
+
+    def _commit_all(repo_, label):
+        for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "post-release case")):
+            if _g(repo_, *args).returncode != 0:
+                failures.append("fixture setup (post-release {}): could not commit".format(label))
+                return False
+        return True
+
+    def _row_text(version, tag, tobj, csha, qa="a" * 64):
+        return ('[[release]]\nversion = "{v}"\ntag = "{t}"\ntag_object_sha = "{to}"\n'
+                'commit_sha = "{c}"\nqa-sha256 = "{q}"\nqa-store-path = "qa/{v}.toml"\n'
+                'attestation-timestamps = [100]\n').format(v=version, t=tag, to=tobj, c=csha, q=qa)
+
+    def _check(repo_, label, want, want_msg):
+        rc, out = _run_capture_root(repo_)
+        if rc != want or want_msg not in out:
+            failures.append("post-release head {}: expected exit {} with {!r} (got rc={}: {})".format(
+                label, want, want_msg, rc, out.strip()[-300:]))
+
+    # ---- fixture 1: the first attested release (one row; replayed genesis) --------------------------
+    base_cl = ('[[release]]\nversion = "0.9.0"\n\n[[release]]\nversion = "1.0.0"\n\n'
+               '[release.artifacts]\nsbom = "sha256:0000"\n')
+    quoted_rel = '''"TODO.md"'''
+    v_line = 'version = "1.0.0"\n'
+    tag_line = 'tag = "v1.0.0"\n'
+
+    repo = _extract_to("post-release")
+    if repo is None or not _pin_fixture_version(repo, failures):
         return False
-    if not _pin_fixture_version(repo, failures):
+    (repo / CHANGELOG_REL).write_text(base_cl, encoding="utf-8")
+    (repo / quoted_rel).write_text("quoted-path fixture\n", encoding="utf-8")
+    own_path = repo / OWNERSHIP_REL
+    own_path.write_text(own_path.read_text(encoding="utf-8") +
+                        "\n[[exclusion]]\npath = '" + quoted_rel + "'\nreason = \"QA round-2 "
+                        "quoted-path fixture; tracked but excluded from pack scope.\"\n", encoding="utf-8")
+    _g(repo, "add", "-A")
+    if not _regen_fixture_manifest(repo, "post-release fixture", failures, env):
         return False
-    for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"],
-                 ["tag", "-a", "v1.0.0", "-m", "1.0.0"]):
-        if subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env).returncode != 0:
+    for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                 ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+        if _g(repo, *args).returncode != 0:
             print("SELF-TEST NOTE: could not build the post-release fixture repo; cases SKIPPED",
                   file=sys.stderr)
             return False
-    commit1 = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
-                             text=True, env=env).stdout.strip()
-    tobj = subprocess.run(["git", "-C", str(repo), "rev-parse", "refs/tags/v1.0.0"], capture_output=True,
-                          text=True, env=env).stdout.strip()
-    row = ('format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
-           'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
-           'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format(tobj, commit1, "a" * 64))
-    base_cl = (repo / CHANGELOG_REL).read_text(encoding="utf-8")
-    tag_line = 'tag = "v1.0.0"\n'
+    commit1 = _gout(repo, "rev-parse", "HEAD")
+    tobj1 = _gout(repo, "rev-parse", "refs/tags/v1.0.0")
+    row = "format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", tobj1, commit1)
 
     def _write(rel, text):
         (repo / rel).write_text(text, encoding="utf-8")
+
+    def _append(rel, text):
+        (repo / rel).write_text((repo / rel).read_text(encoding="utf-8") + text, encoding="utf-8")
 
     def _set_version(v):
         _write("VERSION", v + "\n")
         _write(CHANGELOG_REL, '[[release]]\nversion = "{}"\n'.format(v))
 
+    def _chmod_x(rel):
+        path_ = repo / rel
+        path_.chmod(path_.stat().st_mode | 0o111)
+
+    def _post_smudge():
+        orig, edited = tmp / "agents-orig.bin", tmp / "agents-edited.bin"
+        orig.write_bytes(_g(repo, "show", commit1 + ":AGENTS.md").stdout)
+        edited.write_bytes((repo / "AGENTS.md").read_bytes())
+        (repo / ".git" / "info" / "attributes").write_text("AGENTS.md filter=mask\n", encoding="utf-8")
+        _g(repo, "config", "filter.mask.smudge", "cat " + str(orig))
+        _g(repo, "config", "filter.mask.clean", "cat " + str(edited))
+        (repo / "AGENTS.md").unlink()
+        _g(repo, "checkout", "--", "AGENTS.md")
+
+    def _post_staged():
+        ab = (repo / "AGENTS.md").read_bytes()
+        (repo / "AGENTS.md").write_bytes(ab + b"\nstaged-only edit\n")
+        _g(repo, "add", "AGENTS.md")
+        (repo / "AGENTS.md").write_bytes(ab)
+
+    def _post_untracked_root():
+        (repo / "qa-undeclared.txt").write_text("x\n", encoding="utf-8")
+
+    def _post_untracked_core():
+        (repo / ".aiqt" / "core" / "qa-extra.toml").write_text("format-version = 1\n", encoding="utf-8")
+
+    def _post_orphan():
+        orphan = _gout(repo, "commit-tree", _gout(repo, "rev-parse", "HEAD^{tree}"), "-m", "orphan")
+        _g(repo, "checkout", "-q", orphan)
+
+    # (label, mutate [pre-regen], regen, after_regen [post-regen pre-commit], commit, post [post-commit],
+    #  want_rc, want_msg). Every case that asserts a committed-state guard COMMITS its mutation.
     cases = [
-        ("(a) the attestation row alone (step 6a, and main after it merges)", lambda: None, 0,
-         "release-delta: POST-RELEASE"),
-        ("(b) the attestation row plus the changelog tag key (step 6b)",
-         lambda: _write(CHANGELOG_REL, base_cl + tag_line), 0, "release-delta: POST-RELEASE"),
-        ("(c) the tag key plus another changed path",
-         lambda: (_write(CHANGELOG_REL, base_cl + tag_line),
-                  _write("AGENTS.md", (repo / "AGENTS.md").read_text(encoding="utf-8") + "\nedit\n")),
-         2, "beyond the post-release paths"),
+        ("(a) the attestation row alone, committed (step 6a, and main after it merges)",
+         None, True, None, True, None, 0, "release-delta: POST-RELEASE"),
+        ("(b) the tag key placed after the newest version line, before [release.artifacts] (step 6b)",
+         lambda: _write(CHANGELOG_REL, base_cl.replace(v_line, v_line + tag_line)),
+         True, None, True, None, 0, "release-delta: POST-RELEASE"),
+        ("(d) the tag key appended at EOF lands inside [release.artifacts]",
+         lambda: _write(CHANGELOG_REL, base_cl + tag_line), True, None, True, None,
+         2, "by more than the newest"),
+        ("(d) the exact tag line placed in an OLDER release's table (only the TOML check catches it)",
+         lambda: _write(CHANGELOG_REL, base_cl.replace('version = "0.9.0"\n',
+                                                       'version = "0.9.0"\n' + tag_line)),
+         True, None, True, None, 2, "by more than the newest"),
+        ("(c) the tag key plus another changed path, committed",
+         lambda: (_write(CHANGELOG_REL, base_cl.replace(v_line, v_line + tag_line)),
+                  _append("AGENTS.md", "\nedit\n")),
+         True, None, True, None, 2, "beyond the post-release paths"),
         ("(d) a changelog edit other than the tag key (another key)",
-         lambda: _write(CHANGELOG_REL, base_cl + 'date = "2000-01-01"\n'), 2, "by more than the newest"),
+         lambda: _write(CHANGELOG_REL, base_cl + 'date = "2000-01-01"\n'), True, None, True, None,
+         2, "by more than the newest"),
         ("(d) the tag key plus a changelog comment",
-         lambda: _write(CHANGELOG_REL, "# edited\n" + base_cl + tag_line), 2, "by more than the newest"),
+         lambda: _write(CHANGELOG_REL, "# edited\n" + base_cl.replace(v_line, v_line + tag_line)),
+         True, None, True, None, 2, "by more than the newest"),
         ("(d) a tag key that is not 'v' + version",
-         lambda: _write(CHANGELOG_REL, base_cl + 'tag = "v1.0.1"\n'), 2, "by more than the newest"),
-        ("(e) a head version below the newest row", lambda: _set_version("0.9.0"), 2, "does not increase")]
-    for label, mutate, want, want_msg in cases:
-        for args in (["reset", "-q", "--hard", commit1], ["clean", "-q", "-fdx"]):
-            subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env)
-        _write(RELEASES_REL, row)
-        mutate()
-        if not _regen_fixture_manifest(repo, "post-release " + label, failures, env):
+         lambda: _write(CHANGELOG_REL, base_cl.replace(v_line, v_line + 'tag = "v1.0.1"\n')),
+         True, None, True, None, 2, "by more than the newest"),
+        ("(e) a head version below the newest row",
+         lambda: _set_version("0.9.0"), True, None, True, None, 2, "does not increase"),
+        ("stale manifest: the row lands without regenerating the manifest",
+         None, False, None, True, None, 2, "head manifest freshness"),
+        ("an EXTRA prior release row the release commit never carried",
+         lambda: _write(RELEASES_REL, "format-version = 1\n\n"
+                        + _row_text("0.9.0", "v0.9.0", tobj1, commit1) + "\n"
+                        + _row_text("1.0.0", "v1.0.0", tobj1, commit1)),
+         True, None, True, None, 2, "plus exactly the newest row"),
+        ("a DELETED post-release path (the announce snippet)",
+         None, True, lambda: (repo / ".aiqt/release/announce-snippet.txt").unlink(), True, None,
+         2, "stay an in-place edit"),
+        ("a smudge-masked COMMITTED edit outside the post-release paths",
+         lambda: _append("AGENTS.md", "\nCOMMITTED-HIDDEN-EDIT\n"), True, None, True, _post_smudge,
+         2, "beyond the post-release paths"),
+        ("a committed edit to a quoted path (a name starting with a double quote)",
+         lambda: _write(quoted_rel, "EVIL CONTENT\n"), True, None, True, None,
+         2, "beyond the post-release paths"),
+        ("a staged-only edit with restored working-tree bytes",
+         None, True, None, True, _post_staged, 2, "commit or stash"),
+        ("an untracked file at the repository root",
+         None, True, None, True, _post_untracked_root, 2, "commit or stash"),
+        ("an untracked file under .aiqt/core",
+         None, True, None, True, _post_untracked_core, 2, "commit or stash"),
+        ("a non-descendant head (an orphan commit with an identical tree)",
+         None, True, None, True, _post_orphan, 2, "not an ancestor"),
+    ] + [("a mode-only (+x) change on the post-release path " + rel, None, True,
+          (lambda r=rel: _chmod_x(r)), True, None, 2, "stay an in-place edit")
+         for rel in sorted(POST_RELEASE_PATHS)]
+
+    for label, mutate, regen, after_regen, commit_it, post, want, want_msg in cases:
+        if not _sel(label):
             continue
-        rc, out = _run_capture_root(repo)
-        if rc != want or want_msg not in out:
-            failures.append("post-release head {}: expected exit {} with {!r} (got rc={}: {})".format(
-                label, want, want_msg, rc, out.strip()[-300:]))
+        for key in ("filter.mask.smudge", "filter.mask.clean"):
+            _g(repo, "config", "--unset-all", key)
+        attrs = repo / ".git" / "info" / "attributes"
+        if attrs.exists():
+            attrs.unlink()
+        for args in (("reset", "-q", "--hard", commit1), ("clean", "-q", "-fdx")):
+            _g(repo, *args)
+        _write(RELEASES_REL, row)
+        if mutate:
+            mutate()
+        if regen and not _regen_fixture_manifest(repo, "post-release " + label, failures, env):
+            continue
+        if after_regen:
+            after_regen()
+        if commit_it and not _commit_all(repo, label):
+            continue
+        if post:
+            post()
+        _check(repo, label, want, want_msg)
+
+    # ---- fixture: the release commit's manifest disagreeing with its own row (claude M4) ------------
+    labelM = "predecessor-manifest version binding (release-version 9.9.9 at the release commit)"
+    if _sel(labelM):
+        repoM = _extract_to("post-release-binding")
+        if repoM is None or not _pin_fixture_version(repoM, failures):
+            return False
+        man = (repoM / MANIFEST_REL).read_text(encoding="utf-8")
+        bad = man.replace('release-version = "1.0.0"', 'release-version = "9.9.9"', 1)
+        if bad == man:
+            failures.append("fixture setup ({}): could not rewrite release-version".format(labelM))
+        else:
+            (repoM / MANIFEST_REL).write_text(bad, encoding="utf-8")
+            for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                         ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+                _g(repoM, *args)
+            cM = _gout(repoM, "rev-parse", "HEAD")
+            tM = _gout(repoM, "rev-parse", "refs/tags/v1.0.0")
+            (repoM / RELEASES_REL).write_text(
+                "format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", tM, cM), encoding="utf-8")
+            if _regen_fixture_manifest(repoM, labelM, failures, env) and _commit_all(repoM, labelM):
+                _check(repoM, labelM, 2, "anchored predecessor is inconsistent")
+
+    # ---- fixture: B1 reproduction 2, a malformed genesis tree behind its attestation row ------------
+    labelG = "(B1) a first release whose genesis tree carries a malformed clauses.toml"
+    if _sel(labelG):
+        repoG = _extract_to("post-release-genesis-bad")
+        if repoG is None or not _pin_fixture_version(repoG, failures):
+            return False
+        with open(repoG / CLAUSES_REL, "a", encoding="utf-8") as fh:
+            fh.write('\n[[clause]]\nbogus = "not the 7.2 schema"\n')
+        _g(repoG, "add", "-A")
+        if not _regen_fixture_manifest(repoG, labelG, failures, env):
+            return False
+        for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                     ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+            _g(repoG, *args)
+        # pre-row control: the zero-row genesis gate rejects this tree outright.
+        _check(repoG, labelG + " (pre-row control)", 2, "clause")
+        cG = _gout(repoG, "rev-parse", "HEAD")
+        tG = _gout(repoG, "rev-parse", "refs/tags/v1.0.0")
+        (repoG / RELEASES_REL).write_text(
+            "format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", tG, cG), encoding="utf-8")
+        if _regen_fixture_manifest(repoG, labelG, failures, env) and _commit_all(repoG, labelG):
+            _check(repoG, labelG, 2, "clause")
+
+    # ---- fixture: B1 reproduction 1 (two releases) and an altered prior row -------------------------
+    label2 = "(B1) a later release with an undispositioned clause change, after its attestation row"
+    label2b = "an ALTERED prior release row"
+    if _sel(label2) or _sel(label2b):
+        r2 = _extract_to("post-release-two")
+        if r2 is None or not _pin_fixture_version(r2, failures):
+            return False
+        for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                     ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+            _g(r2, *args)
+        cA = _gout(r2, "rev-parse", "HEAD")
+        tA = _gout(r2, "rev-parse", "refs/tags/v1.0.0")
+        row1 = _row_text("1.0.0", "v1.0.0", tA, cA)
+        (r2 / RELEASES_REL).write_text("format-version = 1\n\n" + row1, encoding="utf-8")
+        if not (_regen_fixture_manifest(r2, "two-release attestation 1.0.0", failures, env)
+                and _commit_all(r2, "two-release attestation 1.0.0")):
+            return False
+        if _edit_clause_consistently(r2) is None:
+            failures.append("fixture setup (two-release): no clause admits a consistent edit")
+            return True
+        (r2 / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+        (r2 / CHANGELOG_REL).write_text(
+            '[[release]]\nversion = "1.0.0"\n\n[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
+        if not (_regen_fixture_manifest(r2, "two-release release 1.0.1", failures, env)
+                and _commit_all(r2, "two-release release 1.0.1")):
+            return False
+        _g(r2, "tag", "-a", "v1.0.1", "-m", "1.0.1")
+        cX = _gout(r2, "rev-parse", "HEAD")
+        tX = _gout(r2, "rev-parse", "refs/tags/v1.0.1")
+        if _sel(label2):
+            # pre-row control: before its row lands, the undispositioned release is exit 1.
+            _check(r2, label2 + " (pre-row control)", 1, "below the required")
+        rows2 = "format-version = 1\n\n" + row1 + "\n" + _row_text("1.0.1", "v1.0.1", tX, cX)
+        (r2 / RELEASES_REL).write_text(rows2, encoding="utf-8")
+        if not (_regen_fixture_manifest(r2, "two-release attestation 1.0.1", failures, env)
+                and _commit_all(r2, "two-release attestation 1.0.1")):
+            return False
+        if _sel(label2):
+            _check(r2, label2, 1, "below the required")
+        if _sel(label2b):
+            (r2 / RELEASES_REL).write_text(rows2.replace("a" * 64, "b" * 64, 1), encoding="utf-8")
+            if (_regen_fixture_manifest(r2, label2b, failures, env)
+                    and _commit_all(r2, label2b)):
+                _check(r2, label2b, 2, "plus exactly the newest row")
     return True
 
 
@@ -3086,9 +3541,16 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                      "a renderers.toml integer target (finding 8) each exit 2 hold") \
                     if real_ran else \
                     "; the REAL FULL-PACK two-release run() case was SKIPPED (git archive unavailable)"
-        full_pack += ("; and the POST-RELEASE head (RELEASING steps 6a/6b: the attestation row alone and plus "
-                      "the changelog tag key exit 0; plus another path, a changelog edit other than the tag "
-                      "key, and a head version below the newest row each exit 2) holds") if post_ran else \
+        full_pack += ("; and the POST-RELEASE head (RELEASING steps 6a/6b, round-2 rewrite over COMMITTED "
+                      "revisions: the attestation row alone and plus the correctly placed changelog tag key "
+                      "exit 0; another committed path, a smudge-masked committed edit, a quoted-path edit, a "
+                      "mode-only change or a deletion on each post-release path, a staged-only edit, "
+                      "untracked files (root and .aiqt/core), a non-descendant head, a stale manifest, an "
+                      "extra or altered prior row, a predecessor-manifest version mismatch, a changelog edit "
+                      "other than the tag key, a mis-placed tag key (EOF/older table, the TOML-only catch), "
+                      "and a head version below the newest row each fail; and the replayed pre-row gate "
+                      "(round-2 B1: an undispositioned later release exits 1 after its row lands, with its "
+                      "pre-row control; a malformed genesis tree exits 2) holds) hold") if post_ran else \
                      "; the POST-RELEASE head cases were SKIPPED (git archive unavailable)"
         print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "
               "genesis-flag-mismatch (exit 2), unreachable-predecessor (exit 2), and git-plumbing "

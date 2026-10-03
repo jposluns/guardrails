@@ -91,7 +91,10 @@ signed; the independently published digest is the authenticated reference.
      squash or rebase), so the commit post-tag certified lands unchanged and its parent stays the tagged
      commit.
    - 6b. Tag key. Only after 6a has merged, record `tag = "vX.Y.Z"` in that release's `changelog.toml`
-     entry, run `python3 tools/gen_manifest.py`, and land both through a separate pull request, merged on
+     entry: place the line inside that release's `[[release]]` table, immediately after its `version`
+     line and before any sub-table header such as `[release.artifacts]` (a line appended at the end of
+     the file would land inside the last sub-table and the release-delta gate rejects it). Then run
+     `python3 tools/gen_manifest.py`, and land both through a separate pull request, merged on
      green before step 7. On that pull request `python3 tools/check_release_delta.py` must again exit 0
      with `release-delta: POST-RELEASE`; in `changelog.toml` it accepts only the newest release's
      `tag = "vX.Y.Z"` key. The tag-monotonicity check arms from the recorded changelog `tag` key, not from
