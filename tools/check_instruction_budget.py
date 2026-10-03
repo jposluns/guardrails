@@ -32,15 +32,24 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       also takes the blank line after the closing fence), then HTML comments as COMMENTS states. A rule
       file must be a regular file (for a symlink, its resolved target): a FIFO, socket, or device named
       `*.md` exits 2. Every file the gate measures is opened non-blocking and read only when it is a
-      regular file, so no read can block. Two entries of one walked directory whose names differ only in
-      case (`a.md` and `A.md`, `s/` and `S/`), and a rule symlink whose resolved path has a component that
-      shares its case-folded name with another entry of its directory, exit 2: a case-insensitive file
-      system holds only one of them, and which one is ambiguous.
+      regular file, so no read can block. Two directories or `.md` entries (in any case) of one walked
+      directory whose names differ only in case (`a.md` and `A.md`, `s/` and `S/`) exit 2: a
+      case-insensitive file system holds only one of them, and which one is ambiguous; two other entries
+      that differ only in case (`notes.txt` and `Notes.txt`) load nothing either way and pass. A rule
+      symlink, a symlinked rule directory, and the rules base are resolved hop by hop: every link on the
+      way is read with os.readlink (at most MAX_HOPS, so a loop exits 2), and every component and every
+      link's own spelling is looked up in its directory before it is followed. Two entries there that can
+      name it exit 2 (`Link.txt` beside `link.txt` on the way, though the resolved path no longer shows
+      them), unless all are directories and a later component matches one entry of the directory a
+      case-insensitive file system merges them into. A hop that leaves the repository exits 2.
   FIXED NAMES. The loader opens CLAUDE.md, `.claude/CLAUDE.md`, and `.claude/rules/` by those exact
       names, and on a case-insensitive file system a case variant of any of them (`claude.md`,
       `.Claude/`, `.claude/claude.md`, `.claude/Rules/`) is what it opens or walks. A case variant of
       CLAUDE.md or `.claude` at the repository root, or of CLAUDE.md or `rules` in `.claude/`, exits 2,
-      whether or not the canonical name is there too.
+      whether or not the canonical name is there too. CLAUDE.md and `.claude/CLAUDE.md` are resolved hop
+      by hop as a rule symlink is, and must resolve inside the repository to a regular file (os.lstat of
+      the resolved path) before the gate opens them, so a FIFO or device, inside the repository or out,
+      is never opened.
   FRONTMATTER. The block FRONTMATTER_RE matches, with the closing `---` at the start of a line and only
       spaces after it, and every character of the block and its fences printable ASCII. Blank lines and
       `#` lines at column 0 are skipped. Every other line is `key: value` with a key from FRONTMATTER_KEYS
@@ -100,9 +109,13 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       and the last is a regular file, that file is the import (under exact case, or the case variant the
       loader on a case-insensitive file system reads). When two or more entries of one directory match a
       component (two files or directories that differ only in case, the exact-case one included), the path
-      exits 2: which one a case-insensitive file system holds is ambiguous. A component holding a Windows
-      8.3 short name marker (`~` followed by a digit, as in `PAYLOA~1.MD`) exits 2: on NTFS with short
-      names enabled it can open a long-named file the gate cannot identify. Each target is
+      exits 2: which one a case-insensitive file system holds is ambiguous. Two or more directories
+      matching a component that a later component follows are the one directory such a file system merges
+      them into: the next component is looked up across all of them, and only two matches there exit 2. A
+      component of the Windows 8.3 short name shape (one to six characters other than `.` and `~`, a `~`
+      and a number from 1, and an optional extension of one to three characters, as in `PAYLOA~1.MD`)
+      exits 2: on NTFS with short names enabled it can open a long-named file the gate cannot identify.
+      Prose such as `git diff @~1` or `npm i lodash@~4.17.21` holds no such component and passes. Each target is
       counted once, recursively through imported files to any depth (a cycle ends), held to the grammar,
       its frontmatter and comments removed as for a counted rule file. An imported file's frontmatter is
       held to the FRONTMATTER grammar and its `paths:` value to the SCOPE grammar (a typed value, nested
@@ -190,9 +203,11 @@ loader writes the resolved path, as the pinned build's rule walker does (the gat
 proof). That header model was verified against the pinned build only (the claude-code-version and
 binary-sha256 of the budget source); it is not asserted for any later build, whose header text or path
 spelling may differ. The loader's once-per-session preamble (HEADERS) is not counted either. Case
-ambiguity is judged with Python's str.casefold: a file system that folds differently, or that also folds
-Unicode normalization (APFS), can merge two names the gate reads as distinct, which is not modelled. A
-short name set by hand without the `~` digit marker is not recognised. The loader's own
+ambiguity is judged on two keys, Unicode NFD then str.casefold, and str.upper, and two names collide when
+either matches (so the dotless i, and U+037E against `;`, collide): a file system whose folding matches
+neither (an NTFS upcase table that differs from this Python's Unicode data, for example) can still merge
+two names the gate reads as distinct, which is not modelled. A short name set by hand outside the 8.3
+shape is not recognised. The loader's own
 120,000-character check
 sums file contents only, so both totals, which include the headers, read a little high against that
 floor. The count is UTF-16 code units, not tokens, so it tracks size, not model cost.
@@ -280,8 +295,12 @@ KEY_RE = re.compile(r"([A-Za-z0-9_-]+):(?: +(.*))?")
 ITEM_RE = re.compile(r" *- +(.*)")
 QUOTED_RE = re.compile(r"\"[^\"]*\"|'[^']*'")
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
-# A Windows 8.3 short name component (`PAYLOA~1.MD`): on NTFS it can open a long-named file.
-SHORT_NAME_RE = re.compile(r"~\d", re.ASCII)
+# A Windows 8.3 short name component (`PAYLOA~1.MD`): one to six characters other than `.` and `~`, a `~`
+# and a number, and an optional extension of one to three characters; on NTFS it can open a long-named file.
+# Prose such as `git diff @~1` or `npm i lodash@~4.17.21` holds no such component.
+SHORT_NAME_RE = re.compile(r"[^.~]{1,6}~[1-9][0-9]{0,5}(?:\.[^.]{1,3})?")
+# The most symlinks _resolve_checked follows for one path (the Linux limit); one more is a loop.
+MAX_HOPS = 40
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 # The enumerated character set (CHARACTERS in the module docstring): a character outside tab, LF and
 # printable ASCII is looked at; it is refused when it is a control, format, separator or unassigned code
@@ -662,29 +681,117 @@ def _inside(path, real_root):
         return False
 
 
+def _fold_keys(name):
+    """The two keys on which a case-insensitive file system may compare `name`: its Unicode NFD form folded
+    with str.casefold (the normalization APFS also folds), and str.upper (an upcase-table fold, which also
+    merges the dotless i with i)."""
+    return unicodedata.normalize("NFD", name).casefold(), name.upper()
+
+
+def _same_name(a, b):
+    """True when the names `a` and `b` can name one entry on a case-insensitive file system: either of
+    their _fold_keys matches."""
+    keys_a, keys_b = _fold_keys(a), _fold_keys(b)
+    return keys_a[0] == keys_b[0] or keys_a[1] == keys_b[1]
+
+
 def _case_collision(names, where):
-    """GateError when two of `names`, entries of one directory, differ only in case: a case-insensitive file
-    system holds only one of them, and which one is ambiguous."""
-    seen = {}
+    """GateError when two of `names` (entries of one directory, or paths of entries of directories a
+    case-insensitive file system merges) have final components that can name one entry (_same_name): such a
+    file system holds only one of them, and which one is ambiguous."""
+    seen = ({}, {})
     for name in sorted(names):
-        other = seen.setdefault(name.casefold(), name)
-        if other != name:
-            raise GateError("{}: {} and {} differ only in case; which one a case-insensitive file system "
-                            "holds is ambiguous; cannot evaluate".format(where, other, name))
+        for table, key in zip(seen, _fold_keys(os.path.basename(name))):
+            other = table.setdefault(key, name)
+            if other != name:
+                raise GateError("{}: {} and {} differ only in case; which one a case-insensitive file system "
+                                "holds is ambiguous; cannot evaluate".format(where, other, name))
 
 
-def _case_unique_path(real, real_root, where):
-    """GateError when a component of the resolved path `real`, below `real_root`, shares its case-folded
-    name with another entry of its directory (_case_collision), or when a directory on the way cannot be
-    listed."""
-    directory = real_root
-    for part in Path(os.path.relpath(real, real_root)).parts:
+def _resolve_checked(root, rel, where):
+    """The resolved path of `root / rel` (`rel` a POSIX path relative to `root`), found by walking it from
+    the resolved repository root one component and one symlink hop at a time, each link read with
+    os.readlink, so every spelling on the way is looked at, not only the final resolved path. Before a
+    component is followed, every entry of its directory that can name it (_same_name) is collected: two or
+    more are GateError (_case_collision), unless all are real directories and a later component follows;
+    those are the one directory a case-insensitive file system merges them into, and the next component is
+    looked up across all of them. GateError when a hop leaves the repository, when more than MAX_HOPS links
+    are followed (a loop), when a component is missing or a directory cannot be listed, and when the result
+    is not os.path.realpath's (a link naming its target only in another case resolves on one file system
+    and not on another)."""
+    real_root = os.path.realpath(root)
+    prefixes = [Path(real_root).parts, Path(os.path.abspath(root)).parts]
+    pending = [part for part in rel.split("/") if part not in ("", ".")]
+    dirs, hops, result = [real_root], 0, real_root
+    while pending:
+        part = pending.pop(0)
+        if part == "..":
+            if dirs[0] == real_root:
+                raise GateError("{} resolves outside the repository; cannot evaluate".format(where))
+            result = os.path.dirname(dirs[0])
+            dirs = [result]
+            continue
+        found = []
+        for directory in dirs:
+            try:
+                names = os.listdir(directory)
+            except OSError as exc:
+                raise GateError("{}: cannot list {} ({}); cannot evaluate".format(where, directory, exc))
+            for name in sorted(names):
+                if _same_name(name, part):
+                    path = os.path.join(directory, name)
+                    try:
+                        found.append((path, os.lstat(path).st_mode))
+                    except OSError as exc:
+                        raise GateError("cannot read {} ({}); cannot evaluate".format(where, exc))
+        if not found:
+            raise GateError("cannot read {}: {} is missing; cannot evaluate".format(
+                where, os.path.join(dirs[0], part)))
+        if len(found) > 1 and pending and all(stat.S_ISDIR(mode) for _, mode in found):
+            dirs = [path for path, _ in found]  # one merged directory: the next component decides
+            continue
+        if len(found) > 1:
+            _case_collision([os.path.relpath(path, real_root) for path, _ in found], where)
+        found.sort(key=lambda entry: os.path.basename(entry[0]) != part)
+        path, mode = found[0]
+        if not stat.S_ISLNK(mode):
+            result, dirs = path, [path]
+            continue
+        hops += 1
+        if hops > MAX_HOPS:
+            raise GateError("{}: symlink loop; cannot evaluate".format(where))
         try:
-            names = os.listdir(directory)
+            target = os.readlink(path)
         except OSError as exc:
-            raise GateError("{}: cannot list {} ({}); cannot evaluate".format(where, directory, exc))
-        _case_collision([name for name in names if name.casefold() == part.casefold()], where)
-        directory = os.path.join(directory, part)
+            raise GateError("cannot read {} ({}); cannot evaluate".format(where, exc))
+        parts = Path(target).parts
+        if target.startswith("/"):
+            prefix = next((p for p in prefixes if parts[:len(p)] == p), None)
+            if prefix is None:
+                raise GateError("{} resolves outside the repository; cannot evaluate".format(where))
+            parts, result = parts[len(prefix):], real_root
+        else:
+            result = os.path.dirname(path)
+        dirs = [result]
+        pending = [part for part in parts if part not in ("", ".")] + pending
+    if result != os.path.realpath(os.path.join(root, rel)):
+        raise GateError("{} resolves to {} when matched case-insensitively but to {} on this file system; "
+                        "ambiguous, cannot evaluate".format(where, os.path.relpath(result, real_root),
+                                                            os.path.realpath(os.path.join(root, rel))))
+    return result
+
+
+def _walked(entry):
+    """True for an entry of a walked rule directory that the loader may read: a directory, or a name ending
+    in `.md` in any case (a case variant of a rule file name merges with it). Only these are held to
+    _case_collision; two names that differ only in case among other entries load nothing either way."""
+    folded, upper = _fold_keys(entry.name)
+    if folded.endswith(".md") or upper.endswith(".MD"):
+        return True
+    try:
+        return entry.is_dir()
+    except OSError:  # a symlink loop: kept, and refused by the walk itself
+        return True
 
 
 def _regular_rule(path, where):
@@ -704,8 +811,8 @@ def rule_files(root):
     loader does. GateError when the tree is missing or cannot be walked, when a symlink resolves outside
     the repository or loops, when a directory is reached a second time through a symlink (whether the
     loader then loads its files once or twice is ambiguous), when two entries of a walked directory differ
-    only in case or a symlink's resolved path collides in case with a sibling (_case_collision), and when a
-    rule file is not a regular file (_regular_rule)."""
+    only in case (_case_collision, among the entries _walked keeps) or a symlink fails _resolve_checked at any
+    hop, and when a rule file is not a regular file (_regular_rule)."""
     base = root / RULES_REL
     if not base.is_dir():
         raise GateError("{} is missing or not a directory".format(RULES_REL))
@@ -713,7 +820,7 @@ def rule_files(root):
     real_base = os.path.realpath(base)
     if not _inside(real_base, real_root):
         raise GateError("{} resolves outside the repository; cannot evaluate".format(RULES_REL))
-    _case_unique_path(real_base, real_root, RULES_REL)
+    _resolve_checked(root, RULES_REL, RULES_REL)
     found, visited = [], {real_base}
 
     def _walk(directory, chain):
@@ -722,7 +829,7 @@ def rule_files(root):
                 entries = sorted(it, key=lambda entry: entry.name)
         except OSError as exc:
             raise GateError("cannot walk {} ({})".format(RULES_REL, exc))
-        _case_collision([entry.name for entry in entries], directory.relative_to(root).as_posix())
+        _case_collision([entry.name for entry in entries if _walked(entry)], directory.relative_to(root).as_posix())
         subdirs = []
         for entry in entries:
             path = directory / entry.name
@@ -736,7 +843,7 @@ def rule_files(root):
                 if not _inside(os.path.realpath(path), real_root):
                     raise GateError("{}: symlink resolves outside the repository; cannot evaluate".format(
                         where))
-                _case_unique_path(os.path.realpath(path), real_root, where)
+                _resolve_checked(root, where, where)
             if entry.is_dir():
                 subdirs.append((path, where))
             elif entry.name.endswith(".md"):
@@ -871,27 +978,34 @@ def _regular(target, mode, where, token):
 
 def _case_walk(parts, base, where, token):
     """The one regular file under `base` matching the components `parts`, each looked up case-insensitively
-    in its directory's listing whether or not the exact name is there (under exact case, or the variant
-    the loader on a case-insensitive file system reads), or None when a component matches nothing. Each
-    directory on the way is listed strictly (_strict) and each entry passed is checked (_entry_mode). Two
-    or more entries matching one component, the exact-case one included, are GateError: which one a
-    case-insensitive file system holds is ambiguous."""
-    entry, mode = base, None
-    for part in parts:
-        folded, matches = part.casefold(), []
-        for name in sorted(_strict(os.listdir, entry, where, token) or []):
-            if name.casefold() == folded:
-                path = os.path.join(entry, name)
-                found = _entry_mode(path, where, token)
-                if found is not None:
-                    matches.append((path, found))
+    (_same_name) in its directory's listing whether or not the exact name is there (under exact case, or
+    the variant the loader on a case-insensitive file system reads), or None when a component matches
+    nothing. Each directory on the way is listed strictly (_strict) and each entry passed is checked
+    (_entry_mode). Two or more entries matching one component, the exact-case one included, are GateError
+    (which one a case-insensitive file system holds is ambiguous), unless all are directories and a later
+    component follows: those are the one directory such a file system merges them into, and the next
+    component is looked up across all of them."""
+    dirs, entry, mode = [base], base, None
+    for k, part in enumerate(parts):
+        matches = []
+        for directory in dirs:
+            for name in sorted(_strict(os.listdir, directory, where, token) or []):
+                if _same_name(name, part):
+                    path = os.path.join(directory, name)
+                    found = _entry_mode(path, where, token)
+                    if found is not None:
+                        matches.append((path, found))
         if not matches:
             return None
+        if len(matches) > 1 and k + 1 < len(parts) and all(stat.S_ISDIR(found) for _, found in matches):
+            dirs = [path for path, _ in matches]  # one merged directory: the next component decides
+            continue
         if len(matches) > 1:
             raise GateError("{}: import @{} has the component {!r}, which matches {} entries "
                             "case-insensitively; which one a case-insensitive file system holds is "
                             "ambiguous; cannot evaluate".format(where, token, part, len(matches)))
         entry, mode = matches[0]
+        dirs = [entry]
     return _regular(entry, mode, where, token)
 
 
@@ -908,8 +1022,8 @@ def resolve_candidate(path, base, where, token):
         raise GateError("{}: import @{} has a `..` component; whether the loader resolves it before or after "
                         "a symlink is ambiguous; outside the enumerated grammar, cannot evaluate".format(
                             where, token))
-    if any(SHORT_NAME_RE.search(part) for part in parts):
-        raise GateError("{}: import @{} has a Windows 8.3 short name component (`~` and a digit); on NTFS it "
+    if any(SHORT_NAME_RE.fullmatch(part) for part in parts):
+        raise GateError("{}: import @{} has a Windows 8.3 short name component (such as PAYLOA~1.MD); on NTFS it "
                         "can open a long-named file the gate cannot identify; ambiguous, cannot "
                         "evaluate".format(where, token))
     return _case_walk(parts, base, where, token)
@@ -985,16 +1099,32 @@ def _case_variants(root):
             raise GateError("cannot list {} ({}); cannot evaluate".format(parent or ".", exc))
         for name in sorted(entries):
             for canonical in names:
-                if name != canonical and name.casefold() == canonical.casefold():
+                if name != canonical and _same_name(name, canonical):
                     raise GateError("{}: a case variant of {}, which the loader opens on a case-insensitive "
                                     "file system and the gate does not measure; ambiguous, cannot "
                                     "evaluate".format(os.path.join(parent, name), os.path.join(parent, canonical)))
 
 
-def _dot_claude(root, real_root):
+def _fixed_file(root, rel):
+    """The resolved path of the file the loader opens by the fixed name `rel` (CLAUDE.md,
+    `.claude/CLAUDE.md`), checked before anything opens it: resolved hop by hop inside the repository
+    (_resolve_checked), then by os.lstat of that resolved path a regular file. GateError otherwise, so a
+    FIFO or device, inside the repository or out, is never opened."""
+    real = _resolve_checked(root, rel, rel)
+    try:
+        mode = os.lstat(real).st_mode
+    except OSError as exc:
+        raise GateError("cannot read {} ({}); cannot evaluate".format(rel, exc))
+    if not stat.S_ISREG(mode):
+        raise GateError("cannot read {}: it is not a regular file; whether the loader reads it is ambiguous; "
+                        "cannot evaluate".format(rel))
+    return real
+
+
+def _dot_claude(root):
     """[(text, real directory, where, 1)] for `.claude/CLAUDE.md`, held to the grammar as CLAUDE.md is, or
     [] when it is genuinely absent. Any other failure to look at or read it (a directory, a broken symlink,
-    a permission error) is GateError, never read as absent."""
+    a permission error) is GateError, never read as absent; it is opened only after _fixed_file."""
     path = root / DOT_CLAUDE_REL
     try:
         os.lstat(path)
@@ -1002,23 +1132,20 @@ def _dot_claude(root, real_root):
         return []
     except OSError as exc:
         raise GateError("cannot read {} ({}); cannot evaluate".format(DOT_CLAUDE_REL, exc))
-    _case_unique_path(os.path.realpath(path), real_root, DOT_CLAUDE_REL)
-    text = read_text(path, DOT_CLAUDE_REL)
+    real = _fixed_file(root, DOT_CLAUDE_REL)
+    text = read_text(real, DOT_CLAUDE_REL)
     _check_characters(text, DOT_CLAUDE_REL)
     _check_comment_joins(text, DOT_CLAUDE_REL)
-    base = os.path.dirname(os.path.realpath(path))
-    if not _inside(base, real_root):
-        raise GateError("{} resolves outside the repository; cannot evaluate".format(DOT_CLAUDE_REL))
-    return [(text, base, DOT_CLAUDE_REL, 1)]
+    return [(text, os.path.dirname(real), DOT_CLAUDE_REL, 1)]
 
 
 def measure(root):
     """Both totals and their parts. Banned imports reached from the rule files, `.claude/CLAUDE.md`, and
     the managed block are returned as findings; every cannot-evaluate condition raises GateError."""
     _case_variants(root)
-    _case_unique_path(os.path.realpath(root / CLAUDE_REL), os.path.realpath(root), CLAUDE_REL)
+    claude_path = _fixed_file(root, CLAUDE_REL)
     rules, counted, conditional, origins, rule_headers = measure_rules(root)
-    claude = read_text(root / CLAUDE_REL, CLAUDE_REL)
+    claude = read_text(claude_path, CLAUDE_REL)
     _check_characters(claude, CLAUDE_REL)
     _check_comment_joins(claude, CLAUDE_REL)
     start, end = managed_block(claude)
@@ -1027,11 +1154,9 @@ def measure(root):
     real_root = os.path.realpath(root)
     # The loader resolves CLAUDE.md's imports from the real directory of the file, so a symlinked
     # CLAUDE.md resolves them from its target's directory.
-    claude_base = os.path.dirname(os.path.realpath(root / CLAUDE_REL))
-    if not _inside(claude_base, real_root):
-        raise GateError("{} resolves outside the repository; cannot evaluate".format(CLAUDE_REL))
+    claude_base = os.path.dirname(claude_path)
     # The loader reads .claude/CLAUDE.md beside CLAUDE.md; it is counted whole, with its imports, into both.
-    dot = _dot_claude(root, real_root)
+    dot = _dot_claude(root)
     dot_units = sum(counted_units(text) for text, _, _, _ in dot)
     # Every loaded file carries a header: the rule files counted, CLAUDE.md, .claude/CLAUDE.md, each import.
     file_headers = rule_headers + sum(fixed_name_header(root, real_root, where)
@@ -1274,6 +1399,24 @@ def _blocks(read, fifo):
         worker.join(5)
         os.close(writer)
     return blocked
+
+
+def _opened_fifo(fn, root):
+    """(fn(root), whether os.open was called on a FIFO while it ran)."""
+    opened, real_open = [], os.open
+
+    def recording(path, *args, **kwargs):
+        try:
+            opened.append(stat.S_ISFIFO(os.stat(path).st_mode))
+        except OSError:
+            pass
+        return real_open(path, *args, **kwargs)
+    os.open = recording
+    try:
+        code = _quiet(fn, root)
+    finally:
+        os.open = real_open
+    return code, any(opened)
 
 
 @contextlib.contextmanager
@@ -1663,6 +1806,73 @@ def self_test(report_path=None):
                           extra=_files("docs/payload-long-name.md", big_b))
         code, err = _stderr_of(run, shortname)
         check("exit/windows-short-name-import-2", (code, "8.3 short name" in err), (2, True))
+        # `~` and a digit in prose is no 8.3 short name: git's `@~1` and an npm tilde range pass.
+        tilde_prose = [_tree(tmp / "tilde-git", outside="Review with `git diff @~1` before pushing.\n"),
+                       _tree(tmp / "tilde-npm", rules=_files("a.md", "Pin it: `npm i lodash@~4.17.21`.\n"))]
+        check("exit/tilde-prose-not-short-name-0", [_quiet(run, r) for r in tilde_prose], [0, 0])
+        # A case collision on a symlink met on the way to a target (Link.txt beside link.txt), which the
+        # fully resolved path no longer shows, exits 2 at every entry point the loader resolves.
+        hop_collisions = []
+        for case, files, links in (
+                ("rule-file", _files("docs/small.txt", "s", "docs/large.txt", big_b),
+                 (("docs/Link.txt", "small.txt"), ("docs/link.txt", "large.txt"),
+                  (RULES_REL + "/a.md", "../../docs/Link.txt"))),
+                ("rule-dir", _files("docs/small/b.md", "s", "docs/large/b.md", big_b),
+                 (("docs/Link", "small"), ("docs/link", "large"), (RULES_REL + "/sub", "../../docs/Link"))),
+                ("rules-base", _files("docs/small/b.md", "s", "docs/large/b.md", big_b),
+                 (("docs/Link", "small"), ("docs/link", "large"), (RULES_REL, "../docs/Link"))),
+                ("claude-md", _files("docs/small.md", gen_claude.BEGIN + gen_claude.END,
+                                     "docs/large.md", big_b + gen_claude.BEGIN + gen_claude.END),
+                 (("docs/Link.md", "small.md"), ("docs/link.md", "large.md"), (CLAUDE_REL, "docs/Link.md"))),
+                ("dot-claude-md", _files("docs/small.md", "s", "docs/large.md", big_b),
+                 (("docs/Link.md", "small.md"), ("docs/link.md", "large.md"), (DOT_CLAUDE_REL, "../docs/Link.md")))):
+            hop = _tree(tmp / ("hop-" + case), extra=files)
+            for rel, target in links:
+                if (hop / rel).is_dir():
+                    os.rmdir(str(hop / rel))
+                elif (hop / rel).exists():
+                    os.unlink(str(hop / rel))
+                os.symlink(target, str(hop / rel))
+            hop_collisions.append(hop)
+        check("exit/case-collision-on-symlink-hop-2",
+              [(lambda out: (out[0], "differ only in case" in out[1]))(_stderr_of(run, r)) for r in hop_collisions],
+              [(2, True)] * 5)
+        # A case collision matters only where it makes the loaded entry ambiguous: a directory beside its
+        # case variant when the next component matches one entry of the two (an import and a rule symlink),
+        # and two names that differ only in case among rule-directory entries that are neither directories
+        # nor `.md` files, pass.
+        merged_import = _tree(tmp / "merged-import", block="\n@docs/a.md\n",
+                              extra=_files("docs/a.md", "s", "Docs/other.txt", "o"))
+        merged_link = _tree(tmp / "merged-link", extra=_files("docs/a.md", "s", "Docs/other.txt", "o"))
+        os.symlink(os.path.join("..", "..", "docs", "a.md"), str(merged_link / RULES_REL / "a.md"))
+        other_files = _tree(tmp / "other-files", rules=_files("a.md", "a", "notes.txt", "n", "Notes.txt", "N"))
+        unambiguous = [merged_import, merged_link, other_files]
+        check("exit/case-unambiguous-layouts-0", [_quiet(run, r) for r in unambiguous], [0, 0, 0])
+        # Names an upcase table or a normalizing file system merges, which str.casefold alone keeps apart (a
+        # dotless i, U+037E against `;`), collide too.
+        folds = [_tree(tmp / "fold-dotless-import", block="\n@docs/file.md\n",
+                       extra=_files("docs/file.md", "s", "docs/f\u0131le.md", big_b)),
+                 _tree(tmp / "fold-greek-question", block="\n@docs/a;b.md\n",
+                       extra=_files("docs/a;b.md", "s", "docs/a\u037eb.md", big_b)),
+                 _tree(tmp / "fold-dotless-rules", rules=_files("file.md", "a", "f\u0131le.md", big_b))]
+        check("exit/case-collision-upper-and-nfd-folds-2", [_quiet(run, r) for r in folds], [2, 2, 2])
+        # CLAUDE.md and .claude/CLAUDE.md are checked to resolve inside the repository and to be regular files
+        # before anything opens them: a FIFO outside the repository or inside it is never opened.
+        os.makedirs(str(tmp / "fixed-outside"))
+        os.mkfifo(str(tmp / "fixed-outside" / "fifo"))
+        fixed_fifos = []
+        for case, rel, target in (("claude-out", CLAUDE_REL, "../fixed-outside/fifo"),
+                                  ("dot-out", DOT_CLAUDE_REL, "../../fixed-outside/fifo"),
+                                  ("claude-in", CLAUDE_REL, "fifo"), ("dot-in", DOT_CLAUDE_REL, "../fifo")):
+            fixed = _tree(tmp / case)
+            if rel == CLAUDE_REL:
+                os.unlink(str(fixed / rel))
+            if not target.startswith("../fixed") and not target.startswith("../../fixed"):
+                os.mkfifo(str(fixed / "fifo"))
+            os.symlink(target, str(fixed / rel))
+            fixed_fifos.append(fixed)
+        check("exit/fixed-file-checked-before-open-2", [_opened_fifo(run, r) for r in fixed_fifos],
+              [(2, False)] * 4)
 
         # The enumerated grammar: a character outside it anywhere in a measured file, a non-ASCII import
         # token, a `..` component or a symlink on an import path, and a directory or unreadable target exit 2;
@@ -1830,7 +2040,7 @@ def self_test(report_path=None):
         lexical = _mutant(tmp, *(follow_link + ('    if ".." in parts:', "    if False:")
                                  + ("    if stat.S_ISDIR(mode):\n", "    if stat.S_ISDIR(mode):\n        return None\n")))
         check("revert/dotdot-import-red", (_quiet(run, dotdot), _quiet(lexical.run, dotdot)), (2, 0))
-        root_base = _mutant(tmp, "claude_base = os.path.dirname(os.path.realpath(root / CLAUDE_REL))",
+        root_base = _mutant(tmp, "claude_base = os.path.dirname(claude_path)",
                             "claude_base = real_root")
         check("revert/claude-md-real-base-red",
               (_measured(measure, linkclaude)["pack_imports"], _measured(root_base.measure, linkclaude)["pack_imports"]),
@@ -1846,7 +2056,7 @@ def self_test(report_path=None):
               ([_quiet(run, r) for r in joined], [_quiet(no_join.run, r) for r in joined]), ([2] * 8, [0] * 8))
         check("revert/comment-email-red",
               (_quiet(run, email_comment), _quiet(_off(tmp, "_import_start").run, email_comment)), (0, 2))
-        no_dot = _mutant(tmp, "    dot = _dot_claude(root, real_root)\n", "    dot = []\n")
+        no_dot = _mutant(tmp, "    dot = _dot_claude(root)\n", "    dot = []\n")
         check("revert/dot-claude-claude-md-red",
               (_measured(measure, dotclaude)["pack"], _measured(no_dot.measure, dotclaude)["pack"]),
               (2 + 50010 + 1000 + dot_hdr, 2 + _hdr(".claude/rules/a.md", "CLAUDE.md")))
@@ -1874,7 +2084,7 @@ def self_test(report_path=None):
                           - _measured(mutant.measure, tmp / ("hdr-" + kind + "-short"))["pack"])
         check("revert/symlinked-header-resolved-path-red",
               ([b - a for a, b in zip(short, long_)], growth), ([200] * 4, [0] * 4))
-        # _case_unique_path is a second layer for three of the four variants, so both are removed.
+        # _resolve_checked's _case_collision is a second layer for some variants, so both are removed.
         no_case = _off(tmp, "_case_variants", "_case_collision")
         check("revert/case-variant-red",
               ([_quiet(run, r) for r in variants], [_quiet(no_case.run, r) for r in variants]), ([2] * 4, [0] * 4))
@@ -1895,8 +2105,38 @@ def self_test(report_path=None):
         check("revert/fifo-read-never-blocks-red",
               (_blocks(read_text, fifo / RULES_REL / "a.md"), _blocks(blocking.read_text, fifo / RULES_REL / "a.md")),
               (False, True))
-        no_short = _mutant(tmp, "    if any(SHORT_NAME_RE.search(part) for part in parts):\n", "    if False:\n")
+        no_short = _mutant(tmp, "    if any(SHORT_NAME_RE.fullmatch(part) for part in parts):\n", "    if False:\n")
         check("revert/windows-short-name-red", (_quiet(run, shortname), _quiet(no_short.run, shortname)), (2, 0))
+        any_tilde = _mutant(tmp, "SHORT_NAME_RE.fullmatch(part)", "SHORT_NAME_RE.search(part)",
+                            'SHORT_NAME_RE = re.compile(r"[^.~]{1,6}~[1-9][0-9]{0,5}(?:\\.[^.]{1,3})?")',
+                            'SHORT_NAME_RE = re.compile(r"~\\d", re.ASCII)')
+        check("revert/tilde-prose-not-short-name-red",
+              ([_quiet(run, r) for r in tilde_prose], [_quiet(any_tilde.run, r) for r in tilde_prose]),
+              ([0, 0], [2, 2]))
+        final_only = _mutant(tmp, "        if len(found) > 1:\n",
+                             "        if len(found) > 1 and not all(stat.S_ISLNK(mode) for _, mode in found):\n")
+        check("revert/case-collision-on-symlink-hop-red",
+              ([_quiet(run, r) for r in hop_collisions], [_quiet(final_only.run, r) for r in hop_collisions]),
+              ([2] * 5, [0] * 5))
+        unmerged = [_mutant(tmp, "        if len(matches) > 1 and k + 1 < len(parts) and all(stat.S_ISDIR(found) "
+                                 "for _, found in matches):\n", "        if False:\n"),
+                    _mutant(tmp, "        if len(found) > 1 and pending and all(stat.S_ISDIR(mode) for _, mode in "
+                                 "found):\n", "        if False:\n"),
+                    _off(tmp, "_walked")]
+        check("revert/case-unambiguous-layouts-red",
+              ([_quiet(run, r) for r in unambiguous],
+               [_quiet(mutant.run, r) for mutant, r in zip(unmerged, unambiguous)]), ([0, 0, 0], [2, 2, 2]))
+        casefold_only = _mutant(tmp, 'return unicodedata.normalize("NFD", name).casefold(), name.upper()',
+                                "return name.casefold(), name.casefold()")
+        check("revert/case-collision-upper-and-nfd-folds-red",
+              ([_quiet(run, r) for r in folds], [_quiet(casefold_only.run, r) for r in folds]), ([2] * 3, [0] * 3))
+        open_first = _mutant(tmp, "    claude_path = _fixed_file(root, CLAUDE_REL)\n",
+                             "    claude_path = (read_text(root / CLAUDE_REL, CLAUDE_REL), _fixed_file(root, CLAUDE_REL))[1]\n",
+                             "    real = _fixed_file(root, DOT_CLAUDE_REL)\n",
+                             "    real = (read_text(path, DOT_CLAUDE_REL), _fixed_file(root, DOT_CLAUDE_REL))[1]\n")
+        check("revert/fixed-file-checked-before-open-red",
+              ([_opened_fifo(run, r) for r in fixed_fifos], [_opened_fifo(open_first.run, r) for r in fixed_fifos]),
+              ([(2, False)] * 4, [(2, True)] * 4))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1930,7 +2170,9 @@ def self_test(report_path=None):
           "HTML comment beside an @ that begins an import exit 2 and an email address in a comment pass, "
           "quoted commas in a flow list read, .claude/CLAUDE.md and its imports counted, a modelled header "
           "counted per loaded file naming its resolved path, case variants of the fixed names exit 2, case "
-          "ambiguity at any import component and case-colliding rule entries exit 2, a non-regular rule "
+          "ambiguity at any import component, at every symlink hop and in case-colliding rule entries exit 2 "
+          "while unambiguous merged directories and non-rule entries pass, upper and NFD folds collide, "
+          "`@~1` prose passes, CLAUDE.md and .claude/CLAUDE.md checked before they are opened, a non-regular rule "
           "file and a Windows 8.3 short name import exit 2 and no read blocking, an "
           "imported file's scope held to the grammar, and the budget source "
           "describing PACK); execution set "
