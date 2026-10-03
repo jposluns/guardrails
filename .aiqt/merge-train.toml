@@ -1,0 +1,57 @@
+# Merge-train declaration for this repository, read by tools/merge_train.py from origin/main only
+# (never from a PR branch or the checkout). Without this file the tool does nothing (exit 2).
+version = 1
+remote = "origin"
+base = "main"
+
+[commit]
+# The merge commit's author and committer; the tool never reads an ambient git identity.
+name = "Jeff Posluns"
+email = "jeff@posluns.ca"
+
+[generated]
+# All five outputs of one tools/gen_manifest.py run: a conflict on any of them takes main's side and
+# is then regenerated. Exact paths, no globs.
+paths = [
+  ".aiqt/manifest.toml",
+  ".aiqt/release/root.txt",
+  ".aiqt/release/announce-snippet.txt",
+  ".aiqt/frozen.json",
+  ".gitattributes",
+]
+regenerate = [
+  ["python3", "-I", "-B", "tools/gen_manifest.py"],
+]
+# Every tools/gen_*.py --check drift gate, gen_manifest last (it digests every other output).
+check = [
+  ["python3", "-I", "-B", "tools/gen_roadmap.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_changelog.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_crosswalk.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_rules.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_agents.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_mappings.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_reference_facts.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_disclosure.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_install.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_notice.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_claude.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_adapters.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_cursor.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_worker_pack.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_secret_patterns.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_hooks.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_skill.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_gensrc.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_enforceability.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_enforcement_register.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_renderers.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_site.py", "--check"],
+  ["python3", "-I", "-B", "tools/gen_manifest.py", "--check"],
+]
+
+[busy]
+probe = []
+
+[limits]
+command_timeout_seconds = 900
+network_timeout_seconds = 120
