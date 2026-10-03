@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "dada4b7d54a7e4bfdb6528b1a8830c1e7bfd9c63541dcb3a61127a89c3699237"
+tree-sha256 = "53f927e3a0fa6e6c5acba014eadcb80178aad49e855da30485f23172bd748b89"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2391,8 +2391,8 @@ sha256 = "22aa04cf10939eeb86e95a1507deae2b74b77aaf78b916944ab1bf0cd179c093"
 
 [[sources]]
 path = "docs/learn.md"
-bytes = 2742
-sha256 = "0b2293fc5e5bdf00c04d76e35a678e823c10b548c671674537f69f8a3a87f8d6"
+bytes = 2815
+sha256 = "6d12ed9abb8f3251c00cbb4bd6d5a4b128fba2a40b9a89cf1b18084fcdc1fee2"
 
 [[sources]]
 path = "docs/rules.md"
@@ -2406,8 +2406,8 @@ sha256 = "2107eb0ae021c8abc849693590810af430326747ee0a8d4978b8bbe92714899a"
 
 [[sources]]
 path = "docs/teams.md"
-bytes = 9884
-sha256 = "ac7597f96ce6a8a5445badee95573dd69d9cc6b116de610e69da522c4e32f8b8"
+bytes = 10317
+sha256 = "33e04b96765091da72d35ddbcaa591ead7fc0d6e86780f97901618cd0ad1e54a"
 
 [[sources]]
 path = "opf/enforcement/ci/github-actions.yml"
@@ -3061,8 +3061,8 @@ sha256 = "cbf43cf00b489514e7d60fb20b1dc9550d129ca77aa083dd24c574e20378ca65"
 
 [[sources]]
 path = "site/install.html"
-bytes = 24139
-sha256 = "753793f6b2073851580f76ca54385e0408b1787ff82b295fb60e55067d3c4bc7"
+bytes = 24154
+sha256 = "e1fcdf1f9a7a7595e44c83de6f79b128f517e6413de16f2185473e12334c6b3c"
 
 [[sources]]
 path = "site/js/install.js"
@@ -3071,8 +3071,8 @@ sha256 = "2d7a781ba483087accec69cc0142ad40c4b50b90509889f043d7f23a48eb7253"
 
 [[sources]]
 path = "site/learn.html"
-bytes = 6597
-sha256 = "f024b2149439e3df0cefc555b6327999970948979533da6879980e2e8b149949"
+bytes = 6670
+sha256 = "368e421d2405522cea2710aa1df292778e5920a5b778aad1530dd5b955d688ba"
 
 [[sources]]
 path = "site/mappings.html"
@@ -3106,8 +3106,8 @@ sha256 = "3a7c8983ab9fca0e04dc69f88afef82b0ff9e533dc150c86f250aae2c3a4d3d3"
 
 [[sources]]
 path = "site/teams.html"
-bytes = 13747
-sha256 = "047652fb9d3990702fca059abde26a121070b7b9206db1d67401b86f82fafa7e"
+bytes = 14180
+sha256 = "209a96f86efc2f8936246e1e0223f0e060943034aa47769eb568c0e49eb14954"
 
 [[sources]]
 path = "site/tech-details.html"
