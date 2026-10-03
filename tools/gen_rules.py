@@ -29,11 +29,21 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
       with three backticks (a fence) or like an ordered list item (digits, then `.` or `)`, then a
       space or the end of the line). A single leading backtick is allowed (a code span; the live
       corpus starts two lines with one), and so are `>`, `|`, `_` and `&` after the first character.
-  The frontmatter carries no heading either: a frontmatter line that starts with `#` (a YAML comment,
-  shown as a heading by a renderer that does not read frontmatter) is refused.
+  FRONTMATTER: in a renderer that does not read frontmatter, the opening `---` is a thematic break and
+  the closing `---` turns the frontmatter into one setext h2 whose text starts with a frontmatter key, so
+  it can never read Detail (a blank or indented frontmatter line can only shorten that heading to the
+  lines after it, or leave no heading). The frontmatter is split into lines at LF only, as the body is. A
+  frontmatter line that starts with `#` (a YAML comment, an ATX heading in that renderer) is refused, and
+  a frontmatter value (for a flow sequence, the text inside its brackets) holds no `<`, `[`, `]`,
+  backslash, control or format character (Unicode categories Cc and Cf) or line or paragraph separator,
+  so no HTML or link in a value can add a heading (`<h2>Detail</h2>`) or hide one (`<style>`) there.
+  Other text, non-ASCII included, is accepted: it can form no HTML or link, and the heading still starts
+  with a key. A value is a number only when it is ASCII digits (with an optional leading `-`), so a
+  non-ASCII digit token (`tier: \u0661\u0660`) stays a string and is refused where a number is required.
   Each of these is refused as a malformed source (exit 2, naming the file and, for a line, its number):
     - either key without the split, a missing detail-trigger with it, or a key value that is not a
       non-empty string;
+    - a frontmatter line that starts with `#`, and a frontmatter value holding a refused character;
     - a second `## Detail` line;
     - a `## Detail` line without a blank line directly above it;
     - a body with no title line, and a body line outside the BODY GRAMMAR;
@@ -105,6 +115,10 @@ _HEADING_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("[]<>&\\~*_`"
 _PROSE_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("<[]\\")
 _PROSE_START = frozenset(" \t#>-+*=~|<[!_:")
 _ORDERED_RE = re.compile(r'^[0-9]+[.)](?: |$)')
+# A frontmatter value (see FRONTMATTER above) holds none of these characters and none of these Unicode
+# categories (control, format, line separator, paragraph separator).
+_VALUE_MARKUP = frozenset("<[]\\")
+_VALUE_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -149,7 +163,7 @@ def _value(v):
         return elems
     if v in ("true", "false"):
         return v == "true"
-    if re.fullmatch(r'-?\d+', v):
+    if re.fullmatch(r'-?[0-9]+', v):
         return int(v)
     return v
 
@@ -177,7 +191,7 @@ def parse_source(path):
     if end == -1:
         raise ValueError("{}: unterminated frontmatter".format(path.name))
     fm = {}
-    for line in text[4:end].splitlines():
+    for line in text[4:end].split("\n"):
         line = line.strip()
         if not line:
             continue
@@ -194,6 +208,13 @@ def parse_source(path):
             fm[key] = _value(val.strip())
         except ValueError as exc:
             raise ValueError("{}: {}".format(path.name, exc))
+        val = val.strip()
+        if isinstance(fm[key], list):
+            val = val[1:-1]
+        if any(ch in _VALUE_MARKUP or unicodedata.category(ch) in _VALUE_CATEGORIES for ch in val):
+            raise ValueError("{}: frontmatter value of {} holds '<', '[', ']', a backslash, or a control, "
+                             "format, line separator or paragraph separator character (a renderer that "
+                             "shows frontmatter as Markdown reads HTML or a link there)".format(path.name, key))
     return fm
 
 
@@ -506,6 +527,25 @@ _CORE = "# Gen-rules detail self-test rule\n\nCore text.\n"
 _TRIGGER = "detail-trigger: writing a self-test fixture\n"
 _REASON = "detail-reason: self-test only, no must-fire clause moves\n"
 _DETAIL_BODY = "\n## Detail\n\nDetail text.\n"
+# An adopter-shaped rule (origin adopter, read the way check_rule_placement reads it: parse_source, then
+# derive with the adopter origin allowed) whose string value holds an accented word.
+_ADOPTER_NAME = "SECI-adopter-accented.md"
+_ADOPTER_SRC = """---
+corpus-id: adopt1
+origin: adopter
+family: security
+facet: SECI
+slug: adopter-accented
+detail-trigger: reviewing a r\u00e9sum\u00e9 upload
+---
+# Adopter rule
+
+Core text.
+
+## Detail
+
+Detail text.
+"""
 _R6_FENCED_COMMENT = "\n```\n<!--\n```\nDeta<span\nclass=\"x\">il</span>\n---\nHidden.\n-->\n"
 _R6_ORDERED_SETEXT = "\nDetail[](x '\n2. # y')\n---\nHidden.\n"
 _DETAIL_CASES = (
@@ -672,6 +712,23 @@ _DETAIL_CASES = (
     ("r6-ordered-paren-setext", "", "\nPara\n10) # x\n===\n", 2),
     ("r6-frontmatter-heading", "## Detail\n", "", 2),
     ("r6-frontmatter-indented-comment", "  # a note\n", "", 2),
+    # QA round 7: a frontmatter value holds no `<`, `[`, `]` or backslash, so no HTML or link in it adds a
+    # Detail heading or hides one where frontmatter renders as Markdown.
+    ("r7-frontmatter-html-heading", "detail-trigger: testing <h2>Detail</h2>\n", _DETAIL_BODY, 2),
+    ("r7-frontmatter-style", "detail-trigger: testing <style>\n", _DETAIL_BODY, 2),
+    ("r7-frontmatter-quoted-html", _TRIGGER + 'detail-reason: "see <b>x</b>"\n', _DETAIL_BODY, 2),
+    ("r7-frontmatter-link", _TRIGGER + "detail-reason: see [the policy]\n", _DETAIL_BODY, 2),
+    ("r7-frontmatter-backslash", _TRIGGER + "detail-reason: a \x5c b\n", _DETAIL_BODY, 2),
+    ("r7-frontmatter-sequence-ok", "secondary: [INTEG]\n" + _TRIGGER, _DETAIL_BODY, 0),
+    # Other non-ASCII text in a value is accepted (it forms no HTML or link); control and format
+    # characters and line separators are refused, and a number is ASCII digits only.
+    ("r7-frontmatter-non-ascii", _TRIGGER + "detail-reason: caf\u00e9\n", _DETAIL_BODY, 0),
+    ("r7b-frontmatter-tab", _TRIGGER + "detail-reason: a\tb\n", _DETAIL_BODY, 2),
+    ("r7b-frontmatter-format", _TRIGGER + "detail-reason: a\u200bb\n", _DETAIL_BODY, 2),
+    ("r7b-frontmatter-line-separator", _TRIGGER + "detail-reason: a\u2028b\n", _DETAIL_BODY, 2),
+    ("r7b-frontmatter-paragraph-separator", _TRIGGER + "detail-reason: a\u2029b\n", _DETAIL_BODY, 2),
+    ("r7b-frontmatter-separator-key", "detail-reason: a\u2028detail-trigger: x\n", _DETAIL_BODY, 2),
+    ("r7b-frontmatter-non-ascii-tier", "", "", 2),
     # The BODY GRAMMAR: one case per refused shape (each exits 2); a grammar-title case sets its title
     # through _CASE_FRAME.
     ("grammar-no-title", "", "", 2),
@@ -740,6 +797,7 @@ _CASE_FRAME = {
     "grammar-title-detail": {"core": "# Details\n\nCore text.\n"},
     "grammar-no-title": {"core": "\n"},
     "r6-fenced-comment-refdef": {"core": "# Gen-rules detail self-test rule\n\nSee [the policy].\n"},
+    "r7b-frontmatter-non-ascii-tier": {"family": "family: aiqt\ntier: \u0661\u0660\nfacet: QUALI\n"},
 }
 # Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
 # importlib, must then turn its case to the reverted exit (0 for a guard that refuses, 2 for a shape the
@@ -764,6 +822,11 @@ _SECOND = ("if found is not None:", "if False:")
 _NOTITLE = ("    if title is None:\n        raise", "    if False:\n        raise")
 _FM = ("        if not line:\n            continue\n", '        if not line or line.startswith("#"):\n            continue\n')
 _FENCE = (' or line.startswith("```")', "")
+_FMVAL = ("if any(ch in _VALUE_MARKUP or unicodedata.category(ch) in _VALUE_CATEGORIES for ch in val):", "if False:")
+_FMVAL_ASCII = (_FMVAL[0], "if not set(val) <= _PROSE_TEXT:")
+_VCAT_FIXED = '_VALUE_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))'
+_FMINT = ("if re.fullmatch(r'-?[0-9]+', v):", "if re.fullmatch(r'-?\\d+', v):")
+_FMSPLIT = ('for line in text[4:end].split("\\n"):', "for line in text[4:end].splitlines():")
 _ORDERED = ("if _ORDERED_RE.match(line):", "if False:")
 _CHARS = ("if not set(line) <= _PROSE_TEXT:", "if False:")
 _TSTART = ('if not line.startswith("# "):', "if False:")
@@ -976,6 +1039,20 @@ _DETAIL_REVERTS = (
     _revert("body-r6-ordered-paren-setext", "r6-ordered-paren-setext", _PROSE),
     _revert("body-r6-frontmatter-heading", "r6-frontmatter-heading", _FM),
     _revert("body-r6-frontmatter-indented-comment", "r6-frontmatter-indented-comment", _FM),
+    _revert("fm-r7-frontmatter-html-heading", "r7-frontmatter-html-heading", _FMVAL),
+    _revert("fm-r7-frontmatter-style", "r7-frontmatter-style", _FMVAL),
+    _revert("fm-r7-frontmatter-quoted-html", "r7-frontmatter-quoted-html", _FMVAL),
+    _revert("fm-r7-frontmatter-link", "r7-frontmatter-link", _FMVAL),
+    _revert("fm-r7-frontmatter-backslash", "r7-frontmatter-backslash", _FMVAL),
+    ("fm-r7-sequence-brackets", "val = val[1:-1]", "val = val", "r7-frontmatter-sequence-ok", 2),
+    ("fm-r7b-ascii-only", _FMVAL_ASCII[0], _FMVAL_ASCII[1], "r7-frontmatter-non-ascii", 2),
+    ("fm-r7b-control", _VCAT_FIXED, _VCAT_FIXED.replace('"Cc", ', ""), "r7b-frontmatter-tab", 0),
+    ("fm-r7b-format", _VCAT_FIXED, _VCAT_FIXED.replace('"Cf", ', ""), "r7b-frontmatter-format", 0),
+    ("fm-r7b-line-separator", _VCAT_FIXED, _VCAT_FIXED.replace('"Zl", ', ""), "r7b-frontmatter-line-separator", 0),
+    ("fm-r7b-paragraph-separator", _VCAT_FIXED, _VCAT_FIXED.replace(', "Zp"', ""),
+     "r7b-frontmatter-paragraph-separator", 0),
+    _revert("fm-r7b-lf-split", "r7b-frontmatter-separator-key", _FMSPLIT),
+    _revert("fm-r7b-ascii-int", "r7b-frontmatter-non-ascii-tier", _FMINT),
     _revert("body-grammar-no-title", "grammar-no-title", _NOTITLE),
     _revert("body-grammar-title-not-first", "grammar-title-not-first", _TITLE, _PROSE),
     _revert("body-grammar-title-no-space", "grammar-title-no-space", _TSTART),
@@ -1132,6 +1209,28 @@ def self_test_main():
             if got != reverted_exit:
                 failures.append("revert {}: with the guard removed, case {} expected exit {} (the guard is "
                                 "what decides it), got {!r}".format(label, case, reverted_exit, got))
+
+        # The adopter-shaped rule is accepted, and is refused once the ASCII-only value check is put back.
+        adopter = tmp / "adopter" / _ADOPTER_NAME
+        adopter.parent.mkdir()
+        adopter.write_bytes(_ADOPTER_SRC.encode("utf-8"))
+        try:
+            got = derive(parse_source(adopter), adopter.name, ("pack", "adopter"))
+        except ValueError as exc:
+            got = "refused ({})".format(exc)
+        if got != "security/" + _ADOPTER_NAME:
+            failures.append("adopter case: a non-ASCII string value expected acceptance, got {!r}".format(got))
+        try:
+            mutant = _load_reverted(revert_base, "fm-r7b-adopter-ascii-only", *_FMVAL_ASCII)
+        except AssertionError as exc:
+            failures.append(str(exc))
+        else:
+            try:
+                mutant.parse_source(adopter)
+                failures.append("revert fm-r7b-adopter-ascii-only: with the ASCII-only value check put back, "
+                                "the adopter case expected a refusal")
+            except ValueError:
+                pass
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1142,7 +1241,8 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: an invalid-UTF-8 generated target fails closed (exit 2), not a raw "
           "UnicodeDecodeError traceback (guards the widened reconcile arm); {} detail layout case(s) "
-          "hold and {} guard revert(s) each go red.".format(len(_DETAIL_CASES), len(_DETAIL_REVERTS)))
+          "hold and {} guard revert(s) each go red; an adopter-shaped rule with a non-ASCII value is accepted "
+          "and goes red under the ASCII-only revert.".format(len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1))
     return 0
 
 
