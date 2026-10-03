@@ -900,7 +900,10 @@ def _fixture_kill_group_members(group, signum, anchors, leader=None):
     signalled only when, with its pidfd ALREADY HELD, /proc still shows the
     group AND a live parent chain reaching one of `anchors` (pids the caller
     proved unreaped: an unreaped owned guardian, or the calling process
-    itself -- never a bare numeric pid, fix 2y codex F1). That order makes
+    itself -- never a bare numeric pid, fix 2y codex F1), with EVERY
+    intermediate hop of that chain pinned by its own pidfd and each link
+    re-read after its pin (QA10: an unpinned hop could be recycled beneath
+    an anchor mid-walk). That order makes
     recycling harmless: a live process the held pidfd references is exactly
     the process /proc describes, so a pid recycled after the census either
     fails the re-check (a foreign process is never parented under an anchor)
@@ -928,26 +931,79 @@ def _fixture_kill_group_members(group, signum, anchors, leader=None):
     never claim the tree was killed past this census. Hosts without pidfd
     address no members (the degraded-escalation disclosures cover them)."""
     import os
+    import select
     import signal
     anchors = {int(anchor) for anchor in anchors}
 
-    def anchored(member):
-        # Follow the CURRENT parent chain (each hop is kernel-truthful for a
-        # live process); only a chain reaching an anchor verifies. A hop that
-        # disappears or cannot be read mid-walk refuses: skipping is always
-        # the safe outcome.
-        hop, depth = member, 0
-        while depth < 128:
-            if hop in anchors:
-                return True
-            fields = _fixture_stat_fields(hop)
-            if fields is None or fields is _FIXTURE_UNREADABLE:
-                return False
-            parent = int(fields[1])
-            if parent <= 1:
-                return False
-            hop, depth = parent, depth + 1
-        return False
+    def anchored(member, member_fd):
+        # Follow the CURRENT parent chain with EVERY HOP PINNED (QA10 codex
+        # blocker / claude m1, D-385-PIDFD-HANDOFF round: an unpinned
+        # intermediate hop can exit, be reaped and have its number recycled
+        # beneath an anchor mid-walk, splicing an unrelated chain together).
+        # Each link is proved in order: read the child's ppid, open a pidfd
+        # on that number, then RE-READ the child's ppid. Unchanged means the
+        # original parent was still alive at the re-read -- a reparent
+        # target is a longer-lived ancestor that was alive WHILE the old
+        # parent was, so it can never carry the dead parent's pid -- and a
+        # parent alive across the open has pinned the number since before
+        # it, so the fresh pidfd references the true parent. After the walk
+        # every held hop, the member included, must still be alive (no held
+        # pidfd readable): the verified chain then existed simultaneously
+        # and each stat record read described a pinned process, never a
+        # recycled number. Any read failure, missing pidfd, or exited hop
+        # refuses: skipping is always the safe outcome.
+        held = []
+        pending = None
+
+        def close_held():
+            for pinned in held:
+                os.close(pinned)
+
+        try:
+            hop, depth = member, 0
+            while depth < 128:
+                if hop in anchors:
+                    if not held:
+                        # A direct member-to-anchor link: both ends are
+                        # already pinned (the caller holds member_fd and
+                        # proved the anchor un-reaped), so there is nothing
+                        # further to re-check -- and the member send itself
+                        # still goes through member_fd, never the number.
+                        return True
+                    poller = select.poll()
+                    for pinned in [member_fd] + held:
+                        poller.register(pinned, select.POLLIN)
+                    return not poller.poll(0)
+                fields = _fixture_stat_fields(hop)
+                if fields is None or fields is _FIXTURE_UNREADABLE:
+                    return False
+                parent = int(fields[1])
+                if parent <= 1:
+                    return False
+                if parent in anchors:
+                    # The anchor's number is pinned by the CALLER (its own
+                    # un-reaped child, or the calling process itself), so
+                    # this link needs no hop pidfd: hop's current ppid can
+                    # equal that number only while the anchor is the parent.
+                    hop, depth = parent, depth + 1
+                    continue
+                parent_fd = _fixture_pidfd(parent)
+                if parent_fd is None:
+                    return False
+                held.append(parent_fd)
+                fields = _fixture_stat_fields(hop)
+                if (fields is None or fields is _FIXTURE_UNREADABLE
+                        or int(fields[1]) != parent):
+                    return False
+                hop, depth = parent, depth + 1
+            return False
+        except BaseException as exc:
+            # Keep the exception already propagating into the close below
+            # visible to the shared boundary (fix 7).
+            pending = exc
+            raise
+        finally:
+            _cleanup_boundary(pending, close_held, "ancestry hop pidfd close")
 
     delivered, skipped, unverifiable = [], [], []
     try:
@@ -989,7 +1045,7 @@ def _fixture_kill_group_members(group, signum, anchors, leader=None):
                 continue
             if fields is None or int(fields[2]) != group or fields[0] == b"Z":
                 continue  # exited or left the group: no longer a member
-            if not anchored(member):
+            if not anchored(member, fd):
                 skipped.append(member)  # live in the group, ownership unverified
                 continue
             try:

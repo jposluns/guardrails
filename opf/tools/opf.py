@@ -2430,26 +2430,39 @@ def _self_test_runtime_supervisor_unit(tmp):
         except OSError:
             pass
 
-    # QA8 claude m3: regression pin for the QA7 blocker, widened by QA9 claude
-    # F1. Parse this host file and require, across the shared helper, this
-    # check, and EVERY _watchdog_* fixture driver (nested fixture helpers
-    # included), that a numeric signal call targets only os.getpid(), the
-    # un-reaped launcher guardian's `child.pid`, or a name whose NEAREST
-    # PRECEDING binding in the same scope is `os.fork()`, and that a bare
-    # os.pidfd_open pins only such a target: every other pid -- one read from
-    # a fixture file included -- must route through _kill_proved_child or
-    # _pidfd_proved_descendant. Inside this check and the helper themselves
-    # the rule stays TOTAL (the QA7 reaped-child class: even a fork-bound name
-    # can be stale here), so restoring the pre-fix
-    # `os.kill(child, signal.SIGKILL)` turns this red -- as does reverting any
-    # QA9 rerouted cleanup kill or proved pidfd open. Like
-    # _runtime_supervisor_signal_audit, a tripwire over ordinary spellings;
-    # the forged-pid runs are the behavioural safeguard.
+    # QA8 claude m3: regression pin for the QA7 blocker, widened by QA9
+    # claude F1 and by QA10 (D-385-PIDFD-HANDOFF). Parse this host file and
+    # require, across the shared helper, this check, and EVERY _watchdog_*
+    # fixture driver (nested fixture helpers included), that a numeric
+    # signal call targets only os.getpid(), the un-reaped launcher
+    # guardian's `child.pid`, or a name whose NEAREST PRECEDING binding in
+    # the same scope is `os.fork()` (plain or annotated assignment) and that
+    # has NOT since been passed to os.waitpid/wait4/waitid (a waited child
+    # may be reaped, so its number is no longer pinned), and that a bare
+    # os.pidfd_open pins only such a target: every other pid -- one read
+    # from a fixture file included -- must route through _kill_proved_child
+    # or arrive as a descriptor from its forking parent
+    # (_pidfd_handoff_recv). Aliased spellings that would dodge the name
+    # match -- getattr(os, "kill"), k = os.kill, po = os.pidfd_open -- are
+    # refused, except an alias bound in a scope that patch.object-replaces
+    # that same attribute (the standard forward-to-the-real-one patch shim).
+    # Inside this check and the helper themselves the rule stays TOTAL (the
+    # QA7 reaped-child class: even a fork-bound name can be stale here), so
+    # restoring the pre-fix `os.kill(child, signal.SIGKILL)` turns this red
+    # -- as does reverting any QA9 rerouted cleanup kill or any QA10 handoff
+    # receive to a bare open. Like _runtime_supervisor_signal_audit, a
+    # tripwire over ordinary spellings, NOT a proof: it does not see a
+    # rebind through `nonlocal`, a loop-carried rebind, `except ... as`, a
+    # closure capturing a name its owner scope later rebinds, a dynamic
+    # getattr with a computed name, os.__dict__ lookups, or
+    # functools.partial; the forged-pid runs and the handoff legs are the
+    # behavioural safeguard.
     import ast
     host_tree = ast.parse(Path(__file__).read_bytes())
 
     def scan_scope(scope, owner, total):
-        bindings, calls, nested = {}, [], []
+        aliasable = ("kill", "killpg", "pthread_kill", "pidfd_open")
+        bindings, calls, nested, aliases = {}, [], [], []
         arguments = scope.args
         for argument in (tuple(getattr(arguments, "posonlyargs", ()))
                          + tuple(arguments.args) + tuple(arguments.kwonlyargs)
@@ -2478,9 +2491,24 @@ def _self_test_runtime_supervisor_unit(tmp):
                         and item.value.func.attr == "fork"
                         and len(item.targets) == 1
                         and isinstance(item.targets[0], ast.Name)) else "other"
+                    if isinstance(item.value, ast.Attribute) \
+                            and item.value.attr in aliasable:
+                        aliases.append((item.value.attr, item.lineno))
                     for target in item.targets:
                         bind(target, item.lineno, kind)
-                elif isinstance(item, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)):
+                elif isinstance(item, ast.AnnAssign):
+                    # `p: int = os.fork()` binds ownership exactly like the
+                    # plain assignment (QA10 codex minor).
+                    kind = "fork" if (
+                        item.value is not None
+                        and isinstance(item.value, ast.Call)
+                        and isinstance(item.value.func, ast.Attribute)
+                        and item.value.func.attr == "fork") else "other"
+                    if isinstance(item.value, ast.Attribute) \
+                            and item.value.attr in aliasable:
+                        aliases.append((item.value.attr, item.lineno))
+                    bind(item.target, item.lineno, kind)
+                elif isinstance(item, (ast.AugAssign, ast.NamedExpr)):
                     bind(item.target, item.lineno, "other")
                 elif isinstance(item, ast.For):
                     bind(item.target, item.lineno, "other")
@@ -2491,6 +2519,30 @@ def _self_test_runtime_supervisor_unit(tmp):
                 collect(item)
 
         collect(scope)
+
+        patched = set()
+        for call in calls:
+            func = call.func
+            named = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if named in ("waitpid", "wait4", "waitid"):
+                index = 1 if named == "waitid" else 0
+                if len(call.args) > index and isinstance(call.args[index], ast.Name):
+                    # A waited name may already be reaped: its number is no
+                    # longer pinned by the fork, so later kills in this scope
+                    # lose the fork-bound licence (QA10 codex minor).
+                    bindings.setdefault(call.args[index].id, []).append(
+                        (call.lineno, "waited"))
+            elif named == "object" and isinstance(func, ast.Attribute) \
+                    and isinstance(func.value, ast.Name) \
+                    and func.value.id == "patch" and len(call.args) > 1 \
+                    and isinstance(call.args[1], ast.Constant):
+                patched.add(call.args[1].value)
+        for attr, lineno in aliases:
+            if attr not in patched:
+                faults.append("{} binds an alias of {} (line {}); aliased signal/pidfd "
+                              "spellings outside a patch-forwarding shim dodge this "
+                              "tripwire and are refused (QA10 claude m3)".format(
+                                  owner, attr, lineno))
 
         def fork_bound(name, lineno):
             prior = [entry for entry in bindings.get(name, ()) if entry[0] < lineno]
@@ -2510,6 +2562,14 @@ def _self_test_runtime_supervisor_unit(tmp):
         for call in calls:
             func = call.func
             named = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if isinstance(func, ast.Name) and func.id == "getattr" \
+                    and len(call.args) > 1 \
+                    and isinstance(call.args[1], ast.Constant) \
+                    and call.args[1].value in aliasable:
+                faults.append("{} fetches {} through getattr (line {}); dynamic "
+                              "signal/pidfd spellings dodge this tripwire and are "
+                              "refused (QA10 claude m3)".format(
+                                  owner, call.args[1].value, call.lineno))
             if named in ("kill", "killpg", "pthread_kill"):
                 if total:
                     faults.append("{} holds a numeric signal call ({}, line {}); the QA7 "
@@ -2523,8 +2583,9 @@ def _self_test_runtime_supervisor_unit(tmp):
             elif named == "pidfd_open" and not total \
                     and not (call.args and allowed(call.args[0], call.lineno)):
                 faults.append("{} opens an unproved pidfd (line {}) on a pid liveness alone "
-                              "cannot authenticate; route it through _pidfd_proved_descendant "
-                              "(QA9 codex blocker 1)".format(owner, call.lineno))
+                              "cannot authenticate; take the descriptor from the forking "
+                              "parent instead (_pidfd_handoff_recv, D-385-PIDFD-HANDOFF; "
+                              "QA9 codex blocker 1)".format(owner, call.lineno))
         for inner in nested:
             scan_scope(inner, owner, total)
 
@@ -3010,50 +3071,77 @@ def _kill_proved_child(pid, sig=None, pidfd=None):
             os.close(fd)
 
 
-def _pidfd_proved_descendant(pid, anchors):
-    """Open a pidfd on `pid` -- a pid READ FROM A FILE a fixture published, or
-    any other record liveness alone cannot authenticate (QA9 codex blocker 1 /
-    claude F3) -- and return the fd ONLY once, with the fd already pinning the
-    identity, the target's live /proc parent chain reaches one of `anchors`
-    (pids this test proved its own: a directly held un-reaped child, or
-    os.getpid()) AND the pinned target has still not exited (the held fd is
-    not yet readable), so every /proc record the walk read described the
-    pinned process, never a recycled number. Anything else -- a forged pid
-    naming an unrelated same-uid process included -- returns None with
-    NOTHING signalled and nothing left open. The held-fd-then-/proc re-check
-    order is the one _fixture_kill_group_members already uses."""
-    import select
-    anchors = {int(anchor) for anchor in anchors}
+def _pidfd_handoff_send(conn, pid):
+    """Forking-parent side of the pidfd handoff (D-385-PIDFD-HANDOFF): call
+    IMMEDIATELY after os.fork() returned `pid`, before ANY wait on it. An
+    un-reaped child's pid cannot be reused, so the pidfd opened HERE is bound
+    to the true child, and SCM_RIGHTS preserves that binding across the
+    socketpair. The numeric pid rides along as DISCLOSURE (for /proc state
+    reads and messages); the receiver never signals the number. On a host
+    without pidfd support the payload is sent descriptor-less and the
+    receiver fails closed (returns False here, True when a descriptor was
+    sent)."""
+    import socket
+    payload = str(int(pid)).encode("ascii")
     if not hasattr(os, "pidfd_open"):
-        return None
+        conn.send(payload)
+        return False
+    fd = os.pidfd_open(int(pid), 0)
     try:
-        fd = os.pidfd_open(int(pid), 0)
-    except OSError:
-        return None
+        socket.send_fds(conn, [payload], [fd])
+    finally:
+        os.close(fd)
+    return True
 
-    def parent_of(hop):
-        try:
-            stat = Path("/proc", str(hop), "stat").read_bytes()
-        except OSError:
-            return None
-        return int(stat.rsplit(b")", 1)[1].split()[1])
 
-    hop, depth, proved = int(pid), 0, False
-    while depth < 128:
-        if hop in anchors:
-            proved = True
-            break
-        parent = parent_of(hop)
-        if parent is None or parent <= 1:
-            break
-        hop, depth = parent, depth + 1
-    if proved:
-        poller = select.poll()
-        poller.register(fd, select.POLLIN)
-        if not poller.poll(0):  # not readable: the pinned target has not exited
-            return fd           # the chain the walk read belongs to this target
-    os.close(fd)
-    return None
+def _pidfd_handoff_recv(conn, note):
+    """Receiving side of the pidfd handoff (D-385-PIDFD-HANDOFF, which
+    retires the /proc-ancestry walk _pidfd_proved_descendant: the walk
+    pinned only the TARGET, so an intermediate /proc hop could exit, be
+    reaped and have its number recycled beneath the anchor mid-walk,
+    splicing an unrelated target into an accepted chain -- QA10 codex
+    blocker / claude m1). The ONLY way a self-test accepts a signal target
+    it did not fork itself is a descriptor the target's FORKING PARENT
+    opened on its own direct child immediately after fork and passed here
+    with SCM_RIGHTS (socket.send_fds / socket.recv_fds). Returns
+    (pid, fd); the pid is disclosure only -- /proc state reads and
+    messages -- NEVER a signal target. Fails closed with AssertionError
+    naming `note`, every received descriptor closed and NOTHING signalled,
+    when: no message arrives within the bound; the sender closed without a
+    message; the message carries no descriptor (or more than one); the
+    payload is not a pid; or the descriptor's process has ALREADY EXITED
+    (the pidfd polls readable) -- a dead target takes no signal and the
+    refusal is loud, never swallowed."""
+    import select
+    import socket
+
+    def refuse(fds, reason):
+        for received in fds:
+            os.close(received)
+        raise AssertionError("pidfd handoff refused ({}): {}; nothing is "
+                             "signalled".format(note, reason))
+
+    poller = select.poll()
+    poller.register(conn.fileno(), select.POLLIN)
+    if not poller.poll(30000):
+        refuse((), "no handoff message arrived within the bound")
+    message, fds, _flags, _addr = socket.recv_fds(conn, 64, 1)
+    if not message:
+        refuse(fds, "the forking parent closed without a handoff message")
+    if len(fds) != 1:
+        refuse(fds, "the forking parent passed {} descriptors, not exactly "
+                    "one".format(len(fds)))
+    try:
+        pid = int(message.decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        refuse(fds, "the handoff payload is not a pid")
+    fd = fds[0]
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    if poller.poll(0):  # readable: the handed-off target has already exited
+        refuse([fd], "the handed-off target (pid {}) has already "
+                     "exited".format(pid))
+    return pid, fd
 
 
 def _case_subreaper():
@@ -4873,14 +4961,19 @@ def _watchdog_completion_case(mode):
                         emit, "_fixture_pdeathsig", lambda: None))
                 child = emit._FixtureProcess(time.monotonic() + 3600, subject=subject_tree)
                 pid = child.start()
-                # Hold OUR OWN proved pidfd on the guardian for the whole
-                # exercise: close() runs in the worker thread below and can
-                # reap the guardian concurrently, so the freeze and the
-                # recovery SIGCONT both go through the ownership proof on
-                # this held fd, never a bare numeric pid a concurrent reap
-                # could free for reuse (QA9 codex blocker 2 / claude F2).
-                held_fd = _pidfd_proved_descendant(pid, {os.getpid()})
-                assert held_fd is not None, "the guardian pidfd proof was refused"
+                # Hold OUR OWN duplicate of the launcher's guardian pidfd
+                # for the whole exercise: the launcher opened child.pidfd on
+                # its own direct child immediately after the fork (the
+                # forking-parent descriptor, D-385-PIDFD-HANDOFF), close()
+                # runs in the worker thread below and can reap the guardian
+                # (and close the original descriptor) concurrently, so the
+                # freeze and the recovery SIGCONT both go through the
+                # ownership proof on this held duplicate, never a bare
+                # numeric pid a concurrent reap could free for reuse (QA9
+                # codex blocker 2 / claude F2).
+                assert child.pidfd is not None, \
+                    "the launcher holds no guardian pidfd"
+                held_fd = os.dup(child.pidfd)
                 stack.callback(os.close, held_fd)
                 subject = await_child(pid, "the guardian subject never appeared")
                 descendant = await_child(subject, "the subject descendant never appeared")
@@ -6065,6 +6158,7 @@ def _watchdog_completion_case(mode):
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "unpinned-kill":
+        import socket
         import time
         # QA20 claude F1 + QA21 codex F3: NEVER signal a numeric pid or pgid
         # whose ownership is not pinned -- a held pidfd does not pin the
@@ -6270,11 +6364,11 @@ def _watchdog_completion_case(mode):
         # pins the group and the member kill still reaches it through its own
         # verified pidfd (QA18 gemini F1 preserved under the pin rule).
         with tempfile.TemporaryDirectory(prefix="opf-pin-") as directory:
-            leader_file = Path(directory, "leader")
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
             opened = Path(directory, "opened")
 
+            handoff, handoff_peer = socket.socketpair()
             guardian = os.fork()
             if guardian == 0:
                 try:
@@ -6294,9 +6388,7 @@ def _watchdog_completion_case(mode):
                         scratch.rename(grandchild_file)
                         time.sleep(3600)      # until the guardian kills it
                         os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
+                    _pidfd_handoff_send(handoff_peer, leader)
                     bound = time.monotonic() + 30
                     while not opened.exists():  # the caller holds the pidfd now
                         if time.monotonic() >= bound:
@@ -6318,13 +6410,14 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
-            await_file(leader_file, "the model leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
-            # The published pid is authenticated, never trusted (QA9 codex
-            # blocker 1): the held fd is returned only once the live parent
-            # chain reaches the guardian, this test's own direct child.
-            fd = _pidfd_proved_descendant(leader, {guardian})
-            assert fd is not None, "the published leader failed its descent proof"
+            handoff_peer.close()
+            # The signal target arrives as a DESCRIPTOR from its forking
+            # parent (D-385-PIDFD-HANDOFF): the guardian opened the pidfd on
+            # its own un-reaped child immediately after the fork and passed
+            # it with SCM_RIGHTS; the numeric pid is disclosure only, never
+            # a signal target.
+            leader, fd = _pidfd_handoff_recv(handoff, "the model leader")
+            handoff.close()
             await_file(grandchild_file, "the model grandchild never appeared")
             grandchild = int(grandchild_file.read_text(encoding="ascii"))
             scratch = Path(directory, "opened.tmp")
@@ -6416,10 +6509,10 @@ def _watchdog_completion_case(mode):
         # pidfd), addresses the descendant, and accounts nothing skipped --
         # only then may the outcome claim the tree ("tree", []).
         with tempfile.TemporaryDirectory(prefix="opf-order-") as directory:
-            leader_file = Path(directory, "leader")
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
 
+            handoff, handoff_peer = socket.socketpair()
             guardian = os.fork()
             if guardian == 0:
                 try:
@@ -6439,9 +6532,7 @@ def _watchdog_completion_case(mode):
                         scratch.rename(grandchild_file)
                         time.sleep(3600)      # LIVE leader, killed last
                         os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
+                    _pidfd_handoff_send(handoff_peer, leader)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -6456,12 +6547,11 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
-            await_file(leader_file, "the leg-7 leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
+            handoff_peer.close()
+            leader, fd = _pidfd_handoff_recv(handoff, "the leg-7 leader")
+            handoff.close()
             await_file(grandchild_file, "the leg-7 grandchild never appeared")
             grandchild = int(grandchild_file.read_text(encoding="ascii"))
-            fd = _pidfd_proved_descendant(leader, {guardian})
-            assert fd is not None, "the leg-7 leader failed its descent proof"
             await_file(frozen_file, "the leg-7 guardian never froze")
             await_state(guardian, ("T",), "the leg-7 guardian did not stop")
             member_calls = []
@@ -6548,6 +6638,7 @@ def _watchdog_completion_case(mode):
         os.waitpid(sentinel, 0)
         os.waitpid(zombie, 0)
     elif mode == "census-verify":
+        import socket
         import time
         import types
         # Fix 2z (premise change) + maintainer ruling
@@ -6585,12 +6676,15 @@ def _watchdog_completion_case(mode):
         def frozen_tree(directory, forker):
             # Frozen subreaper guardian -> setsid leader -> one same-group
             # grandchild; with `forker`, the grandchild forks one more
-            # same-group child when cued through the cue file.
-            leader_file = Path(directory, "leader")
+            # same-group child when cued through the cue file. The leader --
+            # the signal target -- is handed out as a DESCRIPTOR its forking
+            # guardian opened immediately after fork (D-385-PIDFD-HANDOFF),
+            # never as a number published through a file.
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
             cue = Path(directory, "cue")
             forked_file = Path(directory, "forked")
+            handoff, handoff_peer = socket.socketpair()
             guardian = os.fork()
             if guardian == 0:
                 try:
@@ -6623,9 +6717,7 @@ def _watchdog_completion_case(mode):
                         scratch.rename(grandchild_file)
                         time.sleep(3600)              # LIVE leader, killed last
                         os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
+                    _pidfd_handoff_send(handoff_peer, leader)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -6633,14 +6725,15 @@ def _watchdog_completion_case(mode):
                     os._exit(0)
                 except BaseException:
                     os._exit(125)
-            await_file(leader_file, "the model leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
+            handoff_peer.close()
+            leader, leader_fd = _pidfd_handoff_recv(handoff, "the model leader")
+            handoff.close()
             await_file(grandchild_file, "the model grandchild never appeared")
             grandchild = int(grandchild_file.read_text(encoding="ascii"))
             await_file(frozen_file, "the model guardian never froze")
             await_state(guardian, ("T",), "the model guardian did not stop")
             assert state(grandchild) not in (None, "Z"), "the descendant died early"
-            return guardian, leader, grandchild, cue, forked_file
+            return guardian, leader, leader_fd, grandchild, cue, forked_file
 
         def release(guardian):
             # Proof-routed resume (QA9 claude F1): the frozen guardian is this
@@ -6655,10 +6748,8 @@ def _watchdog_completion_case(mode):
         # PermissionError as an exited process and claimed ("tree", []) with
         # the member alive.
         with tempfile.TemporaryDirectory(prefix="opf-unread-") as directory:
-            guardian, leader, grandchild, _cue, _forked = frozen_tree(
+            guardian, leader, fd, grandchild, _cue, _forked = frozen_tree(
                 Path(directory), forker=False)
-            fd = _pidfd_proved_descendant(leader, {guardian})
-            assert fd is not None, "the leg-1 leader failed its descent proof"
             real_os_open = os.open
             blocked = str(Path("/proc", str(grandchild), "stat"))
 
@@ -6708,10 +6799,8 @@ def _watchdog_completion_case(mode):
         # tree. The pre-fix code swallowed the failure and, with a clean
         # census, still claimed ("tree", []) over the live leader.
         with tempfile.TemporaryDirectory(prefix="opf-leaderfail-") as directory:
-            guardian, leader, grandchild, _cue, _forked = frozen_tree(
+            guardian, leader, fd, grandchild, _cue, _forked = frozen_tree(
                 Path(directory), forker=False)
-            fd = _pidfd_proved_descendant(leader, {guardian})
-            assert fd is not None, "the leg-2 leader failed its descent proof"
             real_pidfd_signal = signal.pidfd_send_signal
 
             def failing_leader_kill(target_fd, signum, *args):
@@ -6742,10 +6831,8 @@ def _watchdog_completion_case(mode):
         # "every member addressed" -- with the forked member alive and
         # unaccounted.
         with tempfile.TemporaryDirectory(prefix="opf-forkrace-") as directory:
-            guardian, leader, grandchild, cue, forked_file = frozen_tree(
+            guardian, leader, fd, grandchild, cue, forked_file = frozen_tree(
                 Path(directory), forker=True)
-            fd = _pidfd_proved_descendant(leader, {guardian})
-            assert fd is not None, "the leg-3 leader failed its descent proof"
             real_listdir = os.listdir
             proc_listings = []
 
@@ -6833,6 +6920,7 @@ def _watchdog_completion_case(mode):
         os.kill(survivor, signal.SIGKILL)  # hygiene for the NAMED survivor
         os.waitpid(survivor, 0)
     elif mode == "census-exception":
+        import socket
         import time
         import types
         # Fix 2z (codex BLOCKER 3): cleanup is exception-safe. The subject's
@@ -6881,8 +6969,8 @@ def _watchdog_completion_case(mode):
                 time.sleep(0.005)
 
         def frozen_pair(directory):
-            leader_file = Path(directory, "leader")
             frozen_file = Path(directory, "frozen")
+            handoff, handoff_peer = socket.socketpair()
             guardian = os.fork()
             if guardian == 0:
                 try:
@@ -6895,9 +6983,7 @@ def _watchdog_completion_case(mode):
                         os.setsid()
                         time.sleep(3600)
                         os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
+                    _pidfd_handoff_send(handoff_peer, leader)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -6905,11 +6991,16 @@ def _watchdog_completion_case(mode):
                     os._exit(0)
                 except BaseException:
                     os._exit(125)
-            await_file(leader_file, "the model leader never appeared")
+            # The forking-parent descriptor on the GUARDIAN -- opened on
+            # this test's own direct child immediately after its fork, well
+            # before any reap (D-385-PIDFD-HANDOFF).
+            guardian_fd = os.pidfd_open(guardian)
+            handoff_peer.close()
             await_file(frozen_file, "the model guardian never froze")
             await_state(guardian, ("T",), "the model guardian did not stop")
-            # The guardian publishes the leader pid at fork, but the
-            # leader runs its own setsid: the caller's subject freeze
+            # The LEADER arrives as the descriptor its forking guardian
+            # handed off with SCM_RIGHTS; the pid rides along as disclosure.
+            # The leader runs its own setsid: the caller's subject freeze
             # could land FIRST, pinning the leader in this test
             # process's group for good, so the guardian-anchored
             # census found no group member, no census ran, and the
@@ -6917,17 +7008,16 @@ def _watchdog_completion_case(mode):
             # intermittent "fixture was accepted" flake (fix 16,
             # QA37 claude). Hand the pair out only once the leader
             # holds its own group.
-            leader = int(leader_file.read_text(encoding="ascii"))
+            leader, leader_fd = _pidfd_handoff_recv(handoff, "the model leader")
+            handoff.close()
             await_pgid(leader, "the model leader never took its own group")
-            return guardian, leader
+            return guardian, guardian_fd, leader, leader_fd
 
         # Leg 1: the held-pidfd subject SIGKILL survives a raising census;
         # the census exception still propagates. The pre-fix escalation
         # propagated BEFORE the kill and stranded the frozen leader.
         with tempfile.TemporaryDirectory(prefix="opf-cexc-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            fd = _pidfd_proved_descendant(leader, {guardian})
-            assert fd is not None, "the leg-1 leader failed its descent proof"
+            guardian, guardian_fd, leader, fd = frozen_pair(Path(directory))
             with patch.object(emit, "_fixture_kill_group_members",
                               side_effect=RuntimeError("injected census failure")):
                 refuses(RuntimeError, lambda: emit._fixture_escalate_subject(
@@ -6935,20 +7025,25 @@ def _watchdog_completion_case(mode):
             await_state(leader, (None, "Z"),
                         "the raising census stranded the frozen subject")
             os.close(fd)
+            os.close(guardian_fd)
             assert _kill_proved_child(guardian, signal.SIGCONT), \
                 "the leg-1 release refused the frozen guardian"
             os.waitpid(guardian, 0)
 
-        # Leg 1f (QA9 codex blocker 1 / claude F3): a pid PUBLISHED THROUGH A
-        # FIXTURE FILE is authenticated, never trusted. Forge the file with a
-        # live, UNRELATED group leader -- a decoy whose parent chain never
-        # reaches the guardian -- and require that the descent proof refuses
-        # it BEFORE any descriptor exists to signal through: nothing is sent
-        # and the decoy survives. Removing the parent-chain walk from
-        # _pidfd_proved_descendant (or reverting any caller to a bare
-        # os.pidfd_open, which the AST pin catches) turns this red.
+        # Leg 1f (QA9 codex blocker 1 / claude F3; reshaped by
+        # D-385-PIDFD-HANDOFF after QA10 codex blocker / claude m1): a pid a
+        # FIXTURE FILE names is NEVER read for a signal target. Forge the
+        # file with a live, UNRELATED group leader -- a decoy whose parent
+        # chain never reaches the guardian -- while the REAL target arrives
+        # as the descriptor its forking guardian handed off: the committed
+        # path never consults the file, every pidfd signal of the run goes
+        # through the handed-off descriptor, and the decoy is never
+        # signalled -- not stopped, not killed. A caller reverted to reading
+        # the file and opening a bare os.pidfd_open on the number is caught
+        # by the AST pin; one that signals the file-named number freezes or
+        # kills the decoy and turns this red.
         with tempfile.TemporaryDirectory(prefix="opf-forged-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
+            guardian, guardian_fd, leader, fd = frozen_pair(Path(directory))
             decoy = os.fork()
             if decoy == 0:
                 os.setsid()
@@ -6958,29 +7053,101 @@ def _watchdog_completion_case(mode):
             scratch = Path(directory, "leader.tmp")
             scratch.write_text(str(decoy), encoding="ascii")
             scratch.rename(Path(directory, "leader"))
-            forged = int(Path(directory, "leader").read_text(encoding="ascii"))
+            assert leader != decoy, "the decoy collided with the real leader"
             sent = []
-            with patch.object(signal, "pidfd_send_signal",
-                              lambda target_fd, signum, *args:
-                                  sent.append((target_fd, signum))):
-                proved = _pidfd_proved_descendant(forged, {guardian})
-            assert proved is None, \
-                "a forged live group leader passed the descent proof"
-            assert sent == [], ("the forged leader was signalled", sent)
-            assert state(decoy) not in (None, "Z"), \
-                "the forged (unrelated) leader did not survive the refusal"
-            # Hygiene strictly through the proofs: the REAL leader through its
-            # proved descendant fd, the decoy and the guardian through the
-            # ownership proof on this process's own children.
-            fd = _pidfd_proved_descendant(leader, {guardian})
-            assert fd is not None, "the real leader lost its descent proof"
-            signal.pidfd_send_signal(fd, signal.SIGKILL)
-            await_state(leader, (None, "Z"), "the leg-1f hygiene did not land")
+            real_pidfd_signal = signal.pidfd_send_signal
+
+            def rec_send(target_fd, signum, *args):
+                sent.append((target_fd, signum))
+                return real_pidfd_signal(target_fd, signum, *args)
+
+            with patch.object(signal, "pidfd_send_signal", rec_send):
+                outcome = emit._fixture_escalate_subject(
+                    leader, fd, guardian_pid=guardian)
+            assert outcome == ("tree", []), (
+                "the forged-file run did not address the real tree", outcome)
+            assert sent and all(entry[0] == fd for entry in sent), (
+                "a descriptor other than the handed-off leader pidfd was "
+                "signalled", sent)
+            await_state(leader, (None, "Z"), "the real leader survived")
+            assert state(decoy) in ("S", "R"), (
+                "the forged file's number was signalled: the decoy did not "
+                "stay running untouched", state(decoy))
             os.close(fd)
+            os.close(guardian_fd)
             assert _kill_proved_child(decoy), "the leg-1f hygiene refused the decoy"
             assert _kill_proved_child(guardian, signal.SIGCONT), \
                 "the leg-1f release refused the frozen guardian"
             os.waitpid(guardian, 0)
+
+        # Leg 1g (D-385-PIDFD-HANDOFF, fail closed): a forking parent that
+        # sends NO descriptor is refused -- the receiver fails closed with a
+        # named reason, signals nothing, and the pid named in the payload (a
+        # live bystander here) survives untouched. There is no fallback from
+        # the missing descriptor to the number.
+        bystander = os.fork()
+        if bystander == 0:
+            time.sleep(3600)
+            os._exit(0)
+        handoff, handoff_peer = socket.socketpair()
+        sender = os.fork()
+        if sender == 0:
+            try:
+                handoff.close()
+                handoff_peer.send(str(bystander).encode("ascii"))
+                os._exit(0)
+            except BaseException:
+                os._exit(125)
+        handoff_peer.close()
+        sent = []
+        with patch.object(signal, "pidfd_send_signal",
+                          lambda target_fd, signum, *args:
+                              sent.append((target_fd, signum))):
+            try:
+                _pidfd_handoff_recv(handoff, "the leg-1g proofless handoff")
+            except AssertionError as exc:
+                named = str(exc)
+            else:
+                raise AssertionError("a descriptor-less handoff was accepted")
+        assert "passed 0 descriptors" in named and "leg-1g" in named, named
+        assert sent == [], ("the descriptor-less handoff was signalled", sent)
+        handoff.close()
+        waited, raw = os.waitpid(sender, 0)
+        assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
+        assert state(bystander) in ("S", "R"), (
+            "the payload-named bystander did not survive the refusal",
+            state(bystander))
+        assert _kill_proved_child(bystander), \
+            "the leg-1g hygiene refused the bystander"
+
+        # Leg 1h (D-385-PIDFD-HANDOFF, fail closed): a handed-off descriptor
+        # whose process has ALREADY EXITED is refused loudly -- no signal is
+        # sent through it and the refusal is a named error, never a
+        # swallowed one. This test is the forking parent here: the handoff
+        # is opened on its own un-reaped child, whose pid the zombie still
+        # pins, and the RECEIVER must still refuse the dead target.
+        departed = os.fork()
+        if departed == 0:
+            os._exit(0)
+        handoff, handoff_peer = socket.socketpair()
+        await_state(departed, ("Z",), "the departed child never became a zombie")
+        assert _pidfd_handoff_send(handoff_peer, departed), \
+            "the exited-target handoff was not sent"
+        handoff_peer.close()
+        sent = []
+        with patch.object(signal, "pidfd_send_signal",
+                          lambda target_fd, signum, *args:
+                              sent.append((target_fd, signum))):
+            try:
+                _pidfd_handoff_recv(handoff, "the leg-1h exited target")
+            except AssertionError as exc:
+                named = str(exc)
+            else:
+                raise AssertionError("an exited handoff target was accepted")
+        assert "already exited" in named and "leg-1h" in named, named
+        assert sent == [], ("the exited handoff target was signalled", sent)
+        handoff.close()
+        os.waitpid(departed, 0)
 
         # Leg 2: at the _escalate tier the guardian SIGKILL survives the
         # same failure, the kill that DID run is recorded ("partial",
@@ -6988,13 +7155,8 @@ def _watchdog_completion_case(mode):
         # The pre-fix tier propagated before the guardian SIGKILL and
         # recorded nothing.
         with tempfile.TemporaryDirectory(prefix="opf-cexc2-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            guardian_fd = _pidfd_proved_descendant(guardian, {os.getpid()})
-            assert guardian_fd is not None, \
-                "the frozen guardian failed its own-child proof"
-            leader_fd = _pidfd_proved_descendant(leader, {guardian})
-            assert leader_fd is not None, \
-                "the published leader failed its descent proof"
+            guardian, guardian_fd, leader, leader_fd = frozen_pair(
+                Path(directory))
             fake = types.SimpleNamespace(
                 pid=guardian, pidfd=guardian_fd,
                 subject_pid=leader, subject_pidfd=leader_fd,
@@ -7095,9 +7257,7 @@ def _watchdog_completion_case(mode):
         # SIGKILL. The pre-fix freeze sat before the try: the exception
         # skipped the kill and stranded the live subject.
         with tempfile.TemporaryDirectory(prefix="opf-freeze-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            fd = _pidfd_proved_descendant(leader, {guardian})
-            assert fd is not None, "the leg-4 leader failed its descent proof"
+            guardian, guardian_fd, leader, fd = frozen_pair(Path(directory))
             real_pidfd_signal = signal.pidfd_send_signal
 
             def freeze_fault(target_fd, signum, *args):
@@ -7112,6 +7272,7 @@ def _watchdog_completion_case(mode):
                         "the freeze exception skipped the held-pidfd "
                         "subject SIGKILL")
             os.close(fd)
+            os.close(guardian_fd)
             assert _kill_proved_child(guardian, signal.SIGCONT), \
                 "the leg-4 release refused the frozen guardian"
             os.waitpid(guardian, 0)
@@ -7262,13 +7423,8 @@ def _watchdog_completion_case(mode):
         # the send failed and the frozen subject survives. The pre-fix
         # wording claimed "subject SIGKILL sent".
         with tempfile.TemporaryDirectory(prefix="opf-dfault-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            guardian_fd = _pidfd_proved_descendant(guardian, {os.getpid()})
-            assert guardian_fd is not None, \
-                "the frozen guardian failed its own-child proof"
-            leader_fd = _pidfd_proved_descendant(leader, {guardian})
-            assert leader_fd is not None, \
-                "the published leader failed its descent proof"
+            guardian, guardian_fd, leader, leader_fd = frozen_pair(
+                Path(directory))
             fake = types.SimpleNamespace(
                 pid=guardian, pidfd=guardian_fd,
                 subject_pid=leader, subject_pidfd=leader_fd,
@@ -10960,6 +11116,44 @@ def _watchdog_completion_case(mode):
                 emit._fixture_kill_group_members(6060, signal.SIGKILL,
                                                  set([7777]))
 
+        def hop_close_driver(cancellation, fault, state):
+            # pending point: the SECOND ancestry hop's stat read inside
+            # the pinned parent-chain walk; cleanup: the held hop pidfd
+            # close in the walk's own boundary (QA10).
+            def fake_listdir(path):
+                assert str(path) == "/proc", path
+                return ["4242"]
+
+            def fake_stat_fields(target):
+                if int(target) == 4242:
+                    return [b"S", b"5151", b"6060"]
+                assert int(target) == 5151, target
+                raise cancellation
+
+            def fake_pidfd(target):
+                return {4242: 987002, 5151: 987008}[int(target)]
+
+            def fake_send(fd, signum, *args):
+                raise AssertionError(
+                    ("an unanchored member was signalled", fd, signum))
+
+            def fake_close(fd):
+                if fd == 987008:
+                    raise fault
+                assert fd == 987002, fd
+                return None
+
+            with patch.object(os, "listdir", fake_listdir), (
+                    patch.object(emit, "_fixture_stat_fields",
+                                 fake_stat_fields)), (
+                    patch.object(emit, "_fixture_pidfd",
+                                 fake_pidfd)), (
+                    patch.object(signal, "pidfd_send_signal",
+                                 fake_send)), (
+                    patch.object(os, "close", fake_close)):
+                emit._fixture_kill_group_members(6060, signal.SIGKILL,
+                                                 set([7777]))
+
         def subject_kill_driver(cancellation, fault, state):
             # pending point: the subject freeze; cleanup: the
             # held-pidfd SIGKILL (the leg 12 shape, all three types).
@@ -11277,6 +11471,9 @@ def _watchdog_completion_case(mode):
         behavioural_drivers[
             ("f:_fixture_kill_group_members",
              "member pidfd close", 0)] = member_close_driver
+        behavioural_drivers[
+            ("f:_fixture_kill_group_members",
+             "ancestry hop pidfd close", 0)] = hop_close_driver
         behavioural_drivers[
             ("f:_fixture_escalate_subject",
              "held-pidfd subject SIGKILL", 0)] = subject_kill_driver
