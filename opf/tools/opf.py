@@ -1469,8 +1469,10 @@ _RUNTIME_TIMEOUT = 60
 
 
 def _runtime_snapshot(top):
-    """Map each path under `top` (relative; `.git` pruned; symlinks not followed) to its mode, size,
-    modification time and content: the sha256 of a regular file's bytes, a symlink's target. Returns (snap,
+    """Map each path under `top` (relative; only the TOP-LEVEL `.git` pruned, a nested `.git` recorded;
+    symlinks not followed) to its mode, size, modification time, inode identity (st_ino, st_nlink and
+    st_dev, so a hardlink swap that preserves bytes, mode, size and mtime is still a change) and
+    content: the sha256 of a regular file's bytes, a symlink's target. Returns (snap,
     unread): `unread` names, with the error, every path that could not be listed, stat'ed or read, and `top`
     itself when it is not a directory, so a tree the probe cannot see is a cannot-evaluate finding, never a
     skip."""
@@ -1486,7 +1488,7 @@ def _runtime_snapshot(top):
     except OSError as exc:
         failed(exc)
     for base, dirs, files in os.walk(str(top), onerror=failed):
-        dirs[:] = sorted(each for each in dirs if each != ".git")
+        dirs[:] = sorted(each for each in dirs if each != ".git" or base != str(top))
         for name in dirs + sorted(files):
             path = os.path.join(base, name)
             try:
@@ -1502,59 +1504,136 @@ def _runtime_snapshot(top):
             except OSError as exc:
                 failed(exc)
                 continue
-            snap[os.path.relpath(path, str(top))] = (st.st_mode, st.st_size, st.st_mtime_ns, content)
+            snap[os.path.relpath(path, str(top))] = (
+                st.st_mode, st.st_size, st.st_mtime_ns, st.st_ino, st.st_nlink, st.st_dev, content)
     return snap, unread
 
 
-# Set in each runtime-probe child's environment to a token naming its run, so _runtime_survivors can find a
-# descendant that left the child's process group.
+# Set in each runtime-probe child's environment to a token naming its run; it is informational only. No
+# kill is ever chosen by an environment match, a name match or uid ownership, so an unrelated same-uid
+# process whose environment happens to carry the marker is never signalled and never reported;
+# containment is the supervisor's own-children subtree alone.
 _RUNTIME_MARKER = "OPF_RUNTIME_PROBE"
-# Seconds the runtime probe waits after a child exits before it looks for and kills the child's descendants.
+# Seconds the runtime probe waits after a child exits before it looks for and kills the child's
+# descendants.
 _RUNTIME_SETTLE = 0.05
+# Bounds on the supervisor's kill-and-reap rounds over its own children after the module exits: past
+# either, a child that still appears is reported as a survivor the rounds never drained, a finding.
+_RUNTIME_REAP_SECONDS = 5.0
+_RUNTIME_REAP_ROUNDS = 250
+
+# The per-run supervisor source the runtime probe writes into its scratch directory and runs as a separate
+# process, so the self-test's own process never carries the subreaper flag. The supervisor makes ITSELF a
+# child subreaper (prctl PR_SET_CHILD_SUBREAPER, option 36, Linux) before it spawns the probed module, so
+# every orphaned descendant of the module, a setsid'd, non-dumpable or fork-hopping one included,
+# reparents to the supervisor. After the module exits it repeatedly SIGKILLs and reaps exactly the
+# processes it can prove are its own un-reaped children (/proc/self/task/*/children, or where that file
+# is unavailable the ppid field of /proc/<pid>/stat equal to its own pid), in bounded rounds and time. A
+# pid is signalled only while it is an un-reaped child of the supervisor (nothing else reaps it), so pid
+# reuse cannot redirect a kill to an unrelated process. It prints one JSON line: the module's exit
+# status and output, a timeout flag, the survivors (any is a finding) and whether the rounds drained.
+# When prctl fails or no child enumeration is available it says so and the probe reports cannot-evaluate,
+# never a clean pass. Residual: a descendant that escapes the supervisor's subtree by other means (for
+# example a separate privileged launcher that reparents it elsewhere) is not covered.
+_RUNTIME_SUPERVISOR = """\
+import base64
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
 
 
-def _runtime_survivors(pgid, token):
-    """Find and kill (SIGKILL) what a probed child left running after it exited and was reaped: any process
-    still in its process group `pgid` (the child ran with start_new_session), and, where /proc is readable,
-    any process whose initial environment holds `_RUNTIME_MARKER=token`, so a descendant that left the group
-    with setsid is found too. Repeats until a pass finds none (at most 50 passes). Returns the sorted
-    descriptions of what it found, empty when nothing survived. Residuals: a descendant that left the group
-    and replaced its environment (an exec with a new one) or runs in another PID namespace is not found, and
-    without /proc only the group is."""
-    import signal
-    import time
-    marker = "{}={}".format(_RUNTIME_MARKER, token).encode()
-    seen = set()
-    for _ in range(50):
-        found = set()
+def _children():
+    kids = set()
+    try:
+        for task in os.listdir("/proc/self/task"):
+            with open("/proc/self/task/{}/children".format(task)) as handle:
+                kids.update(int(pid) for pid in handle.read().split())
+        return kids
+    except (OSError, ValueError):
+        kids = set()
+    me = str(os.getpid()).encode()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or entry.encode() == me:
+            continue
         try:
-            os.killpg(pgid, signal.SIGKILL)
-            found.add("process group {}".format(pgid))
-        except ProcessLookupError:
-            pass
-        except OSError:
-            found.add("process group {}".format(pgid))
+            with open("/proc/{}/stat".format(entry), "rb") as handle:
+                fields = handle.read().rsplit(b")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if len(fields) > 1 and fields[1] == me:
+            kids.add(int(entry))
+    return kids
+
+
+def main():
+    timeout, settle = float(sys.argv[1]), float(sys.argv[2])
+    reap_seconds, reap_rounds = float(sys.argv[3]), int(sys.argv[4])
+    report = {"subreaper": False, "enumerable": False, "spawn": None, "timeout": False,
+              "rc": None, "stdout": "", "stderr": "", "survivors": [], "drained": True}
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        report["subreaper"] = libc.prctl(36, 1, 0, 0, 0) == 0
+    except (OSError, AttributeError, ValueError):
+        report["subreaper"] = False
+    try:
+        _children()
+        report["enumerable"] = True
+    except OSError:
+        report["enumerable"] = False
+    if not (report["subreaper"] and report["enumerable"]):
+        print(json.dumps(report))
+        return 0
+    stdout = stderr = b""
+    try:
+        proc = subprocess.Popen(sys.argv[5:], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, start_new_session=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        report["spawn"] = type(exc).__name__
+        proc = None
+    if proc is not None:
         try:
-            pids = [each for each in os.listdir("/proc") if each.isdigit() and int(each) != os.getpid()]
-        except OSError:
-            pids = []
-        for pid in pids:
-            try:
-                with open("/proc/{}/environ".format(pid), "rb") as handle:
-                    environ = handle.read().split(b"\0")
-            except OSError:
-                continue
-            if marker in environ:
-                found.add("pid {}".format(pid))
-                try:
-                    os.kill(int(pid), signal.SIGKILL)
-                except OSError:
-                    pass
-        if not found:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            report["timeout"] = True
+            proc.kill()
+            proc.wait()
+            for stream in (proc.stdout, proc.stderr):
+                stream.close()
+        report["rc"] = proc.returncode
+    report["stdout"] = base64.b64encode(stdout).decode("ascii")
+    report["stderr"] = base64.b64encode(stderr).decode("ascii")
+    time.sleep(settle)
+    deadline = time.monotonic() + reap_seconds
+    for _ in range(reap_rounds):
+        kids = _children()
+        if not kids:
             break
-        seen |= found
+        for pid in sorted(kids):
+            report["survivors"].append("pid {}".format(pid))
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+        if time.monotonic() >= deadline:
+            break
         time.sleep(0.02)
-    return sorted(seen)
+    if _children():
+        report["drained"] = False
+    print(json.dumps(report))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
 
 
 def _runtime_flag_forms(tree):
@@ -1578,8 +1657,14 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, 
     `--self-test`) that `table` does not declare for it, the exact `--self-test` aside (the entry scan's). Each run has a fresh empty cwd, HOME and TMPDIR under
     `tmp`, stdin closed, a `timeout` second limit, its own process group (start_new_session) and an
     environment of PATH (os.defpath), HOME, TMPDIR, LC_ALL=C.UTF-8 and _RUNTIME_MARKER (a token naming the
-    run) only; _RUNTIME_SETTLE seconds after it exits, _runtime_survivors kills its group and every process
-    holding its token. A form passes only if the module refuses it (exit 2, nothing on stdout, and on stderr
+    run; informational only). Each run is supervised by a dedicated child-subreaper process
+    (_RUNTIME_SUPERVISOR, written to `tmp` and run as its own process): _RUNTIME_SETTLE seconds after
+    the module exits, the supervisor SIGKILLs and reaps, in bounded rounds and time, exactly its own
+    un-reaped children, to which every orphaned descendant of the module (a setsid'd, non-dumpable or
+    fork-hopping one included) has reparented; it never signals a process it cannot prove is its own
+    child, and a host where PR_SET_CHILD_SUBREAPER or the /proc child enumeration is unavailable makes
+    every run a cannot-evaluate discrepancy, never a clean pass. A form passes only if the module
+    refuses it (exit 2, nothing on stdout, and on stderr
     one line, or for this host exactly its usage text) or does nothing (exit 0, nothing on stdout or stderr),
     and in both cases leaves no process running, its cwd, HOME and TMPDIR empty and `tree` unchanged (default:
     the repository root two levels above `directory` when it holds `.git`, else `directory`; compared by
@@ -1593,12 +1678,14 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, 
     any other argument list (one built at run time, a word not spelled as a `--` constant, or a longer
     combination), an environment variable, the date, the network or a file outside its fresh directories is
     unseen; a module that runs a suite silently, writes nothing it can see and exits 0 or 2 passes; a write
-    outside the fresh directories and `tree` (`.git` included) is unseen; a descendant _runtime_survivors
-    cannot find (one that left the process group and replaced its environment, or one in another PID
-    namespace; without /proc, any that left the group) is unseen unless it writes into `tree` before the
-    tree is compared; and a write by another process during the run may be blamed on a module. Returns the
+    outside the fresh directories and `tree` (the top-level `.git` included; a nested `.git` IS
+    recorded) is unseen; a descendant that escapes the supervisor's subtree by other means (for example
+    a separate privileged launcher that reparents it elsewhere) is unseen unless it writes into `tree`
+    before the tree is compared; and a write by another process during the run may be blamed on a module. Returns the
     list of discrepancies."""
+    import base64
     import concurrent.futures
+    import json
     import shutil
     import subprocess
     import tempfile
@@ -1627,6 +1714,10 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, 
         runs += [(name, argv) for argv in forms]
     usage = (str(__doc__) + "\n").encode("utf-8")
 
+    supervisor = os.path.abspath(os.path.join(str(tmp), "_opf_runtime_supervisor.py"))
+    with open(supervisor, "w", encoding="utf-8") as handle:
+        handle.write(_RUNTIME_SUPERVISOR)
+
     def child(run):
         name, argv = run
         box = tempfile.mkdtemp(prefix="run-", dir=str(tmp))
@@ -1638,39 +1729,64 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, 
             env = dict(PATH=os.defpath, HOME=fresh[1], TMPDIR=fresh[2], LC_ALL="C.UTF-8",
                        **{_RUNTIME_MARKER: token})
             try:
-                proc = subprocess.Popen([sys.executable, "-I", "-B", str(directory / name)] + argv, cwd=fresh[0],
-                                        env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                proc = subprocess.Popen([sys.executable, "-I", "-B", supervisor, str(timeout),
+                                         str(_RUNTIME_SETTLE), str(_RUNTIME_REAP_SECONDS),
+                                         str(_RUNTIME_REAP_ROUNDS), sys.executable, "-I", "-B",
+                                         str(directory / name)] + argv, cwd=fresh[0], env=env,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, start_new_session=True)
             except (OSError, subprocess.SubprocessError) as exc:
                 return "{} {}: failed to run ({})".format(name, argv, type(exc).__name__)
+            budget = timeout + _RUNTIME_REAP_SECONDS + 30
             try:
-                stdout, stderr = proc.communicate(timeout=timeout)
+                sup_out, sup_err = proc.communicate(timeout=budget)
             except subprocess.TimeoutExpired:
-                _runtime_survivors(proc.pid, token)
-                proc.wait()
-                return "{} {}: timed out after {} s".format(name, argv, timeout)
-            time.sleep(_RUNTIME_SETTLE)
-            survivors = _runtime_survivors(proc.pid, token)
+                proc.kill()
+                proc.communicate()
+                return "{} {}: the probe supervisor did not finish within {} s".format(name, argv, budget)
             written = []
             for each in fresh:
                 try:
                     if os.listdir(each):
                         written.append(os.path.basename(each))
                 except OSError as exc:
-                    written.append("{} (cannot be listed: {})".format(os.path.basename(each), type(exc).__name__))
+                    written.append("{} (cannot be listed: {})".format(os.path.basename(each),
+                                                                      type(exc).__name__))
         finally:
             shutil.rmtree(box, ignore_errors=True)
+        if proc.returncode != 0:
+            return "{} {}: the probe supervisor failed (rc {}; stderr tail {!r})".format(
+                name, argv, proc.returncode, sup_err[-160:])
+        try:
+            report = json.loads(sup_out.decode("utf-8"))
+            stdout = base64.b64decode(report["stdout"])
+            stderr = base64.b64decode(report["stderr"])
+            survivors = sorted(set(report["survivors"]))
+        except (ValueError, KeyError, TypeError) as exc:
+            return "{} {}: the probe supervisor returned no result ({})".format(
+                name, argv, type(exc).__name__)
+        if not (report.get("subreaper") and report.get("enumerable")):
+            return ("cannot evaluate {} {}: the supervisor cannot contain descendants here "
+                    "(PR_SET_CHILD_SUBREAPER or the /proc child enumeration is unavailable)").format(
+                        name, argv)
+        if report.get("spawn"):
+            return "{} {}: failed to run ({})".format(name, argv, report["spawn"])
+        if report.get("timeout"):
+            return "{} {}: timed out after {} s".format(name, argv, timeout)
+        if not report.get("drained"):
+            survivors.append("children still appearing when the reap rounds ended")
         if survivors:
             return "{} {}: left a process running after it exited ({}; killed)".format(
                 name, argv, ", ".join(survivors[:4]))
         if written:
             return "{} {}: wrote into its fresh {}".format(name, argv, " and ".join(written))
-        refused = proc.returncode == 2 and not stdout and (
+        rc = report.get("rc")
+        refused = rc == 2 and not stdout and (
             len(stderr.splitlines()) == 1 or name == host and stderr == usage)
-        if not (refused or proc.returncode == 0 and not stdout and not stderr):
+        if not (refused or rc == 0 and not stdout and not stderr):
             return "{} {}: neither refused nor idle (rc {}, {} bytes of stdout, {} lines of stderr; want " \
                    "exit 2 with one stderr line, or exit 0 with no output)".format(
-                       name, argv, proc.returncode, len(stdout), len(stderr.splitlines()))
+                       name, argv, rc, len(stdout), len(stderr.splitlines()))
         return None
 
     def cannot_evaluate(unread):
@@ -1760,6 +1876,43 @@ _RUNTIME_FIXTURES = (
         "        time.sleep(30)\n        here = os.path.dirname(os.path.abspath(__file__))\n"
         '        open(os.path.join(here, "LATE-{}".format(os.getpid())), "w").close()\n        os._exit(0)\n')
      + "    sys.exit(main())\n", "left a process running"),
+    ("nondumpable.py", "import ctypes\nimport os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n    if os.fork() == 0:\n        os.setsid()\n"
+        "        ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"
+        "        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n"
+        "            os.dup2(null, fd)\n"
+        "        time.sleep(30)\n        here = os.path.dirname(os.path.abspath(__file__))\n"
+        "        open(os.path.join(here, \"LATE-nondumpable\"), \"w\").close()\n        os._exit(0)\n")
+     + "    sys.exit(main())\n", "left a process running"),
+    ("hopper.py", "import os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n    if os.fork() == 0:\n        os.setsid()\n"
+        "        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n"
+        "            os.dup2(null, fd)\n"
+        "        end = time.monotonic() + 0.5\n        while time.monotonic() < end:\n"
+        "            if os.fork() != 0:\n                os._exit(0)\n"
+        "        time.sleep(30)\n        here = os.path.dirname(os.path.abspath(__file__))\n"
+        "        open(os.path.join(here, \"LATE-hopper\"), \"w\").close()\n        os._exit(0)\n")
+     + "    sys.exit(main())\n", "left a process running"),
+    ("inode_swap.py", "import os\nimport sys\n\n"
+     "here = os.path.dirname(os.path.abspath(__file__))\ntarget = os.path.join(here, \"pin.txt\")\n"
+     "dir_st = os.stat(here)\nst = os.stat(target)\n"
+     "with open(target, \"rb\") as handle:\n    data = handle.read()\n"
+     "outside = os.path.join(os.path.dirname(here), \"outside-{}.bin\".format(os.getpid()))\n"
+     "with open(outside, \"wb\") as handle:\n    handle.write(data)\n"
+     "os.chmod(outside, st.st_mode & 0o7777)\nos.utime(outside, ns=(st.st_atime_ns, st.st_mtime_ns))\n"
+     "hop = target + \".{}\".format(os.getpid())\nos.link(outside, hop)\nos.rename(hop, target)\n"
+     "os.utime(here, ns=(dir_st.st_atime_ns, dir_st.st_mtime_ns))\n"
+     "if __name__ == \"__main__\":\n" + _RUNTIME_USAGE,
+     "inode_swap.py ['--self-test', 'extra']: changed"),
+    ("gitnest.py", "import os\nimport sys\n\n"
+     "here = os.path.dirname(os.path.abspath(__file__))\nsub = os.path.join(here, \"sub\")\n"
+     "nest = os.path.join(sub, \".git\")\nsub_st = os.stat(sub)\nnest_st = os.stat(nest)\n"
+     "with open(os.path.join(nest, \"config\"), \"w\") as handle:\n"
+     "    handle.write(os.urandom(8).hex())\n"
+     "os.utime(nest, ns=(nest_st.st_atime_ns, nest_st.st_mtime_ns))\n"
+     "os.utime(sub, ns=(sub_st.st_atime_ns, sub_st.st_mtime_ns))\n"
+     "if __name__ == \"__main__\":\n" + _RUNTIME_USAGE,
+     "gitnest.py ['--self-test', 'extra']: changed"),
     ("literal_form.py", "import sys\n\n\n" + _RUNTIME_EXIT_TAIL
      + '    if sys.argv[1:2] == ["--self-test"] and sys.argv[2:] == ["--vectors-only"]:\n        sys.exit(cases())\n'
      "    sys.exit(main())\n", "literal_form.py ['--self-test', '--vectors-only']: neither refused nor idle"),
@@ -1777,15 +1930,27 @@ def _self_test_runtime_escape_probe(tmp):
     each early-exit spelling: a helper calling sys.exit, `from sys import exit as leave`, builtins.exit, an
     alias of sys, os.execv), a write into the fresh cwd, a write into the tree, a timeout, a rewrite that
     restores the file's size and modification time, a detached (setsid) grandchild that writes into the tree
-    after the module exits, and an undeclared `--self-test --vectors-only` form spelled in the source. Each red
+    after the module exits, a non-dumpable setsid'd grandchild (PR_SET_DUMPABLE 0, its environ
+    unreadable), a fork-hopping grandchild (each parent exits at once), a hardlink swap over a tracked
+    file and a write into a pre-existing nested `.git` (each restoring the parent mtimes), and an
+    undeclared `--self-test --vectors-only` form spelled in the source. Each red
     module must be named for its reason and the passing ones not at all. Unless this runs as root (to whom
     chmod cannot deny a listing), the tree also holds a directory of mode 0111 that locked.py writes into: the
     probe must name it as a path it cannot evaluate. An absent tree must be unreadable to _runtime_snapshot
-    too. Then the mutant: the same probe restricted
+    too. An UNRELATED same-uid process, started outside the probe's subtree with an environment
+    carrying _RUNTIME_MARKER, must survive the whole run unsignalled and unreported: no kill or report
+    is chosen by an environment match, a name match or uid ownership. Direct _runtime_snapshot checks
+    then pin the new coverage: the top-level `.git` stays pruned, a nested `.git` is recorded, a
+    hardlink swap preserving bytes, mode, size and mtime is a change revealed ONLY by the inode
+    identity, and a plant into the nested `.git` with the parent mtimes restored changes nested-`.git`
+    paths alone (the former prune-everywhere snapshot recorded none of them, so it missed the plant).
+    Then the mutant: the same probe restricted
     to the modules the static checks select (_self_test_entry_gap exposes, or _dispatch_targets is non-empty)
     must name none of them, so the breadth of the probe, not the static selection, is what catches them. The
     modules are files run as children; nothing is passed to exec or eval. Returns a list of the
     discrepancies."""
+    import subprocess
+
     import _optlevel
     directory = Path(tmp, "tree", "opf", "tools")
     os.makedirs(str(directory))
@@ -1797,13 +1962,31 @@ def _self_test_runtime_escape_probe(tmp):
         if _self_test_entry_gap(tree)[0] or _dispatch_targets(tree):
             selected.add(name)
     (directory / "same.txt").write_text("0" * 16, encoding="utf-8")
+    (directory / "pin.txt").write_text("0" * 16, encoding="utf-8")
+    os.makedirs(str(directory / "sub" / ".git"))
     os.makedirs(str(directory / "locked"))
     (directory / "locked" / "payload").write_text("BEFORE", encoding="utf-8")
     locks = hasattr(os, "geteuid") and os.geteuid() != 0   # chmod cannot hide a listing from root
     table = {name: _DISPATCH_LIBRARY for name, _source, _want in _RUNTIME_FIXTURES}
-    found = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, timeout=5,
-                                     names={name for name, _source, _want in _RUNTIME_FIXTURES} - {"locked.py"})
+    decoy = subprocess.Popen([sys.executable, "-I", "-B", "-c", "import time; time.sleep(600)"],
+                             env=dict(PATH=os.defpath, **{_RUNTIME_MARKER: "run-decoy"}),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    try:
+        found = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, timeout=5,
+                                         names={name for name, _source, _want in _RUNTIME_FIXTURES}
+                                         - {"locked.py"})
+    finally:
+        signalled = decoy.poll()
+        decoy.kill()
+        decoy.wait()
     faults = []
+    if signalled is not None:
+        faults.append("the unrelated same-uid marker-carrying process outside the probe subtree was "
+                      "signalled (rc {})".format(signalled))
+    if any("pid {}".format(decoy.pid) in miss for miss in found):
+        faults.append("the unrelated same-uid marker-carrying process outside the probe subtree was "
+                      "reported by the probe")
     if locks:
         (directory / "locked").chmod(0o111)
         try:
@@ -1829,6 +2012,47 @@ def _self_test_runtime_escape_probe(tmp):
     restricted = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, names=selected,
                                           timeout=5)
     faults += ["the probe restricted to the static selection still names {}".format(miss) for miss in restricted]
+    unit = Path(tmp, "snapunit")
+    os.makedirs(str(unit / "sub" / ".git"))
+    os.makedirs(str(unit / ".git"))
+    (unit / ".git" / "config").write_text("top-level, pruned", encoding="utf-8")
+    (unit / "sub" / "data.txt").write_text("same bytes", encoding="utf-8")
+    key, nest = os.path.join("sub", "data.txt"), os.path.join("sub", ".git")
+    first, unread = _runtime_snapshot(unit)
+    if unread:
+        faults.append("the snapshot unit tree was unreadable ({})".format("; ".join(unread)))
+    if any(path == ".git" or path.startswith(".git" + os.sep) for path in first):
+        faults.append("the top-level .git was not pruned from the snapshot")
+    if nest not in first:
+        faults.append("a nested .git directory was not recorded by the snapshot")
+    st = os.lstat(str(unit / "sub" / "data.txt"))
+    dir_st = os.lstat(str(unit / "sub"))
+    outside = Path(tmp, "outside.bin")
+    outside.write_bytes((unit / "sub" / "data.txt").read_bytes())
+    os.chmod(str(outside), st.st_mode & 0o7777)
+    os.utime(str(outside), ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.link(str(outside), str(unit / "sub" / "data.lnk"))
+    os.rename(str(unit / "sub" / "data.lnk"), str(unit / "sub" / "data.txt"))
+    os.utime(str(unit / "sub"), ns=(dir_st.st_atime_ns, dir_st.st_mtime_ns))
+    second, unread = _runtime_snapshot(unit)
+    if unread or first.get(key) == second.get(key):
+        faults.append("a hardlink swap preserving bytes, mode, size and mtime was not a snapshot change")
+    elif first.get(key) and second.get(key) and (
+            tuple(first[key][index] for index in (0, 1, 2, 6))
+            != tuple(second[key][index] for index in (0, 1, 2, 6))):
+        faults.append("the hardlink swap was revealed by mode, size, mtime or content rather than by the"
+                      " inode identity alone, so the check does not pin the identity fields")
+    nest_st = os.lstat(str(unit / "sub" / ".git"))
+    (unit / "sub" / ".git" / "config").write_text("PLANTED", encoding="utf-8")
+    os.utime(str(unit / "sub" / ".git"), ns=(nest_st.st_atime_ns, nest_st.st_mtime_ns))
+    os.utime(str(unit / "sub"), ns=(dir_st.st_atime_ns, dir_st.st_mtime_ns))
+    third, unread = _runtime_snapshot(unit)
+    planted = sorted(path for path in set(second) | set(third) if second.get(path) != third.get(path))
+    if unread or not planted:
+        faults.append("a write into a nested .git with the parent mtimes restored was not a snapshot change")
+    elif [path for path in planted if path != nest and not path.startswith(nest + os.sep)]:
+        faults.append("the nested .git plant changed paths outside the nested .git ({}), so the top-level-"
+                      "only pruning is not what catches it".format(planted))
     return faults
 
 
