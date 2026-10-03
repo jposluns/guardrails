@@ -41,6 +41,7 @@ The tool never force-pushes (no --force, no lease flag, no + push refspec), reba
 stashes, cleans, runs reset --hard, prunes worktrees, resolves a non-generated conflict, pushes to or
 checks out the base branch, edits PR metadata, or reads an ambient git identity.
 """
+import errno
 import fcntl
 import hashlib
 import json
@@ -242,9 +243,12 @@ def guard_config_source(root, base_sha):
     return out.decode("utf-8", "replace")
 
 
-def guard_busy(wt, git_dir, probe, timeout, own_merge):
+def guard_busy(wt, git_dir, probe, timeout, own_merge, scan=None):
     """Refuse busy, busy-unknown or in-progress-operation for a worktree in use. own_merge excuses
-    the MERGE_HEAD of the tool's own recorded merge (the pre-commit re-check)."""
+    the MERGE_HEAD of the tool's own recorded merge (the pre-commit re-check). scan is the process
+    scan (wt -> list of users, or None when the table cannot be read); None means _host_scan, the
+    live /proc scan real use runs. It is injected so the self-test decides busy from a fixture, never
+    from whatever else the host runs as the same user."""
     for name in OPERATION_MARKERS:
         if name == "MERGE_HEAD" and own_merge:
             continue
@@ -256,7 +260,7 @@ def guard_busy(wt, git_dir, probe, timeout, own_merge):
         code, _out, err = _run_external(argv, wt, timeout)
         if code != 0:
             raise Refuse("busy", "busy probe exited %s: %s" % (code, err.strip()[:200]))
-    users = _process_users(str(wt))
+    users = (scan if scan is not None else _host_scan)(str(wt))
     if users is None:
         raise Refuse("busy-unknown", "the process table could not be read")
     if users:
@@ -402,16 +406,20 @@ def _read_text(path):
         return ""
 
 
-def _process_users(wt):
+def _process_users(wt, proc="/proc", uid=None):
     """pid:name of every same-uid process, other than this process and its ancestors, whose cwd is
-    inside wt or whose argv names a path inside wt; None when the process table cannot be read."""
-    if not os.path.isdir("/proc/self"):
+    inside wt or whose argv names a path inside wt; None when the process table cannot be read.
+    proc is the process-table root and uid the owner counted as same-uid (None: os.getuid()). Only
+    the self-test passes them: it scans fake tables built in scratch (a scratch entry is owned by the
+    test user, so another uid stands for "this entry belongs to someone else") and so never reads the
+    host /proc. Real use passes neither (see _host_scan)."""
+    if not os.path.isdir(os.path.join(proc, "self")):
         return None
     skip = set()
     pid = os.getpid()
     while pid > 1 and pid not in skip:
         skip.add(pid)
-        stat = _read_text("/proc/%d/stat" % pid)
+        stat = _read_text(os.path.join(proc, str(pid), "stat"))
         try:
             pid = int(stat.rsplit(")", 1)[1].split()[1])
         except (IndexError, ValueError):
@@ -422,20 +430,21 @@ def _process_users(wt):
         return path == real or path.startswith(real + os.sep)
 
     users = []
-    uid = os.getuid()
+    if uid is None:
+        uid = os.getuid()
     try:
-        entries = os.listdir("/proc")
+        entries = os.listdir(proc)
     except OSError:
         return None
     for name in entries:
         if not name.isdigit() or int(name) in skip:
             continue
-        base = "/proc/" + name
+        base = os.path.join(proc, name)
         try:
             if os.stat(base).st_uid != uid:
                 continue
-            cwd = os.readlink(base + "/cwd")
-            with open(base + "/cmdline", "rb") as handle:
+            cwd = os.readlink(os.path.join(base, "cwd"))
+            with open(os.path.join(base, "cmdline"), "rb") as handle:
                 argv = [a.decode("utf-8", "replace") for a in handle.read().split(b"\0") if a]
         except (FileNotFoundError, ProcessLookupError):
             continue
@@ -444,6 +453,13 @@ def _process_users(wt):
         if inside(cwd) or any(inside(os.path.realpath(a)) for a in argv if a.startswith("/")):
             users.append("%s:%s" % (name, os.path.basename(argv[0]) if argv else "?"))
     return users
+
+
+def _host_scan(wt):
+    """The live process scan real use runs: _process_users over the host /proc as this uid. A
+    module-level name so the self-test can replace it with a stub that raises, proving that no case
+    reads the host process table."""
+    return _process_users(wt)
 
 
 def _read_marker(git_dir):
@@ -651,7 +667,7 @@ def _process_pr(ctx, apply):
     if remote != ctx["head_oid"] or view.get("headRefOid") != ctx["head_oid"]:
         raise Refuse("pr-head-moved", "remote head %s, gh %s, listed %s" % (
             remote, view.get("headRefOid"), ctx["head_oid"]))
-    _guard("busy")(wt, git_dir, ctx["probe"], ctx["cmd_timeout"], False)
+    _guard("busy")(wt, git_dir, ctx["probe"], ctx["cmd_timeout"], False, ctx["scan"])
     _guard("dirty")(wt)
     old = _git_text(wt, "rev-parse", "HEAD")
     ctx["old"] = old
@@ -724,7 +740,7 @@ def _merge_commit_push(ctx, old, base):
                            == _changed_lines(wt, base, None, generated))
     ctx["regenerated"] = [p for p in sorted(generated) if p in resolved]
     view = _gh_view(ctx)
-    _guard("busy")(wt, git_dir, ctx["probe"], ctx["cmd_timeout"], True)
+    _guard("busy")(wt, git_dir, ctx["probe"], ctx["cmd_timeout"], True, ctx["scan"])
     _guard("branch-match")(wt, ctx["branch"], view)
     title = "Merge %s/%s into %s (merge-train)" % (ctx["remote"], ctx["base"], ctx["branch"])
     code, _out, err = _git(wt, "commit", "--no-edit", "-m", title, "-m",
@@ -740,8 +756,10 @@ def _merge_commit_push(ctx, old, base):
     return _push_and_observe(ctx, old, new)
 
 
-def run_train(root, apply=False, only=None):
-    """The whole run under the global lock. Returns (exit code, reports, fatal message or None)."""
+def run_train(root, apply=False, only=None, scan=None):
+    """The whole run under the global lock. Returns (exit code, reports, fatal message or None).
+    scan is the busy check's process scan (see guard_busy); None, as in real use, is the live host
+    scan. The self-test injects a fixture scan."""
     reports = []
     try:
         top = _git_text(root, "rev-parse", "--show-toplevel")
@@ -753,10 +771,10 @@ def run_train(root, apply=False, only=None):
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             return 2, reports, "another merge train holds %s" % LOCK_NAME
-        return _run_locked(Path(top), apply, only or set(), reports)
+        return _run_locked(Path(top), apply, only or set(), reports, scan)
 
 
-def _run_locked(root, apply, only, reports):
+def _run_locked(root, apply, only, reports, scan=None):
     # The config lives on the base tip, so v1 fetches the conventional origin/main once, pins M, and
     # requires the config to name that same remote and base.
     remote, base = "origin", "main"
@@ -802,7 +820,7 @@ def _run_locked(root, apply, only, reports):
         report = dict(schema=SCHEMA, pr=pr["number"], branch=branch, worktree=None, base=base_sha,
                       old_head=None, new_head=None, result=None, reason="", regenerated=[],
                       hand_resolution=False, review_carry=None)
-        ctx = dict(old=None, review_carry=None, regenerated=[])
+        ctx = dict(old=None, review_carry=None, regenerated=[], scan=scan)
         try:
             if len(names[branch]) > 1:
                 raise Refuse("ambiguous-pr", "PRs %s share the branch" % names[branch])
@@ -1023,6 +1041,9 @@ class Fixture:
         self.prs = []
         self.runs = 0
         self.violations = []
+        # The busy check's process scan for this fixture's runs: no users unless a case says
+        # otherwise, so no verdict depends on the host process table.
+        self.scan = _no_users
         self.gone = self.base / "gone.git"
         gh = self.bin / "gh"
         gh.write_text("#!%s\n%s" % (sys.executable, FAKE_GH), encoding="utf-8")
@@ -1096,7 +1117,7 @@ class Fixture:
         logged = len(self.log_rows())
         audit = len(GIT_AUDIT)
         try:
-            return run_train(self.main, apply, only)
+            return run_train(self.main, apply, only, scan=self.scan)
         finally:
             attempted = GIT_AUDIT[audit:]
             self.runs += 1
@@ -1157,6 +1178,41 @@ class Fixture:
 def _result(reports, number):
     rows = [r for r in reports if r["pr"] == number]
     return rows[0]["result"] if rows else None
+
+
+def _no_users(_wt):
+    """The fixture process scan: no process uses the worktree."""
+    return []
+
+
+# Fake pids for the scan fixtures: above any Linux pid_max (4194304), so never this process's pid.
+FAKE_PID, FAKE_ANCESTOR = 900000001, 900000002
+HOST_SCAN_CALLS = []
+
+
+def _host_scan_stub(wt):
+    """Replaces _host_scan for the whole self-test: records the call and raises PermissionError,
+    the error an unreadable live /proc entry raises. Every case passing with it in place, and
+    hermetic/host-scan-unused, prove that no verdict depends on the host process table."""
+    HOST_SCAN_CALLS.append(wt)
+    raise PermissionError(errno.EACCES, "the self-test reached the host process scan", wt)
+
+
+def _fake_proc(root, entries):
+    """A fake process table under scratch root: root/self, and per pid a directory holding stat
+    (the parent pid as field 4), a cwd symlink (absent when cwd is None, as for a process that exits
+    mid-scan) and a NUL-separated cmdline. entries maps pid -> (cwd, argv, parent pid)."""
+    root = Path(root)
+    (root / "self").mkdir(parents=True)
+    for pid, (cwd, argv, ppid) in entries.items():
+        base = root / str(pid)
+        base.mkdir()
+        (base / "stat").write_text("%d (%s) S %d 0 0\n" % (pid, os.path.basename(argv[0]), ppid),
+                                   encoding="utf-8")
+        if cwd is not None:
+            os.symlink(str(cwd), str(base / "cwd"))
+        (base / "cmdline").write_bytes(b"".join(a.encode("utf-8") + b"\0" for a in argv))
+    return str(root)
 
 
 def _fixture(tmp, name, probe="[]"):
@@ -1386,14 +1442,16 @@ def case_branch(tmp):
 
 
 def case_busy(tmp):
+    # The process using the worktree is an entry of a fake table whose cwd is the worktree, scanned
+    # by the real _process_users; the host process table is never read.
     fx = _fixture(tmp, "busy")
     wt = _stale_pr(fx)
-    holder = subprocess.Popen(["sleep", "30"], cwd=str(wt))
+    table = _fake_proc(Path(tmp) / "busy-proc", dict([(FAKE_PID, (wt, ["/bin/sleep", "30"], 1))]))
+    fx.scan = lambda path: _process_users(path, table)
     try:
         rc, reports, _fatal = fx.run(apply=True)
     finally:
-        holder.kill()
-        holder.wait()
+        fx.scan = _no_users
     check("refuse/busy-process", (rc, _result(reports, 1), fx.pushes()), (1, "busy", []))
     lock = os.path.join(_git_dir(wt), "index.lock")
     Path(lock).write_text("", encoding="utf-8")
@@ -1653,24 +1711,88 @@ def case_generated_delete(tmp):
 
 
 def case_busy_unknown(tmp):
-    # A real unreadable process table (no /proc, or an access error on a same-uid entry) cannot be
-    # produced without privileges, so the scan is replaced by one reporting the table unreadable.
-    global _process_users
+    # The fixture scan reports the table unreadable; case_scan proves _process_users returns None
+    # for an unreadable table and for an access error on a same-uid entry.
     fx = _fixture(tmp, "busy-unknown")
     wt = _stale_pr(fx)
     old = fx.remote_ref("feat/x")
     before, pushed = _snapshot(wt), fx.pushes()
-    real = _process_users
-    _process_users = lambda _wt: None
-    try:
-        rc, reports, _fatal = fx.run(apply=True)
-    finally:
-        _process_users = real
+    fx.scan = lambda _wt: None
+    rc, reports, _fatal = fx.run(apply=True)
     check("refuse/busy-unknown", (rc, _result(reports, 1)), (1, "busy-unknown"))
     check("refuse/busy-unknown-untouched",
           (_snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"), fx.pushes() == pushed,
            _has_marker(wt)), ([], old, True, False))
     check("refuse/busy-unknown-invariants", _invariants(fx), [])
+
+
+def case_scan(tmp):
+    # _process_users over fake tables built in scratch; the host /proc is never read.
+    wt = Path(tmp) / "scan-wt"
+    (wt / "sub").mkdir(parents=True)
+    out = Path(tmp) / "scan-elsewhere"
+    out.mkdir()
+    inside = (wt / "sub", ["/bin/sleep", "30"], 1)
+    tables = iter(range(100))
+
+    def scan(entries, uid=None):
+        return _process_users(str(wt), _fake_proc(Path(tmp) / ("scan-%d" % next(tables)), entries),
+                              uid)
+
+    check("scan/same-uid-cwd-inside-reported", scan(dict([(FAKE_PID, inside)])),
+          ["%d:sleep" % FAKE_PID])
+    check("scan/argv-inside-reported",
+          scan(dict([(FAKE_PID, (out, ["/usr/bin/python3", str(wt / "x.py")], 1))])),
+          ["%d:python3" % FAKE_PID])
+    check("scan/outside-not-reported",
+          scan(dict([(FAKE_PID, (out, ["/bin/sleep", str(out / "x")], 1))])), [])
+    check("scan/other-uid-skipped", scan(dict([(FAKE_PID, inside)]), uid=os.getuid() + 1), [])
+    check("scan/vanished-entry-skipped",
+          scan(dict([(FAKE_PID, inside), (FAKE_ANCESTOR, (None, ["/bin/sleep"], 1))])),
+          ["%d:sleep" % FAKE_PID])
+    # A same-uid entry whose cwd raises PermissionError: readlink is patched for that one path, so
+    # no real permission changes.
+    table = _fake_proc(Path(tmp) / "scan-denied", dict([
+        (FAKE_PID, inside), (FAKE_ANCESTOR, (out, ["/bin/sleep"], 1))]))
+    denied = os.path.join(table, str(FAKE_ANCESTOR), "cwd")
+    real_readlink = os.readlink
+
+    def readlink(path, *args, **kwargs):
+        if os.fspath(path) == denied:
+            raise PermissionError(errno.EACCES, "Permission denied", path)
+        return real_readlink(path, *args, **kwargs)
+
+    os.readlink = readlink
+    try:
+        got = _process_users(str(wt), table)
+    finally:
+        os.readlink = real_readlink
+    check("scan/cwd-permission-error-unknown", got, None)
+    me = os.getpid()
+    check("scan/self-and-ancestors-skipped",
+          scan(dict([(me, (wt, [sys.executable], FAKE_ANCESTOR)),
+                     (FAKE_ANCESTOR, (wt, ["/bin/sh"], 1)), (FAKE_PID, inside)])),
+          ["%d:sleep" % FAKE_PID])
+    empty = Path(tmp) / "scan-no-table"
+    empty.mkdir()
+    check("scan/no-table-unknown", _process_users(str(wt), str(empty)), None)
+    check("scan/real-use-reads-host-proc", _process_users.__defaults__, ("/proc", None))
+
+
+def case_hermetic(tmp):
+    # self_test runs every case with _host_scan replaced by _host_scan_stub, which raises
+    # PermissionError: no case before this one may have reached it, and the busy check's default
+    # (no scan injected, as in real use) must.
+    check("hermetic/host-scan-unused", list(HOST_SCAN_CALLS), [])
+    idle = Path(tmp) / "hermetic"
+    idle.mkdir()
+    try:
+        guard_busy(idle, idle, [], 60, False)
+        reached = False
+    except PermissionError:
+        reached = True
+    del HOST_SCAN_CALLS[:]
+    check("hermetic/default-is-host-scan", (reached, _host_scan is _host_scan_stub), (True, True))
 
 
 def case_lock_held(tmp):
@@ -1783,8 +1905,9 @@ CASES = dict([
     ("reject", case_reject), ("idem", case_idem), ("remote-changed", case_remote_changed),
     ("push-unknown", case_push_unknown), ("hook-failed", case_hook_failed),
     ("generated-delete", case_generated_delete), ("busy-unknown", case_busy_unknown),
-    ("lock-held", case_lock_held), ("fetch-failure", case_fetch_failure),
+    ("scan", case_scan), ("lock-held", case_lock_held), ("fetch-failure", case_fetch_failure),
     ("position", case_position), ("state-mismatch", case_state_mismatch), ("cli", case_cli),
+    ("hermetic", case_hermetic),
 ])
 
 
@@ -1871,17 +1994,26 @@ def _write_report(report_path):
 
 def self_test(red_on_revert=False, report_path=None):
     """Every case inside fixture_git_lifecycle (GIT_* scrubbed, scratch HOME, global and system
-    config pinned to os.devnull, a PATH-front git wrapper), under one private temp directory."""
+    config pinned to os.devnull, a PATH-front git wrapper), under one private temp directory, with
+    _host_scan replaced by _host_scan_stub so that no verdict depends on the host process table."""
+    global _host_scan
     sys.path.insert(0, str(ROOT / "tools"))
     from _git_fixture_env import fixture_git_lifecycle
     stale = []
-    with fixture_git_lifecycle():
-        with tempfile.TemporaryDirectory(prefix="merge-train-selftest-") as raw:
-            tmp = os.path.realpath(raw)
-            for name in CASES:
-                _run_case(name, tmp)
-            if red_on_revert and not FAILURES:
-                stale = _red_on_revert(tmp)
+    real_scan, _host_scan = _host_scan, _host_scan_stub
+    try:
+        with fixture_git_lifecycle():
+            with tempfile.TemporaryDirectory(prefix="merge-train-selftest-") as raw:
+                tmp = os.path.realpath(raw)
+                for name in CASES:
+                    _run_case(name, tmp)
+                if red_on_revert and not FAILURES:
+                    stale = _red_on_revert(tmp)
+    finally:
+        _host_scan = real_scan
+    if HOST_SCAN_CALLS:
+        FAILURES.append("hermetic/host-scan-called: %d call(s), first %r" % (
+            len(HOST_SCAN_CALLS), HOST_SCAN_CALLS[0]))
     if not _write_report(report_path):
         return 2
     expected = _expected_check_ids()
