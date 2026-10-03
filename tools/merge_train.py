@@ -57,8 +57,10 @@ same cleanup, and a SIGINT unwinds through it as KeyboardInterrupt (the in-fligh
 child is terminated with its WHOLE process group, SIGTERM first so git removes its own lock files,
 then SIGKILL after a short grace, and reaped, and the group is then probed: a grandchild that
 ignored the SIGTERM is SIGKILLed even when the direct child exited first, and a group that still
-has members when the bounded wait expires (unreaped zombies held for a subreaper, a member this
-user cannot signal) is REPORTED on stderr, never silently claimed gone; every
+has members when the bounded wait expires (unreaped zombies held for a subreaper, members in
+uninterruptible sleep, D state) or that the probe cannot evaluate (any error other than ESRCH,
+such as EPERM for a member this user cannot signal) is REPORTED on stderr, never silently
+claimed gone; every
 cleanup finally runs with every signal in UNWIND_SIGNALS blocked, so a second signal cannot abort a removal
 half-way and is re-delivered when that cleanup ends; the scratch and the private base repository
 are removed, the lock is released) and the process then exits with the
@@ -247,13 +249,23 @@ def _cleanup(func):
         signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 
-def _group_alive(pgid):
-    """Whether the process group still has any member (a not-yet-reaped member counts briefly)."""
+def _group_probe(pgid):
+    """None when the process group is GONE, else why it may still have members. ONLY ESRCH means
+    gone (QA round 7, codex minor 2: every OSError used to read as gone, so an EPERM from a
+    member this user cannot signal silenced the remnant report); a successful probe (a
+    not-yet-reaped member counts) and any other error, EPERM included, mean "cannot claim gone"."""
     try:
         os.killpg(pgid, 0)
-    except OSError:
-        return False
-    return True
+    except ProcessLookupError:
+        return None
+    except OSError as exc:
+        return "may still have members (the probe failed: %s)" % exc
+    return "still has members"
+
+
+def _group_alive(pgid):
+    """Whether the process group may still have a member (see _group_probe: ESRCH alone is gone)."""
+    return _group_probe(pgid) is not None
 
 
 def _end_child(proc, group):
@@ -262,14 +274,16 @@ def _end_child(proc, group):
     True the child's WHOLE process group is signalled and then probed (the child was
     started with start_new_session=True, so its pid names the group and every grandchild that
     stayed in it is included; a grandchild that itself calls setsid starts a new session, ESCAPES
-    the group and cannot be ended here): the direct child exiting says nothing about a grandchild
+    the group and can be neither ended nor reported here): the direct child exiting says nothing
+    about a grandchild
     that ignored the SIGTERM, so after the direct child is reaped the group is probed, given the
     bounded grace to finish its own SIGTERM handling, SIGKILLed if anything remains, and probed
     again within the same bound. What that final probe CONFIRMS is only this: either the group
-    was gone within the bound, or a stderr line reports the process group that remains (its
-    members can be unreaped zombies, e.g. SIGKILLed descendants held for a subreaper that has not
-    reaped them yet, or setsid escapes and unsignallable members); the group being GONE on return
-    is NOT guaranteed. That is the dying-run path and the regenerate-or-check TIMEOUT
+    was gone within the bound (the probe got ESRCH), or a stderr line reports the process group
+    that remains or could not be probed (its members can be unreaped zombies, e.g. SIGKILLed
+    descendants held for a subreaper that has not reaped them yet, or members in uninterruptible
+    sleep, D state; a probe error such as EPERM, a member this user cannot signal, is reported
+    with that error and never read as gone); the group being GONE on return is NOT guaranteed. That is the dying-run path and the regenerate-or-check TIMEOUT
     path, where nothing the command spawned may keep running in a scratch directory the run is
     about to remove. With group False only the direct child is signalled: that is the push-TIMEOUT
     path ONLY (see _run_child), where the run itself continues and the in-flight receive-pack of a
@@ -300,10 +314,12 @@ def _end_child(proc, group):
             deadline = time.monotonic() + TERM_GRACE
             while _group_alive(proc.pid) and time.monotonic() < deadline:
                 time.sleep(0.05)
-        if _group_alive(proc.pid):
-            print("%s merge-train: process group %d still has members after SIGKILL; they may be "
-                  "unreaped zombies (held for a subreaper) or setsid escapes; leaving them behind"
-                  % (_now(), proc.pid), file=sys.stderr)
+        state = _group_probe(proc.pid)
+        if state is not None:
+            print("%s merge-train: process group %d %s after SIGKILL; its members may be unreaped "
+                  "zombies (held for a subreaper), members in uninterruptible sleep (D state) or "
+                  "members this user cannot signal; leaving them behind"
+                  % (_now(), proc.pid, state), file=sys.stderr)
     for stream in (proc.stdout, proc.stderr):
         if stream is not None:
             stream.close()
@@ -321,7 +337,12 @@ def _run_child(argv, cwd=None, env=None, timeout=None, push=False):
     statement inside the protected region (never held across communicate, which would delay the
     run's response to a signal by the child's whole runtime), and the child starts with every
     UNWIND_SIGNALS member unblocked (a minimal preexec_fn that only unblocks that set between
-    fork and exec), so git and the generators see the signals unblocked. An unwind ends the whole
+    fork and exec), so git and the generators see the signals unblocked. That is the contract
+    even for a caller that blocked one of these four on purpose: the child inherits every OTHER
+    signal the caller had blocked unchanged (SIG_UNBLOCK, never SIG_SETMASK), and these four are
+    ALWAYS unblocked in the child, because _end_child's SIGTERM-first termination relies on git
+    acting on SIGTERM to remove its own lock files; the caller's own mask in this process is
+    restored unchanged. An unwind ends the whole
     process group, and so does
     a timeout, EXCEPT a timed-out push (push=True), which ends the direct child only: the
     in-flight receive-pack is exactly the indeterminate outcome the push-unknown marker reconciles
@@ -608,8 +629,15 @@ def guard_fixpoint(wt):
     """After regenerate, add and check: nothing unstaged or unmerged (regenerate-not-fixpoint) and
     no untracked file (undeclared-write). --no-renames keeps a base-side rename as separate add
     and delete records: a rename record's ORIGINAL path arrives as its own NUL-separated field,
-    which this parser would misread as a record of its own and falsely refuse."""
-    out = _git(wt, "status", "--porcelain=v2", "-z", "--no-renames", "--untracked-files=all")[1]
+    which this parser would misread as a record of its own and falsely refuse. Like
+    scratch-complete, the probe FAILS CLOSED (QA round 7): git status exits 0 with an empty
+    stdout and only a stderr line when it cannot read part of the checkout, so ANY stderr output
+    is refused by name, never read as a fixpoint."""
+    out, err = _git(wt, "status", "--porcelain=v2", "-z", "--no-renames",
+                    "--untracked-files=all")[1:]
+    if err:
+        raise Refuse("regenerate-not-fixpoint",
+                     "git status could not evaluate the checkout: %s" % err.strip()[:300])
     for entry in [e.decode("utf-8", "replace") for e in out.split(b"\0") if e]:
         if entry.startswith("? "):
             raise Refuse("undeclared-write", "untracked file %s" % entry[2:])
@@ -791,8 +819,18 @@ def guard_scratch_complete(scratch):
     and leaves the path missing from the worktree), and regenerating and validating over that
     incomplete tree would push content the PR never contained. The probe is plain `git status`
     against the just-detached HEAD: any worktree difference immediately after a fresh checkout
-    means the checkout was incomplete."""
-    out = _git(scratch, "status", "--porcelain=v2", "-z", "--untracked-files=no")[1]
+    means the checkout was incomplete. The probe FAILS CLOSED when it cannot evaluate the
+    checkout (QA round 7, codex major 1, observed on git 2.53.0: with a directory of the checkout
+    unreadable, status prints "dir/file: Permission denied" on stderr, prints NOTHING on stdout
+    and exits 0, so reading stdout alone accepted it): a nonzero exit or ANY stderr output is
+    refused by name, and any stdout record at all refuses, so output this guard cannot parse is
+    refused too, never read as clean."""
+    rc, out, err = _git(scratch, "status", "--porcelain=v2", "-z", "--untracked-files=no",
+                        ok=None)
+    if rc != 0 or err:
+        raise Refuse("scratch-incomplete",
+                     "git status could not evaluate the scratch checkout (exit %d): %s" % (
+                         rc, err.strip()[:300] or "(no stderr)"))
     rows = [r.decode("utf-8", "replace") for r in out.split(b"\0") if r]
     if rows:
         raise Refuse("scratch-incomplete",
@@ -3089,17 +3127,70 @@ def case_partial(tmp):
            [p for p in SCRATCHES[made:] if os.path.exists(p)]),
           (1, "scratch-incomplete", old, [], False, []))
     check("scratch/partial-clone-invariants", _invariants(fx), [])
+    _unreadable_checkout(tmp)
+
+
+def _unreadable_checkout(tmp):
+    # QA round 7 (codex major 1, observed on git 2.53.0): with a directory of the scratch checkout
+    # unreadable, `git status` prints "dir/file: Permission denied" on stderr, prints NOTHING on
+    # stdout and exits 0, so a probe that reads stdout alone accepts the checkout. Both status
+    # probes (scratch-complete right after the checkout, fixpoint after regenerate) must refuse
+    # by name. Root reads a mode-0 directory, so the error cannot be produced there: the checks
+    # are then recorded as a NAMED skip on stderr, never as an evaluated pass.
+    want = [("scratch-incomplete", True), ("regenerate-not-fixpoint", True)]
+    if os.geteuid() == 0:
+        print("SELF-TEST SKIP scratch/unreadable-checkout-refused and "
+              "scratch/unreadable-checkout-fixpoint-refused: running as root, which reads a "
+              "mode-0 directory, so the permission error cannot be produced", file=sys.stderr)
+        got = want = ["skipped-as-root", "skipped-as-root"]
+    else:
+        got = _unreadable_probe(tmp)
+    check("scratch/unreadable-checkout-refused", got[0], want[0])
+    check("scratch/unreadable-checkout-fixpoint-refused", got[1], want[1])
+
+
+def _unreadable_probe(tmp):
+    src = Path(tmp) / "unreadable-src"
+    _git(tmp, "init", "--quiet", str(src))
+    os.makedirs(str(src / "dir"))
+    with open(str(src / "dir" / "file"), "w", encoding="utf-8") as handle:
+        handle.write("x\n")
+    _git(src, "add", "dir/file")
+    _git(src, "commit", "-q", "-m", "unreadable fixture", extra_env=FIXTURE_IDENT)
+    scratch = str(Path(tmp) / "unreadable-co")
+    _git(src, "clone", "--quiet", "--shared", "--no-checkout", str(src), scratch)
+    _guard("scratch-setup")(scratch)
+    _git(scratch, "checkout", "--quiet", "--detach", "HEAD")
+    target = os.path.join(scratch, "dir")
+    got = []
+    os.chmod(target, 0)
+    try:
+        for name in ("scratch-complete", "fixpoint"):
+            try:
+                _guard(name)(scratch)
+                got.append("accepted")
+            except Refuse as exc:
+                got.append((exc.status, "Permission denied" in exc.reason))
+    finally:
+        os.chmod(target, 0o755)
+    return got
 
 
 def case_signal(tmp):
-    # A real SIGTERM or SIGHUP mid-regenerate, against a REAL tool subprocess with a case-private
-    # TMPDIR: the handler converts the signal into the normal cleanup (the regenerate child is
-    # killed and reaped, the scratch is removed, the lock is released) and the process exits with
-    # the conventional killed-by-signal status. The tool runs as a subprocess, so the fixture
+    # A real SIGTERM, SIGHUP, SIGQUIT or SIGINT mid-regenerate, against a REAL tool subprocess
+    # with a case-private TMPDIR: the handler converts the signal into the normal cleanup (SIGINT
+    # unwinds as KeyboardInterrupt; the regenerate child is killed and reaped, the scratch is
+    # removed, the lock is released) and the process exits with the conventional
+    # killed-by-signal status (QA round 7, claude 3: the SIGINT leg pins the documented SIGINT
+    # exit, so a main() that swallowed KeyboardInterrupt goes red here). Python installs its
+    # KeyboardInterrupt handler only when SIGINT is not ignored at startup, and a self-test
+    # started in the background of a non-interactive shell inherits SIG_IGN, so the SIGINT leg
+    # resets SIGINT to its default in the tool child. The tool runs as a subprocess, so the fixture
     # invariant recorder does not apply here; the remote is asserted directly.
     for signum, check_id in ((signal.SIGTERM, "signal/sigterm-cleans-up"),
                              (signal.SIGHUP, "signal/sighup-cleans-up"),
-                             (signal.SIGQUIT, "signal/sigquit-cleans-up")):
+                             (signal.SIGQUIT, "signal/sigquit-cleans-up"),
+                             (signal.SIGINT, "signal/sigint-cleans-up")):
         name = "sig%d" % signum
         fx = _fixture(tmp, name)
         wt = _stale_pr(fx)
@@ -3135,7 +3226,9 @@ def case_signal(tmp):
                    FAKE_GH_STATE=str(fx.state), PATH=str(fx.bin) + os.pathsep + fx.path)
         proc = subprocess.Popen([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
                                  "--repo", str(fx.main), "--apply"], cwd=str(fx.base), env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                preexec_fn=(lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+                                if signum == signal.SIGINT else None)
         deadline = time.time() + 120
         tokens = []
         while time.time() < deadline and proc.poll() is None:
@@ -3202,6 +3295,7 @@ def case_signal(tmp):
     _second_signal_during_cleanup(tmp)
     _child_mask_restored()
     _group_remnant_reported(tmp)
+    _group_probe_error_reported()
 
 
 def _sigterm_during_push(tmp):
@@ -3432,6 +3526,14 @@ def _group_remnant_reported(tmp):
     finally:
         TERM_GRACE = saved_grace
         if gc_pid is not None:
+            # SIGKILL before the wait (QA round 7, claude 2): the grandchild ignores SIGTERM and
+            # sleeps 300 s, so when the regression this case guards drops the post-exit SIGKILL,
+            # a bare wait would block until the sleep ends and CI would report a timeout instead
+            # of this named failure. A zombie (the fixed path) takes the SIGKILL harmlessly.
+            try:
+                os.kill(gc_pid, signal.SIGKILL)
+            except OSError:
+                pass
             try:
                 os.waitpid(gc_pid, 0)
             except OSError:
@@ -3442,6 +3544,45 @@ def _group_remnant_reported(tmp):
            ("process group %d still has members" % proc.pid) in reported,
            "zombies" in reported, _group_alive(proc.pid)),
           (True, (-signal.SIGTERM, True), True, True, False))
+
+
+def _group_probe_error_reported():
+    # QA round 7 (codex minor 2, claude 1): only ESRCH means the group is gone. An EPERM from the
+    # probe (a member this user cannot signal) or any other error is "cannot tell", which
+    # _end_child must REPORT like a surviving group, never read as gone. Error injection, codex's
+    # shape: a real direct child that already exited and was reaped (the control: the real probe
+    # says gone), then os.killpg patched to raise EPERM for the probe and _end_child itself.
+    import contextlib
+    import errno
+    import io
+    global TERM_GRACE
+    proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", "pass"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    proc.wait()
+    gone_control = _group_alive(proc.pid)
+    real_killpg = os.killpg
+
+    def _eperm(_pgid, _signum):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    saved_grace = TERM_GRACE
+    sink = io.StringIO()
+    try:
+        TERM_GRACE = 0.2
+        os.killpg = _eperm
+        alive = _group_alive(proc.pid)
+        with contextlib.redirect_stderr(sink):
+            _end_child(proc, group=True)
+    finally:
+        os.killpg = real_killpg
+        TERM_GRACE = saved_grace
+    reported = sink.getvalue()
+    check("signal/group-probe-error-reported",
+          (gone_control, alive,
+           ("process group %d may still have members" % proc.pid) in reported,
+           "Operation not permitted" in reported),
+          (False, True, True, True))
 
 
 def case_crlf(tmp):
