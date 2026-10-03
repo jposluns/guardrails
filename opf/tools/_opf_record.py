@@ -865,12 +865,14 @@ def _decides(rtype, cur_state, target):
     return rtype == PENDING_DECISION and cur_state == "open" and target == "decided"
 
 
-def _ratification_note(rtype, writer, cur_state, cur_qual, target, note):
+def _ratification_note(rtype, writer, written_at, cur_state, cur_qual, target, note):
     """The refusal clause naming what a ratification keeps, given only when the refused transition IS a
-    ratification (leaving a `/proposed` status for its own state) of the record type whose proposal writes
-    that bundle (writer); every other refusal, a ratification of any other record type included, names
-    the legal transition only."""
-    return note if rtype == writer and cur_qual == "proposed" and target == cur_state else ""
+    ratification (leaving a `/proposed` status for its own state) of a status whose proposal wrote that
+    bundle: the record type that writes it (writer) at one of the states its proposal lands (written_at).
+    Every other refusal, a ratification of any other record type or of a status whose proposal wrote no
+    such bundle (`withdrawn/proposed`, `superseded/proposed`) included, names the legal transition only."""
+    return (note if rtype == writer and cur_state in written_at and cur_qual == "proposed"
+            and target == cur_state else "")
 
 
 def _require_decision_options(req, rid, rtype, cur_state, target, cur_qual):
@@ -885,7 +887,7 @@ def _require_decision_options(req, rid, rtype, cur_state, target, cur_qual):
     if given and not _decides(rtype, cur_state, target):
         raise RecordError("--decision and --decided-by apply only to a pending_decision's open -> decided, not "
                           "{} {} -> {}{}; fail-closed".format(rid, cur_state, target, _ratification_note(
-                              rtype, PENDING_DECISION, cur_state, cur_qual, target,
+                              rtype, PENDING_DECISION, {"decided"}, cur_state, cur_qual, target,
                               " (a ratification keeps the bundle its proposal wrote)")))
 
 
@@ -918,13 +920,13 @@ def _require_delivery_options(req, rid, rtype, row, cur_state, target, cur_qual)
     elif given:
         raise RecordError("--channel and --delivery-ref apply only to a contribution's proposed -> sent, not "
                           "{} {} -> {}{}; fail-closed".format(rid, cur_state, target, _ratification_note(
-                              rtype, CONTRIBUTION, cur_state, cur_qual, target,
+                              rtype, CONTRIBUTION, {"sent"}, cur_state, cur_qual, target,
                               " (a ratification keeps the bundle its proposal wrote)")))
     if "--receipt-ref" in req.values and not _acknowledges(rtype, cur_state, target):
         raise RecordError("--receipt-ref applies only to a contribution's sent -> acknowledged, not {} "
                           "{} -> {} (the receipt fields are legal only at acknowledged, spec 8.5{}); "
                           "fail-closed".format(rid, cur_state, target, _ratification_note(
-                              rtype, CONTRIBUTION, cur_state, cur_qual, target,
+                              rtype, CONTRIBUTION, {"sent", "acknowledged"}, cur_state, cur_qual, target,
                               ", and a ratification keeps what its proposal wrote")))
 
 
@@ -3607,8 +3609,11 @@ def _self_test_delivery(check, plan, post, full, now):
               passes_with_planned_delivery(p, c, op, argv))
     check("the oracle is restored after the pass-through vectors", module._expected_delta is oracle)
     # An option refusal says what a ratification keeps only when the refused transition is one (leaving a
-    # `/proposed` status for its own state) of the record type whose proposal writes that bundle; every
-    # other refusal, a backlog item's ratification of done/proposed included, names the legal transition only.
+    # `/proposed` status for its own state) of a status whose proposal wrote that bundle: a pending_decision's
+    # decided for the decision options, a contribution's sent for the delivery options, and its sent or
+    # acknowledged for --receipt-ref. Every other refusal, a backlog item's ratification of done/proposed, a
+    # withdrawn/proposed or superseded/proposed ratification and a ratification given another type's options
+    # included, names the legal transition only.
     bi = dict(id="BI-1", type=BACKLOG, status="open", title="t", created_at=created, updated_at=earlier,
               actor=dict(kind="maintainer"))
     bi_done = dict(bi, status="done/proposed", proposed_from="active")
@@ -3616,6 +3621,12 @@ def _self_test_delivery(check, plan, post, full, now):
     pd = dict(id="PD-1", type=PENDING_DECISION, status="decided/proposed", title="t", created_at=created,
               updated_at=earlier, actor=dict(kind="maintainer"), proposed_from="open", decision="use X",
               decided_at=earlier, decided_by="the board")
+    pd_withdrawn = dict(pd, status="withdrawn/proposed")
+    for key in DECISION_BUNDLE:
+        pd_withdrawn.pop(key)
+    pd_ratify = ["transition", "PD-1", "decided", "--actor", "maintainer"]
+    cn_withdrawn = cn("withdrawn/proposed", proposed_from="proposed")
+    cn_superseded = cn("superseded/proposed", proposed_from="sent", delivery=dict(sent))
     send, receipt = s_argv[5:], ["--receipt-ref", "peer/repo#129 merged"]
     decide = ["--decision", "use Y", "--decided-by", "the board"]
 
@@ -3640,11 +3651,26 @@ def _self_test_delivery(check, plan, post, full, now):
             (bi_ratify + send, [bi_done], "--channel and --delivery-ref apply only", False),
             (bi_ratify + receipt, [bi_done], "--receipt-ref applies only", False),
             (bi_ratify + decide, [bi_done], "--decision and --decided-by apply only", False),
-            (["transition", "PD-1", "decided", "--actor", "maintainer"] + decide, [pd],
-             "--decision and --decided-by apply only", True)):
+            (pd_ratify + decide, [pd], "--decision and --decided-by apply only", True),
+            (r_argv + receipt, [filed], "--receipt-ref applies only", True),
+            (ar_argv + send, [ack_filed], "--channel and --delivery-ref apply only", False),
+            (["transition", "PD-1", "withdrawn", "--actor", "maintainer"] + decide, [pd_withdrawn],
+             "--decision and --decided-by apply only", False),
+            (["transition", "CN-1", "withdrawn", "--actor", "maintainer"] + send, [cn_withdrawn],
+             "--channel and --delivery-ref apply only", False),
+            (["transition", "CN-1", "withdrawn", "--actor", "maintainer"] + receipt, [cn_withdrawn],
+             "--receipt-ref applies only", False),
+            (["transition", "CN-1", "superseded", "--actor", "maintainer"] + send, [cn_superseded],
+             "--channel and --delivery-ref apply only", False),
+            (["transition", "CN-1", "superseded", "--actor", "maintainer"] + receipt, [cn_superseded],
+             "--receipt-ref applies only", False),
+            (pd_ratify + send, [pd], "--channel and --delivery-ref apply only", False),
+            (pd_ratify + receipt, [pd], "--receipt-ref applies only", False),
+            (r_argv + decide, [filed], "--decision and --decided-by apply only", False),
+            (ar_argv + decide, [ack_filed], "--decision and --decided-by apply only", False)):
         text = refusal(argv, rows)
-        check("the {} refusal on {} {} the ratification".format(
-            needle, " ".join(argv[1:3]), "names" if keeps else "does not name"),
+        check("the {} refusal on {} from {} {} the ratification".format(
+            needle, " ".join(argv[1:3]), rows[0]["status"], "names" if keeps else "does not name"),
             needle in text and ("a ratification keeps" in text) == keeps)
 
 
