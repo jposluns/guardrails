@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "959bd9386075dbb23563a3c1e01a65d65e4c4b9448a405e1b9a3b2918e0bb1f8"
+tree-sha256 = "4922862824a5471a0562be33c78c234d15abefc816a534c15197f2ae580f44c4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3331,8 +3331,8 @@ sha256 = "91fa470bab48c2b3601e0be2124420524c996b1cd8e8f3a1bed294b54703efc1"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 350165
-sha256 = "9ecb62808c021de82f54196dd52b901325c1c87745e30712f97d9720b54961f1"
+bytes = 367718
+sha256 = "5eab0333c66184a483caead161796abea15a40897db7e1aabf3f92186651452d"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -3461,8 +3461,8 @@ sha256 = "64f2adcf49949237202e7e5e2b6770442319eab85afc813eafd1d82597de4c0c"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 61313
-sha256 = "cef7e70689d74401a05c75fa09acd4068a55fde4bfa32e543b0f39ca97768aa7"
+bytes = 62203
+sha256 = "bf3e4eb55840d32ca4169c76f6dea32aadae36b8e5d68e1d3bf78d0c8994e729"
 
 [[sources]]
 path = "tools/gen_mappings.py"

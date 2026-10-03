@@ -201,13 +201,38 @@ def _stage1_materialize(repo, commit_oid, dest):
         os.chmod(target, 0o755 if mode == "100755" else 0o644)
 
 
+def _stage1_dotgit_in_ancestry(repo):
+    """True when a `.git` entry (directory, file or symlink; lstat, so a dangling symlink or a
+    gitfile naming a missing gitdir still counts) exists at the gate root or ANY ancestor up to the
+    filesystem root (QA round-7 codex blocker). Git discovery searches ancestor directories, and a
+    DAMAGED ancestor repository (a corrupt .git/HEAD, a .git file whose gitdir is missing) makes
+    discovery fail with the very "not a git repository" wording true absence produces, so absence
+    may be concluded only when no `.git` entry exists anywhere discovery would have searched. Any
+    lstat failure other than a clean does-not-exist counts as PRESENT: fail-closed."""
+    d = os.path.abspath(repo)
+    while True:
+        try:
+            os.lstat(os.path.join(d, ".git"))
+            return True
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return True
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+
+
 def _stage1_no_committed_state(repo):
     """True ONLY when a positive probe establishes that NO COMMITTED STATE exists, the sole
     condition under which the single-stage checkout gate may run (QA round-6 codex blocker 1 /
     claude 3). Either (a) NOT A GIT REPOSITORY: git's own discovery refusal under a pinned C
-    locale names no repository AND no `.git` entry exists at the gate root (a present `.git` entry
-    that git cannot use, e.g. a corrupt HEAD that fails discovery, is a DAMAGED repository and
-    never a fallback); or (b) an UNBORN HEAD: the repository resolves, HEAD is a symbolic ref to a
+    locale names no repository AND no `.git` entry exists at the gate root OR ANY ANCESTOR up to
+    the filesystem root (QA round-7 codex blocker: git discovery searches ancestors, so a present
+    `.git` entry git cannot use ANYWHERE on that walk, e.g. a corrupt ancestor .git/HEAD or an
+    ancestor .git file naming a missing gitdir, is a DAMAGED repository and never a fallback); or
+    (b) an UNBORN HEAD: the repository resolves, HEAD is a symbolic ref to a
     refs/ branch, and `git show-ref --verify` answers exactly "missing" (rc 1) for that branch.
     Every other git failure (dubious ownership, bad config, a corrupt object store, a detached or
     corrupt HEAD) returns False and the caller exits 2 without importing any checkout module.
@@ -216,7 +241,7 @@ def _stage1_no_committed_state(repo):
     if probe.returncode != 0:
         err = probe.stderr.decode("utf-8", "replace")
         return ("not a git repository" in err
-                and not os.path.lexists(os.path.join(repo, ".git")))
+                and not _stage1_dotgit_in_ancestry(repo))
     sym = _stage1_git(repo, ["symbolic-ref", "--quiet", "HEAD"])
     if sym.returncode != 0:
         return False
@@ -913,14 +938,19 @@ def _index_materialized_tree(dest, label):
     GIT_* variable and pins the global/system config to os.devnull so host git config cannot steer it (test
     hermeticity). No clean/smudge filter is configured in this pack, and both validators read source bytes
     from the filesystem while git_tracked reads only the path set, so an index-side eol/text attribute
-    cannot perturb their result. A launch or nonzero exit is cannot-evaluate (GateError, exit 2)."""
+    cannot perturb their result. A launch or nonzero exit is cannot-evaluate (GateError, exit 2).
+    Both calls pin core.fsmonitor=false and protocol.allow=never on the argv, with GIT_NO_LAZY_FETCH
+    in the env (QA round-7 claude F3), matching the funnels: a repo-config fsmonitor hook must never
+    run under a gate-driven git call, here included."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
     env["GIT_NO_LAZY_FETCH"] = "1"
     for argv in (["init", "-q"], ["add", "--force", "-A"]):
         try:
-            proc = subprocess.run(["git", "-C", str(dest), *argv], capture_output=True, env=env)
+            proc = subprocess.run(["git", "-C", str(dest), "-c", "core.fsmonitor=false",
+                                   "-c", "protocol.allow=never", *argv],
+                                  capture_output=True, env=env)
         except OSError as exc:
             raise GateError("{} manifest index: cannot launch git {} ({}); fail-closed".format(
                 label, argv[0], exc))
@@ -1202,7 +1232,9 @@ _DRIFT_ADVISORY_SIZE_CAP = 100 * 1024 * 1024
 
 def _drift_entry_state(root, path_b, committed_symlink, want):
     """Compare ONE tracked path's checkout bytes against HEAD's blob id `want` for the advisory,
-    following NO symlink anywhere on the path (QA round-6 codex majors 3/4 / claude 2): every
+    following NO symlink anywhere on the path (QA round-6 codex majors 3/4 / claude 2) and refusing
+    empty, `.` and `..` path components before any open (QA round-7 claude F1, classified as drift:
+    O_NOFOLLOW stops symlinks, never a real dot-dot walk out of the root): every
     directory component is opened from a root descriptor with O_NOFOLLOW | O_DIRECTORY (a
     symlinked parent is ELOOP, classified as drift, so no byte outside the root is ever read); the
     final file is opened with O_NOFOLLOW | O_NONBLOCK (a FIFO or device swapped in cannot block
@@ -1215,20 +1247,24 @@ def _drift_entry_state(root, path_b, committed_symlink, want):
     import hashlib
     import stat
     algo = hashlib.sha1 if len(want) == 40 else hashlib.sha256
-    dfd, fd = None, None
+    parts = path_b.split(b"/")
+    if any(comp in (b"", b".", b"..") for comp in parts):
+        # QA round-7 claude F1: O_NOFOLLOW stops only symlinks, so a `..` component would walk the
+        # descriptor chain OUT of the root through real directories; refuse empty, `.` and `..`
+        # components before any open (classified as drift, the advisory's refusal state).
+        return "drift"
+    fds = []
     try:
-        parts = path_b.split(b"/")
-        dfd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        fds.append(os.open(str(root), os.O_RDONLY | os.O_DIRECTORY))
         for comp in parts[:-1]:
-            nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
-            os.close(dfd)
-            dfd = nfd
+            fds.append(os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
         name = parts[-1]
         if committed_symlink:
-            data = os.readlink(name, dir_fd=dfd)
+            data = os.readlink(name, dir_fd=fds[-1])
             digest = algo(b"blob " + str(len(data)).encode("ascii") + b"\x00" + data).hexdigest()
             return "match" if digest == want else "drift"
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+        fds.append(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fds[-1]))
+        fd = fds[-1]
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return "drift"
@@ -1248,12 +1284,14 @@ def _drift_entry_state(root, path_b, committed_symlink, want):
     except (OSError, ValueError, MemoryError):
         return "drift"
     finally:
-        for fd_ in (fd, dfd):
-            if fd_ is not None:
-                try:
-                    os.close(fd_)
-                except OSError:
-                    pass
+        # Every descriptor this function opens enters `fds` at the open itself and is closed
+        # EXACTLY here, once, on every path: no close-then-rebind along the walk and no descriptor
+        # ever closed twice (the #378 close sweep's REBIND/TRY shapes both stay empty).
+        for fd_ in fds:
+            try:
+                os.close(fd_)
+            except OSError:
+                pass
 
 
 def _warn_checkout_drift(root):
@@ -1820,8 +1858,9 @@ def _no_committed_state(root):
     """The stage-2 twin of _stage1_no_committed_state (QA round-6 codex blocker 1 / claude 3): True
     ONLY when a positive probe establishes that no committed state exists. Either (a) NOT A GIT
     REPOSITORY: git's own discovery refusal under a pinned C locale names no repository AND no
-    `.git` entry exists at the root (a present `.git` entry git cannot use, e.g. a corrupt HEAD
-    that fails discovery, is a DAMAGED repository, never a fallback); or (b) an UNBORN HEAD: the
+    `.git` entry exists at the root OR ANY ANCESTOR up to the filesystem root (QA round-7 codex
+    blocker, via _stage1_dotgit_in_ancestry: discovery searches ancestors, so a damaged ancestor
+    repository git cannot use is never a fallback); or (b) an UNBORN HEAD: the
     repository resolves, HEAD is a symbolic ref to a refs/ branch, and `git show-ref --verify`
     answers exactly "missing" (rc 1) for it. Every other git failure (dubious ownership, bad
     config, a corrupt object store, a detached or corrupt HEAD) returns False: cannot-evaluate."""
@@ -1829,7 +1868,7 @@ def _no_committed_state(root):
     if probe.returncode != 0:
         err = probe.stderr.decode("utf-8", "replace")
         return ("not a git repository" in err
-                and not os.path.lexists(os.path.join(str(root), ".git")))
+                and not _stage1_dotgit_in_ancestry(str(root)))
     sym = _git(root, ["symbolic-ref", "--quiet", "HEAD"], binary=True)
     if sym.returncode != 0:
         return False
@@ -3756,7 +3795,7 @@ def _post_release_e2e(tmp, failures, only=None):
     # the discriminator target is proven valid; then each attack must leave that verdict unchanged.
     # With the round-5 fix reverted each attack flips to exit 0 (verified out-of-tree; see report).
     labelR5 = "(R5 launch) the stage-1 committed re-execution and committed routing"
-    if _sel("(R5 ") or _sel("(R6 "):
+    if _sel("(R5 ") or _sel("(R6 ") or _sel("(R7 "):
         r5 = _extract_to("post-release-r5")
         if r5 is None or not _pin_fixture_version(r5, failures):
             return False
@@ -3978,7 +4017,8 @@ def _post_release_e2e(tmp, failures, only=None):
         # identified absent committed state (no repository with no .git entry, or an unborn HEAD)
         # may reach the checkout imports.
         _R6_TRIP = ("import os\n"
-                    "print(" + repr(_FAKE_PASS + " (R6 checkout import, must never run)") + ")\n"
+                    "print(" + repr(_FAKE_PASS + " (R6 checkout import, must never run)")
+                    + ", flush=True)\n"
                     "os._exit(0)\n")
 
         label6h = "(R6 corrupt HEAD) a damaged repository fails closed, never the checkout fallback"
@@ -4031,6 +4071,132 @@ def _post_release_e2e(tmp, failures, only=None):
                 "    os._exit(0)\n", encoding="utf-8")
             _cli5_expect(label6i, 2, "head manifest freshness",
                          extra_env={"PYTHONPATH": str(site6)})
+
+        # ---- QA round-7 codex blocker: git DISCOVERY searches ancestor directories, so a damaged
+        # ANCESTOR repository (a corrupt .git/HEAD, a .git file naming a missing gitdir) fails git
+        # with the same "not a git repository" wording as true absence. Absence may hold only when
+        # no .git entry exists at the gate root or ANY ancestor; each case plants the checkout
+        # tripwire and the gate must exit 2 from stage 1 with the tripwire inert. The control case
+        # (no .git anywhere in the ancestry) must still reach the checkout gate by design.
+        label7a = "(R7 corrupt ancestor) a damaged ANCESTOR repository fails closed, never the fallback"
+        label7g = ("(R7 dangling ancestor .git) an ancestor .git file naming a missing gitdir "
+                   "fails closed, never the fallback")
+        label7n = ("(R7 no repository) a root with no .git in any ancestor still reaches the "
+                   "checkout gate")
+        if _sel(label7a) or _sel(label7g) or _sel(label7n):
+            gate_bytes7 = (r5 / "tools" / "check_release_delta.py").read_bytes()
+
+            def _mini_gate7(base_):
+                proj_ = base_ / "project"
+                (proj_ / "tools").mkdir(parents=True)
+                (proj_ / "tools" / "check_release_delta.py").write_bytes(gate_bytes7)
+                (proj_ / "tools" / "_gen_common.py").write_text(_R6_TRIP, encoding="utf-8")
+                return proj_
+
+            def _gate_cli7(label_, proj_, want_rc, want_msg):
+                try:
+                    proc_ = subprocess.run(
+                        [sys.executable, "-I", "-B",
+                         str(proj_ / "tools" / "check_release_delta.py")],
+                        cwd=str(proj_), capture_output=True, env=env, timeout=600)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    failures.append("fixture setup ({}): could not run the gate CLI ({})".format(
+                        label_, exc))
+                    return
+                out_ = (proc_.stdout + proc_.stderr).decode("utf-8", "replace")
+                if proc_.returncode != want_rc or want_msg not in out_:
+                    failures.append("{}: expected exit {} with {!r} (got rc={}: {})".format(
+                        label_, want_rc, want_msg, proc_.returncode, out_.strip()[-300:]))
+
+        if _sel(label7a):
+            anc7 = tmp / "r7-corrupt-ancestor"
+            proj7 = _mini_gate7(anc7)
+            _g(anc7, "init", "-q")
+            (anc7 / ".git" / "HEAD").write_bytes(b"garbage, neither a ref nor an object id\n")
+            _gate_cli7(label7a, proj7, 2, "no probe positively established")
+            if _stage1_no_committed_state(str(proj7)) or _no_committed_state(proj7):
+                failures.append(label7a + ": both absence predicates must refuse a damaged "
+                                "ancestor repository (git discovery searches ancestors)")
+
+        if _sel(label7g):
+            dgl7 = tmp / "r7-dangling-ancestor"
+            proj7g = _mini_gate7(dgl7)
+            (dgl7 / ".git").write_text("gitdir: " + str(dgl7 / "missing-gitdir") + "\n",
+                                       encoding="utf-8")
+            _gate_cli7(label7g, proj7g, 2, "no probe positively established")
+            if _stage1_no_committed_state(str(proj7g)) or _no_committed_state(proj7g):
+                failures.append(label7g + ": both absence predicates must refuse a dangling "
+                                "ancestor .git file")
+
+        if _sel(label7n):
+            import shutil as _shutil7
+            import tempfile as _tempfile7
+            base7 = None
+            for cand7 in (tmp, Path(_tempfile7.gettempdir()), Path("/var/tmp")):
+                if not _stage1_dotgit_in_ancestry(str(cand7)):
+                    base7 = cand7
+                    break
+            if base7 is None:
+                failures.append(label7n + ": every candidate temp path has a .git ancestor; the "
+                                "true no-repository control needs a .git-free path (fixture-env)")
+            else:
+                nr7 = Path(_tempfile7.mkdtemp(prefix="aiqt-r7-norepo-", dir=str(base7)))
+                try:
+                    _gate_cli7(label7n, _mini_gate7(nr7), 0,
+                               "(R6 checkout import, must never run)")
+                finally:
+                    _shutil7.rmtree(nr7, ignore_errors=True)
+
+        # ---- QA round-7 claude F3: a repo-config core.fsmonitor hook is attacker-chosen code and
+        # must never run on the checkout-judged branches either. gen_manifest.git_tracked (the one
+        # tracked-set enumerator those branches consume, directly and through the gen_manifest /
+        # check_manifest validator children) and _index_materialized_tree carry the funnels' pins;
+        # this asserts the GENESIS route end-to-end (both enumerators are also asserted directly
+        # in the isolated self-test; the delta branch reaches them through the same two sites).
+        label7f = ("(R7 fsmonitor genesis) a repo-config fsmonitor hook never runs on a "
+                   "checkout-judged branch")
+        if _sel(label7f):
+            gfx7 = _extract_to("r7-fsmon-genesis")
+            if gfx7 is not None and _pin_fixture_version(gfx7, failures):
+                _git_init_commit(gfx7, "r7 fsmonitor genesis fixture", init=False)
+
+                def _cli7f(label_):
+                    try:
+                        proc_ = subprocess.run(
+                            [sys.executable, "-I", "-B",
+                             str(gfx7 / "tools" / "check_release_delta.py")],
+                            cwd=str(gfx7), capture_output=True, env=env, timeout=1500)
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        failures.append("fixture setup ({}): could not run the gate CLI "
+                                        "({})".format(label_, exc))
+                        return None, ""
+                    return proc_.returncode, (proc_.stdout + proc_.stderr).decode(
+                        "utf-8", "replace")
+
+                rc7b, out7b = _cli7f(label7f + " baseline")
+                if rc7b is not None and (rc7b != 0 or "release-delta: GENESIS" not in out7b):
+                    failures.append("{}: the genesis baseline must exit 0 on the GENESIS route "
+                                    "(got rc={}: {})".format(label7f, rc7b, out7b.strip()[-300:]))
+                elif rc7b is not None:
+                    mark7 = tmp / "r7-fsmon-ran.marker"
+                    hook7 = tmp / "r7-fsmon.sh"
+                    hook7.write_text("#!/bin/sh\n: >> " + str(mark7) + "\nexit 1\n",
+                                     encoding="utf-8")
+                    hook7.chmod(0o755)
+                    _g(gfx7, "config", "core.fsmonitor", str(hook7))
+                    try:
+                        rc7m, out7m = _cli7f(label7f)
+                        if rc7m is not None and (rc7m != 0
+                                                 or "release-delta: GENESIS" not in out7m):
+                            failures.append("{}: the genesis verdict must be unchanged under the "
+                                            "hook config (got rc={}: {})".format(
+                                                label7f, rc7m, out7m.strip()[-300:]))
+                        if mark7.exists():
+                            failures.append("{}: the core.fsmonitor hook RAN on the genesis "
+                                            "branch; the git_tracked / _index_materialized_tree "
+                                            "pins are not effective".format(label7f))
+                    finally:
+                        _g(gfx7, "config", "--unset-all", "core.fsmonitor")
 
 
     # ---- QA round-5 claude m2: the per-object re-hash covers a commit, tree and tag, not only a blob -
@@ -5106,42 +5272,133 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                 globals()["_git"] = _real_g6
 
             if _git_available():
-                # ---- QA round-6 codex majors 3/4 / claude 2: the drift advisory reads nothing it
-                # must not. The outside copy behind the symlinked parent carries the COMMITTED
-                # bytes, so the pre-fix follow-and-read concluded "clean"; the no-follow walk
-                # classifies the path as drift without ever reading outside the root. A FIFO
-                # swapped in is drift via the descriptor-bound regular-file check (no blocking
-                # open), and an over-cap sparse file is reported UNCHECKED, never read.
+                # ---- QA round-6 codex majors 3/4 / claude 2, extended round 7 (claude F1/F2):
+                # the drift advisory reads nothing it must not, blocks on nothing, and classifies
+                # every special-file swap as drift. The outside copies behind the symlinked parent
+                # AND behind the swapped final-component symlink carry the COMMITTED bytes, so a
+                # follow-and-read concludes "clean" (round-7 M7); a FIFO swapped in for a NON-EMPTY
+                # blob is drift via the descriptor-bound regular-file check, and a FIFO swapped in
+                # for an EMPTY blob is drift via that check ALONE (round-7 M9: size 0 hashes to
+                # the empty blob); an over-cap sparse file is UNCHECKED, never read. The whole
+                # advisory runs in a CHILD with its own timeout so a lost O_NONBLOCK pin (round-7
+                # M11) is a NAMED failure, never a hung suite.
                 dr6 = tmp / "r6-drift"
                 (dr6 / "lnkdir").mkdir(parents=True)
                 (dr6 / "lnkdir" / "leaf.txt").write_text("leaf bytes\n", encoding="utf-8")
+                (dr6 / "lnkfile.txt").write_text("lnkfile bytes\n", encoding="utf-8")
                 (dr6 / "fifo.txt").write_text("fifo bytes\n", encoding="utf-8")
+                (dr6 / "emptyfifo.txt").write_text("", encoding="utf-8")
                 (dr6 / "big.txt").write_text("big bytes\n", encoding="utf-8")
                 _git_init_commit(dr6, "r6 drift fixture")
                 outside6 = tmp / "r6-drift-outside"
                 outside6.mkdir()
                 (outside6 / "leaf.txt").write_text("leaf bytes\n", encoding="utf-8")
+                (outside6 / "lnkfile.txt").write_text("lnkfile bytes\n", encoding="utf-8")
                 shutil.rmtree(dr6 / "lnkdir")
                 os.symlink(outside6, dr6 / "lnkdir")
+                os.unlink(dr6 / "lnkfile.txt")
+                os.symlink(outside6 / "lnkfile.txt", dr6 / "lnkfile.txt")
                 os.unlink(dr6 / "fifo.txt")
                 os.mkfifo(dr6 / "fifo.txt")
+                os.unlink(dr6 / "emptyfifo.txt")
+                os.mkfifo(dr6 / "emptyfifo.txt")
                 os.unlink(dr6 / "big.txt")
                 with open(dr6 / "big.txt", "wb") as bf6:
                     bf6.truncate(_DRIFT_ADVISORY_SIZE_CAP + 1)
-                err6d = io.StringIO()
-                with redirect_stderr(err6d):
-                    _warn_checkout_drift(dr6)
-                out6d = err6d.getvalue()
-                if "lnkdir/leaf.txt" not in out6d:
-                    failures.append("(R6 drift symlink-parent): a symlinked parent directory must "
-                                    "be drift WITHOUT following it (the outside copy carries the "
-                                    "committed bytes, so a follow-and-read reports clean)")
-                if "fifo.txt" not in out6d:
-                    failures.append("(R6 drift FIFO): a FIFO swapped in for a tracked file must "
-                                    "be drift (descriptor-bound regular-file check)")
-                if "UNCHECKED" not in out6d or "big.txt" not in out6d:
-                    failures.append("(R6 drift cap): a tracked file over the advisory size cap "
-                                    "must be reported UNCHECKED, never read")
+                child7 = (
+                    "import importlib.util, io, sys\n"
+                    "from contextlib import redirect_stderr\n"
+                    "sys.path.insert(0, {tools!r})\n"
+                    "spec = importlib.util.spec_from_file_location('crd_r7_drift', {gate!r})\n"
+                    "mod = importlib.util.module_from_spec(spec)\n"
+                    "spec.loader.exec_module(mod)\n"
+                    "buf = io.StringIO()\n"
+                    "with redirect_stderr(buf):\n"
+                    "    mod._warn_checkout_drift(mod.Path({root!r}))\n"
+                    "sys.stdout.write(buf.getvalue())\n").format(
+                        tools=str(Path(__file__).resolve().parent),
+                        gate=str(Path(__file__).resolve()), root=str(dr6))
+                try:
+                    drift7 = subprocess.run([sys.executable, "-I", "-B", "-c", child7],
+                                            capture_output=True, env=_selftest_env(), timeout=300)
+                except subprocess.TimeoutExpired:
+                    drift7 = None
+                    failures.append("(R7 drift nonblock): the drift advisory BLOCKED for over "
+                                    "300s on a FIFO open; the O_NONBLOCK pin on the final open is "
+                                    "missing (a NAMED failure, never a hung suite)")
+                if drift7 is not None:
+                    out6d = drift7.stdout.decode("utf-8", "replace")
+                    if drift7.returncode != 0:
+                        failures.append("(R6 drift) the advisory child failed rc={}: {}".format(
+                            drift7.returncode,
+                            drift7.stderr.decode("utf-8", "replace").strip()[-300:]))
+                    if "lnkdir/leaf.txt" not in out6d:
+                        failures.append("(R6 drift symlink-parent): a symlinked parent directory "
+                                        "must be drift WITHOUT following it (the outside copy "
+                                        "carries the committed bytes, so a follow-and-read "
+                                        "reports clean)")
+                    if "lnkfile.txt" not in out6d:
+                        failures.append("(R7 drift symlink-final): a tracked FILE swapped for a "
+                                        "symlink to an outside copy of the committed bytes must "
+                                        "be drift (the final open's O_NOFOLLOW pin)")
+                    if "fifo.txt" not in out6d:
+                        failures.append("(R6 drift FIFO): a FIFO swapped in for a tracked file "
+                                        "must be drift (descriptor-bound regular-file check)")
+                    if "emptyfifo.txt" not in out6d:
+                        failures.append("(R7 drift empty-blob FIFO): a FIFO swapped in for an "
+                                        "EMPTY committed blob must be drift (S_ISREG on the "
+                                        "opened descriptor: size 0 hashes to the empty blob)")
+                    if "UNCHECKED" not in out6d or "big.txt" not in out6d:
+                        failures.append("(R6 drift cap): a tracked file over the advisory size "
+                                        "cap must be reported UNCHECKED, never read")
+                # QA round-7 claude F1: a `..` component must never walk out of the root. The
+                # outside file carries exactly the bytes its blob id names, so the pre-fix walk
+                # READ it and answered match; the component refusal answers drift. `.` is pinned
+                # via the over-cap file (pre-fix answer unchecked, never drift); empty components
+                # are refused the same way.
+                import hashlib as _hl7
+                outside_b7 = b"outside bytes, committed copy\n"
+                (outside6 / "outside.txt").write_bytes(outside_b7)
+                want7 = _hl7.sha1(b"blob " + str(len(outside_b7)).encode("ascii") + b"\x00"
+                                  + outside_b7).hexdigest()
+                if _drift_entry_state(dr6, b"../r6-drift-outside/outside.txt", False,
+                                      want7) != "drift":
+                    failures.append("(R7 drift dotdot): a `..` path component must be refused as "
+                                    "drift; the walk read a file OUTSIDE the root")
+                for bad7 in (b"./big.txt", b"big.txt/", b"a//b.txt"):
+                    if _drift_entry_state(dr6, bad7, False, want7) != "drift":
+                        failures.append("(R7 drift component) {!r}: an empty or `.` path "
+                                        "component must be refused as drift".format(bad7))
+
+                # ---- QA round-7 claude F3, asserted directly on the two tracked-set enumerators
+                # the checkout-judged branches consume: gen_manifest.git_tracked and
+                # _index_materialized_tree each pin core.fsmonitor=false (with the funnels'
+                # protocol.allow / GIT_NO_LAZY_FETCH pins), so a repo-config fsmonitor hook never
+                # runs through either. The genesis route is also asserted end-to-end in
+                # _post_release_e2e (R7 fsmonitor genesis); the delta branch reaches the
+                # enumerators through these same two call sites only.
+                label7t = "(R7 fsmonitor git_tracked/_index_materialized_tree)"
+                fsm7 = tmp / "r7-fsmon-tree"
+                fsm7.mkdir()
+                (fsm7 / "tracked.txt").write_text("tracked bytes\n", encoding="utf-8")
+                _git_init_commit(fsm7, "r7 fsmonitor tree fixture")
+                mark7t = tmp / "r7-fsmon-tree-ran.marker"
+                hook7t = tmp / "r7-fsmon-tree.sh"
+                hook7t.write_text("#!/bin/sh\n: >> " + str(mark7t) + "\nexit 1\n",
+                                  encoding="utf-8")
+                hook7t.chmod(0o755)
+                subprocess.run(["git", "-C", str(fsm7), "config", "core.fsmonitor",
+                                str(hook7t)], capture_output=True, env=_selftest_env())
+                (fsm7 / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+                _index_materialized_tree(fsm7, "r7 fsmonitor")
+                got7t = gen_manifest.git_tracked(fsm7)
+                if "tracked.txt" not in got7t or "untracked.txt" not in got7t:
+                    failures.append("{}: the throwaway index + tracked-set read is wrong "
+                                    "(got {})".format(label7t, sorted(got7t)))
+                if mark7t.exists():
+                    failures.append("{}: the repo-config core.fsmonitor hook RAN under "
+                                    "git_tracked / _index_materialized_tree; the "
+                                    "core.fsmonitor=false pin is not effective".format(label7t))
 
                 # ---- QA round-6 codex blocker 2: a promisor repository's missing object is a
                 # refusal, never a lazy-fetch transport; the marker sshCommand must never run.
@@ -5263,8 +5520,14 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                       "each hold; the QA round-6 fail-closed launch (a corrupt HEAD, a bad config "
                       "and a missing git each exit 2 from stage 1 with a checkout tripwire inert; "
                       "a simulated dubious-ownership refusal fails closed in stage 1 and in "
-                      "routing), the no-follow bounded drift advisory (a symlinked parent, a "
-                      "swapped-in FIFO, and an over-cap UNCHECKED file), the promisor lazy-fetch "
+                      "routing; and round 7: a corrupt ancestor .git/HEAD and a dangling ancestor "
+                      ".git file each exit 2 with the tripwire inert while the no-.git-anywhere "
+                      "control still reaches the checkout gate), the no-follow bounded drift "
+                      "advisory (a symlinked parent, a swapped-in FIFO, an over-cap UNCHECKED "
+                      "file; and round 7: a final-component symlink to an outside committed copy, "
+                      "an empty-blob FIFO, a refused dot-dot/dot/empty component, a child-bounded "
+                      "FIFO open, and the fsmonitor pins held on the genesis route and on "
+                      "git_tracked/_index_materialized_tree), the promisor lazy-fetch "
                       "refusal (GIT_NO_LAZY_FETCH pinned, no transport, no sshCommand), and the "
                       "stage-2 sitecustomize isolation hold; and the replayed "
                       "pre-row gate "
