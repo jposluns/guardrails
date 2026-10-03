@@ -30,9 +30,10 @@ signed; the independently published digest is the authenticated reference.
    one version-numbered zip sits under `site/downloads/`, and `gen_skill.py --check` reports a stale or
    missing one as latest-only drift. The concrete version-numbered
    filename `aiqt-skill-<version>.zip` is spelled as a literal in four places, kept consistent by a
-   fail-closed version-match assertion in `gen_skill.build_outputs` and `gen_skill.py`'s orphan-clean plus
-   `--check` (which flags a stale version-numbered zip), not by true single-sourcing (`versioned_zip_basename` is only the shared
-   filename SHAPE). To bump the skill version, edit all four, then regenerate:
+   fail-closed version-match assertion in `gen_skill.build_outputs` plus `gen_skill.py`'s latest-only
+   refusal and `--check` (each names a stale version-numbered zip; the generator never deletes it), not by
+   true single-sourcing (`versioned_zip_basename` is only the shared
+   filename SHAPE). To bump the skill version, edit all five spots below, then regenerate:
      - a. `.aiqt/core/skill/skill-source.md`: the `meta` `version` (the authoritative source the assertion
        and both generators read).
      - b. `tools/gen_skill.py`: the `ZIP_VERSIONED_PARTS` literal AND its matching `GENSRC_OUTPUTS` target
@@ -41,10 +42,18 @@ signed; the independently published digest is the authenticated reference.
        binary allowed past the portability text scan).
      - d. `.aiqt/core/ownership.toml`: the `[checkout]` `binary` list (the version-numbered zip is a
        tracked binary artefact).
-   Then run `python3 tools/gen_skill.py`, which repacks both zips and orphan-cleans the prior-version
-   `aiqt-skill-<old>.zip` (its `--check` reports that stale zip as drift). A bump that misses spot a leaves
+     - e. `docs/evidence.md`: the install-page sentence ("The chat skill now served from the install page
+       is <version>, ...") must name the new skill version; `gen_skill.py --check` verifies that sentence
+       against the declared skill version and reports a stale or missing one as drift.
+   Then run `python3 tools/gen_skill.py`. The generator never deletes a file: this first run refuses
+   (exit 2) and names the stale prior-version `aiqt-skill-<old>.zip`. Remove it yourself with
+   `git rm site/downloads/aiqt-skill-<old>.zip`, then rerun `python3 tools/gen_skill.py`, which repacks
+   both zips (a surviving stale zip stays a `--check` latest-only drift). Note that from the 1.1.1 pack
+   release on, the skill version equals the pack version (see the top of this checklist), so this bump
+   happens with each release cut. A bump that misses spot a leaves
    the assertion firing (fail-closed exit 2); a bump that misses spot b, c, or d is caught by the relevant
-   drift or portability gate. Next, run `python3 tools/gen_install.py` to repoint the install-page
+   drift or portability gate; a bump that misses spot e is caught by `gen_skill.py --check`. Next, run
+   `python3 tools/gen_install.py` to repoint the install-page
    download button at the new versioned filename. Finally, set the `Version X.Y.Z` line in the three
    hand-written condensations (`site/downloads/aiqt-instructions-8k.txt`, `-5k.txt`, `-1_5k.txt`) and
    re-bless them with `python3 tools/check_sized_instructions.py --update`.

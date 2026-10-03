@@ -51,8 +51,8 @@ renderer-id = "skill"
 entrypoint = "tools/gen_skill.py"
 semantics-revision = 2
 targets = ["site/downloads/aiqt/", "site/downloads/aiqt-instructions.txt", "site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip"]
-closure = ["tools/gen_skill.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
-code-digest = "519c52b833c9a8d004ff807835acd3132225e63e9e475016cfd5750ff947bc69"
+closure = ["tools/gen_skill.py", "tools/_gen_common.py", "tools/_standards.py", "tools/check_sized_instructions.py", "tools/gen_agents.py", "tools/gen_mappings.py", "tools/gen_rules.py"]
+code-digest = "27b65d48d5787cd5e55b0f42bace7dc0af5844636147ca810dc04d0048906c7c"
 
 [[renderer]]
 renderer-id = "worker-pack"
