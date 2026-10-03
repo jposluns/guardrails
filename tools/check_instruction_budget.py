@@ -70,8 +70,9 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       one of `_ . / * ? [ ] { } ! , @ + -` and it holds a `/`, `*`, `?`, `[` or `{`, or a letter, a `.`
       and a letter in a row (`README.md`) (PLAIN_GLOB_RE). No null, boolean, integer, float, timestamp,
       merge or value form of the YAML 1.1 types or the YAML 1.2 core schema holds either, so no resolver
-      of either version can type it; every other plain entry (`2026-10-03`, `0b101`, `1:20`, `src`)
-      exits 2, a known over-refusal that quoting avoids. The value (a string, or each entry of a list) is
+      of either version can type it; every other plain entry exits 2: correctly for a value YAML does
+      type (`2026-10-03`, `0b101`, `1:20`), and as a known over-refusal, which quoting avoids, for one it
+      does not (`src`). The value (a string, or each entry of a list) is
       normalized in the loader's order: split on the commas outside braces, each piece trimmed, one level of
       brace alternation `{a,b}` expanded, one trailing `/**` stripped, and empty globs dropped. The file
       is unconditional, and counted, when no glob is left or every glob is `**` (so `**`, `**/**`, `/**`,
