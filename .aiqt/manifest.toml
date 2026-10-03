@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "7c899b9a42fe355e62b7bc9e3ea6a284c4f38aad892157b1dacdf2e5385e76e5"
+tree-sha256 = "7821b82dc7d2800809ba0fbcfd0c17c39cd4844e46213d7df8d344471456d6e8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2476,8 +2476,8 @@ sha256 = "8d8dbd959ea23e8a70f6667de83ca7a201b52d406f3b403f9312abad80d28f32"
 
 [[sources]]
 path = "opf/site/record-indexes.html"
-bytes = 69628
-sha256 = "870b2c6bb55954b42798bc088dfe9348e0ba001e2cfe33980635c8ee3380d6c5"
+bytes = 69676
+sha256 = "70fc152d9c8106c8262b3ac2a4ea7e6a3f9bbe4803423906f28ab0928319bc3a"
 
 [[sources]]
 path = "opf/site/roadmap.html"
