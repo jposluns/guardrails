@@ -81,8 +81,9 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack;
 until then the files are simple enough to keep by hand, and a conformance claim is self-asserted
 and says so. An implementation declares a conformance class: an upgrade-capable one carries older
-stores forward, and a fresh-only one supports one current format and refuses older or legacy stores
-by name (OPF-SPEC section 16.1).
+stores forward, and a fresh-only one supports one current format and refuses by name an older store
+or one holding an item on its closed legacy-state list, which catches only what it lists (OPF-SPEC
+section 16.1).
 
 ---
 

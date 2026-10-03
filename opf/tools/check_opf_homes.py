@@ -13,7 +13,10 @@ and 13), a default-gate run without the self-test, and an addition landed togeth
 matching registry edit, which review of registry changes catches. Section 9.1 stays untiled
 over its lowercase-may profile rule, but its implementation-class paragraph is pinned sentence
 by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red;
-the rest of 9.1, and additions to it, stay unprotected.
+the rest of 9.1, and additions to it, stay unprotected. The quickstart's implementation-class
+sentence and the opfiles.ai disclosure page's fresh-only item are pinned the same way over
+tag-stripped text (_SURFACE), outside the keyword lint; the rest of those files, and additions
+to them, stay unprotected.
 
 The default entry also runs a section 2 keyword lint over every registered pin: a pin without
 MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D). Residual:
@@ -29,6 +32,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_store as store  # noqa: E402
 
 SPEC = Path(__file__).resolve().parents[1] / "spec" / "OPF-SPEC.md"
+QUICKSTART = SPEC.parent / "OPF-QUICKSTART.md"
+DISCLOSURE = SPEC.parents[1] / "site" / "disclosure.html"
 
 
 class _Descriptive(str):
@@ -156,8 +161,9 @@ _CONTRACT = {
         _D('Because the machine subdirectory is observed at each use rather than declared and trusted, renaming it is a directory move with nothing to go stale; the pointer, which does declare a location, is validated at every resolution and fails closed rather than trusting a stale target (section 4.3).'),
         _D('Profiles declared under [profiles.<name>] are enumerated after the base is validated; a profile a tool does not support is ignored for enforcement and recorded as unevaluated, never treated as a base-validation failure (section 9).'),
         'A fresh-only implementation (section 16.1) MUST recognize a candidate manifest.toml whose base table is the retired [devprocess] only to refuse that store as unsupported-older-store; the recognition is not a discovery match.',
-        'For a fresh-only implementation, a recognized legacy candidate, an ambiguous outcome, and an input that discovery cannot read or parse are a failed discovery of an existing store and MUST NOT be treated as an absent store that permits initialization or adoption; a recognized legacy candidate beside a matching store makes the outcome ambiguous.',
-        'A fresh-only implementation MUST NOT treat a zero-match outcome over a present .working/ as authorizing initialization or adoption by itself: where that .working/ holds no recognized legacy candidate, only a section 14 first adoption authorizes initialization there, through an investigation that distinguishes first adoption from re-adoption and records a digest-stamped inventory, and one approved plan that gives every foreign file a disposition before init-store (section 14.1).',
+        'For a fresh-only implementation, a recognized legacy candidate, an ambiguous outcome, and an input that discovery cannot read or parse are a failed discovery of an existing store and MUST NOT be treated as an absent store that permits initialization or adoption; a recognized legacy candidate beside a matching store makes the outcome ambiguous, which yields cannot-evaluate, not unsupported-older-store, a refusal that applies only where no matching store accompanies the legacy candidate.',
+        'A fresh-only implementation MUST NOT treat a zero-match outcome over a present .working/ as authorizing initialization or adoption by itself.',
+        'Before any write there, it MUST run the section 16.1 legacy-state search over that whole .working/ tree and MUST refuse each listed item it finds as unsupported-legacy-state; where that .working/ holds no recognized legacy candidate and no section 16.1 legacy-state item, only a section 14 first adoption authorizes initialization there, through an investigation that distinguishes first adoption from re-adoption and records a digest-stamped inventory, and one approved plan that gives every foreign file a disposition before init-store (section 14.1).',
     ),
     "4.6": (
         _D('Source files are lowercase; deliverables are uppercase.'),
@@ -736,11 +742,14 @@ _CONTRACT = {
         'The check MUST compare parsed versions, never strings, and MUST refuse:',
         _D('- as unsupported-older-store, a store whose manifest declares a spec_version below the supported one, or whose base table is the retired [devprocess] (section 4.5), naming the declared version or table, the supported version, the store location, and the remedy: upgrade the store with an upgrade-capable implementation, then retry;'),
         _D('- as unsupported-store-generation, a store whose homes or worklog storage generation differs from the supported one, naming each generation found and supported;'),
-        _D('- as unsupported-legacy-state, a store at the supported version that holds legacy state, naming each item and its path.'),
+        _D('- as unsupported-legacy-state, a store at the supported version that holds legacy state, or a zero-match .working/ that holds it (section 4.5), naming each item and its path.'),
         _D('Legacy state is this closed list: a clean-series record, active or archived, whose actor.kind is importer (section 8.6); a declared legacy_fragment type or an LF record (section 8.1); a partial or complete import_status in a store that holds no adoption receipt (sections 11 and 14.1); an evidence inventory in the legacy format opf.ingest.evidence-inventory/v1 (section 4.2); a .working/IMPORT-REPORT.md; and a legacy .working/imports/ directory (section 4.4).'),
         _D('Extending the list is a specification change.'),
-        'The check MUST search the whole .working/ tree of the store repository for each item, its staging, archive, and imported areas included, and MUST read import_status from the store manifest; a legacy run archive outside .working/, for the reference tooling .aiqt/import-archive/, is reached only through the import_status item.',
+        'The check MUST search the whole .working/ tree of the store repository for each item, its staging, archive, and imported areas included, within the two limits that follow, and MUST read import_status from the store manifest; a legacy run archive outside .working/, for the reference tooling .aiqt/import-archive/, is reached only through the import_status item.',
+        'First, the check MUST match the two path-defined items, a .working/IMPORT-REPORT.md and a legacy .working/imports/ directory, at those live paths only; a copy preserved under .working/archive/adoption/<run-id>/ (section 14.2) is adoption evidence, not legacy state.',
+        'Second, the check MUST NOT read the contents of, or enumerate beneath, a path registered under [unmanaged] (section 14.2): it matches such a path against a path-defined item by the path alone and leaves any other listed item kept inside it unsearched, a gap section 17 discloses.',
         _D('A store declaring a spec_version above the supported one is refused under the section 9.2 ceiling.'),
+        "Where a store meets more than one refusal above, the section 9.2 ceiling included, the check MUST report every finding it meets, and that store's refusal fixture names each of them.",
         'An input the check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission.',
         'Each refusal MUST be a fail-closed INVALID finding, never VALID.',
         'A fresh-only implementation MUST NOT grade the rest of a refused store, write, stage, or partially upgrade any file, rewrite a version declaration, fabricate provenance, or invoke another upgrader; the store and product trees, ignored files and the lease path included, MUST stay byte-identical.',
@@ -775,7 +784,8 @@ _CONTRACT = {
         "The token is stable within a base-schema major line; a store-breaking rename MUST ship only with the tested opf upgrade migration (section 9.2), which rewrites the base table and token in place so no existing adopter's manifest is stranded.",
         _D('The retired 1.0.0 token devprocess is recognized by opf upgrade, purely to carry a legacy store forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.'),
         _D('- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not authenticated history: a version declaration and the absence of listed legacy state cannot prove that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only what it lists.'),
-        _D('It does not list a legacy staging run under .working/staging/import/ or .working/staging/ingest/ that carries no legacy-format inventory, nor a legacy run archive outside .working/, which only the import_status item reaches.'),
+        _D('It does not list a legacy staging run under .working/staging/import/ or .working/staging/ingest/ that carries no legacy-format inventory, a legacy .archive/ entry that section 9.2 leaves in place with a standing finding, or a legacy run archive outside .working/, which only the import_status item reaches.'),
+        _D('Admission never reads a path registered under [unmanaged] (section 14.2), so a listed item that only the contents of such a path would show, such as a legacy-format inventory kept there, goes undetected.'),
         _D('Its refusal leaves a store unchanged but offers no preservation, repair, or continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable implementation for that store.'),
         _D('Until validation tooling ships, a class claim is self-asserted (section 16).'),
     ),
@@ -791,6 +801,36 @@ _PINNED = {
         "A profile, a store manifest field, or a command-line request MUST NOT declare, grant, or relax an implementation's class.",
     ),
 }
+
+# Plain-language surfaces restating the section 16.1 classes: sentence pins over tag-stripped,
+# whitespace-normalized text, so deleting or rewording a pinned sentence turns the gate red.
+# They are not specification sentences, so the section 2 keyword lint does not read them.
+_SURFACE = {
+    QUICKSTART: (
+        'An implementation declares a conformance class: an upgrade-capable one carries older stores forward, and a fresh-only one supports one current format and refuses by name an older store or one holding an item on its closed legacy-state list, which catches only what it lists (OPF-SPEC section 16.1).',
+    ),
+    DISCLOSURE: (
+        'A fresh-only implementation (specification section 16.1) proves tested admission and refusal behaviour, not authenticated history: it refuses by name, and leaves unchanged, an older store or one holding an item on the closed legacy-state list, which catches only what it lists; an input it cannot read is cannot-evaluate, never admitted.',
+        'It offers no upgrade, repair, or continuity, so a store holding legacy state needs an upgrade-capable implementation.',
+        'The upgrade into base 1.3.0 is still a target that the reference tooling does not yet perform, and the reference-tooling residuals above name stores its current upgrade cannot carry.',
+        'A class claim is self-asserted until validation tooling ships.',
+    ),
+}
+
+
+def _surface_text(text):
+    return " ".join(re.sub(r"<[^>]*>", "", text).replace("`", "").split())
+
+
+def surface_findings(texts=None):
+    texts = {path: path.read_text(encoding="utf-8") for path in _SURFACE} if texts is None else texts
+    findings = []
+    for path, fragments in _SURFACE.items():
+        body = _surface_text(texts[path])
+        for fragment in fragments:
+            if fragment not in body:
+                findings.append("surface {} missing contract: {}".format(path.name, fragment))
+    return findings
 
 
 def _sections(text):
@@ -2665,6 +2705,19 @@ def _self_test_vectors():
             check("spec-pin-flip-" + section + "-" + fragment,
                   lambda f=finding, m=mutated, frag=fragment, nb=normalized_body:
                   nb.count(frag) == 1 and f in contract_findings(m))
+    # Surface pins: the live files are green, each pin occurs exactly once in its normalized
+    # text, and deleting that occurrence turns the gate red with the pin's own finding.
+    surfaces = {path: path.read_text(encoding="utf-8") for path in _SURFACE}
+    check("surface-contract", lambda: not surface_findings(surfaces))
+    for path, fragments in _SURFACE.items():
+        normalized = _surface_text(surfaces[path])
+        for fragment in fragments:
+            mutated = dict(surfaces)
+            mutated[path] = normalized.replace(fragment, "", 1)
+            finding = "surface {} missing contract: {}".format(path.name, fragment)
+            check("surface-pin-flip-" + path.name + "-" + fragment,
+                  lambda f=finding, m=mutated, frag=fragment, nb=normalized:
+                  nb.count(frag) == 1 and f in surface_findings(m))
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The\s+upgrade\s+MUST\s+be\s+idempotent\.", "", body)
@@ -2731,7 +2784,8 @@ def main(argv=None):
         if args:
             print("check_opf_homes: unexpected arguments", file=sys.stderr)
             return 2
-        findings = contract_findings(SPEC.read_text(encoding="utf-8")) + keyword_findings()
+        findings = (contract_findings(SPEC.read_text(encoding="utf-8")) + keyword_findings()
+                    + surface_findings())
         for finding in findings:
             print("check_opf_homes: " + finding)
         return 1 if findings else 0

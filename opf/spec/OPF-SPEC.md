@@ -351,9 +351,13 @@ recognition is not a discovery match. For a fresh-only implementation, a recogni
 candidate, an ambiguous outcome, and an input that discovery cannot read or parse are a failed
 discovery of an existing store and MUST NOT be treated as an absent store that permits
 initialization or adoption; a recognized legacy candidate beside a matching store makes the
-outcome ambiguous. A fresh-only implementation MUST NOT treat a zero-match outcome over a present
-`.working/` as authorizing initialization or adoption by itself: where that `.working/` holds no
-recognized legacy candidate, only a section 14 first adoption authorizes initialization there,
+outcome ambiguous, which yields cannot-evaluate, not `unsupported-older-store`, a refusal that
+applies only where no matching store accompanies the legacy candidate. A fresh-only implementation
+MUST NOT treat a zero-match outcome over a present `.working/` as authorizing initialization or
+adoption by itself. Before any write there, it MUST run the section 16.1 legacy-state search over
+that whole `.working/` tree and MUST refuse each listed item it finds as `unsupported-legacy-state`;
+where that `.working/` holds no recognized legacy candidate and no section 16.1 legacy-state item,
+only a section 14 first adoption authorizes initialization there,
 through an investigation that distinguishes first adoption from re-adoption and records a
 digest-stamped inventory, and one approved plan that gives every foreign file a disposition before
 `init-store` (section 14.1).
@@ -2072,8 +2076,8 @@ every posture, before any other grading and before any write, the claim of the s
   upgrade-capable implementation, then retry;
 - as `unsupported-store-generation`, a store whose homes or worklog storage generation differs from
   the supported one, naming each generation found and supported;
-- as `unsupported-legacy-state`, a store at the supported version that holds legacy state, naming
-  each item and its path.
+- as `unsupported-legacy-state`, a store at the supported version that holds legacy state, or a
+  zero-match `.working/` that holds it (section 4.5), naming each item and its path.
 
 Legacy state is this closed list: a clean-series record, active or archived, whose `actor.kind` is
 `importer` (section 8.6); a declared `legacy_fragment` type or an LF record (section 8.1); a
@@ -2081,11 +2085,20 @@ Legacy state is this closed list: a clean-series record, active or archived, who
 14.1); an evidence inventory in the legacy format `opf.ingest.evidence-inventory/v1` (section 4.2);
 a `.working/IMPORT-REPORT.md`; and a legacy `.working/imports/` directory (section 4.4). Extending
 the list is a specification change. The check MUST search the whole `.working/` tree of the store
-repository for each item, its staging, archive, and imported areas included, and MUST read
-`import_status` from the store manifest; a legacy run archive outside `.working/`, for the
-reference tooling `.aiqt/import-archive/`, is reached only through the `import_status` item.
+repository for each item, its staging, archive, and imported areas included, within the two limits
+that follow, and MUST read `import_status` from the store manifest; a legacy run archive outside
+`.working/`, for the reference tooling `.aiqt/import-archive/`, is reached only through the
+`import_status` item. First, the check MUST match the two path-defined items, a
+`.working/IMPORT-REPORT.md` and a legacy `.working/imports/` directory, at those live paths only; a
+copy preserved under `.working/archive/adoption/<run-id>/` (section 14.2) is adoption evidence, not
+legacy state. Second, the check MUST NOT read the contents of, or enumerate beneath, a path
+registered under `[unmanaged]` (section 14.2): it matches such a path against a path-defined item
+by the path alone and leaves any other listed item kept inside it unsearched, a gap section 17
+discloses.
 
 A store declaring a `spec_version` above the supported one is refused under the section 9.2 ceiling.
+Where a store meets more than one refusal above, the section 9.2 ceiling included, the check MUST
+report every finding it meets, and that store's refusal fixture names each of them.
 An input the check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission.
 Each refusal MUST be a fail-closed INVALID finding, never VALID. A fresh-only implementation MUST
 NOT grade the rest of a refused store, write, stage, or partially upgrade any file, rewrite a
@@ -2158,8 +2171,11 @@ The gates in this standard are strong where they are strong and say so where the
   authenticated history: a version declaration and the absence of listed legacy state cannot prove
   that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only
   what it lists. It does not list a legacy staging run under `.working/staging/import/` or
-  `.working/staging/ingest/` that carries no legacy-format inventory, nor a legacy run archive
-  outside `.working/`, which only the `import_status` item reaches. Its refusal leaves a store
+  `.working/staging/ingest/` that carries no legacy-format inventory, a legacy `.archive/` entry
+  that section 9.2 leaves in place with a standing finding, or a legacy run archive outside
+  `.working/`, which only the `import_status` item reaches. Admission never reads a path registered
+  under `[unmanaged]` (section 14.2), so a listed item that only the contents of such a path would
+  show, such as a legacy-format inventory kept there, goes undetected. Its refusal leaves a store
   unchanged but offers no preservation, repair, or continuity; an adopter whose store holds legacy
   state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable
   implementation for that store. Until validation tooling ships, a class claim is self-asserted
