@@ -22,12 +22,19 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
     - a `## Detail` line, or any other line that names Detail as a heading, inside a fenced code block
       (backtick or tilde, three or more, indented up to 3 spaces) or inside an HTML comment (from `<!--`
       to the next `-->`, across lines): such a line is never the split and never skipped;
-    - a fenced code block or an HTML comment that is still open at the end of the source;
-    - an ATX heading line that names Detail in another form (another level, case, plural, spacing, or
-      trailing text), at any indent, and also behind blockquote (`>`) or list item (`-`, `*`, `+`, `1.`,
-      `1)`) markers;
+    - a fenced code block or an HTML comment that is still open at the end of the source; an HTML
+      comment opens only where `<!--` starts a line (indent up to 3 spaces), so a `<!--` later in a
+      line (such as inside a code span) is text, and `<!-->` is a whole comment;
+    - any raw HTML block line outside a fenced code block and an HTML comment: a line whose first
+      character, at indent up to 3 spaces, is `<` followed by a letter, `/`, `?`, or a `!` that does not
+      open an HTML comment (such as `<pre>`, `<div>`, `<details>`, `</div>`, `<h2>`), so a `## Detail`
+      inside an HTML block can never be taken as the split;
+    - an ATX heading line that names Detail in another form (another level, case, plural, spacing,
+      emphasis or backticks, or trailing text), at any indent, and also behind blockquote (`>`) or list
+      item (`-`, `*`, `+`, `1.`, `1)`) markers;
     - a setext heading naming Detail: a line reading `Detail` or `Details` (any case, any indent, with
-      or without trailing text) directly followed by a line of `=` or `-` characters;
+      or without emphasis, backticks or trailing text, and also behind blockquote or list item markers)
+      followed, directly or after more non-blank text lines, by a line of `=` or `-` characters;
     - an empty core layer or an empty detail layer, where a layer is empty when it holds nothing but
       blank lines and HTML comments.
   The generated read tree is still the whole source, byte for byte; the separate detail output and its
@@ -86,6 +93,12 @@ DETAIL_KEYS = {"detail-trigger", "detail-reason"}
 _NEAR_DETAIL_RE = re.compile(r'^\s{0,3}#{1,6}\s*details?\b', re.IGNORECASE)
 _CONTAINER_RE = re.compile(r'^[ \t]*(?:>|[-*+](?=[ \t])|\d{1,9}[.)](?=[ \t]))[ \t]*')
 _SETEXT_TEXT_RE = re.compile(r'^[ \t]*details?\b', re.IGNORECASE)
+# Emphasis markers and backticks, dropped from a heading's text before it is compared with Detail.
+_HEADING_MARKUP_RE = re.compile(r'[*_`]')
+# A raw HTML block start (the narrow body grammar admits none): `<` at indent 0-3 followed by a letter,
+# `/`, `?`, or `!` that does not open an HTML comment. An HTML comment opens only at the start of a line.
+_HTML_BLOCK_RE = re.compile(r'^ {0,3}<(?:[A-Za-z]|/|\?|!(?!--))')
+_COMMENT_START_RE = re.compile(r'^ {0,3}<!--')
 _SETEXT_UNDERLINE_RE = re.compile(r'^ {0,3}(?:=+|-+)[ \t]*$')
 _FENCE_OPEN_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')
 _FENCE_CLOSE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})[ \t]*$')
@@ -274,6 +287,12 @@ def _scan_body(text, name):
                 fence = (opening.group(1)[0], len(opening.group(1)), number)
                 out.append((number, line, None, line))
                 continue
+        if comment is None and _HTML_BLOCK_RE.match(line):
+            raise ValueError("{}: line {}: raw HTML block line {!r}; a rule body holds no raw HTML (a "
+                             "heading inside it is never the split)".format(name, number, line))
+        if comment is None and not _COMMENT_START_RE.match(line):
+            out.append((number, line, hidden, line))
+            continue
         visible, pos = [], 0
         while True:
             if comment is not None:
@@ -287,7 +306,7 @@ def _scan_body(text, name):
                     visible.append(line[pos:])
                     break
                 visible.append(line[pos:start])
-                comment, pos = number, start + 4
+                comment, pos = number, start + 2
         out.append((number, line, hidden, "".join(visible)))
     if fence is not None:
         raise ValueError("{}: line {}: fenced code block is never closed".format(name, fence[2]))
@@ -296,15 +315,34 @@ def _scan_body(text, name):
     return out
 
 
-def _names_detail(line):
-    """True when the line, read as an ATX heading at any indent and behind any blockquote or list item
-    markers, names Detail (any level, case, plural, spacing, or trailing text)."""
+def _uncontained(line):
+    """The line with any leading blockquote and list item markers removed."""
     while True:
         container = _CONTAINER_RE.match(line)
         if not container:
-            break
+            return line
         line = line[container.end():]
+
+
+def _names_detail(line):
+    """True when the line, read as an ATX heading at any indent and behind any blockquote or list item
+    markers, names Detail (any level, case, plural, spacing, emphasis, backticks, or trailing text)."""
+    line = _HEADING_MARKUP_RE.sub("", _uncontained(line))
     return bool(_NEAR_DETAIL_RE.match(line.lstrip(" \t")))
+
+
+def _setext_names_detail(scanned, index):
+    """True when the scanned line at index, behind any blockquote or list item markers and without
+    emphasis or backticks, starts with Detail and its paragraph (the following non-blank lines outside a
+    fence or comment) is closed by a setext underline of `=` or `-` characters."""
+    if not _SETEXT_TEXT_RE.match(_HEADING_MARKUP_RE.sub("", _uncontained(scanned[index][1]))):
+        return False
+    for _number, line, hidden, _visible in scanned[index + 1:]:
+        if hidden is not None or not _uncontained(line).strip():
+            return False
+        if _SETEXT_UNDERLINE_RE.match(_uncontained(line)):
+            return True
+    return False
 
 
 def detail_heading_line(text, name):
@@ -328,8 +366,7 @@ def detail_heading_line(text, name):
         elif _names_detail(line):
             raise ValueError("{}: line {}: heading {!r} names Detail but is not exactly '{}'".format(
                 name, number, line, DETAIL_HEADING))
-        elif (_SETEXT_TEXT_RE.match(line) and index + 1 < len(scanned) and scanned[index + 1][2] is None
-              and _SETEXT_UNDERLINE_RE.match(scanned[index + 1][1])):
+        elif _setext_names_detail(scanned, index):
             raise ValueError("{}: line {}: setext heading {!r} names Detail but is not exactly '{}'".format(
                 name, number, line, DETAIL_HEADING))
     return found
@@ -521,6 +558,26 @@ _DETAIL_CASES = (
     ("empty-detail", _TRIGGER, "\n## Detail\n", 2),
     ("comment-only-detail", _TRIGGER, "\n## Detail\n\n<!-- nothing -->\n\n", 2),
     ("non-string-trigger", "detail-trigger: [writing]\n", _DETAIL_BODY, 2),
+    ("longer-fence-close", _TRIGGER, "\n````md\n```\n## Detail\n```\n````\n", 2),
+    ("mixed-fence-close", _TRIGGER, "\n```\n~~~\n## Detail\n~~~\n```\n", 2),
+    ("backtick-info-not-fence", _TRIGGER, "\n```not` a fence\n" + _DETAIL_BODY, 0),
+    ("html-pre", _TRIGGER, "\n<pre>\n## Detail\n</pre>\n\nDetail text.\n", 2),
+    ("html-div", _TRIGGER, "\n<div>\n## Detail\n</div>\n\nDetail text.\n", 2),
+    ("html-script", _TRIGGER, "\n<script>\n## Detail\n</script>\n\nDetail text.\n", 2),
+    ("html-details", _TRIGGER, "\n<details>\n\n## Detail\n\nDetail text.\n\n</details>\n", 2),
+    ("html-close-tag", _TRIGGER, "\n</div>\n## Detail\n\nDetail text.\n", 2),
+    ("html-processing", _TRIGGER, "\n<?x\n## Detail\n?>\n\nDetail text.\n", 2),
+    ("html-declaration", _TRIGGER, "\n<!X\n## Detail\n>\n\nDetail text.\n", 2),
+    ("html-heading-near-miss", "", "\n<h2>Detail</h2>\n", 2),
+    ("blockquote-setext", "", "\n> Detail\n> ---\n", 2),
+    ("list-setext", "", "\n- Detail\n  ---\n", 2),
+    ("multiline-setext", "", "\nDetail\nnotes\n---\n", 2),
+    ("bold-setext", "", "\n**Details**\n===\n", 2),
+    ("bold-near-miss", "", "\n## **Detail**\n", 2),
+    ("underscore-near-miss", "", "\n## _Detail_\n", 2),
+    ("backtick-near-miss", "", "\n## `Detail`\n", 2),
+    ("code-span-comment-opener", _TRIGGER, "\nUse `<!--` to open a comment.\n" + _DETAIL_BODY, 0),
+    ("empty-comment", _TRIGGER, "\n<!-->\n" + _DETAIL_BODY, 0),
 )
 _CASE_FRAME = {
     "security-detail": {"family": "family: security\nfacet: SECI\n"},
@@ -531,6 +588,11 @@ _CASE_FRAME = {
 # keyset that admits the detail keys). (name, fixed text, reverted text, case, exit with the guard reverted)
 _NEAR_RE_FIXED = "_NEAR_DETAIL_RE = re.compile(r'^\\s{0,3}#{1,6}\\s*details?\\b', re.IGNORECASE)"
 _NEAR_RE_NARROW = "_NEAR_DETAIL_RE = re.compile(r'^#{3}\\s*Detail\\b')"
+_HTML_RE_FIXED = "_HTML_BLOCK_RE = re.compile(r'^ {0,3}<(?:[A-Za-z]|/|\\?|!(?!--))')"
+_HTML_GUARD = "if comment is None and _HTML_BLOCK_RE.match(line):"
+_MARKUP_FIXED = 'line = _HEADING_MARKUP_RE.sub("", _uncontained(line))'
+_SETEXT_TEXT_FIXED = '_SETEXT_TEXT_RE.match(_HEADING_MARKUP_RE.sub("", _uncontained(scanned[index][1])))'
+_FENCE_CLOSE_FIXED = "close.group(1)[0] == fence[0] and len(close.group(1)) >= fence[1]"
 _DETAIL_REVERTS = (
     ("missing-trigger", 'if "detail-trigger" not in fm:', "if False:", "detail-without-trigger", 0),
     ("orphan-keys", "        if present:\n", "        if False:\n", "trigger-without-detail", 0),
@@ -546,7 +608,7 @@ _DETAIL_REVERTS = (
     ("list-marker", "container = _CONTAINER_RE.match(line)", "container = None", "list-item-heading", 0),
     ("ordered-list-marker", "container = _CONTAINER_RE.match(line)", "container = None",
      "ordered-list-heading", 0),
-    ("setext", "elif (_SETEXT_TEXT_RE.match(line)", "elif (False", "setext-heading", 0),
+    ("setext", "elif _setext_names_detail(scanned, index):", "elif False:", "setext-heading", 0),
     ("fence-hidden", 'out.append((number, line, "a fenced code block", line))',
      "out.append((number, line, None, line))", "backtick-fenced-heading", 0),
     ("tilde-fence", "_FENCE_OPEN_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')",
@@ -571,6 +633,32 @@ _DETAIL_REVERTS = (
     ("corpus-wiring", "check_detail(read_rule_source(src), fm, src.name)", "pass", "detail-without-trigger", 0),
     ("security-detail-keys", '_check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS | DETAIL_KEYS, name)',
      '_check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS, name)', "security-detail", 2),
+    ("fence-close-length", _FENCE_CLOSE_FIXED, "close.group(1)[0] == fence[0]", "longer-fence-close", 0),
+    ("fence-close-char", _FENCE_CLOSE_FIXED, "len(close.group(1)) >= fence[1]", "mixed-fence-close", 0),
+    ("backtick-info", 'if opening and not (opening.group(1)[0] == "`" and "`" in opening.group(2)):',
+     "if opening:", "backtick-info-not-fence", 2),
+    ("html-pre", _HTML_GUARD, "if False:", "html-pre", 0),
+    ("html-div", _HTML_GUARD, "if False:", "html-div", 0),
+    ("html-script", _HTML_GUARD, "if False:", "html-script", 0),
+    ("html-details", _HTML_GUARD, "if False:", "html-details", 0),
+    ("html-heading", _HTML_GUARD, "if False:", "html-heading-near-miss", 0),
+    ("html-slash", _HTML_RE_FIXED, _HTML_RE_FIXED.replace("|/", ""), "html-close-tag", 0),
+    ("html-question", _HTML_RE_FIXED, _HTML_RE_FIXED.replace("|\\?", ""), "html-processing", 0),
+    ("html-bang", _HTML_RE_FIXED, _HTML_RE_FIXED.replace("|!(?!--)", ""), "html-declaration", 0),
+    ("setext-text-container", _SETEXT_TEXT_FIXED,
+     '_SETEXT_TEXT_RE.match(_HEADING_MARKUP_RE.sub("", scanned[index][1]))', "list-setext", 0),
+    ("setext-underline-container", "if _SETEXT_UNDERLINE_RE.match(_uncontained(line)):",
+     "if _SETEXT_UNDERLINE_RE.match(line):", "blockquote-setext", 0),
+    ("setext-paragraph", "        if _SETEXT_UNDERLINE_RE.match(_uncontained(line)):\n            return True\n",
+     "        return bool(_SETEXT_UNDERLINE_RE.match(_uncontained(line)))\n", "multiline-setext", 0),
+    ("setext-markup", _SETEXT_TEXT_FIXED, "_SETEXT_TEXT_RE.match(_uncontained(scanned[index][1]))",
+     "bold-setext", 0),
+    ("heading-bold", _MARKUP_FIXED, "line = _uncontained(line)", "bold-near-miss", 0),
+    ("heading-underscore", _MARKUP_FIXED, "line = _uncontained(line)", "underscore-near-miss", 0),
+    ("heading-backtick", _MARKUP_FIXED, "line = _uncontained(line)", "backtick-near-miss", 0),
+    ("comment-line-start", "if comment is None and not _COMMENT_START_RE.match(line):", "if False:",
+     "code-span-comment-opener", 2),
+    ("comment-empty", "comment, pos = number, start + 2", "comment, pos = number, start + 4", "empty-comment", 2),
 )
 
 

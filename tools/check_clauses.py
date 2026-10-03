@@ -50,7 +50,7 @@ gen_manifest.py at build time).
   and decode_rule_source (raw bytes, UTF-8, no newline translation), and the heading is located with
   gen_rules.detail_heading_line, so this gate refuses (exit 2) every layout gen_rules refuses: a CR byte,
   a second, near-miss, setext, blockquoted, or listed heading naming Detail, one inside a fenced code
-  block or an HTML comment, and an unclosed fence or comment. A missing, non-string, or unknown `layer`
+  block or an HTML comment, any raw HTML block line, and an unclosed fence or comment. A missing, non-string, or unknown `layer`
   value is also malformed input (exit 2); a disagreement, a crossing span, a frontmatter span, or an
   unregistered detail line is a finding (exit 1).
 
@@ -969,6 +969,10 @@ _LAYER_CASES = (
     ("setext-heading", ["core obligation", "", "Detail", "---", "", "detail obligation"],
      [(1, 0, 0, "core"), (2, 5, 5, "core")], 2),
     ("cr-byte", ["core obligation"], [(1, 0, 0, "core")], 2),
+    ("html-wrapped-heading", ["core obligation", "", "<pre>", "## Detail", "</pre>", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 4, 4, "detail"), (3, 6, 6, "detail")], 2),
+    ("blockquote-setext-heading", ["core obligation", "", "> Detail", "> ---", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 5, 5, "core")], 2),
 )
 # Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
 # importlib (never exec), must turn its case from the expected exit to the reverted exit.
@@ -988,9 +992,16 @@ _LAYER_REVERTS = (
      "partial-detail-paragraph", 0),
     ("frontmatter-span", "if start < first_body:", "if False:", "frontmatter-core-span", 0),
 )
-# The CR refusal lives in the shared gen_rules.decode_rule_source; its revert loads gen_rules with that guard
-# removed and patches this module's two rule-source readers to the reverted ones for the one case.
-_CR_REVERT = ('if b"\\r" in raw:', "if False:", "cr-byte", 0)
+# The CR refusal, the raw HTML refusal and the container setext refusal live in the shared gen_rules reader
+# and heading locator; each revert loads gen_rules with that guard removed and patches this module's rule
+# source readers and heading locator to the reverted ones for the one case.
+# (name, fixed text in gen_rules.py, reverted text, case, exit with the guard reverted)
+_SHARED_REVERTS = (
+    ("cr-byte", 'if b"\\r" in raw:', "if False:", "cr-byte", 0),
+    ("html-block", "if comment is None and _HTML_BLOCK_RE.match(line):", "if False:", "html-wrapped-heading", 0),
+    ("setext-container", "if _SETEXT_UNDERLINE_RE.match(_uncontained(line)):",
+     "if _SETEXT_UNDERLINE_RE.match(line):", "blockquote-setext-heading", 0),
+)
 
 
 def _layer_case(base, name):
@@ -1229,28 +1240,29 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
                 if got != reverted_exit:
                     failures.append("revert {}: with the guard removed, case {} expected exit {} (the guard "
                                     "is what catches it), got {}".format(label, case, reverted_exit, got))
-            old, new, case, reverted_exit = _CR_REVERT
             gr_source = (Path(__file__).resolve().parent / "gen_rules.py").read_text(encoding="utf-8")
-            if gr_source.count(old) != 1:
-                failures.append("revert cr-byte: the fixed text must occur exactly once in gen_rules.py")
-            else:
+            gr_production, gr_sep, gr_tests = gr_source.partition("\n# --- self-test ")
+            for label, old, new, case, reverted_exit in _SHARED_REVERTS:
+                if not gr_sep or gr_production.count(old) != 1:
+                    failures.append("revert {}: the fixed text must occur exactly once in gen_rules.py's "
+                                    "production code".format(label))
+                    continue
                 import importlib.util
-                gr_path = revert_base / "gen_rules_reverted_cr_byte.py"
-                gr_path.write_text(gr_source.replace(old, new, 1), encoding="utf-8")
+                gr_path = revert_base / "gen_rules_reverted_{}.py".format(label.replace("-", "_"))
+                gr_path.write_text(gr_production.replace(old, new, 1) + gr_sep + gr_tests, encoding="utf-8")
                 spec = importlib.util.spec_from_file_location(gr_path.stem, gr_path)
                 gr_mutant = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(gr_mutant)
-                saved = {k: globals()[k] for k in ("decode_rule_source", "parse_source", "read_rule_source")}
+                shared = ("decode_rule_source", "parse_source", "read_rule_source", "detail_heading_line")
+                saved = {k: globals()[k] for k in shared}
                 try:
-                    globals().update(decode_rule_source=gr_mutant.decode_rule_source,
-                                     parse_source=gr_mutant.parse_source,
-                                     read_rule_source=gr_mutant.read_rule_source)
-                    got = _run_quiet(**_paths(_layer_case(revert_base / "cr-byte", case), genesis=True))
+                    globals().update({k: getattr(gr_mutant, k) for k in shared})
+                    got = _run_quiet(**_paths(_layer_case(revert_base / label, case), genesis=True))
                 finally:
                     globals().update(saved)
                 if got != reverted_exit:
-                    failures.append("revert cr-byte: with the shared CR guard removed, case {} expected exit {}, "
-                                    "got {}".format(case, reverted_exit, got))
+                    failures.append("revert {}: with the shared guard removed, case {} expected exit {}, "
+                                    "got {}".format(label, case, reverted_exit, got))
 
             # The same corpus with the DEFERRED manifest leg armed and a matching manifest is clean; a
             # mismatching manifest fails; the default invocation reads no manifest at all.
@@ -1774,8 +1786,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "pass-through fold is permitted (exit 0)); and the clause layer: {} layer case(s) hold "
               "(derived pass, stored-layer disagreement, crossing span, unregistered detail paragraph or "
               "line, missing or unknown layer, two headings, detail row with no heading, frontmatter span, "
-              "fenced, commented, or setext heading, CR byte) and {} guard revert(s) each go red"
-              .format(core, len(_LAYER_CASES), len(_LAYER_REVERTS) + 1))
+              "fenced, commented, HTML-wrapped, setext, or blockquote setext heading, CR byte) and {} guard "
+              "revert(s) each go red"
+              .format(core, len(_LAYER_CASES), len(_LAYER_REVERTS) + len(_SHARED_REVERTS)))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
               "directory), so those invariants are UNVERIFIED this run".format(core))
