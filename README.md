@@ -47,8 +47,9 @@ Code's own limit counts file contents only, so the headers make SESSION read a l
 The gate reads only an enumerated grammar and exits 2, naming the file and line, on anything outside it: a
 control, format, or Unicode whitespace character other than tab and a line ending; frontmatter that is not
 plain ASCII keys and one-line string values; a plain `paths:` value with no `/`, `*`, `?`, `[`, `{` or
-letter-dot-letter run (such as `src` or `Makefile`), which a YAML reader could type, so quote it; an `@` import that is not plain ASCII, holds a `..`, or passes
-through a symlink; an import target it cannot read; a case variant of `CLAUDE.md`, `.claude/CLAUDE.md`,
+letter-dot-letter run (such as `src` or `Makefile`), which the gate cannot prove a YAML reader reads as a
+string (a disclosed over-refusal), so quote it; an `@` import that is not plain ASCII, holds a `..`, or
+passes through a symlink; an import target it cannot read; a case variant of `CLAUDE.md`, `.claude/CLAUDE.md`,
 or `.claude/rules/` (such as `.claude/claude.md`), which a case-insensitive file system loads; and an
 HTML comment on the same line as an `@` that starts an import, since Claude Code removes the comment and
 can join an import path across it. An `@` inside a word, such as an email address in a comment, is exempt
