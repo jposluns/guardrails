@@ -35,8 +35,8 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
   split into lines at LF only, as the body is. Each raw line, before any strip, holds no character of
   Unicode category Cc, Cf, Cn, Co, Cs, Zl or Zp (so no tab, U+0085, U+2028, U+2029, U+001C to U+001F,
   U+FFFE or U+FFFF), except ZWNJ and ZWJ (U+200C and U+200D). A line holding only spaces is skipped. Every
-  other line is `key: value`: the key at column 0, `:`, at least one space, the value, and optional
-  trailing spaces. A comment line (spaces, then `#`; YAML ignores it) is refused, and so is any other
+  other line is `key: value`: the key at column 0, optional spaces, `:`, at least one space, the value,
+  and optional trailing spaces. A comment line (spaces, then `#`; YAML ignores it) is refused, and so is any other
   indented line, except as ADOPTER MODE below allows. The value types, matched against the whole value:
     corpus-id       an id: `[a-z][a-z0-9]{5,}` (a string), `[1-9][0-9]{5,}` (an integer, as YAML reads
                     it), or quoted (below) around `[a-z0-9]{6,}` (a string);
@@ -91,11 +91,12 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
     - spaces before a key, including a whole frontmatter block indented alike (YAML reads that as a
       mapping), or no space after a key's colon (`slug:team-review`): write each `key: value` at column 0;
     - a hidden or format character (such as U+200B, U+00AD or U+FEFF) other than ZWNJ and ZWJ (U+200C,
-      U+200D), which the grammar allows, anywhere in the frontmatter, including in a comment line:
+      U+200D), which the grammar allows in free-text values and comment lines, anywhere in the
+      frontmatter, including in a comment line:
       delete it;
     - a non-ASCII space (U+00A0, U+3000 or any other Unicode space separator) anywhere in a line or
-      alone on a line, except after a comment's `#` and between the words of a detail-trigger or
-      detail-reason value: use an ASCII space or delete it;
+      alone on a line, except after a comment's `#` and inside a detail-trigger or detail-reason
+      value (not as its first or last character): use an ASCII space or delete it;
     - non-ASCII digits in a number (`tier: 10` written in Arabic-Indic digits U+0661 U+0660 or in
       fullwidth digits U+FF11 U+FF10): write ASCII digits;
     - a mapping id outside the id grammar (`A_1`, `"A.5/1"`), or a bare float id that does not print back
