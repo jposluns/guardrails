@@ -1870,12 +1870,18 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
             # (a pipe, the former channel for both, could be reopened that way), and
             # the supervisor is non-dumpable, so a same-uid process can neither list
             # nor pidfd_getfd its descriptors whatever Yama ptrace_scope says (QA7
-            # claude M1; QA8 claude M1/m4). NOT covered: the supervisor's own
-            # stdout/stderr pipes to this process, and pidfd_getfd against THIS
-            # dumpable test process at Yama ptrace_scope 0; tampering with those can
-            # only turn a pass into a failure (the supervisor's stdout must be empty,
-            # and a drained or garbled report fails the run), never a failure into a
-            # pass. Drain the socket in a thread so a large report cannot deadlock
+            # claude M1; QA8 claude M1/m4) -- that closes the report channel on the
+            # SUPERVISOR side only. NOT covered: the supervisor's own stdout/stderr
+            # pipes to this process, where tampering can only turn a pass into a
+            # failure (the supervisor's stdout must be empty, and a drained or
+            # garbled report fails the run); and THIS test process, which stays
+            # dumpable, so at Yama ptrace_scope 0 a same-uid process could
+            # pidfd_getfd this reader's report_r (and report_w until the close
+            # above) and turn a FAILURE INTO A PASS by draining the genuine report
+            # and writing a forged clean one (QA9 claude F4) -- at scope 0 such a
+            # process could already ptrace this test outright, so the route adds no
+            # new exposure, and at scope >= 1 pidfd_getfd on a non-descendant is
+            # refused. Drain the socket in a thread so a large report cannot deadlock
             # against communicate() draining the supervisor's stdio pipes.
             collected = {}
 
@@ -2424,26 +2430,110 @@ def _self_test_runtime_supervisor_unit(tmp):
         except OSError:
             pass
 
-    # QA8 claude m3: regression pin for the QA7 blocker. Parse this host file and
-    # require that neither this check's cleanup nor the shared helper signals by
-    # numeric pid: restoring the pre-fix `os.kill(child, signal.SIGKILL)` on the
-    # already-reaped child turns this red. Like _runtime_supervisor_signal_audit,
-    # a tripwire over ordinary spellings; the forged-pid run above is the
-    # behavioural safeguard.
+    # QA8 claude m3: regression pin for the QA7 blocker, widened by QA9 claude
+    # F1. Parse this host file and require, across the shared helper, this
+    # check, and EVERY _watchdog_* fixture driver (nested fixture helpers
+    # included), that a numeric signal call targets only os.getpid(), the
+    # un-reaped launcher guardian's `child.pid`, or a name whose NEAREST
+    # PRECEDING binding in the same scope is `os.fork()`, and that a bare
+    # os.pidfd_open pins only such a target: every other pid -- one read from
+    # a fixture file included -- must route through _kill_proved_child or
+    # _pidfd_proved_descendant. Inside this check and the helper themselves
+    # the rule stays TOTAL (the QA7 reaped-child class: even a fork-bound name
+    # can be stale here), so restoring the pre-fix
+    # `os.kill(child, signal.SIGKILL)` turns this red -- as does reverting any
+    # QA9 rerouted cleanup kill or proved pidfd open. Like
+    # _runtime_supervisor_signal_audit, a tripwire over ordinary spellings;
+    # the forged-pid runs are the behavioural safeguard.
     import ast
     host_tree = ast.parse(Path(__file__).read_bytes())
-    for node in ast.walk(host_tree):
-        if isinstance(node, ast.FunctionDef) and node.name in (
-                "_self_test_runtime_supervisor_unit", "_kill_proved_child"):
-            for call in ast.walk(node):
-                if not isinstance(call, ast.Call):
+
+    def scan_scope(scope, owner, total):
+        bindings, calls, nested = {}, [], []
+        arguments = scope.args
+        for argument in (tuple(getattr(arguments, "posonlyargs", ()))
+                         + tuple(arguments.args) + tuple(arguments.kwonlyargs)
+                         + tuple(filter(None, (arguments.vararg, arguments.kwarg)))):
+            bindings.setdefault(argument.arg, []).append((scope.lineno, "other"))
+
+        def bind(target, lineno, kind):
+            if isinstance(target, ast.Name):
+                bindings.setdefault(target.id, []).append((lineno, kind))
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                for element in target.elts:
+                    bind(element, lineno, "other")
+            elif isinstance(target, ast.Starred):
+                bind(target.value, lineno, "other")
+
+        def collect(node):
+            for item in ast.iter_child_nodes(node):
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    nested.append(item)
+                    bindings.setdefault(item.name, []).append((item.lineno, "other"))
                     continue
-                func = call.func
-                named = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-                if named in ("kill", "killpg", "pthread_kill"):
+                if isinstance(item, ast.Assign):
+                    kind = "fork" if (
+                        isinstance(item.value, ast.Call)
+                        and isinstance(item.value.func, ast.Attribute)
+                        and item.value.func.attr == "fork"
+                        and len(item.targets) == 1
+                        and isinstance(item.targets[0], ast.Name)) else "other"
+                    for target in item.targets:
+                        bind(target, item.lineno, kind)
+                elif isinstance(item, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)):
+                    bind(item.target, item.lineno, "other")
+                elif isinstance(item, ast.For):
+                    bind(item.target, item.lineno, "other")
+                elif isinstance(item, ast.withitem) and item.optional_vars is not None:
+                    bind(item.optional_vars, item.context_expr.lineno, "other")
+                if isinstance(item, ast.Call):
+                    calls.append(item)
+                collect(item)
+
+        collect(scope)
+
+        def fork_bound(name, lineno):
+            prior = [entry for entry in bindings.get(name, ()) if entry[0] < lineno]
+            return bool(prior) and max(prior)[1] == "fork"
+
+        def allowed(argument, lineno):
+            if isinstance(argument, ast.Call) and isinstance(argument.func, ast.Attribute) \
+                    and argument.func.attr == "getpid":
+                return True
+            if isinstance(argument, ast.Attribute) and argument.attr == "pid" \
+                    and isinstance(argument.value, ast.Name) and argument.value.id == "child":
+                return True
+            if isinstance(argument, ast.Name):
+                return fork_bound(argument.id, lineno)
+            return False
+
+        for call in calls:
+            func = call.func
+            named = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if named in ("kill", "killpg", "pthread_kill"):
+                if total:
                     faults.append("{} holds a numeric signal call ({}, line {}); the QA7 "
                                   "reaped-child kill blocker is back".format(
-                                      node.name, named, call.lineno))
+                                      owner, named, call.lineno))
+                elif not (call.args and allowed(call.args[0], call.lineno)):
+                    faults.append("{} holds a numeric signal call ({}, line {}) on a target "
+                                  "it cannot prove is its own; route it through "
+                                  "_kill_proved_child or a proved pidfd (QA9 claude F1)"
+                                  .format(owner, named, call.lineno))
+            elif named == "pidfd_open" and not total \
+                    and not (call.args and allowed(call.args[0], call.lineno)):
+                faults.append("{} opens an unproved pidfd (line {}) on a pid liveness alone "
+                              "cannot authenticate; route it through _pidfd_proved_descendant "
+                              "(QA9 codex blocker 1)".format(owner, call.lineno))
+        for inner in nested:
+            scan_scope(inner, owner, total)
+
+    for node in host_tree.body:
+        if isinstance(node, ast.FunctionDef) and (
+                node.name in ("_self_test_runtime_supervisor_unit", "_kill_proved_child")
+                or node.name.startswith("_watchdog_")):
+            scan_scope(node, node.name, node.name in (
+                "_self_test_runtime_supervisor_unit", "_kill_proved_child"))
     return faults
 
 
@@ -2918,6 +3008,52 @@ def _kill_proved_child(pid, sig=None, pidfd=None):
     finally:
         if opened:
             os.close(fd)
+
+
+def _pidfd_proved_descendant(pid, anchors):
+    """Open a pidfd on `pid` -- a pid READ FROM A FILE a fixture published, or
+    any other record liveness alone cannot authenticate (QA9 codex blocker 1 /
+    claude F3) -- and return the fd ONLY once, with the fd already pinning the
+    identity, the target's live /proc parent chain reaches one of `anchors`
+    (pids this test proved its own: a directly held un-reaped child, or
+    os.getpid()) AND the pinned target has still not exited (the held fd is
+    not yet readable), so every /proc record the walk read described the
+    pinned process, never a recycled number. Anything else -- a forged pid
+    naming an unrelated same-uid process included -- returns None with
+    NOTHING signalled and nothing left open. The held-fd-then-/proc re-check
+    order is the one _fixture_kill_group_members already uses."""
+    import select
+    anchors = {int(anchor) for anchor in anchors}
+    if not hasattr(os, "pidfd_open"):
+        return None
+    try:
+        fd = os.pidfd_open(int(pid), 0)
+    except OSError:
+        return None
+
+    def parent_of(hop):
+        try:
+            stat = Path("/proc", str(hop), "stat").read_bytes()
+        except OSError:
+            return None
+        return int(stat.rsplit(b")", 1)[1].split()[1])
+
+    hop, depth, proved = int(pid), 0, False
+    while depth < 128:
+        if hop in anchors:
+            proved = True
+            break
+        parent = parent_of(hop)
+        if parent is None or parent <= 1:
+            break
+        hop, depth = parent, depth + 1
+    if proved:
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+        if not poller.poll(0):  # not readable: the pinned target has not exited
+            return fd           # the chain the walk read belongs to this target
+    os.close(fd)
+    return None
 
 
 def _case_subreaper():
@@ -4737,11 +4873,21 @@ def _watchdog_completion_case(mode):
                         emit, "_fixture_pdeathsig", lambda: None))
                 child = emit._FixtureProcess(time.monotonic() + 3600, subject=subject_tree)
                 pid = child.start()
+                # Hold OUR OWN proved pidfd on the guardian for the whole
+                # exercise: close() runs in the worker thread below and can
+                # reap the guardian concurrently, so the freeze and the
+                # recovery SIGCONT both go through the ownership proof on
+                # this held fd, never a bare numeric pid a concurrent reap
+                # could free for reuse (QA9 codex blocker 2 / claude F2).
+                held_fd = _pidfd_proved_descendant(pid, {os.getpid()})
+                assert held_fd is not None, "the guardian pidfd proof was refused"
+                stack.callback(os.close, held_fd)
                 subject = await_child(pid, "the guardian subject never appeared")
                 descendant = await_child(subject, "the subject descendant never appeared")
                 # A stopped guardian models a cleanup that cannot make progress: it
                 # can never exit, so an unbounded close() would block until resumed.
-                os.kill(pid, signal.SIGSTOP)
+                assert _kill_proved_child(pid, signal.SIGSTOP, pidfd=held_fd), \
+                    "the guardian freeze was refused"
                 bound = time.monotonic() + 30
                 while state(pid) != "T":
                     assert time.monotonic() < bound, "the guardian did not stop"
@@ -4794,7 +4940,10 @@ def _watchdog_completion_case(mode):
                     worker.join(20)
                     blocked = worker.is_alive()
                     if blocked:
-                        os.kill(pid, signal.SIGCONT)  # unwedge the leak before failing
+                        # Unwedge the leak before failing: proof-routed, since
+                        # the worker may reap the guardian between the sample
+                        # above and this signal (QA9 codex blocker 2).
+                        _kill_proved_child(pid, signal.SIGCONT, pidfd=held_fd)
                         worker.join(30)
                 elapsed = time.monotonic() - begun
                 assert not blocked, "close() blocked past its bounded cleanup budget"
@@ -6171,7 +6320,11 @@ def _watchdog_completion_case(mode):
 
             await_file(leader_file, "the model leader never appeared")
             leader = int(leader_file.read_text(encoding="ascii"))
-            fd = os.pidfd_open(leader)
+            # The published pid is authenticated, never trusted (QA9 codex
+            # blocker 1): the held fd is returned only once the live parent
+            # chain reaches the guardian, this test's own direct child.
+            fd = _pidfd_proved_descendant(leader, {guardian})
+            assert fd is not None, "the published leader failed its descent proof"
             await_file(grandchild_file, "the model grandchild never appeared")
             grandchild = int(grandchild_file.read_text(encoding="ascii"))
             scratch = Path(directory, "opened.tmp")
@@ -6250,8 +6403,10 @@ def _watchdog_completion_case(mode):
         refuses(ValueError, lambda: legacy_escalate(leader, fd))
         await_state(leader, ("T",),
                     "the reverted probe did not strand the frozen leader")
-        os.kill(leader, signal.SIGKILL)  # hygiene for the demonstrated strand
-        os.waitpid(leader, 0)
+        # Hygiene for the demonstrated strand, through the ownership proof on
+        # the held pidfd (QA9 claude F1): the helper SIGKILLs and reaps race-free.
+        assert _kill_proved_child(leader, pidfd=fd), \
+            "the strand hygiene refused the frozen leader"
         os.close(fd)
 
         # Leg 7 (fix 2y, codex F1/F2 on the GUARDIAN path): with a frozen
@@ -6305,7 +6460,8 @@ def _watchdog_completion_case(mode):
             leader = int(leader_file.read_text(encoding="ascii"))
             await_file(grandchild_file, "the leg-7 grandchild never appeared")
             grandchild = int(grandchild_file.read_text(encoding="ascii"))
-            fd = os.pidfd_open(leader)
+            fd = _pidfd_proved_descendant(leader, {guardian})
+            assert fd is not None, "the leg-7 leader failed its descent proof"
             await_file(frozen_file, "the leg-7 guardian never froze")
             await_state(guardian, ("T",), "the leg-7 guardian did not stop")
             member_calls = []
@@ -6487,7 +6643,10 @@ def _watchdog_completion_case(mode):
             return guardian, leader, grandchild, cue, forked_file
 
         def release(guardian):
-            os.kill(guardian, signal.SIGCONT)
+            # Proof-routed resume (QA9 claude F1): the frozen guardian is this
+            # process's own un-reaped child; never trust the bare number.
+            assert _kill_proved_child(guardian, signal.SIGCONT), \
+                "the release refused the frozen guardian"
             os.waitpid(guardian, 0)
 
         # Leg 1 (codex BLOCKER 2 / gemini F2): an unreadable /proc entry is
@@ -6498,7 +6657,8 @@ def _watchdog_completion_case(mode):
         with tempfile.TemporaryDirectory(prefix="opf-unread-") as directory:
             guardian, leader, grandchild, _cue, _forked = frozen_tree(
                 Path(directory), forker=False)
-            fd = os.pidfd_open(leader)
+            fd = _pidfd_proved_descendant(leader, {guardian})
+            assert fd is not None, "the leg-1 leader failed its descent proof"
             real_os_open = os.open
             blocked = str(Path("/proc", str(grandchild), "stat"))
 
@@ -6550,7 +6710,8 @@ def _watchdog_completion_case(mode):
         with tempfile.TemporaryDirectory(prefix="opf-leaderfail-") as directory:
             guardian, leader, grandchild, _cue, _forked = frozen_tree(
                 Path(directory), forker=False)
-            fd = os.pidfd_open(leader)
+            fd = _pidfd_proved_descendant(leader, {guardian})
+            assert fd is not None, "the leg-2 leader failed its descent proof"
             real_pidfd_signal = signal.pidfd_send_signal
 
             def failing_leader_kill(target_fd, signum, *args):
@@ -6583,7 +6744,8 @@ def _watchdog_completion_case(mode):
         with tempfile.TemporaryDirectory(prefix="opf-forkrace-") as directory:
             guardian, leader, grandchild, cue, forked_file = frozen_tree(
                 Path(directory), forker=True)
-            fd = os.pidfd_open(leader)
+            fd = _pidfd_proved_descendant(leader, {guardian})
+            assert fd is not None, "the leg-3 leader failed its descent proof"
             real_listdir = os.listdir
             proc_listings = []
 
@@ -6764,7 +6926,8 @@ def _watchdog_completion_case(mode):
         # propagated BEFORE the kill and stranded the frozen leader.
         with tempfile.TemporaryDirectory(prefix="opf-cexc-") as directory:
             guardian, leader = frozen_pair(Path(directory))
-            fd = os.pidfd_open(leader)
+            fd = _pidfd_proved_descendant(leader, {guardian})
+            assert fd is not None, "the leg-1 leader failed its descent proof"
             with patch.object(emit, "_fixture_kill_group_members",
                               side_effect=RuntimeError("injected census failure")):
                 refuses(RuntimeError, lambda: emit._fixture_escalate_subject(
@@ -6772,7 +6935,51 @@ def _watchdog_completion_case(mode):
             await_state(leader, (None, "Z"),
                         "the raising census stranded the frozen subject")
             os.close(fd)
-            os.kill(guardian, signal.SIGCONT)
+            assert _kill_proved_child(guardian, signal.SIGCONT), \
+                "the leg-1 release refused the frozen guardian"
+            os.waitpid(guardian, 0)
+
+        # Leg 1f (QA9 codex blocker 1 / claude F3): a pid PUBLISHED THROUGH A
+        # FIXTURE FILE is authenticated, never trusted. Forge the file with a
+        # live, UNRELATED group leader -- a decoy whose parent chain never
+        # reaches the guardian -- and require that the descent proof refuses
+        # it BEFORE any descriptor exists to signal through: nothing is sent
+        # and the decoy survives. Removing the parent-chain walk from
+        # _pidfd_proved_descendant (or reverting any caller to a bare
+        # os.pidfd_open, which the AST pin catches) turns this red.
+        with tempfile.TemporaryDirectory(prefix="opf-forged-") as directory:
+            guardian, leader = frozen_pair(Path(directory))
+            decoy = os.fork()
+            if decoy == 0:
+                os.setsid()
+                time.sleep(3600)
+                os._exit(0)
+            await_pgid(decoy, "the decoy never took its own group")
+            scratch = Path(directory, "leader.tmp")
+            scratch.write_text(str(decoy), encoding="ascii")
+            scratch.rename(Path(directory, "leader"))
+            forged = int(Path(directory, "leader").read_text(encoding="ascii"))
+            sent = []
+            with patch.object(signal, "pidfd_send_signal",
+                              lambda target_fd, signum, *args:
+                                  sent.append((target_fd, signum))):
+                proved = _pidfd_proved_descendant(forged, {guardian})
+            assert proved is None, \
+                "a forged live group leader passed the descent proof"
+            assert sent == [], ("the forged leader was signalled", sent)
+            assert state(decoy) not in (None, "Z"), \
+                "the forged (unrelated) leader did not survive the refusal"
+            # Hygiene strictly through the proofs: the REAL leader through its
+            # proved descendant fd, the decoy and the guardian through the
+            # ownership proof on this process's own children.
+            fd = _pidfd_proved_descendant(leader, {guardian})
+            assert fd is not None, "the real leader lost its descent proof"
+            signal.pidfd_send_signal(fd, signal.SIGKILL)
+            await_state(leader, (None, "Z"), "the leg-1f hygiene did not land")
+            os.close(fd)
+            assert _kill_proved_child(decoy), "the leg-1f hygiene refused the decoy"
+            assert _kill_proved_child(guardian, signal.SIGCONT), \
+                "the leg-1f release refused the frozen guardian"
             os.waitpid(guardian, 0)
 
         # Leg 2: at the _escalate tier the guardian SIGKILL survives the
@@ -6782,8 +6989,12 @@ def _watchdog_completion_case(mode):
         # recorded nothing.
         with tempfile.TemporaryDirectory(prefix="opf-cexc2-") as directory:
             guardian, leader = frozen_pair(Path(directory))
-            guardian_fd = os.pidfd_open(guardian)
-            leader_fd = os.pidfd_open(leader)
+            guardian_fd = _pidfd_proved_descendant(guardian, {os.getpid()})
+            assert guardian_fd is not None, \
+                "the frozen guardian failed its own-child proof"
+            leader_fd = _pidfd_proved_descendant(leader, {guardian})
+            assert leader_fd is not None, \
+                "the published leader failed its descent proof"
             fake = types.SimpleNamespace(
                 pid=guardian, pidfd=guardian_fd,
                 subject_pid=leader, subject_pidfd=leader_fd,
@@ -6885,7 +7096,8 @@ def _watchdog_completion_case(mode):
         # skipped the kill and stranded the live subject.
         with tempfile.TemporaryDirectory(prefix="opf-freeze-") as directory:
             guardian, leader = frozen_pair(Path(directory))
-            fd = os.pidfd_open(leader)
+            fd = _pidfd_proved_descendant(leader, {guardian})
+            assert fd is not None, "the leg-4 leader failed its descent proof"
             real_pidfd_signal = signal.pidfd_send_signal
 
             def freeze_fault(target_fd, signum, *args):
@@ -6900,7 +7112,8 @@ def _watchdog_completion_case(mode):
                         "the freeze exception skipped the held-pidfd "
                         "subject SIGKILL")
             os.close(fd)
-            os.kill(guardian, signal.SIGCONT)
+            assert _kill_proved_child(guardian, signal.SIGCONT), \
+                "the leg-4 release refused the frozen guardian"
             os.waitpid(guardian, 0)
 
         # Leg 5 (round 24, codex boundary): at the _escalate tier the same
@@ -7050,8 +7263,12 @@ def _watchdog_completion_case(mode):
         # wording claimed "subject SIGKILL sent".
         with tempfile.TemporaryDirectory(prefix="opf-dfault-") as directory:
             guardian, leader = frozen_pair(Path(directory))
-            guardian_fd = os.pidfd_open(guardian)
-            leader_fd = os.pidfd_open(leader)
+            guardian_fd = _pidfd_proved_descendant(guardian, {os.getpid()})
+            assert guardian_fd is not None, \
+                "the frozen guardian failed its own-child proof"
+            leader_fd = _pidfd_proved_descendant(leader, {guardian})
+            assert leader_fd is not None, \
+                "the published leader failed its descent proof"
             fake = types.SimpleNamespace(
                 pid=guardian, pidfd=guardian_fd,
                 subject_pid=leader, subject_pidfd=leader_fd,
