@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "75f10831b9a80d3bda0bb8fee02aab68d8ed7c7a1632825d58b0833270e474e2"
+tree-sha256 = "ced292462f5fdc7741186c72d3683cad9266bcfd5ca44b0ac2a832c93bdfce2e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3111,8 +3111,8 @@ sha256 = "b92f3ad68ff7fc20fa7c9f8100b1692575471961fdbd833dd114a806c36a23e5"
 
 [[sources]]
 path = "site/tech-details.html"
-bytes = 22934
-sha256 = "140095a07363448badf8012dba0021888c62156ded5a5c702fa393b41c0f66b7"
+bytes = 22974
+sha256 = "6a0c94397f100fa9a467ce9bc55fd503795461bfcafa1211fab86e5458fd857d"
 
 [[sources]]
 path = "site/theme.js"
