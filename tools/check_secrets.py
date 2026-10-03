@@ -68,6 +68,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".working"}
 # Skip THIS file (it enumerates credential patterns) by its repo-relative PATH, not by basename, so a
@@ -341,7 +342,7 @@ def main() -> int:
     if error is not None:
         print(f"error: invalid entropy control constant ({error}); fail-closed", file=sys.stderr)
         return 2
-    root = Path(__file__).resolve().parents[1]
+    root = precheck_special_files(Path(__file__).resolve().parents[1])
     findings = []
     try:
         for path in sorted(walk_files(root, SKIP_DIRS)):

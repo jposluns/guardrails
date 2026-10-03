@@ -50,7 +50,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: gen_manifest.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, read_source_bytes, reconcile  # noqa: E402
+from _gen_common import repo_root, load_toml, read_source_bytes, reconcile, precheck_special_files  # noqa: E402
 import check_versions  # noqa: E402  the ONE shared ASCII SemVer validator the release gates use
 
 # Static content-bearing inputs shared by manifest.toml/root.txt/announce-snippet.txt (VERSION ->
@@ -685,7 +685,7 @@ def main():
         if i + 1 >= len(args):
             print("usage: gen_manifest.py [--check] [--root DIR] | --self-test", file=sys.stderr)
             return 2
-        root = Path(args[i + 1]).resolve()
+        root = precheck_special_files(Path(args[i + 1]).resolve())
     return run(root, "--check" in args)
 
 

@@ -30,6 +30,7 @@ from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 EN, EM = "–", "—"
 # Site host from AIQT_SITE_HOST (default, and empty-value fallback, aiqt.ai; lowercased), so a
@@ -358,7 +359,7 @@ def run(root):
 
 
 def main():
-    return run(Path(__file__).resolve().parents[1])
+    return run(precheck_special_files(Path(__file__).resolve().parents[1]))
 
 
 def _scan_root(root, subdir):

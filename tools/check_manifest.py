@@ -47,7 +47,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: check_manifest.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, read_source_bytes  # noqa: E402
+from _gen_common import repo_root, load_toml, read_source_bytes, reconcile, precheck_special_files  # noqa: E402
 import gen_manifest  # noqa: E402  reuse the validated loader/expansion; recompute, never trust output
 
 _OPF_TOOLS = str(Path(__file__).resolve().parent.parent / "opf" / "tools")
@@ -341,7 +341,7 @@ def main():
         if i + 1 >= len(args):
             print("usage: check_manifest.py [--root DIR] [--anchored] | --self-test", file=sys.stderr)
             return 2
-        root = Path(args[i + 1]).resolve()
+        root = precheck_special_files(Path(args[i + 1]).resolve())
     return run(root, anchored="--anchored" in args)
 
 
@@ -661,6 +661,81 @@ def _self_test_main_isolated():
                 if rc != 2 or "not a regular file" not in err:
                     failures.append("F-CORPUS-FIFO-HANG: a FIFO at {} expected the named refusal (exit 2, "
                                     "'not a regular file') within the alarm, got {!r}".format(label, rc))
+            # (m) The TOML-record case above is refused at the SOURCES read before load_toml opens it, so it
+            #     cannot guard load_toml: call load_toml on a FIFO directly. MUTATION: reverting load_toml
+            #     alone to open(path, "rb") blocks here and the alarm records the hang.
+            (tmp / "load-toml-fifo").mkdir()
+            os.mkfifo(tmp / "load-toml-fifo" / "record.toml")
+            previous = signal.signal(signal.SIGALRM, _on_alarm)
+            signal.alarm(10)
+            try:
+                load_toml(tmp / "load-toml-fifo" / "record.toml")
+                outcome = "loaded"
+            except _Hang:
+                outcome = "hung"
+            except OSError as exc:
+                outcome = "refused" if "not a regular file" in str(exc) else "OSError {}".format(exc)
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, previous)
+            if outcome != "refused":
+                failures.append("F-CORPUS-FIFO-HANG: load_toml on a FIFO expected the named refusal ('not a "
+                                "regular file') within the alarm, got {!r}".format(outcome))
+
+        # (n) D-400-SPECIAL-FILE-PRECHECK item 4: _gen_common.reconcile refuses a target that is a symlink (even
+        #     to identical bytes) or not a regular file, exit 2, in check and write mode; write mode never
+        #     writes through the link. MUTATION: restoring the path.exists()/read_text read passes the symlink.
+        rdir = tmp / "reconcile-targets"
+        rdir.mkdir()
+        (rdir / "real.toml").write_text("same\n", encoding="utf-8")
+        (rdir / "link.toml").symlink_to(rdir / "real.toml")
+        (rdir / "dir.toml").mkdir()
+        for label, target, check in (("a symlinked target (check)", rdir / "link.toml", True),
+                                     ("a symlinked target (write)", rdir / "link.toml", False),
+                                     ("a directory target (check)", rdir / "dir.toml", True)):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                try:
+                    got = "returned {!r}".format(reconcile(target, "changed\n" if not check else "same\n", check))
+                except SystemExit as exc:
+                    got = exc.code
+            if got != 2:
+                failures.append("reconcile on {} expected exit 2 (refused), got {!r}".format(label, got))
+        if (rdir / "real.toml").read_text(encoding="utf-8") != "same\n":
+            failures.append("reconcile wrote through a symlinked target")
+
+        # (o) D-400-SPECIAL-FILE-PRECHECK item 6: with a FIFO (no writer) at any path of the tree, each of these
+        #     tools exits 2 naming that path at the shared repo_root() precheck, bounded by a timeout. The
+        #     tree is a copy of this repository (its .git replaced by an empty directory, so repo_root() of
+        #     the copied tools resolves to the copy). MUTATION: making precheck_special_files a no-op leaves
+        #     check_versions/check_byte_canon/gen_manifest/conformance hanging or passing on these paths.
+        if hasattr(os, "mkfifo"):
+            import subprocess
+            tree = tmp / "precheck-tree"
+            shutil.copytree(repo_root(), tree, symlinks=True,
+                            ignore=shutil.ignore_patterns(".git", "__pycache__"))
+            (tree / ".git").mkdir()
+            tools = (["check_manifest.py"], ["gen_manifest.py", "--check"], ["gen_rules.py", "--check"],
+                     ["conformance.py"], ["check_versions.py"], ["check_byte_canon.py"])
+            for rel in ("tools/gen_agents.py", ".claude/rules/aiqt/00-project-integrity.md", "CLAUDE.md",
+                        ".aiqt/manifest.toml", ".aiqt/standards/atlas.toml", "VERSION"):
+                saved = (tree / rel).read_bytes()
+                (tree / rel).unlink()
+                os.mkfifo(tree / rel)
+                try:
+                    for cmd in tools:
+                        try:
+                            proc = subprocess.run([sys.executable, "-I", "-B", str(tree / "tools" / cmd[0]),
+                                                   *cmd[1:]], cwd=tree, capture_output=True, text=True,
+                                                  timeout=10)
+                            got, err = proc.returncode, proc.stderr
+                        except subprocess.TimeoutExpired:
+                            got, err = "hung", ""
+                        if got != 2 or str(tree / rel) not in err:
+                            failures.append("D-400-SPECIAL-FILE-PRECHECK: a FIFO at {} expected {} to exit 2 "
+                                            "naming it, got {!r}".format(rel, " ".join(cmd), got))
+                finally:
+                    (tree / rel).unlink()
+                    (tree / rel).write_bytes(saved)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -677,7 +752,9 @@ def _self_test_main_isolated():
           "gen_rules constants is exit 1; an unknown top-level key in the order, references, or "
           "dispositions record and an unsatisfiable quorum each fail closed (exit 2, F-237); and "
           "check_manifest independently rejects an output at git index mode 100755 (exit 2, F-236); a "
-          "FIFO at a SOURCES member or a TOML record is refused (exit 2) inside an alarm, never a hang")
+          "FIFO at a SOURCES member, a TOML record, or load_toml is refused (exit 2) inside an alarm, never a "
+          "hang; reconcile refuses a symlinked or directory target (exit 2); and a FIFO at any of six tree "
+          "paths makes six gates exit 2 by name at the repo_root() special-file precheck")
     return 0
 
 

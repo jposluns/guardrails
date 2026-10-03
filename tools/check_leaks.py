@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 SKIP_NAMES = {"leak-hashes.txt"}
@@ -118,7 +119,7 @@ def scan_text(text, hashes, maxn, honor_leak_allow=True):
 
 
 def main():
-    root = Path(__file__).resolve().parents[1]
+    root = precheck_special_files(Path(__file__).resolve().parents[1])
     try:
         # load_denylist reads a required file (the leak-hash denylist); keep it inside the fail-closed
         # try so an unreadable denylist is a clean exit 2, not a traceback.

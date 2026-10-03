@@ -11,11 +11,12 @@ silently drift (including orphaned generated files with no source). Vendored `ex
 """
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, read_source_text  # noqa: E402
+from _gen_common import SourceReadRefused, repo_root, read_source_text  # noqa: E402
 from _standards import dir_present, map_keys  # noqa: E402
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
@@ -198,7 +199,14 @@ def load_corpus(src_dir):
     def _raise(exc):
         raise exc
     md_files = []
-    for dirpath, _dirs, filenames in os.walk(src_dir, onerror=_raise):
+    for dirpath, dirs, filenames in os.walk(src_dir, onerror=_raise):
+        # A '*.md' entry that is not a regular file (a directory, a symlink, a FIFO) is a named refusal,
+        # never a silent drop: os.walk lists a directory named x.md among dirs (and descends into it), so
+        # without this the rule would vanish from the corpus and write mode would delete its output.
+        for name in sorted(dirs + filenames):
+            if name.endswith(".md") and not stat.S_ISREG(os.lstat(Path(dirpath) / name).st_mode):
+                raise SourceReadRefused("{}: refused, a rule source that is not a regular file (a "
+                                        "directory, symlink, or special file)".format(Path(dirpath) / name))
         md_files.extend(Path(dirpath) / fn for fn in filenames if fn.endswith(".md"))
     for src in sorted(md_files):
         fm = parse_source(src)
@@ -242,7 +250,10 @@ def run(root, check):
     try:
         for rel, content in sorted(desired.items()):
             target = out_dir / rel
-            current = target.read_text(encoding="utf-8") if target.exists() else None
+            try:  # the shared reader: a symlinked or non-regular generated target is refused (OSError, exit 2)
+                current = read_source_text(target)
+            except FileNotFoundError:
+                current = None
             if current != content:
                 drift.append(rel)
                 if not check:
@@ -376,6 +387,45 @@ def self_test_main():
             signal.signal(signal.SIGALRM, previous)
             shutil.rmtree(ftmp, ignore_errors=True)
 
+    # D-400-SPECIAL-FILE-PRECHECK item 3: a '*.md' rule source that turned into a directory or a symlink is
+    # a named refusal (exit 2, "not a regular file") in check AND write mode, never a silent drop; write
+    # mode must keep the generated rule it would otherwise delete as an orphan. MUTATION: dropping the
+    # load_corpus lstat check makes check mode exit 1 (orphan drift) and write mode delete the target.
+    for kind in ("directory", "symlink"):
+        for check in (True, False):
+            try:
+                ktmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-rules-nonfile-"))
+            except OSError as exc:
+                print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+                return 2
+            try:
+                ksrc = ktmp / ".aiqt" / "core" / "rules"
+                ksrc.mkdir(parents=True)
+                kout = ktmp / ".claude" / "rules" / _RULE_REL
+                kout.parent.mkdir(parents=True)
+                kout.write_text(_RULE_SRC, encoding="utf-8")
+                if kind == "directory":
+                    (ksrc / "gen-rules-selftest-target.md").mkdir()
+                else:
+                    (ktmp / "elsewhere.md").write_text(_RULE_SRC, encoding="utf-8")
+                    (ksrc / "gen-rules-selftest-target.md").symlink_to(ktmp / "elsewhere.md")
+                out = io.StringIO()
+                with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                    try:
+                        rc = run(ktmp, check)
+                    except Exception as exc:  # noqa: BLE001  a regression surfaces as a failure, not an abort
+                        rc = "raised {}".format(type(exc).__name__)
+                if rc != 2 or "not a regular file" not in out.getvalue():
+                    failures.append("a {} rule source ({} mode) expected the named refusal (exit 2, 'not a "
+                                    "regular file'), got {!r}".format(kind, "check" if check else "write", rc))
+                if not kout.is_file():
+                    failures.append("write mode deleted a generated rule because its source became a "
+                                    "{}".format(kind))
+            except OSError as exc:
+                failures.append("a {} rule source fixture could not be built: {}".format(kind, exc))
+            finally:
+                shutil.rmtree(ktmp, ignore_errors=True)
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
@@ -383,7 +433,8 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: an invalid-UTF-8 generated target fails closed (exit 2), not a raw "
           "UnicodeDecodeError traceback (guards the widened reconcile arm); a FIFO rule source is refused "
-          "(exit 2) inside an alarm, never a hang.")
+          "(exit 2) inside an alarm, never a hang; a rule source that became a directory or a symlink is "
+          "refused by name (exit 2) in check and write mode and its generated rule is kept.")
     return 0
 
 

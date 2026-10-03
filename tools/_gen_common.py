@@ -58,11 +58,60 @@ def is_external_url(href):
     return not (host == site or host.endswith("." + site))
 
 
+_PRECHECKED_ROOTS = set()
+_SPECIAL_KINDS = ((stat.S_ISFIFO, "a FIFO"), (stat.S_ISSOCK, "a socket"), (stat.S_ISBLK, "a block device"),
+                  (stat.S_ISCHR, "a character device"))
+
+
+def precheck_special_files(root):
+    """Refuse a repository tree that holds a special file, before any tool reads from it
+    (D-400-SPECIAL-FILE-PRECHECK). Walk root (os.walk with a raising onerror, never following a symlink,
+    pruning every entry named .git), lstat every entry, and on the first FIFO, socket, block or character
+    device print its path and exit 2 (the gates' fail-closed exit), as on an unlistable directory. A FIFO
+    with no writer blocks any plain read of it forever, so one walk at the common entry point replaces
+    routing every reader of the tree through the non-blocking reader one by one. Runs once per process per
+    root (cached); returns root so a caller can wrap the expression that computes it.
+
+    Callers: repo_root() on its real-repository path (the .git ancestor), and every gate that accepts an
+    explicit --root, on that root. The shared reader (read_source_bytes) stays on the corpus and manifest
+    paths as defence in depth. Out of scope: a special file created after this walk (a concurrent writer),
+    a vanished entry (skipped), and a tool that bypasses both repo_root() and --root (listed as uncovered
+    in the change record)."""
+    root = Path(root)
+    key = os.path.abspath(root)
+    if key in _PRECHECKED_ROOTS:
+        return root
+
+    def _raise(exc):
+        raise exc
+    try:
+        for dirpath, dirnames, filenames in os.walk(root, onerror=_raise, followlinks=False):
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            for name in dirnames + filenames:
+                if name == ".git":
+                    continue
+                path = os.path.join(dirpath, name)
+                try:
+                    mode = os.lstat(path).st_mode
+                except FileNotFoundError:
+                    continue
+                for is_kind, kind in _SPECIAL_KINDS:
+                    if is_kind(mode):
+                        print("error: {}: refused, {} in the repository tree (a special file, not a regular "
+                              "file); remove it; fail-closed".format(path, kind), file=sys.stderr)
+                        raise SystemExit(2)
+    except OSError as exc:
+        print("error: cannot walk the repository tree {} ({}); fail-closed".format(root, exc), file=sys.stderr)
+        raise SystemExit(2)
+    _PRECHECKED_ROOTS.add(key)
+    return root
+
+
 def repo_root(start=None):
     p = Path(start or __file__).resolve()
     for anc in [p, *p.parents]:
         if (anc / ".git").exists():
-            return anc
+            return precheck_special_files(anc)
     return Path.cwd()
 
 
@@ -164,10 +213,15 @@ def reconcile(path, new_text, check):
     so a drift gate or a regeneration never dies unhandled on a read-only fs, a permission error, or a
     full disk. An invalid-UTF-8 (non-decodable) existing target is mapped to the same exit 2: read_text
     decodes as UTF-8, so a corrupt target raises UnicodeDecodeError, and that is fail-closed too rather
-    than a raw traceback."""
+    than a raw traceback. The current target is read through read_source_text, so a target that is a
+    symlink (even a dangling one) or not a regular file (a FIFO, a directory) is refused, exit 2, in both
+    modes: check never compares through a link and write never writes through one."""
     path = Path(path)
     try:
-        current = path.read_text(encoding="utf-8") if path.exists() else None
+        try:
+            current = read_source_text(path)
+        except FileNotFoundError:
+            current = None
         if check:
             return current != new_text
         path.write_text(new_text, encoding="utf-8")

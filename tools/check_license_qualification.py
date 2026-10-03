@@ -98,6 +98,7 @@ from pathlib import Path
 # check_internal_names.py).
 sys.path.append(str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 # CLASS 1: a whole-project license claim is one of the four claim verbs directly governing "under the
 # Apache License 2.0". Matched case-insensitively, with \s+ between tokens so a line-wrapped claim is
@@ -356,7 +357,7 @@ def main():
     args = parser.parse_args()
     if args.self_test:
         return _self_test()
-    root = Path(__file__).resolve().parents[1]
+    root = precheck_special_files(Path(__file__).resolve().parents[1])
     try:
         findings, claims = _collect(root)
     except _FailClosed as exc:

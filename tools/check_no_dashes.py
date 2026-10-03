@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 from _standards import dir_present  # noqa: E402  fail-closed absence probe (raises on an unreadable parent)
 
 EN_DASH = "–"
@@ -21,7 +22,7 @@ SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[1]
+    root = precheck_special_files(Path(__file__).resolve().parents[1])
     findings = []
     try:
         paths = sorted(walk_files(root, SKIP_DIRS, suffixes={".md", ".mdc"}))

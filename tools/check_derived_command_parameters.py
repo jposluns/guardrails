@@ -60,6 +60,7 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 CONFIG_REL = ".aiqt/derived-command-parameters.toml"
 ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")           # a kebab-case binding identifier
@@ -862,7 +863,7 @@ def main():
     (self_test,) = parsed
     if self_test:
         return self_test_main()
-    root = Path(__file__).resolve().parents[1]
+    root = precheck_special_files(Path(__file__).resolve().parents[1])
     return run(root)
 
 

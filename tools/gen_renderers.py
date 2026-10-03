@@ -34,7 +34,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import repo_root, reconcile, precheck_special_files  # noqa: E402
 from gen_rules import SLUG_RE  # noqa: E402  the authoritative renderer-id slug syntax
 import gen_gensrc  # noqa: E402  reuse its validated GENSRC_OUTPUTS loader, never a second parser
 
@@ -234,7 +234,7 @@ def main():
         if i + 1 >= len(args):
             print("usage: gen_renderers.py [--check] [--root DIR] | --self-test", file=sys.stderr)
             return 2
-        root = Path(args[i + 1]).resolve()
+        root = precheck_special_files(Path(args[i + 1]).resolve())
     return run(root, "--check" in args)
 
 

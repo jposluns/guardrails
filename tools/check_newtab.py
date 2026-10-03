@@ -39,7 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk
-from _gen_common import is_external_url, load_toml  # noqa: E402
+from _gen_common import is_external_url, load_toml, precheck_special_files  # noqa: E402
 
 
 class _Anchors(HTMLParser):
@@ -625,7 +625,7 @@ def _self_test():
 def main():
     if "--self-test" in sys.argv[1:]:
         return _self_test()
-    return run(Path(__file__).resolve().parents[1])
+    return run(precheck_special_files(Path(__file__).resolve().parents[1]))
 
 
 if __name__ == "__main__":
