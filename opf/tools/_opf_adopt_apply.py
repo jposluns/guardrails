@@ -169,6 +169,7 @@ PLAN_V2_FORMAT = schema.PLAN_FORMAT
 # The run's evidence-bundle members apply persists: the approved plan and its captured approval (spec 14.1).
 PLAN_NAME = "plan.toml"
 APPROVAL_NAME = "approval.toml"
+BASE_PHASE = "base"    # the [adoption] identity phase of inventory.toml (spec 4.2)
 # The stage every plan op composes in during apply; the retirement stage follows a green completion check.
 APPLY_STAGE = "apply"
 # The driver's mandatory receipt stage (spec 14), composed after every plan row whatever the plan carries.
@@ -250,7 +251,12 @@ def evidence_home_rel(run_id):
 
 
 def inventory_rel(run_id, phase=None):
-    """The bundle-root inventory: `inventory.toml`, or `inventory-<phase>.toml` for a later phase."""
+    """The bundle-root inventory: `inventory.toml`, or `inventory-<phase>.toml` for a later phase. The
+    base phase name is reserved for `inventory.toml` itself (spec 4.2), so no later phase is ever named
+    `base` and one phase spelling never answers to two file names."""
+    if phase == BASE_PHASE:
+        raise AdoptApplyError("evidence inventory: invalid evidence inventory phase {!r}: the base phase "
+                              "name is reserved for inventory.toml (spec 4.2)".format(phase))
     try:
         return store.evidence_inventory(KIND, run_id, phase)
     except ValueError as exc:
@@ -275,6 +281,20 @@ def _plan_hex(plan_digest):
     if not schema._is_digest(plan_digest):
         raise AdoptApplyError("plan digest {!r} is not a sha256:<64 hex> digest".format(plan_digest))
     return plan_digest[len("sha256:"):]
+
+
+def _plan_digest_of(plan_bytes):
+    """The `plan_digest` the plan bytes carry, shape-checked only: the doctor proves the identity digest
+    against the PROVEN plan (_opf_adopt_state), so this read stays light and a plan frozen by the real
+    planner always yields its own sealed digest. Raises AdoptApplyError on unreadable bytes or a
+    missing or malformed digest."""
+    try:
+        doc = tomllib.loads(plan_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise AdoptApplyError("the plan carries no readable plan_digest ({}); fail-closed".format(exc))
+    digest = doc.get("plan_digest") if isinstance(doc, dict) else None
+    _plan_hex(digest)
+    return digest
 
 
 # --- live re-observation (investigation is not a snapshot; "Re-observe at apply") ---------------------
@@ -336,17 +356,32 @@ def validate_inventory(doc, run_id):
     return schema._ok()
 
 
+def inventory_identity(run_id, doc):
+    """The validated (phase, plan_digest) [adoption] identity of one parsed adoption inventory
+    (spec 4.2), through the doctor's own validator; raises AdoptApplyError on a missing, malformed or
+    foreign-run identity."""
+    import _opf_check
+    try:
+        return _opf_check._adoption_identity(run_id, doc)
+    except (TypeError, ValueError, KeyError) as exc:
+        raise AdoptApplyError("inventory identity: {}".format(exc))
+
+
 def inventory_row(path, data):
     """One inventory row for retained bytes at a store-relative path (spec 4.2 row shape)."""
     return dict(path=path, size=len(data), sha256=_sha256(data))
 
 
-def emit_inventory(run_id, rows):
-    """Canonical inventory bytes for the adoption bundle of `run_id`: rows sorted by path, validated
-    fail-closed FIRST so a malformed row can never reach bytes. Raises AdoptApplyError on any refusal."""
+def emit_inventory(run_id, rows, phase=None, plan_digest=None):
+    """Canonical inventory bytes for the adoption bundle of `run_id`: rows sorted by path, carrying the
+    [adoption] identity table (the run id, the phase, `base` when None, and the plan digest, spec 4.2),
+    validated fail-closed FIRST so a malformed row or identity can never reach bytes. Raises
+    AdoptApplyError on any refusal, a missing or malformed plan digest included."""
     if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         raise AdoptApplyError("inventory rows must be a list of tables")
     doc = dict(format=store.EVIDENCE_INVENTORY_FORMAT,
+               adoption=dict(run_id=run_id, phase=BASE_PHASE if phase is None else phase,
+                             plan_digest=plan_digest),
                file=sorted((dict(r) for r in rows), key=lambda r: str(r.get("path"))))
     checked = validate_inventory(doc, run_id)
     if checked.status != store.VALID:
@@ -578,10 +613,11 @@ class ApplyOps:
     final inventory derived from the list itself. check_apply_ops re-proves every invariant over the
     finished list, so a hand-built list is held to the same rules."""
 
-    def __init__(self, root_fd, run_id, phase=None):
+    def __init__(self, root_fd, run_id, phase=None, plan_digest=None):
         self.root_fd = root_fd
         self.run_id = run_id
         self.phase = phase
+        self.plan_digest = plan_digest
         self.inventory = inventory_rel(run_id, phase)
         self.ops = []
         self.staged = {}
@@ -643,9 +679,28 @@ class ApplyOps:
         data, mode = self.preserve(source_path, plan_digest)
         self.ops.append(_pinned_remove(source_path, data, mode))
 
+    def _sealing_plan_digest(self):
+        """The plan digest the sealed inventory's [adoption] identity carries (spec 4.2): the explicit
+        one this transaction was opened with, else the staged plan's own (the base transaction stages the
+        plan), else the committed bundle plan's own (a later phase extends the committed base); with none
+        of the three the transaction cannot seal (fail-closed)."""
+        if self.plan_digest is not None:
+            return self.plan_digest
+        staged = self.staged.get(plan_rel(self.run_id))
+        if isinstance(staged, bytes):
+            return _plan_digest_of(staged)
+        fst, data = _read_live(self.root_fd, plan_rel(self.run_id))
+        if fst is not None:
+            return _plan_digest_of(data)
+        raise AdoptApplyError("the transaction stages no plan and the bundle holds none, so the sealed "
+                              "inventory's [adoption] identity cannot name a plan digest (spec 4.2); "
+                              "pass one explicitly (fail-closed)")
+
     def seal(self):
-        """Create this transaction's inventory, derived from its own op list, as its final op."""
-        data = emit_inventory(self.run_id, derive_rows(self.run_id, self.ops, self.staged))
+        """Create this transaction's inventory, derived from its own op list and carrying the run, phase
+        and plan identity (spec 4.2), as its final op."""
+        data = emit_inventory(self.run_id, derive_rows(self.run_id, self.ops, self.staged),
+                              self.phase, self._sealing_plan_digest())
         self.create(self.inventory, data)
         self.sealed = True
 
@@ -741,8 +796,16 @@ def check_apply_ops(run_id, phase, ops, staged):
                         "lists".format(target))
     else:
         try:
-            derived = emit_inventory(run_id, derive_rows(run_id, ops[:-1], staged))
-        except (AdoptApplyError, KeyError, TypeError, AttributeError) as exc:
+            sealed_doc = tomllib.loads(staged.get(target, b"").decode("utf-8"))
+            identity = sealed_doc.get("adoption") if isinstance(sealed_doc, dict) else None
+            claimed = identity.get("plan_digest") if isinstance(identity, dict) else None
+            plan_staged = staged.get(plan_rel(run_id))
+            if isinstance(plan_staged, bytes) and claimed != _plan_digest_of(plan_staged):
+                findings.append("inventory {!r} does not carry the staged plan's own plan_digest in its "
+                                "[adoption] identity (spec 4.2)".format(target))
+            derived = emit_inventory(run_id, derive_rows(run_id, ops[:-1], staged), phase, claimed)
+        except (AdoptApplyError, KeyError, TypeError, AttributeError, UnicodeDecodeError,
+                tomllib.TOMLDecodeError) as exc:
             findings.append("no inventory can be derived from this transaction ({})".format(exc))
         else:
             if staged.get(target) != derived:
@@ -979,11 +1042,11 @@ def _committed_base_or_refuse(root_fd, journal_root, run_id, phase):
                               "(fail-closed)".format(phase))
 
 
-def _compose_checked(root_fd, run_id, phase, compose):
+def _compose_checked(root_fd, run_id, phase, compose, plan_digest=None):
     """Compose ONE transaction against the live tree beneath `root_fd`, read-only: compose(ops) fills a fresh
     ApplyOps, the derived inventory seals it, and check_apply_ops re-proves every invariant, so a refusal here
     has written nothing. Returns the sealed ApplyOps."""
-    ops = ApplyOps(root_fd, run_id, phase)
+    ops = ApplyOps(root_fd, run_id, phase, plan_digest)
     compose(ops)
     ops.seal()
     findings = check_apply_ops(run_id, phase, ops.ops, ops.staged)
@@ -1422,7 +1485,7 @@ def _lock_said(lock_state, lock_note):
                              lock_state, "this run's journal lock outcome was not observed")
 
 
-def run_adopt_transaction(product_root, run_id, compose, phase=None):
+def run_adopt_transaction(product_root, run_id, compose, phase=None, plan_digest=None):
     """ONE journaled adoption transaction, the run's base transaction or one later phase's, through the
     shared 9.3 engine. Refusals BEFORE anything is written, in order: containment, a non-clean journal
     (reconcile-first: the adoption journal is inspected FIRST, per the module docstring), the store
@@ -1522,7 +1585,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 maybe_mine = mine is None
             except (_journal.JournalError, OSError) as exc:
                 raise AdoptApplyError("cannot read back the adoption journal lock this run took ({})".format(exc))
-            ops = _compose_checked(root_fd, run_id, phase, compose)
+            ops = _compose_checked(root_fd, run_id, phase, compose, plan_digest)
             staged = dict(ops.staged)
 
             def staged_reader(op):
@@ -2184,6 +2247,22 @@ def _self_test_checks():
         except AdoptApplyError as exc:
             return None, str(exc)
 
+    _t_plan_digest = "sha256:" + "ab" * 32
+    _emit_inventory = globals()["emit_inventory"]
+    _run_adopt_transaction = globals()["run_adopt_transaction"]
+
+    def emit_inventory(run_id_, rows, phase=None, plan_digest=None):
+        """Self-test shadow of the module emitter: the fixtures stage no plan, so every fixture inventory
+        carries the one fixture plan digest in its [adoption] identity unless a vector passes its own."""
+        return _emit_inventory(run_id_, rows, phase,
+                               _t_plan_digest if plan_digest is None else plan_digest)
+
+    def run_adopt_transaction(product_root, run_id_, compose, phase=None, plan_digest=None):
+        """Self-test shadow of the module transaction: the fixture plan digest for every transaction that
+        does not name its own (the fixtures stage no plan the digest could be derived from)."""
+        return _run_adopt_transaction(product_root, run_id_, compose, phase,
+                                      _t_plan_digest if plan_digest is None else plan_digest)
+
     def dead_pid():
         """A pid with POSITIVE evidence of death (ProcessLookupError on signal 0), for the stale-lock
         vector. Nothing is spawned or signalled; EPERM or any ambiguity keeps searching."""
@@ -2269,9 +2348,41 @@ def _self_test_checks():
     check("inventory-reemit-fixed-point", emit_inventory(rid, doc["file"]) == data)
 
     def variant(**changes):
-        d = dict(format=store.EVIDENCE_INVENTORY_FORMAT, file=[dict(r) for r in doc["file"]])
+        d = dict(format=store.EVIDENCE_INVENTORY_FORMAT, adoption=dict(doc["adoption"]),
+                 file=[dict(r) for r in doc["file"]])
         d.update(changes)
         return d
+
+    def identity_variant(**changes):
+        d = variant()
+        d["adoption"] = dict(d["adoption"], **changes)
+        for key, value in list(changes.items()):
+            if value is None:
+                del d["adoption"][key]
+        return d
+
+    # The [adoption] identity (spec 4.2, the run-binding ruling): emitted bytes carry exactly the run,
+    # the phase and the plan digest; a missing or malformed identity, a foreign run and a foreign or
+    # reserved phase are each CANNOT-EVALUATE, and an inventory of another kind never carries the table.
+    check("inventory-identity-emitted", doc["adoption"] == dict(
+        run_id=rid, phase=BASE_PHASE, plan_digest=_t_plan_digest))
+    check("inventory-identity-phase-emitted", tomllib.loads(emit_inventory(
+        rid, [], "retirement").decode("utf-8"))["adoption"]["phase"] == "retirement")
+    check("inventory-identity-missing-cannot-eval", validate_inventory(dict(
+        format=store.EVIDENCE_INVENTORY_FORMAT, file=[dict(r) for r in doc["file"]]), rid).status == CANNOT)
+    check("inventory-identity-foreign-run-cannot-eval",
+          validate_inventory(identity_variant(run_id=other_run), rid).status == CANNOT)
+    for label, broken in (("extra-key", identity_variant(note=1)),
+                          ("missing-digest", identity_variant(plan_digest=None)),
+                          ("short-digest", identity_variant(plan_digest="sha256:" + "a" * 63)),
+                          ("unprefixed-digest", identity_variant(plan_digest="ab" * 32)),
+                          ("bad-phase", identity_variant(phase="Bad/../phase")),
+                          ("uppercase-phase", identity_variant(phase="Retirement"))):
+        check("inventory-identity-{}-cannot-eval".format(label),
+              validate_inventory(broken, rid).status == CANNOT)
+    check("emit-missing-digest-refused", "identity" in
+          (refusal(_emit_inventory, rid, []) or ""))
+    check("base-phase-name-reserved", "reserved" in (refusal(inventory_rel, rid, BASE_PHASE) or ""))
 
     dup = variant()
     dup["file"].append(dict(dup["file"][0]))

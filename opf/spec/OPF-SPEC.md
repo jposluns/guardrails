@@ -271,6 +271,16 @@ canonical store-relative file path spelled from `.working/`), `size` (a nonnegat
 bundle-root inventory, a Move destination, default or explicit, under `.working/archive/moved/`, or, for an
 adoption bundle, a preserved file of the same run, a retire preimage or an archived occupying
 source, under `.working/archive/adoption/<run-id>/`.
+An adoption bundle's inventory MUST also hold exactly one `[adoption]` identity table whose keys
+are exactly `run_id`, `phase` and `plan_digest`: the bundle's own run id, the phase this
+inventory records, spelled `base` for `inventory.toml` and as the file name's `<phase>` for a
+later phase, whose name MUST NOT be `base`, and the run's approved plan's own `plan_digest` in
+the `sha256:` form with 64 lowercase hex digits. An inventory of any other kind MUST NOT carry
+that identity table. The apply side MUST write that identity when it derives the inventory, and
+the doctor MUST refuse an adoption inventory whose identity is missing or malformed, names
+another run, names a phase other than the one its file name carries, or names a plan digest
+other than the proven plan's own, so an inventory copied from another run or phase, an empty
+retirement record included, never evaluates as this run's record.
 The owning writer or migration MUST derive each inventory from the run's transaction record or
 receipt and MUST publish it exclusively with the retained bytes. An inventory MUST NOT be rewritten,
 so a bundle stays immutable and an evidence commit changes only its bundle folder. An inventory is
@@ -1967,7 +1977,9 @@ The reserved children `archive/`, `imported/`, `staging/`, and `journals/` are O
 Detection MUST NOT surface them as adopter content, an adoption option MUST NOT select them, and
 an `[unmanaged]` declaration MUST NOT equal, contain, or lie within them. Adoption evidence MUST
 be committed and immutable under `.working/imported/adoption/<run-id>/`; append-only outcome
-events retain the receipt's history. In homes 2, transaction records live under `.working/journals/adoption/`;
+events retain the receipt's history. Every adoption evidence inventory MUST carry the
+section 4.2 `[adoption]` identity table, naming its own run id, its phase and the approved
+plan's `plan_digest`. In homes 2, transaction records live under `.working/journals/adoption/`;
 homes 1 retains its legacy journal paths and completion-carried evidence checks.
 
 After adoption, containment uses the receipt-bound `import_status` and the bounded treatment of

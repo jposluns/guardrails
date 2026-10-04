@@ -131,6 +131,9 @@ _CONTRACT = {
         _D('Each evidence bundle .working/imported/<kind>/<run-id>/ carries its own inventories at its root: inventory.toml, plus a new inventory-<phase>.toml for each later phase, where <phase> is a lowercase letter followed by up to 31 lowercase letters or digits.'),
         _D('Each holds exactly format = "opf.evidence.inventory/v1" and a file array whose rows have exactly path (a canonical store-relative file path spelled from .working/), size (a nonnegative integer), and sha256 (64 lowercase hex digits).'),
         _D('A row may name a member of its own bundle other than a bundle-root inventory, a Move destination, default or explicit, under .working/archive/moved/, or, for an adoption bundle, a preserved file of the same run, a retire preimage or an archived occupying source, under .working/archive/adoption/<run-id>/.'),
+        "An adoption bundle's inventory MUST also hold exactly one [adoption] identity table whose keys are exactly run_id, phase and plan_digest: the bundle's own run id, the phase this inventory records, spelled base for inventory.toml and as the file name's <phase> for a later phase, whose name MUST NOT be base, and the run's approved plan's own plan_digest in the sha256: form with 64 lowercase hex digits.",
+        'An inventory of any other kind MUST NOT carry that identity table.',
+        "The apply side MUST write that identity when it derives the inventory, and the doctor MUST refuse an adoption inventory whose identity is missing or malformed, names another run, names a phase other than the one its file name carries, or names a plan digest other than the proven plan's own, so an inventory copied from another run or phase, an empty retirement record included, never evaluates as this run's record.",
         "The owning writer or migration MUST derive each inventory from the run's transaction record or receipt and MUST publish it exclusively with the retained bytes.",
         'An inventory MUST NOT be rewritten, so a bundle stays immutable and an evidence commit changes only its bundle folder.',
         _D('An inventory is not a journal projection and remains available in a clone without journals.'),
@@ -681,6 +684,7 @@ _CONTRACT = {
         _D('The reserved children archive/, imported/, staging/, and journals/ are OPF control area.'),
         'Detection MUST NOT surface them as adopter content, an adoption option MUST NOT select them, and an [unmanaged] declaration MUST NOT equal, contain, or lie within them.',
         "Adoption evidence MUST be committed and immutable under .working/imported/adoption/<run-id>/; append-only outcome events retain the receipt's history.",
+        "Every adoption evidence inventory MUST carry the section 4.2 [adoption] identity table, naming its own run id, its phase and the approved plan's plan_digest.",
         _D('In homes 2, transaction records live under .working/journals/adoption/; homes 1 retains its legacy journal paths and completion-carried evidence checks.'),
         'After adoption, containment uses the receipt-bound import_status and the bounded treatment of section 11: a plan-enumerated frozen retire, move or migrate source whose live bytes still match its plan digest MUST be reported rather than failed until its retirement is recorded, whatever the status, and a drifted source MUST fail at required exactly as section 11 defines.',
         'An unregistered path outside that enumerated scope MUST fail containment at required.',
@@ -950,6 +954,12 @@ def boundary_self_test():
     def doc(*rows):
         return {"format": "opf.evidence.inventory/v1", "file": list(rows)}
 
+    def adoc(*rows, phase="base"):
+        # An adoption bundle's inventory carries the [adoption] identity table (spec 4.2).
+        out = doc(*rows)
+        out["adoption"] = dict(run_id=adopt_run, phase=phase, plan_digest="sha256:" + "0" * 64)
+        return out
+
     def row(path, raw=b"retained"):
         return {"path": path, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
 
@@ -1000,10 +1010,10 @@ def boundary_self_test():
             members = (source, moved, receipt, preimage)
             for path in members:
                 add(path, b"retained")
-            for inventory, rows in ((bundle + "/inventory.toml", (row(source), row(moved))),
-                                    (adoption + "/inventory.toml", (row(receipt), row(preimage)))):
+            for inventory, built in ((bundle + "/inventory.toml", doc(row(source), row(moved))),
+                                     (adoption + "/inventory.toml", adoc(row(receipt), row(preimage)))):
                 add(inventory, b"")
-                inventories[inventory] = doc(*rows)
+                inventories[inventory] = built
             check("evidence-members-match", lambda: not evidence().findings and not evidence().cannot)
             check("evidence-not-containment-graded", lambda: not containment(model=manifest2).findings)
         # Nothing reads a homes-1 store's evidence homes; its containment walk grades them as before.
@@ -1055,26 +1065,49 @@ def boundary_self_test():
             add(probe, b"retained")
             check("evidence-unclaimed-phase-member", lambda: graded(evidence(), probe))
             add(adoption + "/inventory-evidence.toml", b"")
-            inventories[adoption + "/inventory-evidence.toml"] = doc(row(probe))
+            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
             check("evidence-phase-inventory", lambda: not evidence().findings and not evidence().cannot)
+            # The [adoption] identity binds each inventory to its run and its phase (spec 4.2): a
+            # foreign run id, a phase other than the file name's, a later phase named base, a missing
+            # identity, and an identity on a non-adoption inventory are each cannot-evaluate.
+            good_phase = copy.deepcopy(inventories[adoption + "/inventory-evidence.toml"])
+            foreign = adoc(row(probe), phase="evidence")
+            foreign["adoption"] = dict(foreign["adoption"],
+                                           run_id=adopt_run.replace("0123", "4567"))
+            for label, broken in (("foreign-run", foreign),
+                                  ("foreign-phase", adoc(row(probe), phase="completion")),
+                                  ("base-phase-name", adoc(row(probe), phase="base")),
+                                  ("missing-identity", doc(row(probe)))):
+                inventories[adoption + "/inventory-evidence.toml"] = broken
+                check("evidence-identity-" + label, lambda: bool(evidence().cannot)
+                      and not evidence().findings)
+            inventories[adoption + "/inventory-evidence.toml"] = good_phase
+            crossed_kind = doc(row(source), row(moved))
+            crossed_kind["adoption"] = dict(good_phase["adoption"])
+            inventories[bundle + "/inventory.toml"] = crossed_kind
+            check("evidence-identity-foreign-kind", lambda: bool(evidence().cannot)
+                  and not evidence().findings)
+            inventories[bundle + "/inventory.toml"] = doc(row(source), row(moved))
+            check("evidence-identity-restored", lambda: not evidence().findings and not evidence().cannot)
             # A phase inventory never substitutes for a missing inventory.toml: the founding claims are
             # unknown, so the bundle cannot evaluate, even when the phase inventory lists every member.
             first = adoption + "/inventory.toml"
             founding = inventories.pop(first)
             del files[first]
-            inventories[adoption + "/inventory-evidence.toml"] = doc(row(probe), *founding["file"])
+            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), *founding["file"],
+                                                                       phase="evidence")
             check("evidence-phase-without-first-cannot", lambda: any(
                 "no inventory.toml" in s for s in evidence().cannot) and not evidence().findings)
             add(first, b"")
             inventories[first] = founding
-            inventories[adoption + "/inventory-evidence.toml"] = doc(row(probe))
+            inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence")
             check("evidence-phase-restored", lambda: not evidence().findings and not evidence().cannot)
             inventory = bundle + "/inventory.toml"
             good = copy.deepcopy(inventories)
             # A claim on another bundle's member or another run's preimage is refused on its own, so the
             # rightful owner's inventory drops that row here rather than masking it as a duplicate claim.
             # An import bundle claiming a preimage path under its OWN run id is refused by its kind alone.
-            sole = {"cross-bundle": doc(row(preimage)), "foreign-preimage": doc(row(receipt))}
+            sole = {"cross-bundle": adoc(row(preimage)), "foreign-preimage": adoc(row(receipt))}
             own_preimage = ".working/archive/adoption/" + run + "/file"
             # Every malformed or unreadable inventory is cannot-evaluate and grades nothing partially.
             for label, broken in (
@@ -1097,7 +1130,7 @@ def boundary_self_test():
                 inventories[adoption + "/inventory.toml"] = sole.get(label, good[adoption + "/inventory.toml"])
                 check("evidence-malformed-" + label, lambda: bool(evidence().cannot) and not evidence().findings)
             inventories.update(copy.deepcopy(good))
-            inventories[adoption + "/inventory.toml"] = doc(row(receipt), row(preimage), row(moved))
+            inventories[adoption + "/inventory.toml"] = adoc(row(receipt), row(preimage), row(moved))
             check("evidence-cross-duplicate-refused", lambda: bool(evidence().cannot))
             inventories.update(copy.deepcopy(good))
             # An unreadable or vanished inventory leaves its bundle's claims unknown: cannot-evaluate

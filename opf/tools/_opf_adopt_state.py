@@ -318,10 +318,18 @@ def _admit_run(root_fd, run_id, machine_rel, in_repo, budget):
         return cant("{!r}: {}".format(inv_rel, "; ".join(graded.findings)))
     if graded.status != store.VALID:
         return refuse("{!r}: {}".format(inv_rel, "; ".join(graded.findings)))
+    # The [adoption] identity (spec 4.2, the run-binding ruling): the VALID grade above already proved
+    # the identity well-formed and bound to this bundle's run id; the base inventory must also carry the
+    # base phase, so an inventory copied from another phase refuses, and once the plan is proven below
+    # its plan digest must be the proven plan's own.
+    phase_id, claimed_digest = apply.inventory_identity(run_id, doc)
+    if phase_id != apply.BASE_PHASE:
+        return refuse("its inventory.toml carries the [adoption] identity of phase {!r}, not the base "
+                      "phase (an inventory copied from another phase)".format(phase_id))
     # The sealed record (spec 4.2): only the canonical emission of its own rows is the committed inventory;
     # appended, reordered or hand-edited bytes refuse. This detects accidents, not deliberate forgery.
     try:
-        sealed = apply.emit_inventory(run_id, [dict(row) for row in doc["file"]])
+        sealed = apply.emit_inventory(run_id, [dict(row) for row in doc["file"]], None, claimed_digest)
     except apply.AdoptApplyError as exc:
         return cant(str(exc))
     if sealed != data:
@@ -382,6 +390,9 @@ def _admit_run(root_fd, run_id, machine_rel, in_repo, budget):
         return cant("its plan describes the store at root {!r} with machine store {!r}, not this store "
                     "(machine store {!r}, in-repo {}): the plan does not describe this store".format(
                         ident.get("store_root"), ident.get("machine_rel"), machine_rel, in_repo))
+    if claimed_digest != plan_doc.get("plan_digest"):
+        return refuse("its inventory.toml [adoption] identity names plan digest {!r}, not its own proven "
+                      "plan's (a misplaced or stale record)".format(claimed_digest))
     # A row under the shared Move root is committed evidence like any other (QA round 3): it is admitted
     # only when the proven plan's own move rows record that exact destination, and its live bytes must
     # hold the row's recorded size and digest, so a listed Move-root file that no move row of this run's
@@ -427,7 +438,21 @@ def _retired(root_fd, run_id, plan_doc, base_rows, budget):
     graded = apply.validate_inventory(doc, run_id)
     if graded.status != store.VALID:
         raise apply.AdoptApplyError("{!r} is not a VALID inventory ({})".format(rel, "; ".join(graded.findings)))
-    if apply.emit_inventory(run_id, [dict(row) for row in doc["file"]]) != data:
+    # The [adoption] identity (spec 4.2, the run-binding ruling): the VALID grade proved it well-formed
+    # and bound to this bundle's run id; the record must also carry the retirement phase and the proven
+    # plan's own digest, so an inventory copied from another run or phase, an empty record included,
+    # never reads as retired.
+    phase_id, claimed_digest = apply.inventory_identity(run_id, doc)
+    if phase_id != RETIREMENT_PHASE:
+        raise apply.AdoptApplyError("{!r} carries the [adoption] identity of phase {!r}, not the "
+                                    "retirement phase (an inventory copied from another phase); whether "
+                                    "the run retired is unknown".format(rel, phase_id))
+    if claimed_digest != plan_doc.get("plan_digest"):
+        raise apply.AdoptApplyError("{!r} names plan digest {!r} in its [adoption] identity, not the "
+                                    "proven plan's own (a record of another run or plan); whether the "
+                                    "run retired is unknown".format(rel, claimed_digest))
+    if apply.emit_inventory(run_id, [dict(row) for row in doc["file"]], RETIREMENT_PHASE,
+                            claimed_digest) != data:
         raise apply.AdoptApplyError("{!r} is not the sealed canonical inventory of its own rows (a hand "
                                     "edit, a reordering or stale bytes); whether the run retired is "
                                     "unknown".format(rel))
@@ -667,6 +692,16 @@ def _self_test_checks():
             return 2
         runs = {frozen_a[0]: frozen_a[1:], frozen_b[0]: frozen_b[1:]}
         rid, rid_b = frozen_a[0], frozen_b[0]
+
+        def plan_digest_of(plan_bytes):
+            return tomllib.loads(plan_bytes.decode("utf-8"))["plan_digest"]
+
+        pdig = dict((r, plan_digest_of(runs[r][0])) for r in runs)
+
+        def emit_inv(rid_, rows, phase=None):
+            """Fixture inventories carry the run's own [adoption] identity (spec 4.2): its run id, the
+            phase (base when None) and its real frozen plan's own digest."""
+            return apply.emit_inventory(rid_, rows, phase, pdig[rid_])
         home = apply.evidence_home_rel(rid)
         plan_rel, approval_rel = home + "/" + apply.PLAN_NAME, home + "/" + apply.APPROVAL_NAME
         imp_run = "imp-20260917T120000Z-0123456789abcdef"
@@ -709,7 +744,7 @@ def _self_test_checks():
         def relist(root, rid_, paths=None):
             rows = [apply.inventory_row(rel, (root / rel).read_bytes()) for rel in (listed(rid_) if paths is None
                                                                                      else paths)]
-            write(root, apply.inventory_rel(rid_), apply.emit_inventory(rid_, rows))
+            write(root, apply.inventory_rel(rid_), emit_inv(rid_, rows))
             commit(root, rid_)
 
         def bundle(root, rid_, plan_bytes=None, approval_bytes=None):
@@ -941,7 +976,7 @@ def _self_test_checks():
         # never read as retired.
         marker = apply.inventory_rel(rid, RETIREMENT_PHASE)
         root = tree()
-        write(root, marker, apply.emit_inventory(rid, []))
+        write(root, marker, emit_inv(rid, [], RETIREMENT_PHASE))
         rep = contain(root)
         check("retirement-marker-unproven-cannot", named(rep.cannot, marker) and bounded(rep) == [])
         os.unlink(root / old)
@@ -989,7 +1024,7 @@ def _self_test_checks():
         # are each CANNOT, never read as retired.
         root = tree()
         retire(root, rid)
-        write(root, marker, apply.emit_inventory(rid, []))
+        write(root, marker, emit_inv(rid, [], RETIREMENT_PHASE))
         rep = contain(root)
         check("retirement-missing-destination-cannot", named(rep.cannot, marker, "destination")
               and bounded(rep) == [])
@@ -999,8 +1034,8 @@ def _self_test_checks():
         check("retirement-marker-is-base-inventory-cannot", named(rep.cannot, marker)
               and bounded(rep) == [])
         root = tree()
-        write(root, marker, apply.emit_inventory(rid, [apply.inventory_row(
-            apply.archive_rel(rid, src), sources[src]) for src in (old, note, move)]))
+        write(root, marker, emit_inv(rid, [apply.inventory_row(
+            apply.archive_rel(rid, src), sources[src]) for src in (old, note, move)], RETIREMENT_PHASE))
         rep = contain(root)
         check("retirement-preimage-shape-is-stale-cannot", named(rep.cannot, marker, "Move destination")
               and bounded(rep) == [])
@@ -1034,22 +1069,22 @@ def _self_test_checks():
         root = tree()
         write(root, moved, b"wrong moved bytes\n")
         relist(root, rid, listed(rid) + [moved])
-        write(root, marker, apply.emit_inventory(rid, [apply.inventory_row(moved, sources[move])]))
+        write(root, marker, emit_inv(rid, [apply.inventory_row(moved, sources[move])], RETIREMENT_PHASE))
         rep = contain(root)
         check("retirement-contradicts-base-cannot", named(rep.cannot, marker, "claimed twice")
               and bounded(rep) == [])
         root = tree()
         write(root, moved, sources[move])
         relist(root, rid, listed(rid) + [moved])
-        write(root, marker, apply.emit_inventory(rid, [dict(apply.inventory_row(moved, sources[move]),
-                                                            size=len(sources[move]) + 100)]))
+        write(root, marker, emit_inv(rid, [dict(apply.inventory_row(moved, sources[move]),
+                                                size=len(sources[move]) + 100)], RETIREMENT_PHASE))
         rep = contain(root)
         check("retirement-size-contradiction-cannot", named(rep.cannot, marker, "claimed twice")
               and bounded(rep) == [])
         root = tree()
         write(root, moved, sources[move])
         relist(root, rid, listed(rid) + [moved])
-        write(root, marker, apply.emit_inventory(rid, [apply.inventory_row(moved, sources[move])]))
+        write(root, marker, emit_inv(rid, [apply.inventory_row(moved, sources[move])], RETIREMENT_PHASE))
         for src in (old, note, move):
             os.unlink(root / src)
         rep = contain(root)
@@ -1059,9 +1094,9 @@ def _self_test_checks():
         # nothing else).
         root = tree()
         retire(root, rid)
-        write(root, marker, apply.emit_inventory(rid, [
+        write(root, marker, emit_inv(rid, [
             apply.inventory_row(moved, sources[move]),
-            apply.inventory_row(apply.archive_rel(rid, keep), sources[keep])]))
+            apply.inventory_row(apply.archive_rel(rid, keep), sources[keep])], RETIREMENT_PHASE))
         rep = contain(root)
         check("retirement-foreign-row-cannot", named(rep.cannot, marker) and bounded(rep) == [])
         # The recorded destination is live committed evidence (QA round 4): after the recorded
@@ -1083,7 +1118,7 @@ def _self_test_checks():
               any("absent" in m and rid in m for m in rep.cannot) and bounded(rep) == [])
         root = tree()
         write(root, moved, b"evil\n")
-        write(root, marker, apply.emit_inventory(rid, [apply.inventory_row(moved, b"evil\n")]))
+        write(root, marker, emit_inv(rid, [apply.inventory_row(moved, b"evil\n")], RETIREMENT_PHASE))
         rep = contain(root)
         check("retirement-destination-not-at-plan-digest-cannot",
               named(rep.cannot, marker, "plan digest") and bounded(rep) == [])
@@ -1134,6 +1169,7 @@ def _self_test_checks():
         check("occupying-fixture-frozen-by-the-real-planner", frozen_o is not None)
         if frozen_o is not None:
             rid_o = frozen_o[0]
+            pdig[rid_o] = plan_digest_of(frozen_o[1])
             plan_o = tomllib.loads(frozen_o[1].decode("utf-8"))
             occ_dest, occ_arch = store.moved_dest(occ), apply.archive_rel(rid_o, occ)
             rows_o = dict((r["path"], r) for r in plan_o["sources"])
@@ -1221,6 +1257,7 @@ def _self_test_checks():
         check("explicit-destination-fixture-frozen-by-the-real-planner", frozen_x is not None)
         if frozen_x is not None:
             rid_x = frozen_x[0]
+            pdig[rid_x] = plan_digest_of(frozen_x[1])
             plan_x = tomllib.loads(frozen_x[1].decode("utf-8"))
             occx_arch = apply.archive_rel(rid_x, occ)
             rows_x = dict((r["path"], r) for r in plan_x["sources"])
@@ -1288,7 +1325,7 @@ def _self_test_checks():
         unbound = apply.emit_checked(dict(tomllib.loads(runs[rid][1].decode("utf-8")),
                                           plan_digest="sha256:" + "0" * 64)).encode("utf-8")
         record("missing-inventory", drop(inventory), "finding", "is absent")
-        record("phase-inventory-without-base", both(drop(inventory), put(marker, apply.emit_inventory(rid, []))),
+        record("phase-inventory-without-base", both(drop(inventory), put(marker, emit_inv(rid, [], RETIREMENT_PHASE))),
                "cannot", "without inventory.toml")
         record("plan-not-listed", lambda root: relist(root, rid, [approval_rel]), "finding", "not listed")
         record("plan-listed-but-absent", drop(plan_rel), "finding", "absent")
@@ -1296,7 +1333,9 @@ def _self_test_checks():
                "cannot")
         record("inventory-not-toml", put(inventory, b"not toml [\n"), "cannot", "malformed TOML")
         record("inventory-path-claimed-twice", put(inventory, apply.emit_checked(dict(
-            format=store.EVIDENCE_INVENTORY_FORMAT, file=[row, row])).encode("utf-8")), "cannot", "more than once")
+            format=store.EVIDENCE_INVENTORY_FORMAT,
+            adoption=dict(run_id=rid, phase=apply.BASE_PHASE, plan_digest=pdig[rid]),
+            file=[row, row])).encode("utf-8")), "cannot", "more than once")
         record("legacy-ingest-inventory", put(inventory, apply.emit_checked(dict(
             format="opf.ingest.evidence-inventory/v1", file=[])).encode("utf-8")), "finding", "legacy-ingest")
         record("plan-not-decodable", put(plan_rel, b"\xff\xfe", relisted=True), "cannot", "malformed TOML")
@@ -1318,9 +1357,9 @@ def _self_test_checks():
         record("inventory-not-sealed",
                lambda root: (root / inventory).write_bytes((root / inventory).read_bytes() + b"\n"),
                "finding", "sealed")
-        record("inventory-of-another-run", put(inventory, apply.emit_inventory(rid_b, [apply.inventory_row(
+        record("inventory-of-another-run", put(inventory, emit_inv(rid_b, [apply.inventory_row(
             apply.evidence_home_rel(rid_b) + "/" + apply.PLAN_NAME, runs[rid_b][0])])), "cannot",
-            "cannot claim")
+            "names run")
         record("archive-row-absent", drop(apply.archive_rel(rid, mig)), "finding", "absent")
         record("archive-row-tampered", put(apply.archive_rel(rid, mig), b"evil\n"), "finding",
                "does not match")
@@ -1343,6 +1382,72 @@ def _self_test_checks():
         record("moved-row-tampered", both(craft_moved_base, put(moved, b"evil\n")), "finding",
                "does not match")
         record("moved-row-absent", both(craft_moved_base, drop(moved)), "finding", "absent")
+
+        # The run-binding ruling (PD-INVENTORY-RUN-BINDING option 1; codex round 6): every adoption
+        # inventory carries its [adoption] identity (run id, phase, plan digest), written by the apply
+        # side when it derives the inventory and checked by the doctor, so an inventory copied from
+        # another run or phase, and one with a missing or malformed identity, never evaluates. Each
+        # vector fails without the identity check: the unit seam uses the retire-only plan, whose empty
+        # sealed record otherwise reads as retired (the round-6 codex reproduction).
+        def unit_retired(root_):
+            fd = os.open(str(root_), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                try:
+                    return reader._retired(fd, rid, retire_only, {}, [reader.READ_CEILING]), None
+                except apply.AdoptApplyError as exc:
+                    return None, str(exc)
+            finally:
+                os.close(fd)
+
+        # 1 (the round-6 reproduction): another run's EMPTY sealed retirement record, copied byte for
+        # byte onto this run's retirement name, refuses at the unit seam and is CANNOT at the doctor,
+        # so the vanished frozen retire sources stay visible rather than suppressed.
+        root = tree()
+        write(root, marker, emit_inv(rid_b, [], RETIREMENT_PHASE))
+        os.unlink(root / old)
+        os.unlink(root / note)
+        unit, why = unit_retired(root)
+        rep = contain(root)
+        check("retirement-record-of-another-run-refused", unit is None and why is not None
+              and "names run" in why and named(rep.cannot, marker) and bounded(rep) == [])
+        # 2: another phase's identity at the retirement name (an empty completion-phase record copied
+        # onto it) refuses, never read as retired.
+        root = tree()
+        write(root, marker, emit_inv(rid, [], "completion"))
+        unit, why = unit_retired(root)
+        rep = contain(root)
+        check("retirement-record-of-another-phase-refused", unit is None and why is not None
+              and "another phase" in why and named(rep.cannot, marker) and bounded(rep) == [])
+        # 2b: the base inventory's identity binds it to the base phase: the base re-emitted with the
+        # retirement-phase identity (the same rows at the same plan digest) refuses admission.
+        root = tree()
+        doc_base = tomllib.loads((root / inventory).read_bytes().decode("utf-8"))
+        write(root, inventory, apply.emit_inventory(rid, [dict(r) for r in doc_base["file"]],
+                                                    RETIREMENT_PHASE, pdig[rid]))
+        rep = contain(root)
+        check("base-inventory-of-another-phase-refused",
+              any(rid in m and "another phase" in m for m in rep.findings)
+              and rep.cannot == [] and bounded(rep) == [])
+        # 3: a missing identity (the pre-ruling record shape) and a malformed one (an extra key) are
+        # each CANNOT, at the retirement name and at the base.
+        root = tree()
+        write(root, marker, apply.emit_checked(dict(format=store.EVIDENCE_INVENTORY_FORMAT,
+                                                    file=[])).encode("utf-8"))
+        unit, why = unit_retired(root)
+        rep = contain(root)
+        check("retirement-record-identity-missing-refused", unit is None and why is not None
+              and "identity" in why and named(rep.cannot, marker) and bounded(rep) == [])
+        record("inventory-identity-missing", put(inventory, apply.emit_checked(dict(
+            format=store.EVIDENCE_INVENTORY_FORMAT,
+            file=[dict(r) for r in doc_base["file"]])).encode("utf-8")), "cannot", "identity")
+        record("inventory-identity-malformed", put(inventory, apply.emit_checked(dict(
+            format=store.EVIDENCE_INVENTORY_FORMAT,
+            adoption=dict(run_id=rid, phase=apply.BASE_PHASE, plan_digest=pdig[rid], note=1),
+            file=[dict(r) for r in doc_base["file"]])).encode("utf-8")), "cannot", "identity")
+        # 4: a base identity naming a plan digest other than the proven plan's own refuses admission.
+        record("inventory-identity-foreign-plan-digest", put(inventory, apply.emit_inventory(
+            rid, [dict(r) for r in doc_base["file"]], None, "sha256:" + "0" * 64)), "finding",
+            "not its own proven")
 
         # Stale identity: a plan that does not describe this in-repo store cannot be evaluated.
         root = tree()

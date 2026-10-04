@@ -14285,7 +14285,8 @@ def _cli_self_test():
                     # done: a COMPLETED engine transaction (its journal entry stays, and its bundle is VALID).
                     done = os.path.join(abase, "done")
                     os.mkdir(done)
-                    _opf_adopt_apply.run_adopt_transaction(done, adopt_rid, lambda ops: None)
+                    _opf_adopt_apply.run_adopt_transaction(done, adopt_rid, lambda ops: None,
+                                                           plan_digest="sha256:" + "ab" * 32)
                     # an empty (nothing-opened) journal entry, which the engine classifies as clean.
                     unopened = os.path.join(abase, "unopened")
                     os.makedirs(os.path.join(unopened, adopt_j_rel, "txn"))
@@ -15698,7 +15699,8 @@ def _close_exc_safe_vectors_self_test():
             try:
                 with mock.patch.object(_opf_adopt_apply, "_open_product_root", open_root):
                     _opf_adopt_apply.run_adopt_transaction(
-                        str(product), "adopt-20260101T000000Z-0123456789abcdef", compose)
+                        str(product), "adopt-20260101T000000Z-0123456789abcdef", compose,
+                        plan_digest="sha256:" + "ab" * 32)
             finally:
                 shutil.rmtree(str(product), ignore_errors=True)
         return call

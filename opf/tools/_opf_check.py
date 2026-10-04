@@ -1968,14 +1968,65 @@ class _LegacyIngestInventory(ValueError):
     """Recognized unsupported format: a named finding, not an unreadable inventory."""
 
 
+ADOPTION_BASE_PHASE = "base"    # the [adoption] identity phase of inventory.toml (spec 4.2)
+
+
+def _inventory_phase(name):
+    """The identity phase a bundle-root inventory file name carries (spec 4.2): `inventory.toml` is the
+    base phase; `inventory-<phase>.toml` is that later phase, whose name is never `base` (the base phase
+    name is reserved, so one phase spelling never answers to two file names). Raises ValueError."""
+    if not _opf_store.is_evidence_inventory_name(name):
+        raise ValueError("{!r} is not an evidence inventory name".format(name))
+    if name == "inventory.toml":
+        return ADOPTION_BASE_PHASE
+    phase = name[len("inventory-"):-len(".toml")]
+    if phase == ADOPTION_BASE_PHASE:
+        raise ValueError("a later phase inventory is never named {!r}: the base phase name is reserved "
+                         "for inventory.toml (spec 4.2)".format(name))
+    return phase
+
+
+def _adoption_identity(run_id, doc):
+    """The validated (phase, plan_digest) identity of ONE adoption inventory (spec 4.2): the [adoption]
+    table holds exactly the bundle's own run id, a phase name and a sha256:<64 lowercase hex> plan
+    digest. Anything else raises ValueError, so a copied, misplaced or malformed record never evaluates;
+    the phase-to-file-name and plan-digest-to-proven-plan bindings are each caller's own check (this
+    helper sees neither the file name nor the plan)."""
+    block = doc.get("adoption") if isinstance(doc, dict) else None
+    if not isinstance(block, dict) or set(block) != {"run_id", "phase", "plan_digest"}:
+        raise ValueError("the [adoption] identity table holds exactly run_id, phase and plan_digest "
+                         "(spec 4.2)")
+    if block["run_id"] != run_id:
+        raise ValueError("the [adoption] identity names run {!r}, not the bundle run {!r} (an inventory "
+                         "copied from another run, spec 4.2)".format(block["run_id"], run_id))
+    phase = block["phase"]
+    if not isinstance(phase, str) or (phase != ADOPTION_BASE_PHASE and not (
+            _opf_store.is_evidence_inventory_name("inventory-{}.toml".format(phase)))):
+        raise ValueError("the [adoption] identity phase {!r} is not a phase name (spec 4.2)".format(phase))
+    digest = block["plan_digest"]
+    if (not isinstance(digest, str) or not digest.startswith("sha256:")
+            or not _HEX64_RE.fullmatch(digest[len("sha256:"):])):
+        raise ValueError("the [adoption] identity plan_digest is not a sha256:<64 lowercase hex> digest "
+                         "(spec 4.2)")
+    return phase, digest
+
+
 def _evidence_rows(bundle, kind, run_id, doc):
-    """Shared schema/path validation for doctor and the adoption apply shell; never upgrades old bytes."""
+    """Shared schema/path validation for doctor and the adoption apply shell; never upgrades old bytes.
+    An adoption inventory additionally holds exactly one [adoption] identity table, validated here
+    against the bundle's own run id (spec 4.2); an inventory of any other kind never carries one."""
     if isinstance(doc, dict) and doc.get("format") == "opf.ingest.evidence-inventory/v1":
         raise _LegacyIngestInventory("legacy-ingest-inventory: old-format ingest inventory is unsupported; "
                                      "refused without migration or rewrite")
-    if (not isinstance(doc, dict) or set(doc) != {"format", "file"}
+    keys = {"format", "file", "adoption"} if kind == "adoption" else {"format", "file"}
+    if (not isinstance(doc, dict) or set(doc) != keys
             or doc["format"] != EVIDENCE_FORMAT or not isinstance(doc["file"], list)):
+        if kind == "adoption":
+            raise ValueError("an adoption inventory holds exactly format {!r}, an [adoption] identity "
+                             "table and a file array (spec 4.2)".format(EVIDENCE_FORMAT))
         raise ValueError("an inventory holds exactly format {!r} and a file array".format(EVIDENCE_FORMAT))
+    if kind == "adoption":
+        _adoption_identity(run_id, doc)
     for row in doc["file"]:
         if not isinstance(row, dict) or set(row) != {"path", "size", "sha256"}:
             raise ValueError("file rows require exactly path, size and sha256")
@@ -2045,6 +2096,13 @@ def _check_evidence(root_fd, homes, rep):
                 if row["path"] in expected:
                     raise ValueError("{!r} is claimed more than once".format(row["path"]))
                 expected[row["path"]] = row
+            if kind == "adoption":
+                phase, _plan = _adoption_identity(run_id, doc)
+                named_phase = _inventory_phase(rel.rsplit("/", 1)[-1])
+                if phase != named_phase:
+                    raise ValueError("the [adoption] identity names phase {!r}, not the {!r} phase its "
+                                     "file name carries (an inventory copied from another phase, "
+                                     "spec 4.2)".format(phase, named_phase))
         except _LegacyIngestInventory as exc:
             rep.finding("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))
             failed[0] = True
