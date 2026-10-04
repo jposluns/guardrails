@@ -2087,8 +2087,13 @@ def _require_unapplied(product_root, run_id):
 def observe_revision(product_root):
     """The live product revision, OBSERVED (spec 14.1: the plan binds the observed revision, and any
     bound-item drift refuses): the commit HEAD names at `product_root`, from ONE read-only
-    `git rev-parse --verify` with an explicit -C binding, replacement objects off and every GIT_* variable
-    scrubbed, so an ambient GIT_DIR or GIT_WORK_TREE cannot redirect the answer. Investigation never enters
+    `git rev-parse --verify` with an explicit -C binding, replacement objects off, every ambient GIT_*
+    variable scrubbed, and the global and system git configuration neutralized (GIT_CONFIG_NOSYSTEM=1,
+    GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM pinned to the null device, the _opf_observe._scrubbed_env
+    convention for every read-only observation), so an ambient GIT_DIR or GIT_WORK_TREE cannot redirect
+    the answer and host configuration (a system core.hooksPath, a core.fsmonitor program, or a malformed
+    global config) can neither run code during the observation nor change or break it: the answer is the
+    repository's alone. Investigation never enters
     .git and takes the revision from the worksheet; approve and apply observe it here. Missing git, a root
     in no repository, an unborn HEAD, a failed or timed-out query, or an answer that is not one 40- or
     64-digit object id refuses: an unreadable or unverifiable revision is never assumed fresh."""
@@ -2097,6 +2102,7 @@ def observe_revision(product_root):
         raise AdoptApplyError("git is not on PATH, so the live product revision cannot be observed; an "
                               "unverifiable revision is never assumed fresh (spec 14.1, fail-closed)")
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     try:
         proc = subprocess.run([git, "--no-replace-objects", "-C", str(product_root), "rev-parse", "--verify",
                                "--quiet", "HEAD^{commit}"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -2455,13 +2461,17 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
 
 def _selftest_git_commit(root):
     """Self-test fixtures only: make `root` a git repository when it is not one, then advance its HEAD by
-    one EMPTY commit through plumbing (mktree, commit-tree, update-ref; no hook, template or signing, a
-    pinned identity and date), so only the revision moves. Returns the new HEAD, or None when git is
-    unavailable or any step fails (the caller records that as a failed check)."""
+    one EMPTY commit through plumbing (mktree, commit-tree, update-ref; no template or signing, a pinned
+    identity and date), so only the revision moves. The global and system git configuration is neutralized
+    (GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM pinned to the null device, matching
+    _opf_observe._scrubbed_env): only so pinned is "no hook" true -- a system core.hooksPath would
+    otherwise run a reference-transaction hook at init and update-ref. Returns the new HEAD, or None when
+    git is unavailable or any step fails (the caller records that as a failed check)."""
     git = shutil.which("git")
     if git is None:
         return None
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     env.update(GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
                GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid",
                GIT_AUTHOR_DATE="2026-01-01T00:00:00Z", GIT_COMMITTER_DATE="2026-01-01T00:00:00Z")
@@ -2492,11 +2502,14 @@ def _selftest_git_commit(root):
 
 
 def _selftest_git_set_head(root, commit):
-    """Self-test fixtures only: point `root`'s HEAD back at `commit` (update-ref); True when it did."""
+    """Self-test fixtures only: point `root`'s HEAD back at `commit` (update-ref), with the global and
+    system git configuration neutralized exactly as _selftest_git_commit pins it (update-ref too runs a
+    reference-transaction hook under a system core.hooksPath); True when it did."""
     git = shutil.which("git")
     if git is None or not isinstance(commit, str):
         return False
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     try:
         proc = subprocess.run([git, "-C", str(root), "update-ref", "HEAD", commit], stdin=subprocess.DEVNULL,
                               capture_output=True, env=env, timeout=60)
@@ -2512,16 +2525,24 @@ def self_test():
     statuses, byte comparisons and journal states; each check asserting a refusal of the executable shell
     or of apply input also matches one reason keyword so the refusal is attributed to the rule under test
     (validator and dispatch gradings are asserted on their returned status, with a named finding matched
-    where that finding is itself the contract). No git, no network, no subprocess; every write lands
-    under its own TemporaryDirectory."""
+    where that finding is itself the contract). No network; every write lands under its own
+    TemporaryDirectory. The driver vectors DO run git fixture subprocesses (_selftest_git_commit,
+    _selftest_git_set_head) and the production observation (observe_revision): each pins
+    GIT_CONFIG_NOSYSTEM/GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM itself, and the whole run executes under a
+    throwaway HOME and XDG_CONFIG_HOME (test-hermeticity, the _opf_observe.self_test convention), so no
+    host git configuration -- hooks, fsmonitor, ignore or attributes files -- is ever read or run."""
     try:
         _journal.require_containment()
     except _journal.JournalError as exc:
         print("OPF-ADOPT-APPLY SELF-TEST: containment unavailable ({}); cannot evaluate".format(exc),
               file=sys.stderr)
         return 2
+    import tempfile
+    from unittest import mock
     try:
-        return _self_test_checks()
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-home-") as home:
+            with mock.patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home, GIT_CONFIG_NOSYSTEM="1"):
+                return _self_test_checks()
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("OPF-ADOPT-APPLY SELF-TEST: harness error ({!r}); failing closed to exit 2".format(exc),
               file=sys.stderr)
@@ -2535,12 +2556,15 @@ def _self_test_checks():
     from unittest import mock
 
     failures = []
+    failure_details = {}
     checked = [0]
 
-    def check(name, cond):
+    def check(name, cond, observed=None):
         checked[0] += 1
         if not cond:
             failures.append(name)
+            if observed is not None:
+                failure_details[name] = observed
 
     def refusal(fn, *args, **kwargs):
         """The refusal text when fn refuses with AdoptApplyError, else None."""
@@ -3214,17 +3238,46 @@ def _self_test_checks():
               and not lock_free(root))
     # 6a''': the release read-back judges the lock by what THIS acquire wrote, never by process identity: a
     # lock another thread of this same process takes after this run's release is not "this run's lock
-    # STAYS" (red against a read-back decided by process identity).
+    # STAYS" (red against a read-back decided by process identity). Test-hermeticity: the released lock's
+    # inode is HELD OPEN (an O_RDONLY descriptor taken before the release, closed only after the verdict)
+    # across the peer acquire, so no filesystem can hand the peer lock the SAME inode number back -- ext4
+    # reuses a freed inode number immediately, tmpfs and btrfs never do -- and the read-back's
+    # (st_dev, st_ino, bytes) identity never sees an inode collision this check does not control (that
+    # collision is the production read-back's own disclosed "altered" residual, not this check's subject).
+    # The process umask is pinned for the vector (restored in the finally): an inherited owner-bit umask
+    # would make the 0o600 lock unreadable to its own read-back, an ambient cause outside this check.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
-        root, files = fixture(temp)
-        real_release = _journal.release_lock
+        saved_umask = os.umask(0o022)
+        pinned_locks = []
+        seen = {}
+        try:
+            root, files = fixture(temp)
+            real_release = _journal.release_lock
 
-        def peer_thread_after(journal_root):
-            real_release(journal_root)
-            _journal.acquire_lock(journal_root, "opf-adopt-selftest-thread")
-        with mock.patch.object(_journal, "release_lock", peer_thread_after):
-            done_txn, why = attempt(run_adopt_transaction, root, rid, compose_full(files))
-        check("commit-release-peer-lock-not-own", done_txn == rid and why is None and not lock_free(root))
+            def peer_thread_after(journal_root):
+                lock = str(Path(journal_root) / "lock")
+                pinned_locks.append(os.open(lock, os.O_RDONLY | os.O_NOFOLLOW))
+                st = os.fstat(pinned_locks[0])
+                seen["own"] = (st.st_dev, st.st_ino)
+                real_release(journal_root)
+                _journal.acquire_lock(journal_root, "opf-adopt-selftest-thread")
+                st = os.lstat(lock)
+                seen["peer"] = (st.st_dev, st.st_ino)
+            with mock.patch.object(_journal, "release_lock", peer_thread_after):
+                done_txn, why = attempt(run_adopt_transaction, root, rid, compose_full(files))
+            try:
+                owner_now = _journal.read_lock_owner(_journal_root(root))
+            except _journal.JournalError as exc:
+                owner_now = "unreadable ({})".format(exc)
+            check("commit-release-peer-lock-not-own",
+                  done_txn == rid and why is None and not lock_free(root),
+                  observed="txn={!r} why={!r} own lock (st_dev, st_ino)={!r} peer lock (st_dev, st_ino)="
+                           "{!r} lock owner now={!r}".format(done_txn, why, seen.get("own"),
+                                                             seen.get("peer"), owner_now))
+        finally:
+            os.umask(saved_umask)
+            for pinned_lock_fd in pinned_locks:
+                _journal._close_fd_quietly(pinned_lock_fd)
     # 6a'''': a refusal past the journal's own pre-INTENT capture (its transaction directory, frames.log and
     # preimages written) never says "nothing written": the composer names each entry the run's two journal
     # listings differ by, over a journal that predates the run and over one the run created (red against
@@ -3412,24 +3465,49 @@ def _self_test_checks():
     # 6a11: a journal path component that changed since the run began (a concurrent cleanup removed the
     # journal tree after this run took what it creates, so its preparation recreated it) may be this run's:
     # the refusal never hides it under the neutral lead-in (red against attributing it to no one).
+    # Test-hermeticity: each removed component's inode is HELD OPEN (an O_DIRECTORY descriptor taken
+    # before its rmdir, closed only after the verdict), so no filesystem can hand the recreated component
+    # the SAME inode number back (ext4 reuses a freed inode number immediately, tmpfs and btrfs never do)
+    # and hide the recreation from the closing listing's (kind, st_dev, st_ino) comparison. The process
+    # umask is pinned for the vector (restored in the finally) so an inherited owner-bit umask cannot make
+    # a recreated component unlistable, an ambient cause outside this check.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
-        root, files = fixture(temp)
-        os.makedirs(root / JOURNAL_REL)
-        real_ensure = _journal.ensure_journal_dirs
+        saved_umask = os.umask(0o022)
+        pinned_components = []
+        seen = {}
+        try:
+            root, files = fixture(temp)
+            os.makedirs(root / JOURNAL_REL)
+            real_ensure = _journal.ensure_journal_dirs
 
-        def cleaned_then_ensure(*args):
-            for rel in reversed(_journal_components()):
-                os.rmdir(root / rel)
-            return real_ensure(*args)
+            def cleaned_then_ensure(*args):
+                for rel in reversed(_journal_components()):
+                    pinned_components.append(os.open(str(root / rel), os.O_RDONLY | os.O_DIRECTORY))
+                    st = os.fstat(pinned_components[-1])
+                    seen[rel + " removed"] = (st.st_dev, st.st_ino)
+                    os.rmdir(root / rel)
+                made = real_ensure(*args)
+                for rel in _journal_components():
+                    try:
+                        st = os.lstat(root / rel)
+                        seen[rel + " recreated"] = (st.st_dev, st.st_ino)
+                    except OSError as exc:
+                        seen[rel + " recreated"] = str(exc)
+                return made
 
-        def compose_refused(ops):
-            raise AdoptApplyError("an injected compose refusal")
-        with mock.patch.object(_journal, "ensure_journal_dirs", cleaned_then_ensure):
-            err = refusal(run_adopt_transaction, root, rid, compose_refused)
-        check("journal-component-recreated-attributed", "injected compose refusal" in (err or "")
-              and "not attributed to this run" not in (err or "") and "this run wrote" in (err or "")
-              and "{} (directory), a component of the journal path".format(JOURNAL_REL) in (err or "")
-              and "nothing written" not in (err or ""))
+            def compose_refused(ops):
+                raise AdoptApplyError("an injected compose refusal")
+            with mock.patch.object(_journal, "ensure_journal_dirs", cleaned_then_ensure):
+                err = refusal(run_adopt_transaction, root, rid, compose_refused)
+            check("journal-component-recreated-attributed", "injected compose refusal" in (err or "")
+                  and "not attributed to this run" not in (err or "") and "this run wrote" in (err or "")
+                  and "{} (directory), a component of the journal path".format(JOURNAL_REL) in (err or "")
+                  and "nothing written" not in (err or ""),
+                  observed="refusal={!r} component (st_dev, st_ino) before/after={!r}".format(err, seen))
+        finally:
+            os.umask(saved_umask)
+            for pinned_component_fd in pinned_components:
+                _journal._close_fd_quietly(pinned_component_fd)
     # 6a11b: only a directory at a journal path component may be this run's recreation; anything else there
     # is named by its type, never as possibly recreated by this run (red against the label for any type).
     comp_dir = _entry_named(JOURNAL_REL, ("directory", 1, 2), [], rid, None, False)
@@ -5088,6 +5166,8 @@ def _self_test_checks():
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
         for f in failures:
             print("  FAILED: {}".format(f))
+            if f in failure_details:
+                print("    observed: {}".format(failure_details[f]))
         return 1
     print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; three executable ops, the finish "
           "ops)".format(checked[0]))
