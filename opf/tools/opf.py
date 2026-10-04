@@ -13145,17 +13145,19 @@ def _cmd_adopt(rest):
           Exit 1: INVALID (a schema-violating decision, op or plan). Exit 2: cannot-evaluate (an
           unreadable worksheet, a changed inventory, an unresolvable root, an unresolved disposition).
       approve --inputs FILE --plan FILE --actor NAME [--root DIR] : the one approval (spec 14.1), writing
-          NOTHING: re-prove the frozen plan PLAN printed from its own bytes, re-derive it from the
-          worksheet over the live tree (any bound-item drift refuses into a fresh plan), and print the
+          NOTHING: re-prove the frozen plan PLAN printed from its own bytes, observe the live revision and
+          re-derive the plan from the worksheet over the live tree (a moved revision, a changed observation
+          or a changed worksheet refuses into a fresh plan), and print the
           approval on stdout, attributed to NAME at the clock instant, binding the plan's plan_digest and
           inventory_digest (_opf_adopt_apply.capture_approval). Exit 0: the approval TOML on stdout. Exit
           2: every refusal or cannot-evaluate.
       apply --inputs FILE --plan FILE --approval FILE [--root DIR] : the apply stage
           (_opf_adopt_apply.run_apply): admit only a plan whose approval binds it, re-derive it over the
-          live tree, then in the run's one journaled base transaction persist the plan and the approval in
-          its evidence bundle and dispatch every plan op in the apply stage; a non-occupying plan source
-          stays frozen in place for the retirement stage. An op whose slice has not landed refuses the
-          whole apply before anything is written, which in this build is every plan. Exit 0: applied
+          live tree and its observed revision, then in the run's one journaled base transaction persist the
+          plan and the approval in its evidence bundle, dispatch every plan op in the apply stage and compose
+          the mandatory receipt stage; a non-occupying plan source stays frozen in place for the retirement
+          stage. An op or the receipt stage not yet landed refuses the whole apply before anything is
+          written, which in this build is every plan. Exit 0: applied
           (completion and retirement follow). Exit 2: every refusal or cannot-evaluate; exit 1 is not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
@@ -13323,6 +13325,7 @@ def _cmd_adopt(rest):
     if sub in ("approve", "apply"):
         import datetime
         try:
+            _opf_adopt_apply.require_clean_journal(root_abs)
             doc = _adopt_read_inputs(inputs_file)
             plan_bytes = _adopt_read_bounded(given["--plan"], "--plan file", _opf_adopt_plan.MAX_ARTIFACT_BYTES)
             if sub == "approve":
@@ -14809,7 +14812,7 @@ def _cli_self_test():
                     return "sha256:" + hashlib.sha256(data).hexdigest()
 
                 adoptee = os.path.join(abase, "adoptee")
-                bindings = _opf_adopt.canonical_plan_bindings()
+                bindings = _opf_adopt.canonical_plan_bindings()   # its revision is the fixture's HEAD, below
                 manifest = _opf_init.build_manifest()
                 views = sorted(v["target"] for v in tomllib.loads(manifest)["views"].values())
                 sheet = dict(schema=1, product="opf", sources=["keep.md", "legacy.md"],
@@ -14830,6 +14833,12 @@ def _cli_self_test():
                     for name, body in (("keep.md", "kept\n"), ("legacy.md", "legacy rules\n")):
                         with open(os.path.join(adoptee, name), "w", encoding="utf-8") as fh:
                             fh.write(body)
+                    # approve and apply observe the live revision, so the fixture is a git repository whose
+                    # HEAD is the revision the worksheet binds.
+                    head = _opf_adopt_apply._selftest_git_commit(adoptee)
+                    if head is None:
+                        raise ValueError("the fixture git repository could not be made")
+                    bindings["revision"] = head
                     obs = _opf_adopt_plan.investigate(os.path.abspath(adoptee), sources=sheet["sources"],
                                                       targets=sheet["targets"])
                     sheet["expected_observation_digest"] = tomllib.loads(
@@ -14884,6 +14893,13 @@ def _cli_self_test():
                                         "refusal; {})".format(rc, err.strip()))
                     with open(os.path.join(adoptee, "legacy.md"), "w", encoding="utf-8") as fh:
                         fh.write("legacy rules\n")
+                    # a revision-only change (an empty commit, every inventoried byte unchanged) -> approve 2.
+                    moved = _opf_adopt_apply._selftest_git_commit(adoptee)
+                    rc, _out, err = run_split(["adopt", "approve", "--inputs", sheet_path, "--plan", plan_path,
+                                               "--actor", "adopter", "--root", adoptee])
+                    if moved is None or rc != EXIT_MALFORMED or "revision moved" not in err:
+                        failures.append("adopt approve after the revision moved: rc={!r} (expected 2 + the "
+                                        "revision-drift refusal; {})".format(rc, err.strip()))
                 # plan over an open adoption-journal transaction (the debris root) -> 2, reconcile first.
                 rc, _out, err = run_split(["adopt", "plan", "--inputs", stale, "--root", debris])
                 if rc != EXIT_MALFORMED or "must be reconciled" not in err:
@@ -14968,8 +14984,8 @@ def _cli_self_test():
               "bundle finding / 2 symlinked, dangling or wrong-type home, plan -> 2 missing, FIFO, oversized "
               "or symlinked worksheet, stale digest or an interrupted adoption transaction / 1 "
               "schema-violating op, each mutating nothing; the stage driver's approve -> 0 with the approval "
-              "binding the plan's two digests / 2 after a source edit, and apply -> 2 on the unlanded ops or "
-              "an approval for another plan, each mutating nothing; an "
+              "binding the plan's two digests / 2 after a source edit or a moved revision, and apply -> 2 on "
+              "the unlanded ops or an approval for another plan, each mutating nothing; an "
               "unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2)")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape

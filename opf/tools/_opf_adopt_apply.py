@@ -15,7 +15,8 @@ adds the plan-v2 apply-input gate, the one approval and the apply stage (spec 14
 re-proves a frozen plan from its own bytes, re-derives it over the live tree and prints the approval
 binding its plan_digest and inventory_digest, writing nothing; `opf adopt apply` admits only that approved
 pair, persists both in the run's evidence bundle within the run's one base transaction, and dispatches
-every plan op through the table, so while no op executes, apply refuses before anything is written. No
+every plan op through the table and then the driver's mandatory receipt stage, so while no op and no
+receipt stage executes, apply refuses before anything is written. No
 operation executes: the file ops, init-store composition, trust verification, hook activation, rendering,
 receipt writing, the completion checks, retirement, and the `complete` and `reconcile` CLI subcommands
 remain later slices; the read-only `opf adopt` subcommands plan and status shipped with K9a. Live outside
@@ -70,17 +71,31 @@ approved work takes a fresh plan with its own run id (spec 14.1).
 
 Stage driver (spec 14, 14.1): a plan is admitted only as its own canonical bytes whose plan_digest
 re-seals and which the schema grades VALID; the approval is the receipt's APPROVAL_REQUIRED shape, its
-plan_digest and inventory_digest equal to the plan's; freshness is re-derivation, the planner re-run over
-the live tree with the worksheet that froze the plan and the plan's own run instant and nonce, which must
-reproduce the plan byte for byte, so any bound-item drift refuses into a fresh plan with its own single
-approval. Apply dispatches every plan op in plan order in the apply stage through one context table
-(`ops`, the transaction's ApplyOps; `plan`; `approval`; `product_root`; `stage`), the seam the op slices
-compose through, and refuses any composed remove or write of a plan source that occupies no managed
-destination: such a source stays frozen in place until the retirement stage after a green completion
-check, and apply takes only its preimage. Disclosed: digests bind the approval to one plan, never the
-actor's authenticity (self-asserted identity and same-user tampering stay spec 14.1 residuals); the
-re-derivation and the transaction are not one snapshot, so each op re-observes its own operands under
-the journal lock; one run takes one base transaction, so an approved plan applies at most once.
+plan_digest and inventory_digest equal to the plan's and its approved_at no earlier than the instant the
+plan froze. Freshness is two observations: the live product revision (observe_revision, one read-only
+git query) must equal the plan's bound revision, and re-derivation, the planner re-run over the live tree
+with the worksheet that froze the plan and the plan's own run instant and nonce, must reproduce the plan
+byte for byte; a moved revision, a changed observed item (sources, targets, store identity, ancestry) or
+a changed worksheet refuses into a fresh plan with its own single approval. Replay admission precedes
+freshness: a run whose base transaction exists refuses on the one-apply rule itself. Apply dispatches
+every plan op in plan order in the apply stage through one context table (`ops`, the transaction's
+ApplyOps; `plan`; `approval`; `product_root`; `stage`), the seam the op slices compose through, then
+composes the driver's mandatory receipt stage (DRIVER_STAGES; spec 14 ends apply with the receipt and its
+outcome-event chain, which no plan row can carry), and refuses any composed remove or write of a plan
+source that occupies no managed destination: such a source stays frozen in place until the retirement
+stage after a green completion check, and apply takes only its preimage. The driver, not handler
+convention, enforces the composition rules: handlers run under a per-thread composition guard that
+refuses any direct filesystem or process effect and any transaction of their own (so a slice composes
+into `ops`, init-store's substrate included), and composition first runs as a write-free preflight
+before the journal is prepared, so every composition refusal writes nothing at all. Disclosed: digests
+bind the approval to one plan, never the actor's authenticity (self-asserted identity and same-user
+tampering stay spec 14.1 residuals); the release, prompt_pack, enforcement and skip_policy bindings are
+worksheet-asserted, so re-derivation proves the worksheet still freezes the plan, not that the tool
+release or packs in use match it (the trust-verification slice observes them); the composition guard is
+an audit hook, not a sandbox (an already-open writable descriptor, ctypes, another thread or an unaudited
+entry point stays outside it); the re-derivation and the transaction are not one snapshot, so each op
+re-observes its own operands under the journal lock; one run takes one base transaction, so an approved
+plan applies at most once.
 
 Single-writer lease (spec 5.7): this slice carries NO lease join, so a transaction REFUSES, before writing
 anything, when the product root resolves a store (RESOLVED) or when a pointer names a store outside the
@@ -110,13 +125,17 @@ modules, so the standalone-closure property holds.
 
 Exit convention (the repo's gates and the sibling OPF units): 0 clean, 1 a finding, 2 cannot-evaluate.
 """
+import contextlib
 import copy
 import datetime
 import hashlib
 import os
 import re
+import shutil
 import stat
+import subprocess
 import sys
+import threading
 import tomllib
 from pathlib import Path
 
@@ -139,6 +158,10 @@ PLAN_NAME = "plan.toml"
 APPROVAL_NAME = "approval.toml"
 # The stage every plan op composes in during apply; the retirement stage follows a green completion check.
 APPLY_STAGE = "apply"
+# The driver's mandatory receipt stage (spec 14), composed after every plan row whatever the plan carries.
+RECEIPT_STAGE = "receipt"
+# The bound on the one read-only git query that observes the live product revision (observe_revision).
+_GIT_TIMEOUT_SECONDS = 30
 DIR_MODE = 0o755
 FILE_MODE = 0o644
 _NONCE_RE = re.compile(r"^[0-9a-f]{16}\Z")
@@ -925,6 +948,20 @@ def _committed_base_or_refuse(root_fd, journal_root, run_id, phase):
                               "(fail-closed)".format(phase))
 
 
+def _compose_checked(root_fd, run_id, phase, compose):
+    """Compose ONE transaction against the live tree beneath `root_fd`, read-only: compose(ops) fills a fresh
+    ApplyOps, the derived inventory seals it, and check_apply_ops re-proves every invariant, so a refusal here
+    has written nothing. Returns the sealed ApplyOps."""
+    ops = ApplyOps(root_fd, run_id, phase)
+    compose(ops)
+    ops.seal()
+    findings = check_apply_ops(run_id, phase, ops.ops, ops.staged)
+    if findings:
+        raise AdoptApplyError("the composed transaction is refused before it opens: {}".format(
+            "; ".join(findings)))
+    return ops
+
+
 def run_adopt_transaction(product_root, run_id, compose, phase=None):
     """ONE journaled adoption transaction, the run's base transaction or one later phase's, through the
     shared 9.3 engine. Refusals BEFORE anything is written, in order: containment, a non-clean journal
@@ -935,7 +972,14 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     against the live tree, the derived inventory seals it, and check_apply_ops re-proves every invariant;
     a refusal there releases the lock with nothing written beyond the journal directories. A failure that
     may have left the transaction open RETAINS the lock so every later run refuses into reconcile().
-    Returns the transaction name."""
+    A transaction opened from inside the stage driver's composition (a plan op handler opening its own)
+    refuses before anything else: one run takes one base transaction. Returns the transaction name."""
+    denied = getattr(_COMPOSITION, "denied", None)
+    if denied is not None:
+        denied.append("a nested adoption transaction")
+        raise AdoptApplyError("a plan op handler may not open its own adoption transaction: every op composes "
+                              "into the driver's one base transaction (spec 14.1, 14.2); nothing written "
+                              "(fail-closed)")
     txn = _txn_name(run_id, phase)
     if not callable(compose):
         raise AdoptApplyError("compose must be a callable that fills the transaction's ApplyOps")
@@ -973,13 +1017,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 raise AdoptApplyError("cannot take the adoption journal lock ({}); nothing "
                                       "written (fail-closed)".format(exc))
             held = True
-            ops = ApplyOps(root_fd, run_id, phase)
-            compose(ops)
-            ops.seal()
-            findings = check_apply_ops(run_id, phase, ops.ops, ops.staged)
-            if findings:
-                raise AdoptApplyError("the composed transaction is refused before it opens: {}".format(
-                    "; ".join(findings)))
+            ops = _compose_checked(root_fd, run_id, phase, compose)
             staged = dict(ops.staged)
 
             def staged_reader(op):
@@ -1093,6 +1131,129 @@ def require_clean_journal(product_root):
         store._close_fd_exc_safe(root_fd)
 
 
+def _require_unapplied(product_root, run_id):
+    """Replay admission (spec 14.1: one approval, one apply), read-only and BEFORE freshness, so a second
+    apply of a run refuses on this rule itself, never on whatever drift its own first apply left behind: a
+    run whose base transaction the adoption journal already holds, in any state, refuses.
+    run_adopt_transaction re-proves the rule under the journal lock."""
+    txn = _txn_name(run_id, None)
+    root_fd = _open_product_root(product_root)
+    try:
+        prior = _journal._lstat_contained(root_fd, JOURNAL_REL + "/" + txn)
+    except (_journal.JournalError, OSError) as exc:
+        raise AdoptApplyError("cannot inspect the adoption journal ({}); fail-closed".format(exc))
+    finally:
+        store._close_fd_exc_safe(root_fd)
+    if prior is not None:
+        raise AdoptApplyError("run {} already has its transaction {!r}: an approved plan applies at most once, "
+                              "and changing approved work takes a fresh plan with its own run id (spec 14.1); "
+                              "nothing written (fail-closed)".format(run_id, txn))
+
+
+def observe_revision(product_root):
+    """The live product revision, OBSERVED (spec 14.1: the plan binds the observed revision, and any
+    bound-item drift refuses): the commit HEAD names at `product_root`, from ONE read-only
+    `git rev-parse --verify` with an explicit -C binding, replacement objects off and every GIT_* variable
+    scrubbed, so an ambient GIT_DIR or GIT_WORK_TREE cannot redirect the answer. Investigation never enters
+    .git and takes the revision from the worksheet; approve and apply observe it here. Missing git, a root
+    in no repository, an unborn HEAD, a failed or timed-out query, or an answer that is not one 40- or
+    64-digit object id refuses: an unreadable or unverifiable revision is never assumed fresh."""
+    git = shutil.which("git")
+    if git is None:
+        raise AdoptApplyError("git is not on PATH, so the live product revision cannot be observed; an "
+                              "unverifiable revision is never assumed fresh (spec 14.1, fail-closed)")
+    env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+    try:
+        proc = subprocess.run([git, "--no-replace-objects", "-C", str(product_root), "rev-parse", "--verify",
+                               "--quiet", "HEAD^{commit}"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=env, timeout=_GIT_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AdoptApplyError("the live product revision cannot be observed ({}); an unverifiable revision is "
+                              "never assumed fresh (spec 14.1, fail-closed)".format(exc))
+    answer = proc.stdout.decode("ascii", errors="replace").strip() if proc.returncode == 0 else None
+    if answer is None or not schema._is_revision(answer):
+        raise AdoptApplyError("the live product revision at {} cannot be observed (git rev-parse exit {}: no "
+                              "repository, an unborn HEAD, or an unreadable answer); an unverifiable revision is "
+                              "never assumed fresh (spec 14.1, fail-closed)".format(product_root, proc.returncode))
+    return answer
+
+
+# The composition guard (spec 14.1, 14.2): while the stage driver composes, a plan op handler may only stage
+# into the transaction's ApplyOps; a direct filesystem or process effect, or a transaction of its own, would
+# land before the driver's checks and outside the run's one base transaction. One process-wide audit hook,
+# installed on the first composition and armed per thread only inside one, refuses each such effect and
+# records it, so a handler that swallows the refusal still refuses the whole composition.
+_COMPOSITION = threading.local()
+_COMPOSITION_HOOK = []
+_WRITE_OPEN_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+_EFFECT_EVENTS = frozenset((
+    "os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.link", "os.symlink", "os.truncate", "os.chmod",
+    "os.chown", "os.chflags", "os.lchflags", "os.utime", "os.mkfifo", "os.mknod", "os.setxattr",
+    "os.removexattr", "os.fork", "os.forkpty", "os.exec", "os.posix_spawn", "os.spawn", "os.system",
+    "os.startfile", "os.kill", "os.killpg", "subprocess.Popen", "pty.spawn", "shutil.copyfile",
+    "shutil.copymode", "shutil.copystat", "shutil.copytree", "shutil.chown", "shutil.move", "shutil.rmtree",
+    "shutil.make_archive", "shutil.unpack_archive", "tempfile.mkstemp", "tempfile.mkdtemp"))
+
+
+def _composition_audit(event, args):
+    denied = getattr(_COMPOSITION, "denied", None)
+    if denied is None:
+        return
+    if event == "open":
+        mode = args[1] if len(args) > 1 else None
+        flags = args[2] if len(args) > 2 else None
+        if not ((isinstance(flags, int) and flags & _WRITE_OPEN_FLAGS)
+                or (isinstance(mode, str) and any(c in mode for c in "wax+"))):
+            return
+    elif event not in _EFFECT_EVENTS:
+        return
+    denied.append(event)
+    raise AdoptApplyError("a plan op handler attempted a direct effect ({}) while the stage driver composes; "
+                          "a handler only stages into the transaction's ApplyOps, so nothing lands before the "
+                          "driver's checks or outside the run's one base transaction (fail-closed)".format(event))
+
+
+@contextlib.contextmanager
+def _composing():
+    """Arm the composition guard on this thread for one composition; a composition already armed here (a
+    handler re-entering the driver) refuses. After the body, any recorded effect refuses the composition even
+    where a handler caught the guard's own refusal. Disclosed: an audit hook is not a sandbox; a write
+    through an already-open writable descriptor, ctypes, another thread, or an entry point CPython does not
+    audit stays outside it."""
+    if getattr(_COMPOSITION, "denied", None) is not None:
+        raise AdoptApplyError("a composition is already in progress on this thread; a plan op handler may not "
+                              "re-enter the stage driver (fail-closed)")
+    if not _COMPOSITION_HOOK:
+        sys.addaudithook(_composition_audit)
+        _COMPOSITION_HOOK.append(_composition_audit)
+    denied = []
+    _COMPOSITION.denied = denied
+    try:
+        yield
+    finally:
+        _COMPOSITION.denied = None
+    if denied:
+        raise AdoptApplyError("a plan op handler attempted direct effect(s) {} while the stage driver composed "
+                              "and continued past the refusal; the composition refuses (fail-closed)".format(
+                                  ", ".join(denied)))
+
+
+def _receipt_not_yet_composable(context=None):
+    """The mandatory receipt stage's slice-1 composer: a refusing not-yet-executable verdict, so apply
+    refuses before anything is written until the record-adoption slice replaces DRIVER_STAGES[RECEIPT_STAGE]."""
+    return schema.AdoptValidation(store.CANNOT_EVALUATE, [
+        "the adoption receipt and its outcome-event chain are not yet composable in this build; a later "
+        "adoption slice lands the receipt stage (fail-closed)"])
+
+
+# The driver's mandatory stages (spec 14: apply ends with an adoption receipt plus its outcome-event chain).
+# No plan can carry that receipt, since its core binds the approval recorded after the plan freezes
+# (_opf_adopt_plan), so the obligation is the driver's: composed after every plan row, inside the run's one
+# base transaction, whatever rows the plan carries. A record-adoption row a plan does carry dispatches like
+# any other row; the receipt slice reconciles that row with this stage.
+DRIVER_STAGES = {RECEIPT_STAGE: _receipt_not_yet_composable}
+
+
 def _canonical_toml(data, label):
     """Parse `data` as TOML that is byte-identical to its own emit_checked rendering, or refuse: a frozen
     artefact admits no second spelling (a comment, a reordering or a whitespace change is a hand edit)."""
@@ -1135,10 +1296,22 @@ def frozen_plan(plan_bytes):
     return doc
 
 
+def _run_instant(run_id):
+    """The aware UTC instant an adoption run id's stamp names (the plan's own freezing instant)."""
+    if not isinstance(run_id, str):
+        raise AdoptApplyError("plan run id {!r} is not a string; fail-closed".format(run_id))
+    stamp = run_id[len("adopt-"):len("adopt-") + len("YYYYMMDDTHHMMSSZ")]
+    try:
+        return datetime.datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=datetime.timezone.utc)
+    except ValueError as exc:
+        raise AdoptApplyError("plan run id {!r} names no calendar instant ({}); fail-closed".format(run_id, exc))
+
+
 def approval_findings(approval, plan_doc):
     """The findings against one captured approval for one plan, empty when it binds (spec 14.1): the closed
-    APPROVAL_REQUIRED keyset (the receipt's own approval shape), a token actor, an RFC 3339 UTC approved_at,
-    and a plan_digest AND an inventory_digest equal to the plan's own, hence that whole plan."""
+    APPROVAL_REQUIRED keyset (the receipt's own approval shape), a token actor, an RFC 3339 UTC approved_at
+    no earlier than the instant the plan froze (its run id's stamp; the approval follows its plan), and a plan_digest AND an
+    inventory_digest equal to the plan's own, hence that whole plan."""
     findings = []
     if schema._validate_subtable(approval, schema.APPROVAL_REQUIRED, "approval", findings) is None or findings:
         return findings
@@ -1146,6 +1319,18 @@ def approval_findings(approval, plan_doc):
         findings.append("approval actor is not a non-empty single-line token")
     if not schema._is_timestamp(approval["approved_at"]):
         findings.append("approval approved_at is not an RFC 3339 UTC instant")
+    else:
+        try:
+            approved = datetime.datetime.fromisoformat(approval["approved_at"])
+            planned = _run_instant(plan_doc.get("run_id"))
+            follows = approved >= planned
+        except (AdoptApplyError, TypeError, ValueError) as exc:
+            findings.append("approval approved_at cannot be ordered after the plan's run instant ({})".format(exc))
+        else:
+            if not follows:
+                findings.append("approval approved_at {!r} precedes the instant its plan froze ({}, its run id's "
+                                "stamp): the one approval MUST follow its concrete plan (spec 14.1)".format(
+                                    approval["approved_at"], planned.strftime("%Y-%m-%dT%H:%M:%SZ")))
     for key in ("plan_digest", "inventory_digest"):
         if approval[key] != plan_doc.get(key):
             findings.append("approval {0} {1!r} does not bind this plan's {0} {2!r}; an approval binds exactly "
@@ -1182,17 +1367,24 @@ def apply_plan(plan_doc, approval=None):
 def rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
     """Bound-item freshness (spec 14.1: any bound-item drift refuses into a fresh plan with its own single
     approval), read-only as the planner is: re-run the planner over the LIVE tree with the worksheet that
-    froze the plan and the plan's own run instant and nonce, and require the byte-identical plan. A changed
-    observation refuses on the planner's own stale-inventory binding; a change to any other bound item (a
-    decision, an op, a binding input) freezes a different plan and refuses. `worksheet` is the parsed
-    planning worksheet: sources, targets, expected_observation_digest, product, decisions, ops, bindings."""
+    froze the plan and the plan's own run instant and nonce, and require the byte-identical plan; but first
+    the live product revision is OBSERVED (observe_revision) and must equal the plan's bound revision, so a
+    revision-only change (an empty commit advancing HEAD) refuses. A changed observation (the sources,
+    targets, store identity and ancestry the planner observes) refuses on the planner's own stale-inventory
+    binding, and a change to a worksheet input (a decision, an op, a binding) freezes a different plan and
+    refuses. Disclosed: the release, prompt_pack, enforcement and skip_policy bindings are worksheet-asserted,
+    not observed here, so re-derivation proves only that the worksheet still freezes this plan, never that
+    the tool release, prompt pack or enforcement pack in use match it; observing them is the trust-verification
+    slice's. `worksheet` is the parsed planning worksheet: sources, targets, expected_observation_digest,
+    product, decisions, ops, bindings."""
     import _opf_adopt_plan as planner
+    observed = observe_revision(product_root)
+    if observed != plan_doc["revision"]:
+        raise AdoptApplyError("the product revision moved: the plan binds {} and the live HEAD is {}; any "
+                              "bound-item drift refuses into a fresh plan with its own single approval (spec "
+                              "14.1, fail-closed)".format(plan_doc["revision"], observed))
     run_id = plan_doc["run_id"]
-    stamp = run_id[len("adopt-"):len("adopt-") + len("YYYYMMDDTHHMMSSZ")]
-    try:
-        now = datetime.datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=datetime.timezone.utc)
-    except ValueError as exc:
-        raise AdoptApplyError("plan run id {!r} names no calendar instant ({}); fail-closed".format(run_id, exc))
+    now = _run_instant(run_id)
     try:
         sheet = copy.deepcopy(worksheet)
         res = planner.plan(product_root, sources=sheet["sources"], targets=sheet["targets"],
@@ -1214,13 +1406,16 @@ def rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
 
 def capture_approval(product_root, plan_bytes, worksheet, actor, now):
     """The approve stage, the one approval (spec 14.1), write-free: re-prove the frozen plan from its bytes,
-    refuse over a non-clean adoption journal, re-derive the plan over the live tree (rederive_or_refuse, so
-    a stale observation or any bound-item drift refuses into a fresh plan), then return the canonical
+    refuse over a non-clean adoption journal or a run already applied, re-derive the plan over the live
+    tree and its observed revision (rederive_or_refuse, so a moved revision, a stale observation or a changed
+    worksheet refuses into a fresh plan), refuse an approval instant before the plan froze, then
+    return the canonical
     approval bytes, in the receipt's APPROVAL_REQUIRED shape, binding the plan's plan_digest and
     inventory_digest. `now` is the clock instant of the approval. The adopter holds those bytes until apply,
     which persists them with the plan in the run's evidence bundle; nothing is written here."""
     plan_doc = frozen_plan(plan_bytes)
     require_clean_journal(product_root)
+    _require_unapplied(product_root, plan_doc["run_id"])
     rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
     if (type(now) is not datetime.datetime or type(now.tzinfo) is not datetime.timezone
             or now.utcoffset() != datetime.timedelta(0)):
@@ -1239,44 +1434,65 @@ def capture_approval(product_root, plan_bytes, worksheet, actor, now):
 def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     """The apply stage (spec 14, 14.1, 14.2). Before anything is written, in order: re-prove the frozen
     plan (frozen_plan) and the captured approval from their own canonical bytes; admit the pair through
-    apply_plan (the approval binds this plan's plan_digest and inventory_digest); refuse over a non-clean
-    adoption journal; re-derive the plan over the live tree (rederive_or_refuse); and refuse while any plan
-    op's slice has not landed (its handler is still _not_yet_executable), so an unlanded op refuses the
-    whole apply fail-closed by construction, never half of it. Then ONE base transaction
-    (run_adopt_transaction) persists the plan and approval bytes in the run's evidence bundle and dispatches
-    EVERY plan op, in plan order, in the apply stage, each with one context table: `ops` (the transaction's
-    ApplyOps), `plan`, `approval`, `product_root` and `stage`; the first refusing verdict refuses the whole
-    transaction. Retirement partition (spec 14.1, 14.2): a plan source that occupies no managed destination
-    stays frozen, byte-identical in place, until the retirement stage after a green completion check, so the
-    apply stage may take only its preimage: a composed remove or write of any non-occupying plan source
-    refuses the transaction. Returns the transaction name."""
+    apply_plan (the approval binds this plan's plan_digest and inventory_digest and follows its plan);
+    refuse over a non-clean adoption journal; refuse a run already applied (_require_unapplied, replay
+    admission ahead of freshness); re-derive the plan over the live tree and its observed revision
+    (rederive_or_refuse); and refuse while any plan op's slice, or the driver's mandatory receipt stage
+    (DRIVER_STAGES), has not landed, so an unlanded step refuses the whole apply fail-closed by
+    construction, never half of it.
+
+    Composition is the driver's, and so are its rules. One compose function stages the plan and approval
+    bytes in the run's evidence bundle, dispatches EVERY plan op in plan order in the apply stage, each with
+    one context table (`ops`, the transaction's ApplyOps; `plan`; `approval`; `product_root`; `stage`), then
+    composes the mandatory receipt stage whatever rows the plan carries; the first refusing verdict refuses
+    the whole composition. Handlers run under the composition guard (_composing): a handler only stages into
+    `ops`, so a direct filesystem or process effect, or a transaction of its own, refuses the composition (a
+    slice that would delegate to its own journaled operation, init-store's substrate included, composes into
+    `ops` instead). Retirement partition (spec 14.1, 14.2): a plan source that occupies no managed
+    destination stays frozen, byte-identical in place, until the retirement stage after a green completion
+    check, so the apply stage may take only its preimage: a composed remove or write of any non-occupying
+    plan source refuses. The compose function first runs as a write-free preflight against the live tree,
+    BEFORE the journal is prepared, so a handler, receipt, partition or invariant refusal writes nothing at
+    all; then ONE base transaction (run_adopt_transaction) composes it again under the journal lock, every
+    check re-proved there, and commits it. Returns the transaction name."""
     plan_doc = frozen_plan(plan_bytes)
     approval = _canonical_toml(approval_bytes, "the adoption approval")
     gate = apply_plan(plan_doc, approval)
     if gate.status != store.VALID:
         raise AdoptApplyError("the approval does not admit this plan: {} (fail-closed)".format(
             "; ".join(gate.findings)))
+    run_id = plan_doc["run_id"]
     require_clean_journal(product_root)
+    _require_unapplied(product_root, run_id)
     rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
     rows = list(plan_doc["ops"])
-    unlanded = sorted(set(row["op"] for row in rows
-                          if OP_HANDLERS.get(row["op"], _not_yet_executable) is _not_yet_executable))
+    unlanded = []
+    ops_unlanded = sorted(set(row["op"] for row in rows
+                              if OP_HANDLERS.get(row["op"], _not_yet_executable) is _not_yet_executable))
+    if ops_unlanded:
+        unlanded.append("plan op(s) " + ", ".join(ops_unlanded))
+    if DRIVER_STAGES.get(RECEIPT_STAGE, _receipt_not_yet_composable) is _receipt_not_yet_composable:
+        unlanded.append("the mandatory {} stage".format(RECEIPT_STAGE))
     if unlanded:
-        raise AdoptApplyError("plan op(s) {} not yet executable in this build; a later adoption slice lands "
-                              "each, and apply refuses before anything is written (fail-closed)".format(
-                                  ", ".join(unlanded)))
-    run_id = plan_doc["run_id"]
+        raise AdoptApplyError("{} not yet executable in this build; a later adoption slice lands each, and apply "
+                              "refuses before anything is written (fail-closed)".format(" and ".join(unlanded)))
     frozen = set(row["path"] for row in plan_doc["sources"] if not row["occupying"])
 
     def compose(ops):
-        ops.create(plan_rel(run_id), plan_bytes)
-        ops.create(approval_rel(run_id), approval_bytes)
-        context = dict(ops=ops, plan=plan_doc, approval=approval, product_root=product_root, stage=APPLY_STAGE)
-        for i, row in enumerate(rows):
-            verdict = dispatch(row, context)
+        with _composing():
+            ops.create(plan_rel(run_id), plan_bytes)
+            ops.create(approval_rel(run_id), approval_bytes)
+            context = dict(ops=ops, plan=plan_doc, approval=approval, product_root=product_root,
+                           stage=APPLY_STAGE)
+            for i, row in enumerate(rows):
+                verdict = dispatch(row, context)
+                if verdict.status != store.VALID:
+                    raise AdoptApplyError("plan op[{}] ({!r}) refused: {}".format(
+                        i, row["op"], "; ".join(verdict.findings)))
+            verdict = DRIVER_STAGES[RECEIPT_STAGE](context)
             if verdict.status != store.VALID:
-                raise AdoptApplyError("plan op[{}] ({!r}) refused: {}".format(
-                    i, row["op"], "; ".join(verdict.findings)))
+                raise AdoptApplyError("the mandatory {} stage refused: {}".format(
+                    RECEIPT_STAGE, "; ".join(verdict.findings)))
         touched = sorted(set(op["path"] for op in ops.ops
                              if op.get("op") in ("remove", "write") and op.get("path") in frozen))
         if touched:
@@ -1284,7 +1500,65 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
                                   "each stays frozen, byte-identical in place, until the retirement stage after "
                                   "a green completion check (spec 14.1, 14.2), and apply takes only its "
                                   "preimage (fail-closed)".format(", ".join(touched)))
+
+    root_fd = _open_product_root(product_root)
+    try:
+        _compose_checked(root_fd, run_id, None, compose)
+    finally:
+        store._close_fd_exc_safe(root_fd)
     return run_adopt_transaction(product_root, run_id, compose)
+
+
+def _selftest_git_commit(root):
+    """Self-test fixtures only: make `root` a git repository when it is not one, then advance its HEAD by
+    one EMPTY commit through plumbing (mktree, commit-tree, update-ref; no hook, template or signing, a
+    pinned identity and date), so only the revision moves. Returns the new HEAD, or None when git is
+    unavailable or any step fails (the caller records that as a failed check)."""
+    git = shutil.which("git")
+    if git is None:
+        return None
+    env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+    env.update(GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+               GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid",
+               GIT_AUTHOR_DATE="2026-01-01T00:00:00Z", GIT_COMMITTER_DATE="2026-01-01T00:00:00Z")
+    where = str(root)
+    try:
+        if not os.path.isdir(os.path.join(where, ".git")):
+            subprocess.run([git, "-C", where, "-c", "init.templateDir=", "init", "-q"],
+                           stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=60, check=True)
+        tree = subprocess.run([git, "-C", where, "mktree"], input=b"", capture_output=True, env=env,
+                              timeout=60, check=True).stdout.decode("ascii").strip()
+        head = subprocess.run([git, "-C", where, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                              stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=60)
+        if head.returncode == 0:
+            made = subprocess.run([git, "-C", where, "commit-tree", "--no-gpg-sign", "-p",
+                                   head.stdout.decode("ascii").strip(), "-m", "fixture", tree],
+                                  stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=60,
+                                  check=True)
+        else:
+            made = subprocess.run([git, "-C", where, "commit-tree", "--no-gpg-sign", "-m", "fixture", tree],
+                                  stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=60,
+                                  check=True)
+        commit = made.stdout.decode("ascii").strip()
+        subprocess.run([git, "-C", where, "update-ref", "HEAD", commit], stdin=subprocess.DEVNULL,
+                       capture_output=True, env=env, timeout=60, check=True)
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return None
+    return commit
+
+
+def _selftest_git_set_head(root, commit):
+    """Self-test fixtures only: point `root`'s HEAD back at `commit` (update-ref); True when it did."""
+    git = shutil.which("git")
+    if git is None or not isinstance(commit, str):
+        return False
+    env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+    try:
+        proc = subprocess.run([git, "-C", str(root), "update-ref", "HEAD", commit], stdin=subprocess.DEVNULL,
+                              capture_output=True, env=env, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
 
 
 # --- self-test -----------------------------------------------------------------------------------------
@@ -2950,6 +3224,11 @@ def _self_test_checks():
     res = apply_plan(canon_plan, dict(bound, actor="adopter\nsecond line"))
     check("apply-approval-multiline-actor-refused",
           res.status == CANNOT and any("actor" in f for f in res.findings))
+    # the one approval follows its plan (spec 14.1): an approved_at before the plan's created_at is refused (red
+    # against a gate that checks the timestamp's shape alone).
+    res = apply_plan(canon_plan, dict(bound, approved_at="1999-01-01T00:00:00Z"))
+    check("apply-approval-before-plan-refused",
+          res.status == CANNOT and any("precedes" in f for f in res.findings))
     v2 = apply_plan(dict(format=PLAN_V2_FORMAT))
     check("apply-v2-marked-plan-refused",
           v2.status == INVALID and any("missing required key" in f for f in v2.findings))
@@ -2959,13 +3238,19 @@ def _self_test_checks():
 
 
     # 11: the stage driver over a fixture the real planner froze (a non-occupying retire source and a kept
-    # file at a NOT-ADOPTED root). Approve is write-free and binds the plan's two digests; a stale tree or a
+    # file at a NOT-ADOPTED root that is a git repository, its HEAD the plan's bound revision). Approve is
+    # write-free and binds the plan's two digests; a moved revision, an unobservable one, a stale tree or a
     # changed worksheet refuses into a fresh plan; a hand-edited or unsealed plan refuses; an approval for
-    # another plan refuses; a non-clean adoption journal refuses the stage; with every op still refusing,
-    # apply refuses before ANY write. With composing handlers patched in for the landed-op case, apply
-    # persists the plan and approval in the run's bundle, dispatches every row in plan order in the apply
-    # stage, and leaves the frozen retire source in place; the retirement-partition flip removes it.
+    # another plan, or one before its plan, refuses; a non-clean adoption journal refuses the stage; with
+    # every op still refusing, apply refuses before ANY write. With composing handlers patched in for the
+    # landed-op case, apply still refuses while the driver's mandatory receipt stage is unlanded; with it
+    # patched in too, apply persists the plan and approval in the run's bundle, dispatches every row in plan
+    # order in the apply stage and then the receipt stage, and leaves the frozen retire source in place. The
+    # retirement-partition flip, a handler writing the live tree directly, one swallowing that refusal and
+    # one opening its own transaction each refuse with the WHOLE tree unchanged; a second apply refuses on
+    # the one-apply rule itself.
     import copy as _copy   # this function binds `copy` as a local name (section 4), shadowing the module
+    import shutil
     import _opf_adopt_plan as planner
     import _opf_init
 
@@ -2977,11 +3262,13 @@ def _self_test_checks():
         return path.read_bytes() if path.is_file() else None
 
     def _snapshot(root):
+        """Every path beneath root but the fixture repository's own .git, which only the revision vectors
+        move (through git itself), with each file's bytes."""
         return dict((str(p.relative_to(root)), p.read_bytes() if p.is_file() else None)
-                    for p in sorted(root.rglob("*")))
+                    for p in sorted(root.rglob("*")) if p.relative_to(root).parts[0] != ".git")
 
-    def _sheet(root):
-        bindings = schema.canonical_plan_bindings()
+    def _sheet(root, revision):
+        bindings = dict(schema.canonical_plan_bindings(), revision=revision or "0" * 40)
         manifest = _opf_init.build_manifest()
         views = sorted(v["target"] for v in tomllib.loads(manifest)["views"].values())
         rows = [dict(op="init-store", store_root=".", members=[dict(
@@ -3006,7 +3293,9 @@ def _self_test_checks():
         root = Path(temp).resolve()
         (root / "keep.md").write_bytes(b"kept\n")
         (root / "legacy.md").write_bytes(b"legacy rules\n")
-        sheet = _sheet(root)
+        head = _selftest_git_commit(root)
+        check("driver-fixture-git-revision", head is not None and attempt(observe_revision, root)[0] == head)
+        sheet = _sheet(root, head)
         plan_bytes = _freeze(root, sheet)
         check("driver-fixture-plan-frozen", plan_bytes is not None)
         plan_bytes = plan_bytes or b""
@@ -3036,6 +3325,25 @@ def _self_test_checks():
         check("driver-approve-writes-nothing", _snapshot(root) == before)
         check("driver-approve-multiline-actor-refused", "actor" in
               (refusal(capture_approval, root, plan_bytes, sheet, "adopter\nsecond", now) or ""))
+        # the approval follows its plan: an approval instant before the plan's created_at is refused.
+        check("driver-approve-before-plan-refused", "precedes" in
+              (refusal(capture_approval, root, plan_bytes, sheet, "adopter",
+                       now - datetime.timedelta(days=1)) or ""))
+        # revision-only drift: an EMPTY commit advances HEAD with every inventoried byte unchanged, so only
+        # the observed revision can see it; approve and apply both refuse into a fresh plan.
+        moved = _selftest_git_commit(root)
+        check("driver-fixture-revision-moved", moved is not None and moved != head and _snapshot(root) == before)
+        check("driver-approve-revision-drift-refused", "revision moved" in
+              (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or ""))
+        check("driver-apply-revision-drift-refused", "revision moved" in
+              (refusal(run_apply, root, plan_bytes, approval_bytes, sheet) or ""))
+        check("driver-fixture-revision-restored", _selftest_git_set_head(root, head)
+              and attempt(observe_revision, root)[0] == head)
+        # an unobservable revision (no repository at the root) refuses, never assumed fresh.
+        os.rename(root / ".git", root / "git-aside")
+        check("driver-approve-unobservable-revision-refused", "revision" in
+              (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or ""))
+        os.rename(root / "git-aside", root / ".git")
         # stale observation: a source's bytes change after the plan froze -> refuse into a fresh plan.
         (root / "legacy.md").write_bytes(b"edited after planning\n")
         check("driver-approve-stale-observation-refused", "fresh plan" in
@@ -3058,7 +3366,6 @@ def _self_test_checks():
               (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or ""))
         check("driver-plan-stage-open-journal-refused", "must be reconciled" in
               (refusal(require_clean_journal, root) or ""))
-        import shutil
         shutil.rmtree(root / ".aiqt")
         check("driver-fixture-restored", _snapshot(root) == before)
 
@@ -3073,6 +3380,9 @@ def _self_test_checks():
               (refusal(run_apply, root, other_plan, approval_bytes, sheet) or ""))
         check("driver-apply-edited-approval-refused", "canonical emitted form" in
               (refusal(run_apply, root, plan_bytes, approval_bytes + b"# also\n", sheet) or ""))
+        early = emit_checked(dict(approval_doc, approved_at="1999-01-01T00:00:00Z")).encode("utf-8")
+        check("driver-apply-approval-before-plan-refused", "precedes" in
+              (refusal(run_apply, root, plan_bytes, early, sheet) or ""))
         check("driver-apply-refusals-write-nothing", _snapshot(root) == before)
 
         # landed ops (patched handlers that compose through the context table).
@@ -3085,6 +3395,11 @@ def _self_test_checks():
                 context["ops"].preserve(op_row["path"], op_row["preimage_digest"])
             return schema._ok()
 
+        def receipt(context):
+            seen.append((RECEIPT_STAGE, context.get("stage"), context["plan"]["plan_digest"],
+                         context["approval"]["actor"], context.get("product_root")))
+            return schema._ok()
+
         def over_eager(op_row, context):
             # a retire handler that removes a non-occupying source at apply (archive-then-remove, which
             # check_apply_ops alone admits as a valid preserve-first pair).
@@ -3092,23 +3407,78 @@ def _self_test_checks():
                 context["ops"].archive_occupying(op_row["path"], op_row["preimage_digest"])
             return schema._ok()
 
-        with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, over_eager)):
+        def rogue_write(op_row, context):
+            # a handler writing the live tree directly instead of staging into context["ops"].
+            with open(os.path.join(str(context["product_root"]), "rogue.txt"), "wb") as fh:
+                fh.write(b"written outside the transaction\n")
+            return schema._ok()
+
+        def swallowing(op_row, context):
+            # a handler that catches the guard's refusal of its direct mkdir and reports success anyway.
+            try:
+                os.mkdir(os.path.join(str(context["product_root"]), "rogue-dir"))
+            except AdoptApplyError:
+                pass
+            return schema._ok()
+
+        def own_transaction(op_row, context):
+            # a handler opening its own journaled transaction (an init-store delegating to its substrate).
+            try:
+                run_adopt_transaction(context["product_root"], context["plan"]["run_id"], lambda ops: None)
+            except AdoptApplyError:
+                pass
+            return schema._ok()
+
+        def landed(handler, stage=receipt):
+            stack = contextlib.ExitStack()
+            stack.enter_context(mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, handler)))
+            if stage is not None:
+                stack.enter_context(mock.patch.dict(DRIVER_STAGES, {RECEIPT_STAGE: stage}))
+            return stack
+        # the mandatory receipt stage (spec 14): the planner-produced plan carries no record-adoption row, and
+        # with every row's handler landed apply still refuses before any write while the receipt stage is
+        # unlanded (red against a driver that enumerates plan rows only).
+        rows_named = [row["op"] for row in plan_doc["ops"]]
+        with landed(composing, stage=None):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-receipt-stage-unlanded-refused", "record-adoption" not in rows_named
+              and "mandatory receipt stage" in (err or "") and "plan op(s)" not in (err or "") and not seen
+              and _snapshot(root) == before)
+        with landed(over_eager):
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-retire-partition-flip-refused", "stays frozen" in (err or "") and "legacy.md" in (err or ""))
+        # the partition refusal lands in the write-free preflight: the WHOLE tree is unchanged, no journal
+        # directory included (red against a composition that first runs under the prepared journal).
         check("driver-retire-partition-source-untouched",
-              _bytes(root / "legacy.md") == b"legacy rules\n"
-              and not (root / archive_rel(frid, "legacy.md")).exists()
-              and not (root / JOURNAL_REL / frid).exists())
+              _bytes(root / "legacy.md") == b"legacy rules\n" and _snapshot(root) == before)
+        # composition rules the driver enforces, not handler convention: a direct write, a direct mkdir
+        # whose refusal the handler swallows, and a transaction of the handler's own each refuse the apply
+        # with the whole tree unchanged (each red against a driver that trusts its handlers).
+        with landed(rogue_write):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-handler-direct-write-refused", "direct effect" in (err or "")
+              and not (root / "rogue.txt").exists() and _snapshot(root) == before)
+        with landed(swallowing):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-handler-swallowed-refusal-refused", "continued past the refusal" in (err or "")
+              and not (root / "rogue-dir").exists() and _snapshot(root) == before)
+        with landed(own_transaction):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-handler-own-transaction-refused", "nested adoption transaction" in (err or "")
+              and _snapshot(root) == before)
+        del seen[:]
         (root / "keep.md").write_bytes(b"kept, then edited\n")
-        with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, composing)):
+        with landed(composing):
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-drift-after-approval-refused", "fresh plan" in (err or "") and not seen)
         (root / "keep.md").write_bytes(b"kept\n")
-        with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, composing)):
+        with landed(composing):
             txn, err = attempt(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-commits-with-landed-ops", txn == frid and err is None)
+        # every row in plan order, then the receipt stage, in the write-free preflight and again in the
+        # transaction, each in the apply stage with the plan, approval and product root.
         check("driver-apply-dispatches-every-row-in-order",
-              [s[0] for s in seen] == [row["op"] for row in plan_doc["ops"]]
+              [s[0] for s in seen] == (rows_named + [RECEIPT_STAGE]) * 2
               and all(s[1:] == (APPLY_STAGE, plan_doc["plan_digest"], "adopter", root) for s in seen))
         check("driver-apply-frozen-source-in-place-with-preimage",
               _bytes(root / "legacy.md") == b"legacy rules\n"
@@ -3119,9 +3489,14 @@ def _self_test_checks():
         check("driver-apply-bundle-verifies", verify_bundle(root, frid).status == VALID
               and sorted(r["path"] for r in bundle_rows)
               == sorted([plan_rel(frid), approval_rel(frid), archive_rel(frid, "legacy.md")]))
-        with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, composing)):
+        # one approval, one apply: the second apply refuses on that rule itself, ahead of the freshness
+        # refusal its own first apply would otherwise trigger, with the evidence unchanged.
+        applied = _snapshot(root)
+        del seen[:]
+        with landed(composing):
             again = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
-        check("driver-apply-one-approval-one-apply", again is not None)
+        check("driver-apply-one-approval-one-apply", "already has its transaction" in (again or "")
+              and not seen and _snapshot(root) == applied)
 
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
