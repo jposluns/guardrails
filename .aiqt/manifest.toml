@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "589d998438aab5d6c5bd1b70144379eb8df90251c615c1482c594e74cba22713"
+tree-sha256 = "9835747d7ad7b93824c1843d9e431ac3cc9c01a3098a5b457df5e00af8d04e41"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2581,8 +2581,8 @@ sha256 = "f0e2b818eeba233ce1cc542d1f60cf42cc65d56e6e34f35ce902ba50b95665d0"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_hook.py"
-bytes = 138879
-sha256 = "ebc17a1ae6b73670fafd5f4251b5fb3414556e4dca619dfe5fa5b32c448626a8"
+bytes = 139378
+sha256 = "a7dfa6d6d72ec8ca5f495d1aa6fd71c75ed3905340d51f419205f5196ed6b0a6"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_observe.py"
@@ -3311,8 +3311,8 @@ sha256 = "15b9957c36edfb81fd06ab20a36151827fb8efd5e65f735263400783c2cf617f"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 98520
-sha256 = "85d84d54cd38c8ec6e21ac682aa659ae04fe7ce7435bbacc3dcee3ef0675a274"
+bytes = 100167
+sha256 = "4173ee1431349658a835c706d6f3cdb16a4bacefb313c629c4f19d87282c897a"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -3496,8 +3496,8 @@ sha256 = "e11c54da27d193671c0b6631ae2fb66756d21b5f7f5f3bb75c975ba991957909"
 
 [[sources]]
 path = "tools/gen_renderers.py"
-bytes = 44949
-sha256 = "e7b42a2b7853b20a6c883a7efd848df6215d9b9020de39d10025026b37228486"
+bytes = 46458
+sha256 = "bfef335481e61c66ca8ca4b1ee065782834427430ae40821ac5cb4e15abb0ec4"
 
 [[sources]]
 path = "tools/gen_roadmap.py"

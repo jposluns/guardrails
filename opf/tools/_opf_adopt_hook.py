@@ -2130,9 +2130,20 @@ def self_test():
     # parses but exceeds the Python-level emission depth (roughly the interpreter recursion limit)
     # exhausts EMISSION on the changed-merge path (mapped by the merged-emission handler, whose
     # message never claims a verification ran); dropping either RecursionError handler turns
-    # its vector into an uncaught crash here.
-    deep_parse = b"[" * 100000 + b"]" * 100000
-    r = merge_registration(deep_parse, entry)
+    # its vector into an uncaught crash here. The parser exhaustion is INJECTED (json.loads raising
+    # RecursionError) rather than provoked by a fixed deep body: the depth at which the json scanner
+    # overflows depends on the build and its C stack, so a fixed body can parse where there is more
+    # headroom and the vector would stop exercising _parse's handler.
+    real_loads = json.loads
+
+    def _overflowing_loads(*args, **kwargs):
+        raise RecursionError("injected parser overflow")
+
+    json.loads = _overflowing_loads
+    try:
+        r = merge_registration(b"[]", entry)
+    finally:
+        json.loads = real_loads
     check("deep-nesting-parse-cannot-eval", r.status is CANNOT_EVALUATE and r.new_bytes is None)
     deep_env = b'{"env":' + b"[" * 2000 + b"]" * 2000 + b"}"
     r = merge_registration(deep_env, entry)

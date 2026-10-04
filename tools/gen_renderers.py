@@ -475,8 +475,12 @@ def main():
 #       alone also refuses two bindings.
 #   (k) a PEP 263 cookie cannot hide a declaration: a UTF-7 cookie that makes a UTF-8 comment a declaration,
 #       and any other non-UTF-8 cookie, fail --check (exit 2); a UTF-8 BOM is parsed as Python parses it.
-#   (l) a tools/*.py nested deeply enough to overflow the parser or compiler stack fails --check with exit 2
-#       (GateError), never a traceback.
+#   (l) a parser or compiler stack overflow (RecursionError or MemoryError) while parsing a tools/*.py, or
+#       while evaluating a RENDERER_DECL literal, fails with exit 2 (GateError), never a traceback. The
+#       overflow is INJECTED at the gate's ast.parse and ast.literal_eval calls rather than provoked by a
+#       deeply nested body: the depth at which CPython overflows is an interpreter implementation limit
+#       (parser stack, C stack, recursion checks) that changes between patch releases, so a nesting body
+#       that overflows on one interpreter parses cleanly on another and the case would flip.
 #   (m) the refusal names where a binder runs: a walrus in a decorator, a default or a class base runs in
 #       the enclosing scope, so it is not reported as inside the def or class; one in a body is.
 
@@ -573,10 +577,14 @@ _COOKIES = (
 )
 _BOM_DECL = b"\xef\xbb\xbf" + "RENDERER_DECL = {}\n".format(_DECL_LITERAL).encode("ascii")
 
-# (l) unlisted tools/zz_deep.py bodies that overflow the parser stack (MemoryError) or the compiler stack
-# (RecursionError) under ast.parse.
-_DEEP = (("deep unary nesting", "x = " + "-" * 200000 + "1\n"),
-         ("deep subscript nesting", "x = a" + "[0]" * 100000 + "\n"))
+# (l) (label, the ast attribute the overflow is injected at, the exception class). The parse injection fires
+# only for tools/zz_deep.py, an unlisted file; the literal_eval injection fires on the first literal the gate
+# evaluates, the listed tools/gen_alpha.py RENDERER_DECL.
+_DEEP = (("parser RecursionError", "parse", RecursionError),
+         ("parser MemoryError", "parse", MemoryError),
+         ("literal RecursionError", "literal_eval", RecursionError),
+         ("literal MemoryError", "literal_eval", MemoryError))
+_DEEP_FILE = "tools/zz_deep.py"
 
 # (m) (source, the expected _unsupported_binding description).
 _WALRUS = "an assignment expression (walrus)"
@@ -759,18 +767,31 @@ def self_test_main():
             failures.append("a UTF-8 BOM before a declaration expected discovery, got GateError ({})"
                             .format(exc))
 
-        # (l) a parser or compiler stack overflow is a GateError (exit 2), never a traceback.
-        for label, body in _DEEP:
-            case = tmp / ("deep-" + label.split()[1])
+        # (l) a parser or compiler stack overflow is a GateError (exit 2), never a traceback. The overflow is
+        # injected (see the case note above), so the case is identical on every interpreter and turns red if
+        # MemoryError or RecursionError is dropped from either mapping.
+        for label, attr, exc_class in _DEEP:
+            case = tmp / ("deep-" + label.replace(" ", "-"))
             _fixture(case, _ENTRY_GOOD)
-            (case / "tools" / "zz_deep.py").write_text(body, encoding="utf-8")
+            (case / "tools" / "zz_deep.py").write_text("VALUE = 1\n", encoding="utf-8")
+            real = getattr(ast, attr)
+
+            def overflow(*args, _real=real, _attr=attr, _exc=exc_class, **kwargs):
+                if _attr == "literal_eval" or kwargs.get("filename") == _DEEP_FILE:
+                    raise _exc("injected {} overflow".format(_attr))
+                return _real(*args, **kwargs)
+
+            setattr(ast, attr, overflow)
             try:
                 rc = run_quiet(case, check=False)
             except (MemoryError, RecursionError) as exc:
                 rc = "raised {}".format(type(exc).__name__)
+            finally:
+                setattr(ast, attr, real)
             if rc != 2:
-                failures.append("an unlisted tools/zz_deep.py with {} expected exit 2 (GateError), got {}"
-                                .format(label, rc))
+                failures.append("an injected {} ({}) expected exit 2 (GateError), got {}"
+                                .format(label, "tools/gen_alpha.py RENDERER_DECL" if attr == "literal_eval"
+                                        else _DEEP_FILE, rc))
 
         # (m) an accurate refusal message.
         for source, expected in _WHERE_MESSAGES:
@@ -792,7 +813,7 @@ def self_test_main():
           "renderers.toml fails --check (exit 1); and a wildcard pack-local import, a missing "
           "RENDERER_DECL, a non-slug renderer-id, an unlisted generator declaring RENDERER_DECL, {} "
           "unsupported RENDERER_DECL binding forms, 5 non-regular *.py entries, {} rebindings or bare "
-          "annotations, {} non-UTF-8 coding cookies and {} parser or compiler stack overflows each fail "
+          "annotations, {} non-UTF-8 coding cookies and {} injected parser or literal stack overflows each fail "
           "closed (exit 2), while an annotated declaration alone renders, a UTF-8 BOM parses, and {} "
           "refusal messages name where the binder runs".format(
               len(_UNSUPPORTED_BINDINGS), len(_REBOUND), len(_COOKIES), len(_DEEP), len(_WHERE_MESSAGES)))
