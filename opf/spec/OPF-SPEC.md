@@ -213,9 +213,14 @@ state. Journals are machine-local even after completion; a clone without them ca
 transactions, and requested recovery MUST fail closed on a missing journal. Containment and doctor
 exclude journals and make no recovery claim; a rogue file there is outside their coverage.
 
-Under pre-1.3.0 tooling, every store within that tooling's own version ceiling keeps its legacy
-grading: the homes-2 names are ordinary store paths there, graded, detected, and dispositioned
-exactly as before, and the pre-1.3.0 doctor's check roster and residuals are unchanged. Tooling
+Under pre-1.3.0 tooling, a store that has not started an adoption keeps, within that tooling's
+own version ceiling, its legacy grading: the homes-2 names are ordinary store paths there, graded,
+detected, and dispositioned exactly as before, and the pre-1.3.0 doctor's check roster and
+residuals are unchanged for such a store. A store whose adoption home
+`.working/imported/adoption/` exists has started an adoption and receives the adoption grading
+from the same pre-1.3.0 tooling at once: its admitted adoption records are registered, its
+plan-enumerated frozen sources are graded as bounded adoption state, and the adopting residuals
+are disclosed in addition to the legacy residuals. Tooling
 that carries the section 9.2 ceiling refuses an above-ceiling declaration as a fail-closed
 INVALID finding; tooling released before that ceiling grades such a store as legacy instead, a
 disclosed residual of section 9.2. Activated 1.3.0

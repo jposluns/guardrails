@@ -1,28 +1,37 @@
 """The homes-1 adoption control area and the bounded adoption state the doctor reads (OPF-SPEC 4.2, 11, 14.2, 17).
 
 A store that has adopted (its `.working/imported/adoption/` home exists) registers, on homes 1, each ADMITTED
-run: its evidence bundle `.working/imported/adoption/<run-id>/`, its adoption archive
-`.working/archive/adoption/<run-id>/`, and the shared Move root `.working/archive/moved/`. C-CONTAINMENT
-recognizes them by containment as OPF control area and does not re-enumerate them (spec 4.2, 17). A run is
-admitted only when its bundle record re-proves: a VALID `inventory.toml` listing `plan.toml` and
-`approval.toml` at their exact size and digest, a plan that re-proves as a frozen plan/v2
-(`_opf_adopt_apply.frozen_plan`), a canonical approval that binds it, a plan run id equal to the bundle
-name, and a plan store identity equal to this in-repo store. Every other path under the control area stays
-an unregistered path, graded exactly as before.
+run AT FILE LEVEL: the paths its journal-proven inventories list, plus the recorded Move destinations of its
+non-occupying move rows. C-CONTAINMENT recognizes exactly those files as OPF control area; every other path
+under the adoption homes, the run's own evidence bundle, its adoption archive and the Move root included, is
+graded as an unregistered path (spec 4.2, 17). A run is admitted only when its durable record re-proves AND
+the adoption journal proves its publication: a VALID `inventory.toml` listing `plan.toml` and
+`approval.toml` at their exact size and digest, a COMMITTED base adoption transaction of the same run whose
+recorded INTENT digest matches the live inventory bytes (the proof the apply side itself demands of a phase,
+`_opf_adopt_apply._committed_base_or_refuse`; a self-consistent hand-written bundle admits nothing), a plan
+that re-proves as a frozen plan/v2 (`_opf_adopt_apply.frozen_plan`), a canonical approval that binds it, a
+plan run id equal to the bundle name, and a plan store identity equal to this in-repo store.
 
 The frozen retire, move and migrate sources under `.working/` of each admitted run (the non-occupying source
 rows of its frozen plan) are bounded adoption state until their retirement is recorded (spec 11, 14.2): a
 source whose live bytes still match its plan digest is `bounded` (reported as migration_incomplete, never
 failed), one whose bytes differ is `drifted`, and one that is gone is `absent`; both of the latter fail at
-required. A retirement is recorded when the run bundle carries a VALID retirement-phase inventory; it ends
-the bounded state of the retire and move rows only. A migrate source retires through its import, which a
-later activation reads, so it stays bounded until then.
+required AND stay reported as migration_incomplete, because the approved source remains unresolved (spec 11).
+A retirement is recorded only when a COMPLETE retirement-phase adoption transaction of the same run published
+the bundle's VALID retirement inventory with a matching recorded INTENT digest; any other present marker or
+transaction state is CANNOT-EVALUATE, never read as retired. A recorded retirement ends the bounded state of
+the retire and move rows only. A migrate source retires through its import, which a later activation reads,
+so it stays bounded until then.
 
-Read-only by construction: the reader never opens the adoption journal (spec 4.2: doctor MUST NOT consult a
-journal), never reads an archive copy or a payload (on homes 1 the completion checks carry those digests,
-spec 17), and writes nothing. Every file read is contained, no-follow, single-link and bounded by the
-journal 16 MiB read cap (`_opf_adopt_apply._read_live`). A store without the adoption home costs exactly
-one lstat and keeps the legacy grading unchanged. C-EVIDENCE-ENUM stays inactive on homes 1.
+Read-only and bounded by construction: the reader opens the adoption journal only to CLASSIFY the run's own
+transactions for the admission and retirement proof, read-only, and writes nothing, the journal included; it
+never consults the journal to decide partial status (spec 4.2). The bytes an admitted inventory lists are
+registered by name only and are NOT verified here, and nothing in this build verifies them (the section 14.1
+completion checks are the intended verifier and have not landed). Every file read is contained, no-follow,
+single-link and bounded by the journal 16 MiB read cap (`_opf_adopt_apply._read_live`); one adoption_state
+call additionally refuses past RUN_CEILING run directories, SOURCE_CEILING frozen sources, or READ_CEILING
+total bytes read (CANNOT-EVALUATE, fail-closed). A store without the adoption home costs exactly one lstat
+and keeps the legacy grading unchanged. C-EVIDENCE-ENUM stays inactive on homes 1.
 
 Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
 modules, so the standalone-closure property holds.
@@ -54,7 +63,7 @@ ADOPTION_HOME = "{}/{}".format(store.IMPORTED_REL, apply.KIND)
 ARCHIVE_ADOPTION = "{}/{}".format(store.ARCHIVE_REL, apply.KIND)
 MOVED_ROOT = apply._MOVED_ROOT
 # The control-area ancestors C-CONTAINMENT walks as managed namespaces while a store adopts, so that every
-# entry beneath them other than an admitted run home is still graded.
+# entry beneath them other than a registered file is still graded.
 ADOPTION_NAMESPACES = (store.IMPORTED_REL, ADOPTION_HOME, store.ARCHIVE_REL, ARCHIVE_ADOPTION)
 # The roots an [unmanaged] declaration may not equal, contain or lie within while the store adopts (spec 14.2).
 CONTROL_ROOTS = (store.IMPORTED_REL, store.ARCHIVE_REL)
@@ -67,6 +76,12 @@ RETIREMENT_PHASE = "retirement"
 FROZEN_DISPOSITIONS = ("retire", "move", "migrate")
 # The dispositions whose bounded state the recorded retirement ends (a migrate source retires by import).
 RETIRED_BY_RETIREMENT = ("retire", "move")
+
+# Fail-closed ceilings of ONE adoption_state call (an adversarial tree cannot make the doctor read without
+# bound): run directories read, frozen sources graded, and total bytes read through the contained reader.
+RUN_CEILING = 128
+SOURCE_CEILING = 4096
+READ_CEILING = 64 * 1024 * 1024
 
 FrozenSource = collections.namedtuple("FrozenSource", ("digest", "run_id", "disposition", "grade", "detail"))
 AdoptionState = collections.namedtuple(
@@ -97,14 +112,57 @@ def _list(root_fd, rel):
         raise apply.AdoptApplyError("cannot list {!r} ({})".format(rel, exc))
 
 
+def _read_budgeted(root_fd, rel, budget):
+    """apply._read_live under the whole-reader byte budget: the read refuses once the adoption state has
+    read READ_CEILING total bytes (fail-closed), so no tree makes the doctor read without bound."""
+    fst, data = apply._read_live(root_fd, rel)
+    if data is not None:
+        budget[0] -= len(data)
+        if budget[0] < 0:
+            raise apply.AdoptApplyError("reading {!r} exceeds the adoption-state read ceiling of {} bytes; "
+                                        "fail-closed".format(rel, READ_CEILING))
+    return fst, data
+
+
+def _txn_proof(root_fd, run_id, phase):
+    """(state, published) of the (run, phase) adoption transaction, read from the journal READ-ONLY:
+    `state` is `_journal.classify_state`'s verdict ("absent" when no transaction directory exists) and
+    `published` is the content digest the transaction's INTENT recorded for the phase inventory create, or
+    None. This is the apply side's own prior-run proof pattern (`_committed_base_or_refuse`); nothing here
+    writes, recovers, or reads any transaction other than the named one. Raises AdoptApplyError when the
+    journal cannot be read or classified (fail-closed)."""
+    txn = run_id if phase is None else "{}.{}".format(run_id, phase)
+    rel = apply.inventory_rel(run_id, phase)
+    try:
+        st = _journal._lstat_contained(root_fd, apply.JOURNAL_REL + "/" + txn)
+        if st is None:
+            return "absent", None
+        jr_fd = _journal.open_journal_root_fd(root_fd, apply.JOURNAL_REL)
+        try:
+            state = _journal.classify_state(jr_fd, Path(txn))
+            frames, _torn, _good = _journal.read_frames(jr_fd, Path(txn))
+        finally:
+            _journal._close_fd_quietly(jr_fd)
+    except (_journal.JournalError, OSError) as exc:
+        raise apply.AdoptApplyError("the adoption transaction {!r} cannot be classified from the journal "
+                                    "({}); fail-closed".format(txn, exc))
+    intent = _journal._first(frames, _journal.F_INTENT)
+    ops = intent.get("ops", []) if isinstance(intent, dict) else []
+    published = next(((op.get("poststate") or {}).get("content-sha256") for op in ops
+                      if isinstance(op, dict) and op.get("op") == "create" and op.get("path") == rel), None)
+    return state, published
+
+
 def adoption_state(root_fd, machine_rel, *, in_repo):
-    """The adoption state of the store beneath root_fd (an AdoptionState). Read-only and journal-free.
+    """The adoption state of the store beneath root_fd (an AdoptionState). Read-only; the journal is opened
+    only to classify this store's own adoption transactions (the admission and retirement proof).
 
     `.working/imported/adoption` absent: NOT_ADOPTING after exactly one lstat, so the legacy grading runs
     unchanged. Present: every run-id child is admitted or refused (_admit_run); an admitted run contributes
-    its homes to `registered` and its frozen sources to `frozen`, each graded against its plan digest. A
-    refused run record is a finding (the run homes are then graded as unregistered paths); an input that
-    cannot be read, or a plan that does not describe this store, is a cannot-evaluate."""
+    the file paths its proven inventories list (plus its recorded Move destinations) to `registered` and its
+    frozen sources to `frozen`, each graded against its plan digest. A refused run record is a finding (the
+    run homes are then graded as unregistered paths); an input that cannot be read, a plan that does not
+    describe this store, or an exceeded ceiling is a cannot-evaluate."""
     try:
         st = _journal._lstat_contained(root_fd, ADOPTION_HOME)
     except (_journal.JournalError, OSError) as exc:
@@ -119,34 +177,42 @@ def adoption_state(root_fd, machine_rel, *, in_repo):
         subdirs, _files = _list(root_fd, ADOPTION_HOME)
     except apply.AdoptApplyError as exc:
         return _state((), (), {}, (), [_PREFIX + "{}; fail-closed".format(exc)])
-    findings, cannot, runs, plans = [], [], [], {}
     # A file or a non-run-id child is never admitted; the containment walk grades it as unregistered.
-    for name in subdirs or ():
-        if not apply.is_run_id(name):
-            continue
-        plan_doc, run_findings, run_cannot = _admit_run(root_fd, name, machine_rel, in_repo)
+    run_names = [name for name in subdirs or () if apply.is_run_id(name)]
+    if len(run_names) > RUN_CEILING:
+        return _state((), (), {}, (), [_PREFIX + "the adoption home {!r} holds {} run directories, over the "
+                                       "adoption-state ceiling of {}; fail-closed".format(
+                                           ADOPTION_HOME, len(run_names), RUN_CEILING)])
+    budget = [READ_CEILING]
+    findings, cannot, runs, plans, registered = [], [], [], {}, []
+    for name in run_names:
+        plan_doc, run_registered, run_findings, run_cannot = _admit_run(root_fd, name, machine_rel,
+                                                                        in_repo, budget)
         findings.extend(run_findings)
         cannot.extend(run_cannot)
         if plan_doc is not None:
             runs.append(name)
             plans[name] = plan_doc
-    registered = []
-    for run_id in runs:
-        registered.extend((apply.evidence_home_rel(run_id), apply._archive_root(run_id)))
-    if runs:
-        registered.append(MOVED_ROOT)
+            registered.extend(run_registered)
     claims = {}
     for run_id in runs:
+        registered.extend(move_destinations(plans[run_id]))
         try:
-            sources = frozen_sources(plans[run_id], _retired(root_fd, run_id))
+            retired, retired_registered = _retired(root_fd, run_id, budget)
         except apply.AdoptApplyError as exc:
             # Whether this run retired cannot be told, so none of its sources is bounded (each then grades as
             # an unregistered path) and the report cannot evaluate.
             cannot.append(_PREFIX + "adoption run {}: the retirement state cannot be evaluated ({}); "
                           "fail-closed".format(run_id, exc))
             continue
-        for path, (hexdigest, disposition) in sources.items():
+        registered.extend(retired_registered)
+        for path, (hexdigest, disposition) in frozen_sources(plans[run_id], retired).items():
             claims.setdefault(path, []).append((run_id, hexdigest, disposition))
+    if len(claims) > SOURCE_CEILING:
+        cannot.append(_PREFIX + "the admitted adoption runs claim {} frozen sources, over the "
+                      "adoption-state ceiling of {}; no source is graded (fail-closed)".format(
+                          len(claims), SOURCE_CEILING))
+        claims = {}
     frozen = {}
     for path in sorted(claims):
         if len(claims[path]) > 1:
@@ -156,35 +222,37 @@ def adoption_state(root_fd, machine_rel, *, in_repo):
             continue
         run_id, hexdigest, disposition = claims[path][0]
         try:
-            grade, detail = grade_frozen(root_fd, path, hexdigest)
+            grade, detail = grade_frozen(root_fd, path, hexdigest, budget)
         except apply.AdoptApplyError as exc:
             cannot.append(_PREFIX + "frozen {} source {!r} of adoption run {} cannot be graded ({}); "
                           "fail-closed".format(disposition, path, run_id, exc))
             grade, detail = "cannot", str(exc)
         frozen[path] = FrozenSource(hexdigest, run_id, disposition, grade, detail)
-    return _state(runs, registered, frozen, findings, cannot)
+    return _state(runs, sorted(set(registered)), frozen, findings, cannot)
 
 
-def _admit_run(root_fd, run_id, machine_rel, in_repo):
-    """(plan_doc or None, findings, cannot) for one adoption run bundle. The run is admitted only when its
-    durable record re-proves (see the module introduction): a refused record is a finding naming the reason;
-    an unreadable or malformed input, and a plan that describes another store, are cannot-evaluate."""
+def _admit_run(root_fd, run_id, machine_rel, in_repo, budget):
+    """(plan_doc or None, registered, findings, cannot) for one adoption run bundle. The run is admitted only
+    when its durable record re-proves AND its COMMITTED base transaction published the live inventory bytes
+    (see the module introduction): a refused record is a finding naming the reason; an unreadable or
+    malformed input, and a plan that describes another store, are cannot-evaluate. `registered` is the file
+    paths the proven inventory lists, plus the inventory itself; never a directory, never a whole tree."""
     findings, cannot = [], []
     bundle = apply.evidence_home_rel(run_id)
     tail = "; the run is not admitted, so its homes are graded as unregistered paths"
 
     def refuse(reason):
         findings.append(_PREFIX + "adoption run {} is not admitted: {}{}".format(run_id, reason, tail))
-        return None, findings, cannot
+        return None, (), findings, cannot
 
     def cant(reason):
         cannot.append(_PREFIX + "adoption run {} cannot be evaluated: {}{} (fail-closed)".format(
             run_id, reason, tail))
-        return None, findings, cannot
+        return None, (), findings, cannot
 
     inv_rel = apply.inventory_rel(run_id)
     try:
-        fst, data = apply._read_live(root_fd, inv_rel)
+        fst, data = _read_budgeted(root_fd, inv_rel, budget)
     except apply.AdoptApplyError as exc:
         return cant(str(exc))
     if fst is None:
@@ -205,6 +273,19 @@ def _admit_run(root_fd, run_id, machine_rel, in_repo):
         return cant("{!r}: {}".format(inv_rel, "; ".join(graded.findings)))
     if graded.status != store.VALID:
         return refuse("{!r}: {}".format(inv_rel, "; ".join(graded.findings)))
+    # The journal proof (spec 4.2): the base inventory must be the one a COMMITTED base transaction of this
+    # run published, byte for byte. A self-consistent bundle on disk alone never admits.
+    try:
+        state, published = _txn_proof(root_fd, run_id, None)
+    except apply.AdoptApplyError as exc:
+        return cant(str(exc))
+    if state != "complete":
+        return refuse("no COMMITTED base adoption transaction of this run published its inventory.toml "
+                      "(the journal reads it {!r}); a hand-planted or interrupted bundle admits nothing "
+                      "(spec 4.2)".format(state))
+    if published != apply._sha256(data):
+        return refuse("its inventory.toml does not hold the bytes the run's COMMITTED base transaction "
+                      "published (the recorded INTENT digest differs; a swapped or stale record)")
     rows = dict((row["path"], row) for row in doc["file"])
     blobs = {}
     for name in (apply.PLAN_NAME, apply.APPROVAL_NAME):
@@ -213,7 +294,7 @@ def _admit_run(root_fd, run_id, machine_rel, in_repo):
         if row is None:
             return refuse("{!r} is not listed in its inventory.toml".format(rel))
         try:
-            fst, data = apply._read_live(root_fd, rel)
+            fst, data = _read_budgeted(root_fd, rel, budget)
         except apply.AdoptApplyError as exc:
             return cant(str(exc))
         if fst is None:
@@ -242,20 +323,33 @@ def _admit_run(root_fd, run_id, machine_rel, in_repo):
         return cant("its plan describes the store at root {!r} with machine store {!r}, not this store "
                     "(machine store {!r}, in-repo {}): the plan does not describe this store".format(
                         ident.get("store_root"), ident.get("machine_rel"), machine_rel, in_repo))
-    return plan_doc, findings, cannot
+    return plan_doc, [inv_rel] + sorted(rows), findings, cannot
 
 
-def _retired(root_fd, run_id):
-    """True when the run bundle carries a VALID retirement-phase inventory, False when it is absent. Raises
-    AdoptApplyError when it is unreadable, malformed or not VALID: whether the run retired is then unknown."""
+def _retired(root_fd, run_id, budget):
+    """(recorded, registered): whether the run's retirement is recorded, and the file paths its retirement
+    inventory registers. Recorded ONLY when a COMPLETE retirement-phase transaction of the same run published
+    the live, VALID `inventory-retirement.toml` bytes (a matching recorded INTENT digest). An absent marker
+    with no such transaction is not retired. Every other combination raises AdoptApplyError: whether the run
+    retired is then unknown (CANNOT-EVALUATE), never read as retired."""
     rel = apply.inventory_rel(run_id, RETIREMENT_PHASE)
-    fst, data = apply._read_live(root_fd, rel)
+    fst, data = _read_budgeted(root_fd, rel, budget)
     if fst is None:
-        return False
-    graded = apply.validate_inventory(_toml(data, rel), run_id)
+        state, _published = _txn_proof(root_fd, run_id, RETIREMENT_PHASE)
+        if state in ("absent", "nothing-opened", "rolled-back"):
+            return False, []
+        raise apply.AdoptApplyError("the run has a retirement-phase adoption transaction (journal state "
+                                    "{!r}) but no {!r}; whether the run retired is unknown".format(state, rel))
+    doc = _toml(data, rel)
+    graded = apply.validate_inventory(doc, run_id)
     if graded.status != store.VALID:
         raise apply.AdoptApplyError("{!r} is not a VALID inventory ({})".format(rel, "; ".join(graded.findings)))
-    return True
+    state, published = _txn_proof(root_fd, run_id, RETIREMENT_PHASE)
+    if state != "complete" or published != apply._sha256(data):
+        raise apply.AdoptApplyError("{!r} was not published by a COMPLETE retirement-phase transaction of "
+                                    "this run with a matching recorded INTENT digest (journal state {!r}); "
+                                    "whether the run retired is unknown".format(rel, state))
+    return True, [rel] + [row["path"] for row in doc["file"]]
 
 
 def frozen_sources(plan_doc, retired):
@@ -276,11 +370,27 @@ def frozen_sources(plan_doc, retired):
     return out
 
 
-def grade_frozen(root_fd, path, hexdigest):
+def move_destinations(plan_doc):
+    """The recorded Move destinations of one admitted plan's non-occupying move rows: their `preservation`
+    paths beneath the Move root, registered at file level beside the inventory-listed paths. Any other
+    spelling registers nothing (fail-closed: the path is then graded as unregistered)."""
+    out = []
+    for row in plan_doc.get("sources", ()):
+        if row.get("disposition") != "move" or row.get("occupying") is not False:
+            continue
+        dest = row.get("preservation")
+        if isinstance(dest, str) and dest.startswith(MOVED_ROOT + "/"):
+            out.append(dest)
+    return out
+
+
+def grade_frozen(root_fd, path, hexdigest, budget=None):
     """(grade, detail) of one frozen source: `bounded` (live bytes equal the plan digest), `drifted` or
-    `absent`. A symlink, special file, multiply-linked file or a file over the read cap raises
-    AdoptApplyError (cannot-evaluate), never a guess."""
-    fst, data = apply._read_live(root_fd, path)
+    `absent`. A symlink, special file, multiply-linked file, a file over the read cap, or an exhausted
+    read budget raises AdoptApplyError (cannot-evaluate), never a guess."""
+    if budget is None:
+        budget = [READ_CEILING]
+    fst, data = _read_budgeted(root_fd, path, budget)
     if fst is None:
         return "absent", "it is absent before its retirement is recorded (a vanished frozen source)"
     if apply._sha256(data) != hexdigest:
@@ -312,6 +422,8 @@ def _self_test_checks():
     import datetime
     import hashlib
     import os
+    import shutil
+    import subprocess
     import tempfile
     from unittest import mock
     import _opf_adopt as schema
@@ -331,8 +443,10 @@ def _self_test_checks():
     now = datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc)
     mrel = ".working/toml"
     old, note, mig, keep = ".working/OLD.md", ".working/notes/old.md", ".working/MIG.md", ".working/KEEP.md"
-    sources = {old: b"old rules\n", note: b"old note\n", mig: b"to migrate\n", keep: b"kept\n"}
-    decisions = {old: "retire", note: "retire", mig: "migrate", keep: "keep"}
+    move = ".working/MOVE.md"
+    sources = {old: b"old rules\n", note: b"old note\n", mig: b"to migrate\n", keep: b"kept\n",
+               move: b"to move\n"}
+    decisions = {old: "retire", note: "retire", mig: "migrate", keep: "keep", move: "move"}
     moved = MOVED_ROOT + "/legacy/moved.md"
     manifest_text = _opf_init.build_manifest()
     legacy_manifest = tomllib.loads(manifest_text)
@@ -393,10 +507,36 @@ def _self_test_checks():
             h = apply.evidence_home_rel(rid_)
             return [h + "/" + apply.PLAN_NAME, h + "/" + apply.APPROVAL_NAME, apply.archive_rel(rid_, mig), moved]
 
+        def commit(root, rid_, phase=None, complete=True):
+            """(Re)record the (run, phase) adoption transaction, publishing the live phase inventory bytes:
+            the journal proof _txn_proof demands (a bundle without it admits nothing). complete=False leaves
+            the transaction OPEN (an interrupted apply)."""
+            txn = rid_ if phase is None else "{}.{}".format(rid_, phase)
+            txn_dir = root / apply.JOURNAL_REL / txn
+            if txn_dir.exists():
+                shutil.rmtree(txn_dir)
+            txn_dir.mkdir(parents=True, exist_ok=True)
+            inv = root / apply.inventory_rel(rid_, phase)
+            fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                jr = _journal.open_journal_root_fd(fd, apply.JOURNAL_REL)
+                try:
+                    _journal._create_frames_excl(jr, txn)
+                    _journal.publish(jr, txn, _journal.F_INTENT, dict(txn=txn, ops=[dict(
+                        op="create", path=apply.inventory_rel(rid_, phase),
+                        poststate={"content-sha256": hashlib.sha256(inv.read_bytes()).hexdigest()})]))
+                    if complete:
+                        _journal.publish(jr, txn, _journal.F_COMPLETE, dict(txn=txn))
+                finally:
+                    _journal._close_fd_quietly(jr)
+            finally:
+                os.close(fd)
+
         def relist(root, rid_, paths=None):
             rows = [apply.inventory_row(rel, (root / rel).read_bytes()) for rel in (listed(rid_) if paths is None
                                                                                      else paths)]
             write(root, apply.inventory_rel(rid_), apply.emit_inventory(rid_, rows))
+            commit(root, rid_)
 
         def bundle(root, rid_, plan_bytes=None, approval_bytes=None):
             h = apply.evidence_home_rel(rid_)
@@ -455,8 +595,8 @@ def _self_test_checks():
         with mock.patch.object(_journal, "_lstat_contained", lambda fd, rel: seen.append(rel) or lstat(fd, rel)), \
                 mock.patch.object(apply, "_read_live", lambda fd, rel: reads.append(rel) or read_live(fd, rel)):
             rep = contain(root)
-        legacy = sorted((".working/MIG.md", ".working/OLD.md", ".working/archive", ".working/imported",
-                         ".working/notes"))
+        legacy = sorted((".working/MIG.md", ".working/MOVE.md", ".working/OLD.md", ".working/archive",
+                         ".working/imported", ".working/notes"))
         check("legacy-not-adopting-one-lstat-no-read", seen == [ADOPTION_HOME] and reads == [])
         check("legacy-findings-unchanged", rep.findings == [unregistered.format(p) for p in legacy]
               and rep.cannot == [] and rep.triage == [])
@@ -467,18 +607,37 @@ def _self_test_checks():
         root = tree()
         rep = contain(root)
         check("admitted-run-registered", rep.findings == [] and rep.cannot == [])
-        check("frozen-sources-bounded", bounded(rep) == sorted((old, note, mig)) and not named(
+        check("frozen-sources-bounded", bounded(rep) == sorted((old, note, mig, move)) and not named(
             rep.migration_incomplete, keep))
         check("adopting-residual-disclosed", rep.residuals == list(_opf_check._RESIDUALS)
               + list(_opf_check._ADOPTING_RESIDUALS))
         result = rep.result()
         check("store-validation-carries-migration-incomplete",
-              result.migration_incomplete == rep.migration_incomplete and len(result.migration_incomplete) == 3)
-        # bounded at a clean start as much as at a substantiated partial (spec 11), never triage.
-        write(root, ".working/imports/{}/plan.toml".format(imp_run), b"x = 1\n")
+              result.migration_incomplete == rep.migration_incomplete and len(result.migration_incomplete) == 4)
+        # bounded at a clean start as much as at a substantiated partial (spec 11). In an ADOPTING store the
+        # partial triage downgrade does not apply (ruling R-a; QA round 1): every unenumerated path stays a
+        # finding at required; the legacy triage posture is for legacy (non-adopting) stores only.
+        imp_rel = ".working/imports/{}/plan.toml".format(imp_run)
+        write(root, imp_rel, b"x = 1\n")
+        write(root, ".working/OTHER.md", b"x\n")
         rep = contain(root, status="partial")
-        check("bounded-under-partial", bounded(rep) == sorted((old, note, mig)) and rep.findings == []
+        check("bounded-under-partial", bounded(rep) == sorted((old, note, mig, move))
               and not any(named(rep.triage, p) for p in sources))
+        check("adopting-partial-strays-still-findings", rep.triage == []
+              and named(rep.findings, ".working/OTHER.md", "unregistered")
+              and named(rep.findings, imp_rel, "unregistered"))
+
+        # S2b (QA round 1): registration is at FILE level only; a stray beside the registered files under
+        # the bundle, the adoption archive and the Move root is graded, never silently covered.
+        root = tree()
+        write(root, home + "/stray.md", b"x\n")
+        write(root, apply._archive_root(rid) + "/stray.md", b"x\n")
+        write(root, MOVED_ROOT + "/hide/evil.sh", b"evil\n")
+        rep = contain(root)
+        check("admitted-homes-strays-graded", named(rep.findings, home + "/stray.md", "unregistered")
+              and named(rep.findings, apply._archive_root(rid) + "/stray.md", "unregistered")
+              and named(rep.findings, MOVED_ROOT + "/hide", "unregistered") and len(rep.findings) == 3
+              and rep.cannot == [])
 
         # S3: every other path under the control area is still graded.
         root = tree()
@@ -505,7 +664,7 @@ def _self_test_checks():
         write(root, old, b"old rules, edited\n")
         rep = contain(root)
         check("drifted-source-finding", named(rep.findings, old, "drifted") and len(rep.findings) == 1
-              and not named(rep.migration_incomplete, old))
+              and named(rep.migration_incomplete, old, "unresolved"))
         write(root, ".working/imports/{}/plan.toml".format(imp_run), b"x = 1\n")
         rep = contain(root, status="partial")
         check("drifted-under-partial-is-finding", named(rep.findings, old, "drifted")
@@ -515,7 +674,8 @@ def _self_test_checks():
         root = tree()
         os.unlink(root / old)
         rep = contain(root)
-        check("vanished-source-finding", named(rep.findings, old, "vanished") and len(rep.findings) == 1)
+        check("vanished-source-finding", named(rep.findings, old, "vanished") and len(rep.findings) == 1
+              and named(rep.migration_incomplete, old, "unresolved"))
 
         # S7: a symlinked or a hard-linked frozen source cannot be evaluated.
         root = tree()
@@ -538,13 +698,26 @@ def _self_test_checks():
         rep = contain(tree(), model=legacy_manifest)
         check("keep-row-not-frozen", rep.findings == [unregistered.format(keep)])
 
-        # S10: a recorded retirement ends the bounded state of retire rows; a migrate source stays bounded.
+        # S10: a recorded retirement ends the bounded state of the retire AND move rows; a migrate source
+        # stays bounded. Recorded means a COMPLETE retirement-phase transaction published the VALID marker;
+        # a marker no transaction published is CANNOT-EVALUATE, never read as retired (QA round 1).
         marker = apply.inventory_rel(rid, RETIREMENT_PHASE)
         root = tree()
         write(root, marker, apply.emit_inventory(rid, []))
         rep = contain(root)
+        check("retirement-marker-unproven-cannot", named(rep.cannot, marker) and bounded(rep) == [])
+        os.unlink(root / old)
+        os.unlink(root / note)
+        rep = contain(root)
+        check("unproven-retirement-never-hides-vanished-sources", named(rep.cannot, marker)
+              and bounded(rep) == [])
+        root = tree()
+        write(root, marker, apply.emit_inventory(rid, []))
+        commit(root, rid, RETIREMENT_PHASE)
+        rep = contain(root)
         check("retired-retire-source-graded", named(rep.findings, old, "unregistered")
-              and named(rep.findings, ".working/notes", "unregistered") and bounded(rep) == [mig])
+              and named(rep.findings, ".working/notes", "unregistered")
+              and named(rep.findings, move, "unregistered") and bounded(rep) == [mig])
         # S4c: the ancestor of a frozen source that is gone is graded as one unregistered entry, even empty.
         os.unlink(root / note)
         rep = contain(root)
@@ -557,6 +730,11 @@ def _self_test_checks():
         os.symlink("inventory.toml", root / marker)
         rep = contain(root)
         check("retirement-marker-symlink-cannot", rep.cannot != [] and bounded(rep) == [])
+        # S10c: a COMPLETE retirement transaction whose published marker is gone is contradictory (cannot).
+        os.unlink(root / marker)
+        rep = contain(root)
+        check("retirement-txn-without-marker-cannot", any("retire" in m and rid in m for m in rep.cannot)
+              and bounded(rep) == [])
 
         # S11: every record case refuses admission; the run homes are then graded and nothing is bounded.
         def record(name, mutate, verdict, *words):
@@ -615,6 +793,18 @@ def _self_test_checks():
 
         record("plan-run-id-not-bundle", lambda root: misplace(root, rid_b, rid), "finding",
                "names run")
+        # QA round 1 (the admission proof): a self-consistent bundle with no COMMITTED base transaction, an
+        # OPEN (interrupted) one, a swapped inventory, and an unclassifiable journal each fail closed.
+        record("no-base-transaction", lambda root: shutil.rmtree(root / apply.JOURNAL_REL), "finding",
+               "admits nothing")
+        record("base-transaction-open", lambda root: commit(root, rid, complete=False), "finding",
+               "admits nothing")
+        record("stale-inventory-after-commit",
+               lambda root: (root / inventory).write_bytes((root / inventory).read_bytes() + b"\n"),
+               "finding", "COMMITTED base transaction published")
+        record("journal-unclassifiable", lambda root: (root / apply.JOURNAL_REL / rid / "frames.log")
+               .write_bytes((root / apply.JOURNAL_REL / rid / "frames.log").read_bytes() * 2), "cannot",
+               "cannot be classified")
 
         # Stale identity: a plan that does not describe this in-repo store cannot be evaluated.
         root = tree()
@@ -658,7 +848,9 @@ def _self_test_checks():
         check("reader-fault-cannot", any("adoption state cannot be read" in m and "injected" in m
                                          for m in rep.cannot))
 
-        # S15: read-only and journal-free: no write effect, no path under .aiqt opened, the tree unchanged.
+        # S15: read-only: the journal is opened only to CLASSIFY this store's own adoption transactions
+        # (the admission and retirement proof); journal_state, the partial-status surface, is never
+        # consulted, there is no write effect, and the tree, the journal included, is byte-unchanged.
         root = tree()
         write(root, apply.JOURNAL_REL + "/txn/intent.toml", b"x = 1\n")
         before = snapshot(root)
@@ -677,8 +869,91 @@ def _self_test_checks():
         except (apply.AdoptApplyError, AssertionError) as exc:
             effect = exc
         check("read-only-no-effect", effect is None and rep.findings == [] and rep.cannot == [])
-        check("journal-never-opened", opened != [] and not any(".aiqt" in p for p in opened))
+        check("journal-state-never-consulted", opened != [])
         check("tree-unchanged", snapshot(root) == before)
+
+        # S17 (QA round 1): the fail-closed ceilings. Each is patched small over a tree that otherwise reads
+        # clean, so every vector fails without its enforcement.
+        root = tree()
+        with mock.patch.object(reader, "RUN_CEILING", 0):
+            rep = contain(root)
+        check("run-ceiling-cannot", any("run" in m and "ceiling" in m for m in rep.cannot)
+              and bounded(rep) == [])
+        root = tree()
+        with mock.patch.object(reader, "SOURCE_CEILING", 1):
+            rep = contain(root)
+        check("source-ceiling-cannot", any("frozen sources" in m and "ceiling" in m for m in rep.cannot)
+              and bounded(rep) == [])
+        root = tree()
+        with mock.patch.object(reader, "READ_CEILING", 8):
+            rep = contain(root)
+        check("read-ceiling-cannot", any("read ceiling" in m for m in rep.cannot))
+
+        # S18 (QA round 1): the move row, frozen by the real planner: bounded, drifted and vanished grade
+        # exactly as retire does, and its recorded Move destination is registered at file level.
+        root = tree()
+        write(root, store.moved_dest(move), sources[move])
+        rep = contain(root)
+        check("move-destination-registered", rep.findings == [] and rep.cannot == []
+              and named(rep.migration_incomplete, move))
+        root = tree()
+        write(root, move, b"to move, edited\n")
+        rep = contain(root)
+        check("moved-source-drift-finding", named(rep.findings, move, "drifted")
+              and named(rep.migration_incomplete, move, "unresolved"))
+        root = tree()
+        os.unlink(root / move)
+        rep = contain(root)
+        check("moved-source-vanished-finding", named(rep.findings, move, "vanished")
+              and named(rep.migration_incomplete, move, "unresolved"))
+
+        # S16 (QA round 1): end to end through the real doctor engine: a real scaffolded store (opf init,
+        # opf render --write), real git observations, the adoption bundle with its COMMITTED transaction,
+        # and validate_store returns VALID carrying the bounded sources as migration_incomplete.
+        import contextlib
+        import io
+        import _opf_observe
+        import opf as _opf_cli
+
+        def git_commit_all(root):
+            git = shutil.which("git")
+            if git is None:
+                return False
+            env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+            env.update(GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                       GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid",
+                       GIT_AUTHOR_DATE="2026-01-01T00:00:00Z", GIT_COMMITTER_DATE="2026-01-01T00:00:00Z")
+            add = subprocess.run([git, "-C", str(root), "add", "-A"], stdin=subprocess.DEVNULL,
+                                 capture_output=True, env=env, timeout=60)
+            done = subprocess.run([git, "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                                   "-c", "maintenance.auto=false", "-c", "commit.gpgsign=false", "commit",
+                                   "-q", "-m", "fixture"], stdin=subprocess.DEVNULL, capture_output=True,
+                                  env=env, timeout=60)
+            return add.returncode == 0 and done.returncode == 0
+
+        e2e = base / "e2e"
+        e2e.mkdir()
+        quiet = io.StringIO()
+        ok = apply._selftest_git_commit(e2e) is not None
+        with contextlib.redirect_stdout(quiet):
+            ok = ok and _opf_cli.main(["init", "--root", str(e2e)]) == 0
+        ok = ok and git_commit_all(e2e)
+        with contextlib.redirect_stdout(quiet):
+            ok = ok and _opf_cli.main(["render", "--write", "--root", str(e2e)]) == 0
+        for rel, data in sources.items():
+            if rel != keep:
+                write(e2e, rel, data)
+        bundle(e2e, rid)
+        ok = ok and git_commit_all(e2e)
+        result = None
+        if ok:
+            res = store.resolve_store(e2e)
+            if res.status == store.RESOLVED:
+                obs, _notes = _opf_observe.gather(res)
+                result = _opf_check.validate_store(res, observations=obs)
+        check("s16-end-to-end-doctor-valid", result is not None and result.status == store.VALID
+              and result.checks.get("C-CONTAINMENT") == "PASS" and len(result.migration_incomplete) == 4
+              and result.findings == [] and result.cannot_evaluate == [])
 
     if failures:
         print("OPF-ADOPT-STATE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
@@ -690,13 +965,12 @@ def _self_test_checks():
 
 
 def main():
-    args = sys.argv[1:]
-    if "--self-test" in args or "--selftest" in args:
-        return self_test()
     print("usage: _opf_adopt_state.py --self-test (a library module; C-CONTAINMENT in `opf doctor` reads it)",
           file=sys.stderr)
     return 2
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(main())
