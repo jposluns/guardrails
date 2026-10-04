@@ -5272,6 +5272,48 @@ def self_test():
         failures.append("32k a flow sequence padded inside its brackets must be refused "
                         "loudly, got {!r} {!r}".format(got_problems, got_diagnostics))
 
+    # QA round 12 (codex MEDIUM = claude m1): the grammar stores a PLAIN scalar as its text, so a
+    # plain null, Null or NULL reached the round-11 rule as a non-empty string, while YAML reads
+    # each as null and the Actions runner hands a null string input to setup-python as an empty
+    # one (its .python-version fallback, a read of the checkout before the precheck). The one
+    # modelled input must now be a literal VERSION STRING (_SETUP_PYTHON_VERSION_RE), which no
+    # YAML null spelling matches. Each null and non-version vector returns ([], []) without the
+    # round-12 rule; the version-string vectors pin the forms that stay accepted.
+    count += 1
+    for spelling in ("null", "Null", "NULL", "'null'", "true", "'~'", "'.python-version'"):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            order_fixture.replace("          python-version: '3.14'\n",
+                                  "          python-version: {}\n".format(spelling), 1),
+            "fixture.yml")
+        if not any("not a literal version string" in problem for problem in got_problems):
+            failures.append("32l setup-python python-version: {} must be refused as no literal "
+                            "version string, got {!r} {!r}".format(spelling, got_problems,
+                                                                   got_diagnostics))
+    for spelling, needle in (("~", "outside the modelled scalar forms"),
+                             ("", "must carry a modelled scalar value")):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            order_fixture.replace("          python-version: '3.14'\n",
+                                  "          python-version:{}\n".format(
+                                      " " + spelling if spelling else ""), 1),
+            "fixture.yml")
+        if not any(needle in diagnostic.message for diagnostic in got_diagnostics):
+            failures.append("32l setup-python python-version: {!r} (a YAML null) must be refused "
+                            "by the grammar, got {!r} {!r}".format(spelling, got_problems,
+                                                                   got_diagnostics))
+    for spelling in ("3.14", "'3.14'", "3.x", "'pypy3.10'", "3.13t", "'3.14.0-alpha.1'"):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            order_fixture.replace("          python-version: '3.14'\n",
+                                  "          python-version: {}\n".format(spelling), 1),
+            "fixture.yml")
+        if got_problems or got_diagnostics:
+            failures.append("32l setup-python python-version: {} is a literal version string and "
+                            "must stay accepted, got {!r} {!r}".format(spelling, got_problems,
+                                                                       got_diagnostics))
+    disclosure = " ".join(workflow_precheck_order_problems.__doc__.split())
+    if "${{ matrix.python-version }}" not in disclosure:
+        failures.append("32l the KNOWN-REFUSED disclosure must name the matrix python-version "
+                        "expression")
+
     # codex round-4 finding 4: a workflows directory path no path call accepts (an embedded NUL) is a
     # read-error diagnostic, never a raw ValueError. Fails without the (OSError, ValueError) arm.
     count += 1
@@ -5321,6 +5363,12 @@ _GRAMMAR_QUOTED_RE = re.compile(r"""^'[^'"\\]*'$""")
 # (branches: [main]; types: [opened, synchronize, reopened, edited]; os: [ubuntu-latest,
 # macos-latest]).
 _GRAMMAR_FLOW_SEQ_RE = re.compile(r"^\[[A-Za-z0-9_.-]+(?:, [A-Za-z0-9_.-]+)*\]$")
+
+# QA round 12 (codex MEDIUM = claude m1): the setup-python python-version: value the order guard
+# accepts at or before the precheck: a literal version string (a letter or digit first, at least
+# one digit, then only letters, digits, '.', '_', '+' and '-'), such as 3.14, 3.x, 3.13t or
+# pypy3.10. No YAML null spelling (null, Null, NULL, ~, an empty value) and no boolean matches.
+_SETUP_PYTHON_VERSION_RE = re.compile(r"^(?=[^0-9]*[0-9])[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 WORKFLOW_LEVEL_KEYS = ("jobs", "name", "on", "permissions")
 JOB_LEVEL_KEYS = ("name", "runs-on", "steps", "strategy")
@@ -5758,7 +5806,11 @@ def workflow_precheck_order_problems(text, source):
     and before the precheck only actions/setup-python may appear (with EXACTLY ONE non-empty,
     literal python-version: input and no other input; QA round 11, claude m1: with no explicit
     version, or an expression that can evaluate empty, setup-python falls back to READING the
-    checkout's .python-version file, a read of the checkout before the precheck step runs; and
+    checkout's .python-version file, a read of the checkout before the precheck step runs; QA
+    round 12, codex MEDIUM = claude m1: that value must be a literal VERSION STRING,
+    _SETUP_PYTHON_VERSION_RE, plain or simply single-quoted, because the grammar keeps a plain
+    scalar as its text and a plain null, Null or NULL is YAML null, which the Actions runner
+    passes to setup-python as an empty input; ~ and a bare key are refused by the grammar; and
     NO env: mapping on any step at or before the precheck: a
     NODE_OPTIONS or BASH_ENV value there runs uncertified code or poisons the environment
     first; QA rounds 5 to 7); before checkout only PRE_CHECKOUT_RUN_LINES may run and no action
@@ -5792,7 +5844,12 @@ def workflow_precheck_order_problems(text, source):
     its brackets ('[ main ]'), folded ('>') and keep ('|+') block scalars, multi-line scalars
     of every kind, flow mappings, flow sequences beyond one line of plain items, anchors,
     aliases, tags, merge keys, directives, document markers, tabs, quoted or escaped mapping
-    keys, non-two-space indentation, and plain values carrying ':' or '#'. Refusal CODES name
+    keys, non-two-space indentation, and plain values carrying ':' or '#'. On a setup-python
+    step at or before the precheck, the matrix idiom python-version: ${{ matrix.python-version }}
+    (and every other expression) is refused, as is any python-version: value that is not a
+    literal version string: a range such as '>=3.9 <3.12', a YAML null and a boolean among them
+    (no action step after the precheck is modelled either, so a version matrix needs a reviewed
+    guard change). Refusal CODES name
     the modelled level of the refused line's indent alone (_grammar_context_code), so a refused
     line under a non-jobs subtree can carry a job-key or step-key code; the quoted line text in
     the diagnostic is the authoritative locator.
@@ -5880,6 +5937,20 @@ def workflow_precheck_order_problems(text, source):
                                     "setup-python read the checkout's .python-version file "
                                     "before the precheck runs".format(versions[0][1],
                                                                       versions[0][0]))
+                elif not _SETUP_PYTHON_VERSION_RE.match(versions[0][1]):
+                    # QA round 12 (codex MEDIUM = claude m1): the grammar keeps a plain scalar
+                    # as its text, so a plain null, Null or NULL arrives here as a non-empty
+                    # string while YAML reads it as null, and the Actions runner turns a null
+                    # string input into an empty one. Only a literal version string passes.
+                    problems.append(where + " passes setup-python python-version: {!r} (line {}) "
+                                    "at or before the special-file precheck, which is not a "
+                                    "literal version string (a letter or digit first, at least "
+                                    "one digit, then only letters, digits, '.', '_', '+' and "
+                                    "'-'); a plain null, Null or NULL is YAML null, which "
+                                    "reaches setup-python as an empty input, and an empty "
+                                    "version makes setup-python read the checkout's "
+                                    ".python-version file before the precheck "
+                                    "runs".format(versions[0][1], versions[0][0]))
             if not s["env"]:
                 continue
             if s is job_steps[precheck]:

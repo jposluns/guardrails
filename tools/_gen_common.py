@@ -163,9 +163,11 @@ def precheck_special_files(root):
     ignore status; os.stat classifies the target without opening, so the classification itself cannot
     block); a non-ignored symlink that cannot be resolved for any reason OTHER than a missing target
     (a loop above all); and a non-ignored symlink to a directory OUTSIDE the root, whose contents this
-    walk cannot certify. ACCEPTED: a regular file or directory; a DANGLING symlink (every open of it
-    fails at once, so no read of it can block); a symlink to a REGULAR file, inside or outside the
-    root (a plain read of a regular file does not block); a symlink to a directory INSIDE the root,
+    walk cannot certify. ACCEPTED (except on a TRACKED path, whose route is held to the stricter
+    tracked-path rule below: a tracked path through a link leaving the root is refused even when it
+    dangles or reaches a regular file): a regular file or directory; a DANGLING symlink (every open
+    of it fails at once, so no read of it can block); a symlink to a REGULAR file, inside or outside
+    the root (a plain read of a regular file does not block); a symlink to a directory INSIDE the root,
     whose contents are walked UNDER THE LINK'S OWN LOGICAL PATH with the link path's ignore
     classification (QA round 11 codex MAJOR: the ignore status and the tracked-shadow test follow
     the path AS GIT NAMES IT, never the target's spelling; substituting the target's path let a
@@ -175,8 +177,14 @@ def precheck_special_files(root):
     10 claude MD2 covered in both directions), at most 64 link-walks per run (a directory-link
     cycle, a link to its own ancestor, or a heavier aliasing is refused by name, fail-closed,
     never walked forever or certified in part), so linked-in contents, which a gate can reach
-    through the link's own certified path, are checked rather than trusted; and a GIT-IGNORED
-    symlink
+    through the link's own certified path, are checked rather than trusted. QA round 12 (claude
+    m3): an in-root directory link at a GIT-IGNORED logical path (the link ignored, or under an
+    ignored directory) is NOT walked under that path and does not count toward the bound: every
+    rule below that path is already the lenient ignored one, its target is walked under its own
+    path and classification, and every tracked path through it is resolved by the tracked-path
+    layer, so walking it again adds no refusal (a pnpm-style ignored node_modules with many
+    in-root links passes); the bound still refuses more than 64 link-walks at non-ignored logical
+    paths, a tracked workspace-link layout of that size included. And a GIT-IGNORED symlink
     to a directory outside the root THAT SHADOWS NO TRACKED CONTENT (git ls-files under the link's
     own path answers empty), or a git-ignored unresolvable symlink, both accepted un-walked (a
     developer's .venv link shadows nothing; an unresolvable link cannot block, every open of it
@@ -188,7 +196,8 @@ def precheck_special_files(root):
     the root, when resolution exceeds 40 link steps (a loop), or when the object it resolves to is
     a special file (QA round 11, codex MAJOR: the object a tracked path resolves to is always
     classified, however many directory links re-spell the route); a tracked path with a missing or
-    dangling component stays accepted (every open of it fails at once).
+    dangling component stays accepted (every open of it fails at once) when no link step on its
+    route has left the root.
 
     SCOPE: the whole tree under root, except the repository's OWN git dir (the one `git rev-parse
     --absolute-git-dir` names; git's own metadata is outside the tools' read set, but git itself
@@ -226,8 +235,19 @@ def precheck_special_files(root):
     to, one, are refused by name BEFORE that query, because git's ignore probe opens a nested .git
     file and .git/HEAD with plain blocking reads while deciding whether the directory is a nested
     repository; without this screen the refusal still came, but only after the query's 60-second
-    bound had expired. When git cannot answer at all (an exported tree with no repository; any git
-    failure), the walk runs with NO ignore filter: strictly more refusals, never fewer.
+    bound had expired. QA round 12 (codex MINOR = claude m2): git's probe also reads a nested
+    .git directory's commondir, and FOLLOWS a nested gitfile ('gitdir: <path>') to read its
+    target's HEAD and commondir (it reads nothing else there: no refs, no config, not the
+    commondir's own target). So the same pass reads each nested gitfile itself (one bounded,
+    O_NONBLOCK open, fstat-checked as a regular file, parsed as git parses it), REFUSES by name a
+    gitfile whose target resolves outside both the tree and the repository's own git dir (this
+    walk cannot certify a directory it does not cover), and screens commondir beside HEAD in every
+    nested .git directory and every in-tree gitfile target. The ROOT .git entry is the
+    repository's own marker and is not followed (a linked worktree's root gitfile names a git dir
+    outside the tree by design; git has already read it to answer rev-parse, and its metadata is
+    the operator-domain residual SCOPE names). When git cannot answer at all (an exported tree
+    with no repository; any git failure), the walk runs with NO ignore filter: strictly more
+    refusals, never fewer.
 
     ENTRY POINTS. This module is invoked directly (--precheck) as the FIRST post-checkout run step of
     every job in every CI workflow (tools/check_ci_parity.py holds every job to that order) and ahead
@@ -311,6 +331,49 @@ def precheck_special_files(root):
                               "blocking read".format(what, kind))
         return checked
 
+    def _gitfile_target(path, dirpath):
+        # QA round 12 (codex MINOR = claude m2): the real path of the git dir a nested gitfile
+        # names, parsed as git's read_gitfile parses it ('gitdir: ' first, trailing CR and LF
+        # dropped, the path ending at a NUL, a relative path joined to the gitfile's own
+        # directory), or None when git would not follow it. One open, O_NONBLOCK and fstat-checked
+        # as a regular file, so a raced swap to a FIFO cannot park it. A target outside both the
+        # tree and the repository's own git dir is refused by name.
+        flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+                 | getattr(os, "O_BINARY", 0))
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                _refuse(path, "a nested .git marker that stopped being a regular file while it "
+                              "was screened")
+            data = b""
+            while len(data) <= 1 << 20:
+                chunk = os.read(fd, 1 << 16)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            os.close(fd)
+        if len(data) > 1 << 20:
+            _refuse(path, "a nested gitfile larger than 1 MiB, which this screen does not parse")
+        if not data.startswith(b"gitdir: "):
+            return None
+        body = data.rstrip(b"\r\n")
+        if len(body) < 9:
+            return None
+        target = os.path.realpath(os.path.join(dirpath,
+                                               os.fsdecode(body[8:].split(b"\0", 1)[0])))
+        for allowed in (real_root, own_git_dir):
+            if allowed is not None and (target == allowed
+                                        or target.startswith(allowed + os.sep)):
+                return target if os.path.isdir(target) else None
+        _refuse(path, "a nested gitfile naming a git dir outside the repository tree (to {}); "
+                      "git's ignore query reads that directory's HEAD and commondir with plain "
+                      "blocking opens, and this walk cannot certify a tree it does not "
+                      "cover".format(target))
+
     try:
         real_root = os.path.realpath(root)
         for dirpath, dirnames, filenames in os.walk(root, onerror=_raise, followlinks=False):
@@ -334,10 +397,19 @@ def precheck_special_files(root):
                     path = os.path.join(dirpath, name)
                     mode = _screen_pre_git(path, "a nested .git marker (git reads it while "
                                                  "probing for a nested repository)")
+                    gitdir = None
                     if mode is not None and stat.S_ISDIR(mode):
-                        _screen_pre_git(os.path.join(path, "HEAD"),
-                                        "a nested .git HEAD (git reads it while probing for "
-                                        "a nested repository)")
+                        gitdir = path
+                    elif (mode is not None and stat.S_ISREG(mode)
+                          and os.path.realpath(dirpath) != real_root):
+                        # QA round 12 (codex MINOR = claude m2): git follows a nested gitfile
+                        # to its target and reads that target's HEAD and commondir.
+                        gitdir = _gitfile_target(path, dirpath)
+                    if gitdir is not None:
+                        for probe in ("HEAD", "commondir"):
+                            _screen_pre_git(os.path.join(gitdir, probe),
+                                            "a nested git dir's {} (git reads it while probing "
+                                            "for a nested repository)".format(probe))
         ignored = _ignored_paths(root)
         tracked_state = []
 
@@ -502,6 +574,13 @@ def precheck_special_files(root):
                                       "file)".format(kind))
                 if stat.S_ISDIR(target_mode):
                     real = os.path.realpath(path)
+                    if skipped and (real == real_root or real.startswith(real_root + os.sep)):
+                        # QA round 12 (claude m3): an in-root directory link at an IGNORED
+                        # logical path is not walked under that path, and so not counted: below
+                        # it every rule is already the lenient ignored one, its target is walked
+                        # under its own path and classification, and every tracked path through
+                        # it is resolved by the tracked-path layer after this walk.
+                        continue
                     if real == real_root or real.startswith(real_root + os.sep):
                         # QA round 11 (codex MAJOR): descend through an in-root directory link
                         # by the link's OWN LOGICAL path and ignore classification, never the

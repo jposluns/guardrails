@@ -1517,6 +1517,87 @@ def _self_test_main_isolated():
             _entry_expect("a FIFO at a nested .git HEAD", nestedhead_tree, "opf", 2,
                           nestedhead_tree / "docs" / "sub" / ".git" / "HEAD"
                           if nestedhead_tree else None)
+
+            # (s21) QA round 12 (codex MINOR = claude m2): a nested GITFILE naming a git dir
+            # OUTSIDE the tree, whose HEAD is a FIFO. git's ignore query follows the gitfile and
+            # opens that HEAD with a plain blocking read, so the round-11 screen (which classified
+            # only the gitfile itself) stalled 60 seconds and then PASSED. The gitfile is now
+            # read without blocking and an out-of-tree target is refused by name. Fails without
+            # the round-12 screen (the 30-second subprocess bound reports a hang).
+            gitfile_ext_tree = _mini_tree("nested-gitfile-external")
+            if gitfile_ext_tree is not None:
+                ext_gitdir = tmp / "ext-nested-gitdir"
+                (ext_gitdir / "objects").mkdir(parents=True)
+                (ext_gitdir / "refs").mkdir()
+                os.mkfifo(ext_gitdir / "HEAD")
+                (gitfile_ext_tree / "docs" / "sub").mkdir(parents=True)
+                (gitfile_ext_tree / "docs" / "sub" / ".git").write_text(
+                    "gitdir: {}\n".format(ext_gitdir), encoding="utf-8")
+            for which in ("gen", "opf"):
+                _entry_expect("a nested gitfile naming an out-of-tree git dir", gitfile_ext_tree,
+                              which, 2, gitfile_ext_tree / "docs" / "sub" / ".git"
+                              if gitfile_ext_tree else None)
+            # (s22) the in-tree twin: a nested gitfile naming an in-tree git dir whose HEAD is a
+            # FIFO, and (s23) a nested .git DIRECTORY with a valid HEAD whose commondir is a FIFO
+            # (git reads commondir only once HEAD validates). Both are refused by name before the
+            # ignore query. Each fails without the round-12 screen (a hang).
+            gitfile_in_tree = _mini_tree("nested-gitfile-intree")
+            if gitfile_in_tree is not None:
+                (gitfile_in_tree / "gd" / "objects").mkdir(parents=True)
+                (gitfile_in_tree / "gd" / "refs").mkdir()
+                os.mkfifo(gitfile_in_tree / "gd" / "HEAD")
+                (gitfile_in_tree / "docs" / "sub").mkdir(parents=True)
+                (gitfile_in_tree / "docs" / "sub" / ".git").write_text(
+                    "gitdir: ../../gd\n", encoding="utf-8")
+            commondir_tree = _mini_tree("nested-git-commondir-fifo")
+            if commondir_tree is not None:
+                nested_git = commondir_tree / "docs" / "sub" / ".git"
+                (nested_git / "objects").mkdir(parents=True)
+                (nested_git / "refs").mkdir()
+                (nested_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+                os.mkfifo(nested_git / "commondir")
+            for which in ("gen", "opf"):
+                _entry_expect("a nested gitfile naming an in-tree git dir with a FIFO HEAD",
+                              gitfile_in_tree, which, 2,
+                              gitfile_in_tree / "gd" / "HEAD" if gitfile_in_tree else None)
+                _entry_expect("a FIFO at a nested .git commondir", commondir_tree, which, 2,
+                              commondir_tree / "docs" / "sub" / ".git" / "commondir"
+                              if commondir_tree else None)
+            # (s24) controls: a nested gitfile naming a well-formed in-tree git dir, and one that
+            # git would not follow (no 'gitdir: ' prefix), both pass.
+            gitfile_ok_tree = _mini_tree("nested-gitfile-ok")
+            if gitfile_ok_tree is not None:
+                (gitfile_ok_tree / "gd" / "objects").mkdir(parents=True)
+                (gitfile_ok_tree / "gd" / "refs").mkdir()
+                (gitfile_ok_tree / "gd" / "HEAD").write_text("ref: refs/heads/main\n",
+                                                             encoding="utf-8")
+                (gitfile_ok_tree / "docs" / "sub").mkdir(parents=True)
+                (gitfile_ok_tree / "docs" / "sub" / ".git").write_text(
+                    "gitdir: ../../gd\n", encoding="utf-8")
+                (gitfile_ok_tree / "docs" / "other").mkdir()
+                (gitfile_ok_tree / "docs" / "other" / ".git").write_text(
+                    "not a gitfile\n", encoding="utf-8")
+            for which in ("gen", "opf"):
+                _entry_expect("a nested gitfile naming a well-formed in-tree git dir",
+                              gitfile_ok_tree, which, 0)
+            # (s25) QA round 12 (claude m3): 70 in-root directory links inside an IGNORED
+            # directory (a pnpm-style node_modules) pass: an in-root directory link at an ignored
+            # logical path is not walked under that path, so it does not count toward the bound
+            # of 64. The same 70 links at a NON-ignored path stay refused by the bound. The first
+            # fails without the round-12 rule (exit 2 at the bound).
+            for label, ignore_rule, want_rc in (("ignored", "/nm/\n", 0),
+                                                ("non-ignored", "/other/\n", 2)):
+                links_tree = _mini_tree("many-links-" + label)
+                if links_tree is not None:
+                    (links_tree / ".gitignore").write_text(ignore_rule, encoding="utf-8")
+                    for index in range(70):
+                        (links_tree / "nm" / "store" / "p{}".format(index)).mkdir(parents=True)
+                        (links_tree / "nm" / "l{}".format(index)).symlink_to(
+                            "store/p{}".format(index))
+                for which in ("gen", "opf"):
+                    _entry_expect("70 in-root directory links at an {} path".format(label),
+                                  links_tree, which, want_rc,
+                                  "bound of 64" if want_rc else None)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1542,7 +1623,7 @@ def _self_test_main_isolated():
           "subprocess, refuses a FIFO, a link to a FIFO, a FIFO behind a planted nested .git or an "
           "in-root directory link, an outside-root directory link, a git-ignored link to a FIFO, a "
           "FIFO behind an in-root link into an ignored directory, and a symlinked tools/ or opf/ "
-          "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), walks a tracked link into an ignored directory strictly in both directions (round 10), resolves every tracked logical path component by component so a FIFO behind two or three chained directory links, in either walk order, and a tracked path through an ignored link loop are refused by the logical path, and screens a nested .git and its HEAD before the ignore query (round 11), while a dangling link, a venv-like "
+          "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), walks a tracked link into an ignored directory strictly in both directions (round 10), resolves every tracked logical path component by component so a FIFO behind two or three chained directory links, in either walk order, and a tracked path through an ignored link loop are refused by the logical path, and screens a nested .git and its HEAD before the ignore query (round 11), follows a nested gitfile without blocking, refusing an out-of-tree target and screening each nested git dir's HEAD and commondir, and passes 70 in-root directory links inside an ignored directory while the same links at a non-ignored path stay bounded (round 12), while a dangling link, a venv-like "
           "ignored tree and a git-ignored outside-root directory link pass; a multi-newline "
           "rev-parse answer fails closed, one trailing newline stays accepted, and a NUL root is "
           "git-cannot-answer in both copies, with mutants proving the vectors discriminate")
