@@ -61,12 +61,17 @@ unreadable-input case allows with a note, since there is no hazard to fail close
 denies. A clean pass emits NO decision and exits 0 silently.
 
 gensrc_guard (gensrc): a CONFIRMED registry match (a hand-edit of a registered generated artefact) DENIES
-and names the source to edit and the regenerate command. Its cannot-evaluate branches (an unreadable,
-malformed, or unknown-version registry, an unresolvable repo root, a target outside the repo, an unreadable
-payload field, a non-git session) are NOT confirmed generated-artefact edits and have no reachable "edit the
-source" action to name, and denying them would block legitimate Write/Edit/MultiEdit calls, so they ALLOW
-with a note; the CI generated-artefact drift gate remains the authoritative backstop. An absent registry is
-the inert ALLOW; only a missing tool_name denies under the shared fail-closed contract.
+and names the source to edit and the regenerate command. A PRESENT registry it cannot read (not a regular
+file, a stat or read fault, an oversize, non-UTF-8, malformed-JSON or non-object file, a non-int or unknown
+version, a non-list generated field, a malformed entry) is a cannot-evaluate branch that DENIES, fail
+closed, so a corrupted registry cannot silently disable the protection. Its other cannot-evaluate branches
+(an unreadable tool_name, tool_input or file_path payload field, a control character in file_path, no
+session cwd, a non-git session, an unresolvable target or repo root, a target outside the repo or a
+containment fault, a registry entry that cannot be resolved for containment) are NOT confirmed
+generated-artefact edits and have no reachable "edit the source" action to name, and denying them would
+block legitimate Write/Edit/MultiEdit calls, so they ALLOW with a note; the CI generated-artefact drift gate
+remains the authoritative backstop. An absent registry is the inert ALLOW; a missing tool_name also denies
+under the shared fail-closed contract, and a mis-wired event hard-blocks.
 
 commit_msg_subst (sectvl): a backtick or $( command substitution in a git commit argument is a
 command-injection hazard the shell runs before git sees the argument, so it DENIES and names the safe
@@ -188,6 +193,39 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # --- decision constructors ---------------------------------------------------------------------------
 # A handler returns (exit_code, stdout_obj_or_None, stderr_text_or_None). The dispatcher prints the
 # stdout object as JSON when present, prints the stderr text when present, and exits with the code.
+#
+# NOTE_CONSTRUCTORS is the declared set of note constructors and DENY_CONSTRUCTORS the declared set of
+# deny constructors (_deny, whose block result also carries a banner, and every helper that returns a
+# deny constructor's call). Only the single-return leaf constructors (_allow_note, _stop_warn,
+# _dispatcher_fail_open_warn and _deny) spell the {"systemMessage": ...} key; every other declared
+# constructor reaches a result only by returning another constructor's call. The hooks self-test
+# (tools/selftest_aiqt_hooks.py, _note_constructor_shape_failures) checks these shapes: a leaf builds its
+# note or deny dict only as a dict literal (no call to dict by name or attribute, such as
+# builtins.dict(...), no systemMessage or hookSpecificOutput keyword, and neither key string other than as
+# a key of a dict literal) and holds that literal inside
+# its return through tuple elements only, in a name bound once to that literal (a plain or annotated
+# assignment) and loaded only there, or as the one argument of `print(json.dumps(...))`, with no global
+# or nonlocal statement, and its hookSpecificOutput value is a dict literal; every use of a declared
+# name is the callee of a call that is the direct value of a `return` statement (no assignment,
+# unpacking, subscript, alias, attribute, conditional expression, lambda, comprehension or argument); no
+# declared constructor, HANDLERS entry or main carries a decorator; and main holds no global or nonlocal
+# statement, binds a handler's result once and uses its stdout object only in `print(json.dumps(...))`
+# and `is None` tests. Those rules target an edit of a handler's stdout object; the exit code main
+# returns is outside this check. Each note site is one `return <constructor>(...)` position that the
+# hooks self-test inventories and requires to execute. That static check is not a defence against
+# adversarial source: a result transformed, inside or after a constructor, by any construct the scan
+# does not model (a note key assembled at run time, a lookup through getattr or globals(), or a patched
+# json.dumps, print or sys.stdout, for example) is outside it.
+NOTE_CONSTRUCTORS = (
+    "_allow_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
+    "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
+    "_gate_weakening_fallback", "_gensrc_fail_ask", "_git_discard_fallback", "_stash_drop_clear_outcome",
+    "_orch_stop_family")
+DENY_CONSTRUCTORS = (
+    "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
+    "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
+    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_protected_line_fallback",
+    "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -3422,14 +3460,15 @@ def _discard_ask_reason(kind, detail, optout=None):
     return (reason, banner)
 
 
-def _discard_deny(kind):
+def _discard_deny(kind, recovery=""):
     """A DENY: a whole-tree-clobbering verb on a tree the probe confirms is dirty (an uncommitted tracked
     change OR an untracked file the verb could reach), so the loss is certain. The wording covers untracked
-    too, because the config-forced probe now counts an untracked-only-dirty tree as dirty."""
+    too, because the config-forced probe now counts an untracked-only-dirty tree as dirty. `recovery` is
+    appended to the reason as given (see _deny_with_recovery), so no caller edits a built deny result."""
     reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} would overwrite the working tree, which "
               "currently holds uncommitted or untracked changes the command could destroy, discarding any "
               "fix you have applied but not yet committed. {}{}"
-              .format(kind, _DISCARD_ALTS, _OPTOUT_PRISTINE))
+              .format(kind, _DISCARD_ALTS, _OPTOUT_PRISTINE)) + recovery
     banner = ("AIQT guardrail: blocked a git command that would discard uncommitted work (rule prsunc). "
               "Prefix GUARDRAIL_ALLOW_DISCARD=1 to override.")
     return _deny(reason, banner)
@@ -4368,14 +4407,14 @@ def _stash_drop_clear_outcome(repo, stash_op):
 
 def _deny_with_recovery(kind, snap):
     """A DENY (a confirmed whole-tree clobber on a dirty tree) whose reason folds in the recovery outcome,
-    mirroring _discard_recovery_result."""
-    code, obj, err = _discard_deny(kind)
+    mirroring _discard_recovery_result. The recovery text goes in through _discard_deny's parameter: a
+    deny constructor's result is only ever returned, never unpacked and edited."""
+    recovery = ""
     if snap is not None and snap[0] == "ok":
-        obj["hookSpecificOutput"]["permissionDecisionReason"] += " " + _recovery_pointer(snap[1])
+        recovery = " " + _recovery_pointer(snap[1])
     elif snap is not None and snap[0] == "fail":
-        obj["hookSpecificOutput"]["permissionDecisionReason"] += (
-            " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1]))
-    return (code, obj, err)
+        recovery = " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1])
+    return _discard_deny(kind, recovery)
 
 
 def _cd_target_dir(tokens, cw, base):
@@ -6392,7 +6431,7 @@ def protected_line(data):
                 "AIQT guardrail: denied a {} targeting a protected branch (rule prtbrn)."
                 .format(act_noun))
         if pending_deny is None:
-            pending_deny = _deny(
+            pending_deny = (
                 "AIQT rule prtbrn (protected-branch-integrity): this git push {}. This guard cannot "
                 "prove it will not rewrite the protected line, so it is denied fail-safe rather than "
                 "run. Re-issue it as a push this guard can prove misses the protected branch (an "
@@ -6401,7 +6440,7 @@ def protected_line(data):
                 "AIQT guardrail: denied a git push this guard cannot prove misses the protected branch "
                 "(rule prtbrn); push to a feature branch and merge on green.")
     if pending_deny is not None:
-        return pending_deny
+        return _deny(*pending_deny)
     if not saw_git and _RAW_GIT_RE.search(command):
         return _protected_line_fallback(command)
     return _allow()
@@ -6877,8 +6916,8 @@ def branch_root(data):
     # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
     # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
     # correct action (an explicit start point, a plain command from the target repo, or restoring
-    # origin/HEAD). A confirmed orphan returns immediately; a cannot-prove deny is held in pending_deny so a
-    # confirmed orphan elsewhere wins first.
+    # origin/HEAD). A confirmed orphan returns immediately; a cannot-prove deny's (reason, banner) is held in
+    # pending_deny so a confirmed orphan elsewhere wins first.
     pending_deny = None
     pending_note = None
     saw_dir_change = False
@@ -6897,7 +6936,7 @@ def branch_root(data):
             continue
         if start is _ASK_START:
             if pending_deny is None:
-                pending_deny = _deny(
+                pending_deny = (
                     "AIQT rule brnrot (branch-rooted-on-live-main): this command uses a branch/worktree form "
                     "this guard cannot classify with confidence (an --orphan, an abbreviated or negated "
                     "option, or an option of unknown arity); it may create a branch "
@@ -6914,7 +6953,7 @@ def branch_root(data):
             # a cd/pushd/popd earlier, or a non-cosmetic ambient GIT_* override: the repository view cannot be
             # reconciled with the session cwd and is NOT the honoured explicit-target form -> deny fail-safe.
             if pending_deny is None:
-                pending_deny = _deny(
+                pending_deny = (
                     "AIQT rule brnrot (branch-rooted-on-live-main): this branch-creation command runs under "
                     "a directory change or an ambient repository-view override this guard cannot reconcile "
                     "with the session repository (a cd/pushd in an earlier segment, or a non-cosmetic ambient "
@@ -6943,7 +6982,7 @@ def branch_root(data):
                 probe_repo = rd
             else:
                 if pending_note is None:
-                    pending_note = _allow_note(
+                    pending_note = (
                         "AIQT guardrail (rule brnrot, branch-rooted-on-live-main): this branch creation "
                         "carries a command-local repository redirect whose target this guard cannot resolve "
                         "(a --git-dir/GIT_DIR/-c form, or an unresolvable -C target), so it "
@@ -6961,7 +7000,7 @@ def branch_root(data):
                 "or replay the branch's unique commits onto it first.".format(start),
                 "AIQT guardrail: denied branch creation from an orphaned start point (rule brnrot).")
         if outcome == "unknown" and pending_deny is None:
-            pending_deny = _deny(
+            pending_deny = (
                 "AIQT rule brnrot (branch-rooted-on-live-main): branch-root ancestry could not be evaluated "
                 "({}), so this guard cannot prove the start point is rooted and it is denied fail-safe. If "
                 "origin/HEAD is missing, run `git remote set-head origin --auto`, then retry; confirm the "
@@ -6969,9 +7008,9 @@ def branch_root(data):
                 "AIQT guardrail: denied a branch creation whose root ancestry is unresolved (rule brnrot); "
                 "restore origin/HEAD, then retry.")
     if pending_deny is not None:
-        return pending_deny  # a confirmed orphan / cannot-prove-rooted deny outranks an allow-note
+        return _deny(*pending_deny)  # a confirmed orphan / cannot-prove-rooted deny outranks an allow-note
     if pending_note is not None:
-        return pending_note  # a command-local redirect whose target could not be resolved (finding 12)
+        return _allow_note(pending_note)  # an unresolvable command-local redirect (finding 12)
     return _allow()
 
 
@@ -7237,7 +7276,7 @@ def gate_weakening(data):
         # gate bypass) still DENIES.
         if sep_after == "||" and _command_word(nxt) in _EXIT_SWALLOWS:
             if pending_note is None:
-                pending_note = _allow_note(
+                pending_note = (
                     "AIQT guardrail (rule gatdis, gate-discipline): {!r} looks like a verification gate and "
                     "its failure would be swallowed by the following '|| {}'. If it genuinely gates this "
                     "work, do not swallow it: run it bare and let the exit status stand, so a failing check "
@@ -7245,14 +7284,14 @@ def gate_weakening(data):
                     .format(_command_word(tokens), _command_word(nxt)))
         elif sep_after == "|" and _command_word(nxt) in _TRUNCATING_SINKS:
             if pending_note is None:
-                pending_note = _allow_note(
+                pending_note = (
                     "AIQT guardrail (rule gatdis, gate-discipline): {!r} looks like a verification gate and "
                     "is piped into '{}', a truncating sink whose exit status replaces the checker's under "
                     "default pipeline semantics. If it gates this work, run it bare (or redirect the output "
                     "to a file and read that) so its failure signal is not discarded; if it is only a benign "
                     "output glance, this is allowed.".format(_command_word(tokens), _command_word(nxt)))
     if pending_note is not None:
-        return pending_note
+        return _allow_note(pending_note)
     return _allow()
 
 
@@ -7726,8 +7765,9 @@ def _load_gensrc_registry(root):
             raw_bytes = handle.read(_GENSRC_MAX_BYTES + 1)
     except FileNotFoundError:
         # The lstat above saw a regular file, but it is gone at open: a concurrent DELETE race in the
-        # lstat->open window. This is BAD (fail-safe ASK), never absent: absence is ONLY the lstat-probe
-        # FileNotFoundError, so a benign delete race can never read as the inert no-coverage ALLOW.
+        # lstat->open window. This is BAD (gensrc_guard denies it fail-closed), never absent: absence is ONLY
+        # the lstat-probe FileNotFoundError, so a benign delete race can never read as the inert no-coverage
+        # ALLOW.
         return ("bad", "the registry disappeared during the read (a concurrent change); failing safe")
     except OSError as exc:
         return ("bad", "the registry could not be read ({})".format(exc))
@@ -7746,8 +7786,8 @@ def _load_gensrc_registry(root):
     version = obj.get("version")
     # type(version) is int, not `== _GENSRC_VERSION` alone: `True == 1` in Python, so a JSON bool version
     # (true) would else read as version 1. type(True) is bool, not int, so a bool (or a string "1", a
-    # float) is rejected. A future version 2 also degrades to a fail-safe ask, never a misread of an
-    # unknown shape.
+    # float) is rejected. A future version 2 is also BAD (gensrc_guard denies it fail-closed), never a
+    # misread of an unknown shape.
     if type(version) is not int or version != _GENSRC_VERSION:
         return ("bad", "unknown registry version (expected {})".format(_GENSRC_VERSION))
     generated = obj.get("generated")
@@ -7768,8 +7808,8 @@ def _load_gensrc_registry(root):
         if not isinstance(target, str) or not target or "\\" in target or _is_absolute(target):
             return ("bad", "a registry entry has a malformed target")
         # Reject a control character (any codepoint < 0x20, NUL included, or DEL 0x7f) in ANY target,
-        # BEFORE the kind==block skip below, so a NUL-bearing block entry is BAD (ASK), never silently
-        # dropped to zero entries and read as the inert no-coverage ALLOW.
+        # BEFORE the kind==block skip below, so a NUL-bearing block entry is BAD (gensrc_guard denies it
+        # fail-closed), never silently dropped to zero entries and read as the inert no-coverage ALLOW.
         if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in target):
             return ("bad", "a registry entry target contains a control character")
         has_trailing = target.endswith("/")
@@ -7800,8 +7840,8 @@ def _gensrc_within(candidate, parent):
     "err" when the check FAULTS (a symlink loop, or commonpath given mixed or foreign inputs such as two
     Windows drive roots). DELIBERATELY NOT the shared _path_is_within, which errs to True (matched) so
     git_discard REFUSES to write recovery data inside a tree it cannot clear; here an unresolved
-    containment must not read as a match NOR as a no-match ALLOW, so the fault surfaces as "err" and the
-    caller fails safe to ask."""
+    containment must not read as a match NOR as a silent no-match ALLOW, so the fault surfaces as "err" and
+    the caller allows the edit with a warning systemMessage (_gensrc_fail_ask; there is no ask posture)."""
     try:
         cand = os.path.realpath(candidate)
         base = os.path.realpath(parent)
@@ -7816,7 +7856,8 @@ def _gensrc_match(entries, target, root_c):
     """The first registry entry that `target` (an already-realpath'd absolute path) matches, as
     (entry_target, sources, regenerate); None on a PROVEN no-match; or the _GENSRC_MATCH_FAULT sentinel
     when a resolution or containment fault means no-match cannot be proven (the handler turns the
-    sentinel into a fail-safe ask, never a match and never a silent allow). A FILE entry matches on
+    sentinel into an allow with a warning systemMessage via _gensrc_fail_ask, never a match and never a
+    silent allow; there is no ask posture). A FILE entry matches on
     realpath EQUALITY; a TREE entry matches when `target` is the tree root or lies under it, by
     component-boundary containment (_gensrc_within), never a raw string prefix, so gen-extra/ never
     matches gen/ and GEN.md.bak never matches GEN.md. Each entry target is repo-root-relative, so it is
@@ -7851,24 +7892,30 @@ def gensrc_guard(data):
     correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES, fail-closed (round-2 finding
     8): a corrupted registry must not silently disable the generated-artefact protection, so a cannot-read of
     a PRESENT .aiqt/gensrc.json is a cannot-evaluate resolved to the safe (deny) outcome for this protective
-    guard. The remaining cannot-evaluate branches (see _gensrc_fail_ask: a malformed/empty/list/bool
-    tool_name, a control-char payload field, no session cwd, a non-git session, an outside-repo target, an
-    unresolvable target, a containment fault) are NOT confirmed generated-artefact edits, have no
-    "edit the source" action to name, and are outside any expected coverage, so they ALLOW with an
-    informational note rather than block a legitimate edit; a genuinely-ABSENT registry is likewise the inert
-    ALLOW (adopters author their own). The CI generated-artefact drift gate remains the authoritative
-    backstop. Only a missing tool_name denies under the shared fail-closed contract. The repo
-    root is the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
+    guard. The remaining cannot-evaluate branches (each routed through _gensrc_fail_ask: an unreadable
+    tool_name (an empty string, a list, a bool), a non-dict tool_input, a missing or unreadable file_path, a
+    control character in file_path, no session cwd, a non-git session, an unresolvable target or repo root, a
+    target outside the repo or a containment fault, a registry entry that cannot be resolved for containment)
+    are NOT confirmed generated-artefact edits, have no "edit the source" action to name, and are outside any
+    expected coverage, so they ALLOW with an informational note rather than block a legitimate edit; a
+    genuinely-ABSENT registry is likewise the inert ALLOW (adopters author their own). The CI
+    generated-artefact drift gate remains the authoritative backstop. Besides a confirmed registry match, the
+    guard denies fail-closed in exactly three cases: a missing tool_name (the shared fail-closed contract), a
+    PRESENT-but-unreadable/malformed registry, and a mis-wired event (a hard block, exit 2). The repo root is
+    the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
     _gen_common.repo_root, which falls back to cwd and would fabricate a root)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gensrc_guard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
     tool_name = data.get("tool_name")
     if tool_name is None:
-        return _deny_missing_tool_name("gensrc")  # the ONLY deny: a missing field cannot be matched
+        # A missing field cannot be matched. This is one of three fail-closed denies, with a present but
+        # unreadable/malformed registry and a mis-wired event (the hard block above).
+        return _deny_missing_tool_name("gensrc")
     if not isinstance(tool_name, str) or not tool_name:
         # A present-but-unreadable tool_name (an empty string, a list, a bool) cannot be matched against
-        # the scope set; fail SAFE to ask rather than silently allow (only a MISSING tool_name denies).
+        # the scope set; allow with a warning systemMessage rather than silently allow. The fail-closed
+        # denies are a MISSING tool_name, a present but unreadable/malformed registry, and a mis-wired event.
         return _gensrc_fail_ask("the tool_name was unreadable")
     if tool_name not in _GENSRC_TOOLS:
         return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit)
@@ -7879,7 +7926,8 @@ def gensrc_guard(data):
     if not isinstance(file_path, str) or not file_path:
         return _gensrc_fail_ask("the {} payload carried no readable file_path".format(tool_name))
     # A control character (NUL included) in file_path is malformed input that would also raise inside
-    # os.path.realpath ("embedded null byte"); reject it here so it fails SAFE to ask, never crashes.
+    # os.path.realpath ("embedded null byte"); reject it here so it allows with a warning systemMessage,
+    # never crashes.
     if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in file_path):
         return _gensrc_fail_ask("the {} payload file_path contains a control character".format(tool_name))
     cwd = data.get("cwd")
@@ -7915,8 +7963,8 @@ def gensrc_guard(data):
         return _allow()  # a registry of only block entries has nothing this path guard can match
     # A relative file_path can only arrive via MultiEdit (abs-paths does not cover it); joining it onto
     # cwd matches the platform's own resolution. Canonicalize both to realpaths for the match; a
-    # resolution fault (a symlink loop, an unresolvable path) is an unresolvable target -> fail SAFE to
-    # ask, NOT an uncaught crash the dispatcher would turn into an exit-2 hard DENY.
+    # resolution fault (a symlink loop, an unresolvable path) is an unresolvable target -> allow with a
+    # warning systemMessage, NOT an uncaught crash the dispatcher would turn into an exit-2 hard DENY.
     try:
         target = os.path.realpath(file_path if _is_absolute(file_path) else os.path.join(cwd, file_path))
         root_c = os.path.realpath(root)
@@ -7924,8 +7972,9 @@ def gensrc_guard(data):
         return _gensrc_fail_ask("the target or repo root could not be resolved (an unresolvable path)")
     within = _gensrc_within(target, root_c)
     if within != "in":
-        # "out" (proven outside) OR "err" (a containment fault) both fail safe: an uncleared target
-        # cannot be judged against the registry of THIS repo, so it must never read as a silent allow.
+        # "out" (proven outside) OR "err" (a containment fault) both allow with a warning systemMessage: an
+        # uncleared target cannot be judged against the registry of THIS repo, so it must never read as a
+        # silent allow.
         return _gensrc_fail_ask("the target canonicalizes outside the resolved repo, or the containment "
                                 "check could not be cleared, so it cannot be judged against the registry "
                                 "of this repo")
@@ -9159,8 +9208,10 @@ def orch_yield_tool(data):
     if root is None:
         return _allow()
     status, reg = _orch_registry(root)
+    if status == "absent":
+        return _allow()
     if status != "ok":
-        return _allow() if status == "absent" else _deny(
+        return _deny(
             "AIQT guardrail (setcmp/cntdef): the orchestration registry could not be read ({}); a "
             "scheduling call that would park or end the run cannot be judged, so it is denied fail-closed "
             "(ignorance refuses the wind-down). Fix the orchestration registry, or continue the actionable "
@@ -9223,9 +9274,9 @@ def orch_yield_tool(data):
                 msg += " " + extra
         if spoof_warn:
             msg += " " + spoof_warn
-        return (0, {"systemMessage": msg}, None)
+        return _allow_note(msg)
     if spoof_warn:
-        return (0, {"systemMessage": "AIQT guardrail: {}".format(spoof_warn)}, None)
+        return _allow_note("AIQT guardrail: {}".format(spoof_warn))
     return _allow()
 
 
@@ -9792,9 +9843,9 @@ def orch_dispatch_ledger(data):
             # identifier is SURFACED as unbound, never correlated to a dispatch by recency or arrival
             # order. Non-blocking (this recorder never blocks), so a genuinely id-less read is flagged
             # rather than silently accepted.
-            return (0, {"systemMessage": "AIQT rule expbnd: this TaskOutput carried no task_id, so its "
-                        "result is UNBOUND and cannot be tied to a dispatch; correlate it by the "
-                        "dispatch's own id, never by which task completed most recently."}, None)
+            return _allow_note("AIQT rule expbnd: this TaskOutput carried no task_id, so its "
+                               "result is UNBOUND and cannot be tied to a dispatch; correlate it by the "
+                               "dispatch's own id, never by which task completed most recently.")
     else:
         dispatch_tools = reg.get("dispatch_tools") if isinstance(
             reg.get("dispatch_tools"), list) else []
@@ -9821,8 +9872,8 @@ def orch_dispatch_ledger(data):
     row["ts"] = _orch_now().isoformat()
     path = os.path.join(_orch_state_dir_for_root(root), "dispatch-ledger.jsonl")
     if not _orch_append_jsonl(path, row):
-        return (0, {"systemMessage": "AIQT guardrail: the dispatch-ledger write failed; "
-                                     "the launched work may be invisible to the stop guard."}, None)
+        return _allow_note("AIQT guardrail: the dispatch-ledger write failed; "
+                           "the launched work may be invisible to the stop guard.")
     return _allow()
 
 
@@ -10360,11 +10411,11 @@ def orch_resume_barrier(data):
             json.dump(barrier, fh)
     except OSError:
         pass
-    return (0, {"systemMessage": (
+    return _allow_note(
         "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
         "audit found divergence ({}) and this mutation is outside the record surfaces. Correct the "
         "record first, then clear the barrier with 'python3 tools/orch_doctor.py --resume-audit'."
-        .format("; ".join(barrier.get("findings") or [])[:500]))}, None)
+        .format("; ".join(barrier.get("findings") or [])[:500]))
 
 
 # --- write-scope guard (EN-8, wrtscp) ----------------------------------------------------------------
@@ -11181,10 +11232,13 @@ HANDLER_EVENT = {
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
     UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage on exit 0, so no error on
-    these paths can wedge a session, trap a teammate, or block a human prompt."""
-    return {"systemMessage": (
+    these paths can wedge a session, trap a teammate, or block a human prompt. It prints the note and
+    returns the exit code 0, so main returns it directly (a note constructor's call is only ever the
+    direct value of a return)."""
+    print(json.dumps({"systemMessage": (
         "AIQT guardrail: the {} check could not run ({}); surfacing a warning rather than blocking "
-        "(non-blocking by design on this event).".format(handler_name, detail))}
+        "(non-blocking by design on this event).".format(handler_name, detail))}))
+    return 0
 
 
 def main(argv):
@@ -11207,8 +11261,7 @@ def main(argv):
         if is_fail_open:
             # A Stop handler's ERROR path never exits 2 (a deliberate deny does, via the orchestration
             # stop guard), not even on a malformed invocation: WARN and exit 0.
-            print(json.dumps(_dispatcher_fail_open_warn(handler_name,"bad invocation: {}".format(detail))))
-            return 0
+            return _dispatcher_fail_open_warn(handler_name, "bad invocation: {}".format(detail))
         print("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail), file=sys.stderr)
         return 2
     try:
@@ -11220,8 +11273,7 @@ def main(argv):
         if is_fail_open:
             # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
             # payload (including a bare '{' or any garbage) can ever wedge the session.
-            print(json.dumps(_dispatcher_fail_open_warn(handler_name,"unreadable payload: {}".format(exc))))
-            return 0
+            return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(exc))
         # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
         # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
         print("aiqt_hooks: unreadable hook payload ({}); failing closed".format(exc), file=sys.stderr)
@@ -11232,8 +11284,7 @@ def main(argv):
         if is_fail_open:
             # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
             # pathological message): WARN and exit 0, never exit 2.
-            print(json.dumps(_dispatcher_fail_open_warn(handler_name,"handler crash: {}".format(exc))))
-            return 0
+            return _dispatcher_fail_open_warn(handler_name, "handler crash: {}".format(exc))
         # A PreToolUse handler crash fails closed (block), not pass.
         print("aiqt_hooks: handler {} failed ({}); failing closed".format(handler_name, exc),
               file=sys.stderr)
