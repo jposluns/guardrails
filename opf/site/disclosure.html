@@ -112,11 +112,13 @@
         ships only with the tested <code>opf upgrade</code> migration, as the 1.0.0 to 1.1.0 rename of
         <code>devprocess</code> to <code>opf</code> did.</li>
       <li><b style="color:var(--ink)">A fresh-only implementation</b> (specification section 16.1)
-        proves tested admission and refusal behaviour, not authenticated history: it refuses by name,
-        and leaves unchanged, an older store or one in which its admission check detects an item on
-        the closed legacy-state list. Before that check it recovers its own interrupted writes and
-        reconciles a dead run's leftover lease as the base rules require, so a store it refuses can
-        carry their effects. That check searches only the files section 16.1 permits and
+        proves tested admission and refusal behaviour, not authenticated history: it refuses by name
+        an older store or one in which its admission check detects an item on
+        the closed legacy-state list. It runs that check once before any write, and a store refused
+        there is left unchanged; only then does it recover, within a bound, its own interrupted
+        writes and reconcile a dead run's leftover lease as the base rules require, and it runs the
+        check again after them, so a store refused only by that second run can carry their effects.
+        That check searches only the files section 16.1 permits and
         the list catches only what it lists, so legacy state the list omits, or that sits where the
         check does not search, goes undetected; an input it cannot read is cannot-evaluate, never
         admitted.
