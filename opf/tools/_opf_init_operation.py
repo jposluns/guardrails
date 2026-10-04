@@ -210,6 +210,12 @@ REQUIRED_CHECKS = _SOURCE_CHECKS + ("view-poststate", "view-correspondence", "vi
 PUBLICATION_BOUNDARIES = {"milestone": "VIEWS-READY", "views": "unstaged",
                           "index": "deferred-pr5", "commit": "never"}
 RECOVERY_POLICY = "resume-forward-preserve"
+# A COUPLED operation (its id caller-minted and bound into a coupled adoption's own durable
+# intent) records THIS policy instead: it is never resumed by ANY later call, named or plain --
+# its adoption transaction reverses a partial operation and a changed run takes a fresh plan
+# (spec 14.1, 14.2) -- so a plain `opf init` after an interrupted coupled adoption can never
+# finish, publish or adopt the coupled operation's scaffold outside that adoption transaction.
+COUPLED_RECOVERY_POLICY = "resume-forward-preserve-coupled"
 ACCEPTANCE_NONE = {"present": False}
 MAX_SOURCE_BYTES = 1 << 20  # Also the intentional per-view ceiling; see DISCLOSED RESIDUALS.
 _STAGE_MARKER = ".opf-init-stage-"
@@ -939,6 +945,28 @@ def _admitted_dirs(paths):
     return dirs
 
 
+def _bad_admitted_dirs(admitted_dirs):
+    """Why `admitted_dirs` is not a well-formed admitted pre-existing-directory inventory, or
+    None. The coupled-adoption seam's SECOND leg (spec 14.2): after the shell archives an
+    occupying machine-store file, the file's now-EMPTY parent directory legitimately survives
+    (the apply shell never removes a pre-existing directory), so a coupled adoption may admit the
+    PLANNED directories that pre-exist: each entry names a planned directory
+    (PERMITTED_DIRECTORIES), closed under ancestors (an admitted machine home implies an admitted
+    `.working`). Plain init passes none and refuses any existing `.working` exactly as before."""
+    if type(admitted_dirs) not in (list, tuple):
+        return "admitted_dirs must be a list of planned directory paths"
+    seen = set()
+    for path in admitted_dirs:
+        if type(path) is not str or path not in PERMITTED_DIRECTORIES:
+            return "admitted_dirs entry {!r} is not a planned directory".format(path)
+        if path in seen:
+            return "admitted_dirs entry {!r} is duplicated".format(path)
+        seen.add(path)
+    if _MACHINE_HOME in seen and _opf_store.WORKING_DIRNAME not in seen:
+        return "admitted_dirs admits the machine home without its .working ancestor"
+    return None
+
+
 def _plan_e_working(plan):
     """A VALIDATED plan's admitted pre-existing `.working` entries (its E set minus the preserved
     CHANGELOG.md)."""
@@ -1090,7 +1118,8 @@ def compute_plan_digest(plan):
 
 
 def build_init_plan(*, operation_id, binding, head, inventory_digest_value, application_time,
-                    existing_changelog=None, seed=None, admitted=(), working_mode=None):
+                    existing_changelog=None, seed=None, admitted=(), working_mode=None,
+                    coupled=False):
     """Produce the immutable opf.init.plan/v1 envelope (a pure producer): returns (plan model, exact
     canonical bytes). `existing_changelog` is None when CHANGELOG.md is absent (the plan creates it)
     or its observed {path, mode, size, digest} entry, preserved in E. `seed` is a validated
@@ -1098,8 +1127,10 @@ def build_init_plan(*, operation_id, binding, head, inventory_digest_value, appl
     so a retry never searches history again. `admitted` (the coupled-adoption seam) is the verified
     admitted .working inventory, recorded in E beside the changelog so every later check and a
     resume re-verify it; `working_mode` is the admitted `.working` directory's observed mode (the
-    operation preserves it rather than planning its own). The result is re-validated by
-    validate_init_plan."""
+    operation preserves it rather than planning its own); `coupled` records that the operation id
+    was caller-minted and bound into a coupled adoption's own durable intent, so the plan carries
+    the coupled recovery policy and is NEVER resumed (its adoption transaction reverses a partial
+    operation instead; spec 14.2). The result is re-validated by validate_init_plan."""
     first_adoption = seed is None
     payloads = build_source_payloads(
         operation_id=operation_id, binding=binding, head=head, first_adoption=first_adoption,
@@ -1142,7 +1173,7 @@ def build_init_plan(*, operation_id, binding, head, inventory_digest_value, appl
         "staging_set": [],
         "required_checks": list(REQUIRED_CHECKS),
         "publication_boundaries": dict(PUBLICATION_BOUNDARIES),
-        "recovery_policy": RECOVERY_POLICY,
+        "recovery_policy": COUPLED_RECOVERY_POLICY if coupled else RECOVERY_POLICY,
     }
     plan["plan_digest"] = compute_plan_digest(plan)
     raw = _opf_init_contract.canonical_json_bytes(plan)
@@ -1288,8 +1319,10 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None, comple
     if any(path != CHANGELOG_RELPATH for path in e_paths) and type(dirs) is list and dirs \
             and type(dirs[0]) is dict and set(dirs[0]) == {"path", "mode"} \
             and dirs[0]["path"] == _opf_store.WORKING_DIRNAME \
-            and type(dirs[0]["mode"]) is int and 0 <= dirs[0]["mode"] <= 0o777:
-        want_dirs[0] = dict(dirs[0])   # an admitted .working keeps its observed mode
+            and type(dirs[0]["mode"]) is int and 0 <= dirs[0]["mode"] <= 0o777 \
+            and not dirs[0]["mode"] & 0o022:
+        want_dirs[0] = dict(dirs[0])   # an admitted .working keeps its observed mode, never one
+        # writable by group or world (a store is never published beneath a home others can write)
     if dirs != want_dirs:
         _plan_bad("permitted_directories must be exactly .working and its machine store")
     if plan["staging_set"] != []:
@@ -1298,8 +1331,9 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None, comple
         _plan_bad("required_checks is not this generator's roster")
     if plan["publication_boundaries"] != PUBLICATION_BOUNDARIES:
         _plan_bad("publication_boundaries is not the VIEWS-READY boundary")
-    if plan["recovery_policy"] != RECOVERY_POLICY:
-        _plan_bad("recovery_policy must be {!r}".format(RECOVERY_POLICY))
+    if plan["recovery_policy"] not in (RECOVERY_POLICY, COUPLED_RECOVERY_POLICY):
+        _plan_bad("recovery_policy must be {!r}, or {!r} for a coupled operation".format(
+            RECOVERY_POLICY, COUPLED_RECOVERY_POLICY))
     if plan["plan_digest"] != compute_plan_digest(plan):
         _plan_bad("plan_digest does not match the recomputed digest")
     _validate_plan_payloads(plan, payloads, counters_basis)
@@ -1532,10 +1566,14 @@ def _fsync_dir_at(pfd, name, label):
         raise InitOperationError("cannot fsync {} and its parent ({})".format(label, exc), FAILED)
 
 
-def _preclassify_dirs(root_fd, plan):
-    """Before directory intent, every planned directory must be absent, including on retry; the one
-    exception is an admitted `.working` (the plan preserves pre-existing entries beneath it, the
-    coupled-adoption seam), which must instead already be a plain directory."""
+def _preclassify_dirs(root_fd, plan, admitted_dirs=()):
+    """Before directory intent, every planned directory must be absent, including on retry; the
+    exceptions are an admitted `.working` (the plan preserves pre-existing entries beneath it, the
+    coupled-adoption seam) and a runtime-admitted pre-existing planned directory (`admitted_dirs`,
+    the seam's second leg: the empty machine home an archived occupying file left behind), each of
+    which must instead already be a plain directory owned by this operation's uid -- an
+    admitted_dirs entry additionally at EXACTLY its planned mode, because a pre-existing directory
+    is preserved as found through the whole operation AND its reversal, never rewritten."""
     admits = _plan_admits_working(plan)
     for d in plan["permitted_directories"]:
         path = d["path"]
@@ -1543,24 +1581,35 @@ def _preclassify_dirs(root_fd, plan):
             st = _journal._lstat_contained(root_fd, path)
         except (_journal.JournalError, OSError) as exc:
             raise InitOperationError("cannot observe {} ({})".format(path, exc), CANNOT_EVALUATE)
-        if admits and path == _opf_store.WORKING_DIRNAME:
+        if path in admitted_dirs or (admits and path == _opf_store.WORKING_DIRNAME):
             if st is None or not stat.S_ISDIR(st.st_mode):
-                raise InitOperationError("the admitted .working directory is no longer a plain "
-                                         "directory; preserved and refused")
+                raise InitOperationError("the admitted pre-existing directory {} is no longer a "
+                                         "plain directory; preserved and refused".format(path))
+            if st.st_uid != os.getuid():
+                raise InitOperationError("the admitted pre-existing directory {} is owned by uid "
+                                         "{}, not this operation's; preserved and "
+                                         "refused".format(path, st.st_uid))
+            if path in admitted_dirs and stat.S_IMODE(st.st_mode) != d["mode"]:
+                raise InitOperationError("the admitted pre-existing directory {} holds mode {:o}, "
+                                         "not the planned {:o}; it is preserved as found, never "
+                                         "rewritten; refused".format(
+                                             path, stat.S_IMODE(st.st_mode), d["mode"]))
             continue
         if st is not None:
             raise InitOperationError("{} appeared before this operation recorded its intent; "
                                      "preserved and refused".format(path))
 
 
-def _apply_dirs(root_fd, plan, resuming):
+def _apply_dirs(root_fd, plan, resuming, admitted_dirs=()):
     """Create each permitted directory parent-first, at its EXACT planned mode whatever the umask,
     each fsynced with its parent. An existing directory is accepted only on RESUME (a prior attempt
-    recorded this group's intent) or for an admitted `.working` (whose plan records its observed
-    mode, preserved rather than rewritten): at its exact mode, or, when it is ours and its mode lies
-    within the planned one (all an interrupted mkdir-then-chmod can leave), after its mode is
-    completed. A symlink, a non-directory, a foreign owner, or any other mode refuses and is
-    preserved. Returns {path: created | verified}."""
+    recorded this group's intent), for an admitted `.working` (whose plan records its observed
+    mode, preserved rather than rewritten), or for a runtime-admitted pre-existing planned
+    directory (`admitted_dirs`, required at EXACTLY its planned mode so it is preserved as found):
+    at its exact mode, or, when it is ours and its mode lies within the planned one (all an
+    interrupted mkdir-then-chmod can leave), after its mode is completed. A symlink, a
+    non-directory, a foreign owner, or any other mode refuses and is preserved. Returns
+    {path: created | verified}."""
     out = {}
     for d in plan["permitted_directories"]:
         path, mode = d["path"], d["mode"]
@@ -1583,8 +1632,9 @@ def _apply_dirs(root_fd, plan, resuming):
                 if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
                     raise InitOperationError("{} exists and is not a plain directory; preserved "
                                              "and refused".format(path))
-                if not (resuming or (path == _opf_store.WORKING_DIRNAME
-                                     and _plan_admits_working(plan))):
+                if not (resuming or path in admitted_dirs
+                        or (path == _opf_store.WORKING_DIRNAME
+                            and _plan_admits_working(plan))):
                     raise InitOperationError("{} appeared before this operation created it; "
                                              "preserved and refused".format(path))
                 if st.st_uid != os.getuid():
@@ -1592,6 +1642,11 @@ def _apply_dirs(root_fd, plan, resuming):
                                              "refused".format(path, st.st_uid))
                 modes = _dir_modes(pfd, st, mode)
                 current = stat.S_IMODE(st.st_mode)
+                if not resuming and path in admitted_dirs and current != mode:
+                    raise InitOperationError("admitted pre-existing directory {} holds mode {:o}, "
+                                             "not the planned {:o}; it is preserved as found, "
+                                             "never rewritten; refused".format(
+                                                 path, current, mode))
                 if current not in modes:
                     if current & ~max(modes):
                         raise InitOperationError("{} has mode {:o}, outside the planned {:o}; "
@@ -2292,7 +2347,8 @@ def _select(run, binding):
     return "fresh", None
 
 
-def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=None):
+def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=None,
+                admitted_dirs=()):
     """Preflight a FRESH adoption under the mutex and produce its immutable plan: no pointer, no
     resolvable or partial store, every destination and staging name absent, no destination already
     tracked, and CHANGELOG.md either absent (created) or a plain file (preserved in E). Without
@@ -2310,18 +2366,43 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
             raise InitOperationError("an existing store pointer {} is present".format(pointer))
     model, present = observe_inventory(root_fd)
     working_mode = None
-    if not admitted:
+    if not admitted and not admitted_dirs:
         if present:
             raise InitOperationError("a .working directory already exists ({} entries); foreign "
                                      "content is never adopted by a fresh init".format(
                                          len(model["entries"])))
     else:
         if not present:
-            raise InitOperationError("the plan admits {} pre-existing .working file(s) and .working "
-                                     "is absent; the admitted inventory must hold exactly".format(
-                                         len(admitted)))
+            raise InitOperationError("the plan admits {} pre-existing .working file(s) and {} "
+                                     "pre-existing planned directory(ies), and .working is "
+                                     "absent; the admitted inventory must hold exactly".format(
+                                         len(admitted), len(admitted_dirs)))
         want_files = {e["path"]: e for e in admitted}
-        want_dirs = _admitted_dirs(want_files)
+        want_dirs = _admitted_dirs(want_files) | {
+            d for d in admitted_dirs if d != _opf_store.WORKING_DIRNAME}
+        for dpath in admitted_dirs:
+            # re-proved HERE, before the plan is even built, so a wrong pre-existing directory
+            # refuses with nothing written and no operation recorded; _preclassify_dirs re-checks
+            # the same facts under the dirs group before its intent.
+            try:
+                dst = _journal._lstat_contained(root_fd, dpath)
+            except (_journal.JournalError, OSError) as exc:
+                raise InitOperationError("cannot observe admitted pre-existing directory {} "
+                                         "({})".format(dpath, exc), CANNOT_EVALUATE)
+            if dst is None or not stat.S_ISDIR(dst.st_mode):
+                raise InitOperationError("admitted pre-existing directory {} is not a plain "
+                                         "directory; preserved and refused".format(dpath))
+            if dst.st_uid != os.getuid():
+                raise InitOperationError("admitted pre-existing directory {} is owned by uid {}, "
+                                         "not this operation's; preserved and refused".format(
+                                             dpath, dst.st_uid))
+            if dpath == _opf_store.WORKING_DIRNAME and admitted:
+                continue   # its observed mode is recorded in the plan (checked for write bits below)
+            if stat.S_IMODE(dst.st_mode) != DIR_MODE:
+                raise InitOperationError("admitted pre-existing directory {} holds mode {:o}, not "
+                                         "the planned {:o}; it is preserved as found, never "
+                                         "rewritten; refused".format(
+                                             dpath, stat.S_IMODE(dst.st_mode), DIR_MODE))
         got_files = {e["path"]: e for e in model["entries"] if e["kind"] == "file"}
         got_dirs = {e["path"] for e in model["entries"] if e["kind"] == "directory"}
         unexpected = sorted((set(got_files) - set(want_files)) | (got_dirs - want_dirs))
@@ -2344,11 +2425,17 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
             raise InitOperationError("admitted .working file(s) {} occupy planned destinations; an "
                                      "occupied destination is dispositioned and removed before "
                                      "init, never admitted".format(clash))
-        try:
-            wst = os.stat(_opf_store.WORKING_DIRNAME, dir_fd=root_fd, follow_symlinks=False)
-        except OSError as exc:
-            raise InitOperationError("cannot stat .working ({})".format(exc), CANNOT_EVALUATE)
-        working_mode = stat.S_IMODE(wst.st_mode) & 0o777
+        if admitted:
+            try:
+                wst = os.stat(_opf_store.WORKING_DIRNAME, dir_fd=root_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise InitOperationError("cannot stat .working ({})".format(exc), CANNOT_EVALUATE)
+            working_mode = stat.S_IMODE(wst.st_mode) & 0o777
+            if working_mode & 0o022:
+                raise InitOperationError("the admitted .working directory mode {:o} is group- or "
+                                         "world-writable; a store is never published beneath a "
+                                         "home writable by others; preserved and "
+                                         "refused".format(working_mode))
     res = _opf_store.resolve_store(root)
     if res.status == _opf_store.RESOLVED:
         raise InitOperationError("an existing store resolves at {} ({}); this layer adopts only an "
@@ -2359,7 +2446,7 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
         # non-NOT-ADOPTED posture the coupled-adoption seam exists for, re-proved by a fresh
         # discovery at the held root descriptor (never inferred from the resolver's detail text).
         admitted_posture = False
-        if admitted:
+        if admitted or admitted_dirs:
             try:
                 status, _machine, _detail = _opf_store.discover_machine_store(root_fd, Path(root))
             except (_opf_store.StoreError, OSError):
@@ -2386,7 +2473,8 @@ def _fresh_plan(run, binding, head, ancestral, git, admitted=(), operation_id=No
     plan, raw = build_init_plan(operation_id=op_id, binding=binding, head=head,
                                 inventory_digest_value=inventory_digest(model),
                                 application_time=_utc_now(), existing_changelog=changelog,
-                                seed=seed, admitted=admitted, working_mode=working_mode)
+                                seed=seed, admitted=admitted, working_mode=working_mode,
+                                coupled=operation_id is not None)
     if admitted:
         # Admitted frozen sources may legitimately be git-tracked, so the tracked-destination
         # pathspec never sweeps the whole .working: the planned destinations are enumerated exactly
@@ -2481,13 +2569,30 @@ def _release_all(run):
         run.root_fd = None
 
 
-def _resume_binding_or_refuse(plan, op_id, ancestral, admitted, operation_id):
+def _resume_binding_or_refuse(plan, op_id, ancestral, admitted, operation_id, admitted_dirs=()):
     """A resume continues only the SAME requested operation: the recorded plan's adoption kind and
     counters seed, its admitted .working inventory, and (when the caller names one) its operation id
     must each equal this call's, else the resume refuses with nothing written. A partial operation
     seeded from one ancestor is never finished under a request naming another (or none): counters
     are seeded from the pinned high-water, never from zero, and a zero-seeded partial is never
-    finished under a re-adoption request (decision 6)."""
+    finished under a re-adoption request (decision 6). A COUPLED partial (its plan records the
+    coupled recovery policy: the id was caller-minted and bound into a coupled adoption's own
+    durable intent) is never resumed AT ALL, named or unnamed: its adoption transaction reverses
+    it and a changed run takes a fresh plan (spec 14.1, 14.2), so a plain `opf init` can never
+    finish or publish a coupled operation's scaffold outside that adoption transaction. A request
+    admitting pre-existing directories never resumes either: the recorded plan enumerates no
+    admitted pre-existing directories, so the admitted content cannot be proven unchanged."""
+    if plan["recovery_policy"] == COUPLED_RECOVERY_POLICY:
+        raise InitOperationError("the one partial operation {} was begun by a coupled adoption "
+                                 "(its id was caller-minted and bound into that adoption's "
+                                 "durable intent); it is never resumed or published outside its "
+                                 "adoption transaction, which reverses it (spec 14.2); a retried "
+                                 "or changed run takes a fresh plan with its own run id".format(
+                                     op_id))
+    if admitted_dirs:
+        raise InitOperationError("a resume never changes what pre-existing content is admitted, "
+                                 "and the recorded plan enumerates no admitted pre-existing "
+                                 "directories")
     if operation_id is not None and op_id != operation_id:
         raise InitOperationError("the one partial operation is {} and this call names operation {}; "
                                  "a resume never adopts another operation's history".format(
@@ -2515,7 +2620,7 @@ def _resume_binding_or_refuse(plan, op_id, ancestral, admitted, operation_id):
 
 
 def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=None,
-                       operation_id=None):
+                       operation_id=None, admitted_dirs=None):
     """Run (or resume) the PR3a/PR3b init operation on the EXPLICIT absolute product root and return
     an InitResult; never raises for an expected outcome. Takes the shared mutex before any write
     (pre-store holder), re-observes the binding and HEAD under it (a pre-lock observation never
@@ -2531,15 +2636,23 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
     reported separately. `ancestral` is a pinned evidence commit for a re-adoption's counters seed
     (PR4 selects it); `recover` is passed to the lock's explicit, confirmed-dead recovery;
     `admitted` is the coupled-adoption seam's verified admitted .working inventory (empty or None,
-    the unweakened default, refuses ANY existing .working exactly as before); `operation_id` is a
-    caller-minted operation id, bound by the coupled adoption's durable intent. A RESUME must carry
-    the SAME ancestral, admitted and operation_id bindings its recorded plan carries, else it
-    refuses (_resume_binding_or_refuse)."""
+    the unweakened default, refuses ANY existing .working exactly as before); `admitted_dirs` is
+    the seam's second leg, the planned directories a coupled adoption admits as pre-existing (the
+    empty machine home an archived occupying file leaves; empty or None for a plain init);
+    `operation_id` is a caller-minted operation id, bound by the coupled adoption's durable
+    intent, and its plan records the coupled recovery policy, so such an operation is NEVER
+    resumed (its adoption transaction reverses a partial one). A plain RESUME must carry the SAME
+    ancestral, admitted and operation_id bindings its recorded plan carries, else it refuses
+    (_resume_binding_or_refuse)."""
     result = InitResult()
     try:
         root = _abs_root(product_root)
         admitted = tuple(admitted) if admitted else ()
         reason = _bad_admitted(admitted)
+        if reason is not None:
+            raise InitOperationError(reason)
+        admitted_dirs = tuple(admitted_dirs) if admitted_dirs else ()
+        reason = _bad_admitted_dirs(admitted_dirs)
         if reason is not None:
             raise InitOperationError(reason)
         if operation_id is not None and (type(operation_id) is not str
@@ -2586,7 +2699,8 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
             result.phases = tuple(p for _s, p in rep.phases)
             return result
         if kind == "fresh":
-            plan, raw = _fresh_plan(run, binding, head, ancestral, git, admitted, operation_id)
+            plan, raw = _fresh_plan(run, binding, head, ancestral, git, admitted, operation_id,
+                                    admitted_dirs)
             try:
                 run.sub = _opf_init_substrate.begin_operation(run.holder, raw)
             except _opf_init_substrate.InitSubstrateError as exc:
@@ -2602,7 +2716,8 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
                                          CANNOT_EVALUATE)
             run.plan = validate_init_plan(run.sub._plan_bytes, expected_binding=binding,
                                           expected_head=head)
-            _resume_binding_or_refuse(run.plan, rep.op_id, ancestral, admitted, operation_id)
+            _resume_binding_or_refuse(run.plan, rep.op_id, ancestral, admitted, operation_id,
+                                      admitted_dirs)
             run.phases = _phase_names(run.sub)
             if not run.phases:
                 run.record("plan-recorded")
@@ -2611,9 +2726,9 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
         result.operation_id = run.plan["operation_id"]
         result.plan_digest = run.plan["plan_digest"]
         _run_group(run, "dirs", _dir_effects(run.plan),
-                   lambda resuming: _apply_dirs(run.root_fd, run.plan, resuming),
+                   lambda resuming: _apply_dirs(run.root_fd, run.plan, resuming, admitted_dirs),
                    lambda: _verify_dirs(run.root_fd, run.plan),
-                   pre_intent=lambda: _preclassify_dirs(run.root_fd, run.plan))
+                   pre_intent=lambda: _preclassify_dirs(run.root_fd, run.plan, admitted_dirs))
         try:
             run.cap = _opf_oplock.attach_init_lease(run.holder, run.plan["operation_id"])
         except _opf_oplock.OpLockError as exc:
@@ -2662,10 +2777,11 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
 
 
 def init_operation(product_root, *, ancestral=None, recover=False, admitted=None,
-                   operation_id=None):
+                   operation_id=None, admitted_dirs=None):
     """Public CLI seam; preserve the library result and decision-7 milestone boundary."""
     return run_init_operation(product_root, ancestral=ancestral, recover=recover,
-                              admitted=admitted, operation_id=operation_id)
+                              admitted=admitted, operation_id=operation_id,
+                              admitted_dirs=admitted_dirs)
 
 
 # --- self-test ------------------------------------------------------------------------------------
@@ -2817,11 +2933,12 @@ def _tree_snapshot(root):
     return snap
 
 
-def _child(root, env, kill="none", seed=None, recover=True, umask=None):
+def _child(root, env, kill="none", seed=None, recover=True, umask=None, opid=None):
     """Run run_init_operation in a FRESH interpreter; returns (exit status, result dict or None)."""
     import subprocess
     argv = [sys.executable, "-I", "-B", os.path.abspath(__file__), "--selftest-child", root, kill,
-            seed or "-", "1" if recover else "0", "-" if umask is None else "{:o}".format(umask)]
+            seed or "-", "1" if recover else "0", "-" if umask is None else "{:o}".format(umask),
+            opid or "-"]
     proc = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           timeout=300)
     out = proc.stdout.decode("utf-8", "replace").strip().splitlines()
@@ -2834,7 +2951,8 @@ def _child(root, env, kill="none", seed=None, recover=True, umask=None):
 def _child_main(argv):
     """The --selftest-child entry: install the named kill hook, run once, print the result."""
     import signal
-    root, kill, seed, recover, umask = argv
+    root, kill, seed, recover, umask = argv[:5]
+    opid = argv[5] if len(argv) > 5 and argv[5] != "-" else None
     if umask != "-":
         os.umask(int(umask, 8))
     this = sys.modules[__name__]
@@ -2938,7 +3056,8 @@ def _child_main(argv):
         _journal.recover = _journal._restore_preimage = _journal.reconcile_and_claim_stale = refuse
     elif name != "none":
         raise SystemExit("unknown kill point {!r}".format(kill))
-    res = run_init_operation(root, ancestral=None if seed == "-" else seed, recover=recover == "1")
+    res = run_init_operation(root, ancestral=None if seed == "-" else seed, recover=recover == "1",
+                             operation_id=opid)
     print(json.dumps({s: getattr(res, s) for s in InitResult.__slots__}, sort_keys=True))
     return 0
 
@@ -3314,6 +3433,73 @@ def _seam_tests(base, env, ok):
     res = run_init_operation(root, recover=True)
     ok("SEAM-unseeded-partial-resumes-bound", res.status == VIEWS_READY
        and sub_ops(root) == partial, str(res.primary_failure))
+
+    # A COUPLED partial (its id caller-minted; its plan records the coupled recovery policy) is
+    # never resumed: plain and NAMED resumes both refuse with nothing written, no publication.
+    root = _plain_repo(os.path.join(d, "coupled"), env)
+    coupled_id = "deadbeef-dead-4ead-8ead-deadbeefdead"
+    _child(root, env, kill="source:2", opid=coupled_id)
+    partial = sub_ops(root)
+
+    def no_lease(snapshot):
+        # the lock's explicit recovery legitimately settles the killed holder's stale lease
+        return {rel: v for rel, v in snapshot.items() if rel != LEASE_RELPATH.replace("/", os.sep)}
+
+    before = no_lease(_tree_snapshot(root))
+    res = run_init_operation(root, recover=True)
+    ok("SEAM-coupled-partial-plain-resume-refused", len(partial) == 1
+       and res.status == REFUSED
+       and "never resumed or published outside" in res.primary_failure["detail"]
+       and _opf_store.resolve_store(root).status != _opf_store.RESOLVED
+       and sub_ops(root) == partial and no_lease(_tree_snapshot(root)) == before,
+       str(res.primary_failure))
+    res = run_init_operation(root, recover=True, operation_id=coupled_id)
+    ok("SEAM-coupled-partial-named-resume-refused", res.status == REFUSED
+       and "never resumed or published outside" in res.primary_failure["detail"]
+       and sub_ops(root) == partial and no_lease(_tree_snapshot(root)) == before,
+       str(res.primary_failure))
+
+    # A group- or world-writable admitted .working refuses before anything is written: a store is
+    # never published beneath a home others can write.
+    root, adm, payload = admit_fixture("worldwrite")
+    os.chmod(os.path.join(root, ".working"), 0o777)
+    before = _tree_snapshot(root)
+    res = run_init_operation(root, admitted=adm)
+    ok("SEAM-world-writable-working-refused", res.status == REFUSED
+       and "writable" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+
+    # The seam's second leg: a pre-existing EMPTY machine home (what archival of an occupying
+    # machine-store file leaves behind) is admitted ONLY through admitted_dirs, at exactly its
+    # planned mode; plain init still refuses the same tree (the no-weakening pin).
+    root = _plain_repo(os.path.join(d, "dirs"), env)
+    os.makedirs(os.path.join(root, _MACHINE_HOME))
+    os.chmod(os.path.join(root, _opf_store.WORKING_DIRNAME), DIR_MODE)
+    os.chmod(os.path.join(root, _MACHINE_HOME), DIR_MODE)
+    before = _tree_snapshot(root)
+    res = run_init_operation(root)
+    ok("SEAM-plain-empty-machine-dir-refused", res.status == REFUSED
+       and "already exists" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+    res = run_init_operation(root, admitted_dirs=(_MACHINE_HOME,))
+    ok("SEAM-admitted-dirs-closure-refused", res.status == REFUSED
+       and ".working ancestor" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before, str(res.primary_failure))
+    res = run_init_operation(root,
+                             admitted_dirs=(_opf_store.WORKING_DIRNAME, _MACHINE_HOME))
+    ok("SEAM-admitted-dirs-accepted", res.status == VIEWS_READY
+       and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
+       and len(sub_ops(root)) == 1, str(res.primary_failure))
+    root = _plain_repo(os.path.join(d, "dirsmode"), env)
+    os.makedirs(os.path.join(root, _MACHINE_HOME))
+    os.chmod(os.path.join(root, _opf_store.WORKING_DIRNAME), DIR_MODE)
+    os.chmod(os.path.join(root, _MACHINE_HOME), 0o700)
+    before = _tree_snapshot(root)
+    res = run_init_operation(root,
+                             admitted_dirs=(_opf_store.WORKING_DIRNAME, _MACHINE_HOME))
+    ok("SEAM-admitted-dir-wrong-mode-refused", res.status == REFUSED
+       and "preserved as found" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
 
 
 def _b6_tests(base, env, ok, refuses):
@@ -4194,7 +4380,7 @@ def _view_tests(base, env, ok, signal):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("--self-test", "--selftest"):
         sys.exit(_run_self_test())
-    if len(sys.argv) == 7 and sys.argv[1] == "--selftest-child":
+    if len(sys.argv) in (7, 8) and sys.argv[1] == "--selftest-child":
         sys.exit(_child_main(sys.argv[2:]))
     sys.stderr.write("usage: python3 -I -B _opf_init_operation.py --self-test "
                      "(a library module; no live mode)\n")
