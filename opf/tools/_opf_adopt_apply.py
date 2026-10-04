@@ -419,7 +419,10 @@ def verify_bundle(product_root, run_id):
     capture and poststate verification, so no bundle this shell writes can carry an over-cap payload.
     Directory identities are RETAINED from the bundle listing through every inventory and payload read
     (_verify_bundle_at), so a directory concurrently swapped onto a listed pathname is never re-resolved
-    mid-verification (round 3)."""
+    mid-verification (round 3). Each inventory's [adoption] identity is held to the doctor's bar (spec
+    4.2): a phase other than its file name's, or a plan digest other than the one the bundle's own
+    plan.toml proves (read once, and its row checked against those same bytes), is CANNOT-EVALUATE, as
+    is a bundle whose plan.toml is absent, unreadable or unproven."""
     if not is_run_id(run_id):
         return schema._cannot("bundle run id {!r} does not match the adoption grammar".format(run_id))
     root_fd = _open_product_root(product_root)
@@ -444,6 +447,7 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
     # descriptor stays open and the cleanup below owns only the dup) and the bundle is stat'ed and opened
     # beneath THAT held identity, never re-walked from root_fd, so an evidence home swapped onto its
     # pathname between the caller's listing and this verification can never contribute a bundle.
+    import _opf_check
     dir_fds = dict()
     if home_fd is not None:
         # Round 7 MINOR: the subscript KEY is computed BEFORE the dup (Python evaluates an
@@ -516,6 +520,7 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
             return schema._cannot("evidence bundle {!r} has a phase inventory but no inventory.toml; a "
                                   "phase inventory never stands in for it (spec 4.2)".format(bundle))
         expected = dict()
+        digests = dict()
         for name in inventories:
             rel = bundle + "/" + name
             try:
@@ -527,34 +532,71 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
             if checked.status != store.VALID:
                 return schema.AdoptValidation(checked.status, [
                     "inventory {!r}: {}".format(rel, f) for f in checked.findings])
+            # The doctor's identity bar (spec 4.2): the phase is the one this file name carries, and the
+            # plan digest (compared below, once the plan is proven) is the bundle's own sealed plan's.
+            try:
+                phase, digests[rel] = _opf_check._adoption_identity(run_id, doc)
+                named = _opf_check._inventory_phase(name)
+            except ValueError as exc:
+                return schema._cannot("inventory {!r}: {}".format(rel, exc))
+            if phase != named:
+                return schema._cannot("inventory {!r} names phase {!r}, not the {!r} phase its file name "
+                                      "carries (an inventory copied from another phase, spec "
+                                      "4.2)".format(rel, phase, named))
             for row in doc["file"]:
                 if row["path"] in expected:
                     return schema._cannot("{!r} is claimed by more than one inventory of bundle "
                                           "{!r}".format(row["path"], bundle))
                 expected[row["path"]] = row
+        # The bundle's own plan.toml, read ONCE: its seal proof and its inventory row (below) are checked
+        # against the same bytes, so a plan swapped between two reads never combines into a clean result.
+        # An absent, unreadable or unproven plan proves no digest, so no inventory of the bundle (an empty
+        # base inventory included) verifies as this run's record (spec 4.2).
+        plan_path = bundle + "/" + PLAN_NAME
+        try:
+            plan_raw, _fst = read_retained(plan_path)
+        except FileNotFoundError:
+            return schema._cannot("evidence bundle {!r} has no {} to prove its inventories' plan digest "
+                                  "against (spec 4.2)".format(bundle, PLAN_NAME))
+        except (_journal.JournalError, OSError) as exc:
+            return schema._cannot("the bundle's {!r} is unreadable, so no plan digest is proven "
+                                  "({})".format(plan_path, exc))
+        try:
+            sealed = _opf_check._prove_adoption_plan(plan_raw, run_id)
+        except ValueError as exc:
+            return schema._cannot("{!r}: {}".format(plan_path, exc))
+        for rel in sorted(digests):
+            if digests[rel] != sealed:
+                return schema._cannot("inventory {!r} names plan digest {!r}, not its bundle's own sealed "
+                                      "plan's {!r} (an inventory of another run or plan, spec "
+                                      "4.2)".format(rel, digests[rel], sealed))
         findings = []
         for path in sorted(expected):
             row = expected[path]
-            try:
-                parts = _journal._check_rel(path)
+            if path == plan_path:
+                data = plan_raw    # the bytes the seal proof read: never a second read
+            else:
                 try:
-                    pfd = dir_at(tuple(parts[:-1]))
-                except FileNotFoundError:
-                    findings.append("listed file {!r} is missing".format(path))
-                    continue
-                pst = _journal._lstat_at(pfd, parts[-1])
-                if pst is None:
-                    findings.append("listed file {!r} is missing".format(path))
-                    continue
-                if not stat.S_ISREG(pst.st_mode):
-                    findings.append("listed entry {!r} is not a regular file".format(path))
-                    continue
-                # bounded by _MAX_PRODUCT_READ_BYTES (16 MiB): an over-cap listed payload cannot be hashed
-                # here and is CANNOT-EVALUATE below, naming the cap (a disclosed capacity limit; the same
-                # ceiling bounds compose/capture/poststate, so the shell never writes such a bundle).
-                data, _fst = read_retained(path)
-            except (_journal.JournalError, OSError) as exc:
-                return schema._cannot("cannot read listed file {!r} ({})".format(path, exc))
+                    parts = _journal._check_rel(path)
+                    try:
+                        pfd = dir_at(tuple(parts[:-1]))
+                    except FileNotFoundError:
+                        findings.append("listed file {!r} is missing".format(path))
+                        continue
+                    pst = _journal._lstat_at(pfd, parts[-1])
+                    if pst is None:
+                        findings.append("listed file {!r} is missing".format(path))
+                        continue
+                    if not stat.S_ISREG(pst.st_mode):
+                        findings.append("listed entry {!r} is not a regular file".format(path))
+                        continue
+                    # bounded by _MAX_PRODUCT_READ_BYTES (16 MiB): an over-cap listed payload cannot be
+                    # hashed here and is CANNOT-EVALUATE below, naming the cap (a disclosed capacity
+                    # limit; the same ceiling bounds compose/capture/poststate, so the shell never writes
+                    # such a bundle).
+                    data, _fst = read_retained(path)
+                except (_journal.JournalError, OSError) as exc:
+                    return schema._cannot("cannot read listed file {!r} ({})".format(path, exc))
             if len(data) != row["size"] or _sha256(data) != row["sha256"]:
                 findings.append("listed file {!r} does not match its recorded size and sha256 (payload "
                                 "drift)".format(path))
@@ -2248,21 +2290,41 @@ def _self_test_checks():
         except AdoptApplyError as exc:
             return None, str(exc)
 
-    _t_plan_digest = "sha256:" + "ab" * 32
     _emit_inventory = globals()["emit_inventory"]
     _run_adopt_transaction = globals()["run_adopt_transaction"]
 
+    def fixture_plan(run_id_):
+        """(bytes, digest): the run's fixture plan, sealed as the planner seals it (its plan_digest is the
+        digest of its canonical emission without that field), so the bundle verifier proves it exactly as
+        it proves a real plan (spec 4.2)."""
+        body = dict(format="opf.adoption.plan/v2", run_id=run_id_)
+        digest = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
+        return emit_checked(dict(body, plan_digest=digest)).encode("utf-8"), digest
+
     def emit_inventory(run_id_, rows, phase=None, plan_digest=None):
-        """Self-test shadow of the module emitter: the fixtures stage no plan, so every fixture inventory
-        carries the one fixture plan digest in its [adoption] identity unless a vector passes its own."""
+        """Self-test shadow of the module emitter: every fixture inventory carries its run's fixture plan
+        digest in its [adoption] identity unless a vector passes its own."""
         return _emit_inventory(run_id_, rows, phase,
-                               _t_plan_digest if plan_digest is None else plan_digest)
+                               fixture_plan(run_id_)[1] if plan_digest is None else plan_digest)
 
     def run_adopt_transaction(product_root, run_id_, compose, phase=None, plan_digest=None):
-        """Self-test shadow of the module transaction: the fixture plan digest for every transaction that
-        does not name its own (the fixtures stage no plan the digest could be derived from)."""
-        return _run_adopt_transaction(product_root, run_id_, compose, phase,
-                                      _t_plan_digest if plan_digest is None else plan_digest)
+        """Self-test shadow of the module transaction: a base transaction that names no plan digest
+        stages its run's fixture plan first, as apply stages the approved plan, and every transaction
+        that names none carries that plan's digest."""
+        plan_bytes_, digest = fixture_plan(run_id_)
+        staged = compose
+        if phase is None and plan_digest is None:
+            def staged(ops):
+                ops.create(plan_rel(run_id_), plan_bytes_)
+                return compose(ops)
+        return _run_adopt_transaction(product_root, run_id_, staged, phase,
+                                      digest if plan_digest is None else plan_digest)
+
+    def stage_fixture_plan(product_root, run_id_):
+        """Write the run's fixture plan into a hand-built bundle."""
+        path = Path(product_root) / plan_rel(run_id_)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(fixture_plan(run_id_)[0])
 
     def dead_pid():
         """A pid with POSITIVE evidence of death (ProcessLookupError on signal 0), for the stale-lock
@@ -2305,6 +2367,7 @@ def _self_test_checks():
     # 1: run identity. The homes grammar and the schema's shipped grammar agree on every vector; the mint
     # validates its own output; the import family and traversal spellings are refused.
     rid = mint_run_id(now, "0123456789abcdef")
+    _t_plan_digest = fixture_plan(rid)[1]
     other_run = mint_run_id(now, "fedcba9876543210")
     check("mint-run-id-grammar", is_run_id(rid) and rid == "adopt-20260917T120000Z-0123456789abcdef")
     check("mint-run-id-deterministic", mint_run_id(now, "0123456789abcdef") == rid)
@@ -2425,7 +2488,7 @@ def _self_test_checks():
         (_root3 / inventory_rel(rid)).write_bytes(
             emit_inventory(rid, [inventory_row(_payload_rel, b"alpha\n")]))
         (_root3 / inventory_rel(rid, "completion")).write_bytes(
-            emit_inventory(rid, [inventory_row(_payload_rel, b"alpha\n")]))
+            emit_inventory(rid, [inventory_row(_payload_rel, b"alpha\n")], "completion"))
         crossed = verify_bundle(_root3, rid)
         check("verify-cross-inventory-duplicate-cannot-eval",
               crossed.status == CANNOT and any("more than one inventory" in f for f in crossed.findings))
@@ -2446,6 +2509,7 @@ def _self_test_checks():
         (broot / _swap_payload_rel).write_bytes(b"BAD!!")
         (broot / inventory_rel(rid)).write_bytes(
             emit_inventory(rid, [inventory_row(_swap_payload_rel, b"GOOD!")]))
+        stage_fixture_plan(broot, rid)
         repl = broot / "replacement"
         repl.mkdir()
         for name, payload in replacement_files:
@@ -2503,6 +2567,33 @@ def _self_test_checks():
         check("verify-swap-after-listing-injection-fired", _list_fired != [])
         check("verify-swap-after-listing-still-original-drift",
               swapped.status == INVALID and any("payload drift" in f for f in swapped.findings))
+
+    # 3d (round 9): the verifier reads the bundle's plan.toml ONCE and checks its inventory row against
+    # the bytes its seal proof read (spec 4.2): plan A is swapped for B (A plus a newline) right after
+    # the proof, under an inventory whose plan row names B, so a second read would combine the proof of
+    # A with B's row into a false VALID; the one read instead reports the plan's drift.
+    import _opf_check
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        _root4 = Path(temp).resolve()
+        _plan_a = fixture_plan(rid)[0]
+        _plan_b = _plan_a + b"\n"
+        stage_fixture_plan(_root4, rid)
+        (_root4 / inventory_rel(rid)).write_bytes(
+            emit_inventory(rid, [inventory_row(plan_rel(rid), _plan_b)]))
+        _proofs = []
+        _real_prove = _opf_check._prove_adoption_plan
+
+        def _proving_swap(raw, run_id_):
+            _proofs.append(raw)
+            sealed_ = _real_prove(raw, run_id_)
+            (_root4 / plan_rel(rid)).write_bytes(_plan_b)
+            return sealed_
+
+        with mock.patch.object(_opf_check, "_prove_adoption_plan", _proving_swap):
+            swapped = verify_bundle(_root4, rid)
+        check("verify-plan-swapped-after-proof-one-read",
+              _proofs == [_plan_a] and swapped.status == INVALID
+              and any(repr(plan_rel(rid)) in f and "payload drift" in f for f in swapped.findings))
 
     # 4: the op-list invariants, over hand-built lists (check_apply_ops is pure).
     src, body = ".working/TODO.md", b"todo\n"
@@ -2692,7 +2783,8 @@ def _self_test_checks():
         check("non-occupying-source-frozen-in-place", after.get("legacy/RULES.md") == files["legacy/RULES.md"])
         inv = tomllib.loads(after.get(inventory_rel(rid), b"file = []").decode("utf-8"))
         check("inventory-derived-from-transaction",
-              sorted(r["path"] for r in inv["file"]) == sorted(archive_rel(rid, p) for p in files))
+              sorted(r["path"] for r in inv["file"])
+              == sorted([plan_rel(rid)] + [archive_rel(rid, p) for p in files]))
         check("apply-bundle-verifies", verify_bundle(root, rid).status == VALID)
         # THE single-byte payload flip (size preserved): the re-read verification goes red, then the
         # missing and non-regular listed-entry findings.

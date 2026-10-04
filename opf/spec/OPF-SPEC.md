@@ -237,6 +237,14 @@ missing or malformed, names another run, names a phase other than the one its fi
 or names a plan digest other than the run's proven plan's own (the frozen plan that re-seals its
 own bytes and that its approval binds), so an inventory copied from another run or phase, an
 empty retirement record included, never evaluates as this run's record.
+The apply side's bundle verifier, through which `opf adopt status` reports a run, MUST hold every
+adoption inventory to that bar against its bundle's own `plan.toml`: it MUST yield cannot-evaluate
+for an inventory that names a phase other than the one its file name carries or a plan digest
+other than that plan's, and for every bundle whose `plan.toml` is absent, unreadable or not
+canonical, names another run, or carries a `plan_digest` that does not re-seal its own bytes, an
+empty base inventory included. It MUST check that plan's inventory row against the same bytes its
+seal was proven from. It does not check the approval's binding, which the doctor's admission
+checks.
 A retirement is recorded only by a sealed retirement inventory in the shape the
 retirement-phase transaction derives from its own create ops: one row per move row of the plan,
 occupying or not, whose recorded Move destination (its move-file destination) lies beneath
@@ -286,12 +294,15 @@ inventory records, spelled `base` for `inventory.toml` and as the file name's `<
 later phase, whose name MUST NOT be `base`, and the run's approved plan's own `plan_digest` in
 the `sha256:` form with 64 lowercase hex digits. An inventory of any other kind MUST NOT carry
 that identity table. The apply side MUST write that identity when it derives the inventory.
+Except for an inventory in the recognized legacy format below, which is its named finding,
 C-EVIDENCE-ENUM MUST yield cannot-evaluate for an adoption inventory whose identity is missing or
 malformed, names another run, names a phase other than the one its file name carries, or names a
 plan digest other than its bundle's own sealed `plan.toml` digest, and for every inventory of an
 adoption bundle whose `plan.toml` is absent, unreadable or not canonical, names another run, or
 carries a `plan_digest` that does not re-seal its own bytes, so an inventory copied from another
-run or phase never evaluates as this run's record.
+run or phase never evaluates as this run's record. C-EVIDENCE-ENUM MUST check that `plan.toml`'s
+inventory row against the same bytes its seal was proven from, so a plan swapped between two
+reads never combines into a clean result.
 The owning writer or migration MUST derive each inventory from the run's transaction record or
 receipt and MUST publish it exclusively with the retained bytes. An inventory MUST NOT be rewritten,
 so a bundle stays immutable and an evidence commit changes only its bundle folder. An inventory is

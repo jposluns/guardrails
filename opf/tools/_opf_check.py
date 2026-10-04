@@ -2017,11 +2017,11 @@ def _adoption_identity(run_id, doc):
 
 
 def _adoption_plan_digest(root_fd, bundle, run_id, rep):
-    """The plan_digest of an adoption bundle's own plan.toml, proven from its bytes (spec 4.2): canonical
-    TOML naming the bundle's run id, whose plan_digest re-seals it (the planner's seal: the digest of the
-    canonical emission of the plan without its plan_digest). Every adoption inventory's [adoption]
-    identity must name this digest. An absent, unreadable, non-canonical, foreign-run or unsealed plan
-    raises ValueError, so no inventory of that bundle evaluates as this run's record."""
+    """(digest, bytes): the plan_digest of an adoption bundle's own plan.toml, proven from ONE read of
+    its bytes, and those exact bytes, so the caller checks the plan's inventory row against the bytes
+    the seal proof read, never a second read (spec 4.2). An absent or unreadable plan, and every refusal
+    of _prove_adoption_plan, raises ValueError, so no inventory of that bundle evaluates as this run's
+    record."""
     rel = _rel(bundle, ADOPTION_PLAN_NAME)
     raw, state = _read_bytes(root_fd, rel, rep)
     if state == "absent":
@@ -2030,6 +2030,15 @@ def _adoption_plan_digest(root_fd, bundle, run_id, rep):
     if state != "ok":
         raise ValueError("the adoption bundle's {} is unreadable, so no plan digest is proven (spec "
                          "4.2)".format(ADOPTION_PLAN_NAME))
+    return _prove_adoption_plan(raw, run_id), raw
+
+
+def _prove_adoption_plan(raw, run_id):
+    """The plan_digest an adoption bundle's plan.toml bytes prove (spec 4.2): canonical TOML naming the
+    bundle's run id, whose plan_digest re-seals it (the planner's seal: the digest of the canonical
+    emission of the plan without its plan_digest). Every adoption inventory's [adoption] identity must
+    name this digest. Pure over bytes its caller read once, and shared by the doctor and the apply
+    side's bundle verifier; a non-canonical, foreign-run or unsealed plan raises ValueError."""
     try:
         plan = tomllib.loads(raw.decode("utf-8"))
         canonical = _opf_emit.emit_checked(plan).encode("utf-8")
@@ -2086,7 +2095,9 @@ def _check_evidence(root_fd, homes, rep):
     a phase inventory but no inventory.toml, cannot evaluate; a malformed inventory stops the
     reconciliation, since its claims are unknown. An adoption inventory's [adoption] identity must name
     the phase its file name carries and the plan digest its bundle's own sealed plan.toml proves; a
-    foreign identity, or a bundle whose plan.toml is absent or does not prove, cannot evaluate.
+    foreign identity, or a bundle whose plan.toml is absent or does not prove, cannot evaluate. The
+    plan's seal proof and its inventory row are checked against ONE read of its bytes, so a plan swapped
+    between two reads never combines into a clean result.
     Deleting a whole bundle, inventory and payload together, is outside this local snapshot check;
     history coverage is separate. Reads use the contained readers and their per-file cap, with a
     bounded walk.
@@ -2098,7 +2109,8 @@ def _check_evidence(root_fd, homes, rep):
     bundles = []
     budget = [0]
     failed = [False]
-    plans = {}    # adoption bundle -> its proven plan digest, or the ValueError proving it raised
+    plans = {}    # adoption bundle -> (its proven plan digest, the bytes proven), or the ValueError raised
+    proven = {}   # plan.toml path -> the bytes its seal proof read, the ONE read its row is checked against
 
     def listing(rel, depth, required):
         # A directory reached through its parent's listing is required: its absence is a race.
@@ -2148,12 +2160,14 @@ def _check_evidence(root_fd, homes, rep):
                         plans[bundle] = _adoption_plan_digest(root_fd, bundle, run_id, rep)
                     except ValueError as exc:
                         plans[bundle] = exc
+                    else:
+                        proven[_rel(bundle, ADOPTION_PLAN_NAME)] = plans[bundle][1]
                 if isinstance(plans[bundle], ValueError):
                     raise plans[bundle]
-                if plan_digest != plans[bundle]:
+                if plan_digest != plans[bundle][0]:
                     raise ValueError("the [adoption] identity names plan digest {!r}, not its bundle's own "
                                      "sealed plan's {!r} (an inventory of another run or plan, spec "
-                                     "4.2)".format(plan_digest, plans[bundle]))
+                                     "4.2)".format(plan_digest, plans[bundle][0]))
         except _LegacyIngestInventory as exc:
             rep.finding("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))
             failed[0] = True
@@ -2210,7 +2224,10 @@ def _check_evidence(root_fd, homes, rep):
             if full not in expected:
                 rep.finding("C-EVIDENCE-ENUM: off-inventory file {!r}".format(full))
                 continue
-            raw, status = _read_bytes(root_fd, full, rep)
+            if full in proven:
+                raw, status = proven[full], "ok"    # the bytes the seal proof read: never a second read
+            else:
+                raw, status = _read_bytes(root_fd, full, rep)
             if status == "absent":
                 continue    # reported below with every other missing listed file
             seen.add(full)

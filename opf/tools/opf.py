@@ -14282,11 +14282,22 @@ def _cli_self_test():
                             os.close(jr_fd)
                     finally:
                         os.close(debris_fd)
-                    # done: a COMPLETED engine transaction (its journal entry stays, and its bundle is VALID).
+                    # done: a COMPLETED engine transaction (its journal entry stays, and its bundle is VALID):
+                    # it stages a plan sealed as the planner seals it, as apply stages the approved plan, so
+                    # the bundle verifier proves its inventory's plan digest against it (spec 4.2).
+                    def sealed_plan(run_id_):
+                        body = dict(format="opf.adoption.plan/v2", run_id=run_id_)
+                        digest = "sha256:" + _opf_adopt_apply._sha256(
+                            _opf_adopt_apply.emit_checked(body).encode("utf-8"))
+                        return (_opf_adopt_apply.emit_checked(dict(body, plan_digest=digest)).encode("utf-8"),
+                                digest)
+
+                    adopt_plan, adopt_digest = sealed_plan(adopt_rid)
                     done = os.path.join(abase, "done")
                     os.mkdir(done)
-                    _opf_adopt_apply.run_adopt_transaction(done, adopt_rid, lambda ops: None,
-                                                           plan_digest="sha256:" + "ab" * 32)
+                    _opf_adopt_apply.run_adopt_transaction(
+                        done, adopt_rid, lambda ops: ops.create(_opf_adopt_apply.plan_rel(adopt_rid), adopt_plan),
+                        plan_digest=adopt_digest)
                     # an empty (nothing-opened) journal entry, which the engine classifies as clean.
                     unopened = os.path.join(abase, "unopened")
                     os.makedirs(os.path.join(unopened, adopt_j_rel, "txn"))
@@ -14344,6 +14355,30 @@ def _cli_self_test():
                                        "adoption run {}: evidence bundle at".format(adopt_rid)),
                                       ("nothing-opened journal entry", unopened, EXIT_OK,
                                        "no adoption run exists")]
+                    # Round 9: status holds each inventory's [adoption] identity to the doctor's bar (spec
+                    # 4.2), each red at the round-9 head (which listed the run and exited 0): a plan digest
+                    # other than the bundle's own sealed plan's, a phase other than the file name's, and an
+                    # empty base inventory with no plan are each cannot-evaluate; the hand-built control
+                    # with its own sealed plan stays clean.
+                    for v_tag, v_plan, v_phase, v_digest, v_want, v_needle in (
+                            ("handbuilt", adopt_plan, None, adopt_digest, EXIT_OK,
+                             "adoption run {}: evidence bundle at".format(adopt_rid)),
+                            ("foreigndigest", adopt_plan, None, "sha256:" + "0" * 64, EXIT_MALFORMED,
+                             "not its bundle's own sealed plan"),
+                            ("wrongphase", adopt_plan, "completion", adopt_digest, EXIT_MALFORMED,
+                             "phase its file name carries"),
+                            ("emptynoplan", None, None, adopt_digest, EXIT_MALFORMED, "no plan.toml")):
+                        root = fresh_root(v_tag)
+                        os.makedirs(os.path.join(root, evidence_rel, adopt_rid))
+                        v_rows = []
+                        if v_plan is not None:
+                            v_plan_rel = _opf_adopt_apply.plan_rel(adopt_rid)
+                            with open(os.path.join(root, v_plan_rel), "wb") as fh:
+                                fh.write(v_plan)
+                            v_rows.append(_opf_adopt_apply.inventory_row(v_plan_rel, v_plan))
+                        with open(os.path.join(root, _opf_adopt_apply.inventory_rel(adopt_rid)), "wb") as fh:
+                            fh.write(_opf_adopt_apply.emit_inventory(adopt_rid, v_rows, v_phase, v_digest))
+                        status_vectors.append(("bundle ({})".format(v_tag), root, v_want, v_needle))
                     root = fresh_root("nobundle")
                     os.makedirs(os.path.join(root, evidence_rel, adopt_rid))
                     status_vectors.append(("run-id directory with no inventory", root, EXIT_FINDING,
@@ -14498,16 +14533,21 @@ def _cli_self_test():
                     home_abs = os.path.join(swaproot, evidence_rel)
                     payload_rel = evidence_rel + "/" + adopt_rid + "/payload.txt"
                     good_inv = _opf_adopt_apply.emit_inventory(
-                        adopt_rid, [_opf_adopt_apply.inventory_row(payload_rel, b"GOOD!")])
+                        adopt_rid, [_opf_adopt_apply.inventory_row(payload_rel, b"GOOD!")],
+                        plan_digest=adopt_digest)
                     os.makedirs(os.path.join(home_abs, adopt_rid))
                     with open(os.path.join(home_abs, adopt_rid, "inventory.toml"), "wb") as fh:
                         fh.write(good_inv)
+                    with open(os.path.join(home_abs, adopt_rid, "plan.toml"), "wb") as fh:
+                        fh.write(adopt_plan)                     # each home's own sealed plan (spec 4.2)
                     with open(os.path.join(home_abs, adopt_rid, "payload.txt"), "wb") as fh:
                         fh.write(b"BAD!!")                       # drifted: the original home is exit 1
                     repl_abs = os.path.join(swaproot, ".working", "imported", "adoption-replacement")
                     os.makedirs(os.path.join(repl_abs, adopt_rid))
                     with open(os.path.join(repl_abs, adopt_rid, "inventory.toml"), "wb") as fh:
                         fh.write(good_inv)
+                    with open(os.path.join(repl_abs, adopt_rid, "plan.toml"), "wb") as fh:
+                        fh.write(adopt_plan)
                     with open(os.path.join(repl_abs, adopt_rid, "payload.txt"), "wb") as fh:
                         fh.write(b"GOOD!")                       # verifies, but beside a foreign entry
                     os.mkdir(os.path.join(repl_abs, "zzz-foreign"))
@@ -15002,7 +15042,9 @@ def _cli_self_test():
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
               "adoption planner -- bare/malformed usage and the deferred complete/reconcile "
               "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
-              "bundle finding / 2 symlinked, dangling or wrong-type home, plan -> 2 missing, FIFO, oversized "
+              "bundle finding / 2 symlinked, dangling or wrong-type home or a bundle whose inventory names "
+              "another phase or plan digest than its own sealed plan's, or has no plan, "
+              "plan -> 2 missing, FIFO, oversized "
               "or symlinked worksheet, stale digest or an interrupted adoption transaction / 1 "
               "schema-violating op, each mutating nothing; the stage driver's approve -> 0 with the approval "
               "binding the plan's two digests / 2 after a source edit or a moved revision, and apply -> 2 on "
