@@ -100,18 +100,28 @@ def _expected_check_ids():
 
 
 def _verdict(result):
-    """Reduce a handler result tuple to one of: allow, warn, ask, deny, block2."""
+    """Reduce a handler result tuple to one of: allow, warn, ask, deny, block2, explicit-allow, matching
+    selftest_aiqt_hooks._reduce_result. "warn" is ONLY exit 0 with a stdout object whose keys are exactly
+    systemMessage, holding non-whitespace text (the allow-with-note shape). An explicit permissionDecision
+    "allow", with or without a note, is "explicit-allow", which no check expects (the hooks' _allow never
+    emits one). Any other shape is an "unexpected" string."""
     code, obj, _err = result
     if code == 2:
         return "block2"
     if code == 0 and obj is None:
         return "allow"
     if code == 0 and isinstance(obj, dict):
-        decision = obj.get("hookSpecificOutput", {}).get("permissionDecision")
-        if decision in ("ask", "deny"):
-            return decision
-        if "systemMessage" in obj or "hookSpecificOutput" in obj:
-            return "warn"
+        specific = obj.get("hookSpecificOutput")
+        if isinstance(specific, dict):
+            decision = specific.get("permissionDecision")
+            if decision == "allow":
+                return "explicit-allow"
+            if decision in ("ask", "deny"):
+                return decision
+        elif set(obj) == {"systemMessage"}:
+            note = obj["systemMessage"]
+            if isinstance(note, str) and note.strip():
+                return "warn"
     return "unexpected({!r})".format(result)
 
 

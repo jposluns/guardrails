@@ -1,6 +1,7 @@
 """Shared helpers for the single-source generators (roadmap, changelog). Stdlib only.
 
-Requires Python 3.11+ for tomllib; CI pins 3.14. run_all_checks.sh runs these locally.
+Requires Python 3.11+ for tomllib; CI pins 3.14. The hooks self-test (tools/selftest_aiqt_hooks.py)
+needs 3.12+ for sys.monitoring. run_all_checks.sh runs these locally.
 """
 import io
 import os

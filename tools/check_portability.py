@@ -130,7 +130,7 @@ PLUGIN_JSON = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
 # The only shippable file that is not scannable text. It is byte-reconciled by gen_skill.py --check from
 # sources this gate DOES scan, so its content portability follows transitively; it is still OPENED here so
 # an unreadable copy fails closed rather than passing silently.
-BINARY_ALLOW = {"site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.5.zip"}
+BINARY_ALLOW = {"site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip"}
 
 # GD-56 attribution exemption (NARROW and REVIEWED; NOT a general operator-identity allowance). The
 # maintainer deliberately attributes both the project and himself, by name, on the two PUBLISHED chat
