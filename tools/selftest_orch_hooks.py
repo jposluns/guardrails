@@ -859,6 +859,21 @@ def _main_isolated(report_path=None):
         # a '<<' in arithmetic is a shift, never a here-document: the lines after it stay code.
         check("trunc/fg-arith-shift-not-heredoc-denies", fg("echo $((1<<2))\nsleep 5 &\n2"), "deny")
         check("trunc/fg-arith-bracket-shift-not-heredoc-denies", fg("echo $[1<<2]\nsleep 5 &\n2]"), "deny")
+        # ROUND tg-r1: the here-document body skip is narrowed so it can only make the scan MORE permissive.
+        # Each bypass below let a real foreground detach through before the fix (base guard denied all);
+        # every one now DENIES, and the narrow-skip harmless forms still ALLOW.
+        check("trunc/fg-herestring-then-detach-denies", fg('cat <<<x\nsleep 5 &\nx'), "deny")
+        check("trunc/fg-herestring-word-then-detach-denies", fg('grep -c a <<<EOF\nsleep 5 &\nEOF'), "deny")
+        check("trunc/fg-heredoc-bslash-nl-join-denies", fg('cat <<true\ntr\\\nue\nsleep 5 &\nwait\ntrue'), "deny")
+        check("trunc/fg-heredoc-bslash-nl-word-denies", fg('cat <<EO\\\nF\nA & B\nEOF'), "deny")
+        check("trunc/fg-arith-for-glued-not-heredoc-denies", fg('for((i=0;i<1<<n;i++)); do :; done\nsleep 5 &\nn'), "deny")
+        check("trunc/fg-arith-while-glued-not-heredoc-denies", fg('i=9;while((i<1<<k)); do i=$((i+1)); done\nsleep 5 &\nk'), "deny")
+        check("trunc/fg-arith-after-sep-not-heredoc-denies", fg('true;((y=1<<2))\nsleep 5 &\n2'), "deny")
+        check("trunc/fg-arith-subscript-not-heredoc-denies", fg('a[1<<2]=3\nsleep 5 &\n2]=3'), "deny")
+        check("trunc/fg-heredoc-opline-cmdsub-open-denies", fg('cat <<EOF $(true\nsleep 5 &\n)\nEOF'), "deny")
+        check("trunc/fg-heredoc-opline-cmdsub-closed-allows", fg('cat <<EOF $(echo hi)\nA & B\nEOF'), "allow")
+        check("trunc/fg-heredoc-bslash-nl-no-amp-allows", fg('cat <<EOF\nfoo \\\nbar\nEOF'), "allow")
+        check("trunc/scan-herestring-not-heredoc", aiqt_hooks._orch_foreground_detach('cat <<<x\nsleep 5 &\nx'), True)
         # The deny message fits its cause: a could-not-read (ambiguous) deny does not advise
         # run_in_background (before the fix it carried the detach advice), a real detach still does.
         _reason = lambda cmd: (bg(cmd, rib=False)[1] or {}).get(
@@ -867,6 +882,8 @@ def _main_isolated(report_path=None):
               "run_in_background" in _reason("echo 'oops & more"), False)
         check("trunc/fg-ambiguous-reason-is-deny", fg("echo 'oops & more"), "deny")
         check("trunc/fg-detach-reason-background-advice", "run_in_background" in _reason("sleep 5 &"), True)
+        check("trunc/fg-heredoc-data-reason-no-background-advice", "run_in_background" in _reason('cat <<EO\\\nF\nA & B\nEOF'), False)
+        check("trunc/fg-heredoc-data-reason-is-deny", fg('cat <<EO\\\nF\nA & B\nEOF'), "deny")
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
