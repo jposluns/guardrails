@@ -546,14 +546,18 @@ MUST take the lease (`lease.toml`, present only while held, carrying the holder,
 an acquired-at timestamp read from the clock) and MUST make it observable at the sync target before
 its writes begin, so a second system's reconciliation sees the held lease and refuses. A lease MUST
 NOT be seized from a live holder; it MUST be reconciled against recorded state on resume or close,
-and a leftover lease from a dead run MUST be released only through that reconciliation. Where the
-concurrent-operation module is enabled, the lease MUST additionally be recorded as a `session_lease`
-record, with one exception: a fresh-only implementation that stops at the section 16.1 post-lease
-admission recheck writes no `session_lease` record and releases unrecorded any lease that carries
-its own claim (section 16.1). There is a residual window between taking the lease and its reaching
-the target in which two systems can both begin; the divergence check above is the overlapping
-control that catches that collision after the fact, and the two layers together are the guarantee
-(disclosed in section 17).
+and a leftover lease from a dead run MUST be released only through that reconciliation. A fresh-only
+implementation (section 16.1) splits that reconciliation around its admission check: it MUST decide
+before admission, from recorded state and writing nothing, whether a leftover lease is a dead run's,
+and MUST release a dead run's lease only after admission, by replacing that lease with its own claim
+(section 16.1). Where the concurrent-operation module is enabled, the lease MUST additionally be
+recorded as a `session_lease` record, with one exception: a fresh-only implementation that stops at
+the section 16.1 post-lease admission recheck writes no `session_lease` record and releases
+unrecorded any lease that carries its own claim, restoring a dead run's lease that its claim
+replaced (section 16.1). There is a residual window between taking the lease and its reaching the
+target in which two systems can both begin; the divergence check above is the overlapping control
+that catches that collision after the fact, and the two layers together are the guarantee (disclosed
+in section 17).
 
 This contract states two generic operational requirements inline. First, a **single-writer
 lease**: a run MUST hold a lease so two runs never act on the same store state at once, MUST
@@ -2094,24 +2098,35 @@ declaration MUST yield cannot-evaluate and MUST NOT authorize any store operatio
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease
-(section 5.7) included. The check MUST run after any section 5.7 reconciliation the command
-performs, over the state that reconciliation found, and a fresh-only implementation's `opf sync`
-MUST NOT bring in, by a fast-forward, a state that the check, run first over the fetched target
-state, refuses or cannot evaluate, nor send, by a push of pending local commits (section 5.7), a
-state that the check, run first over the local state it would push, refuses or cannot evaluate. A
-command that writes MUST, after admission, take the `lease.toml` that section 5.7 has it take in the
-machine store and make it observable at the sync target where the store has one (section 5.7) before
-any other write, the `session_lease` record that section 5.7 has it record for that lease where the
-concurrent-operation module is enabled included. Once that `lease.toml` is taken and observable, and
-before any other write, that `session_lease` record included, it MUST confirm that the `lease.toml`
-carries its own claim and that every directory listing, existence-probe result, and candidate the
-check read is unchanged, apart from that `lease.toml` and its directory entry, from what the check
-read. Where the `lease.toml` carries its own claim but anything else differs, it MUST stop as
-cannot-evaluate, write no `session_lease` record and no other file, and release its own lease
-unrecorded, the section 5.7 exception, so the lease path ends as it was before the claim. Where the
-`lease.toml` does not carry its own claim, it MUST stop as cannot-evaluate, write no `session_lease`
-record and no other file, and leave that `lease.toml` untouched, since section 5.7 forbids seizing a
-lease from a live holder. The check MUST compare parsed versions, never strings, and MUST refuse:
+(section 5.7) included. The check MUST run after any section 5.7 comparison against the sync target
+that the command performs, over the state that comparison found, and a fresh-only implementation's
+`opf sync` MUST NOT bring in, by a fast-forward, a state that the check, run first over the fetched
+target state, refuses or cannot evaluate, nor send, by a push of pending local commits (section
+5.7), a state that the check, run first over the local state it would push, refuses or cannot
+evaluate. Of the section 5.7 lease reconciliation, only the reading that decides from recorded state
+whether a leftover `lease.toml` is a dead run's MAY precede admission, and that reading writes
+nothing; a command MUST NOT release a dead run's lease before admission, so a refusal or
+cannot-evaluate at admission leaves that lease in place. A command that writes MUST, after
+admission, take the `lease.toml` that section 5.7 has it take in the machine store and make it
+observable at the sync target where the store has one (section 5.7) before any other write, the
+`session_lease` record that section 5.7 has it record for that lease where the concurrent-operation
+module is enabled included. Where that reading found a dead run's leftover `lease.toml`, the command
+MUST take the lease by replacing that file with its own claim in one write, never by removing it
+first, and that replacement is the section 5.7 release of the dead run's lease; where the
+concurrent-operation module is enabled, it MUST write that dead lease's `session_lease` transition
+to `reconciled` only after the recheck below, before any other write, alongside its own
+`session_lease` record. Once that `lease.toml` is taken and observable, and before any other write,
+those `session_lease` writes included, it MUST confirm that the `lease.toml` carries its own claim
+and that every directory listing, existence-probe result, and candidate the check read is unchanged,
+apart from that `lease.toml` and its directory entry, from what the check read. Where the
+`lease.toml` carries its own claim but anything else differs, it MUST stop as cannot-evaluate, write
+no `session_lease` record and no other file, and release its own lease unrecorded, the section 5.7
+exception, by removing that `lease.toml` or, where its claim replaced a dead run's lease, by
+restoring that lease's bytes, so the lease path ends as it was before the claim and a restored dead
+lease stays for a later reconciliation. Where the `lease.toml` does not carry its own claim, it MUST
+stop as cannot-evaluate, write no `session_lease` record and no other file, and leave that
+`lease.toml` untouched, since section 5.7 forbids seizing a lease from a live holder. The check MUST
+compare parsed versions, never strings, and MUST refuse:
 
 - as `unsupported-older-store`, a store whose manifest declares a `spec_version` below the supported
   one, or whose base table is the retired `[devprocess]` (section 4.5), naming the declared version
@@ -2204,9 +2219,11 @@ only on that decision; the third limit above alone decides whether it is a candi
 an `inventory.toml` or `inventory-<phase>.toml` at the root of a run folder there is one, parsed and
 classified as any other. An adoption receipt kept outside `.working/imported/adoption/`, which
 section 14.2 does not permit, decides nothing, a gap section 17 discloses. A fresh-only
-implementation's own adoption writer MUST publish its adoption receipt before, or in the same
-transaction as, the `partial` or `complete` `import_status` that receipt substantiates, so an
-interruption never leaves its own store holding that status without that receipt.
+implementation's own adoption writer MUST make its adoption receipt crash-durable before it begins
+to write the `partial` or `complete` `import_status` that receipt substantiates, whether or not both
+writes share a transaction, and any reversal of that status MUST make the prior `import_status`
+crash-durable before it removes that receipt, so no interruption, recovered or not, leaves its own
+store holding that status without that receipt.
 
 Where a command that recovers an interrupted journaled transaction of the implementation's own
 writer, a section 8.8 authoring or import transaction, a section 14.2 apply, or a section 14.1
@@ -2216,18 +2233,19 @@ candidates and directories above that it reads, and MUST evaluate each candidate
 as an operand by the prestate and planned poststate the journal proves for it, never by its live
 bytes, discovery included, classifying and searching each of those images as it would that
 candidate. Only where those images and every other input admit the store MAY the command take the
-lease as above, and the post-lease recheck MUST also find that journal unchanged. The command MUST
-then complete or roll back that transaction under the lease as its section requires, and only then
-run the full admission check over the state that recovery left, before any other grading and any
-other write. A refusal or cannot-evaluate there leaves the store as the recovery left it, apart from
-releasing its own lease as section 5.7 requires, and the byte-identical rule below binds from that
-state; after a section 8.8 reconciliation, its refusal of the new operation still applies. The check
-MUST yield cannot-evaluate, never admission and never a recovery write, where that journal cannot be
-read or parsed, does not prove both images of such an operand, or names an image that holds legacy
-state or meets another refusal above, and where a live operand holds bytes that are neither of its
-images nor a write of either torn by the interruption. No other input takes this path: every input
-of a command that performs no such recovery, and a torn or unparseable candidate that no such
-journal names, is classed by the rules above.
+lease as above, by replacement where the interrupted writer left a dead run's lease, and the
+post-lease recheck MUST also find that journal unchanged. The command MUST then complete or roll
+back that transaction under the lease as its section requires, and only then run the full admission
+check over the state that recovery left, before any other grading and any other write. A refusal or
+cannot-evaluate there leaves the store as the recovery left it, apart from releasing its own lease
+as section 5.7 requires, and the byte-identical rule below binds from that state; after a section
+8.8 reconciliation, its refusal of the new operation still applies. The check MUST yield
+cannot-evaluate, never admission and never a recovery write, where that journal cannot be read or
+parsed, does not prove both images of such an operand, or names an image that holds legacy state or
+meets another refusal above, and where a live operand holds bytes that are neither of its images nor
+a write of either torn by the interruption. No other input takes this path: every input of a command
+that performs no such recovery, and a torn or unparseable candidate that no such journal names, is
+classed by the rules above.
 
 Where a store meets more than one refusal above, the section 9.2 ceiling included, the check MUST
 report every finding it meets, and that store's refusal fixture asserts each of them. An input the
@@ -2264,10 +2282,19 @@ journal included, one whose candidate is torn under such a journal that proves c
 images, which a command that performs that recovery recovers and then admits under the full check,
 the section 14.2 one interrupted after apply removed an occupying `manifest.toml`, and one whose
 journal names an image that holds legacy state, which every store-resolving command MUST report as
-cannot-evaluate, never as admission, with both trees byte-identical. Missing evidence makes the
-claim `indeterminate`, never a pass. A fresh-only claim MUST NOT imply upgrade compatibility or
-continuity from the implementation's own earlier releases; moving to a later base version requires a
-new declaration and new evidence.
+cannot-evaluate, never as admission, with both trees byte-identical. The lease takeover's fixtures
+MUST include, each with the concurrent-operation module enabled and with it disabled: one whose
+interrupted writer left a dead run's `lease.toml`, and with the module that run's `held`
+`session_lease` record, beside a candidate torn under a journal that proves current-format images,
+in which a recovering command takes over that lease by replacing that `lease.toml`, writes
+`reconciled` for that record, with the module, only after its recheck, recovers the transaction, and
+then admits the store; one that the check refuses and that holds such a lease, which every
+store-resolving command refuses with both trees byte-identical, that `lease.toml` included; and one
+that holds such a lease and in which a candidate changes between admission and the recheck, where
+the command stops as cannot-evaluate with that dead lease's bytes restored and, with the module, its
+record still `held`. Missing evidence makes the claim `indeterminate`, never a pass. A fresh-only
+claim MUST NOT imply upgrade compatibility or continuity from the implementation's own earlier
+releases; moving to a later base version requires a new declaration and new evidence.
 
 ## 17. Residual coverage disclosures
 
@@ -2327,11 +2354,11 @@ The gates in this standard are strong where they are strong and say so where the
   that section 9.2 leaves in place with a standing finding, or a legacy run archive outside
   `.working/`, which only the `import_status` item reaches. Admission parses only the section 16.1
   candidates, and on its recovery path a recovery journal of the implementation's own writer
-  (sections 8.8 and 14), and never reads beneath a path registered under `[unmanaged]` that section
-  14.2 permits, so a listed item kept outside those candidates, such as a legacy-format inventory
-  kept under such a path or anywhere but the root of a staging or evidence run folder, goes
-  undetected; an `[unmanaged]` entry that section 14.2 forbids is a cannot-evaluate input, never a
-  reason to leave a path unsearched. Admission recognizes only the adoption receipts of the
+  (sections 8.8, 14.1, and 14.2), and never reads beneath a path registered under `[unmanaged]` that
+  section 14.2 permits, so a listed item kept outside those candidates, such as a legacy-format
+  inventory kept under such a path or anywhere but the root of a staging or evidence run folder,
+  goes undetected; an `[unmanaged]` entry that section 14.2 forbids is a cannot-evaluate input,
+  never a reason to leave a path unsearched. Admission recognizes only the adoption receipts of the
   implementation's own section 14 adoption writer, so where another implementation's writer placed a
   store's adoption receipt under `.working/imported/adoption/` at another path or in another format,
   and that area holds no adoption receipt of the implementation's own writer, the check cannot
@@ -2340,24 +2367,30 @@ The gates in this standard are strong where they are strong and say so where the
   where a current-format adoption set that status. An adoption receipt kept outside
   `.working/imported/adoption/`, which section 14.2 does not permit, decides nothing, so where that
   area holds no file, its store's `partial` or `complete` `import_status` is refused as
-  `unsupported-legacy-state`. Its refusal leaves a store unchanged but offers no preservation,
-  repair, or continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0
-  import history included, needs an upgrade-capable implementation for that store. A command that
-  writes rechecks admission once its `lease.toml` is taken and observable and before it writes any
-  record; a stop there writes no record, a `session_lease` record included, and removes only the
-  command's own lease contribution: it releases a `lease.toml` that carries its own claim and leaves
-  untouched one that carries another holder's claim. That stop restores nothing else, so a change
-  that another process made and the recheck detected stays in the tree; where the store has a sync
-  target, that target's history can keep the lease's claim and release, and where the
-  concurrent-operation module is enabled no `session_lease` record of that lease remains. On the
-  section 16.1 recovery path, admission trusts the implementation's own recovery journal for the
-  images it proves of an interrupted transaction's operands, a section 8.8 transaction and a section
-  14 adoption transaction alike, and runs in full only after recovery; a command that performs no
-  such recovery, a read-only command included, reports a store with a torn candidate as
-  cannot-evaluate until a recovering command recovers it, and a clone without the journal (section
-  4.2) stays cannot-evaluate. A change made after the recheck by anything that does not take the
-  lease, such as a hand edit or a branch switch, is outside admission. Until validation tooling
-  ships, a class claim is self-asserted (section 16).
+  `unsupported-legacy-state`. Its refusal leaves a store unchanged, a dead run's leftover lease
+  included, but offers no preservation, repair, or continuity; an adopter whose store holds legacy
+  state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable
+  implementation for that store. A command that writes rechecks admission once its `lease.toml` is
+  taken and observable and before it writes any record; a stop there writes no record, a
+  `session_lease` record included, and removes only the command's own lease contribution: it
+  releases a `lease.toml` that carries its own claim, restoring the bytes of a dead run's lease that
+  its claim replaced, and leaves untouched one that carries another holder's claim. That stop
+  restores nothing else, so a change that another process made and the recheck detected stays in the
+  tree; where the store has a sync target, that target's history can keep the lease's claim and
+  release, and where the concurrent-operation module is enabled no `session_lease` record of that
+  lease remains and a restored dead lease's record stays `held`. On the section 16.1 recovery path,
+  admission trusts the implementation's own recovery journal for the images it proves of an
+  interrupted transaction's operands, a section 8.8, 14.1, or 14.2 transaction alike, and runs in
+  full only after recovery; a command that performs no such recovery, a read-only command included,
+  reports a store with a torn candidate as cannot-evaluate until a recovering command recovers it,
+  and a clone without the journal (section 4.2) stays cannot-evaluate. Only the transactions section
+  16.1 lists take that path: a candidate torn by any other write, such as a section 12 rotation or a
+  non-green outcome event appended to an adoption receipt, is classed like any other candidate even
+  where the implementation journals that write, so one left unparseable stays cannot-evaluate for
+  every command of a fresh-only implementation, its own writers included, until it is repaired by
+  hand, and one left parseable is not recognized as torn. A change made after the recheck by
+  anything that does not take the lease, such as a hand edit or a branch switch, is outside
+  admission. Until validation tooling ships, a class claim is self-asserted (section 16).
 
 ## Appendix A: record envelope example
 
