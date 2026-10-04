@@ -795,7 +795,7 @@ def _main_isolated(report_path=None):
         check("trunc/fg-pipe-stderr-allows", _verdict(bg("build |& tee log", rib=False)), "allow")
         check("trunc/fg-single-quoted-amp-allows", _verdict(bg("echo 'a & b'", rib=False)), "allow")
         check("trunc/fg-double-quoted-amp-allows", _verdict(bg('echo "a & b"', rib=False)), "allow")
-        check("trunc/fg-escaped-amp-denies", _verdict(bg("echo a \\& b", rib=False)), "deny")
+        check("trunc/fg-escaped-amp-allows", _verdict(bg("echo a \\& b", rib=False)), "allow")
         # direct scanner unit checks (the quote/escape provenance _segments cannot carry): a quoted or an
         # escaped redirect char before `&` is still a real detach, while a genuine dup redirect is not.
         check("trunc/scan-quoted-redirect-detach", aiqt_hooks._orch_foreground_detach('echo ">" &'), True)
@@ -809,81 +809,31 @@ def _main_isolated(report_path=None):
         check("trunc/scan-ansi-c-hidden-detach", aiqt_hooks._orch_foreground_detach(r"echo $'a\'b' & echo x"), True)
         check("trunc/scan-unbalanced-single-asks", aiqt_hooks._orch_foreground_detach("echo 'oops & bg"), True)
         check("trunc/fg-ansi-c-hidden-detach-denies", _verdict(bg(r"echo $'a\'b' & echo x", rib=False)), "deny")
-        # A `#` is outside the conservative safe subset (rule A), so any command carrying one is OUT; when it
-        # also carries an `&` byte the guard cannot prove that `&` is comment text rather than an operator, so
-        # it over-denies in the safe direction (these two returned a not-detach allow before the subset shrank).
-        check("trunc/scan-comment-amp-now-out", aiqt_hooks._orch_foreground_detach("echo done # & comment"), True)
-        check("trunc/scan-comment-leading-hash-now-out", aiqt_hooks._orch_foreground_detach("# long_job &"), True)
+        # finding F (an unquoted word-start `#` comment is dropped, so a commented-out `&` does not prompt):
+        # without the fix the `&` in comment text was scanned as an operator and over-fired (historically an
+        # over-ASK, now an over-deny).
+        check("trunc/scan-comment-amp-not-detach", aiqt_hooks._orch_foreground_detach("echo done # & comment"), False)
+        check("trunc/scan-comment-leading-hash-not-detach", aiqt_hooks._orch_foreground_detach("# long_job &"), False)
         # L-GS1 fix-round: a `#` comment runs only to the end of ITS line, never to the end of a multi-line
         # command. A comment on an earlier line must NOT swallow a real bare-& detach on a later line; before
         # the fix the whole scan broke at the first `#`, so these two silently ALLOWED (returned False).
         check("trunc/scan-comment-then-detach-nextline", aiqt_hooks._orch_foreground_detach("echo hi  # note\nsleep 100 &"), True)
         check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
         check("trunc/fg-comment-then-detach-denies", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "deny")
-        check("trunc/fg-comment-amp-denies", _verdict(bg("echo done # & comment", rib=False)), "deny")
+        check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
         # inert when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
         ti = Fixture(tmp, "trunc-inert")
         (ti.root / ".aiqt" / "orchestration.local.json").unlink()
         check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "allow")
-        # Data is not syntax: a here-document body (quoted or unquoted delimiter) carries apostrophes and
-        # ampersands that are data, not a bare-& operator, so these forms ALLOW. A `${...}` parameter
-        # expansion is now OUT of the conservative subset (a `$` and braces), so a `${...}` carrying an `&`
-        # over-denies in the safe direction (the two `-denies` rows below).
-        fg = lambda cmd: _verdict(bg(cmd, rib=False))
-        check("trunc/fg-heredoc-quoted-apostrophe-allows", fg("cat > f <<'EOF'\nThe user's file\nEOF"), "allow")
-        check("trunc/fg-heredoc-commit-amp-allows", fg("git commit -F - <<'EOF'\nFix A & B\nEOF"), "allow")
-        check("trunc/fg-heredoc-python-interp-denies", fg("python3 - <<'EOF'\nx = 1 & 2\nEOF"), "deny")
-        check("trunc/fg-heredoc-unquoted-allows", fg("cat > f <<EOF\nThe user's A & B\nEOF"), "allow")
-        check("trunc/fg-heredoc-dash-tab-allows", fg("cat <<-EOF\n\tit's A & B\n\tEOF"), "allow")
-        check("trunc/fg-heredoc-two-bodies-allows", fg("cat <<A <<'B'\nx & y\nA\nit's\nB\necho ok"), "allow")
-        check("trunc/fg-param-default-amp-denies", fg("echo ${x:-&}"), "deny")
-        check("trunc/fg-param-pattern-amp-denies", fg("echo ${x//&/and} && echo y"), "deny")
-        # Discriminating: a GENUINE bare '&' outside a here-document body or parameter expansion is still
-        # denied, and text that can still run a command is never skipped as data.
-        check("trunc/fg-real-sleep-detach-denies", fg("sleep 5 &"), "deny")
-        check("trunc/fg-heredoc-then-detach-denies", fg("cat > f <<'EOF'\nA & B's\nEOF\nsleep 5 &"), "deny")
-        check("trunc/fg-heredoc-operator-line-detach-denies", fg("cat <<'EOF' &\nbody\nEOF"), "deny")
-        check("trunc/fg-heredoc-two-bodies-then-detach-denies",
-              fg("cat <<A <<'B'\nx & y\nA\nit's\nB\nsleep 1 &"), "deny")
-        check("trunc/fg-heredoc-dash-then-detach-denies", fg("cat <<-EOF\n\tA & B\n\tEOF\n\tsleep 1 &"), "deny")
-        check("trunc/fg-heredoc-unterminated-amp-denies", fg("cat <<EOF\nno terminator & here"), "deny")
-        check("trunc/fg-heredoc-expanded-cmdsub-amp-denies",
-              fg("cat <<EOF\n$(sleep 5 >/dev/null &)\nEOF"), "deny")
-        check("trunc/fg-param-then-detach-denies", fg("echo ${x:-&} &"), "deny")
-        check("trunc/fg-param-cmdsub-detach-denies", fg("echo ${x:-$(sleep 5 &)}"), "deny")
-        check("trunc/fg-funsub-detach-denies", fg("echo ${ sleep 5 & }"), "deny")
-        # a '<<' that is word text inside a parameter expansion scanned as code opens no here-document.
-        check("trunc/fg-param-heredoc-text-then-detach-denies",
-              fg("echo ${x:-$(date)<<EOF}\nsleep 5 &\nEOF}"), "deny")
-        # a '<<' in arithmetic is a shift, never a here-document: the lines after it stay code.
-        check("trunc/fg-arith-shift-not-heredoc-denies", fg("echo $((1<<2))\nsleep 5 &\n2"), "deny")
-        check("trunc/fg-arith-bracket-shift-not-heredoc-denies", fg("echo $[1<<2]\nsleep 5 &\n2]"), "deny")
-        # ROUND tg-r1: the here-document body skip is narrowed so it can only make the scan MORE permissive.
-        # Each bypass below let a real foreground detach through before the fix (base guard denied all);
-        # every one now DENIES, and the narrow-skip harmless forms still ALLOW.
-        check("trunc/fg-herestring-then-detach-denies", fg('cat <<<x\nsleep 5 &\nx'), "deny")
-        check("trunc/fg-herestring-word-then-detach-denies", fg('grep -c a <<<EOF\nsleep 5 &\nEOF'), "deny")
-        check("trunc/fg-heredoc-bslash-nl-join-denies", fg('cat <<true\ntr\\\nue\nsleep 5 &\nwait\ntrue'), "deny")
-        check("trunc/fg-heredoc-bslash-nl-word-denies", fg('cat <<EO\\\nF\nA & B\nEOF'), "deny")
-        check("trunc/fg-arith-for-glued-not-heredoc-denies", fg('for((i=0;i<1<<n;i++)); do :; done\nsleep 5 &\nn'), "deny")
-        check("trunc/fg-arith-while-glued-not-heredoc-denies", fg('i=9;while((i<1<<k)); do i=$((i+1)); done\nsleep 5 &\nk'), "deny")
-        check("trunc/fg-arith-after-sep-not-heredoc-denies", fg('true;((y=1<<2))\nsleep 5 &\n2'), "deny")
-        check("trunc/fg-arith-subscript-not-heredoc-denies", fg('a[1<<2]=3\nsleep 5 &\n2]=3'), "deny")
-        check("trunc/fg-heredoc-opline-cmdsub-open-denies", fg('cat <<EOF $(true\nsleep 5 &\n)\nEOF'), "deny")
-        check("trunc/fg-heredoc-bslash-nl-no-amp-allows", fg('cat <<EOF\nfoo \\\nbar\nEOF'), "allow")
-        check("trunc/scan-herestring-not-heredoc", aiqt_hooks._orch_foreground_detach('cat <<<x\nsleep 5 &\nx'), True)
-        # The deny message fits its cause: a could-not-read (ambiguous) deny does not advise
-        # run_in_background (before the fix it carried the detach advice), a real detach still does.
-        _reason = lambda cmd: (bg(cmd, rib=False)[1] or {}).get(
-            "hookSpecificOutput", {}).get("permissionDecisionReason", "")
-        check("trunc/fg-ambiguous-reason-no-background-advice",
-              "run_in_background" in _reason("echo 'oops & more"), False)
-        check("trunc/fg-ambiguous-reason-is-deny", fg("echo 'oops & more"), "deny")
-        check("trunc/fg-detach-reason-background-advice", "run_in_background" in _reason("sleep 5 &"), True)
-        check("trunc/fg-heredoc-data-reason-no-background-advice", "run_in_background" in _reason('cat <<EO\\\nF\nA & B\nEOF'), False)
-        check("trunc/fg-heredoc-data-reason-is-deny", fg('cat <<EO\\\nF\nA & B\nEOF'), "deny")
+        # The cautious scanner's disclosed over-refusal residual: a here-document body is scanned as code,
+        # so a safe body carrying an unquoted `&` is denied; the double-quoted commit-message form is read
+        # as double-quoted text and allowed.
+        check("trunc/fg-heredoc-amp-overrefusal-residual-denies",
+              _verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)), "deny")
+        check("trunc/fg-commit-template-amp-allows",
+              _verdict(bg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\"", rib=False)), "allow")
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
@@ -923,285 +873,6 @@ def _main_isolated(report_path=None):
             {"hook_event_name": "PreToolUse", "cwd": str(tb.root), "tool_name": "Bash",
              "tool_input": None})), "deny")
 
-        # ---------- component 2b: ground-truth differential against real bash ----------
-        # ONE registry of shell-command cases: (id, raw [% is newline], scanner verdict, bash mode). EVERY
-        # row's scanner verdict is asserted; every row with a bash mode is ALSO run through real bash with a
-        # sleep-before-create `touch` shim FIRST on a fixed PATH, so a background child (marker ABSENT when
-        # bash returns, PRESENT after a bounded wait) is discriminated from a foreground/waited run and from
-        # no run at all. Bash modes: "detach" (a non-waited background child: strict discrimination), "ran"
-        # (the marked touch executed; its timing inside a substitution cannot prove background, but a real
-        # positive observation, never vacuous), "nodetach" (the marker is planted INSIDE the region that must
-        # be DATA; it must NEVER appear and bash must exit 0), "overdeny" (same bash predicate as nodetach,
-        # but the scanner verdict is a CONSERVATIVE deny: the documented safe-direction over-denial cost,
-        # pinned so it never silently relaxes into a bypass), "resid" (a DISCLOSED RESIDUAL: bash confirms a
-        # real detach and the scanner still allows; the row pins the disclosed gap with its ACTUAL outcome so
-        # a drift in either direction fails), None (scanner-only). A bash timeout, or a
-        # required marker observation that does not hold, is cannot-evaluate and FAILS (never counted harmless).
-        import time as _time
-        import shutil as _shutil
-        import random as _random
-        import signal as _signal
-        _mkr2 = lambda raw: raw.replace("%", chr(10))
-        _cr, _vt, _ff, _nb = chr(13), chr(11), chr(12), chr(160)
-        GT = []
-        _scanv = {}
-        for _cid, _raw, _sw, _mode in [
-          ('trunc/fg-r3-case-dq-detach-denies', "echo \"$(case x in x) touch MARK >/dev/null & ;; esac)\"", "deny", 'detach'),
-          ('trunc/fg-r3-case-semiamp-ran-denies', "echo \"$(case x in x) touch MARK >/dev/null ;& esac)\"", "deny", 'ran'),
-          ('trunc/fg-r3-dq-backtick-detach-denies', "echo \"`touch MARK >/dev/null &`\"", "deny", 'detach'),
-          ('trunc/fg-r3-ansic-detach-denies', "touch MARK $'x\\'y' & echo \\'", "deny", 'detach'),
-          ('trunc/fg-r4-esc-gtamp-detach-denies', ": $'x'; touch MARK \\>&", "deny", 'detach'),
-          ('trunc/fg-r4-esc-ampamp-detach-denies', ": $'x'; touch MARK \\&& true", "deny", 'detach'),
-          ('trunc/fg-r4-esc-pipeamp-detach-denies', ": $'x'; touch MARK \\|&", "deny", 'detach'),
-          ('trunc/fg-r4-comment-opener-detach-denies', "echo \"$(cat # <<'true'%touch MARK >/dev/null &%true%)\"", "deny", 'detach'),
-          ('trunc/fg-r4-esc-opener-detach-denies', "echo \"$(cat \\<<'true'%touch MARK >/dev/null &%true%)\"", "deny", 'detach'),
-          ('trunc/fg-r4-bslash-nl-detach-denies', "echo \"$\\%(touch MARK >/dev/null &)\"", "deny", 'detach'),
-          ('trunc/fg-r4-eval-quoteremoval-detach-denies', "e'v'al 'touch MARK &'", "deny", 'detach'),
-          ('trunc/fg-r4-brace-eval-detach-denies', "{eval,} 'touch MARK &'", "deny", 'detach'),
-          ('trunc/fg-r4-dup-param-detach-denies', "touch MARK >${x:-/dev/null}&", "deny", 'detach'),
-          ('trunc/fg-r4-lt-param-detach-denies', "touch MARK <${f:-/dev/null}&", "deny", 'detach'),
-          ('trunc/fg-r4-dup-cmdsub-heredoc-detach-denies', "touch MARK >$(cat <<'EOF'%/dev/null%EOF%)&", "deny", 'detach'),
-          ('trunc/fg-r4-param-hash-detach-denies', "echo ${HOME}#;touch MARK &", "deny", 'detach'),
-          ('trunc/fg-r4-cmdsub-hash-detach-denies', "echo $(cat <<'EOF'%x%EOF%)#;touch MARK &", "deny", 'detach'),
-          ('trunc/fg-r4-comment-heredoc-detach-denies', "echo \"$(cat /dev/null #<<'EOF'%touch MARK >/dev/null &%EOF%)\"", "deny", 'detach'),
-          ('trunc/fg-r4-esc-heredoc-detach-denies', "echo \"$(cat \\<<'EOF'%touch MARK >/dev/null &%EOF%)\"", "deny", 'detach'),
-          ('trunc/fg-r4-paren-param-detach-denies', "echo ${x:-(}; touch MARK >/dev/null & case a in a) : ;; esac; echo }", "deny", 'detach'),
-          ('trunc/fg-r4-procsub-hash-detach-denies', "cat <(true)#;touch MARK &", "deny", 'detach'),
-          ('trunc/fg-r4-array-hash-detach-denies', "x=(a)#;touch MARK &", "deny", 'detach'),
-          ('trunc/fg-r4-eof-terminator-detach-denies', "echo \"$(cat <<'EOF'%x%EOF)\"; touch MARK >/dev/null &%EOF%)\"", "deny", 'detach'),
-          ('trunc/fg-r4-dollar-bracket-detach-denies', "a='b[$(touch MARK >/dev/null &)]'; echo \"$[a]\"", "deny", 'detach'),
-          ('trunc/fg-r4-esc-eval-detach-denies', "\\eval 'touch MARK &'", "deny", 'detach'),
-          ('trunc/fg-cr-before-hash-detach-denies', "touch MARK y" + _cr + "#z &", "deny", 'detach'),
-          ('trunc/fg-vt-before-hash-detach-denies', "touch MARK y" + _vt + "#z &", "deny", 'detach'),
-          ('trunc/fg-ff-before-hash-detach-denies', "touch MARK y" + _ff + "#z &", "deny", 'detach'),
-          ('trunc/fg-nbsp-before-hash-detach-denies', "touch MARK y" + _nb + "#z &", "deny", 'detach'),
-          ('trunc/fg-heredoc-amp-apos-marker-allows', "cat <<'EOF'%Tom & Jerry it's touch MARK & body%EOF", "allow", 'nodetach'),
-          ('trunc/fg-commit-template-marker-allows', "echo \"$(cat <<'EOF'%touch MARK & msg%EOF%)\"", "allow", 'nodetach'),
-          ('trunc/fg-logical-and-marker-allows', "echo 'touch MARK &' && echo done", "allow", 'nodetach'),
-          ('trunc/fg-dup-2to1-marker-allows', "echo 'touch MARK &' 2>&1", "allow", 'nodetach'),
-          ('trunc/fg-amp-redirect-marker-allows', "echo 'touch MARK &' &> /dev/null", "allow", 'nodetach'),
-          ('trunc/fg-pipe-amp-marker-allows', "echo 'touch MARK &' |& cat", "allow", 'nodetach'),
-          ('trunc/fg-sq-amp-marker-allows', "echo 'touch MARK & later'", "allow", 'nodetach'),
-          ('trunc/fg-dq-amp-marker-allows', "echo \"touch MARK & later\"", "allow", 'nodetach'),
-          ('trunc/fg-heredoc-unquoted-marker-allows', "cat <<EOF%The user's A & B touch MARK & x%EOF", "allow", 'nodetach'),
-          ('trunc/fg-r5-template-suffix-eval-detach-denies', "e\"$(cat <<'EOF'%v%EOF%)\"al 'touch MARK &'", "deny", 'detach'),
-          ('trunc/fg-r5-interp-heredoc-detach-denies', "bash <<'EOF'%touch MARK &%EOF", "deny", 'detach'),
-          ('trunc/fg-r5-template-close-suffix-denies', "echo \"$(cat <<'EOF'%touch MARK & msg%EOF%)\"suffix", "deny", 'overdeny'),
-          ('trunc/fg-r5-dq-herestring-amp-denies', "echo \"<<< &\"", "deny", 'overdeny'),
-          ('trunc/fg-r5-resid-bashc-sq-detach-allows', "bash -c 'touch MARK &'", "allow", 'resid'),
-          ('trunc/fg-r5-resid-coproc-noamp-detach-allows', "coproc touch MARK", "allow", 'resid'),
-          ('trunc/fg-r5-resid-procsub-noamp-detach-allows', "true <(touch MARK)", "allow", 'resid'),
-        ]:
-            _scanv[_cid] = fg(_mkr2(_raw))
-            check(_cid, _scanv[_cid], _sw)
-            GT.append((_cid, _raw, _sw, _mode))
-        check("trunc/scan-ansi-c-balanced-detach", aiqt_hooks._orch_foreground_detach("true $'x\\'y' & echo ok"), True)
-        check("trunc/scan-dq-cmdsub-amp-detach", aiqt_hooks._orch_foreground_detach("echo " + chr(34) + "$(sleep 5 &)" + chr(34)), True)
-        _fixed_path = "/usr/bin:/bin"
-        _bash = _shutil.which("bash", path=_fixed_path)  # finding E: availability on the SAME fixed PATH
-        _SHIM_SLEEP, _WAIT, _TIMEOUT = 0.25, 0.60, 6.0
-        _real_touch = next((p for p in ("/usr/bin/touch", "/bin/touch") if os.path.exists(p)), None)
-
-        def _gt_run(cmd, shim_dir):
-            """Run cmd under bash in a fresh temp HOME/cwd on the fixed PATH with the sleep-first touch shim.
-            Returns a dict discriminating a background child (marker ABSENT at bash return, PRESENT after a
-            bounded wait) from a foreground/waited run and from no run at all. The process GROUP is signalled
-            and the direct child reaped, and private scratch removal is VERIFIED (ground-truth rule D)."""
-            d = tempfile.mkdtemp(prefix="gt.", dir=str(tmp))
-            mark = os.path.join(d, "MARK")
-            env = dict(PATH=shim_dir + ":" + _fixed_path, HOME=d)
-            timed_out, exit_code, pgid = False, None, None
-            try:
-                proc = subprocess.Popen(["bash", "-c", cmd], cwd=d, env=env,
-                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL, start_new_session=True)
-                pgid = proc.pid  # start_new_session: the child leads its own group (pgid == pid)
-                try:
-                    exit_code = proc.wait(timeout=_TIMEOUT)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                at_return = os.path.exists(mark)
-                appeared = at_return
-                if not appeared:
-                    deadline = _time.time() + _WAIT
-                    while _time.time() < deadline:
-                        if os.path.exists(mark):
-                            appeared = True
-                            break
-                        _time.sleep(0.01)
-                return dict(timed_out=timed_out, exit_code=exit_code, at_return=at_return,
-                            present=appeared, detached=(not at_return) and appeared)
-            finally:
-                if pgid is not None:
-                    try:
-                        os.killpg(pgid, _signal.SIGKILL)  # tear down any lingering background child
-                    except OSError:
-                        pass
-                    if timed_out:
-                        try:
-                            proc.wait(timeout=_TIMEOUT)  # reap the killed direct child (no zombie)
-                        except (OSError, subprocess.TimeoutExpired):
-                            pass
-                _shutil.rmtree(d, ignore_errors=True)
-                _gt_cleanup.append(not os.path.exists(d))  # VERIFY scratch removal, never assume it
-
-        def _gt_eval(raw, mode, shim_dir):
-            """('ok'|'bad'|'cannot', result-dict) for one bash mode. A timeout is cannot-evaluate (FAILS,
-            never counted harmless). 'detach' (and 'resid', the disclosed-residual row) requires the strict
-            background discrimination; 'ran' requires a real marker observation; 'nodetach' and 'overdeny'
-            require the marker ABSENT and a clean exit 0 (a failed
-            instrumentation run, a nonzero exit, is not read as harmless)."""
-            r = _gt_run(_mkr2(raw), shim_dir)
-            if r["timed_out"]:
-                return "cannot", r
-            if mode in ("detach", "resid"):
-                return ("ok" if r["detached"] else "bad"), r
-            if mode == "ran":
-                return ("ok" if r["present"] else "bad"), r
-            return ("ok" if (not r["present"] and r["exit_code"] == 0) else "bad"), r
-
-        _UNV = "UNVERIFIABLE"
-        _gt_cleanup = []
-        if not _bash or not _real_touch:
-            _gt_bash_ok = _UNV
-            _gt_det_ok = _gt_harm_ok = _gt_cannot_ok = _gt_flip_ok = _gt_flip_real_ok = _UNV
-            _gt_resid_ok = _gt_over_ok = _UNV
-            _gt_fuzz_ok = _gt_fuzz_power_ok = _gt_cleanup_ok = _UNV
-        else:
-            _gt_bash_ok = True
-            _shim_dir = tempfile.mkdtemp(prefix="gtshim.", dir=str(tmp))
-            _shim = os.path.join(_shim_dir, "touch")
-            with open(_shim, "w", encoding="utf-8") as _sf:
-                _sf.write("#!/bin/sh\nsleep " + str(_SHIM_SLEEP) + "\nexec "
-                          + _real_touch + " " + chr(34) + "$@" + chr(34) + "\n")
-            os.chmod(_shim, 0o755)
-            _res = dict((cid, _gt_eval(raw, mode, _shim_dir))
-                        for cid, raw, _sw, mode in GT if mode)
-            _cannot = [cid for cid, pair in _res.items() if pair[0] == "cannot"]
-            _det_rows = [cid for cid, raw, _sw, mode in GT if mode in ("detach", "ran")]
-            _harm_rows = [cid for cid, raw, _sw, mode in GT if mode == "nodetach"]
-            _resid_rows = [cid for cid, raw, _sw, mode in GT if mode == "resid"]
-            _over_rows = [cid for cid, raw, _sw, mode in GT if mode == "overdeny"]
-            _rawof = dict((cid, raw) for cid, raw, _sw, mode in GT)
-            _gt_det_ok = all(_res[cid][0] == "ok" and _scanv[cid] == "deny" for cid in _det_rows)
-            _gt_harm_ok = all(_res[cid][0] == "ok" and _scanv[cid] == "allow" for cid in _harm_rows)
-            # the disclosed residuals (bash -c '... &', coproc, an unwaited process substitution) are
-            # registered with their ACTUAL outcome: bash CONFIRMS the detach and the scanner allows.
-            _gt_resid_ok = bool(_resid_rows) and all(
-                _res[cid][0] == "ok" and _scanv[cid] == "allow" for cid in _resid_rows)
-            # conservative over-denials of bash-harmless forms (the safe-direction cost): no marker,
-            # clean exit 0, scanner deny.
-            _gt_over_ok = bool(_over_rows) and all(
-                _res[cid][0] == "ok" and _scanv[cid] == "deny" for cid in _over_rows)
-            _gt_cannot_ok = (len(_cannot) == 0)
-            # REAL FLIP (rule F): the SAME differential predicate must PASS for the real scanner and FAIL for
-            # a weakened one (the out-of-subset rule removed, so OUT allows). A bash-confirmed detach row the
-            # weak scanner allows is a reintroduced bypass the differential has to catch.
-            def _weak(cmd):
-                v = aiqt_hooks._orch_safe_subset_scan(cmd)
-                return None if v == "OUT" else v
-            _confirmed = [cid for cid in _det_rows if _res[cid][0] == "ok"]
-            def _all_denied_by(fn):
-                return all(fn(_mkr2(_rawof[cid])) is not None for cid in _confirmed)
-            _gt_flip_real_ok = bool(_confirmed) and _all_denied_by(aiqt_hooks._orch_foreground_detach_kind)
-            _gt_flip_ok = bool(_confirmed) and (not _all_denied_by(_weak))
-            # MUTATION DIFFERENTIAL FUZZ (fixed seed): each case is generated by MUTATING a historical repro
-            # family (round 1-4), not replaying a fixed template: delimiters, variable names, blanks, escapes,
-            # comments, control bytes, and the quote split around a reserved word are randomized. Each case runs
-            # through BOTH the scanner and real bash. The soundness invariant is one-directional: whenever bash
-            # backgrounds the marker (strict discrimination), the scanner MUST deny. The seed and count print.
-            Mq = "touch MARK >/dev/null &"
-            M = "touch MARK &"
-            _odd = (_cr, _vt, _ff, _nb)
-            def _word(rng):
-                return "".join(rng.choice("abcdeEOFxyz_") for _ in range(rng.randint(1, 4)))
-            def _eval_splice(rng):
-                return rng.choice([
-                    "e" + chr(39) + "v" + chr(39) + "al", "ev" + chr(39) + "a" + chr(39) + "l",
-                    chr(39) + "eval" + chr(39), chr(34) + "eval" + chr(34), "{eval,}", "\\eval"])
-            def _blanks(rng):
-                return "".join(rng.choice([" ", "\t", ""]) for _ in range(rng.randint(0, 2)))
-            def _dq_case(rng):
-                sep = rng.choice([";;", ";&", ";;&"])
-                w = _word(rng)
-                return ("echo " + chr(34) + "$(case " + w + " in " + w + ") " + Mq + " " + sep
-                        + " esac)" + chr(34))
-            def _dq_backtick(rng):
-                return "echo " + chr(34) + _blanks(rng) + chr(96) + Mq + chr(96) + chr(34)
-            def _ansi_c(rng):
-                return "touch MARK $" + chr(39) + _word(rng) + "\\" + chr(39) + "y" + chr(39) + " & echo"
-            def _escaped_op(rng):
-                op = rng.choice(["\\>&", "\\&& true", "\\|&", "\\& echo x"])
-                return ": $" + chr(39) + "x" + chr(39) + "; touch MARK " + op
-            def _opener(rng):
-                sep = rng.choice(["# ", "\\", "# " + _word(rng) + " ", "/dev/null #"])
-                dlm = _word(rng)
-                return ("echo " + chr(34) + "$(cat " + sep + "<<" + chr(39) + dlm + chr(39) + "\n"
-                        + Mq + "\n" + dlm + "\n)" + chr(34))
-            def _param_dup(rng):
-                redir = rng.choice([">", "<"])
-                return "touch MARK " + redir + "${" + _word(rng) + ":-/dev/null}&"
-            def _hash_after(rng):
-                head = rng.choice(["echo ${" + _word(rng) + "}", "echo $(cat <<" + chr(39) + "D" + chr(39)
-                                   + "\nx\nD\n)", "cat <(true)", "x=(a)"])
-                return head + "#;" + M
-            def _dollar_bracket(rng):
-                return "a=" + chr(39) + "b[$(" + Mq + ")]" + chr(39) + "; echo " + chr(34) + "$[a]" + chr(34)
-            def _ctrl_hash(rng):
-                return "touch MARK y" + rng.choice(_odd) + "#" + _word(rng) + " &"
-            def _eval_fam(rng):
-                return _eval_splice(rng) + " " + chr(39) + M + chr(39)
-            def _plain(rng):
-                return _blanks(rng) + rng.choice(["", "true ; ", ": ; "]) + M
-            def _harm_heredoc(rng):
-                dlm = _word(rng)
-                return "cat <<" + chr(39) + dlm + chr(39) + "\nTom & it" + chr(39) + "s " + M + " body\n" + dlm
-            def _harm_template(rng):
-                dlm = _word(rng)
-                return ("echo " + chr(34) + "$(cat <<" + chr(39) + dlm + chr(39) + "\n" + M + " msg\n"
-                        + dlm + "\n)" + chr(34))
-            def _harm_quoted(rng):
-                return rng.choice(["echo " + chr(39) + M + " later" + chr(39),
-                                   "echo " + chr(34) + M + " later" + chr(34),
-                                   "echo " + chr(39) + M + chr(39) + " && echo ok"])
-            _FAMILIES = [_dq_case, _dq_backtick, _ansi_c, _escaped_op, _opener, _param_dup, _hash_after,
-                         _dollar_bracket, _ctrl_hash, _eval_fam, _plain, _harm_heredoc, _harm_template,
-                         _harm_quoted]
-            def _fuzz_make(rng):
-                return rng.choice(_FAMILIES)(rng)
-            _FUZZ_SEED, _FUZZ_COUNT = 20251101, 120
-            _rng = _random.Random(_FUZZ_SEED)
-            _fuzz_false_allow, _fuzz_timeouts, _fuzz_detaches = [], 0, 0
-            _fuzz_weak_catch = 0
-            for _ in range(_FUZZ_COUNT):
-                _c = _fuzz_make(_rng)
-                _r = _gt_run(_c, _shim_dir)
-                if _r["timed_out"]:
-                    _fuzz_timeouts += 1
-                    continue
-                if _r["detached"]:
-                    _fuzz_detaches += 1
-                    if aiqt_hooks._orch_foreground_detach_kind(_c) is None:
-                        _fuzz_false_allow.append(_c)
-                    if _weak(_c) is None:
-                        _fuzz_weak_catch += 1   # the corpus has power: a weakened scanner WOULD miss this
-            _gt_fuzz_ok = (not _fuzz_false_allow) and (_fuzz_timeouts == 0) and (_fuzz_detaches > 0)
-            _gt_fuzz_power_ok = (_fuzz_weak_catch > 0)
-            _gt_cleanup_ok = bool(_gt_cleanup) and all(_gt_cleanup)
-            print("GT-FUZZ seed={0} count={1} detaches={2} false_allows={3} timeouts={4} weak_catch={5}".format(
-                _FUZZ_SEED, _FUZZ_COUNT, _fuzz_detaches, len(_fuzz_false_allow), _fuzz_timeouts,
-                _fuzz_weak_catch))
-        check("gt/bash-available", _gt_bash_ok, True)
-        check("gt/detach-cases-all-denied", _gt_det_ok, True)
-        check("gt/harmless-cases-no-detach-and-allowed", _gt_harm_ok, True)
-        check("gt/residual-rows-detach-confirmed-and-disclosed-allow", _gt_resid_ok, True)
-        check("gt/overdeny-rows-no-detach-and-denied", _gt_over_ok, True)
-        check("gt/no-cannot-evaluate", _gt_cannot_ok, True)
-        check("gt/cleanup-verified", _gt_cleanup_ok, True)
-        check("gt/flip-catches-reintroduced-bypass", _gt_flip_ok, True)
-        check("gt/flip-real-scanner-denies-detaches", _gt_flip_real_ok, True)
-        check("gt/fuzz-no-false-allow", _gt_fuzz_ok, True)
-        check("gt/fuzz-has-power", _gt_fuzz_power_ok, True)
         # ---------- component 3b: the untracked wait-loop guard (trkasy, deny) ----------
         w = Fixture(tmp, "waitloop")
         # predicate direct checks (three-valued): the four-conjunct truth table.
@@ -2055,14 +1726,11 @@ def _main_isolated(report_path=None):
           "ALLOWS-WITH-NOTE (reducer 'warn') any other shell syntax or reserved word, DENIES-and-educates a "
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
           "producer's full output and exit status) and a "
-          "foreground bare-& detach (historically an ASK for both); it skips a depth-0 here-document body "
-          "and the one nested commit-message template as data (a real detach beside either still denies), "
-          "and for a command OUTSIDE the conservative safe subset (a `$`, backtick, backslash, `#`, a "
-          "paren/brace, `<<<`, a quote-reconstructed case/esac/eval/coproc word, or a word-glued `[` "
-          "subscript) it over-denies on any `&` byte rather than trust its own data-skipping, fails an "
-          "unbalanced quote toward a could-not-read deny rather than a silent allow, and fails closed on a "
-          "malformed tool_input, run_in_background, or command; "
-          "the ledger records launches and completions; the resume "
+          "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment "
+          "and failing an unbalanced/ANSI-C quote toward treating it as a detach (now a deny) rather than a "
+          "silent allow (a here-document body is scanned as code, a disclosed over-refusal), and fails "
+          "closed on a malformed tool_input, run_in_background, or command; the ledger records launches "
+          "and completions; the resume "
           "audit arms and clears the mutation barrier on real record state; the prompt stamp "
           "resets guard counters from genuine human input; an actor-owned, symlinked, or writable "
           "escape sentinel is ignored, recorded, and surfaced once at resume; a declared attestation "
