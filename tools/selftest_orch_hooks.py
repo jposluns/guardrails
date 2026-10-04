@@ -780,7 +780,8 @@ def _main_isolated(report_path=None):
         # a bare `&` detaches a child into untracked async work -> DENY-and-educate (use the tracked
         # background dispatch, or run it foreground and wait; historically this ASKED). The shell forms that
         # also carry an ampersand but do NOT detach (&&, &>, &>>, <&, >&, |&, and any quoted or escaped &)
-        # stay ALLOW; the narrow scanner over-denies (never silently allows) on grammar it cannot model.
+        # stay ALLOW; the narrow scanner over-denies on some grammar it cannot model and silently allows
+        # other forms (the KNOWN FALSE-ALLOW residual disclosed in the manifest).
         check("trunc/fg-detach-trailing-denies", _verdict(bg("long_job &", rib=False)), "deny")
         check("trunc/fg-detach-between-denies", _verdict(bg("worker & echo done", rib=False)), "deny")
         check("trunc/fg-detach-grouped-denies", _verdict(bg("( long_job & )", rib=False)), "deny")
@@ -801,8 +802,8 @@ def _main_isolated(report_path=None):
         check("trunc/scan-quoted-redirect-detach", aiqt_hooks._orch_foreground_detach('echo ">" &'), True)
         check("trunc/scan-escaped-gt-then-detach", aiqt_hooks._orch_foreground_detach("echo \\>&"), True)
         check("trunc/scan-real-dup-not-detach", aiqt_hooks._orch_foreground_detach("cmd 2>&1"), False)
-        # finding E (unbalanced/ambiguous quoting fails toward treating it as a detach - now a DENY, once an
-        # ASK - never a silent allow of a real `&`): a
+        # finding E (a scan that ENDS inside a quote fails toward treating it as a detach - now a DENY, once
+        # an ASK; a quote misread in mid-string can still shift it into a disclosed silent allow): a
         # scan that ends still inside a quote (an unbalanced quote, or an ANSI-C $'...' construct this scan
         # does not model) could hide a real trailing `&`, so it reports a detach. Without the fix each of
         # these ended `inside quotes` and returned False, silently allowing the real `&`.
@@ -872,6 +873,68 @@ def _main_isolated(report_path=None):
         check("trunc/dir-registry-malformed-denies", _verdict(aiqt_hooks.orch_truncation_guard(
             {"hook_event_name": "PreToolUse", "cwd": str(tb.root), "tool_name": "Bash",
              "tool_input": None})), "deny")
+        # Where a `#` opens a comment follows bash as well as the historical str.isspace() rule, and either
+        # rule's detach denies: a `#` after a character bash does not treat as a word break (carriage return,
+        # the 0x1c separator, an ideographic space) is NOT a comment to bash, so the `&` after it detaches;
+        # a `#` after a metacharacter (`;#`) IS a comment to bash, so the apostrophe in it no longer shifts
+        # the scan past the real `&` on the next line. Each was a silent allow before this fix.
+        check("trunc/fg-hash-after-cr-detach-denies", _verdict(bg("touch m y\r#z &", rib=False)), "deny")
+        check("trunc/fg-hash-after-x1c-detach-denies", _verdict(bg("touch m y\x1c#z &", rib=False)), "deny")
+        check("trunc/fg-hash-after-u3000-detach-denies", _verdict(bg("touch m y　#z &", rib=False)),
+              "deny")
+        check("trunc/fg-metachar-comment-quote-shift-denies",
+              _verdict(bg("echo a;# it's\nsleep 5 & echo done # '", rib=False)), "deny")
+        # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
+        # that a bare '&' was found (before this fix it reused the bare-& detach reason).
+        uq = bg("cat > f <<'EOF'\nthe user's file\nEOF", rib=False)
+        uq_reason = (uq[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        check("trunc/fg-unbalanced-quote-reason-names-quote",
+              (_verdict(uq), "quote still open" in uq_reason, "detaches a child" in uq_reason),
+              ("deny", True, False))
+        # The shared fail-closed contract: a missing tool_name, and a cwd that is missing, null, not a
+        # string, or empty, deny (before this fix each reached an allow); a non-Bash tool stays out of scope.
+        nocwd = {"hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Bash",
+                 "tool_input": {"command": "sleep 5 &"}}
+        check("trunc/missing-tool-name-denies", _verdict(aiqt_hooks.orch_truncation_guard(
+            {"hook_event_name": "PreToolUse", "cwd": str(t.root), "session_id": "s1",
+             "tool_input": {"command": "sleep 5 &"}})), "deny")
+        check("trunc/malformed-cwd-missing-denies", _verdict(aiqt_hooks.orch_truncation_guard(nocwd)), "deny")
+        check("trunc/malformed-cwd-null-denies",
+              _verdict(aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=None))), "deny")
+        check("trunc/malformed-cwd-int-denies",
+              _verdict(aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=42))), "deny")
+        check("trunc/malformed-cwd-empty-denies",
+              _verdict(aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=""))), "deny")
+        check("trunc/non-bash-tool-allows", raw({"tool_name": "Write", "tool_input": None}), "allow")
+        # The shared dispatcher fails closed on ANY exception while reading stdin: deeply nested JSON raises
+        # RecursionError and a read can raise MemoryError, which the old narrow except let escape as a
+        # traceback with exit 1 (non-blocking). A PreToolUse hook now exits 2 naming the exception; a Stop
+        # hook keeps its warn-and-exit-0 posture.
+        deep = "[" * 200000 + "]" * 200000
+        hook_py = str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts" / "aiqt_hooks.py")
+        dp = subprocess.run([sys.executable, "-I", "-B", hook_py, "orch_truncation_guard"], input=deep,
+                            capture_output=True, text=True, timeout=120)
+        check("trunc/dispatch-deep-json-fails-closed", (dp.returncode, "RecursionError" in dp.stderr),
+              (2, True))
+        ds = subprocess.run([sys.executable, "-I", "-B", hook_py, "orch_stop_guard"], input=deep,
+                            capture_output=True, text=True, timeout=120)
+        check("trunc/dispatch-deep-json-stop-warns", (ds.returncode, "RecursionError" in ds.stdout),
+              (0, True))
+
+        class _MemErrStdin:
+            def read(self, *_a):
+                raise MemoryError("simulated")
+        saved_in, saved_err = sys.stdin, sys.stderr
+        cap = __import__("io").StringIO()
+        try:
+            sys.stdin, sys.stderr = _MemErrStdin(), cap
+            try:
+                mrc = aiqt_hooks.main(["orch_truncation_guard"])
+            except MemoryError:
+                mrc = "escaped"
+        finally:
+            sys.stdin, sys.stderr = saved_in, saved_err
+        check("trunc/dispatch-memoryerror-fails-closed", (mrc, "MemoryError" in cap.getvalue()), (2, True))
 
         # ---------- component 3b: the untracked wait-loop guard (trkasy, deny) ----------
         w = Fixture(tmp, "waitloop")
@@ -1727,9 +1790,12 @@ def _main_isolated(report_path=None):
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
           "producer's full output and exit status) and a "
           "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment "
-          "and failing an unbalanced/ANSI-C quote toward treating it as a detach (now a deny) rather than a "
-          "silent allow (a here-document body is scanned as code, a disclosed over-refusal), and fails "
-          "closed on a malformed tool_input, run_in_background, or command; the ledger records launches "
+          "and failing a scan that ends inside an open quote toward a deny with its own reason (a quote the "
+          "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
+          "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "
+          "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, and fails "
+          "closed on a missing tool_name, an unreadable cwd, a malformed tool_input, run_in_background, or "
+          "command, and on any stdin the dispatcher cannot parse; the ledger records launches "
           "and completions; the resume "
           "audit arms and clears the mutation barrier on real record state; the prompt stamp "
           "resets guard counters from genuine human input; an actor-owned, symlinked, or writable "
