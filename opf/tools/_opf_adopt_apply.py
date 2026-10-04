@@ -28,7 +28,10 @@ evidence home in opf.py through the _journal containment primitives, then grades
 through this module's _verify_bundle_at (beneath the HELD home descriptor it is passed) and the journal
 through journal_state, with _open_product_root anchoring both reads to one product-root descriptor;
 every mutating entry -- the transaction shell, reconcile(), the dispatch table and compose_rows -- stays
-reachable only from the self-test until those slices land.
+unreachable from any CLI verb until those slices land: its only callers are the self-test and the crash
+children the self-test starts in a fresh interpreter through the `--selftest-child` flag (the
+`_opf_init_operation` crash-child precedent), a self-test harness entry, never an adoption interface, which
+runs whatever spec it is handed without an approval.
 
 Preserve-first (spec 14.2), enforced over the composed op list BEFORE any transaction opens: a live file
 is removed, OR OVERWRITTEN BY A `write` (which destroys the live bytes exactly as a removal does), ONLY
@@ -71,8 +74,14 @@ transaction. Recovery is the EXPLICIT reconcile() entry: it rolls an open transa
 poststate already verifies, else back from its durable preimages (`_journal.recover`), under the journal's
 own lock, breaking a confirmed-dead owner's lock only through `_journal.reconcile_and_claim_stale`; the
 interrupted run stays refused. A transaction is named by its run (base) or run.phase, so one run has at
-most one base transaction and one per phase; a second attempt refuses before it opens, and changing
-approved work takes a fresh plan with its own run id (spec 14.1).
+most one base transaction and COMMITS at most one transaction per phase: a second base attempt, and any
+phase attempt once one has committed, refuses before it opens, and changing approved work takes a fresh
+plan with its own run id (spec 14.1). A phase attempt that ended terminal WITHOUT committing (rolled back,
+by its own pre-commit abort or by reconcile() after an interruption, or never opened) is retained in the
+journal as it stands, and a retry of that phase opens as the next attempt, `<run>.<phase>.attempt-<n>`,
+bound to the same committed base and its preservation exactly as the first attempt was
+(_next_attempt_or_refuse). The base is never retried: nothing binds to a base that has not committed, so a
+base that did not commit takes a fresh plan with its own run id.
 
 Single-writer lease (spec 5.7): this slice carries NO lease join, so a transaction REFUSES, before writing
 anything, when the product root resolves a store (RESOLVED) or when a pointer names a store outside the
@@ -94,16 +103,21 @@ copy is the declared row's unlisted first half; the RETIREMENT_PHASE transaction
 store exactly as every transaction here does (no lease join yet), so once init-store executes, a real
 adoption's retirement stage refuses until the lease join lands; the retirement stage is bound to the plan
 rows it is handed, not to the rows the base ran (the base INTENT records ops, not plan rows), so binding
-both stages to the one approved plan is the stage driver's, through the approval it captures; a
-retirement transaction that ROLLS BACK (a fault before its commit) still uses the run's one
-RETIREMENT_PHASE transaction, so a retry of that stage refuses and the committed base's frozen sources stay
-frozen in place until a fresh plan with its own run id (a retry rule for a rolled-back phase is the stage
-driver's to settle); and occupancy is the plan row's fact, never re-derived from the tree, so a planner
+both stages to the one approved plan is the stage driver's, through the approval it captures; while a
+retirement attempt is rolled back and not yet retried, the committed base's frozen sources stay frozen in
+place, but an OCCUPYING move source, which the base archived and removed, exists only in this run's archive
+(neither at its source nor at its destination) until a retry relocates it (when to retry is the stage
+driver's; the engine admits the retry); a frozen retire source whose MODE alone changed after apply refuses
+its retirement (its preserved copy keeps the apply-time mode and a removal pairs only at that mode, which
+is stricter than spec 14.1's bytes-only drift rule; restoring the mode, or a fresh plan, clears it), while
+a frozen move source relocates with its live mode; and occupancy is the plan row's fact, never re-derived
+from the tree, so a planner
 misclassification of a non-occupying source as occupying archives and removes it at apply (its bytes
 preserved byte-exact) rather than leaving it frozen until the green check. Interruption is exercised in
 process through the journal's kill-point seam AND by real process death: the self-test's kill-injection
 matrix (the migrate.py crash-harness model) runs each stage's transaction in a child interpreter that
-os._exit()s at every kill point the transaction reaches, then reconciles in a fresh process, breaking the
+os._exit()s at every kill point the transaction reaches and mid-write in every payload it creates, then
+reconciles in a fresh process, breaking the
 dead owner's stale lock, and lands the tree on exactly its prestate or its verified poststate; the
 rollback leg kills the recovery itself at every restore point.
 
@@ -168,6 +182,10 @@ def _within(path, home):
 
 def _is_mode(value):
     return type(value) is int and 0 <= value <= 0o7777
+
+
+def _mode_text(value):
+    return "{:04o}".format(value) if _is_mode(value) else repr(value)
 
 
 # --- run identity (the homes grammar, _opf_store; `adopt-<YYYYMMDD>T<HHMMSS>Z-<hash16>`, spec 4.2) ----
@@ -773,10 +791,12 @@ def check_apply_ops(run_id, phase, ops, staged, committed=None, moves=None, comm
                     findings.append("{} {} {!r} whose pinned digest differs from its archive copy's "
                                     "content digest".format(where, verb, path))
                 elif paired[1] != pin["mode"]:
-                    findings.append("{} {} {!r} whose pinned mode {!r} differs from the mode {!r} its "
+                    findings.append("{} {} {!r} whose pinned mode {} differs from the mode {} its "
                                     "preserved copy is created at: a preservation keeps the source's mode "
-                                    "bits exactly (fail-closed)".format(
-                                        where, verb, path, pin["mode"], paired[1]))
+                                    "bits exactly, so a source whose mode changed after its copy was made "
+                                    "is not removed (restore the mode, or take a fresh plan; "
+                                    "fail-closed)".format(
+                                        where, verb, path, _mode_text(pin["mode"]), _mode_text(paired[1])))
     inventories = [i for i, op in enumerate(ops)
                    if isinstance(op, dict) and op.get("op") == "create" and isinstance(op.get("path"), str)
                    and _bundle_root_inventory(run_id, op["path"])]
@@ -1051,19 +1071,66 @@ def _committed_base_or_refuse(root_fd, journal_root, run_id, phase):
             {op["path"]: (op.get("poststate") or {}).get("mode") for op in creates})
 
 
+def _attempt_name(txn, n):
+    return txn if n == 1 else "{}.attempt-{}".format(txn, n)
+
+
+def _next_attempt_or_refuse(root_fd, journal_root, run_id, phase):
+    """The journal name this transaction opens under, decided from the adoption journal READ-ONLY before
+    anything is written. With no prior attempt of this (run, phase) it is the transaction name itself. A
+    base attempt of any state refuses: the base is the run's one binding, and nothing binds to a base that
+    has not committed. For a phase, every prior attempt (`<run>.<phase>`, then `.attempt-<n>`) is
+    classified: a COMMITTED one refuses (one run commits one transaction per phase), an open one cannot
+    reach here (journal_clean_or_refuse refuses it first) and any state but rolled-back or nothing-opened
+    refuses; otherwise the retry takes the next attempt number, every prior attempt's record retained as it
+    stands (spec 14.1: a stage is bound to the run's approved plan and committed base, never to one
+    attempt). An unreadable or corrupt prior attempt refuses (fail-closed)."""
+    txn = _txn_name(run_id, phase)
+    pattern = re.compile(re.escape(txn) + r"(?:\.attempt-([1-9][0-9]*))?\Z")
+    prior = []
+    try:
+        if _journal._lstat_contained(root_fd, JOURNAL_REL) is None:
+            return txn
+        jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+        try:
+            for entry in _journal._journal_txn_dirs(jr_fd, journal_root):
+                match = pattern.match(entry.name)
+                if match:
+                    prior.append((int(match.group(1) or 1), entry.name, _journal.classify_state(jr_fd, entry)))
+        finally:
+            _journal._close_fd_quietly(jr_fd)
+    except (_journal.JournalError, OSError) as exc:
+        raise AdoptApplyError("cannot inspect the adoption journal ({}); fail-closed".format(exc))
+    if not prior:
+        return txn
+    committed = [name for _n, name, state in prior if state == "complete"]
+    if phase is None or committed:
+        raise AdoptApplyError("run {} already has its transaction {!r}: one run takes one base transaction and "
+                              "commits one transaction per phase, and changing approved work takes a fresh plan "
+                              "with its own run id (spec 14.1); nothing written (fail-closed)".format(
+                                  run_id, (committed or [txn])[0]))
+    unsettled = sorted(name for _n, name, state in prior if state not in ("rolled-back", "nothing-opened"))
+    if unsettled:
+        raise AdoptApplyError("prior attempt(s) {} of {!r} are neither rolled back nor unopened; nothing "
+                              "written (fail-closed)".format(", ".join(unsettled), txn))
+    return _attempt_name(txn, max(n for n, _name, _state in prior) + 1)
+
+
 def run_adopt_transaction(product_root, run_id, compose, phase=None):
     """ONE journaled adoption transaction, the run's base transaction or one later phase's, through the
     shared 9.3 engine. Refusals BEFORE anything is written, in order: containment, a non-clean journal
     (reconcile-first: the adoption journal is inspected FIRST, per the module docstring), the store
-    posture (no lease join, spec 5.7), an existing transaction of this run and phase, and for a phase
-    anything but a committed, INTENT-digest-matched base inventory.toml (spec 4.2). Then, under the journal
+    posture (no lease join, spec 5.7), an existing base transaction of this run or a COMMITTED transaction
+    of this run and phase (_next_attempt_or_refuse: a phase attempt that rolled back or never opened is
+    retried as the next attempt, its record retained), and for a phase anything but a committed,
+    INTENT-digest-matched base inventory.toml (spec 4.2). Then, under the journal
     lock so observation and the journal's own capture are contiguous, compose(ops) fills a fresh ApplyOps
     against the live tree, the derived inventory seals it, check_apply_ops re-proves every invariant, and
     every committed archive copy a retirement removal pairs with is re-read live (_committed_pairs_live);
     a refusal there releases the lock with nothing written beyond the journal directories. A failure that
     may have left the transaction open RETAINS the lock so every later run refuses into reconcile().
-    Returns the transaction name."""
-    txn = _txn_name(run_id, phase)
+    Returns the transaction name (the attempt's, for a retried phase)."""
+    _txn_name(run_id, phase)   # validates the run id and phase before anything is opened
     if not callable(compose):
         raise AdoptApplyError("compose must be a callable that fills the transaction's ApplyOps")
     root_fd = _open_product_root(product_root)
@@ -1076,14 +1143,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             raise AdoptApplyError("{} (fail-closed)".format(exc))
         journal_clean_or_refuse(root_fd, journal_root)
         _store_posture_or_refuse(product_root)
-        try:
-            prior = _journal._lstat_contained(root_fd, JOURNAL_REL + "/" + txn)
-        except (_journal.JournalError, OSError) as exc:
-            raise AdoptApplyError("cannot inspect the adoption journal ({}); fail-closed".format(exc))
-        if prior is not None:
-            raise AdoptApplyError("run {} already has its transaction {!r}: one run takes one transaction "
-                                  "per phase, and changing approved work takes a fresh plan with its own run "
-                                  "id (spec 14.1); nothing written (fail-closed)".format(run_id, txn))
+        txn = _next_attempt_or_refuse(root_fd, journal_root, run_id, phase)
         committed, committed_modes = {}, {}
         if phase is not None:
             committed, committed_modes = _committed_base_or_refuse(root_fd, journal_root, run_id, phase)
@@ -1173,9 +1233,10 @@ class OpContext:
     disposition and occupancy are plan facts, spec 14.1, never inferred from the tree), and the planned
     bytes of each create-file path, which the handler digest-checks against the row before staging them. A
     path two source rows claim is ambiguous and binds nothing, and a row whose path is not a string binds
-    nothing either. `claimed` holds every create-file path and move destination the rows have named, so
-    two rows can never land on one path (the live tree alone cannot see a path a row composed earlier in
-    this transaction, or one a later stage creates)."""
+    nothing either. `claimed` holds every create-file path and move destination the rows have named
+    (case-folded, to the path as named), so two rows can never land on one path, on case variants of one
+    path, or on a file and its own ancestor or descendant (the live tree alone cannot see a path a row
+    composed earlier in this transaction, or one a later stage creates)."""
 
     def __init__(self, ops, sources=(), content=None):
         self.ops = ops
@@ -1185,15 +1246,21 @@ class OpContext:
             if isinstance(path, str):
                 self.sources[path] = None if path in self.sources else row
         self.content = dict(content or {})
-        self.claimed = set()
+        self.claimed = {}
 
     def claim(self, path):
-        """Claim one created path for this transaction's rows; a second claim refuses."""
-        if path in self.claimed:
-            raise AdoptApplyError("{!r} is named by two plan rows (a create-file path or move destination); "
-                                  "a collision routes to a disposition, never an overwrite "
-                                  "(fail-closed)".format(path))
-        self.claimed.add(path)
+        """Claim one created path for this transaction's rows. A path equal to one already claimed, a case
+        variant of it (one name on a case-insensitive filesystem), or its ancestor or descendant (one row
+        needs as a file a name the other needs as a directory) refuses before the base commits work that
+        no retirement stage could finish."""
+        folded = path.casefold()
+        for prior_folded, prior in self.claimed.items():
+            if _within(folded, prior_folded) or _within(prior_folded, folded):
+                raise AdoptApplyError("{!r} and {!r} are named by two plan rows (create-file paths or move "
+                                      "destinations) as one path, case variants, or a file and its own "
+                                      "ancestor or descendant; a collision routes to a disposition, never an "
+                                      "overwrite (fail-closed)".format(prior, path))
+        self.claimed[folded] = path
 
 
 def _stage(ops):
@@ -1399,7 +1466,7 @@ def self_test():
     or of apply input also matches one reason keyword so the refusal is attributed to the rule under test
     (validator and dispatch gradings are asserted on their returned status, with a named finding matched
     where that finding is itself the contract). No git and no network; the only subprocesses are this
-    module's own --kill-injection-child interpreters (the crash matrix, section 12), and every write lands
+    module's own --selftest-child interpreters (the crash matrix, section 12), and every write lands
     under its own TemporaryDirectory."""
     try:
         _journal.require_containment()
@@ -1807,18 +1874,24 @@ def _self_test_checks():
         return root, files
 
     def snapshot(root):
-        return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*"))
-                if p.is_file() and not p.is_symlink() and not str(p.relative_to(root)).startswith(".aiqt/")}
+        # the regular files outside `.aiqt/`, read through the same fail-closed walk as tree_state
+        return {rel: data for rel, (kind, _mode, data) in tree_state(root).items()
+                if kind == "file" and not rel.startswith(".aiqt/")}
 
     # The whole-tree state the file-op checks (section 11 on) compare: EVERY entry beneath the root, `.aiqt/`
     # included, as (kind, mode, bytes or link target), never followed; directories, symlinks and special
     # entries count, as do modes. journal=False leaves out exactly the adoption journal root's subtree and
     # its ancestor directories (the journal's own bookkeeping), for comparisons across a transaction.
+    # A directory the walk cannot list (the root or any subtree) RAISES (os.walk alone skips it silently), so
+    # an unreadable subtree fails the comparison instead of dropping out of both states (section 11k).
     journal_dirs = tuple("/".join(JOURNAL_REL.split("/")[:i]) for i in range(1, JOURNAL_REL.count("/") + 2))
+
+    def walk_error(exc):
+        raise exc
 
     def tree_state(root, journal=True):
         out = {}
-        for dirpath, dirnames, filenames in os.walk(root):
+        for dirpath, dirnames, filenames in os.walk(root, onerror=walk_error):
             base = os.path.relpath(dirpath, root)
             for name in dirnames + filenames:
                 rel = name if base == "." else base + "/" + name
@@ -3209,6 +3282,17 @@ def _self_test_checks():
             check("preimage-flip-{}-retirement-refused-untouched-save-journal-dirs".format(source),
                   why is not None and "drifted" in why and untouched_save_journal_dirs(before, root))
             (root / source).write_bytes(fx_files[source])
+        # a frozen retire source whose MODE alone changed since apply (bytes intact) refuses its retirement:
+        # its preserved copy keeps the apply-time mode, and the refusal names both modes in octal.
+        rules = root / "legacy/RULES.md"
+        rules_mode = stat.S_IMODE(rules.lstat().st_mode)
+        rules.chmod(0o755)
+        before = tree_state(root)
+        _txn, why = retirement_stage(root)
+        check("retirement-mode-only-change-refused-octal-untouched-save-journal-dirs",
+              why is not None and "pinned mode 0755 differs from the mode {:04o}".format(rules_mode) in why
+              and untouched_save_journal_dirs(before, root))
+        rules.chmod(rules_mode)
         # the committed preservation re-verifies at retirement: a tampered archive copy refuses the whole
         # stage before anything is removed or relocated.
         copy_path = root / archive_rel(rid, "legacy/RULES.md")
@@ -3263,6 +3347,17 @@ def _self_test_checks():
     pair_sources = [dict(r, preservation=pair_dest) for r in fx_sources if r["path"] == "legacy/MOVE.md"] + [
         dict(path="legacy/RULES.md", disposition="move", occupying=False, preservation=pair_dest,
              digest=plan_digest(fx_files["legacy/RULES.md"]))]
+
+    def two_moves(dest_move, dest_rules, reverse=False):
+        """Two frozen move sources, legacy/MOVE.md to dest_move and legacy/RULES.md to dest_rules."""
+        rows = [move_row(dest_move), dict(op="move-file", source="legacy/RULES.md", destination=dest_rules,
+                                          source_digest=plan_digest(fx_files["legacy/RULES.md"]))]
+        sources = [dict(r, preservation=dest_move) for r in fx_sources if r["path"] == "legacy/MOVE.md"] + [
+            dict(path="legacy/RULES.md", disposition="move", occupying=False, preservation=dest_rules,
+                 digest=plan_digest(fx_files["legacy/RULES.md"]))]
+        return dict(rows=rows[::-1] if reverse else rows, sources=sources)
+
+    beneath_new = fx_new + "/y.md"
     in_root, in_root_bytes = store.moved_dest("old/x.md"), b"moved earlier\n"
     in_root_row = dict(op="retire-file", path=in_root, preimage_digest=plan_digest(in_root_bytes))
     in_root_sources = [dict(path=in_root, disposition="retire", occupying=False,
@@ -3295,6 +3390,15 @@ def _self_test_checks():
             ("move-onto-create-file-path", dict(rows=[fx_create, move_row(fx_new)], sources=moved_to(fx_new)),
              "two plan rows"),
             ("two-moves-one-destination", dict(rows=pair_rows, sources=pair_sources), "two plan rows"),
+            # a file and its own descendant, in both row orders, and two case variants of one destination
+            ("create-file-then-move-beneath-it", dict(rows=[fx_create, move_row(beneath_new)],
+                                                      sources=moved_to(beneath_new)), "two plan rows"),
+            ("move-beneath-then-create-file", dict(rows=[move_row(beneath_new), fx_create],
+                                                   sources=moved_to(beneath_new)), "two plan rows"),
+            ("two-moves-file-then-descendant", two_moves(pair_dest, pair_dest + "/child.md"), "two plan rows"),
+            ("two-moves-descendant-then-file", two_moves(pair_dest, pair_dest + "/child.md", reverse=True),
+             "two plan rows"),
+            ("two-moves-case-variants", two_moves(pair_dest, pair_dest.lower()), "two plan rows"),
             ("move-store-tree-case-variant", dict(rows=[move_row(".Working/stuff.md")],
                                                   sources=moved_to(".Working/stuff.md")),
              "inside the store tree"),
@@ -3319,16 +3423,20 @@ def _self_test_checks():
                   and lock_free(root))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = file_fixture(temp)
-        before = snapshot(root)
         wrong = refusal(run_adopt_transaction, root, rid, lambda ops: None)
+        before = tree_state(root)
         late = refusal(run_adopt_transaction, root, rid, compose_rows(fx_disposed[:1], fx_sources),
                        phase="completion")
-        check("file-op-other-phase-refused", wrong is None and late is not None and "runs no file op" in late)
+        check("file-op-other-phase-refused-untouched-save-journal-dirs",
+              wrong is None and late is not None and "runs no file op" in late
+              and untouched_save_journal_dirs(before, root) and lock_free(root))
+        before = tree_state(root)
         unlanded = refusal(run_adopt_transaction, root, other_run,
                            compose_rows([schema.canonical_op("init-store")]))
-        check("compose-rows-unlanded-op-refuses-whole-transaction",
+        check("compose-rows-unlanded-op-refuses-whole-transaction-untouched-save-journal-dirs",
               unlanded is not None and "not yet executable" in unlanded
-              and not (root / JOURNAL_REL / other_run).exists())
+              and not (root / JOURNAL_REL / other_run).exists()
+              and untouched_save_journal_dirs(before, root) and lock_free(root))
 
     # 11e: the retirement-stage pairing rule over hand-built lists (check_apply_ops is pure). A frozen
     # source's removal pairs with its committed base archive copy, or with its move destination's create
@@ -3377,9 +3485,34 @@ def _self_test_checks():
         with mock.patch.object(_journal, "_verify_staged_digest", failing_retirement_inventory):
             aborted = refusal(run_adopt_transaction, root, rid, compose_rows(fx_disposed, fx_sources),
                               phase=RETIREMENT_PHASE)
+        rtxn = rid + "." + RETIREMENT_PHASE
         check("retirement-abort-reverses-byte-exact",
               aborted is not None and "rolled back" in aborted and snapshot(root) == before
-              and txn_state(root, rid + "." + RETIREMENT_PHASE) == "rolled-back" and lock_free(root))
+              and txn_state(root, rtxn) == "rolled-back" and lock_free(root))
+        # until it is retried, the occupying move source exists only in this run's archive (disclosed)
+        check("retirement-rolled-back-occupying-move-source-only-archived",
+              "docs/VIEW.md" not in before and fx_view_dest not in before
+              and before.get(archive_rel(rid, "docs/VIEW.md")) == fx_files["docs/VIEW.md"])
+        # the rolled-back attempt does not block the stage for good: with the fault removed, a retry opens as
+        # the next attempt (the rolled-back record retained as it stands), binds the same committed base and
+        # finishes every row, the occupying move relocated from the committed archive copy included.
+        retry, why = retirement_stage(root)
+        done = snapshot(root)
+        check("retirement-retry-after-rollback-commits-as-next-attempt",
+              retry == rtxn + ".attempt-2" and why is None and txn_state(root, rtxn + ".attempt-2") == "complete"
+              and txn_state(root, rtxn) == "rolled-back" and lock_free(root))
+        check("retirement-retry-after-rollback-finishes-every-row",
+              "legacy/RULES.md" not in done and "legacy/MOVE.md" not in done
+              and done.get(fx_moved) == fx_files["legacy/MOVE.md"]
+              and done.get(fx_view_dest) == fx_files["docs/VIEW.md"]
+              and done.get(archive_rel(rid, "docs/VIEW.md")) == fx_files["docs/VIEW.md"]
+              and verify_bundle(root, rid).status == VALID)
+        settled = tree_state(root)
+        again = refusal(run_adopt_transaction, root, rid, compose_rows(fx_disposed, fx_sources),
+                        phase=RETIREMENT_PHASE)
+        check("retirement-after-committed-retry-refused-untouched-save-journal-dirs",
+              again is not None and "fresh plan" in again and untouched_save_journal_dirs(settled, root)
+              and lock_free(root))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = file_fixture(temp)
         apply_stage(root)
@@ -3397,6 +3530,46 @@ def _self_test_checks():
         check("retirement-interrupt-reconciles-back-byte-exact",
               (rtxn, "rolled-back") in reconcile_without_store(root) and snapshot(root) == before
               and lock_free(root))
+        # recovery clears the stage too: after reconcile rolled the interrupted attempt back, a retry commits.
+        retry, why = retirement_stage(root)
+        done = snapshot(root)
+        check("retirement-retry-after-reconciled-interrupt-commits",
+              retry == rtxn + ".attempt-2" and why is None and txn_state(root, retry) == "complete"
+              and "legacy/RULES.md" not in done and done.get(fx_view_dest) == fx_files["docs/VIEW.md"])
+    # a phase attempt that never opened (a failure before its INTENT) is retained and retried as well, the
+    # attempt number following the highest retained one; the base is never retried, whatever its state.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = file_fixture(temp)
+
+        def capture_fails(*_args, **_kwargs):
+            raise _journal.JournalError("injected failure before INTENT")
+
+        with mock.patch.object(_journal, "capture_preimages", capture_fails):
+            unopened_base = refusal(run_adopt_transaction, root, rid, compose_rows(
+                [fx_create] + fx_disposed, fx_sources, {fx_new: fx_new_bytes}))
+        before = tree_state(root)
+        base_retry = refusal(run_adopt_transaction, root, rid, compose_rows(
+            [fx_create] + fx_disposed, fx_sources, {fx_new: fx_new_bytes}))
+        check("unopened-base-never-retried",
+              unopened_base is not None and "before it opened" in unopened_base
+              and txn_state(root, rid) == "nothing-opened" and base_retry is not None
+              and "fresh plan" in base_retry and untouched_save_journal_dirs(before, root) and lock_free(root))
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = file_fixture(temp)
+        apply_stage(root)
+        before = snapshot(root)
+        rtxn = rid + "." + RETIREMENT_PHASE
+        with mock.patch.object(_journal, "capture_preimages", capture_fails):
+            unopened = [refusal(run_adopt_transaction, root, rid, compose_rows(fx_disposed, fx_sources),
+                                phase=RETIREMENT_PHASE) for _ in range(2)]
+        check("retirement-unopened-attempts-retained-tree-untouched",
+              all(u is not None and "before it opened" in u for u in unopened) and snapshot(root) == before
+              and txn_state(root, rtxn) == txn_state(root, rtxn + ".attempt-2") == "nothing-opened"
+              and lock_free(root))
+        retry, why = retirement_stage(root)
+        check("retirement-retry-after-unopened-attempts-commits",
+              retry == rtxn + ".attempt-3" and why is None and txn_state(root, retry) == "complete"
+              and "legacy/RULES.md" not in snapshot(root))
 
     # 11g: a HAND-BUILT retirement removal (a compose callback appending a pinned removal, never through
     # ApplyOps.retire) is held to the live preservation check too: the committed archive copy it pairs with
@@ -3482,16 +3655,42 @@ def _self_test_checks():
         check("op-context-non-string-source-path-binds-nothing",
               raw is None and why is not None and "plan source row" in why and lock_free(root))
 
+    # 11k: the whole-tree comparison fails CLOSED. A directory the walk cannot list, the root itself or a
+    # child, raises out of tree_state and out of the refusal predicate built on it, never drops out of both
+    # states as an empty or partial snapshot (os.walk alone skips it).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = file_fixture(temp)
+        real_scandir = os.scandir
+        intact = tree_state(root)
+        for label, victim in (("root", root), ("child", root / "legacy")):
+            def unlistable(path=".", _victim=os.fspath(victim)):
+                if os.fspath(path) == _victim:
+                    raise PermissionError("injected: directory {} cannot be listed".format(_victim))
+                return real_scandir(path)
+
+            for name, probe in (("tree-state", lambda: tree_state(root)),
+                                ("refusal-predicate", lambda: untouched_save_journal_dirs(intact, root))):
+                with mock.patch.object(os, "scandir", unlistable):
+                    try:
+                        probe()
+                        raised = False
+                    except PermissionError:
+                        raised = True
+                check("{}-unlistable-{}-fails-closed".format(name, label), raised)
+        check("tree-state-control-leg-lists-every-entry",
+              "legacy" in intact and "legacy/RULES.md" in intact and tree_state(root) == intact)
+
     # 12: the kill-injection matrix (the journal's crash harness, the migrate.py model): each stage's
     # transaction runs in a CHILD interpreter that os._exit()s (137) at one kill point, leaving only what
     # was already fsync'd; a FRESH child then reconciles, breaking the dead owner's stale lock, and an
     # in-process reconcile after it is a no-op (idempotent). The tree outside the journal must then be
     # EXACTLY its prestate (the transaction not complete) or the verified poststate a clean child commits
     # (the transaction complete, the bundle verifying), with no lock and no open transaction. The kill
-    # points are every one the stage's transaction reaches, RECORDED from an in-process run, plus the two
-    # torn frame publications. The apply stage covers preservation (archive copies) and preserve-first
-    # removal; the retirement stage covers frozen-source removal and destination publication (live and
-    # from the committed archive). The rollback leg kills the transaction one op short of its end, then
+    # points are every one the stage's transaction reaches, RECORDED from an in-process run, plus a torn
+    # payload (a strict prefix written and fsync'd, then death) in every create the transaction's INTENT
+    # lists, plus the two torn frame publications. The apply stage covers preservation (archive copies) and
+    # preserve-first removal; the retirement stage covers frozen-source removal and destination publication
+    # (live and from the committed archive). The rollback leg kills the transaction one op short of its end, then
     # kills the recovery itself at every restore point and torn rollback frame; a final fresh recovery
     # lands the exact prestate.
     import subprocess
@@ -3503,7 +3702,7 @@ def _self_test_checks():
         env.pop(_journal.KILL_ENV, None)
         if kill is not None:
             env[_journal.KILL_ENV] = kill
-        return subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__), "--kill-injection-child",
+        return subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__), "--selftest-child",
                                str(spec_file)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                               timeout=300).returncode
 
@@ -3530,19 +3729,27 @@ def _self_test_checks():
         txn_of = _txn_name(rid, phase)
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
             root = staged_fixture(temp, phase)
-            points = []
-            with mock.patch.object(_journal, "_kill_point", points.append):
+            points, kinds = [], []
+            real_run = _journal.run_transaction
+
+            def recording_run(*args):
+                kinds.extend(op["op"] for op in args[5])   # the op list the journal applies, in order
+                return real_run(*args)
+
+            with mock.patch.object(_journal, "_kill_point", points.append), \
+                    mock.patch.object(_journal, "run_transaction", recording_run):
                 (apply_stage if phase is None else retirement_stage)(root)
+            tears = ["torn-payload:{}".format(i) for i, kind in enumerate(kinds) if kind == "create"]
         n = len([p for p in points if p.startswith("after-apply-")])
         check("kill-matrix-{}-points-recorded".format(stage),
-              "after-lock" in points and "after-publish-COMPLETE" in points and n >= 4)
+              "after-lock" in points and "after-publish-COMPLETE" in points and n >= 4 and len(tears) >= 3)
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
             root = staged_fixture(temp, phase)
             pre = tree_state(root, journal=False)
             clean = crash_child(temp, stage_spec(root, phase))
             post = tree_state(root, journal=False)
         check("kill-matrix-{}-clean-child-commits".format(stage), clean == 0 and post != pre)
-        for point in points + ["torn:INTENT", "torn:COMPLETE"]:
+        for point in points + tears + ["torn:INTENT", "torn:COMPLETE"]:
             with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
                 root = staged_fixture(temp, phase)
                 pre = tree_state(root, journal=False)
@@ -3579,10 +3786,11 @@ def _self_test_checks():
 
 
 def _kill_injection_child(spec_path):
-    """The self-test's kill-injection child, `--kill-injection-child SPEC` (the migrate.py crash-harness
-    model): in THIS fresh interpreter, run ONE adoption transaction of the plan rows SPEC names, or
-    reconcile(), against SPEC's fixture root. The parent sets _journal.KILL_ENV, so the journal os._exit()s
-    (137) at that named point exactly as a power loss would; otherwise 0 done, 2 refused."""
+    """The self-test's kill-injection child, `--selftest-child SPEC` (the migrate.py crash-harness model,
+    entered as `_opf_init_operation --selftest-child` is): in THIS fresh interpreter, run ONE adoption
+    transaction of the plan rows SPEC names, or reconcile(), against SPEC's fixture root. The parent sets
+    _journal.KILL_ENV, so the journal os._exit()s (137) at that named point exactly as a power loss would;
+    otherwise 0 done, 2 refused."""
     try:
         spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
         if spec["action"] == "reconcile":
@@ -3599,7 +3807,9 @@ def _kill_injection_child(spec_path):
 
 def main():
     args = sys.argv[1:]
-    if len(args) == 2 and args[0] == "--kill-injection-child":
+    # the crash matrix's child entry, the house crash-child pattern (`_opf_init_operation --selftest-child`):
+    # a self-test harness entry the self-test alone starts, never an adoption interface.
+    if len(args) == 2 and args[0] == "--selftest-child":
         return _kill_injection_child(args[1])
     if "--self-test" in args or "--selftest" in args:
         return self_test()
