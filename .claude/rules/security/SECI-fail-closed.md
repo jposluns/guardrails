@@ -15,9 +15,9 @@ An exception or error in an authentication, authorization, validation, or crypto
 system in the deny or otherwise safe state. A failed, unavailable, or unreadable check is treated as not
 passed, never as a default-allow.
 
-Code that such a check loads in process can exit with any status, fault outside any handler (error
-formatting, cleanup, background work, or shutdown), or replace the check's reporting machinery, the only
-channel that review and pinning with the check exempt from the in-process duty below. In a child process,
-no early exit or late fault yields a passing verdict (a complete structured result and a clean finish: no
-fault reported on the child's error stream); in process, each channel is covered, unreachable, or disclosed
+Code that such a check loads can exit with any status, fault outside any handler (error formatting,
+cleanup, background work, or shutdown), or replace the check's reporting machinery; review and pinning with
+the check exempt only the replacement channel from the in-process duty. Run in a child process, such code
+yields a passing verdict only with a complete structured result, a zero exit, and no fault reported on an
+error stream it cannot redirect or silence. In process, each channel is covered, unreachable, or disclosed
 under the gate-discipline rule, a fault-to-pass channel never merely disclosed.
