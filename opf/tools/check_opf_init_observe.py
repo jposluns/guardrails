@@ -7,10 +7,18 @@ created. Filesystem/operation fixture families remain separate PR4 obligations.
 The harness accepts source text without a reconciled repository review target;
 reversal reports identify the measured candidate content digest only.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_opf_init_observe.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import argparse
 import hashlib
 import pathlib
-import sys
 import types
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))

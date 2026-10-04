@@ -21,10 +21,18 @@ Usage:
         standardized on CPython 3.14 and the gate uses the single-interpreter form above; a cross-version
         matrix was declined by the maintainer (2026-09-10).
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: selftest_commonmark_conformance.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import os
 import subprocess
-import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _commonmark_headings as ch        # noqa: E402  reuse the pinned, containment-checked marko loader
