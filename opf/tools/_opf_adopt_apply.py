@@ -918,14 +918,14 @@ def _store_posture_or_refuse(product_root):
                                   "evidence and archives belong at that store root, which this slice "
                                   "does not support (fail-closed)".format(res.pointer_source))
         raise AdoptApplyError("the product root resolves a store ({}); this apply shell carries no "
-                              "single-writer lease join yet (spec 5.7), so it refuses before writing "
+                              "single-writer lease join yet (spec 5.7), so it refuses "
                               "(fail-closed)".format(res.machine_rel))
     if res.status == store.NOT_ADOPTED:
         return
     if res.pointer_source == "default" and _default_store_present_without_manifest(product_root):
         return
     raise AdoptApplyError("the store posture cannot be evaluated ({}); an ambiguous, malformed or "
-                          "unreadable store input refuses before anything is written (spec 14.2, "
+                          "unreadable store input refuses (spec 14.2, "
                           "fail-closed)".format(res.detail))
 
 
@@ -1111,43 +1111,89 @@ def _journal_listing(root_fd):
     return found
 
 
-def _entry_named(rel, seen, created, txn):
-    """One entry present now that the run's first listing did not hold, named with what is true of it."""
-    if seen[0] == "unlisted":
-        return "{} could not be listed ({})".format(rel, seen[1])
+def _entry_named(rel, seen, created, txn, mine, maybe_mine):
+    """One entry present now that the run's first listing did not hold, named with what is true of it:
+    (text, True when it is this run's or may be). The lock is this run's ONLY when it is the inode this
+    run's acquire wrote (`mine`); with no such identity it may be this run's only while `maybe_mine` (an
+    acquire of this run may have created it), else it is another run's."""
     named = "{} ({})".format(rel, seen[0])
     journal = JOURNAL_REL + "/"
     if rel in created:
-        return named + ", a journal directory this run created"
+        return named + ", a journal directory this run created", True
     if rel == journal + txn or rel.startswith(journal + txn + "/"):
-        return named + ", in this run's transaction record {!r}, which the journal keeps".format(txn)
+        return named + ", in this run's transaction record {!r}, which the journal keeps".format(txn), True
     if rel == journal + "lock":
-        return named + ", a journal lock"
+        if mine is not None and seen[1:] == mine[:2]:
+            return named + ", this run's journal lock", True
+        if mine is not None or not maybe_mine:
+            return named + ", another run's journal lock, not this run's", False
+        return named + ", a journal lock", True
     if (rel.startswith(journal) and "/" not in rel[len(journal):] and seen[0] != "directory"
             and rel != journal + "lock.break"):
         return named + (", a stray entry: the next run refuses on it as unreadable and reconcile() does not "
-                        "touch it, so no sanctioned path clears it and it stays")
-    return named
+                        "touch it, so no sanctioned path clears it and it stays"), False
+    return named, False
 
 
-def _observed(before, after, created, txn):
-    """What the run's closing listing shows against its first one: [] when the two are equal, else each
-    entry present now that was not (or not as the same type and inode), then each entry gone."""
-    said = [_entry_named(rel, after[rel], created, txn)
-            for rel in sorted(rel for rel in after if after[rel] != before.get(rel))]
-    gone = sorted(rel for rel in before if rel not in after)
-    if said:
-        said[0] = "the adoption journal now holds entries it did not hold when this run began: " + said[0]
+def _observed(before, after, created, txn, mine=None, maybe_mine=False):
+    """What the run's closing listing shows against its first one: ([], False) when the two are equal and
+    each saw everything, else (clauses, ours). A directory EITHER listing could not open or list makes the
+    journal not fully observed, which is named first and always stands in place of the claim, even when
+    both listings failed alike. Then each entry present now that was not (or not as the same type and
+    inode), under a lead-in that attributes them to this run only when one of them is (or may be) its
+    own, then each entry gone. `ours` is True when any clause concerns what this run wrote or cannot
+    rule out."""
+    blind = {}
+    for listing in (before, after):
+        for rel, seen in listing.items():
+            if seen[0] == "unlisted":
+                blind.setdefault(rel, seen[1])
+    said = []
+    if blind:
+        said.append("the adoption journal could not be fully observed, so what this run left there is not "
+                    "known: {}".format("; ".join("{} could not be listed ({})".format(rel, why)
+                                                 for rel, why in sorted(blind.items()))))
+    named = [_entry_named(rel, after[rel], created, txn, mine, maybe_mine)
+             for rel in sorted(rel for rel in after if rel not in blind and after[rel] != before.get(rel))]
+    ours = bool(blind) or any(own for _text, own in named)
+    if named:
+        said.append(("the adoption journal now holds entries it did not hold when this run began: " if ours
+                     else "the adoption journal now holds entries it did not hold when this run began, not "
+                     "attributed to this run: ") + ", ".join(text for text, _own in named))
+    gone = sorted(rel for rel in before if rel not in after and rel not in blind)
     if gone:
         said.append("entries present when this run began are gone: {}".format(", ".join(gone)))
-    return said
+    return said, ours
 
 
-def _refusal_text(head, observed=None):
+def _journal_unbound(jr_fd, held, after):
+    """None when the closing listing observed the journal directory this run wrote to: the journal path
+    still resolves to the identity (st_dev, st_ino) of the descriptor the run held, or it is absent and
+    that held directory is unlinked (this run's cleanup removed it, empty). Else the clause saying the
+    binding changed, in place of the claim: what the directory this run wrote to now holds is unobserved.
+    Called while the descriptor is still held, so its inode cannot be reused by a later directory."""
+    if jr_fd is None or held is None:
+        return None
+    now = after.get(JOURNAL_REL)
+    if now is not None and now[0] == "directory" and now[1:] == held:
+        return None
+    if now is None:
+        try:
+            if os.fstat(jr_fd).st_nlink == 0:
+                return None
+        except OSError:
+            pass
+    return ("the adoption journal path {} no longer resolves to the journal directory this run wrote to "
+            "(st_dev {}, st_ino {}), so what that directory holds was not observed".format(
+                JOURNAL_REL, held[0], held[1]))
+
+
+def _refusal_text(head, observed=None, ours=True):
     """THE composer of every refusal of run_adopt_transaction: the reason, stripped of any trailing claim a
     shared helper wrote, then "nothing written" ONLY when `observed` is [] (the run's two journal listings
-    are equal, its cleanup durable, and its lock released durably or never taken), else the observed
-    leftovers in place of it. No observation (None) makes no claim at all."""
+    are equal and complete, bound to the journal directory it wrote to, its cleanup durable, and its lock
+    released durably or never taken), else the observed leftovers in place of it, said to be this run's
+    only when `ours` (something observed is, or may be, its own). No observation (None) makes no claim."""
     for tail in _CLAIM_TAILS:
         if head.endswith(tail):
             head = head[:-len(tail)]
@@ -1156,6 +1202,8 @@ def _refusal_text(head, observed=None):
         return head + " (fail-closed)"
     if not observed:
         return head + "; " + _NOTHING_WRITTEN
+    if not ours:
+        return "{}; {} (fail-closed)".format(head, "; ".join(observed))
     return "{}; NOT everything this run wrote is confirmed undone: {} (fail-closed)".format(
         head, "; ".join(observed))
 
@@ -1193,7 +1241,13 @@ def _release_outcome(jr_fd, journal_root, mine):
     read; ("unconfirmed", why) when no lock of this run's is present but the release raised or was
     interrupted, so it may not be durable; else ("released", None). The third element is an interrupt (any
     other BaseException) raised inside the release: the read-back still runs, and the caller re-raises
-    it with the outcome attached."""
+    it with the outcome attached. ("altered", why) when the inode this run's acquire wrote is present with
+    other or malformed content: this run's lock was altered and stays, never presumed released.
+    Residual (disclosed): the identity is the inode and the bytes acquire_lock writes, which carry no value
+    unique to one acquire (uid, pid, pid-start, session, utc to the second); another acquire in this same
+    process, with this session, in the same second, that is given back the freed inode reads as this run's
+    lock (only ever over-reported as staying). A per-acquire token would change the journal lock format
+    other readers validate, so none is added here."""
     failed = interrupt = None
     try:
         _journal.release_lock(journal_root)
@@ -1208,6 +1262,9 @@ def _release_outcome(jr_fd, journal_root, mine):
         return "unreadable", exc, interrupt
     if now is not None and mine is not None and now == mine:
         return "stays", failed or "its release left it", interrupt
+    if now is not None and mine is not None and now[:2] == mine[:2]:
+        return "altered", "the inode its acquire wrote now holds other content{}".format(
+            "; {}".format(failed) if failed is not None else ""), interrupt
     if now is not None and mine is None:
         return "unidentified", None, interrupt
     if failed is not None:
@@ -1231,8 +1288,31 @@ def _release_note(jr_fd, journal_root, mine):
     if state == "unconfirmed":
         return state, ("this run's journal lock was released, but the release may not be durable "
                        "({})".format(detail)), interrupt
+    if state == "altered":
+        return state, _altered_lock(detail), interrupt
     return state, ("this run's journal lock STAYS ({}): the next run refuses on it, and reconcile() breaks "
                    "it once this process has exited".format(detail)), interrupt
+
+
+def _altered_lock(detail):
+    """The clause for this run's lock altered in place: an unresolved outcome, never a release."""
+    return ("this run's journal lock was altered and stays ({}/lock: {}); it is not released, and the next "
+            "run refuses on it".format(JOURNAL_REL, detail))
+
+
+def _interrupted_lock_state(jr_fd):
+    """What an interrupt inside acquire_lock left, OBSERVED beneath the held journal descriptor, never
+    presumed: (state, clause). No lock present is "untaken"; a present lock this run cannot tell from
+    another's (the interrupt may have come before or after its create) is named and stays."""
+    try:
+        now = _lock_identity(jr_fd)
+    except (_journal.JournalError, OSError) as exc:
+        return "unreadable", _unreadable_lock(exc, at_acquire=True)
+    if now is None:
+        return "untaken", None
+    return "unidentified", ("a journal lock {}/lock is present after this run's lock acquire was interrupted, "
+                            "and this run cannot tell whether it is its own: it stays, and the next run "
+                            "refuses on it".format(JOURNAL_REL))
 
 
 def _failed_lock_state(jr_fd, journal_root, error):
@@ -1264,6 +1344,8 @@ def _failed_lock_state(jr_fd, journal_root, error):
     if state == "unconfirmed":
         return state, ("this run's own journal lock WAS created, then released again, but the release may "
                        "not be durable ({})".format(detail)), interrupt
+    if state == "altered":
+        return state, _altered_lock(detail), interrupt
     return state, ("this run's own journal lock WAS created and STAYS ({}): the next run refuses on it, and "
                    "reconcile() breaks it once this process has exited".format(detail)), interrupt
 
@@ -1288,8 +1370,11 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     (_remove_journal_dirs). EVERY refusal here is worded by ONE composer (_refusal_text), and the claim
     "nothing written" is DERIVED, never hand-written: the run takes a no-follow listing of the adoption
     journal tree (_journal_listing) before it creates anything and again at the refusal, after its cleanup,
-    and the claim stands ONLY when the two are equal, the cleanup durable, and the lock released durably
-    (or never taken); otherwise the refusal names every entry present now that was not before (a
+    and the claim stands ONLY when the two are equal and each saw the whole tree, the journal path still
+    resolves to the directory this run held (_journal_unbound, checked before that descriptor is closed),
+    the cleanup durable, and the lock released durably (or never taken); otherwise the refusal names what
+    could not be observed and every entry present now that was not before, attributed to this run only
+    when one is (or may be) its own (a
     pre-INTENT transaction directory, its frames.log and preimages included), what its cleanup left or may
     not have made durable, and what its lock release left, in place of the claim. A leftover only the
     reconcile-first discipline clears is left to it rather than to hand removal, and one no sanctioned
@@ -1315,7 +1400,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         raise AdoptApplyError(_refusal_text("compose must be a callable that fills the transaction's ApplyOps"))
     root_fd = _open_product_root(product_root)
     journal_root = _journal_root(product_root)
-    jr_fd = mine = before = interrupted = None
+    jr_fd = jr_id = mine = before = interrupted = None
+    maybe_mine = False
     created = []
     failure = None
     lock_state, lock_note = "untaken", None
@@ -1342,14 +1428,19 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         try:
             _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
             jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+            jr_st = os.fstat(jr_fd)
+            jr_id = (jr_st.st_dev, jr_st.st_ino)    # the journal directory this run writes to
         except (_journal.JournalError, OSError) as exc:
             raise AdoptApplyError("cannot prepare the adoption journal {} ({})".format(JOURNAL_REL, exc))
         try:
+            maybe_mine = True
             try:
                 _journal.acquire_lock(journal_root, SESSION_ID)
             except _journal.JournalError as exc:   # the O_EXCL create refused: the lock was never this run's
+                maybe_mine = False
                 raise AdoptApplyError("cannot take the adoption journal lock ({})".format(exc))
             except OSError as exc:
+                maybe_mine = getattr(exc, "lock_created", False)
                 lock_state, clause, interrupted = _failed_lock_state(jr_fd, journal_root, exc)
                 if interrupted is not None or lock_state not in ("untaken", "released"):
                     lock_note = clause      # named once, by the composer, in place of the claim
@@ -1357,10 +1448,14 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                         raise interrupted
                     raise AdoptApplyError("cannot take the adoption journal lock ({})".format(exc))
                 raise AdoptApplyError("cannot take the adoption journal lock ({}); {}".format(exc, clause))
+            except BaseException:   # an interrupt inside acquire: the lock state is observed, never presumed
+                lock_state, lock_note = _interrupted_lock_state(jr_fd)
+                raise
             held = True
             lock_state = "held"
             try:
                 mine = _lock_identity(jr_fd)    # what THIS acquire wrote, so the release reads back by identity
+                maybe_mine = mine is None
             except (_journal.JournalError, OSError) as exc:
                 raise AdoptApplyError("cannot read back the adoption journal lock this run took ({})".format(exc))
             ops = _compose_checked(root_fd, run_id, phase, compose)
@@ -1409,13 +1504,12 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         failure = exc
         raise
     finally:
-        if jr_fd is not None:
-            _journal._close_fd_quietly(jr_fd)
         left, unconfirmed = [], []
-        if created and not (done or retain):
-            left, unconfirmed = _remove_journal_dirs(root_fd, created)
         observed = said = None
+        ours = True
         try:
+            if created and not (done or retain):
+                left, unconfirmed = _remove_journal_dirs(root_fd, created)
             if before is not None and not done:
                 said = [lock_note] if lock_note else []
                 if (left or unconfirmed) and not entered:
@@ -1432,9 +1526,14 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                                  "transaction there")
                 if lock_state not in ("untaken", "released") and not lock_note:
                     said.append(_lock_said(lock_state, lock_note))
-                delta = _observed(before, _journal_listing(root_fd), created, txn)
-                observed = said + delta
+                after = _journal_listing(root_fd)
+                delta, ours = _observed(before, after, created, txn, mine, maybe_mine)
+                unbound = _journal_unbound(jr_fd, jr_id, after)
+                ours = ours or bool(said) or unbound is not None
+                observed = said + ([unbound] if unbound else []) + delta
         finally:
+            if jr_fd is not None:   # held through the closing observation, so its identity stays this run's
+                _journal._close_fd_quietly(jr_fd)
             store._close_fd_exc_safe(root_fd)
         if failure is not None and (not isinstance(failure, Exception) or failure is interrupted):
             # an interrupt still propagates as itself, with the transaction state and the outcome named
@@ -1453,11 +1552,11 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             if lock_note:
                 raise AdoptCommittedLockError(txn, lock_note)
         elif isinstance(failure, AdoptApplyError):
-            text = _refusal_text(str(failure), observed)
+            text = _refusal_text(str(failure), observed, ours)
             if text != str(failure):
                 raise AdoptApplyError(text) from failure
         elif said:
-            raise AdoptApplyError(_refusal_text(str(failure), observed)) from failure
+            raise AdoptApplyError(_refusal_text(str(failure), observed, ours)) from failure
         elif observed:
             failure.add_note("; ".join(observed) + " (fail-closed)")   # not a refusal: it propagates as itself
 
@@ -2568,6 +2667,16 @@ def _self_test_checks():
               store.resolve_store(root).status == CANNOT and twin is not None
               and "cannot be evaluated" in twin and snapshot(root) == before
               and not (root / ".aiqt").exists())
+        # the posture refusals carry no mid-message write claim of their own, so the composed text never
+        # contradicts itself (red against "refuses before anything is written" / "before writing").
+        check("posture-refusal-no-own-claim", twin is not None and "before anything" not in twin
+              and twin.count("nothing written") <= 1)
+        os.unlink(root / ".working/other/manifest.toml")
+        os.rmdir(root / ".working/other")
+        leased = refusal(run_adopt_transaction, root, rid, lambda ops: ops.create(
+            evidence_home_rel(rid) + "/x.md", b"x\n"))
+        check("posture-resolved-refusal-no-own-claim", store.resolve_store(root).status == store.RESOLVED
+              and leased is not None and "lease join" in leased and "before writing" not in leased)
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = Path(temp).resolve()
         (root / ".opf.toml").write_bytes(b"this is [not toml")
@@ -2695,6 +2804,113 @@ def _self_test_checks():
                   and "{}/frames.log (file)".format(txn_rel) in (err or "")
                   and "{}/preimages".format(txn_rel) in (err or "")
                   and (root / txn_rel / "frames.log").is_file() and lock_free(root))
+    # 6a5: a journal listing that could not read part of the tree never authorizes "nothing written", even
+    # when both listings failed alike; it says the journal could not be fully observed (red against a
+    # comparison in which two equal "unlisted" markers vanish). The fault hits the listing only.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        os.makedirs(root / JOURNAL_REL)
+        jst = os.stat(root / JOURNAL_REL)
+        real_capture, real_listdir = _journal.capture_preimages, os.listdir
+
+        def capture_then_refuse(*args):
+            real_capture(*args)
+            raise _journal.JournalError("injected refusal after capture, before INTENT")
+
+        def journal_unlistable(target="."):
+            if isinstance(target, int) and (os.fstat(target).st_dev, os.fstat(target).st_ino) == (
+                    jst.st_dev, jst.st_ino):
+                raise PermissionError(13, "an injected listing fault")
+            return real_listdir(target)
+        with mock.patch.object(_journal, "capture_preimages", capture_then_refuse), \
+                mock.patch.object(os, "listdir", journal_unlistable):
+            err = refusal(run_adopt_transaction, root, rid, compose_full(files))
+        check("pre-intent-unlisted-journal-no-claim", "refused before it opened" in (err or "")
+              and "nothing written" not in (err or "") and "could not be fully observed" in (err or "")
+              and (root / JOURNAL_REL / rid / "frames.log").is_file())
+    # 6a6: the closing observation is bound to the journal directory this run wrote to: one swapped in
+    # during preparation, then moved away with the original restored, never reads as "nothing written"
+    # (red against a closing listing compared by path alone).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        jpath = root / JOURNAL_REL
+        os.makedirs(jpath)
+        real_capture, real_ensure, real_release = (_journal.capture_preimages, _journal.ensure_journal_dirs,
+                                                   _journal.release_lock)
+
+        def capture_then_refuse(*args):
+            real_capture(*args)
+            raise _journal.JournalError("injected refusal after capture, before INTENT")
+
+        def swap_in(*args):
+            os.rename(jpath, root / "journal-aside")
+            return real_ensure(*args)
+
+        def release_then_restore(journal_root):
+            real_release(journal_root)
+            os.rename(jpath, root / "retained-journal")
+            os.rename(root / "journal-aside", jpath)
+        with mock.patch.object(_journal, "capture_preimages", capture_then_refuse), \
+                mock.patch.object(_journal, "ensure_journal_dirs", swap_in), \
+                mock.patch.object(_journal, "release_lock", release_then_restore):
+            err = refusal(run_adopt_transaction, root, rid, compose_full(files))
+        check("pre-intent-journal-swap-restore-named", "refused before it opened" in (err or "")
+              and "nothing written" not in (err or "") and "no longer resolves" in (err or "")
+              and (root / "retained-journal" / rid / "frames.log").is_file())
+    # 6a7: content changed in place on the inode this run's acquire wrote (here malformed) is an unresolved
+    # outcome, never a release: a committed transaction raises AdoptCommittedLockError naming the altered
+    # lock (red against a read-back that presumes release on any other content).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        real_release = _journal.release_lock
+
+        def malformed_then_release(journal_root):
+            (Path(journal_root) / "lock").write_bytes(b"{")
+            real_release(journal_root)
+        with mock.patch.object(_journal, "release_lock", malformed_then_release):
+            try:
+                run_adopt_transaction(root, rid, compose_full(files))
+                altered_error = None
+            except AdoptApplyError as exc:
+                altered_error = exc
+        check("commit-release-altered-lock-unresolved", isinstance(altered_error, AdoptCommittedLockError)
+              and "altered and stays" in str(altered_error) and "lock was released" not in str(altered_error)
+              and (root / JOURNAL_REL / "lock").read_bytes() == b"{")
+    # 6a8: another run's lock, planted between the clean check and this run's acquire, is never this run's:
+    # the refusal attributes nothing to this run and names the lock as another run's (red against the
+    # "NOT everything this run wrote" lead-in, or an unattributed lock label).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        os.makedirs(root / JOURNAL_REL)
+        real_acquire = _journal.acquire_lock
+
+        def foreign_first(journal_root, session_id):
+            (Path(journal_root) / "lock").write_bytes(json.dumps(dict(
+                uid=os.getuid(), pid=os.getppid(), session="another-run", **{"pid-start": ""}, utc="2026-01-01T00:00:00Z")).encode())
+            return real_acquire(journal_root, session_id)
+        with mock.patch.object(_journal, "acquire_lock", foreign_first):
+            err = refusal(run_adopt_transaction, root, rid, compose_full(files))
+        check("acquire-foreign-lock-not-attributed", "cannot take the adoption journal lock" in (err or "")
+              and "not attributed to this run" in (err or "") and "another run's journal lock" in (err or "")
+              and "this run wrote" not in (err or "") and "nothing written" not in (err or "")
+              and not lock_free(root))
+    # 6a9: an interrupt inside acquire after the lock file exists records the lock as observed, never as
+    # "this run holds no journal lock" (red against a lock state presumed untaken).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        os.makedirs(root / JOURNAL_REL)
+
+        def created_then_interrupted(journal_root, session_id):
+            real_acquire(journal_root, session_id)
+            raise KeyboardInterrupt("injected acquire interrupt")
+        notes = None
+        with mock.patch.object(_journal, "acquire_lock", created_then_interrupted):
+            try:
+                run_adopt_transaction(root, rid, compose_full(files))
+            except KeyboardInterrupt as exc:
+                notes = " ".join(getattr(exc, "__notes__", []))
+        check("acquire-interrupt-lock-observed", notes is not None and "holds no journal lock" not in notes
+              and "lock acquire was interrupted" in notes and not lock_free(root))
 
     # 6b: the spec 14.2 apply-side verification checkpoint. A same-length fault injected into the archive
     # copy's own destination write (the staged bytes verify; the DISK bytes differ) is caught by the
