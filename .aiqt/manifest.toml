@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5bdcc6a25375f0e5542ab5b67d4b647ed1fc8f83f91a6b1ece8465898bfcc395"
+tree-sha256 = "32a927216db1a87a51374f3dd444c31004b2ae9d9d4db9fe0ca52fc4c29c4249"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2311,8 +2311,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 177069
-sha256 = "5fabc734ad32c514cb5b42a3509f5e8a3af1469a25e1386c38d9b7e93218ae8c"
+bytes = 177066
+sha256 = "e219d004f3c50504fca65f158332beb909532cfb36833079ae425abdb0a852a8"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3046,8 +3046,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 224428
-sha256 = "c687731b5078417c4ff0d5bc54a780b59d9a39d3c9ea3eb0782dca405434b6fa"
+bytes = 224472
+sha256 = "1fbdf6a7af18cd2ab236b354fa3e164cdaa75438cb2cb528ec7ad1a5412e6c37"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3456,13 +3456,13 @@ sha256 = "f68d246fb296fa6f3bd5a09cbf321f059759f15cc7472d8c8937e1531f53de4a"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
-bytes = 53352
-sha256 = "64ef65ee1cb02bf6525ab835afde65795843a7135cdabea750d1a6b32a9083ca"
+bytes = 60040
+sha256 = "2a31939af946eac12c7072f7bb5bf99faa22a4e31ddd4bff31f8a02098b195d6"
 
 [[sources]]
 path = "tools/gen_enforcement_register.py"
-bytes = 76310
-sha256 = "8ca6c0b3281e4c08994398a18c4f886cc2a6c07d9928dc26d8dd2cb31783d8e7"
+bytes = 79132
+sha256 = "714af7d081c43ff7f985cbc4981d93ad0c943eeb031accf68fceca46ef39917e"
 
 [[sources]]
 path = "tools/gen_gensrc.py"

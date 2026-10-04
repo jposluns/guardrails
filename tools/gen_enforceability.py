@@ -71,6 +71,7 @@ argument, a heredoc, or an eval string may be miscounted. The authoritative sing
 import ast
 import json
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -124,7 +125,8 @@ BOUNDARY = (
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces. Sources are the content-bearing inputs the
-# ledger DERIVES from (the corpus and the two manifests); the roster files are excluded (see ROSTER_FILES).
+# ledger DERIVES from (the corpus, the two manifests and the preview declaration); the roster files are
+# excluded (see ROSTER_FILES).
 GENSRC_OUTPUTS = (
     {"target": ".aiqt/enforceability.json", "kind": "file",
      "sources": (".aiqt/core/rules/", ".aiqt/core/hooks/manifest.toml",
@@ -218,10 +220,34 @@ def _published_previews(root):
     return {name[:-3] for name in names if name.endswith(".py")}
 
 
-def _module_docstring(path):
-    """The module docstring of a preview hook file (empty when it has none). A file that does not parse
-    raises ValueError (SyntaxError subclasses it), an unreadable one OSError: both fail closed."""
-    return ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))) or ""
+def _preview_docstring(root, rel):
+    """The module docstring of the declared preview hook file root/rel, validated before any of its rules
+    are read: the path must be a regular file (a symlink or a directory is not), readable, UTF-8, parse
+    as Python, and carry a non-empty module docstring. An unreadable file raises OSError; every other
+    failure raises ValueError (a SyntaxError is converted, since it is not a ValueError subclass), so
+    run() fails closed with exit 2 either way."""
+    path = root / rel
+    if not stat.S_ISREG(path.lstat().st_mode):  # lstat raises OSError on an absent or unreadable path
+        raise ValueError("{} is not a regular file".format(rel))
+    text = path.read_text(encoding="utf-8")  # OSError, or UnicodeDecodeError (a ValueError)
+    try:
+        tree = ast.parse(text, filename=rel)
+    except SyntaxError as exc:
+        raise ValueError("{} does not parse as Python ({}, line {})".format(
+            rel, exc.msg, exc.lineno)) from None
+    doc = ast.get_docstring(tree)
+    if not doc:
+        raise ValueError("{} has no module docstring".format(rel))
+    return doc
+
+
+def _names_slug(doc, slug):
+    """True when the docstring NAMES the slug: the slug appears, in any letter case, with no word
+    character (a letter, digit or underscore) and no hyphen directly on either side. The forward check (a
+    declared rule must be named) and the reverse check (a named rule must be declared) share this one
+    predicate, so the two directions cannot disagree about what naming is."""
+    pattern = r"(?<![\w-]){}(?![\w-])".format(re.escape(slug))
+    return re.search(pattern, doc, re.IGNORECASE) is not None
 
 
 def load_previews(root, slugs):
@@ -262,15 +288,18 @@ def load_previews(root, slugs):
         rel = "{}/{}.py".format(PREVIEW_DIR_REL, pid)
         if pid not in published:
             raise ValueError("{}: no published preview hook {}".format(where, rel))
-        doc = None
+        doc = _preview_docstring(root, rel)  # every declared file, whether or not it lists rules
         for rule in rules:
             if rule not in slugs:
                 raise ValueError("{}: cites corpus-id '{}' not in .aiqt/core/rules/".format(where, rule))
-            if doc is None:
-                doc = _module_docstring(root / rel)
-            if not re.search(r"(?<![a-z0-9-]){}(?![a-z0-9-])".format(re.escape(slugs[rule])), doc):
+            if not _names_slug(doc, slugs[rule]):
                 raise ValueError("{}: the module docstring of {} does not name rule '{}' (slug {})".format(
                     where, rel, rule, slugs[rule]))
+        unlisted = sorted(cid for cid, slug in slugs.items() if cid not in rules and _names_slug(doc, slug))
+        if unlisted:
+            raise ValueError("{}: the module docstring of {} names rule(s) the entry does not list: "
+                             "{}".format(where, rel, ", ".join("{} (slug {})".format(cid, slugs[cid])
+                                                               for cid in unlisted)))
         out.append({"id": pid, "file": rel, "rules": rules})
     undeclared = sorted(published - {p["id"] for p in out})
     if undeclared:
@@ -474,7 +503,14 @@ def main():
 #   (r) a published preview hook with no declaration entry, (s) an entry naming no published hook, (t) an
 #       entry citing a rule whose slug the hook's own docstring does not name, (u) an entry citing an
 #       unknown corpus-id, and (v) published preview hooks with the declaration absent each fail closed
-#       (exit 2).
+#       (exit 2),
+#   (w) a declared preview file that lists NO rules is still validated: one that is unreadable, not
+#       UTF-8, a directory, a symlink, unparseable, or has no module docstring each fails closed (exit 2),
+#   (x) a linked preview file that does not parse returns exit 2 from run() instead of raising,
+#   (y) a slug with a letter (either case), digit, underscore or hyphen directly beside it is not named,
+#       while the slug in another letter case between punctuation is named, and
+#   (z) an entry whose docstring names a corpus slug it does not list fails closed (exit 2), with
+#       naming defined exactly as in (y).
 # These cases exercise this tool's OWN logic (the gates manifest shape, the class-d ledger boundary, the
 # hook and gate no-orphan checks, the roster reconciliation, and drift). The corpus and hooks-manifest
 # read-failure paths and the empty-hook-residue path are validated fail-closed by the reused loaders
@@ -638,6 +674,14 @@ def self_test_main():
                 return run(root, check)
             except SystemExit as exc:
                 return "raised SystemExit({!r})".format(exc.code)
+
+    def run_caught(root, check):
+        # Like run_quiet, but an unexpected exception of any kind is also returned as a non-int
+        # sentinel, so a case expecting exit 2 records a failure rather than crashing the self-test.
+        try:
+            return run_quiet(root, check)
+        except Exception as exc:  # noqa: BLE001  the escape itself is what the case detects
+            return "raised {}".format(type(exc).__name__)
 
     def replace_in(path, old, new):
         text = path.read_text(encoding="utf-8")
@@ -895,6 +939,63 @@ def self_test_main():
         (vtree / PREVIEW_DECL_REL).unlink()
         if run_quiet(vtree, check=False) != 2:
             failures.append("published preview hooks with no declaration expected exit 2")
+        # (w) A declared file that lists no rules is validated all the same.
+        wcases = (
+            ("not UTF-8", lambda f: f.write_bytes(b"\xff\n")),
+            ("a directory", lambda f: (f.unlink(), f.mkdir())),
+            ("a symlink", lambda f: (f.unlink(), f.with_name("target.txt").write_text(
+                '"""A valid hook body reached through a link."""\n', encoding="utf-8"),
+                f.symlink_to("target.txt"))),
+            ("unparseable", lambda f: f.write_text("def (:\n", encoding="utf-8")),
+            ("without a module docstring", lambda f: f.write_text("X = 1\n", encoding="utf-8")),
+        )
+        for wi, (wname, wmutate) in enumerate(wcases):
+            wtree = _add_previews(_build(tmp / "preview-empty-bad-{}".format(wi)))
+            wmutate(wtree / ".preview" / "p-two.py")
+            got = run_caught(wtree, check=False)
+            if got != 2:
+                failures.append("a rule-less declared preview file {} expected exit 2, got {!r}".format(
+                    wname, got))
+        wtree = _add_previews(_build(tmp / "preview-empty-unreadable"))
+        wfile = wtree / ".preview" / "p-two.py"
+        os.chmod(wfile, 0)
+        try:
+            if os.access(wfile, os.R_OK):
+                skipped.append("w unreadable-preview")
+            else:
+                got = run_caught(wtree, check=False)
+                if got != 2:
+                    failures.append("an unreadable rule-less preview file expected exit 2, got "
+                                    "{!r}".format(got))
+        finally:
+            os.chmod(wfile, 0o644)
+        # (x) A linked preview file that does not parse returns exit 2 rather than raising SyntaxError.
+        xtree = _add_previews(_build(tmp / "preview-linked-syntax"))
+        (xtree / ".preview" / "p-one.py").write_text("def (:\n", encoding="utf-8")
+        got = run_caught(xtree, check=True)
+        if got != 2:
+            failures.append("a linked preview file that does not parse expected exit 2, got {!r}".format(got))
+        # (y) The slug boundary: any word character or hyphen beside the slug means it is not named.
+        for yi, (ydoc, ywant) in enumerate((
+                ("Xselftest-rule-ddX", 2), ("xselftest-rule-ddx", 2), ("_selftest-rule-dd_", 2),
+                ("9selftest-rule-dd", 2), ("selftest-rule-dd-x", 2), ("-selftest-rule-dd", 2),
+                ("selftest-rule-dd\u00e9", 2), ("Motivated by (SELFTEST-RULE-DD).", 0))):
+            ytree = _add_previews(_build(tmp / "preview-boundary-{}".format(yi)))
+            (ytree / ".preview" / "p-one.py").write_text('"""{}"""\n'.format(ydoc), encoding="utf-8")
+            got = run_caught(ytree, check=False)
+            if got != ywant:
+                failures.append("a p-one docstring {!r} expected exit {}, got {!r}".format(ydoc, ywant, got))
+        # (z) The reverse direction: a docstring naming a corpus slug its entry does not list fails closed,
+        #     so an entry cannot hide a rule behind rules = [] (same naming predicate as (y)).
+        for zi, (zdoc, zwant) in enumerate((
+                ("Motivated by selftest-rule-cc.", 2), ("Motivated by Selftest-Rule-CC.", 2),
+                ("Motivated by selftest-rule-ccx.", 0), ("Motivated by selftest_rule_cc.", 0))):
+            ztree = _add_previews(_build(tmp / "preview-unlisted-{}".format(zi)))
+            (ztree / ".preview" / "p-two.py").write_text('"""{}"""\n'.format(zdoc), encoding="utf-8")
+            got = run_caught(ztree, check=False)
+            if got != zwant:
+                failures.append("a rule-less p-two docstring {!r} expected exit {}, got {!r}".format(
+                    zdoc, zwant, got))
     finally:
         if unread_manifest is not None:
             os.chmod(unread_manifest, 0o644)  # restore even on an unexpected early exit
@@ -918,8 +1019,10 @@ def self_test_main():
           "unknown gates-manifest top-level key, an unknown [[gate]] entry key, and a manifest script "
           "named only inside a roster inline comment all fail closed (exit 2); preview hooks are listed "
           "at the top level and per rule without changing a status, and an undeclared or unpublished "
-          "preview, a declared rule the hook's docstring does not name, an unknown declared corpus-id, "
-          "and an absent declaration beside published previews all fail closed (exit 2)" + note)
+          "preview, a declared rule the hook's docstring does not name, a docstring naming a rule its entry "
+          "does not list, a declared preview file that is unreadable, not UTF-8, not a regular file, "
+          "unparseable or without a docstring (rules listed or not), an unknown declared corpus-id, and an "
+          "absent declaration beside published previews all fail closed (exit 2)" + note)
     return 0
 
 

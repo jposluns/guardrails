@@ -2,7 +2,7 @@
 
 This file is generated from the enforceability ledger, the enforcement roadmap, and the rule corpus by tools/gen_enforcement_register.py. Do not edit it by hand; change the source and regenerate.
 
-This register lists every rule and the shipped mechanical controls linked to it. A link records that a control exists, not how much of the rule it covers, so no status here means a rule is enforced. Gate-linked means at least one shipped repository gate cites the rule: class a when at least one of those gates is a deterministic check over what it examines, class c only when every linked gate covers just a recognizable subset of the surface. Hook-linked means at least one shipped runtime hook cites the rule and no gate does. No control means no shipped control cites the rule yet; pending means the same, and its description states the intended build. Each mechanism's class and residual describe the boundary of what it checks, and a linked mechanism may cover only part of a rule's violation surface. The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim and not summarized. The class letter is a maintainer assessment of the check's decision procedure, not a coverage score.
+This register lists every rule and the shipped mechanical controls linked to it. A link records that a control exists, not how much of the rule it covers, so none of the statuses means a rule is enforced. Gate-linked means at least one shipped repository gate cites the rule: class a when at least one of those gates is total for what it examines, class c only when every linked gate covers just a recognizable subset of the surface. Hook-linked means at least one shipped runtime hook cites the rule and no gate does. No control means no shipped control cites the rule yet; pending means the same, and its description states the intended build. Each mechanism's class and residual describe the boundary of what it checks, and a linked mechanism may cover only part of a rule's violation surface. The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim and not summarized. The class letter is a maintainer assessment of the check's decision procedure, not a coverage score.
 
 ## Summary
 
@@ -16,140 +16,140 @@ This register lists every rule and the shipped mechanical controls linked to it.
 
 ## Rules
 
-| Rule | Corpus ID | Status | How enforced or intended |
+| Rule | Corpus ID | Status | Linked controls or planned build |
 |---|---|---|---|
-| The AIQT principle (highest precedence) | `prjint1` | No control | Enforcement has not been built yet. |
-| Citation only from a file opened at the reviewed commit | `citint` | No control | Enforcement has not been built yet. |
-| Claims about the work rest on observation | `clmobs` | No control | Enforcement has not been built yet. |
+| The AIQT principle (highest precedence) | `prjint1` | No control | No shipped control cites this rule. |
+| Citation only from a file opened at the reviewed commit | `citint` | No control | No shipped control cites this rule. |
+| Claims about the work rest on observation | `clmobs` | No control | No shipped control cites this rule. |
 | A completeness claim enumerates its set | `setcmp` | Hook-linked | `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
-| Corroborate external claims | `corrob` | No control | Enforcement has not been built yet. |
-| A count carries its predicate | `cntprd` | No control | Enforcement has not been built yet. |
-| Disclose a guard's residual coverage | `dscres` | No control | Enforcement has not been built yet. |
+| Corroborate external claims | `corrob` | No control | No shipped control cites this rule. |
+| A count carries its predicate | `cntprd` | No control | No shipped control cites this rule. |
+| Disclose a guard's residual coverage | `dscres` | No control | No shipped control cites this rule. |
 | Evidence-grounded completion | `evgcmp` | Gate-linked (class a) | `gate:selftest-execution`, class a |
 | A guard is only as good as its input | `grdinp` | Gate-linked (class a) | `gate:aei-enumerator-selftest`, class a; `gate:derived-command-parameters`, class c |
 | Measured and estimated figures stay separate | `estsep` | Hook-linked | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
-| No fabrication | `nofabr` | No control | Enforcement has not been built yet. |
-| Observe before asserting behaviour | `obsbeh` | No control | Enforcement has not been built yet. |
-| A partial read is not the whole | `prtwhl` | No control | Enforcement has not been built yet. |
-| Read before characterizing | `rdbchr` | No control | Enforcement has not been built yet. |
-| Capture the reference when the claim is made | `refcap` | No control | Enforcement has not been built yet. |
-| Reproduce a defect before fixing it | `reprod` | No control | Enforcement has not been built yet. |
+| No fabrication | `nofabr` | No control | No shipped control cites this rule. |
+| Observe before asserting behaviour | `obsbeh` | No control | No shipped control cites this rule. |
+| A partial read is not the whole | `prtwhl` | No control | No shipped control cites this rule. |
+| Read before characterizing | `rdbchr` | No control | No shipped control cites this rule. |
+| Capture the reference when the claim is made | `refcap` | No control | No shipped control cites this rule. |
+| Reproduce a defect before fixing it | `reprod` | No control | No shipped control cites this rule. |
 | A current timestamp is read from the clock | `tstamp` | Hook-linked | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
-| Validate an inferred premise before acting | `valinf` | No control | Enforcement has not been built yet. |
-| Verify a fix is in its commit | `vfxcmt` | No control | Enforcement has not been built yet. |
-| Anything wrong is fixed first | `actbef` | No control | Enforcement has not been built yet. |
-| Attestation lines are harness-owned | `attint` | No control | Enforcement has not been built yet. |
+| Validate an inferred premise before acting | `valinf` | No control | No shipped control cites this rule. |
+| Verify a fix is in its commit | `vfxcmt` | No control | No shipped control cites this rule. |
+| Anything wrong is fixed first | `actbef` | No control | No shipped control cites this rule. |
+| Attestation lines are harness-owned | `attint` | No control | No shipped control cites this rule. |
 | Branch and merge only on green | `artbr1` | Hook-linked | `hook:protected-line-guard`, class b |
 | Cut branches from the live protected line and re-home after a rewrite | `brnrot` | Gate-linked (class c only) | `gate:branch-root`, class c; `hook:branch-root-guard`, class c |
-| A check fails closed on input it cannot read | `chkfcl` | No control | Enforcement has not been built yet. |
+| A check fails closed on input it cannot read | `chkfcl` | No control | No shipped control cites this rule. |
 | Commit identity | `cmtidn` | Hook-linked | `hook:commit-identity`, class b |
 | Bind to the explicit target, not the ambient context | `expbnd` | Hook-linked | `hook:git-discard`, class b; `hook:git-explicit-binding`, class b; `hook:git-stash-ref`, class b; `hook:orch-dispatch-ledger`, class c |
 | Gate discipline | `gatdis` | Gate-linked (class c only) | `gate:ci-parity`, class c; `hook:gate-weakening-guard`, class b |
 | A generated artefact is changed only through its source | `gensrc` | Gate-linked (class a) | `gate:adapters-drift`, class a; `gate:agents-drift`, class a; `gate:changelog-drift`, class a; `gate:claude-drift`, class a; `gate:crosswalk-schema-drift`, class a; `gate:cursor-drift`, class a; `gate:disclosure-drift`, class a; `gate:enforceability-drift`, class a; `gate:enforcement-register-drift`, class a; `gate:gensrc-failclose`, class a; `gate:gensrc-registry-drift`, class a; `gate:hooks-drift`, class a; `gate:install-drift`, class a; `gate:manifest-gen-drift`, class a; `gate:mappings-page-drift`, class a; `gate:notice-drift`, class a; `gate:reference-roster-drift`, class a; `gate:renderers-drift`, class a; `gate:roadmap-drift`, class a; `gate:rules-drift`, class a; `gate:secret-patterns-drift`, class a; `gate:skill-drift`, class a; `gate:worker-pack-drift`, class a; `hook:gensrc-edit-guard`, class c |
-| Verify licence compatibility before introducing third-party material | `liccmp` | No control | Enforcement has not been built yet. |
+| Verify licence compatibility before introducing third-party material | `liccmp` | No control | No shipped control cites this rule. |
 | No concealed failure | `nocncl` | Hook-linked | `hook:orch-truncation-guard`, class b |
 | Preserve uncommitted work | `prsunc` | Hook-linked | `hook:git-discard`, class b |
 | Protected-branch integrity | `prtbrn` | Hook-linked | `hook:protected-line-guard`, class b |
-| A required step remains required under friction | `reqstp` | No control | Enforcement has not been built yet. |
-| A rerun pass does not erase an earlier failure | `rerunf` | No control | Enforcement has not been built yet. |
-| A review in flight pins its artefact | `rvwpin` | No control | Enforcement has not been built yet. |
-| Make retries safe to repeat | `rtsafe` | No control | Enforcement has not been built yet. |
+| A required step remains required under friction | `reqstp` | No control | No shipped control cites this rule. |
+| A rerun pass does not erase an earlier failure | `rerunf` | No control | No shipped control cites this rule. |
+| A review in flight pins its artefact | `rvwpin` | No control | No shipped control cites this rule. |
+| Make retries safe to repeat | `rtsafe` | No control | No shipped control cites this rule. |
 | Separate task changes from pre-existing work | `septsk` | Hook-linked | `hook:write-scope`, class c |
-| Stage artefacts and promote only on green | `stgprm` | No control | Enforcement has not been built yet. |
+| Stage artefacts and promote only on green | `stgprm` | No control | No shipped control cites this rule. |
 | A launched task stays observable | `trkasy` | Hook-linked | `hook:orch-dispatch-ledger`, class c; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-truncation-guard`, class b; `hook:orch-untracked-wait-loop`, class b |
-| Validation is a gate on apply | `valgat` | No control | Enforcement has not been built yet. |
+| Validation is a gate on apply | `valgat` | No control | No shipped control cites this rule. |
 | Workers produce inert data | `wowo01` | Hook-linked | `hook:write-scope`, class c |
 | Use absolute paths, not relative | `abspth` | Hook-linked | `hook:abs-paths`, class b; `hook:abs-paths-bash`, class b |
 | A behavioural change carries a check that fails without it | `chgchk` | Gate-linked (class a) | `gate:selftest-execution`, class a |
-| Preserve compatibility or provide a migration path | `cmpmig` | No control | Enforcement has not been built yet. |
+| Preserve compatibility or provide a migration path | `cmpmig` | No control | No shipped control cites this rule. |
 | Confirm the execution target before a side-effectful operation | `exetgt` | Gate-linked (class c only) | `gate:derived-command-parameters`, class c; `hook:write-scope`, class c |
-| Defence in depth by default | `dfdpth` | No control | Enforcement has not been built yet. |
-| A borrowed process timer is restored elapsed-aware | `tmrrst` | No control | Enforcement has not been built yet. |
-| A verification finding is fixed, not argued away | `fndfix` | No control | Enforcement has not been built yet. |
-| Goal fidelity across a long trajectory | `goalfd` | No control | Enforcement has not been built yet. |
-| High-assurance verification | `hiasrv` | No control | Enforcement has not been built yet. |
-| A kill timeout outlives the wait it bounds | `kltwat` | No control | Enforcement has not been built yet. |
-| Isolate verifiers and judge by their result signal | `lvw001` | No control | Enforcement has not been built yet. |
-| Match the surrounding code | `mtchcd` | No control | Enforcement has not been built yet. |
-| Minimize external dependencies in favour of standard libraries | `mindep` | No control | Enforcement has not been built yet. |
-| Propose a guardrail when an error reveals a gap | `slfgrd` | No control | Enforcement has not been built yet. |
-| Prefer the smallest correct change | `smlcng` | No control | Enforcement has not been built yet. |
-| Surface a counterproductive instruction before executing it | `srfcp1` | No control | Enforcement has not been built yet. |
-| A test's verdict comes from the code, not its surroundings | `tsthrm` | No control | Enforcement has not been built yet. |
+| Defence in depth by default | `dfdpth` | No control | No shipped control cites this rule. |
+| A borrowed process timer is restored elapsed-aware | `tmrrst` | No control | No shipped control cites this rule. |
+| A verification finding is fixed, not argued away | `fndfix` | No control | No shipped control cites this rule. |
+| Goal fidelity across a long trajectory | `goalfd` | No control | No shipped control cites this rule. |
+| High-assurance verification | `hiasrv` | No control | No shipped control cites this rule. |
+| A kill timeout outlives the wait it bounds | `kltwat` | No control | No shipped control cites this rule. |
+| Isolate verifiers and judge by their result signal | `lvw001` | No control | No shipped control cites this rule. |
+| Match the surrounding code | `mtchcd` | No control | No shipped control cites this rule. |
+| Minimize external dependencies in favour of standard libraries | `mindep` | No control | No shipped control cites this rule. |
+| Propose a guardrail when an error reveals a gap | `slfgrd` | No control | No shipped control cites this rule. |
+| Prefer the smallest correct change | `smlcng` | No control | No shipped control cites this rule. |
+| Surface a counterproductive instruction before executing it | `srfcp1` | No control | No shipped control cites this rule. |
+| A test's verdict comes from the code, not its surroundings | `tsthrm` | No control | No shipped control cites this rule. |
 | A degraded verifier delivery is not a verdict | `vrfdlv` | Hook-linked | `hook:orch-truncation-guard`, class b |
-| Verifier diversity | `vrfdiv` | No control | Enforcement has not been built yet. |
-| Maintain an AI toolchain register | `aitreg` | No control | Enforcement has not been built yet. |
-| Assess and advise are discussion only | `asadv1` | No control | Enforcement has not been built yet. |
-| Claim a pooled item atomically | `atmclm` | No control | Enforcement has not been built yet. |
+| Verifier diversity | `vrfdiv` | No control | No shipped control cites this rule. |
+| Maintain an AI toolchain register | `aitreg` | No control | No shipped control cites this rule. |
+| Assess and advise are discussion only | `asadv1` | No control | No shipped control cites this rule. |
+| Claim a pooled item atomically | `atmclm` | No control | No shipped control cites this rule. |
 | Change record | `chtrk1` | Gate-linked (class a) | `gate:record-drift`, class a |
-| Change record has a curated public face | `chgtrk` | No control | Enforcement has not been built yet. |
-| Clarify before acting | `clrfy1` | No control | Enforcement has not been built yet. |
+| Change record has a curated public face | `chgtrk` | No control | No shipped control cites this rule. |
+| Clarify before acting | `clrfy1` | No control | No shipped control cites this rule. |
 | Hold a concurrency lease to prevent double runs | `cnclse` | Hook-linked | `hook:orch-resume-audit`, class b; `hook:orch-stop-guard`, class b |
 | Continue by default | `cntdef` | Hook-linked | `hook:orch-ask-unattended`, class b; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
-| Express authorization before execution | `exauth` | No control | Enforcement has not been built yet. |
+| Express authorization before execution | `exauth` | No control | No shipped control cites this rule. |
 | Human oversight and the autonomy threshold | `humovs` | Hook-linked | `hook:orch-ask-unattended`, class b |
 | Do not bury the review surface under raw dumps | `cnsdif` | Hook-linked | `hook:diff-source`, class b; `hook:diff-wall-stop`, class b |
 | An orchestrator keeps a mistakes register | `mstreg` | Gate-linked (class a) | `gate:mistakes-register`, class a |
 | Reconcile the record against reality | `recncl` | Gate-linked (class a) | `gate:record-drift`, class a; `gate:record-sections`, class c; `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
 | Records first | `recfst` | Hook-linked | `hook:orch-ask-unattended`, class b; `hook:orch-dispatch-ledger`, class c |
-| Close each session on green | `sescls` | No control | Enforcement has not been built yet. |
+| Close each session on green | `sescls` | No control | No shipped control cites this rule. |
 | Resume from the durable handoff | `sesres` | Hook-linked | `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
-| A standing constraint persists across context loss | `cnstpr` | No control | Enforcement has not been built yet. |
-| Trust recovery and escalation | `trstre` | No control | Enforcement has not been built yet. |
-| Autonomy steps down after a confirmed trust loss | `trsrcv` | No control | Enforcement has not been built yet. |
-| Decision classification before enacting | `deccls` | No control | Enforcement has not been built yet. |
-| Repeated failure triggers premise review | `rpfail` | No control | Enforcement has not been built yet. |
-| Background work during CI waits | `bgcwai` | No control | Enforcement has not been built yet. |
-| Cost tier | `csttir` | No control | Enforcement has not been built yet. |
-| Classify content by sensitivity tier | `datbnd` | No control | Enforcement has not been built yet. |
-| Egress goes only to expected destinations | `secegr` | No control | Enforcement has not been built yet. |
+| A standing constraint persists across context loss | `cnstpr` | No control | No shipped control cites this rule. |
+| Trust recovery and escalation | `trstre` | No control | No shipped control cites this rule. |
+| Autonomy steps down after a confirmed trust loss | `trsrcv` | No control | No shipped control cites this rule. |
+| Decision classification before enacting | `deccls` | No control | No shipped control cites this rule. |
+| Repeated failure triggers premise review | `rpfail` | No control | No shipped control cites this rule. |
+| Background work during CI waits | `bgcwai` | No control | No shipped control cites this rule. |
+| Cost tier | `csttir` | No control | No shipped control cites this rule. |
+| Classify content by sensitivity tier | `datbnd` | No control | No shipped control cites this rule. |
+| Egress goes only to expected destinations | `secegr` | No control | No shipped control cites this rule. |
 | Keep secrets out | `secsec` | Gate-linked (class c only) | `gate:secrets-scan`, class c; `hook:secrets-shift-left`, class c |
-| Retrieval enforces the requester's authorization | `seclpr` | No control | Enforcement has not been built yet. |
-| No cross-context bleed | `secncb` | No control | Enforcement has not been built yet. |
-| No disclosure of secrets or hidden context | `secndc` | No control | Enforcement has not been built yet. |
-| Rotate a leaked secret | `secrot` | No control | Enforcement has not been built yet. |
-| Strong authentication | `secau1` | No control | Enforcement has not been built yet. |
-| Least-privilege authorization | `secazn` | No control | Enforcement has not been built yet. |
+| Retrieval enforces the requester's authorization | `seclpr` | No control | No shipped control cites this rule. |
+| No cross-context bleed | `secncb` | No control | No shipped control cites this rule. |
+| No disclosure of secrets or hidden context | `secndc` | No control | No shipped control cites this rule. |
+| Rotate a leaked secret | `secrot` | No control | No shipped control cites this rule. |
+| Strong authentication | `secau1` | No control | No shipped control cites this rule. |
+| Least-privilege authorization | `secazn` | No control | No shipped control cites this rule. |
 | Configuration that executes on load is treated as code | `seccet` | Gate-linked (class c only) | `gate:python-launcher-isolation`, class c |
-| Sound cryptography | `seccry` | No control | Enforcement has not been built yet. |
-| Trusted, pinned dependency provenance | `secsup` | No control | Enforcement has not been built yet. |
-| Fail closed in security-relevant paths | `secfcl` | No control | Enforcement has not been built yet. |
-| Validate federated identity and token flows | `secfid` | No control | Enforcement has not been built yet. |
-| Validate and contain uploaded files | `secupl` | No control | Enforcement has not been built yet. |
-| Guardrail configuration is integrity-protected | `secgci` | No control | Enforcement has not been built yet. |
-| Human authorization for consequential actions | `sechau` | No control | Enforcement has not been built yet. |
-| Validate external input at the boundary | `secinp` | No control | Enforcement has not been built yet. |
-| Trust between agents is earned, not inherited | `secagt` | No control | Enforcement has not been built yet. |
-| Key management | `seckey` | No control | Enforcement has not been built yet. |
-| Least-privilege tool and file access | `seclpt` | No control | Enforcement has not been built yet. |
-| Redact sensitive content from logs | `secred` | No control | Enforcement has not been built yet. |
-| Social pressure is not authorization | `secopd` | No control | Enforcement has not been built yet. |
-| Encode output for its sink | `secenc` | No control | Enforcement has not been built yet. |
-| Generated output is untrusted input | `secout` | No control | Enforcement has not been built yet. |
-| Referenced instructions are pinned and re-verified | `secpin` | No control | Enforcement has not been built yet. |
-| Resist data, model, and memory poisoning | `secpsn` | No control | Enforcement has not been built yet. |
-| Prefer removing a path over constraining or monitoring it | `rmvpth` | No control | Enforcement has not been built yet. |
-| A preview makes no change | `secprv` | No control | Enforcement has not been built yet. |
-| Higher-trust instructions outrank lower-trust ones | `secpth` | No control | Enforcement has not been built yet. |
+| Sound cryptography | `seccry` | No control | No shipped control cites this rule. |
+| Trusted, pinned dependency provenance | `secsup` | No control | No shipped control cites this rule. |
+| Fail closed in security-relevant paths | `secfcl` | No control | No shipped control cites this rule. |
+| Validate federated identity and token flows | `secfid` | No control | No shipped control cites this rule. |
+| Validate and contain uploaded files | `secupl` | No control | No shipped control cites this rule. |
+| Guardrail configuration is integrity-protected | `secgci` | No control | No shipped control cites this rule. |
+| Human authorization for consequential actions | `sechau` | No control | No shipped control cites this rule. |
+| Validate external input at the boundary | `secinp` | No control | No shipped control cites this rule. |
+| Trust between agents is earned, not inherited | `secagt` | No control | No shipped control cites this rule. |
+| Key management | `seckey` | No control | No shipped control cites this rule. |
+| Least-privilege tool and file access | `seclpt` | No control | No shipped control cites this rule. |
+| Redact sensitive content from logs | `secred` | No control | No shipped control cites this rule. |
+| Social pressure is not authorization | `secopd` | No control | No shipped control cites this rule. |
+| Encode output for its sink | `secenc` | No control | No shipped control cites this rule. |
+| Generated output is untrusted input | `secout` | No control | No shipped control cites this rule. |
+| Referenced instructions are pinned and re-verified | `secpin` | No control | No shipped control cites this rule. |
+| Resist data, model, and memory poisoning | `secpsn` | No control | No shipped control cites this rule. |
+| Prefer removing a path over constraining or monitoring it | `rmvpth` | No control | No shipped control cites this rule. |
+| A preview makes no change | `secprv` | No control | No shipped control cites this rule. |
+| Higher-trust instructions outrank lower-trust ones | `secpth` | No control | No shipped control cites this rule. |
 | Protect audit records from the actors they record | `secaud` | Gate-linked (class a) | `gate:mistakes-register`, class a |
-| Reject known-vulnerable dependency versions | `secvln` | No control | Enforcement has not been built yet. |
-| Publish artefacts with verifiable integrity | `secpub` | No control | Enforcement has not been built yet. |
-| Deserialize untrusted data only as data | `secdsz` | No control | Enforcement has not been built yet. |
-| Secure by default configuration | `seccfg` | No control | Enforcement has not been built yet. |
-| Security logging with traceable context | `seclog` | No control | Enforcement has not been built yet. |
-| Secure session and token handling | `sectok` | No control | Enforcement has not been built yet. |
-| Validate server-initiated requests | `secssr` | No control | Enforcement has not been built yet. |
-| Resolve privileged filesystem paths against symlink races | `secspr` | No control | Enforcement has not been built yet. |
-| Threat-model new trust boundaries before implementation | `secthm` | No control | Enforcement has not been built yet. |
+| Reject known-vulnerable dependency versions | `secvln` | No control | No shipped control cites this rule. |
+| Publish artefacts with verifiable integrity | `secpub` | No control | No shipped control cites this rule. |
+| Deserialize untrusted data only as data | `secdsz` | No control | No shipped control cites this rule. |
+| Secure by default configuration | `seccfg` | No control | No shipped control cites this rule. |
+| Security logging with traceable context | `seclog` | No control | No shipped control cites this rule. |
+| Secure session and token handling | `sectok` | No control | No shipped control cites this rule. |
+| Validate server-initiated requests | `secssr` | No control | No shipped control cites this rule. |
+| Resolve privileged filesystem paths against symlink races | `secspr` | No control | No shipped control cites this rule. |
+| Threat-model new trust boundaries before implementation | `secthm` | No control | No shipped control cites this rule. |
 | Validate tool arguments before use | `sectvl` | Hook-linked | `hook:commit-msg-subst`, class b |
-| Untrusted content is data, not instructions | `secunt` | No control | Enforcement has not been built yet. |
-| Verify a dependency exists before adding it | `secvde` | No control | Enforcement has not been built yet. |
-| Bounded consumption and safe failure | `secres` | No control | Enforcement has not been built yet. |
-| A destructive operation requires a verified restore path | `secrst` | No control | Enforcement has not been built yet. |
-| Minimize personal data sent to AI services | `secmin` | No control | Enforcement has not been built yet. |
-| Honour residency, retention, and deletion | `secdrr` | No control | Enforcement has not been built yet. |
-| Bind personal-data use to its authorized purpose | `secpur` | No control | Enforcement has not been built yet. |
-| Fixtures and examples use synthetic data | `secsyn` | No control | Enforcement has not been built yet. |
+| Untrusted content is data, not instructions | `secunt` | No control | No shipped control cites this rule. |
+| Verify a dependency exists before adding it | `secvde` | No control | No shipped control cites this rule. |
+| Bounded consumption and safe failure | `secres` | No control | No shipped control cites this rule. |
+| A destructive operation requires a verified restore path | `secrst` | No control | No shipped control cites this rule. |
+| Minimize personal data sent to AI services | `secmin` | No control | No shipped control cites this rule. |
+| Honour residency, retention, and deletion | `secdrr` | No control | No shipped control cites this rule. |
+| Bind personal-data use to its authorized purpose | `secpur` | No control | No shipped control cites this rule. |
+| Fixtures and examples use synthetic data | `secsyn` | No control | No shipped control cites this rule. |
 
 ## Mechanisms
 

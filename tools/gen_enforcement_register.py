@@ -125,9 +125,9 @@ CLASS_LEGEND = (
 # semantics. One string, rendered as Markdown and as HTML text.
 EXPLAINER = (
     "This register lists every rule and the shipped mechanical controls linked to it. A link records that "
-    "a control exists, not how much of the rule it covers, so no status here means a rule is enforced. "
-    "Gate-linked means at least one shipped repository gate cites the rule: class a when at least one of "
-    "those gates is a deterministic check over what it examines, class c only when every linked gate covers "
+    "a control exists, not how much of the rule it covers, so none of the statuses means a rule is "
+    "enforced. Gate-linked means at least one shipped repository gate cites the rule: class a when at least "
+    "one of those gates is total for what it examines, class c only when every linked gate covers "
     "just a recognizable subset of the surface. Hook-linked means at least one shipped runtime hook cites "
     "the rule and no gate does. No control means no shipped control cites the rule yet; pending means the "
     "same, and its description states the intended build. Each mechanism's class and residual describe the "
@@ -135,6 +135,12 @@ EXPLAINER = (
     "The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim "
     "and not summarized. The class letter is a maintainer assessment of the check's decision procedure, "
     "not a coverage score.")
+
+# The rules table's fourth column heading and the text of a no-control row, single-sourced for both views.
+# Neither calls a linked control "enforcement": the column lists linked controls or a planned build, and a
+# no-control row says only that no shipped control cites the rule (not that one will be built).
+COLUMN_HEADING = "Linked controls or planned build"
+NO_CONTROL_TEXT = "No shipped control cites this rule."
 
 GENERATED_NOTE = (
     "This file is generated from the enforceability ledger, the enforcement roadmap, and the rule corpus "
@@ -456,7 +462,7 @@ def render_md(rows, roadmap, controls, enforced_union):
     lines += ["| {} | {} |".format(label, counts[label]) for label in STATUS_LABELS]
     lines += ["",
              "## Rules", "",
-             "| Rule | Corpus ID | Status | How enforced or intended |",
+             "| Rule | Corpus ID | Status | {} |".format(COLUMN_HEADING),
              "|---|---|---|---|"]
     for cid, title, _fm in rows:
         row = roadmap[cid]
@@ -466,7 +472,7 @@ def render_md(rows, roadmap, controls, enforced_union):
         elif status == "pending":
             how = row["description"]
         else:
-            how = "Enforcement has not been built yet."
+            how = NO_CONTROL_TEXT
         lines.append("| {} | `{}` | {} | {} |".format(
             _md_cell(_no_ctrl(title, "rule title {}".format(cid))), cid, _status_label(row, controls),
             _md_cell(how)))
@@ -506,7 +512,7 @@ def render_html(rows, roadmap, controls, enforced_union):
     out.append('        <div class="tablewrap">')
     out.append('          <table class="dtable">')
     out.append('            <thead><tr><th>Rule</th><th>Corpus ID</th><th>Status</th>'
-               '<th>How enforced or intended</th></tr></thead>')
+               '<th>{}</th></tr></thead>'.format(_t(COLUMN_HEADING)))
     out.append('            <tbody>')
     for cid, title, _fm in rows:
         row = roadmap[cid]
@@ -522,7 +528,7 @@ def render_html(rows, roadmap, controls, enforced_union):
         elif status == "pending":
             how = _t(row["description"])
         else:
-            how = "Enforcement has not been built yet."
+            how = NO_CONTROL_TEXT
         out.append('            <tr id="rule-{cid}"><td>{title}</td><td><code>{cid}</code></td>'
                    '<td>{status}</td><td>{how}</td></tr>'.format(
                        cid=_a(cid), title=_t(title), status=_t(_status_label(row, controls)), how=how))
@@ -660,8 +666,8 @@ def _page_content(html_inner):
         '  <p class="eyebrow">Enforcement register</p>',
         '  <h1>Guardrail Enforcement Register</h1>',
         '  <p class="lead">Which rules have a shipped mechanical control linked to them, and which do not yet.',
-        '    This page is generated from the enforceability ledger, so what it claims about linkage is always',
-        '    what the pack actually ships.</p>',
+        '    This page is generated from the enforceability ledger, so its linkage claims match the controls',
+        '    declared in the pack\'s gates and hooks manifests when the page was generated.</p>',
         '</div>',
         "",
         '<section id="register">',
@@ -1012,6 +1018,8 @@ def self_test_main():
                 return run(root, check)
             except SystemExit as exc:
                 return "raised SystemExit({!r})".format(exc.code)
+            except Exception as exc:  # noqa: BLE001  an escaped exception is a failure, not a crash
+                return "raised {}".format(type(exc).__name__)
 
     def replace_in(path, old, new):
         text = path.read_text(encoding="utf-8")
@@ -1041,7 +1049,7 @@ def self_test_main():
             body = md.read_text(encoding="utf-8")
             for token in ("| Gate-linked (class a) | 2 |", "| Gate-linked (class c only) | 0 |",
                           "| Hook-linked | 1 |", "| Pending | 1 |", "| No control | 1 |", "`gate:gate-alpha`",
-                          "`hook:hook-one`", "Enforcement has not been built yet.",
+                          "`hook:hook-one`", NO_CONTROL_TEXT,
                           "### `gate:gate-alpha`", RESIDUAL_HEADING,
                           "Class letters:", _ALPHA_RESIDUE, _HOOK_RESIDUE):
                 if token not in body:
@@ -1092,6 +1100,22 @@ def self_test_main():
         # the page head band are present, not just the register block.
         if "Enforced" in html_page or "enforced," in html_page:
             failures.append("conformant tree: the page must not label any rule enforced")
+        # Neither view calls a linked control "enforcement" in the column heading or the no-control cell,
+        # the explainer says no status means enforced in unambiguous words and gives the class a criterion
+        # the rubric uses (totality, not determinism), and the page lead claims only what its inputs declare.
+        md_body = (good / MD_REL).read_text(encoding="utf-8") if (good / MD_REL).is_file() else ""
+        for view_name, view in (("ENFORCEMENT.md", md_body), ("the generated page", html_page)):
+            for banned in ("How enforced", "Enforcement has not been built", "no status here means",
+                           "deterministic check over what it examines"):
+                if banned in view:
+                    failures.append("conformant tree: {} still carries {!r}".format(view_name, banned))
+            for wanted in (COLUMN_HEADING, NO_CONTROL_TEXT, "none of the statuses means a rule is enforced",
+                           "class a when at least one of those gates is total for what it examines"):
+                if wanted not in view:
+                    failures.append("conformant tree: {!r} missing from {}".format(wanted, view_name))
+        if "always" in _page_content("") or "declared in the pack" not in _page_content(""):
+            failures.append("conformant tree: the page lead must scope its linkage claim to the declared "
+                            "inputs, with no unconditional 'always'")
         for token in ("<td>Gate-linked (class a)</td>", "<td>Hook-linked</td>", "<td>No control</td>",
                       "Gate-linked (class c only): <strong>0</strong>"):
             if token not in html_page:
@@ -1326,6 +1350,14 @@ def self_test_main():
                     t / ROADMAP,
                     'description = "A self-test intended build for the apex rule."',
                     'description = "   "'))
+        # (y) A published preview hook that does not parse fails closed with exit 2 through the reused
+        #     ledger build, rather than escaping as an uncaught SyntaxError (which --check would report as
+        #     exit 1, the drift code).
+        expect2("preview-syntax-error",
+                lambda t: ((t / ".preview").mkdir(),
+                           (t / ".preview" / "p-bad.py").write_text("def (:\n", encoding="utf-8"),
+                           (t / gen_enforceability.PREVIEW_DECL_REL).write_text(
+                               '[[preview]]\nid = "p-bad"\nrules = []\n', encoding="utf-8")))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1347,7 +1379,9 @@ def self_test_main():
           "description or carrying a mechanism or carrying only whitespace, a NEWLINE in a table-cell "
           "description, an unsupported lint: reference, a stale committed ledger, an en dash or a raw tab "
           "in a residue, a boolean roadmap version, a site shell missing its content token, and an "
-          "invalid-UTF-8 generated Markdown or HTML target all fail closed (exit 2)")
+          "invalid-UTF-8 generated Markdown or HTML target, and a published preview hook that does not "
+          "parse all fail closed (exit 2); neither view calls a linked control enforcement, and the page "
+          "lead scopes its linkage claim to the declared inputs")
     return 0
 
 
