@@ -2894,7 +2894,7 @@ source-path = ".aiqt/core/rules/security-seci-fail-closed.md"
 start-line = 14
 end-line = 16
 canonical-text = "An exception or error in an authentication, authorization, validation, or cryptographic check leaves the\nsystem in the deny or otherwise safe state. A failed, unavailable, or unreadable check is treated as not\npassed, never as a default-allow."
-source-digest = "adefdcd28958c72fe97e95352977fcd77a21d00960a22ab8fcba1d2b81ce24de"
+source-digest = "8ccb6d94b1cbde7ad35c87f5d3862b7408c5869982feac3d8ff8329278bf036b"
 
 [[clause]]
 clause-id = "secfcl.2"
@@ -2902,8 +2902,8 @@ corpus-id = "secfcl"
 source-path = ".aiqt/core/rules/security-seci-fail-closed.md"
 start-line = 18
 end-line = 23
-canonical-text = "Catching exceptions does not make such a check fail closed over code it loads into its own process: that\ncode can also end the process with any status, replace the machinery the check reports through, or fault\noutside any handler during formatting, cleanup, background work, or shutdown. Unless that code is reviewed\nand pinned with the check, it runs in a separate process whose verdict is read under the gate-discipline\nrule, or it stays in process only with each such channel recorded as covered, unreachable, or disclosed, and\na channel that can turn a fault into a pass is never left merely disclosed."
-source-digest = "adefdcd28958c72fe97e95352977fcd77a21d00960a22ab8fcba1d2b81ce24de"
+canonical-text = "Code such a check loads into its own process can, beyond raising, exit with any status, fault outside any\nhandler (formatting its errors, cleanup, background work, shutdown), or replace the check's reporting\nmachinery. It runs in a child process whose verdict it cannot produce by exiting early or faulting after it\n(a complete structured result and a clean finish, any later fault failing it), or in process with each\nchannel covered, unreachable, or disclosed under the gate-discipline rule, a fault-to-pass channel never\nmerely disclosed. Review and pinning with the check exempt only the last channel."
+source-digest = "8ccb6d94b1cbde7ad35c87f5d3862b7408c5869982feac3d8ff8329278bf036b"
 
 [[clause]]
 clause-id = "secupl.1"

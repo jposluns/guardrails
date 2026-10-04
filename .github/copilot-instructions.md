@@ -1189,12 +1189,12 @@ An exception or error in an authentication, authorization, validation, or crypto
 system in the deny or otherwise safe state. A failed, unavailable, or unreadable check is treated as not
 passed, never as a default-allow.
 
-Catching exceptions does not make such a check fail closed over code it loads into its own process: that
-code can also end the process with any status, replace the machinery the check reports through, or fault
-outside any handler during formatting, cleanup, background work, or shutdown. Unless that code is reviewed
-and pinned with the check, it runs in a separate process whose verdict is read under the gate-discipline
-rule, or it stays in process only with each such channel recorded as covered, unreachable, or disclosed, and
-a channel that can turn a fault into a pass is never left merely disclosed.
+Code such a check loads into its own process can, beyond raising, exit with any status, fault outside any
+handler (formatting its errors, cleanup, background work, shutdown), or replace the check's reporting
+machinery. It runs in a child process whose verdict it cannot produce by exiting early or faulting after it
+(a complete structured result and a clean finish, any later fault failing it), or in process with each
+channel covered, unreachable, or disclosed under the gate-discipline rule, a fault-to-pass channel never
+merely disclosed. Review and pinning with the check exempt only the last channel.
 
 ## Validate federated identity and token flows
 
