@@ -987,11 +987,12 @@ def _remove_journal_dirs(root_fd, created):
     longer empty (a transaction record, a retained or concurrent run's lock) stays in place. A directory
     the walk cannot reach (an ancestor it cannot open, such as one created with mode 000 under a 0777
     umask) or cannot remove never ends the sweep: every shallower one is still attempted, since an empty
-    ancestor is removable through its own parent. Returns what stays, each with its reason (a removal whose
-    parent fsync failed included, as possibly not durable), omitting anything beneath a directory this
-    sweep removed and fsynced or found absent (an rmdir succeeds only on an empty directory); [] when the
-    tree is as found."""
+    ancestor is removable through its own parent. Returns (stays, unconfirmed): what stays, each with its
+    reason, omitting anything beneath a directory this sweep removed or found absent (an rmdir succeeds
+    only on an empty directory); and what it removed whose parent fsync then failed, so the removal may
+    not be durable. ([], []) when the tree is as found."""
     left = []
+    unconfirmed = []
     gone = []
     for rel in reversed(created):
         try:
@@ -1010,17 +1011,49 @@ def _remove_journal_dirs(root_fd, created):
             except OSError as exc:
                 left.append((rel, "not removed: {}".format(exc)))
                 continue
+            gone.append(rel)
             try:
                 os.fsync(pfd)
             except OSError as exc:
-                left.append((rel, "removed, but the removal may not be durable: its parent fsync "
-                                  "failed: {}".format(exc)))
-                continue
-            gone.append(rel)
+                unconfirmed.append("{} (parent fsync failed: {})".format(rel, exc))
         finally:
             _journal._close_fd_quietly(pfd)
-    return ["{} ({})".format(rel, why) for rel, why in left
-            if not any(rel.startswith(g + "/") for g in gone)]
+    return (["{} ({})".format(rel, why) for rel, why in left
+             if not any(rel.startswith(g + "/") for g in gone)], unconfirmed)
+
+
+def _failed_lock_state(jr_fd, journal_root):
+    """What an acquire_lock that failed with an OSError left, read beneath the held journal descriptor, so
+    the refusal reports it precisely: acquire_lock creates the lock BEFORE it writes and synchronizes it,
+    so such a failure can leave this run's own lock. That lock is released again (ownership-checked, as
+    every refusal under the lock releases it) and what stays, or a release whose durability is
+    unconfirmed, is named. A lock this run cannot attribute to itself (another run's, or an unreadable
+    one) is never touched."""
+    try:
+        owner = _journal.read_lock_owner_at(jr_fd)
+    except (_journal.JournalError, OSError) as exc:
+        return ("a journal lock is present but unreadable ({}), possibly this run's own unfinished write; it "
+                "is never blind-removed, so the next run and reconcile() both refuse on it".format(exc))
+    if owner is None:
+        return "this run left no journal lock"
+    if not _journal._owner_is_current(owner):
+        return "the journal lock present is another run's (pid {}), not this run's".format(owner.get("pid"))
+    failed = None
+    try:
+        _journal.release_lock(journal_root)
+    except (_journal.JournalError, OSError) as exc:
+        failed = exc
+    try:
+        released = _journal.read_lock_owner_at(jr_fd) is None
+    except (_journal.JournalError, OSError):
+        released = False
+    if released and failed is None:
+        return "this run's own journal lock WAS created, then released again"
+    if released:
+        return ("this run's own journal lock WAS created, then released again, but the release may not be "
+                "durable ({})".format(failed))
+    return ("this run's own journal lock WAS created and STAYS ({}): the next run refuses on it, and "
+            "reconcile() breaks it once this process has exited".format(failed or "its release left it"))
 
 
 def run_adopt_transaction(product_root, run_id, compose, phase=None):
@@ -1033,8 +1066,10 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     against the live tree, the derived inventory seals it, and check_apply_ops re-proves every invariant;
     a refusal there releases the lock and removes the journal directories this run created
     (_remove_journal_dirs), so it leaves the tree as it found it; a directory that cleanup cannot remove
-    (disclosed: one a concurrent run has populated meanwhile stays) turns the refusal into one that names
-    every directory left behind, never a silent "nothing written". Disclosed too: a concurrent run that
+    (disclosed: one a concurrent run has populated meanwhile stays), or whose removal may not be durable,
+    turns the refusal into one that names each such directory, never a silent "nothing written", and
+    leaves it to the reconcile-first discipline rather than to hand removal. A lock failure past the
+    lock's creation names what it left (_failed_lock_state). Disclosed too: a concurrent run that
     prepared the journal but has not yet taken its lock can find the directory removed by that cleanup,
     and then refuses at the lock. A failure that may have left the transaction open RETAINS the lock (and
     the journal) so every later run refuses into reconcile().
@@ -1082,9 +1117,12 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         try:
             try:
                 _journal.acquire_lock(journal_root, SESSION_ID)
-            except (_journal.JournalError, OSError) as exc:
+            except _journal.JournalError as exc:   # the O_EXCL create refused: the lock was never this run's
                 raise AdoptApplyError("cannot take the adoption journal lock ({}); nothing "
                                       "written (fail-closed)".format(exc))
+            except OSError as exc:
+                raise AdoptApplyError("cannot take the adoption journal lock ({}); {} (fail-closed)".format(
+                    exc, _failed_lock_state(jr_fd, journal_root)))
             held = True
             ops = _compose_checked(root_fd, run_id, phase, compose)
             staged = dict(ops.staged)
@@ -1133,13 +1171,22 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     finally:
         if jr_fd is not None:
             _journal._close_fd_quietly(jr_fd)
-        left = []
+        left, unconfirmed = [], []
         if created and not (done or retain):
-            left = _remove_journal_dirs(root_fd, created)
+            left, unconfirmed = _remove_journal_dirs(root_fd, created)
         store._close_fd_exc_safe(root_fd)
-        if left and not entered:
-            note = ("the refusal's cleanup is INCOMPLETE, so this run DID leave journal directories it "
-                    "created behind: {}; inspect and remove them (fail-closed)".format("; ".join(left)))
+        if (left or unconfirmed) and not entered:
+            said = []
+            if left:
+                said.append("the refusal's cleanup is INCOMPLETE: journal directories this run created STAY: "
+                            "{}".format("; ".join(left)))
+            if unconfirmed:
+                said.append("the refusal's cleanup is UNCONFIRMED: journal directories this run created were "
+                            "removed, but the removal may not be durable: {}".format("; ".join(unconfirmed)))
+            note = ("{}. They are left to the reconcile-first discipline, never to hand removal: a later run "
+                    "inspects the adoption journal before it writes, reuses an empty journal directory, and "
+                    "refuses into reconcile() on a held lock or an open transaction there "
+                    "(fail-closed)".format("; ".join(said)))
             if failure is not None and not isinstance(failure, Exception):
                 failure.add_note(note)    # an interrupt still propagates as itself, with the leftovers named
             else:
@@ -3639,7 +3686,9 @@ def _self_test_checks():
             os.chmod(root / ".aiqt", 0o700)
         shutil.rmtree(root / ".aiqt", ignore_errors=True)
         # a directory the cleanup cannot remove (populated meanwhile) is named in the refusal, with every
-        # ancestor it keeps, never a bare "nothing written" (red against a cleanup that reports nothing).
+        # ancestor it keeps, never a bare "nothing written" (red against a cleanup that reports nothing),
+        # and left to the reconcile-first discipline, never to hand removal (red against a refusal that
+        # directs the operator to remove what may hold a concurrent run's lock).
 
         def populated_journal(root_fd, journal_rel):
             os.makedirs(root / journal_rel)
@@ -3651,9 +3700,11 @@ def _self_test_checks():
         check("driver-apply-incomplete-cleanup-named", "cannot prepare" in (err or "")
               and "cleanup is INCOMPLETE" in (err or "")
               and all("{} (not removed".format(r) in (err or "") for r in rels)
-              and (root / JOURNAL_REL / "stray").is_file())
+              and "remove them" not in (err or "") and "never to hand removal" in (err or "")
+              and "reconcile()" in (err or "") and (root / JOURNAL_REL / "stray").is_file())
         shutil.rmtree(root / ".aiqt", ignore_errors=True)
-        # a removal whose parent fsync fails is reported as possibly not durable, never as clean.
+        # a removal whose parent fsync fails is reported as possibly not durable, never as clean, and never
+        # as a directory that stays (red against a refusal that calls it a leftover).
         real_fsync = os.fsync
 
         def fsync_failing(fd):
@@ -3664,7 +3715,8 @@ def _self_test_checks():
                 mock.patch.object(os, "fsync", fsync_failing):
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-cleanup-fsync-failure-named", "cannot prepare" in (err or "")
-              and "may not be durable" in (err or "") and _snapshot(root) == before)
+              and "may not be durable" in (err or "") and "cleanup is UNCONFIRMED" in (err or "")
+              and "INCOMPLETE" not in (err or "") and "STAY" not in (err or "") and _snapshot(root) == before)
         shutil.rmtree(root / ".aiqt", ignore_errors=True)
         # a lock-file failure other than a held lock (here the journal directory vanishing under a peer's
         # cleanup) is the named lock refusal, not a raw OSError past the driver.
@@ -3674,7 +3726,52 @@ def _self_test_checks():
         with landed(composing), mock.patch.object(_journal, "acquire_lock", vanishing_lock):
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-lock-oserror-named-refusal", "cannot take the adoption journal lock" in (err or "")
-              and _snapshot(root) == before)
+              and "left no journal lock" in (err or "") and _snapshot(root) == before)
+        shutil.rmtree(root / ".aiqt", ignore_errors=True)
+        # a lock failure PAST the lock's creation, with the journal directories predating the run (so no
+        # directory cleanup runs), names what it left: this run's own lock released again, a release whose
+        # durability is unconfirmed, a lock that stays, or an unreadable lock left in place; never "nothing
+        # written" over a lock left behind (each red against a refusal that neither releases nor names it).
+        os.makedirs(root / JOURNAL_REL)
+        prior = _snapshot(root)
+        lock_path = root / JOURNAL_REL / "lock"
+        real_fsync_dir = _journal._fsync_path_dir
+        real_write_all = _journal._write_all
+        faults = []
+
+        def failing(real, times):
+            def faulty(*args):
+                if len(faults) < times:
+                    faults.append(args)
+                    raise OSError("an injected lock fault")
+                return real(*args)
+            return faulty
+        with landed(composing), mock.patch.object(_journal, "_fsync_path_dir", failing(real_fsync_dir, 1)):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-lock-sync-failure-released", "cannot take the adoption journal lock" in (err or "")
+              and "WAS created, then released again" in (err or "") and "may not be durable" not in (err or "")
+              and "nothing written" not in (err or "") and _snapshot(root) == prior)
+        del faults[:]
+        with landed(composing), mock.patch.object(_journal, "_fsync_path_dir", failing(real_fsync_dir, 2)):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-lock-release-unconfirmed-named", "released again, but the release may not be "
+              "durable" in (err or "") and "nothing written" not in (err or "") and _snapshot(root) == prior)
+        del faults[:]
+        with landed(composing), mock.patch.object(_journal, "_fsync_path_dir", failing(real_fsync_dir, 1)), \
+                mock.patch.object(_journal, "release_lock", lambda journal_root: None):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        stayed = lock_path.is_file()
+        with landed(composing):
+            later = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-lock-left-named", "WAS created and STAYS" in (err or "")
+              and "nothing written" not in (err or "") and stayed and "lock is held" in (later or ""))
+        if os.path.lexists(lock_path):
+            os.unlink(lock_path)
+        del faults[:]
+        with landed(composing), mock.patch.object(_journal, "_write_all", failing(real_write_all, 1)):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-lock-unreadable-named", "present but unreadable" in (err or "")
+              and "nothing written" not in (err or "") and lock_path.is_file())
         shutil.rmtree(root / ".aiqt", ignore_errors=True)
         del seen[:]
         (root / "keep.md").write_bytes(b"kept, then edited\n")
