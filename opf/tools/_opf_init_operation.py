@@ -2641,7 +2641,8 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
     empty machine home an archived occupying file leaves; empty or None for a plain init);
     `operation_id` is a caller-minted operation id, bound by the coupled adoption's durable
     intent, and its plan records the coupled recovery policy, so such an operation is NEVER
-    resumed (its adoption transaction reverses a partial one). A plain RESUME must carry the SAME
+    resumed (its adoption transaction reverses a partial one); `admitted` and `admitted_dirs`
+    are REFUSED without it (they are the coupled seam's bindings, never a plain init's). A plain RESUME must carry the SAME
     ancestral, admitted and operation_id bindings its recorded plan carries, else it refuses
     (_resume_binding_or_refuse)."""
     result = InitResult()
@@ -2659,6 +2660,11 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
                                          or not _OP_ID_RE.match(operation_id)):
             raise InitOperationError("operation_id {!r} is not a well-formed operation "
                                      "id".format(operation_id))
+        if (admitted or admitted_dirs) and operation_id is None:
+            raise InitOperationError("admitted and admitted_dirs are the coupled-adoption "
+                                     "seam's bindings; they are accepted only with the coupled "
+                                     "adoption's caller-minted operation_id, never by a plain "
+                                     "init (nothing written)")
         _journal.require_containment()
         if not _containment.probe():
             raise InitOperationError("race-free containment primitive absent", CANNOT_EVALUATE)
@@ -3327,6 +3333,20 @@ def _seam_tests(base, env, ok):
     ok("SEAM-empty-admitted-is-plain", res.status == REFUSED
        and "already exists" in res.primary_failure["detail"] and _tree_snapshot(root) == before)
 
+    def oid(n):
+        # a fixed well-formed caller-minted operation id per seam fixture (the coupled
+        # adoption's binding; the seam refuses admitted/admitted_dirs without one)
+        return "%08x-c0de-4ead-8ead-%012x" % (n, n)
+
+    # The seam's bindings are coupled-only: admitted (and admitted_dirs, below) refuses
+    # without the caller-minted operation id, with nothing written.
+    res = run_init_operation(root, admitted=(
+        dict(path=".working/notes.md", mode=0o644, size=8,
+             digest="sha256:" + "0" * 64),))
+    ok("SEAM-admitted-without-operation-id-refused", res.status == REFUSED
+       and "caller-minted operation_id" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
+
     def admit_fixture(name, payload=b"frozen source\n"):
         root = _plain_repo(os.path.join(d, name), env)
         rel = os.path.join(".working", "notes", "frozen.md")
@@ -3338,7 +3358,7 @@ def _seam_tests(base, env, ok):
 
     # The seam accepts EXACTLY the admitted inventory and preserves it byte-exact through the run.
     root, adm, payload = admit_fixture("admit")
-    res = run_init_operation(root, admitted=adm)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(1))
     with open(os.path.join(root, ".working/notes/frozen.md"), "rb") as fh:
         live = fh.read()
     ok("SEAM-admitted-accepted", res.status == VIEWS_READY and live == payload
@@ -3349,7 +3369,7 @@ def _seam_tests(base, env, ok):
     root, adm, payload = admit_fixture("drift")
     _write(os.path.join(root, ".working", "notes", "frozen.md"), payload[:-2] + b"X\n")
     before = _tree_snapshot(root)
-    res = run_init_operation(root, admitted=adm)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(2))
     ok("SEAM-admitted-drift-refused", res.status == REFUSED
        and "never adopted" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
@@ -3358,13 +3378,13 @@ def _seam_tests(base, env, ok):
     root, adm, payload = admit_fixture("extra")
     _write(os.path.join(root, ".working", "stray.md"), b"stray\n")
     before = _tree_snapshot(root)
-    res = run_init_operation(root, admitted=adm)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(3))
     ok("SEAM-extra-beside-admitted-refused", res.status == REFUSED
        and "not exactly the admitted inventory" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
     root, adm, payload = admit_fixture("missing")
     os.unlink(os.path.join(root, ".working", "notes", "frozen.md"))
-    res = run_init_operation(root, admitted=adm)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(4))
     ok("SEAM-admitted-missing-refused", res.status == REFUSED
        and "not exactly the admitted inventory" in res.primary_failure["detail"]
        and sub_ops(root) == [], str(res.primary_failure))
@@ -3375,11 +3395,12 @@ def _seam_tests(base, env, ok):
               os.path.join(root, ".working", "TODO.md"))
     os.rmdir(os.path.join(root, ".working", "notes"))
     occ = (dict(adm[0], path=".working/TODO.md"),)
-    res = run_init_operation(root, admitted=occ)
+    res = run_init_operation(root, admitted=occ, operation_id=oid(5))
     ok("SEAM-admitted-occupying-destination-refused", res.status == REFUSED
        and "occupy planned destinations" in res.primary_failure["detail"]
        and sub_ops(root) == [], str(res.primary_failure))
-    res = run_init_operation(root, admitted=(dict(adm[0], path=".working/toml/x.md"),))
+    res = run_init_operation(root, admitted=(dict(adm[0], path=".working/toml/x.md"),),
+                             operation_id=oid(6))
     ok("SEAM-admitted-machine-home-refused", res.status == REFUSED
        and "machine store home" in res.primary_failure["detail"], str(res.primary_failure))
 
@@ -3424,7 +3445,7 @@ def _seam_tests(base, env, ok):
     ok("SEAM-partial-refuses-other-operation-id", res.status == REFUSED
        and "never adopts another operation's history" in res.primary_failure["detail"],
        str(res.primary_failure))
-    res = run_init_operation(root, recover=True, admitted=(
+    res = run_init_operation(root, recover=True, operation_id=partial[0], admitted=(
         {"path": ".working/notes/frozen.md", "mode": 0o644, "size": 1,
          "digest": "sha256:" + "2" * 64},))
     ok("SEAM-partial-refuses-changed-admitted", res.status == REFUSED
@@ -3464,7 +3485,7 @@ def _seam_tests(base, env, ok):
     root, adm, payload = admit_fixture("worldwrite")
     os.chmod(os.path.join(root, ".working"), 0o777)
     before = _tree_snapshot(root)
-    res = run_init_operation(root, admitted=adm)
+    res = run_init_operation(root, admitted=adm, operation_id=oid(7))
     ok("SEAM-world-writable-working-refused", res.status == REFUSED
        and "writable" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
@@ -3481,12 +3502,17 @@ def _seam_tests(base, env, ok):
     ok("SEAM-plain-empty-machine-dir-refused", res.status == REFUSED
        and "already exists" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
-    res = run_init_operation(root, admitted_dirs=(_MACHINE_HOME,))
+    res = run_init_operation(root, admitted_dirs=(_MACHINE_HOME,), operation_id=oid(8))
     ok("SEAM-admitted-dirs-closure-refused", res.status == REFUSED
        and ".working ancestor" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before, str(res.primary_failure))
+    res = run_init_operation(root, admitted_dirs=(_opf_store.WORKING_DIRNAME, _MACHINE_HOME))
+    ok("SEAM-admitted-dirs-without-operation-id-refused", res.status == REFUSED
+       and "caller-minted operation_id" in res.primary_failure["detail"]
+       and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
     res = run_init_operation(root,
-                             admitted_dirs=(_opf_store.WORKING_DIRNAME, _MACHINE_HOME))
+                             admitted_dirs=(_opf_store.WORKING_DIRNAME, _MACHINE_HOME),
+                             operation_id=oid(9))
     ok("SEAM-admitted-dirs-accepted", res.status == VIEWS_READY
        and _opf_store.resolve_store(root).status == _opf_store.RESOLVED
        and len(sub_ops(root)) == 1, str(res.primary_failure))
@@ -3496,7 +3522,8 @@ def _seam_tests(base, env, ok):
     os.chmod(os.path.join(root, _MACHINE_HOME), 0o700)
     before = _tree_snapshot(root)
     res = run_init_operation(root,
-                             admitted_dirs=(_opf_store.WORKING_DIRNAME, _MACHINE_HOME))
+                             admitted_dirs=(_opf_store.WORKING_DIRNAME, _MACHINE_HOME),
+                             operation_id=oid(10))
     ok("SEAM-admitted-dir-wrong-mode-refused", res.status == REFUSED
        and "preserved as found" in res.primary_failure["detail"]
        and _tree_snapshot(root) == before and sub_ops(root) == [], str(res.primary_failure))
