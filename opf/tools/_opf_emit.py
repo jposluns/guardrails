@@ -2004,7 +2004,8 @@ class _FixtureProcess:
                     # the restore below, so close() never treats a reaped
                     # number as an uncollected guardian. The exit itself is
                     # awaited first WITHOUT reaping and unmasked, so a
-                    # cancellation can still interrupt that wait.
+                    # cancellation can still interrupt that wait. The reap is a
+                    # WNOHANG poll (QA18 claude m2): a 0 result is an unexpected PID.
                     try:
                         os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOWAIT)
                     except OSError as exc:
@@ -2013,7 +2014,7 @@ class _FixtureProcess:
                     prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
                     try:
                         _fixture_mask_cancellation()
-                        waited, raw = _fixture_wait(self.pid, 0)
+                        waited, raw = _fixture_wait(self.pid, os.WNOHANG)
                         if waited == self.pid:
                             self.collected = True
                     finally:

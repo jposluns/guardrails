@@ -3167,19 +3167,27 @@ def _self_test_runtime_escape_probe(tmp):
     writers write only into the sibling `late` directory (_RUNTIME_LATE_HOLD), and the case waits, for at
     most _RUNTIME_LATE_BOUND seconds, until each has exited (a writer of its own with a 1 s life included)
     before its directory can be removed: a writer still running then, a writer without its late write,
-    a fixture kind with no late write, or a late write in the probed directory is a discrepancy. The
-    modules are files run as children; nothing is passed to exec or eval. Returns a list of the
-    discrepancies."""
+    a fixture kind with no late write, or a late write in the probed directory is a discrepancy. The case's
+    own writer is its own child, so it alone may be signalled: if it outlives the same bound it is killed
+    and reaped, within a further short bound, and that is a discrepancy too. The case OWNS `tmp` (the
+    caller makes it with tempfile.mkdtemp, never a TemporaryDirectory): it removes `tmp` only once no
+    writer holds its LIVE lock, and otherwise leaves it in place, named in a discrepancy, so no late write
+    can race its removal. The modules are files run as children; nothing is passed to exec or eval.
+    Returns a list of the discrepancies."""
     import fcntl
+    import shutil
     import subprocess
+    import time
 
     late = Path(tmp, "tree", "opf", "late")
     os.makedirs(str(late))
+    reaped, live = [], None   # `live`: the marks held once the waits are over (None: never established)
     try:
         faults = _runtime_escape_cases(tmp)
     finally:
         # A writer of the same shape with a known 1 s life pins the wait itself: without the wait, the
         # checks below find it still holding its LIVE lock and its late write absent.
+        deadline = time.monotonic() + _RUNTIME_LATE_BOUND
         hold = os.open(str(late / "LIVE-own"), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         try:
             fcntl.flock(hold, fcntl.LOCK_EX)
@@ -3189,13 +3197,33 @@ def _self_test_runtime_escape_probe(tmp):
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         finally:
             os.close(hold)
-        held = _runtime_late_wait(late, _RUNTIME_LATE_BOUND)
-        names = os.listdir(str(late))   # before own.wait(), so only the wait can let `own` finish first
-        own.wait()
+        try:
+            held = _runtime_late_wait(late, _RUNTIME_LATE_BOUND)
+            names = os.listdir(str(late))   # before `own` is reaped, so only the wait can let it finish first
+            try:
+                own.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                own.kill()   # this case's own child (D-385-CURRENT-CHILD forbids only the escaped writers)
+                try:
+                    own.wait(timeout=5)
+                    reaped.append("the case's own writer was still running {} s after the probe, so it was "
+                                  "killed and reaped".format(_RUNTIME_LATE_BOUND))
+                except subprocess.TimeoutExpired:
+                    reaped.append("the case's own writer was still running {} s after the probe and was not "
+                                  "reaped within 5 s of its kill".format(_RUNTIME_LATE_BOUND))
+            landed = sorted(name for name in os.listdir(str(Path(tmp, "tree", "opf", "tools")))
+                            if name.startswith("LATE-"))
+            live = _runtime_late_wait(late, 0)
+        finally:
+            if live == []:
+                shutil.rmtree(tmp)
+    faults += reaped
     if held:
-        faults.append("{} escaped fixture writer(s) still running {} s after the probe (LIVE-{}), so the fixture "
-                      "directory would be removed under them".format(len(held), _RUNTIME_LATE_BOUND,
-                                                                     ", LIVE-".join(held[:4])))
+        faults.append("{} escaped fixture writer(s) still running {} s after the probe (LIVE-{})".format(
+            len(held), _RUNTIME_LATE_BOUND, ", LIVE-".join(held[:4])))
+    if live:
+        faults.append("writer(s) LIVE-{} may still write, so the fixture directory {} is left in place, not "
+                      "removed under them".format(", LIVE-".join(live[:4]), tmp))
     done = {name.split("-")[2]: name.split("-")[1] for name in names
             if name.startswith("LATE-") and name.count("-") == 2}
     unwritten = sorted(name[len("LIVE-"):] for name in names
@@ -3207,7 +3235,6 @@ def _self_test_runtime_escape_probe(tmp):
     if missing:
         faults.append("no late write from {} reached {}, so the wait did not cover that writer".format(
             ", ".join(missing), late))
-    landed = sorted(name for name in os.listdir(str(Path(tmp, "tree", "opf", "tools"))) if name.startswith("LATE-"))
     if landed:
         faults.append("an escaped writer's late write landed in the probed fixture directory ({})".format(
             ", ".join(landed[:4])))
@@ -3217,7 +3244,7 @@ def _self_test_runtime_escape_probe(tmp):
 def _runtime_late_wait(late, bound):
     """Poll, for at most `bound` seconds, until no LIVE-<mark> file in `late` is still locked by an escaped
     writer (_RUNTIME_LATE_HOLD); the lock is released only when the last holder exits. Returns the marks
-    still held when the bound ran out."""
+    still held when the bound ran out (a bound of 0 polls once)."""
     import fcntl
     import time
     deadline = time.monotonic() + bound
@@ -3433,8 +3460,9 @@ def _aggregator_self_test():
         missed += _self_test_dispatch_escape_probe(tmp)
     with tempfile.TemporaryDirectory(prefix="opf-entry-runtime-") as tmp:
         missed += _self_test_runtime_probe(here, tmp)
-    with tempfile.TemporaryDirectory(prefix="opf-entry-runtime-escape-") as tmp:
-        missed += _self_test_runtime_escape_probe(tmp)
+    # The escape probe owns its directory and removes it only once no escaped writer can still write
+    # into it; a TemporaryDirectory would remove it under a writer that outlived the probe's bound.
+    missed += _self_test_runtime_escape_probe(tempfile.mkdtemp(prefix="opf-entry-runtime-escape-"))
     if gaps or faults or missed:
         print("opf aggregator self-test: FAIL (self_test modules without the canonical `--self-test` entry: {}; "
               "registry floor faults: {}; synthetic probe discrepancies: {})".format(
@@ -6048,10 +6076,17 @@ def _watchdog_completion_case(mode):
         starting.deadline = time.monotonic() + 5
         starting.subject = lambda: None
         starting.pid, starting.collected = failed, False
+        # With the mask restore dropped the SIGINT stays pending and _start runs on to its report read: a
+        # no-op here, so that mutant fails on the lost-interrupt assertion below.
+        starting._read_report = lambda raw: None
         starting.control, starting.peer = socket.socketpair()
         real_fixture_wait = emit._fixture_wait
 
         def interrupting_wait(pid, flags):
+            # QA18 claude m2: the masked reap must be a WNOHANG poll; a blocking one could hang with
+            # SIGINT and SIGTERM masked if the number were reaped and reused between it and the waitid.
+            if pid == failed and not flags & os.WNOHANG:
+                raise AssertionError("the masked startup reap is a blocking wait (no os.WNOHANG)")
             waited, raw = real_fixture_wait(pid, flags)
             if waited == failed:
                 signal.raise_signal(signal.SIGINT)
@@ -6066,6 +6101,8 @@ def _watchdog_completion_case(mode):
                     starting._start()
             except KeyboardInterrupt:
                 pass
+            except emit.ChildStatusUnavailable as exc:
+                raise AssertionError("the interrupt raised inside the startup reap was lost ({})".format(exc))
             else:
                 raise AssertionError("the interrupt raised inside the startup reap was lost")
             finally:
