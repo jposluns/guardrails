@@ -132,6 +132,7 @@ JOURNAL_REL = ".aiqt/adopt/journal"
 PLAN_V2_FORMAT = "opf.adoption.plan/v2"
 DIR_MODE = 0o755
 FILE_MODE = 0o644
+ARCHIVE_MODE_MASK = 0o755    # an archive copy keeps its source's mode bits under this mask (never widened)
 _NONCE_RE = re.compile(r"^[0-9a-f]{16}\Z")
 # The store-tree control homes this engine may create beneath and never rewrite (spec 4.2, 14.2); which of
 # their paths take a create is the shared protected-destination predicate's.
@@ -579,8 +580,13 @@ class ApplyOps:
                                   "with its own approval is the remedy (spec 14.2)".format(source_path))
         # the copy carries the SOURCE's own mode, not the default create mode: an adopter file
         # narrowed to owner-only (a registration overlay can carry secrets) must not widen to
-        # world-readable in the tracked archive home (spec 4.2 keeps that home tracked).
-        self.create(archive_rel(self.run_id, source_path), data, mode=stat.S_IMODE(fst.st_mode))
+        # world-readable in the tracked archive home (spec 4.2 keeps that home tracked). The mask
+        # only narrows: a group- or world-writable or setuid/setgid/sticky source never yields such
+        # a copy. Mode protects local readers only: git records 644 or 755, so once the archive is
+        # committed the copy's mode is not preserved, and a source kept untracked only by an anchored
+        # ignore rule (such as /.claude/) is copied into the tracked archive home, a disclosed residual.
+        self.create(archive_rel(self.run_id, source_path), data,
+                    mode=stat.S_IMODE(fst.st_mode) & ARCHIVE_MODE_MASK)
         return data, stat.S_IMODE(fst.st_mode)
 
     def archive_occupying(self, source_path, plan_digest):
@@ -1033,7 +1039,9 @@ def _compose_enable_hook(op_row, ops):
     the threat model). The registration path must name a supported v1 registration target (the merge
     core's closed REGISTRATION_PATHS allowlist: PATH identity selects the platform, decided BEFORE any
     read, so an unsupported platform or a non-settings file refuses with nothing read and nothing
-    written, however settings-shaped its content). The registration file must then be present, regular,
+    written, however settings-shaped its content). The plugin_entry must match the pack-member grammar
+    dispatch already validated, re-proved here because OP_HANDLERS is a public table and a direct
+    caller skips dispatch. The registration file must then be present, regular,
     contained and hash to the row's
     old_digest: drift refuses into a fresh plan, never a merge over unknown content (threat 3).
     merge_registration computes the merged bytes and refuses every unrecognized format or shape, conflicting
@@ -1054,6 +1062,11 @@ def _compose_enable_hook(op_row, ops):
                               "file gets no enable-hook write at all, and content shape never admits "
                               "one (fail-closed)".format(path, hook.REGISTRATION_FAMILY,
                                                          ", ".join(hook.REGISTRATION_PATHS)))
+    if not schema._is_hook_entry(op_row["plugin_entry"]):
+        raise AdoptApplyError("enable-hook plugin_entry is not one word of the pack-member grammar "
+                              "(_opf_adopt._is_hook_entry), re-proved here so a caller of the handler "
+                              "table that skips dispatch still cannot register it; nothing read or "
+                              "written (fail-closed)")
     if path in ops.staged:
         raise AdoptApplyError("{!r} is merged by two plan rows; one row merges one registration file "
                               "(fail-closed)".format(path))
@@ -2838,11 +2851,11 @@ def _self_test_checks():
         return dict(op="enable-hook", registration_path=path, plugin_entry=entry,
                     old_digest=plan_digest(old), new_digest=plan_digest(new))
 
-    def compose_hook(rows):
+    def compose_hook(rows, handler=dispatch):
         def compose(ops):
             context = HookContext(ops)
             for i, row in enumerate(rows):
-                verdict = dispatch(row, context)
+                verdict = handler(row, context)
                 if verdict.status != VALID:
                     raise AdoptApplyError("plan op[{}] ({!r}) refused: {}".format(
                         i, row.get("op"), "; ".join(verdict.findings)))
@@ -2887,6 +2900,20 @@ def _self_test_checks():
         check("hook-outside-apply-stage-refused", late is not None and "apply stage" in late
               and (root / reg_rel).read_bytes() == reg_new)
 
+    # a widened source never yields a widened copy: the archive copy takes the source's mode under
+    # ARCHIVE_MODE_MASK, so a group- and world-writable registration archives at 0o644 while the live
+    # file keeps its own mode (reverting the mask turns this red).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = hook_fixture(temp)
+        (root / reg_rel).chmod(0o666)
+        txn, why = attempt(run_adopt_transaction, root, rid, compose_hook([hook_row()]))
+        copy_path = root / archive_rel(rid, reg_rel)
+        check("hook-archive-copy-never-widens",
+              txn == rid and why is None and copy_path.is_file()
+              and stat.S_IMODE(copy_path.lstat().st_mode) == 0o644
+              and stat.S_IMODE((root / reg_rel).lstat().st_mode) == 0o666
+              and (root / reg_rel).read_bytes() == reg_new)
+
     # the verified no-op: a registration already carrying the canonical entry binds new_digest equal to
     # old_digest, and the op composes nothing, neither an archive copy nor a write.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -2900,14 +2927,21 @@ def _self_test_checks():
     stale = hook.merge_registration(reg_old, "opf-other").new_bytes
     drifted = hook._emit(dict(hook.canonical_registration(), model="drifted"))
     foreign = hook._emit(dict(hook.canonical_registration(), unknownKey="x"))
+    # why unrecognized-shape is redundantly guarded: a refused merge carries no postimage digest, so
+    # no row's new_digest can ever match it and the handler's new_digest check also refuses.
+    foreign_merge = hook.merge_registration(foreign, entry)
+    check("hook-unrecognized-shape-has-no-postimage",
+          foreign_merge.status != VALID and foreign_merge.new_digest is None
+          and foreign_merge.new_bytes is None)
     empty = b"{}"
     empty_new = hook.merge_registration(empty, entry).new_bytes
     # A candidate that is NOT one shell word: the pure merge core accepts any token (its disclosed
     # trust boundary), so this row's digests are built from the core's own output over it, and
-    # ONLY the plan-row pack-member grammar (_opf_adopt._is_hook_entry, run by validate_op at
-    # dispatch) refuses the row. With the grammar reverted to the generic token rule the row
-    # validates, the merge agrees with its own digests, and the write LANDS, so BOTH checks of
-    # its vector go red: a behavioural flip, not a diagnostic one.
+    # ONLY the plan-row pack-member grammar (_opf_adopt._is_hook_entry) refuses the row: through
+    # dispatch (validate_op), and again inside the handler, which a direct OP_HANDLERS caller
+    # reaches without dispatch. Handed straight to the handler with its re-proof removed, the
+    # merge agrees with the row's digests and the write LANDS, so BOTH checks of that vector go
+    # red: a behavioural flip, not a diagnostic one.
     multiword = "pkg-tool a.cfg;b"
     multiword_new = hook.merge_registration(reg_old, multiword).new_bytes
 
@@ -2915,16 +2949,23 @@ def _self_test_checks():
         return dict(op="enable-hook", registration_path=reg_rel, plugin_entry=multiword,
                     old_digest=plan_digest(reg_old), new_digest=plan_digest(multiword_new))
 
-    # Guard accounting (QA round 1, codex 2 / claude 4): each vector names which rule refuses it
-    # and whether that rule is SINGLY or DOUBLY guarded, so no mutation claim is stronger than
-    # the source. Singly guarded (removing the one guard admits the write or the drift; both of
-    # the vector's checks go red): stale-new-digest, already-merged-drift, registration-absent,
-    # unrecognized-shape, the three allowlist vectors, and multiword-plugin-entry. Deliberately
-    # DOUBLY guarded (removing the handler's check alone re-attributes the refusal but admits no
-    # write, because a second independent rule still refuses): old-digest-drift (preserve()
-    # re-checks the digest, and the changed postimage also misses new_digest),
-    # protected-registration-path (check_apply_ops re-proves the op list over the same predicate),
-    # and two-rows-one-registration (ApplyOps.create refuses the second archive copy's path).
+    # Guard accounting (QA rounds 1 and 2): each vector names the rule that refuses it and what
+    # removing that rule ALONE actually does, as observed under single-guard mutants of this
+    # source, so no mutation claim is stronger than the source. SINGLY guarded (removing the one
+    # guard admits the write or the drift, so both of the vector's checks go red): stale-new-digest
+    # (new_digest), already-merged-drift (old_digest: the merge no-ops and the drifted transaction
+    # commits), the three allowlist vectors, and multiword-entry-direct-handler (the handler's
+    # grammar re-proof). REDUNDANTLY guarded (removing the named check alone re-attributes the
+    # refusal, so only its -refused check goes red, and no write is admitted because the next rule
+    # in source order still refuses): old-digest-drift (then new_digest, since the drifted file
+    # merges to another postimage, then preserve()'s digest re-check); unrecognized-shape (then
+    # new_digest: a refused merge has no postimage digest, pinned above); protected-registration-
+    # path (then the allowlist; with both removed, check_apply_ops refuses the archive mkdir under
+    # .aiqt); multiword-plugin-entry (dispatch's grammar, then the handler's re-proof); and
+    # two-rows-one-registration (then ApplyOps.create refuses the second archive copy's path).
+    # registration-absent is neither: removing its guard admits no write, but the next statement
+    # hashes the absent bytes and raises TypeError, which escapes the named refusal (this self-test
+    # then fails closed with exit 2), so that guard turns an uncaught crash into an attributed refusal.
     hook_flips = (
         # THE new_digest flip: live bytes and old_digest agree, but the plan's new_digest is stale (another
         # merge's postimage), so the merged bytes are not the registration the approval bound
@@ -2954,7 +2995,7 @@ def _self_test_checks():
          "supported v1 registration", {"config/application.json": empty}),
         ("local-settings-path", [hook_row(path=".claude/settings.local.json")], None,
          "supported v1 registration", {".claude/settings.local.json": reg_old}),
-        ("multiword-plugin-entry", [multiword_row()], reg_old, "plugin_entry", None),
+        ("multiword-plugin-entry", [multiword_row()], reg_old, "field 'plugin_entry'", None),
         ("two-rows-one-registration", [hook_row(), hook_row()], reg_old, "two plan rows", None),
     )
     for label, rows, payload, keyword, extra in hook_flips:
@@ -2972,6 +3013,18 @@ def _self_test_checks():
                   and not (root / JOURNAL_REL / rid).exists()
                   and all((root / rel).read_bytes() == data
                           for rel, data in (extra or dict()).items()))
+
+    # the grammar re-proof IN the handler: the multiword row handed straight to OP_HANDLERS, skipping
+    # dispatch, refuses with the tree unchanged and no transaction opened.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = hook_fixture(temp)
+        before = snapshot(root)
+        why = refusal(run_adopt_transaction, root, rid,
+                      compose_hook([multiword_row()], handler=OP_HANDLERS["enable-hook"]))
+        check("hook-multiword-entry-direct-handler-refused",
+              why is not None and "pack-member grammar" in why)
+        check("hook-multiword-entry-direct-handler-writes-nothing",
+              snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
 
     # the reversal: an injected failure at the final op (the inventory publication, AFTER the registration
     # write landed) rolls the transaction back, restoring the prior registration byte-exact.

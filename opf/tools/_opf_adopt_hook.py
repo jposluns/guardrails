@@ -32,8 +32,10 @@ platform's next load, and the file usually already carries the adopter's own sec
      arbitrary command text. `plugin_entry` is a token naming a member of the digest-verified
      installed pack (the plant-governance trust gate); until that trust gate lands, the op-row
      grammar (`_opf_adopt._is_hook_entry`) holds the token to ONE shell word of portable filename
-     characters, so a plan row cannot carry shell command text; the merge inserts exactly that
-     pinned token and nothing else; the exact post-merge bytes are pinned by the plan's `new_digest`, which the
+     characters, so a plan row cannot carry arguments or shell syntax (that one word can still name
+     any program on the adopter's PATH or any repository file, which only the trust gate's
+     installed-pack check closes); the merge inserts exactly that pinned token and nothing else;
+     the exact post-merge bytes are pinned by the plan's `new_digest`, which the
      single approval binds transitively through `plan_digest`, so the adopter's one informed yes
      covers the precise executable registration byte-exact. The approval presentation must quote
      what will execute and when (on the platform's next load, not at apply).
