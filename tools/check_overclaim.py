@@ -1444,7 +1444,7 @@ def _md_row_cells(line):
 # The exact header cells and the separator shape render_md emits for the '## Rules' table. A data row is a
 # 4-cell '| ... |' row (its interior pipes escaped by _md_cell); the separator '|---|---|---|---|' carries no
 # interior ' | ' so _md_row_cells rejects it, hence the dedicated separator pattern below.
-_MD_RULES_HEADER = ["Rule", "Corpus ID", "Status", "How enforced or intended"]
+_MD_RULES_HEADER = ["Rule", "Corpus ID", "Status", gen_enforcement_register.COLUMN_HEADING]  # single-sourced
 _MD_SEP_RE = re.compile(r"\|(?:\s*:?-+:?\s*\|)+")
 
 
