@@ -1056,8 +1056,8 @@ def _journal_listing(root_fd):
     keyed by relative path to (type, st_dev, st_ino). A directory the walk traverses is keyed by the fstat
     of the descriptor it opened, never by the stat by name before the open: one whose identity differs
     between the two (swapped in between) is keyed to ("unlisted", reason) and not traversed. A directory
-    the walk cannot open or list is keyed `<dir>/*` to ("unlisted", reason), so a listing never stands for
-    what it did not see."""
+    the walk cannot open or list is keyed `<dir>/` to ("unlisted", reason), a key no entry name can take
+    (a name is never empty), so a listing never stands for what it did not see."""
     found = {}
 
     def opened_as(rel, st, fd):
@@ -1079,7 +1079,7 @@ def _journal_listing(root_fd):
         try:
             names = sorted(os.listdir(dfd))
         except OSError as exc:
-            found[rel + "/*"] = ("unlisted", str(exc))
+            found[rel + "/"] = ("unlisted", str(exc))
             return
         for name in names:
             sub = rel + "/" + name
@@ -1093,7 +1093,7 @@ def _journal_listing(root_fd):
                 try:
                     cfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
                 except OSError as exc:
-                    found[sub + "/*"] = ("unlisted", str(exc))
+                    found[sub + "/"] = ("unlisted", str(exc))
                     continue
                 try:
                     if opened_as(sub, st, cfd):
@@ -1120,7 +1120,7 @@ def _journal_listing(root_fd):
             try:
                 cur = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
             except OSError as exc:
-                found[rel + "/*"] = ("unlisted", str(exc))
+                found[rel + "/"] = ("unlisted", str(exc))
                 break
             opened.append(cur)
             if not opened_as(rel, st, cur):
@@ -1148,7 +1148,9 @@ def _entry_named(rel, seen, created, txn, mine, maybe_mine):
     named = "{} ({})".format(rel, seen[0])
     journal = JOURNAL_REL + "/"
     if rel in created:
-        return named + ", a journal directory this run created", True
+        if seen[0] == "directory":
+            return named + ", a journal directory this run created", True
+        return named + ", now a {} where this run had created a journal directory".format(seen[0]), True
     if rel == journal + txn or rel.startswith(journal + txn + "/"):
         return named + ", in this run's transaction record {!r}, which the journal keeps".format(txn), True
     if rel == journal + "lock":
@@ -1176,8 +1178,10 @@ def _observed(before, after, created, txn, mine=None, maybe_mine=False):
     journal not fully observed, which is named first and always stands in place of the claim, even when
     both listings failed alike. Then each entry present now that was not (or not as the same type and
     inode), under a lead-in that attributes them to this run only when one of them is (or may be) its
-    own, then each entry gone, never one at or below a directory either listing could not see. `ours` is
-    True when any clause concerns what this run wrote or cannot rule out."""
+    own, then each entry gone. An entry either listing could not state hides itself and everything below
+    it; a directory either listing stated but could not list (keyed `<dir>/`) hides only what is below it,
+    so an entry the closing listing observed absent is always named gone. `ours` is True when any clause
+    concerns what this run wrote or cannot rule out."""
     blind = {}
     for listing in (before, after):
         for rel, seen in listing.items():
@@ -1195,9 +1199,9 @@ def _observed(before, after, created, txn, mine=None, maybe_mine=False):
         said.append(("the adoption journal now holds entries it did not hold when this run began: " if ours
                      else "the adoption journal now holds entries it did not hold when this run began, not "
                      "attributed to this run: ") + ", ".join(text for text, _own in named))
-    unseen = [rel[:-2] if rel.endswith("/*") else rel for rel in blind]
     gone = sorted(rel for rel in before if rel not in after and not any(
-        rel == top or rel.startswith(top + "/") for top in unseen))
+        rel.startswith(key) if key.endswith("/") else rel == key or rel.startswith(key + "/")
+        for key in blind))
     if gone:
         said.append("entries present when this run began are gone: {}".format(", ".join(gone)))
     return said, ours
@@ -1222,7 +1226,7 @@ def _journal_unbound(jr_fd, held, after):
         except OSError:
             pass
     if now is not None and now[0] == "unlisted" or now is None and any(
-            after.get(r, ("",))[0] == "unlisted" or after.get(r + "/*", ("",))[0] == "unlisted"
+            after.get(r, ("",))[0] == "unlisted" or after.get(r + "/", ("",))[0] == "unlisted"
             for r in _journal_components()[:-1]):
         return ("the adoption journal path {} could not be observed, so whether it still resolves to the "
                 "journal directory this run wrote to (st_dev {}, st_ino {}), and what that directory holds, "
@@ -3040,6 +3044,14 @@ def _self_test_checks():
           and not comp_file[1] and "possibly recreated" not in comp_file[0]
           and "{} (file), a component of the journal path that changed since this run began, now a file".format(
               JOURNAL_REL) in comp_file[0])
+    # 6a11c: an entry at a journal directory this run created is named by its observed type: only a
+    # directory there is "a journal directory this run created" (red against that label for any type).
+    made_dir = _entry_named(JOURNAL_REL, ("directory", 1, 2), [JOURNAL_REL], rid, None, False)
+    made_file = _entry_named(JOURNAL_REL, ("file", 1, 2), [JOURNAL_REL], rid, None, False)
+    check("journal-created-type-named", made_dir == ("{} (directory), a journal directory this run "
+                                                     "created".format(JOURNAL_REL), True)
+          and made_file == ("{} (file), now a file where this run had created a journal directory".format(
+              JOURNAL_REL), True))
     # 6a12: a journal path the closing listing could not reach is said to be unobserved, never to "no
     # longer resolve" (red against the binding clause that treats an unreached path as absent), and the
     # journal beneath the unlisted `adopt` is never said to be gone (red against "gone" for unseen entries).
@@ -3074,6 +3086,63 @@ def _self_test_checks():
               and "nothing written" not in (err or "") and "no longer resolves" not in (err or "")
               and "{} could not be observed".format(JOURNAL_REL) in (err or "")
               and " are gone" not in (err or ""))
+    # 6a12b: a directory the opening listing stated but could not list hides only what is below it: the
+    # journal, removed before the closing listing observed it absent, is named gone (red against a
+    # "contents not listed" key that hides the directory itself).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        os.makedirs(root / JOURNAL_REL)
+        jst = os.stat(root / JOURNAL_REL)
+        real_listdir, faults = os.listdir, []
+
+        def journal_unlistable_once(target="."):
+            if not faults and isinstance(target, int) and (os.fstat(target).st_dev, os.fstat(target).st_ino) == (
+                    jst.st_dev, jst.st_ino):
+                faults.append(True)     # the opening listing's only: the closing one lists what is there
+                raise PermissionError(13, "an injected listing fault")
+            return real_listdir(target)
+
+        def removed_then_refused(*args):
+            os.rmdir(root / JOURNAL_REL)
+            raise OSError("an injected preparation fault")
+        with mock.patch.object(os, "listdir", journal_unlistable_once), \
+                mock.patch.object(_journal, "ensure_journal_dirs", removed_then_refused):
+            err = refusal(run_adopt_transaction, root, rid, compose_full(files))
+        check("pre-intent-unlisted-journal-gone-named", "cannot prepare the adoption journal" in (err or "")
+              and "{}/ could not be listed".format(JOURNAL_REL) in (err or "")
+              and "entries present when this run began are gone: {}".format(JOURNAL_REL) in (err or "")
+              and "nothing written" not in (err or "") and not (root / JOURNAL_REL).exists())
+    # 6a12c: the same rule read directly, one level up (red against hiding `adopt` under its own key); and
+    # an entry literally named "*" whose stat fails is that entry alone, never its directory's contents
+    # (red against a "contents not listed" key an entry name can take).
+    adopt = JOURNAL_REL.rsplit("/", 1)[0]
+    said, _ours = _observed({".aiqt": ("directory", 1, 1), adopt: ("directory", 1, 2),
+                             adopt + "/": ("unlisted", "an injected fault")}, {".aiqt": ("directory", 1, 1)}, [], rid)
+    check("observed-unlisted-contents-dir-gone", ("entries present when this run began are gone: " + adopt) in said
+          and "{}/ could not be listed (an injected fault)".format(adopt) in said[0])
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        jdir = Path(temp) / JOURNAL_REL
+        os.makedirs(jdir)
+        (jdir / "x").write_bytes(b"")
+        (jdir / "*").write_bytes(b"")
+        real_stat = os.stat
+
+        def star_unstatable(path, *args, **kwargs):
+            if path == "*":
+                raise PermissionError(13, "an injected stat fault")
+            return real_stat(path, *args, **kwargs)
+        listing_fd = store._open_dir_nofollow(Path(temp).resolve())
+        try:
+            first = _journal_listing(listing_fd)
+            os.unlink(jdir / "x")
+            with mock.patch.object(os, "stat", star_unstatable):
+                second = _journal_listing(listing_fd)
+        finally:
+            os.close(listing_fd)
+        said, _ours = _observed(first, second, [], rid)
+        check("observed-star-entry-not-contents", second.get(JOURNAL_REL + "/*", ("",))[0] == "unlisted"
+              and JOURNAL_REL + "/" not in second
+              and ("entries present when this run began are gone: {}/x".format(JOURNAL_REL)) in said)
     # 6a13: an ordinary exception inside acquire, after the lock file exists, is described as an error,
     # never as an interrupt (red against the interrupt wording for every exception).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
