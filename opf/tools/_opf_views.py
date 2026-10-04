@@ -3484,15 +3484,33 @@ def self_test():
         import contextlib
         import io
         deep_err = io.StringIO()
+        deep_reader = None
         try:
             with contextlib.redirect_stderr(deep_err):
                 deep_rc = render_write(rroot)
+            # The render backstop (_render_resolved_store) also maps RecursionError and prints the same
+            # injected text, so the exit code alone cannot tell which handler fired: pin the PARSE locus's own
+            # diagnostic (it names the file it could not parse), and call the reader directly, requiring its
+            # ViewsError. Dropping RecursionError from _read_raw_and_parsed alone turns both red.
+            deep_fd = os.open(str(rroot / WORKING_DIRNAME / "toml"), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _read_raw_and_parsed(deep_fd, "finding.index.toml")
+                deep_reader = "ACCEPTED"
+            except ViewsError as exc:
+                deep_reader = str(exc)
+            except RecursionError:
+                deep_reader = "escaped RecursionError"
+            finally:
+                os.close(deep_fd)
         except RecursionError:
             deep_rc = "escaped RecursionError"
         finally:
             tomllib.loads, tomllib.load = real_loads, real_load
         check("deep-toml-recursion-cannot-eval", deep_rc == EXIT_CANNOT_EVALUATE
-              and "cannot evaluate" in deep_err.getvalue() and "injected parser overflow" in deep_err.getvalue())
+              and "cannot evaluate: cannot parse " in deep_err.getvalue()
+              and "finding.index.toml (injected parser overflow)" in deep_err.getvalue())
+        check("deep-toml-recursion-parse-locus-viewserror",
+              deep_reader == "cannot parse finding.index.toml (injected parser overflow)")
 
         # --- a non-UTF-8 machine-dir name is rejected fail-closed UNIVERSALLY, even for a header-exempt
         # VERSION-only store. Before render()'s explicit early machine_rel UTF-8 check this store rendered

@@ -2338,15 +2338,24 @@ def self_test():
           and all(validate_registration_model(_timeout_model(good)).status is VALID
                   for good in ("60", "-0", "1.5E3", "1e-400")))
     # no FINDING path formats a caller value in a way that can raise: an exact int past the
-    # interpreter's digit limit and a code-built array nested far past any repr depth, each
-    # in the entry type field, refuse with a fixed descriptor (a repr-based finding raises
-    # ValueError on the first and RecursionError on the second).
-    deep_array = []
-    for _ in range(200000):
-        deep_array = [deep_array]
+    # interpreter's digit limit and a nested array whose repr overflows, each in the entry type
+    # field, refuse with a fixed descriptor (a repr-based finding raises ValueError on the first
+    # and RecursionError on the second). The array's repr overflow is INJECTED (its innermost
+    # _Number's repr raises RecursionError while the vector runs) rather than provoked by nesting
+    # far past a repr depth: that depth depends on the build and its C stack, so on a large enough
+    # stack a deep array's repr succeeds and the vector would stop exercising the never-raises
+    # rule. The array holds only types the entry gate admits, and every formatting of it (repr,
+    # str, format) reaches the injected repr, so a finding that formats it raises at any stack size.
+    deep_array = [[[_Number("1")]]]
+    real_number_repr = _Number.__dict__["__repr__"]
+
+    def _overflowing_number_repr(self):
+        raise RecursionError("injected repr overflow")
+
     for name, type_value, shown in (("huge-int", 10 ** 5000, _SHOWN_INT),
                                     ("int-in-array", [10 ** 5000], _SHOWN_ARRAY),
                                     ("deep-array", deep_array, _SHOWN_ARRAY)):
+        _Number.__repr__ = _overflowing_number_repr
         try:
             v = validate_registration_model({"hooks": {"Stop": [{"hooks": [
                 {"command": "x", "type": type_value}]}]}})
@@ -2355,7 +2364,21 @@ def self_test():
                     shown)]
         except (ValueError, RecursionError):
             refused = False
+        finally:
+            _Number.__repr__ = real_number_repr
         check("model-{}-type-refuses-never-raises".format(name), refused)
+    # the injection fires while installed and is gone after restore, so the vector above can
+    # never pass because the injected repr silently stopped raising
+    _Number.__repr__ = _overflowing_number_repr
+    try:
+        repr(deep_array)
+        injected = False
+    except RecursionError:
+        injected = True
+    finally:
+        _Number.__repr__ = real_number_repr
+    check("model-deep-array-repr-injection-fires",
+          injected and repr(deep_array) == "[[[" + repr(_Number("1")) + "]]]")
     del deep_array, type_value
 
     # 11: findings and refusal messages BOUND what they repeat (_shown): on every path that
