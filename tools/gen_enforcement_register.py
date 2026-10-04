@@ -1358,6 +1358,30 @@ def self_test_main():
                            (t / ".preview" / "p-bad.py").write_text("def (:\n", encoding="utf-8"),
                            (t / gen_enforceability.PREVIEW_DECL_REL).write_text(
                                '[[preview]]\nid = "p-bad"\nrules = []\n', encoding="utf-8")))
+        # (z) A published preview hook too complex to parse (the parser's MemoryError, or a RecursionError
+        #     on another Python) and one with an unknown coding cookie fail closed with exit 2 the same
+        #     way, never a traceback or exit 1. The setup refreshes the committed ledger whenever the
+        #     build accepts the file, so exit 2 can come only from the preview check, never from a stale
+        #     ledger; the valid control proves the refresh.
+        def add_preview(t, body):
+            (t / ".preview").mkdir()
+            (t / ".preview" / "p-bad.py").write_bytes(body)
+            (t / gen_enforceability.PREVIEW_DECL_REL).write_text(
+                '[[preview]]\nid = "p-bad"\nrules = []\n', encoding="utf-8")
+            try:
+                (t / ".aiqt" / "enforceability.json").write_text(
+                    gen_enforceability.build_ledger(t), encoding="utf-8")
+            except Exception:  # noqa: BLE001  a build that refuses the file leaves run() to refuse it
+                pass
+
+        expect2("preview-too-complex",
+                lambda t: add_preview(t, ('"""A doc."""\nx = ' + "-" * 100000 + "1\n").encode("utf-8")))
+        expect2("preview-unknown-cookie",
+                lambda t: add_preview(t, b'# coding: not_an_encoding\n"""No named rule."""\n'))
+        ztree = _build(tmp / "preview-valid")
+        add_preview(ztree, b'"""A valid preview hook."""\n')
+        if run_quiet(ztree, check=False) != 0:
+            failures.append("preview-valid: expected exit 0 (the refreshed ledger must be accepted)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1380,7 +1404,8 @@ def self_test_main():
           "description, an unsupported lint: reference, a stale committed ledger, an en dash or a raw tab "
           "in a residue, a boolean roadmap version, a site shell missing its content token, and an "
           "invalid-UTF-8 generated Markdown or HTML target, and a published preview hook that does not "
-          "parse all fail closed (exit 2); neither view calls a linked control enforcement, and the page "
+          "parse, is too complex to parse, or carries an unknown coding cookie all fail closed (exit 2); "
+          "neither view calls a linked control enforcement, and the page "
           "lead scopes its linkage claim to the declared inputs")
     return 0
 

@@ -22,9 +22,16 @@ nothing installs them. .aiqt/core/hooks/preview.toml declares each one and the c
 docstring names (an entry may name none). The ledger lists every declared preview at the top level and, per
 rule, the ids of the previews that name it; a preview never changes a status. The declaration is checked
 fail-closed against .preview/ in both directions (a published hook with no entry, or an entry with no
-published hook, exits 2) and each declared corpus id must resolve in the corpus AND its slug must appear in
-that hook's own module docstring, so a link the hook does not itself name cannot be declared. Those .preview/
-reads are validation only and never change the ledger bytes, so .preview/ is not a GENSRC_OUTPUTS source.
+published hook, exits 2). Every declared hook file is validated whether or not its entry lists rules: the
+file itself (the final path component) must be a regular file, so a symlink (even to a valid file) or a
+directory is rejected, while the directories above it are resolved as usual; it must be readable, valid
+UTF-8 with no coding cookie other than UTF-8 (a UTF-8 byte order mark is allowed), parse as Python from its
+BYTES (so the docstring checked is the one Python sees), and carry a non-blank module docstring. A docstring
+NAMES a rule when the rule's slug appears in it, its ASCII letters in either case, with no word character,
+hyphen or combining mark directly on either side. Linkage is checked both ways: each declared corpus id must
+resolve in the corpus AND be named, and every corpus rule the docstring names must be declared, so an entry
+can neither claim a link its hook does not name nor hide one its hook does. Those .preview/ reads are
+validation only and never change the ledger bytes, so .preview/ is not a GENSRC_OUTPUTS source.
 
 GRADING RUBRIC (the class letter grades a control's DECISION PROCEDURE against the rule's violation
 surface; the a-versus-c line is TOTALITY over the examined class, not determinism of the scan):
@@ -69,10 +76,14 @@ argument, a heredoc, or an eval string may be miscounted. The authoritative sing
 (generating both runners from this manifest) is deferred.
 """
 import ast
+import codecs
+import io
 import json
 import re
 import stat
 import sys
+import tokenize
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -221,33 +232,55 @@ def _published_previews(root):
 
 
 def _preview_docstring(root, rel):
-    """The module docstring of the declared preview hook file root/rel, validated before any of its rules
-    are read: the path must be a regular file (a symlink or a directory is not), readable, UTF-8, parse
-    as Python, and carry a non-empty module docstring. An unreadable file raises OSError; every other
-    failure raises ValueError (a SyntaxError is converted, since it is not a ValueError subclass), so
-    run() fails closed with exit 2 either way."""
+    """The module docstring of the declared preview hook file root/rel, exactly as Python sees it,
+    validated before any of its rules are read. The file itself (the final path component) must be a
+    regular file: a symlink, even to a valid file, or a directory is rejected, while the directories above
+    it are resolved as usual. It must be readable; its bytes must be valid UTF-8 (a UTF-8 byte order mark
+    is allowed) with no PEP 263 coding cookie or one naming UTF-8, so the text Python decodes is the text
+    checked here; it must parse as Python from those BYTES, so Python's own source decoding applies; and
+    its module docstring must be non-blank. An unreadable file raises OSError; every other failure raises
+    ValueError (a SyntaxError, and the MemoryError or RecursionError of a file too complex to parse, are
+    converted, since none is a ValueError subclass), so run() fails closed with exit 2 either way."""
     path = root / rel
     if not stat.S_ISREG(path.lstat().st_mode):  # lstat raises OSError on an absent or unreadable path
         raise ValueError("{} is not a regular file".format(rel))
-    text = path.read_text(encoding="utf-8")  # OSError, or UnicodeDecodeError (a ValueError)
+    raw = path.read_bytes()  # OSError on an unreadable file
+    raw.decode("utf-8")  # UnicodeDecodeError (a ValueError) on bytes that are not UTF-8
     try:
-        tree = ast.parse(text, filename=rel)
+        encoding = tokenize.detect_encoding(io.BytesIO(raw).readline)[0]
+    except SyntaxError as exc:  # an unknown codec, or a byte order mark beside a non-UTF-8 cookie
+        raise ValueError("{} has an unusable coding cookie ({})".format(rel, exc.msg)) from None
+    if codecs.lookup(encoding).name not in ("utf-8", "utf-8-sig"):
+        raise ValueError("{} declares coding {}; a preview hook must be UTF-8 with no other coding "
+                         "cookie".format(rel, encoding))
+    try:
+        tree = ast.parse(raw, filename=rel)
     except SyntaxError as exc:
         raise ValueError("{} does not parse as Python ({}, line {})".format(
             rel, exc.msg, exc.lineno)) from None
+    except (MemoryError, RecursionError) as exc:
+        raise ValueError("{} is too complex to parse as Python ({}: {})".format(
+            rel, type(exc).__name__, exc)) from None
     doc = ast.get_docstring(tree)
-    if not doc:
-        raise ValueError("{} has no module docstring".format(rel))
+    if not doc or not doc.strip():
+        raise ValueError("{} has no module docstring (a blank one counts as none)".format(rel))
     return doc
 
 
 def _names_slug(doc, slug):
-    """True when the docstring NAMES the slug: the slug appears, in any letter case, with no word
-    character (a letter, digit or underscore) and no hyphen directly on either side. The forward check (a
-    declared rule must be named) and the reverse check (a named rule must be declared) share this one
-    predicate, so the two directions cannot disagree about what naming is."""
-    pattern = r"(?<![\w-]){}(?![\w-])".format(re.escape(slug))
-    return re.search(pattern, doc, re.IGNORECASE) is not None
+    """True when the docstring NAMES the slug: the slug appears, each ASCII letter in either case (no other
+    case folding, so a Kelvin sign is not a k), with no word character (a letter, digit or underscore), no
+    hyphen and no combining mark directly on either side. The forward check (a declared rule must be named)
+    and the reverse check (a named rule must be declared) share this one predicate, so the two directions
+    cannot disagree about what naming is. It is lexical: it does not read Markdown or meaning."""
+    body = "".join("[{}{}]".format(c.lower(), c.upper()) if c.isascii() and c.isalpha() else re.escape(c)
+                   for c in slug)
+    for match in re.finditer(r"(?<![\w-]){}(?![\w-])".format(body), doc):
+        start, end = match.span()
+        beside = (doc[i] for i in (start - 1, end) if 0 <= i < len(doc))
+        if not any(unicodedata.category(ch).startswith("M") for ch in beside):
+            return True
+    return False
 
 
 def load_previews(root, slugs):
@@ -948,6 +981,16 @@ def self_test_main():
                 f.symlink_to("target.txt"))),
             ("unparseable", lambda f: f.write_text("def (:\n", encoding="utf-8")),
             ("without a module docstring", lambda f: f.write_text("X = 1\n", encoding="utf-8")),
+            ("with a whitespace-only module docstring",
+             lambda f: f.write_text('""" \n """\n', encoding="utf-8")),
+            ("with an unknown coding cookie",
+             lambda f: f.write_bytes(b'# coding: not_an_encoding\n"""No named rule."""\n')),
+            ("with a latin-1 coding cookie",
+             lambda f: f.write_bytes(b'# -*- coding: latin-1 -*-\n"""A doc."""\n')),
+            ("with a byte order mark beside a latin-1 cookie",
+             lambda f: f.write_bytes(b'\xef\xbb\xbf# coding: latin-1\n"""A doc."""\n')),
+            ("too complex to parse", lambda f: f.write_text('"""A doc."""\nx = ' + "-" * 100000 + "1\n",
+                                                            encoding="utf-8")),
         )
         for wi, (wname, wmutate) in enumerate(wcases):
             wtree = _add_previews(_build(tmp / "preview-empty-bad-{}".format(wi)))
@@ -979,7 +1022,8 @@ def self_test_main():
         for yi, (ydoc, ywant) in enumerate((
                 ("Xselftest-rule-ddX", 2), ("xselftest-rule-ddx", 2), ("_selftest-rule-dd_", 2),
                 ("9selftest-rule-dd", 2), ("selftest-rule-dd-x", 2), ("-selftest-rule-dd", 2),
-                ("selftest-rule-dd\u00e9", 2), ("Motivated by (SELFTEST-RULE-DD).", 0))):
+                ("selftest-rule-dd\u00e9", 2), ("\u017felftest-rule-dd", 2), ("selftest-rule-dd\u0301", 2),
+                ("e\u0301selftest-rule-dd", 2), ("Motivated by (SELFTEST-RULE-DD).", 0))):
             ytree = _add_previews(_build(tmp / "preview-boundary-{}".format(yi)))
             (ytree / ".preview" / "p-one.py").write_text('"""{}"""\n'.format(ydoc), encoding="utf-8")
             got = run_caught(ytree, check=False)
@@ -996,6 +1040,21 @@ def self_test_main():
             if got != zwant:
                 failures.append("a rule-less p-two docstring {!r} expected exit {}, got {!r}".format(
                     zdoc, zwant, got))
+        # (aa) The bytes Python reads decide: the docstring checked is the one Python sees. A unicode_escape
+        #      cookie that makes Python's docstring name rule cc behind rules = [] fails closed; a UTF-8 byte
+        #      order mark is Python and is accepted, and the reverse check still reads through it; a cookie
+        #      naming UTF-8 is accepted.
+        for ai, (abytes, awant) in enumerate((
+                (b'# coding: unicode_escape\nr"""Motivated by \\x73elftest-rule-cc."""\n', 2),
+                (b'\xef\xbb\xbf"""A self-test preview hook whose docstring names no rule."""\n', 0),
+                (b'\xef\xbb\xbf"""Motivated by selftest-rule-cc."""\n', 2),
+                (b'# -*- coding: utf-8 -*-\n"""A doc."""\n', 0), (b'# coding: utf8\n"""A doc."""\n', 0))):
+            atree = _add_previews(_build(tmp / "preview-bytes-{}".format(ai)))
+            (atree / ".preview" / "p-two.py").write_bytes(abytes)
+            got = run_caught(atree, check=False)
+            if got != awant:
+                failures.append("a rule-less p-two file {!r} expected exit {}, got {!r}".format(
+                    abytes, awant, got))
     finally:
         if unread_manifest is not None:
             os.chmod(unread_manifest, 0o644)  # restore even on an unexpected early exit
@@ -1020,9 +1079,11 @@ def self_test_main():
           "named only inside a roster inline comment all fail closed (exit 2); preview hooks are listed "
           "at the top level and per rule without changing a status, and an undeclared or unpublished "
           "preview, a declared rule the hook's docstring does not name, a docstring naming a rule its entry "
-          "does not list, a declared preview file that is unreadable, not UTF-8, not a regular file, "
-          "unparseable or without a docstring (rules listed or not), an unknown declared corpus-id, and an "
-          "absent declaration beside published previews all fail closed (exit 2)" + note)
+          "does not list (read from the bytes Python reads, a UTF-8 byte order mark included), a declared "
+          "preview file that is unreadable, not UTF-8, coded other than UTF-8 or with an unknown coding "
+          "cookie, not a regular file, unparseable, too complex to parse, or without a non-blank docstring "
+          "(rules listed or not), an unknown declared corpus-id, and an absent declaration beside published "
+          "previews all fail closed (exit 2)" + note)
     return 0
 
 
