@@ -1285,8 +1285,11 @@ def _init_store_prior_run_paths(root_fd, run_id, model, machine, jr_fd, journal_
     when each artefact is PROVEN, per prior run id a control-home file names: (1) that run's
     init-store transaction is terminal ROLLED-BACK in this adoption journal (the one sanctioned
     way its id was burnt), (2) its evidence bundle verifies (_verify_bundle_at for that run id,
-    re-reading every listed payload), and (3) EVERY listed artefact lies beneath that run's own
-    bundle or archive home and was created by a transaction COMPLETE in this journal, its live
+    re-reading every listed payload), and (3) EVERY listed artefact lies within that run's
+    RETAINED-EVIDENCE domains -- the SAME _evidence_eligible predicate the composer derives
+    inventory rows from (its own bundle, its own adoption archive, or a default Move
+    destination), plus its own bundle-root inventories -- and was created by a transaction
+    COMPLETE in this journal, its live
     bytes digest-matched (so a hand-planted or tampered artefact is never admitted). The whole
     prior bundle is admitted or none of it. The machine directory is admitted only on such a
     prior run's COMMITTED archival: a complete transaction that created the preservation copy
@@ -1324,9 +1327,14 @@ def _init_store_prior_run_paths(root_fd, run_id, model, machine, jr_fd, journal_
             raise AdoptApplyError("cannot search the adoption journal for prior run {}'s "
                                   "committed transactions ({}); fail-closed".format(prior, exc))
         listed = _init_store_bundle_listed(root_fd, model, prior)
-        homes = (evidence_home_rel(prior), _archive_root(prior))
+        # The admissible domains are EXACTLY the retained-evidence domains this module already
+        # defines (_evidence_eligible: own bundle, own adoption archive, default Move
+        # destinations -- never re-spelled here) plus the prior run's own bundle-root
+        # inventories, which _evidence_eligible deliberately excludes from derived rows but
+        # which the committed transaction created all the same (codex round 5, finding 1: a
+        # committed Move payload is retained evidence and must not strand the bundle).
         admitted = {path: digest for path, digest in listed.items()
-                    if any(_within(path, h) for h in homes)
+                    if (_evidence_eligible(prior, path) or _bundle_root_inventory(prior, path))
                     and creates.get(path) == _plan_hex(digest)}
         if not admitted or set(admitted) != set(listed):
             continue   # an artefact not proven committed keeps the whole bundle foreign
@@ -1394,10 +1402,14 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
     journal, and the machine home only on its committed archival -- so a fresh run continues a
     reversed run's committed work without re-running its burnt id (claude round 4, F1;
     spec 14.1). Only then is the emptied, pre-existing
-    directory admitted as a pre-existing planned directory, its mode pre-checked HERE against
-    the planned one (before the run's intent opens, so a wrong-mode tree never burns the run
-    id, and at the FULL stat.S_IMODE the substrate compares, so a special bit such as setgid
-    02755 refuses here too, codex round 4), which the substrate re-verifies and preserves.
+    directory admitted as a pre-existing planned directory, its mode pre-checked HERE (before
+    the run's intent opens, so a wrong-mode tree never burns the run id) at the FULL
+    stat.S_IMODE the substrate compares: the machine directory against the planned mode
+    (codex round 4), and `.working` with admitted files against the substrate's own two
+    facts -- it records `.working`'s observed mode MASKED to 0o777 and re-compares the full
+    S_IMODE against that record, so a special bit (a setgid 02755) can never pass, and it
+    refuses a group- or world-writable mode outright (claude round 5, N2). The substrate
+    re-verifies and preserves what it admits.
     Every consumed
     sources-row field (path, digest, disposition, occupying, preservation) is validated
     fail-closed through the planner's own _validate_plan_sources BEFORE it justifies anything: a
@@ -1484,8 +1496,6 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
         # (a setgid 02755 directory) would otherwise pass here and burn the run id on the
         # substrate's own post-intent refusal.
         for dpath in admitted_dirs:
-            if dpath == store.WORKING_DIRNAME and admitted:
-                continue   # with admitted files the substrate records the observed mode instead
             try:
                 dst = os.stat(dpath, dir_fd=root_fd, follow_symlinks=False)
             except OSError as exc:
@@ -1493,6 +1503,27 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
             if not stat.S_ISDIR(dst.st_mode):
                 raise AdoptApplyError("admitted pre-existing path {} is no longer a directory; "
                                       "fail-closed (nothing written)".format(dpath))
+            if dpath == store.WORKING_DIRNAME and admitted:
+                # With admitted files the substrate records `.working`'s observed mode MASKED
+                # to 0o777 and re-compares the FULL stat.S_IMODE against that record under its
+                # mutex, and refuses a group- or world-writable mode; the SAME two facts are
+                # pre-checked HERE so a special-bit or writable `.working` refuses BEFORE the
+                # run's intent opens and never burns the run id (claude round 5, N2).
+                wmode = stat.S_IMODE(dst.st_mode)
+                if wmode != (wmode & 0o777):
+                    raise AdoptApplyError("admitted pre-existing directory {} holds mode {}, "
+                                          "whose special bit the substrate's 0o777-masked "
+                                          "recorded mode can never match; it is preserved as "
+                                          "found, never rewritten, and refused BEFORE the "
+                                          "run's intent opens (nothing written)".format(
+                                              dpath, "%o" % wmode))
+                if wmode & 0o022:
+                    raise AdoptApplyError("the admitted {} directory mode {} is group- or "
+                                          "world-writable; a store is never published beneath "
+                                          "a home writable by others, and it is refused "
+                                          "BEFORE the run's intent opens (nothing "
+                                          "written)".format(dpath, "%o" % wmode))
+                continue
             if stat.S_IMODE(dst.st_mode) != init_op.DIR_MODE:
                 raise AdoptApplyError("admitted pre-existing directory {} holds mode {}, not "
                                       "the planned {}; it is preserved as found, never "
@@ -4821,6 +4852,33 @@ def _init_store_git_checks(check, ctx, refused):
         check("init-store-unburnt-run-id-reruns-after-mode-fix", res.status == valid
               and store.resolve_store(root).status == store.RESOLVED)
 
+        # THE `.working` FULL-MODE PRE-CHECK (claude round 5, N2): with admitted files the
+        # substrate records `.working`'s observed mode MASKED to 0o777 and re-compares the
+        # FULL stat.S_IMODE against that record under its mutex (so a special bit can never
+        # pass), and refuses a group- or world-writable mode; the SAME two facts are
+        # pre-checked before the run's intent opens, so each wrong `.working` mode refuses
+        # with no operation record and the SAME run id reruns once the mode is corrected --
+        # never a burnt id.
+        root = init_op._plain_repo(os.path.join(base, "wmode"), env)
+        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        run = rid()
+        run_adopt_transaction(root, run, lambda ops: ops.archive_occupying(
+            manifest_rel, "sha256:" + _sha256(occ_bytes)))
+        occ_row = dict(path=manifest_rel, digest="sha256:" + _sha256(occ_bytes),
+                       disposition="retire", occupying=True,
+                       preservation=archive_rel(run, manifest_rel))
+        os.chmod(os.path.join(root, machine_dir), 0o755)
+        for wmode, why in ((0o2755, "holds mode 2755"), (0o1755, "holds mode 1755"),
+                           (0o775, "group- or world-writable")):
+            os.chmod(os.path.join(root, store.WORKING_DIRNAME), wmode)
+            check("init-store-working-mode-{:o}-refused-pre-intent".format(wmode),
+                  refused(dispatch(row, ctx(root, run_id=run, sources=[occ_row])), why)
+                  and op_ids(root) == [])
+        os.chmod(os.path.join(root, store.WORKING_DIRNAME), 0o755)
+        res = dispatch(row, ctx(root, run_id=run, sources=[occ_row]))
+        check("init-store-working-unburnt-run-id-reruns-after-mode-fix", res.status == valid
+              and store.resolve_store(root).status == store.RESOLVED)
+
         # THE PRIOR REVERSED RUN'S COMMITTED ARTEFACTS (claude round 4, F1; the orchestrator
         # ruling): spec 14.1 keeps the reversed run id burnt, and a FRESH run continues the
         # occupied-machine composition by admitting the PRIOR run's committed artefacts -- the
@@ -4857,6 +4915,36 @@ def _init_store_git_checks(check, ctx, refused):
                   and txn_state(root, r2) == "complete"
                   and live_digest(root, archive_rel(r1, manifest_rel)) == occ_digest
                   and live_digest(root, manifest_rel) == scaffold[manifest_rel])
+
+        # THE MOVE-PAYLOAD CONTINUATION (codex round 5, finding 1): a prior reversed run whose
+        # COMMITTED transaction also created a default Move destination -- retained evidence
+        # under the SAME _evidence_eligible domains the composer derives inventory rows from --
+        # is admitted whole by the fresh run; an admission re-spelled to the bundle and archive
+        # homes alone strands this bundle and goes red here.
+        root = init_op._plain_repo(os.path.join(base, "priormove"), env)
+        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        moved_rel = store.moved_dest("prior-note.md")
+        moved_bytes = b"a prior run's committed Move payload" + b"\x0a"
+        r1 = rid()
+
+        def compose_move(ops):
+            ops.archive_occupying(manifest_rel, occ_digest)
+            ops.create(moved_rel, moved_bytes)
+
+        run_adopt_transaction(root, r1, compose_move)
+        occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                       occupying=True, preservation=archive_rel(r1, manifest_rel))
+        reversed_r1 = refused(dispatch(dict(row, members=wrongv),
+                                       ctx(root, run_id=r1, sources=[occ_row])),
+                              "restoring NOT-ADOPTED")
+        burnt = refused(dispatch(row, ctx(root, run_id=r1, sources=[occ_row])), "was reversed")
+        res = dispatch(row, ctx(root, run_id=rid()))
+        check("init-store-prior-move-payload-admitted-after-reversal",
+              reversed_r1 and burnt and res.status == valid
+              and store.resolve_store(root).status == store.RESOLVED
+              and live_digest(root, moved_rel) == "sha256:" + _sha256(moved_bytes)
+              and live_digest(root, archive_rel(r1, manifest_rel)) == occ_digest
+              and live_digest(root, manifest_rel) == scaffold[manifest_rel])
 
         # The negatives stay foreign and refuse with nothing written: a prior bundle that no
         # longer verifies (a tampered archive copy), and a prior archival that ROLLED BACK with
@@ -4902,6 +4990,48 @@ def _init_store_git_checks(check, ctx, refused):
               rolled is not None and "rolled back to the prestate" in rolled
               and refused(dispatch(row, ctx(root, run_id=rid())),
                           "undispositioned foreign")
+              and snap(root) == before and op_ids(root) == [])
+
+        # THE TERMINAL-ROLLED-BACK CONJUNCT PINNED (claude round 5, N1a): a prior run's REAL
+        # committed archival whose init-store transaction NEVER RAN proves nothing -- its id
+        # was never burnt the one sanctioned way -- so the fresh run refuses with the
+        # snapshot unchanged and no operation record; dropping the terminal-ROLLED-BACK gate
+        # (and its absent-transaction sibling) admits it and goes red here.
+        root = init_op._plain_repo(os.path.join(base, "priornoinit"), env)
+        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        r1 = rid()
+        run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(
+            manifest_rel, occ_digest))
+        before = snap(root)
+        check("init-store-prior-without-init-store-txn-refused",
+              refused(dispatch(row, ctx(root, run_id=rid())), "undispositioned foreign")
+              and snap(root) == before and op_ids(root) == [])
+
+        # THE COMMITTED-CREATION CONJUNCT PINNED (claude round 5, N1b): an extra artefact
+        # hand-planted in the reversed prior run's archive home and LISTED by a rewritten,
+        # self-consistent inventory still refuses -- no COMPLETE transaction of this journal
+        # created it (nor the rewritten inventory's own bytes) -- with the snapshot unchanged
+        # and no operation record; dropping the committed-creation equality admits it and
+        # goes red here.
+        root = init_op._plain_repo(os.path.join(base, "priorextra"), env)
+        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        r1 = rid()
+        run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(
+            manifest_rel, occ_digest))
+        occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                       occupying=True, preservation=archive_rel(r1, manifest_rel))
+        reversed_r1 = refused(dispatch(dict(row, members=wrongv),
+                                       ctx(root, run_id=r1, sources=[occ_row])),
+                              "restoring NOT-ADOPTED")
+        planted = b"hand-planted, never committed" + b"\x0a"
+        init_op._write(os.path.join(root, archive_rel(r1, "planted.txt")), planted)
+        init_op._write(os.path.join(root, inventory_rel(r1)), emit_inventory(r1, [
+            inventory_row(archive_rel(r1, manifest_rel), occ_bytes),
+            inventory_row(archive_rel(r1, "planted.txt"), planted)]))
+        before = snap(root)
+        check("init-store-prior-extralisted-artefact-refused",
+              reversed_r1
+              and refused(dispatch(row, ctx(root, run_id=rid())), "undispositioned foreign")
               and snap(root) == before and op_ids(root) == [])
 
         # CRASH AT EVERY POINT (round 2): the transaction mkdir, the INTENT, a member's staging
@@ -4973,8 +5103,10 @@ def _init_store_git_checks(check, ctx, refused):
                   and outside_store(root) == before)
 
         # THE SCRUB'S DURABILITY ORDER (codex round 4, finding 1; claude round 4, F3), pinned
-        # by a MOCKED SYSCALL-ORDER TRACE over one real scrub: every cleanup unlink and rmdir
-        # is immediately followed by an fsync of the SAME parent directory (matched by the
+        # by a MOCKED SYSCALL-ORDER TRACE over one real scrub: EVERY cleanup unlink and rmdir
+        # in the pre-discard trace -- each one, not just some (claude round 5, N3: an
+        # any-form pairing stayed green when the lease-unlink fsync alone was dropped) -- is
+        # immediately followed by an fsync of the SAME parent directory (matched by the
         # descriptor's device and inode, so a dropped parent fsync goes red), a cleanup target
         # already ABSENT on entry to a RESTARTED scrub has its nearest surviving ancestor
         # fsynced, and every one of these barriers precedes the record discard.
@@ -5074,6 +5206,14 @@ def _init_store_git_checks(check, ctx, refused):
                        and seq[i + 1] == ("fsync", ident)
                        for i, e in enumerate(seq))
 
+        def every_paired(head):
+            # Over the RAW pre-discard trace: each unlink/rmdir is IMMEDIATELY followed by
+            # the fsync of its own parent, so no removal -- the lease's included -- can ride
+            # on a sibling pair in the same directory (claude round 5, N3).
+            return all(e[0] not in ("unlink", "rmdir")
+                       or (i + 1 < len(head) and head[i + 1] == ("fsync", e[1]))
+                       for i, e in enumerate(head))
+
         root = init_op._plain_repo(os.path.join(base, "scrubtrace"), env)
         rc1 = _init_store_child(root, env, "stage:" + init_op.CHANGELOG_RELPATH, row,
                                 ctx(root, run_id=rid()))
@@ -5081,12 +5221,29 @@ def _init_store_git_checks(check, ctx, refused):
         root_id = path_ident(root)
         working_id = path_ident(os.path.join(root, store.WORKING_DIRNAME))
         machine_id = path_ident(os.path.join(root, machine_dir))
-        head = before_discard(traced_scrub(root))
+        # The scrub's OWN lease branch is exercised by planting a leftover lease AFTER the
+        # mutex acquisition: the oplock's recovery deletes a verified stale lease itself
+        # (fsynced) during acquire, so the organic fixture never reaches the scrub's lease
+        # unlink and its fsync would otherwise go unpinned (claude round 5, N3).
+        import _opf_oplock
+        real_acquire = _opf_oplock.acquire_init_operation
+
+        def plant_lease_after_acquire(*a, **k):
+            holder = real_acquire(*a, **k)
+            init_op._write(os.path.join(root, init_op.LEASE_RELPATH), b"leftover lease\x0a")
+            return holder
+
+        _opf_oplock.acquire_init_operation = plant_lease_after_acquire
+        try:
+            head = before_discard(traced_scrub(root))
+        finally:
+            _opf_oplock.acquire_init_operation = real_acquire
         seq = labeled(head) if head is not None else []
         check("init-store-scrub-order-removal-then-parent-fsync-then-discard",
               rc1 != 0 and head is not None
+              and every_paired(head)                        # EVERY removal, lease included
               and paired(seq, "unlink", root_id)            # the staging leftover
-              and paired(seq, "unlink", machine_id)         # the lease
+              and paired(seq, "unlink", machine_id)         # the planted leftover lease
               and paired(seq, "rmdir", working_id)          # the created machine directory
               and paired(seq, "rmdir", root_id))            # the created .working
         res = dispatch(row, ctx(root, run_id=rid(), recover=True))
@@ -5104,7 +5261,7 @@ def _init_store_git_checks(check, ctx, refused):
         head = before_discard(traced_scrub(root))
         seq = labeled(head) if head is not None else []
         check("init-store-scrub-restart-absent-target-fsync-before-discard",
-              rc1 != 0 and rc2 != 0 and gone and head is not None
+              rc1 != 0 and rc2 != 0 and gone and head is not None and every_paired(head)
               and ("fsync", working_id) in seq)             # the removed machine directory's
         res = dispatch(row, ctx(root, run_id=rid(), recover=True))   # surviving parent
         check("init-store-scrub-restart-recovers", res.status == valid
