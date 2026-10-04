@@ -834,7 +834,7 @@ def _main_isolated(report_path=None):
         fg = lambda cmd: _verdict(bg(cmd, rib=False))
         check("trunc/fg-heredoc-quoted-apostrophe-allows", fg("cat > f <<'EOF'\nThe user's file\nEOF"), "allow")
         check("trunc/fg-heredoc-commit-amp-allows", fg("git commit -F - <<'EOF'\nFix A & B\nEOF"), "allow")
-        check("trunc/fg-heredoc-python-amp-allows", fg("python3 - <<'EOF'\nx = 1 & 2\nEOF"), "allow")
+        check("trunc/fg-heredoc-python-interp-denies", fg("python3 - <<'EOF'\nx = 1 & 2\nEOF"), "deny")
         check("trunc/fg-heredoc-unquoted-allows", fg("cat > f <<EOF\nThe user's A & B\nEOF"), "allow")
         check("trunc/fg-heredoc-dash-tab-allows", fg("cat <<-EOF\n\tit's A & B\n\tEOF"), "allow")
         check("trunc/fg-heredoc-two-bodies-allows", fg("cat <<A <<'B'\nx & y\nA\nit's\nB\necho ok"), "allow")
@@ -931,7 +931,11 @@ def _main_isolated(report_path=None):
         # no run at all. Bash modes: "detach" (a non-waited background child: strict discrimination), "ran"
         # (the marked touch executed; its timing inside a substitution cannot prove background, but a real
         # positive observation, never vacuous), "nodetach" (the marker is planted INSIDE the region that must
-        # be DATA; it must NEVER appear and bash must exit 0), None (scanner-only). A bash timeout, or a
+        # be DATA; it must NEVER appear and bash must exit 0), "overdeny" (same bash predicate as nodetach,
+        # but the scanner verdict is a CONSERVATIVE deny: the documented safe-direction over-denial cost,
+        # pinned so it never silently relaxes into a bypass), "resid" (a DISCLOSED RESIDUAL: bash confirms a
+        # real detach and the scanner still allows; the row pins the disclosed gap with its ACTUAL outcome so
+        # a drift in either direction fails), None (scanner-only). A bash timeout, or a
         # required marker observation that does not hold, is cannot-evaluate and FAILS (never counted harmless).
         import time as _time
         import shutil as _shutil
@@ -980,6 +984,13 @@ def _main_isolated(report_path=None):
           ('trunc/fg-sq-amp-marker-allows', "echo 'touch MARK & later'", "allow", 'nodetach'),
           ('trunc/fg-dq-amp-marker-allows', "echo \"touch MARK & later\"", "allow", 'nodetach'),
           ('trunc/fg-heredoc-unquoted-marker-allows', "cat <<EOF%The user's A & B touch MARK & x%EOF", "allow", 'nodetach'),
+          ('trunc/fg-r5-template-suffix-eval-detach-denies', "e\"$(cat <<'EOF'%v%EOF%)\"al 'touch MARK &'", "deny", 'detach'),
+          ('trunc/fg-r5-interp-heredoc-detach-denies', "bash <<'EOF'%touch MARK &%EOF", "deny", 'detach'),
+          ('trunc/fg-r5-template-close-suffix-denies', "echo \"$(cat <<'EOF'%touch MARK & msg%EOF%)\"suffix", "deny", 'overdeny'),
+          ('trunc/fg-r5-dq-herestring-amp-denies', "echo \"<<< &\"", "deny", 'overdeny'),
+          ('trunc/fg-r5-resid-bashc-sq-detach-allows', "bash -c 'touch MARK &'", "allow", 'resid'),
+          ('trunc/fg-r5-resid-coproc-noamp-detach-allows', "coproc touch MARK", "allow", 'resid'),
+          ('trunc/fg-r5-resid-procsub-noamp-detach-allows', "true <(touch MARK)", "allow", 'resid'),
         ]:
             _scanv[_cid] = fg(_mkr2(_raw))
             check(_cid, _scanv[_cid], _sw)
@@ -1036,13 +1047,14 @@ def _main_isolated(report_path=None):
 
         def _gt_eval(raw, mode, shim_dir):
             """('ok'|'bad'|'cannot', result-dict) for one bash mode. A timeout is cannot-evaluate (FAILS,
-            never counted harmless). 'detach' requires the strict background discrimination; 'ran' requires a
-            real marker observation; 'nodetach' requires the marker ABSENT and a clean exit 0 (a failed
+            never counted harmless). 'detach' (and 'resid', the disclosed-residual row) requires the strict
+            background discrimination; 'ran' requires a real marker observation; 'nodetach' and 'overdeny'
+            require the marker ABSENT and a clean exit 0 (a failed
             instrumentation run, a nonzero exit, is not read as harmless)."""
             r = _gt_run(_mkr2(raw), shim_dir)
             if r["timed_out"]:
                 return "cannot", r
-            if mode == "detach":
+            if mode in ("detach", "resid"):
                 return ("ok" if r["detached"] else "bad"), r
             if mode == "ran":
                 return ("ok" if r["present"] else "bad"), r
@@ -1053,6 +1065,7 @@ def _main_isolated(report_path=None):
         if not _bash or not _real_touch:
             _gt_bash_ok = _UNV
             _gt_det_ok = _gt_harm_ok = _gt_cannot_ok = _gt_flip_ok = _gt_flip_real_ok = _UNV
+            _gt_resid_ok = _gt_over_ok = _UNV
             _gt_fuzz_ok = _gt_fuzz_power_ok = _gt_cleanup_ok = _UNV
         else:
             _gt_bash_ok = True
@@ -1067,9 +1080,19 @@ def _main_isolated(report_path=None):
             _cannot = [cid for cid, pair in _res.items() if pair[0] == "cannot"]
             _det_rows = [cid for cid, raw, _sw, mode in GT if mode in ("detach", "ran")]
             _harm_rows = [cid for cid, raw, _sw, mode in GT if mode == "nodetach"]
+            _resid_rows = [cid for cid, raw, _sw, mode in GT if mode == "resid"]
+            _over_rows = [cid for cid, raw, _sw, mode in GT if mode == "overdeny"]
             _rawof = dict((cid, raw) for cid, raw, _sw, mode in GT)
             _gt_det_ok = all(_res[cid][0] == "ok" and _scanv[cid] == "deny" for cid in _det_rows)
             _gt_harm_ok = all(_res[cid][0] == "ok" and _scanv[cid] == "allow" for cid in _harm_rows)
+            # the disclosed residuals (bash -c '... &', coproc, an unwaited process substitution) are
+            # registered with their ACTUAL outcome: bash CONFIRMS the detach and the scanner allows.
+            _gt_resid_ok = bool(_resid_rows) and all(
+                _res[cid][0] == "ok" and _scanv[cid] == "allow" for cid in _resid_rows)
+            # conservative over-denials of bash-harmless forms (the safe-direction cost): no marker,
+            # clean exit 0, scanner deny.
+            _gt_over_ok = bool(_over_rows) and all(
+                _res[cid][0] == "ok" and _scanv[cid] == "deny" for cid in _over_rows)
             _gt_cannot_ok = (len(_cannot) == 0)
             # REAL FLIP (rule F): the SAME differential predicate must PASS for the real scanner and FAIL for
             # a weakened one (the out-of-subset rule removed, so OUT allows). A bash-confirmed detach row the
@@ -1171,6 +1194,8 @@ def _main_isolated(report_path=None):
         check("gt/bash-available", _gt_bash_ok, True)
         check("gt/detach-cases-all-denied", _gt_det_ok, True)
         check("gt/harmless-cases-no-detach-and-allowed", _gt_harm_ok, True)
+        check("gt/residual-rows-detach-confirmed-and-disclosed-allow", _gt_resid_ok, True)
+        check("gt/overdeny-rows-no-detach-and-denied", _gt_over_ok, True)
         check("gt/no-cannot-evaluate", _gt_cannot_ok, True)
         check("gt/cleanup-verified", _gt_cleanup_ok, True)
         check("gt/flip-catches-reintroduced-bypass", _gt_flip_ok, True)

@@ -9405,6 +9405,21 @@ _ORCH_SUBSET_KEYWORDS = frozenset(("case", "esac", "eval", "coproc"))
 # there; when one does, the scanner stops modelling and the caller denies on any `&` byte (see _orch_any_bare_amp).
 _ORCH_SUBSET_FORBIDDEN = frozenset("$`\\#(){}")
 
+# Interpreters that EXECUTE their standard input as CODE: a here-document fed to one of these is a
+# program, not data (`bash <<'EOF'` runs the body, so a `&` inside it is a real detach operator there).
+# Matched on the dequoted word's basename; a python version suffix (python3.12) matches by prefix. A
+# renamed or aliased interpreter stays inside the disclosed renames residual.
+_ORCH_STDIN_CODE_WORDS = frozenset((
+    "sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "yash", "csh", "tcsh", "fish", "busybox",
+    "python", "python2", "python3", "perl", "ruby", "node", "nodejs", "php", "lua"))
+
+
+def _orch_is_stdin_code_word(word):
+    """True when the dequoted word names, by basename, an interpreter that executes its standard input
+    as code (a python version suffix such as python3.12 matches by prefix)."""
+    base = word.rsplit("/", 1)[-1]
+    return base in _ORCH_STDIN_CODE_WORDS or base.startswith("python")
+
 
 def _orch_match_safe_cmdsub_heredoc(command, i):
     """The ONE nested command-substitution shape the scanner models exactly and treats as safe data, matched
@@ -9418,7 +9433,10 @@ def _orch_match_safe_cmdsub_heredoc(command, i):
     BODY is a literal that is neither expanded nor run; the operator line is exactly `"$(cat <<'DELIM'` with
     one quoted delimiter word and nothing else (no comment, no escape, no extra token); the terminator line is
     exactly DELIM (a body line that merely starts with DELIM, which bash can match leniently, is rejected);
-    and the next line is exactly `)"`. BODY is therefore opaque data and an `&` anywhere in it is here-document
+    and the closing line is exactly `)"`, followed by end of input, a newline, or a single command
+    separator (`;`, `&`, `|`) that the main scan then reads itself. A suffix glued to `)"` would splice
+    the substitution output into a longer word (`e"$(...)"al` rebuilds `eval`), so it is NOT the template.
+    BODY is therefore opaque data and an `&` anywhere in it is here-document
     text, never an operator. Any deviation returns None and falls to the out-of-subset rule."""
     n = len(command)
     if not command.startswith('"$(cat', i):
@@ -9458,7 +9476,12 @@ def _orch_match_safe_cmdsub_heredoc(command, i):
         j = eol + 1
     if not command.startswith(')"', j):
         return None                      # the line after the terminator must be exactly `)"`
-    return j + 2
+    j += 2
+    if j < n and command[j] not in "\n;&|":
+        return None                      # a suffix glued to `)"` is outside the template: only end of
+                                         # input, a newline, or one command separator the main scan
+                                         # itself reads may follow the closing line
+    return j
 
 
 def _orch_any_bare_amp(command):
@@ -9510,18 +9533,26 @@ def _orch_safe_subset_scan(command):
 
     THE SAFE SUBSET (rule A): a command whose code carries NONE of the metacharacters in
     _ORCH_SUBSET_FORBIDDEN (a `$`, a backtick, a backslash, a `#`, or `(` `)` `{` `}`) and no `<<<`
-    here-string, where single quotes, double quotes, and depth-0 here-document bodies (under the unambiguous
+    here-string ANYWHERE in the raw command, even inside quoted data (a LITERAL whole-command exclusion,
+    checked before the walk), where single quotes, double quotes, and depth-0 here-document bodies (under the unambiguous
     physical-line boundary rule of _orch_heredoc_bodies) carry data; a forbidden byte INSIDE that data takes
     the command OUT too, so the data regions cannot hide a substitution. A command word that dequotes to a
     reserved word (case/esac/eval/coproc) is OUT, since bash would reconstruct and run it. A word-glued `[`
-    index subscript or arithmetic is OUT as well. The ONE nested
+    index subscript or arithmetic is OUT as well. A here-document on a command line that also carries a
+    word dequoting to a stdin-executing interpreter (_ORCH_STDIN_CODE_WORDS: the sh-family shells,
+    python, perl, ruby, node, php, lua, by basename) is OUT in either order and across a pipe
+    (`bash <<'EOF'`, `<<'EOF' bash`, `cat <<'EOF' | bash`), since the interpreter executes the body as
+    code and a `&` in that body is a real detach operator there. The ONE nested
     exception is the exact commit-message template matched by _orch_match_safe_cmdsub_heredoc.
 
     EVERYTHING ELSE is OUT, and the caller denies on any `&` byte, so over-denial outside the subset is in the
     safe direction. Inside the subset a bare `&` is a detach; `&&`, `&>` / `&>>`, and a `>&` / `<&` / `|&`
     descriptor-duplication or pipe-stderr adjacent form are not."""
+    if "<<<" in command:
+        return "OUT"    # the here-string exclusion is literal over the whole command (quoted data too)
     i, n = 0, len(command)
     in_single = in_double = False
+    interp = False      # the current command line carries a word naming a stdin-executing interpreter
     pending = []        # here-documents awaiting their body (all at depth 0 in the subset)
     prev_dup = False    # the previous code char was an unquoted >, <, or | (a dup/pipe operator lead)
     word_start = True   # the next code char begins a word (start of string, or after a separator/blank)
@@ -9542,8 +9573,13 @@ def _orch_safe_subset_scan(command):
             i += 1
             continue
         if word_start and ch not in " \t\n":
-            if _orch_dequoted_command_word(command, i) in _ORCH_SUBSET_KEYWORDS:
+            word = _orch_dequoted_command_word(command, i)
+            if word in _ORCH_SUBSET_KEYWORDS:
                 return "OUT"             # a reserved word at a command position (quote removal included)
+            if word is not None and _orch_is_stdin_code_word(word):
+                if pending:
+                    return "OUT"         # an interpreter word on a line with a pending here-document:
+                interp = True            # the body would be executed as code (`<<'EOF' bash`, `| bash`)
         if ch in _ORCH_SUBSET_FORBIDDEN:
             return "OUT"
         if ch == "[" and not word_start:
@@ -9575,14 +9611,12 @@ def _orch_safe_subset_scan(command):
                 if any(c in _ORCH_SUBSET_FORBIDDEN for c in command[i + 1:end]):
                     return "OUT"         # a forbidden byte in the body: not modelled as plain data
                 pending = []
-                prev_dup, word_start = False, True
+                interp, prev_dup, word_start = False, False, True
                 i = end
                 continue
-            prev_dup, word_start = False, True
+            interp, prev_dup, word_start = False, False, True
             i += 1
             continue
-        if ch == "<" and command.startswith("<<<", i):
-            return "OUT"                 # a here-string is outside the subset
         if ch == "<" and command.startswith("<<", i):
             j = i + 2
             strip_tabs = command.startswith("-", j)
@@ -9595,6 +9629,8 @@ def _orch_safe_subset_scan(command):
             text, quoted, endw = word
             if any(c in _ORCH_SUBSET_FORBIDDEN for c in command[i:endw]):
                 return "OUT"             # a forbidden byte in the redirect or the delimiter word
+            if interp:
+                return "OUT"             # an interpreter on this line would execute the body as code
             pending.append((text, strip_tabs, quoted))
             prev_dup, word_start = False, False
             i = endw
@@ -9602,7 +9638,7 @@ def _orch_safe_subset_scan(command):
         if ch == "&":
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt == "&":               # `&&` logical AND: not a detach
-                prev_dup, word_start = False, True
+                interp, prev_dup, word_start = False, False, True
                 i += 2
                 continue
             if nxt == ">":               # `&>` / `&>>` redirect: not a detach
@@ -9615,11 +9651,11 @@ def _orch_safe_subset_scan(command):
                 continue
             return "detach"              # a bare `&` control operator (a detach)
         if ch == ";":
-            prev_dup, word_start = False, True
+            interp, prev_dup, word_start = False, False, True
             i += 1
             continue
         if ch == "|":
-            prev_dup, word_start = True, True
+            interp, prev_dup, word_start = False, True, True
             i += 1
             continue
         if ch in "<>":
@@ -9652,8 +9688,13 @@ def _orch_foreground_detach_kind(command):
 
     DISCLOSED RESIDUALS (unchanged in character): a runtime detacher that carries no bare `&` byte at all
     (a `coproc`, a `setsid worker`, a nested `bash -c '... &'` where the `&` is inside a single-quoted
-    string) is not caught; and an alias or function that renames a detacher is not modelled. These remain
-    silent-allow residuals disclosed in the manifest."""
+    string, an asynchronous process substitution the consumer never waits for such as `true <(worker)`,
+    or an interpreter fed code - a quoted script, or a here-document under a RENAMED interpreter - that
+    starts background work with no `&` byte) is not caught; and an alias or function that renames a
+    detacher or an interpreter is not modelled. A here-document consumed by a RECOGNIZED stdin-executing
+    interpreter is OUT (see _orch_safe_subset_scan), so with any `&` byte present it is refused, never
+    silently allowed. These remain silent-allow residuals disclosed in the manifest and pinned as
+    expected-ALLOW rows in the self-test ground-truth differential."""
     verdict = _orch_safe_subset_scan(command)
     if verdict == "OUT":
         return "unreadable" if _orch_any_bare_amp(command) else None
