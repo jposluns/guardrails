@@ -1747,48 +1747,6 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "false positive: the leg-1h sender child closes its inherited hold_write copy inside its try and every "
      "path of that child ends in os._exit; the parent's later os.close(hold_write) closes the parent's own "
      "copy, once, after the go-ahead write"),
-    ("opf/tools/opf.py", "run_case", "AFTER", "side", "side", 1,
-     "false positive: the QA26 case runner child (_unit_bound_self_test.run_case, if pid == 0:) closes its "
-     "inherited side copy first thing in its try and every path of that child ends in os._exit, so it never "
-     "reaches the parent's side.close() in the finally; the parent closes its own copy there, once"),
-    ("opf/tools/opf.py", "run_case", "AFTER", "out", "out", 1,
-     "false positive: the QA26 case runner child closes its inherited out copy first thing in its try and "
-     "every path of that child ends in os._exit, so it never reaches the parent's out.close() in the finally; "
-     "the parent closes its own copy there, once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "err_r", "err_w", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "err_r", "out_w", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "err_r", "source", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "err_w", "err_w", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "err_w", "out_w", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "err_w", "source", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "out_r", "err_w", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "out_r", "out_w", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "out_r", "source", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "out_w", "err_w", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "out_w", "out_w", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "AFTER", "out_w", "source", 1,
-     "false positive: the QA27 unit child (_run_unit_bounded, if pid == 0:) closes its inherited pipe-end copies inside its try (out_r and err_r first, then out_w and err_w once dup2 has placed them over 1 and 2) and every path of that child ends in os._exit, so it never reaches the parent's own closes (os.close(out_w), os.close(err_w), the pump's and the finally's os.close(source)); each process closes each of its own copies exactly once"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "REBIND", "each", "", 1,
-     'false positive: the fork-failure hygiene loop closes each of the four fresh pipe ends exactly once and the branch returns EXIT_MALFORMED; the child and parent branches that close those names again are never reached after a failed fork'),
-    ("opf/tools/opf.py", "_run_unit_bounded", "REBIND", "err_r", "", 1,
-     "false positive: the parent's read ends are owned by the pipes dict alone: the pump's EOF close deletes the entry it closed, so the finally's close (itself wrapped in an OSError guard) runs only for entries still present, and no descriptor number is closed twice; the child's close of its inherited copy happens in another process that ends in os._exit"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "REBIND", "out_r", "", 1,
-     "false positive: the parent's read ends are owned by the pipes dict alone: the pump's EOF close deletes the entry it closed, so the finally's close (itself wrapped in an OSError guard) runs only for entries still present, and no descriptor number is closed twice; the child's close of its inherited copy happens in another process that ends in os._exit"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "REBIND", "err_w", "", 1,
-     "false positive: the parent's os.close of its write-end copy runs exactly once, right after the fork; the child's close of its inherited copy and the fork-failure loop's close run in the other process and the other branch, which return before any repeat"),
-    ("opf/tools/opf.py", "_run_unit_bounded", "REBIND", "out_w", "", 1,
-     "false positive: the parent's os.close of its write-end copy runs exactly once, right after the fork; the child's close of its inherited copy and the fork-failure loop's close run in the other process and the other branch, which return before any repeat"),
     ("opf/tools/opf.py", "_watchdog_completion_case", "AFTER", "victim_read", "victim_read", 1,
      "false positive: the leg-1l sender child closes its inherited victim_read copy inside its try and every "
      "path of that child ends in os._exit; the parent's later os.close(victim_read) closes the parent's own "
