@@ -1083,7 +1083,9 @@ def _journal_listing(root_fd, keep=None):
     stay open: while they are HELD no filesystem can hand a removed component's freed inode number to a
     recreation, so a later listing compared against this one can never read a recreated component as
     unchanged; the caller re-reads each held identity with fstat at that comparison and closes every kept
-    descriptor. With no `keep` they are closed here."""
+    descriptor. Each is appended to `keep` the moment it is bound (one list operation, no later transfer
+    step), so from then on the caller alone closes it, on every path, an interrupt included; one opened but
+    interrupted before that append is closed here. With no `keep` they are closed here."""
     found = {}
 
     def opened_as(rel, st, fd):
@@ -1128,9 +1130,9 @@ def _journal_listing(root_fd, keep=None):
                     _journal._close_fd_quietly(cfd)
 
     parts = JOURNAL_REL.split("/")
-    opened = []
+    opened = keep if keep is not None else []   # handed over as each is bound: the caller's list owns it
+    cur = root_fd
     try:
-        cur = root_fd
         for i, comp in enumerate(parts):
             rel = "/".join(parts[:i + 1])
             try:
@@ -1156,8 +1158,8 @@ def _journal_listing(root_fd, keep=None):
         if keep is None:
             for _rel, fd in reversed(opened):
                 _journal._close_fd_quietly(fd)
-        else:
-            keep.extend(opened)
+        if cur != root_fd and cur not in [fd for _rel, fd in opened]:
+            _journal._close_fd_quietly(cur)     # bound, but interrupted before its append: closed here, once
     return found
 
 
@@ -1167,11 +1169,14 @@ def _journal_components():
     return ["/".join(parts[:i + 1]) for i in range(len(parts))]
 
 
-def _entry_named(rel, seen, created, txn, mine, maybe_mine):
+def _entry_named(rel, seen, created, txn, mine, maybe_mine, lock_gone=False):
     """One entry present now that the run's first listing did not hold, named with what is true of it:
     (text, True when it is this run's or may be). The lock is this run's ONLY when it is the inode this
     run's acquire wrote (`mine`); with no such identity it may be this run's only while `maybe_mine` (an
-    acquire of this run may have created it), else it is another run's. A changed component of the journal
+    acquire of this run may have created it), else it is another run's; when `lock_gone` (this run's
+    release read back no lock of its own while it still held the lock's descriptor) any lock present is
+    another run's, whatever its identity, since that descriptor no longer pins the inode. A changed
+    component of the journal
     path itself may be this run's when it is a directory: its preparation may have recreated it after
     `created` was taken; it creates nothing else there."""
     named = "{} ({})".format(rel, seen[0])
@@ -1183,9 +1188,9 @@ def _entry_named(rel, seen, created, txn, mine, maybe_mine):
     if rel == journal + txn or rel.startswith(journal + txn + "/"):
         return named + ", in this run's transaction record {!r}, which the journal keeps".format(txn), True
     if rel == journal + "lock":
-        if mine is not None and seen[1:] == mine[:2]:
+        if mine is not None and seen[1:] == mine[:2] and not lock_gone:
             return named + ", this run's journal lock", True
-        if mine is not None or not maybe_mine:
+        if mine is not None or not maybe_mine or lock_gone:
             return named + ", another run's journal lock, not this run's", False
         return named + ", a journal lock", True
     if rel in _journal_components():
@@ -1201,7 +1206,7 @@ def _entry_named(rel, seen, created, txn, mine, maybe_mine):
     return named, False
 
 
-def _observed(before, after, created, txn, mine=None, maybe_mine=False):
+def _observed(before, after, created, txn, mine=None, maybe_mine=False, lock_gone=False):
     """What the run's closing listing shows against its first one: ([], False) when the two are equal and
     each saw everything, else (clauses, ours). A directory EITHER listing could not open or list makes the
     journal not fully observed, which is named first and always stands in place of the claim, even when
@@ -1210,7 +1215,7 @@ def _observed(before, after, created, txn, mine=None, maybe_mine=False):
     own, then each entry gone. An entry either listing could not state hides itself and everything below
     it; a directory either listing stated but could not list (keyed `<dir>/`) hides only what is below it,
     so an entry the closing listing observed absent is always named gone. `ours` is True when any clause
-    concerns what this run wrote or cannot rule out."""
+    concerns what this run wrote or cannot rule out. `lock_gone` is _entry_named's."""
     blind = {}
     for listing in (before, after):
         for rel, seen in listing.items():
@@ -1221,7 +1226,7 @@ def _observed(before, after, created, txn, mine=None, maybe_mine=False):
         said.append("the adoption journal could not be fully observed, so what this run left there is not "
                     "known: {}".format("; ".join("{} could not be listed ({})".format(rel, why)
                                                  for rel, why in sorted(blind.items()))))
-    named = [_entry_named(rel, after[rel], created, txn, mine, maybe_mine)
+    named = [_entry_named(rel, after[rel], created, txn, mine, maybe_mine, lock_gone)
              for rel in sorted(rel for rel in after if rel not in blind and after[rel] != before.get(rel))]
     ours = bool(blind) or any(own for _text, own in named)
     if named:
@@ -1301,24 +1306,34 @@ def _lock_identity(jr_fd, keep=None):
     is HELD no filesystem can hand this lock's freed inode number to a later lock, so a read-back compared
     against this identity can never read a peer's lock as this run's; the caller closes it, on every path,
     only after that comparison. With no `keep`, and whenever what is present cannot be read, it is closed
-    here."""
+    here. Ownership passes with the append itself (one list operation): the finally closes the descriptor
+    ONLY while it is not in `keep`, so at every point exactly one party closes it, once. The open sits
+    inside the protected block, so no instruction between its binding and that block goes uncovered."""
+    lfd = None
     try:
-        lfd = os.open("lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=jr_fd)
-    except FileNotFoundError:
-        return None
-    kept = False
-    try:
+        try:
+            lfd = os.open("lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=jr_fd)
+        except FileNotFoundError:
+            return None
         st = os.fstat(lfd)
         if not stat.S_ISREG(st.st_mode):
             raise _journal.JournalError("journal lock is not a regular file (fail-closed)")
         identity = st.st_dev, st.st_ino, _journal._read_fd(lfd, cap=_journal._MAX_JOURNAL_READ_BYTES)
         if keep is not None:
             keep.append(lfd)
-            kept = True
         return identity
     finally:
-        if not kept:
+        if lfd is not None and (keep is None or lfd not in keep):
             _journal._close_fd_quietly(lfd)
+
+
+def _close_held(fds):
+    """Close every descriptor a caller HOLDS in the list `fds`, emptying it. Each is taken out of the list
+    BEFORE its one close, so a later pass over the same list (an outer finally) never closes a number
+    again: an interrupt between the two can at worst leave that one descriptor unclosed, never closed twice
+    (a second close can shut another thread's reused number, man 2 close)."""
+    while fds:
+        _journal._close_fd_quietly(fds.pop())
 
 
 def _release_outcome(jr_fd, journal_root, mine):
@@ -1446,8 +1461,7 @@ def _failed_lock_state(jr_fd, journal_root, error):
         return state, ("this run's own journal lock WAS created and STAYS ({}): the next run refuses on it, and "
                        "reconcile() breaks it once this process has exited".format(detail)), interrupt
     finally:
-        for lfd in held:
-            _journal._close_fd_quietly(lfd)
+        _close_held(held)
 
 
 def _lock_said(lock_state, lock_note):
@@ -1477,11 +1491,14 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     when one is (or may be) its own (a
     pre-INTENT transaction directory, its frames.log and preimages included), what its cleanup left or may
     not have made durable, and what its lock release left, in place of the claim. The first listing's
-    descriptors on the journal path components, and the descriptor on the lock this run's acquire wrote,
-    are HELD until that closing comparison (as jr_fd is), the components' before-identities re-read from
-    the held descriptors with fstat, so a filesystem that reuses freed inode numbers (ext4) can never hand
-    a removed component's inode to a recreation, or the released lock's inode to a peer's lock, and make
-    the comparison read it as unchanged or as this run's own. A leftover only the
+    descriptors on the journal path components are HELD until that closing comparison (as jr_fd is), the
+    components' before-identities re-read from the held descriptors with fstat, and the descriptor on the
+    lock this run's acquire wrote is HELD until the release's read-back, so a filesystem that reuses freed
+    inode numbers (ext4) can never hand a removed component's inode to a recreation, or the released lock's
+    inode to a peer's lock, and make the comparison read it as unchanged or as this run's own. The lock's
+    descriptor is closed right after that read-back, BEFORE the cleanup and the closing listing (an NFS
+    client keeps a file unlinked while open as a .nfsXXXX entry until its last close), and the closing
+    listing attributes a lock from the recorded release outcome. A leftover only the
     reconcile-first discipline clears is left to it rather than to hand removal, and one no sanctioned
     path clears is named as such. The lock release is read back by identity (the inode and content this
     run's acquire wrote, _lock_identity), never by process identity; at the end of a committed transaction
@@ -1606,7 +1623,13 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             return txn
         finally:
             if held and not retain:
-                lock_state, lock_note, interrupted = _release_note(jr_fd, journal_root, mine)
+                try:
+                    lock_state, lock_note, interrupted = _release_note(jr_fd, journal_root, mine)
+                finally:
+                    # closed right after the read-back, BEFORE the cleanup and the closing listing: an NFS
+                    # client renames a file unlinked while still open to .nfsXXXX until its last close, an
+                    # entry the closing listing would misreport and one that keeps rmdir from the journal
+                    _close_held(mine_held)
                 if interrupted is not None:
                     raise interrupted
     except BaseException as exc:
@@ -1647,15 +1670,17 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                         before[rel] = ("unlisted", str(exc))
                     else:
                         before[rel] = (_entry_kind(cst), cst.st_dev, cst.st_ino)
-                delta, ours = _observed(before, after, created, txn, mine, maybe_mine)
+                # the lock is attributed from the recorded release outcome: its descriptor is closed by now,
+                # and a read-back taken while it was held that found no lock of this run's rules one out
+                delta, ours = _observed(before, after, created, txn, mine, maybe_mine,
+                                        lock_state in ("released", "unconfirmed"))
                 unbound = _journal_unbound(jr_fd, jr_id, after)
                 ours = ours or bool(said) or unbound is not None
                 observed = said + ([unbound] if unbound else []) + delta
         finally:
             for _rel, cfd in reversed(held_components):   # held through the closing comparison, as jr_fd is
                 _journal._close_fd_quietly(cfd)
-            for lfd in mine_held:   # held through the release read-back and the closing comparison
-                _journal._close_fd_quietly(lfd)
+            _close_held(mine_held)  # any still held: a retained lock, or no release reached
             if jr_fd is not None:   # held through the closing observation, so its identity stays this run's
                 _journal._close_fd_quietly(jr_fd)
             store._close_fd_exc_safe(root_fd)
@@ -2176,7 +2201,9 @@ def observe_revision(product_root):
         said = " ".join(said.split())[:_GIT_DIAGNOSIS_CHARS]
         raise AdoptApplyError("the live product revision at {} cannot be observed (git rev-parse exit {}: no "
                               "repository, an unborn HEAD, a repository git refuses, or an unreadable answer{}); "
-                              "an unverifiable revision is never assumed fresh (spec 14.1, fail-closed)".format(
+                              "this observation ignores the global and system git configuration, so a "
+                              "safe.directory set there (as git's own hint suggests) does not apply here; an "
+                              "unverifiable revision is never assumed fresh (spec 14.1, fail-closed)".format(
                                   product_root, proc.returncode, "; git said: " + said if said else ""))
     return answer
 
@@ -2618,6 +2645,11 @@ def _self_test_checks():
     failures = []
     failure_details = {}
     checked = [0]
+    skipped = []    # (check, why): a check this platform cannot evaluate, named, never silently dropped
+    # The descriptor census the inode-reuse, handoff and NFS vectors use is /proc/self/fd; a platform
+    # without it (macOS) skips exactly those vectors, each named with this note, never a partial run.
+    census = Path("/proc/self/fd").is_dir()
+    no_census = "no /proc/self/fd descriptor census on this platform"
 
     def check(name, cond, observed=None):
         checked[0] += 1
@@ -3373,48 +3405,313 @@ def _self_test_checks():
     # against an identity descriptor closed before the release: the remap arms, the read-back sees this
     # run's inode with the peer's bytes, and the committed transaction falsely raises
     # AdoptCommittedLockError over a peer's lock, saying this run's lock was altered and stays).
-    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
-        saved_umask = os.umask(0o022)
-        reuse = {}
-        seen = {}
-        try:
-            root, files = fixture(temp)
-            real_release = _journal.release_lock
-
-            def peer_reused_inode(journal_root):
-                lock = str(Path(journal_root) / "lock")
-                own_st = _real_lstat(lock)
-                own = (own_st.st_dev, own_st.st_ino)
-                real_release(journal_root)
-                _journal.acquire_lock(journal_root, "opf-adopt-selftest-peer")
-                peer_st = _real_lstat(lock)
-                seen["own"] = own
-                seen["peer"] = (peer_st.st_dev, peer_st.st_ino)
-                seen["own freed"] = _inode_free(own)
-                if seen["own freed"]:
-                    reuse[(peer_st.st_dev, peer_st.st_ino)] = own
-            stat_w, lstat_w, fstat_w = (_reuse_remapped(_real_stat, reuse),
-                                        _reuse_remapped(_real_lstat, reuse),
-                                        _reuse_remapped(_real_fstat, reuse))
-            with mock.patch.object(_journal, "release_lock", peer_reused_inode), \
-                    mock.patch.object(os, "stat", stat_w), \
-                    mock.patch.object(os, "lstat", lstat_w), \
-                    mock.patch.object(os, "fstat", fstat_w), \
-                    mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {stat_w}), \
-                    mock.patch.object(os, "supports_follow_symlinks",
-                                      os.supports_follow_symlinks | {stat_w, lstat_w}):
-                done_txn, why = attempt(run_adopt_transaction, root, rid, compose_full(files))
+    if not census:
+        skipped.append(("commit-release-peer-reused-inode-not-own", no_census))
+    else:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            saved_umask = os.umask(0o022)
+            reuse = {}
+            seen = {}
             try:
-                owner_now = _journal.read_lock_owner(_journal_root(root))
-            except _journal.JournalError as exc:
-                owner_now = "unreadable ({})".format(exc)
-            check("commit-release-peer-reused-inode-not-own",
-                  done_txn == rid and why is None and not lock_free(root)
-                  and seen.get("own freed") is False,
-                  observed="txn={!r} why={!r} seen={!r} lock owner now={!r}".format(
-                      done_txn, why, seen, owner_now))
-        finally:
-            os.umask(saved_umask)
+                root, files = fixture(temp)
+                real_release = _journal.release_lock
+
+                def peer_reused_inode(journal_root):
+                    lock = str(Path(journal_root) / "lock")
+                    own_st = _real_lstat(lock)
+                    own = (own_st.st_dev, own_st.st_ino)
+                    real_release(journal_root)
+                    _journal.acquire_lock(journal_root, "opf-adopt-selftest-peer")
+                    peer_st = _real_lstat(lock)
+                    seen["own"] = own
+                    seen["peer"] = (peer_st.st_dev, peer_st.st_ino)
+                    seen["own freed"] = _inode_free(own)
+                    if seen["own freed"]:
+                        reuse[(peer_st.st_dev, peer_st.st_ino)] = own
+                stat_w, lstat_w, fstat_w = (_reuse_remapped(_real_stat, reuse),
+                                            _reuse_remapped(_real_lstat, reuse),
+                                            _reuse_remapped(_real_fstat, reuse))
+                with mock.patch.object(_journal, "release_lock", peer_reused_inode), \
+                        mock.patch.object(os, "stat", stat_w), \
+                        mock.patch.object(os, "lstat", lstat_w), \
+                        mock.patch.object(os, "fstat", fstat_w), \
+                        mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {stat_w}), \
+                        mock.patch.object(os, "supports_follow_symlinks",
+                                          os.supports_follow_symlinks | {stat_w, lstat_w}):
+                    done_txn, why = attempt(run_adopt_transaction, root, rid, compose_full(files))
+                try:
+                    owner_now = _journal.read_lock_owner(_journal_root(root))
+                except _journal.JournalError as exc:
+                    owner_now = "unreadable ({})".format(exc)
+                check("commit-release-peer-reused-inode-not-own",
+                      done_txn == rid and why is None and not lock_free(root)
+                      and seen.get("own freed") is False,
+                      observed="txn={!r} why={!r} seen={!r} lock owner now={!r}".format(
+                          done_txn, why, seen, owner_now))
+            finally:
+                os.umask(saved_umask)
+    # 6a'''b2: the inode-reuse vector for the acquire-failure path (_failed_lock_state): acquire_lock creates
+    # this run's lock, then fails with an OSError (lock_created), so the refusal releases that lock and
+    # reads it back; a peer acquires inside that release and the stat family is remapped under the ext4
+    # reuse rule above. _failed_lock_state HOLDS the identity's descriptor across its release and
+    # read-back, so the remap never arms and the refusal says this run's lock was created, then released
+    # again, the peer's lock named as another run's (red against an identity descriptor closed before the
+    # release: the read-back sees this run's inode with the peer's bytes and falsely says this run's lock
+    # was altered and stays).
+    if not census:
+        skipped.append(("failed-lock-state-peer-reused-inode", no_census))
+    else:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            saved_umask = os.umask(0o022)
+            reuse = {}
+            seen = {}
+            try:
+                root, files = fixture(temp)
+                os.makedirs(root / JOURNAL_REL)
+                real_release = _journal.release_lock
+                real_acquire_now = _journal.acquire_lock
+
+                def created_then_os_failed(journal_root, session_id):
+                    real_acquire_now(journal_root, session_id)
+                    fault = OSError("an injected acquire fault after the create")
+                    fault.lock_created = True
+                    raise fault
+
+                def peer_reused_inode_at_failure(journal_root):
+                    lock = str(Path(journal_root) / "lock")
+                    own_st = _real_lstat(lock)
+                    own = (own_st.st_dev, own_st.st_ino)
+                    real_release(journal_root)
+                    real_acquire_now(journal_root, "opf-adopt-selftest-peer")
+                    peer_st = _real_lstat(lock)
+                    seen["own"] = own
+                    seen["peer"] = (peer_st.st_dev, peer_st.st_ino)
+                    seen["own freed"] = _inode_free(own)
+                    if seen["own freed"]:
+                        reuse[(peer_st.st_dev, peer_st.st_ino)] = own
+                stat_w, lstat_w, fstat_w = (_reuse_remapped(_real_stat, reuse),
+                                            _reuse_remapped(_real_lstat, reuse),
+                                            _reuse_remapped(_real_fstat, reuse))
+                with mock.patch.object(_journal, "acquire_lock", created_then_os_failed), \
+                        mock.patch.object(_journal, "release_lock", peer_reused_inode_at_failure), \
+                        mock.patch.object(os, "stat", stat_w), \
+                        mock.patch.object(os, "lstat", lstat_w), \
+                        mock.patch.object(os, "fstat", fstat_w), \
+                        mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {stat_w}), \
+                        mock.patch.object(os, "supports_follow_symlinks",
+                                          os.supports_follow_symlinks | {stat_w, lstat_w}):
+                    err = refusal(run_adopt_transaction, root, rid, compose_full(files))
+                check("failed-lock-state-peer-reused-inode",
+                      "WAS created, then released again" in (err or "") and "altered" not in (err or "")
+                      and "another run's journal lock, not this run's" in (err or "")
+                      and seen.get("own freed") is False and not reuse,
+                      observed="refusal={!r} seen={!r}".format(err, seen))
+            finally:
+                os.umask(saved_umask)
+    # 6a'''b3: the two descriptor handoffs (_lock_identity's and _journal_listing's `keep`) are interrupt
+    # safe: a KeyboardInterrupt raised at EVERY bytecode boundary of the keeping call's own frame
+    # (sys.settrace with opcode events), one boundary per run, propagates with each descriptor closed
+    # exactly once by exactly one party and none leaked. The close ledger closes each number for real,
+    # then parks a guard pipe on it, so a second close of that number is counted rather than landing on a
+    # reused descriptor; the leak census is /proc/self/fd. The lock leg runs the identity read of a held
+    # lock, the failure leg the one inside _failed_lock_state (its created lock stays, as the interrupt
+    # note says, and is removed between runs), the listing leg the run's first listing over a journal of
+    # three components. Scope: the one boundary between a C call's return and the binding of the
+    # descriptor it returned (no Python code can protect it), and an interrupt inside a cleanup block of
+    # a caller (a finally that is already closing), are outside what any Python handoff can guarantee
+    # (red against an ownership flag set after the append: two closes; and against a transfer inside the
+    # finally: a leak).
+    handoff_legs = (("descriptor-handoff-interrupt-lock-identity", _lock_identity, False),
+                    ("descriptor-handoff-interrupt-failed-lock-state", _lock_identity, True),
+                    ("descriptor-handoff-interrupt-journal-listing", _journal_listing, False))
+    if not census:
+        for name, _target, _failing in handoff_legs:
+            skipped.append((name, no_census))
+    else:
+        import dis
+
+        def _fds_open():
+            out = set()
+            for fd_name in os.listdir("/proc/self/fd"):
+                try:
+                    _real_fstat(int(fd_name))
+                except OSError:
+                    continue
+                out.add(int(fd_name))
+            return out
+
+        def _unbound_returns(code):
+            """The offsets of each store binding a call's result: the one boundary no Python code covers."""
+            got, prior = set(), None
+            for ins in dis.get_instructions(code):
+                if (ins.opname.startswith(("STORE_FAST", "STORE_DEREF")) and prior is not None
+                        and prior.opname.startswith("CALL")
+                        and any(name in str(ins.argval) for name in ("lfd", "cur"))):
+                    got.add(ins.offset)
+                prior = ins
+            return got
+
+        def _handoff_run(root, target, boundary, compose, real_close):
+            """One transaction interrupted at opcode `boundary` of the keeping call of `target`: (fired,
+            outcome, numbers closed twice, numbers leaked)."""
+            code = target.__code__
+            skip = _unbound_returns(code)
+            hits, fired = [0], []
+            guard_r, guard_w = os.pipe()
+            guard_st = _real_fstat(guard_r)
+            guard_id = (guard_st.st_dev, guard_st.st_ino)
+            guarded, doubles = set(), []
+
+            def ledger_close(fd):
+                try:
+                    fst = _real_fstat(fd)
+                    fid = (fst.st_dev, fst.st_ino)
+                except OSError:
+                    fid = None
+                if fid is None or (fd in guarded and fid == guard_id):
+                    doubles.append(fd)      # already closed once and never reopened: a second close
+                    guarded.discard(fd)
+                    return real_close(fd)
+                real_close(fd)
+                os.dup2(guard_r, fd, inheritable=False)     # a second close of this number lands here
+                guarded.add(fd)
+                return None
+
+            def local(frame, event, arg):
+                if fired:
+                    return None
+                frame.f_trace_opcodes = True    # set again here: some interpreters arm it only from a local
+                if event == "opcode" and frame.f_lasti not in skip:
+                    hits[0] += 1
+                    if hits[0] == boundary:
+                        fired.append(frame.f_lineno)
+                        raise KeyboardInterrupt("an injected interrupt at boundary {}".format(boundary))
+                return local
+
+            def tracer(frame, event, arg):
+                if fired or frame.f_code is not code or frame.f_locals.get("keep") is None:
+                    return None
+                frame.f_trace_opcodes = True
+                return local
+            outcome = None
+            leaked = set()
+            prior_trace = sys.gettrace()
+            try:
+                baseline = _fds_open()
+                with mock.patch.object(os, "close", ledger_close):
+                    sys.settrace(tracer)
+                    try:
+                        run_adopt_transaction(root, rid, compose)
+                    except KeyboardInterrupt:
+                        outcome = "interrupted"
+                    except AdoptApplyError:
+                        outcome = "refused"
+                    finally:
+                        sys.settrace(prior_trace)
+                leaked = _fds_open() - baseline - guarded
+            finally:
+                for fd in sorted(guarded):
+                    _journal._close_fd_quietly(fd)
+                _journal._close_fd_quietly(guard_r)
+                _journal._close_fd_quietly(guard_w)
+            return fired, outcome, sorted(doubles), sorted(leaked)
+
+        def compose_refused_here(ops):
+            raise AdoptApplyError("an injected compose refusal")
+        for name, target, failing in handoff_legs:
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                saved_umask = os.umask(0o022)
+                bad = []
+                boundary = 0
+                control = None
+                try:
+                    root, files = fixture(temp)
+                    os.makedirs(root / JOURNAL_REL)
+                    real_acquire_now = _journal.acquire_lock
+                    real_close = os.close
+
+                    def created_then_os_failed_here(journal_root, session_id):
+                        real_acquire_now(journal_root, session_id)
+                        fault = OSError("an injected acquire fault after the create")
+                        fault.lock_created = True
+                        raise fault
+                    acquire = created_then_os_failed_here if failing else real_acquire_now
+                    with mock.patch.object(_journal, "acquire_lock", acquire):
+                        while boundary < 4000:
+                            boundary += 1
+                            fired, outcome, doubles, leaked = _handoff_run(root, target, boundary,
+                                                                           compose_refused_here, real_close)
+                            lock_path = _journal_root(root) / "lock"
+                            stays = os.path.lexists(lock_path)
+                            if failing and stays:
+                                os.unlink(lock_path)    # this run's created lock, which the interrupt left
+                            if not fired:
+                                control = (outcome, doubles, leaked, stays)
+                                break
+                            if outcome != "interrupted" or doubles or leaked or (stays and not failing):
+                                bad.append((boundary, fired[0], outcome, doubles, leaked, stays))
+                finally:
+                    os.umask(saved_umask)
+                check(name, 1 < boundary < 4000 and not bad and control is not None
+                      and control[0] == "refused" and not control[1] and not control[2],
+                      observed="boundaries={} control={!r} failed (boundary, line, outcome, closed twice, "
+                               "leaked, lock stays)={!r}".format(boundary - 1, control, bad[:6]))
+    # 6a'''b4: an NFS product root, modelled: a file unlinked while this process still holds it open is
+    # renamed to .nfsXXXX (the client's silly-rename) and removed at its last close. The run closes the
+    # lock descriptor it holds right after the release's read-back, before the cleanup and the closing
+    # listing, so a refusal under the lock still says "nothing written" and removes the journal it
+    # created (red against holding that descriptor through the cleanup: the .nfs entry is named a stray
+    # that stays, and the rmdir of the journal directory fails as not empty).
+    nfs_legs = ((True, "nfs-silly-rename-lock-closed-before-listing"),
+                (False, "nfs-silly-rename-lock-closed-before-cleanup"))
+    if not census:
+        for _prebuilt, name in nfs_legs:
+            skipped.append((name, no_census))
+    else:
+        for prebuilt, name in nfs_legs:
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                saved_umask = os.umask(0o022)
+                silly, renamed = {}, []
+                err = left = None
+                try:
+                    root, files = fixture(temp)
+                    if prebuilt:
+                        os.makedirs(root / JOURNAL_REL)
+                    lock_path = str(_journal_root(root) / "lock")
+                    nfs_path = str(_journal_root(root) / ".nfs000000000000abc1")
+                    real_unlink, real_close = os.unlink, os.close
+
+                    def nfs_unlink(path, *args, **kwargs):
+                        if not args and not kwargs and str(path) == lock_path:
+                            st = _real_lstat(lock_path)
+                            if not _inode_free((st.st_dev, st.st_ino)):
+                                os.rename(lock_path, nfs_path)
+                                silly[nfs_path] = (st.st_dev, st.st_ino)
+                                renamed.append(nfs_path)
+                                return None
+                        return real_unlink(path, *args, **kwargs)
+
+                    def nfs_close(fd):
+                        try:
+                            return real_close(fd)
+                        finally:
+                            for path, identity in list(silly.items()):
+                                if _inode_free(identity):
+                                    del silly[path]
+                                    real_unlink(path)
+
+                    def compose_refused_nfs(ops):
+                        raise AdoptApplyError("an injected compose refusal")
+                    with mock.patch.object(os, "unlink", nfs_unlink), mock.patch.object(os, "close", nfs_close), \
+                            mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {nfs_unlink}):
+                        err = refusal(run_adopt_transaction, root, rid, compose_refused_nfs)
+                    left = sorted(os.listdir(root / JOURNAL_REL)) if prebuilt else os.path.lexists(root / ".aiqt")
+                finally:
+                    os.umask(saved_umask)
+                check(name, bool(renamed) and not silly and left in ([], False)
+                      and "injected compose refusal; " + _NOTHING_WRITTEN in (err or "") and ".nfs" not in (err or ""),
+                      observed="refusal={!r} silly-renamed={!r} still renamed={!r} left={!r}".format(
+                          err, renamed, silly, left))
     # 6a'''': a refusal past the journal's own pre-INTENT capture (its transaction directory, frames.log and
     # preimages written) never says "nothing written": the composer names each entry the run's two journal
     # listings differ by, over a journal that predates the run and over one the run created (red against
@@ -3669,51 +3966,54 @@ def _self_test_checks():
     # comparison, so the remap never arms and the refusal names the recreated components (red against a
     # first listing that closes them: every remap arms, the recreated components compare as unchanged, and
     # the refusal falsely says "nothing written" over three directories this run recreated and left).
-    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
-        saved_umask = os.umask(0o022)
-        reuse = {}
-        seen = {}
-        try:
-            root, files = fixture(temp)
-            os.makedirs(root / JOURNAL_REL)
-            real_ensure = _journal.ensure_journal_dirs
+    if not census:
+        skipped.append(("journal-component-reused-inode-named", no_census))
+    else:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            saved_umask = os.umask(0o022)
+            reuse = {}
+            seen = {}
+            try:
+                root, files = fixture(temp)
+                os.makedirs(root / JOURNAL_REL)
+                real_ensure = _journal.ensure_journal_dirs
 
-            def cleaned_then_ensure(*args):
-                removed = {}
-                for rel in reversed(_journal_components()):
-                    rm_st = _real_lstat(root / rel)
-                    removed[rel] = (rm_st.st_dev, rm_st.st_ino)
-                    os.rmdir(root / rel)
-                made = real_ensure(*args)
-                for rel in _journal_components():
-                    new_st = _real_lstat(root / rel)
-                    freed = _inode_free(removed[rel])
-                    seen[rel] = dict(removed=removed[rel], recreated=(new_st.st_dev, new_st.st_ino),
-                                     freed=freed)
-                    if freed:
-                        reuse[(new_st.st_dev, new_st.st_ino)] = removed[rel]
-                return made
+                def cleaned_then_ensure(*args):
+                    removed = {}
+                    for rel in reversed(_journal_components()):
+                        rm_st = _real_lstat(root / rel)
+                        removed[rel] = (rm_st.st_dev, rm_st.st_ino)
+                        os.rmdir(root / rel)
+                    made = real_ensure(*args)
+                    for rel in _journal_components():
+                        new_st = _real_lstat(root / rel)
+                        freed = _inode_free(removed[rel])
+                        seen[rel] = dict(removed=removed[rel], recreated=(new_st.st_dev, new_st.st_ino),
+                                         freed=freed)
+                        if freed:
+                            reuse[(new_st.st_dev, new_st.st_ino)] = removed[rel]
+                    return made
 
-            def compose_refused(ops):
-                raise AdoptApplyError("an injected compose refusal")
-            stat_w, lstat_w, fstat_w = (_reuse_remapped(_real_stat, reuse),
-                                        _reuse_remapped(_real_lstat, reuse),
-                                        _reuse_remapped(_real_fstat, reuse))
-            with mock.patch.object(_journal, "ensure_journal_dirs", cleaned_then_ensure), \
-                    mock.patch.object(os, "stat", stat_w), \
-                    mock.patch.object(os, "lstat", lstat_w), \
-                    mock.patch.object(os, "fstat", fstat_w), \
-                    mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {stat_w}), \
-                    mock.patch.object(os, "supports_follow_symlinks",
-                                      os.supports_follow_symlinks | {stat_w, lstat_w}):
-                err = refusal(run_adopt_transaction, root, rid, compose_refused)
-            check("journal-component-reused-inode-named", "injected compose refusal" in (err or "")
-                  and "nothing written" not in (err or "") and "this run wrote" in (err or "")
-                  and "{} (directory), a component of the journal path".format(JOURNAL_REL) in (err or "")
-                  and not reuse,
-                  observed="refusal={!r} components={!r}".format(err, seen))
-        finally:
-            os.umask(saved_umask)
+                def compose_refused(ops):
+                    raise AdoptApplyError("an injected compose refusal")
+                stat_w, lstat_w, fstat_w = (_reuse_remapped(_real_stat, reuse),
+                                            _reuse_remapped(_real_lstat, reuse),
+                                            _reuse_remapped(_real_fstat, reuse))
+                with mock.patch.object(_journal, "ensure_journal_dirs", cleaned_then_ensure), \
+                        mock.patch.object(os, "stat", stat_w), \
+                        mock.patch.object(os, "lstat", lstat_w), \
+                        mock.patch.object(os, "fstat", fstat_w), \
+                        mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {stat_w}), \
+                        mock.patch.object(os, "supports_follow_symlinks",
+                                          os.supports_follow_symlinks | {stat_w, lstat_w}):
+                    err = refusal(run_adopt_transaction, root, rid, compose_refused)
+                check("journal-component-reused-inode-named", "injected compose refusal" in (err or "")
+                      and "nothing written" not in (err or "") and "this run wrote" in (err or "")
+                      and "{} (directory), a component of the journal path".format(JOURNAL_REL) in (err or "")
+                      and not reuse,
+                      observed="refusal={!r} components={!r}".format(err, seen))
+            finally:
+                os.umask(saved_umask)
     # 6a12: a journal path the closing listing could not reach is said to be unobserved, never to "no
     # longer resolve" (red against the binding clause that treats an unreached path as absent), and the
     # journal beneath the unlisted `adopt` is never said to be gone (red against "gone" for unseen entries).
@@ -4963,7 +5263,8 @@ def _self_test_checks():
         with mock.patch.object(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 128, b"", said)):
             err = refusal(observe_revision, root) or ""
         check("driver-unobservable-revision-names-git-diagnosis", "dubious ownership" in err
-              and "\x1b" not in err and len(err) < 1000)
+              and "\x1b" not in err and len(err) < 1000
+              and "ignores the global and system git configuration, so a safe.directory set there" in err)
         # stale observation: a source's bytes change after the plan froze -> refuse into a fresh plan.
         (root / "legacy.md").write_bytes(b"edited after planning\n")
         check("driver-approve-stale-observation-refused", "fresh plan" in
@@ -5352,6 +5653,8 @@ def _self_test_checks():
     # 12: the finish ops (slice 5), see _finish_ops_self_test.
     _finish_ops_self_test(check)
 
+    for name, why in skipped:
+        print("  SKIPPED: {} ({})".format(name, why))
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
         for f in failures:
