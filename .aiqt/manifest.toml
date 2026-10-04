@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "24486c704eff02f1f81bfd74c863ec02be06b2d9b5da6bd87ffb603abb9d7a8e"
+tree-sha256 = "f4c5d0e4616958e870d83826fb485954292f27b7649f3f73bd86e571ee059f18"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -127,7 +127,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2867
-sha256 = "549c11114af2e6c5ef41dd23f3eded7fd6f76846c8860237b071e71cf4b09fff"
+sha256 = "518ea6b07ab22be69b5ad218f05003adfadace969a5f0414c48531312a35f1e7"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2556,8 +2556,8 @@ sha256 = "72026d6e7d77dbd23b091a569a7791ab183025f06b9b7ae60362f7b8e16b0df9"
 
 [[sources]]
 path = "opf/tools/_containment.py"
-bytes = 29934
-sha256 = "be6c3d1dde14cb6ca7b80e115ae905942fe9e2b83140a3e445a0f1c8f9c22cad"
+bytes = 30734
+sha256 = "194fbd6c8d02d05ea9afd2d81ca0c61abb2ea24707c984f3025acf8c18e43d37"
 
 [[sources]]
 path = "opf/tools/_journal.py"
@@ -3131,8 +3131,8 @@ sha256 = "5bb55aeaf3708f9df4545de618311bb22ac484568d5a494055f9967c5eb9ae7f"
 
 [[sources]]
 path = "tools/_gen_common.py"
-bytes = 37913
-sha256 = "1ec16d9966905d066bd6a7279263ec193eb55ecab7c7b6498fe69f38a488a672"
+bytes = 38713
+sha256 = "d7d25b7ecc7e3053751619119f82c97990b4ca3addfffc94734caca9d0f56c8d"
 
 [[sources]]
 path = "tools/_git_fixture_env.py"
@@ -3196,8 +3196,8 @@ sha256 = "b61ee4627184d0afc7e7e0d4b864c3a7b0d0b505d5546a36b09084f8ec34567a"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 262116
-sha256 = "29bc2f9af475f0b8b9f9d033b29e72394502888fd373b78ca6553d991c2b8088"
+bytes = 271047
+sha256 = "97300c546b6508f355d456e154e1668f45e173cdbe9db58ffafbe205323f017c"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -3266,8 +3266,8 @@ sha256 = "5d497dd47f36726ad387fe985359979b5c31093de6248931979366bb0cb9aec3"
 
 [[sources]]
 path = "tools/check_manifest.py"
-bytes = 86075
-sha256 = "155349aa75ce3fe56db2583f5e9875c290293e8c710508db1b6f4fcd24962d16"
+bytes = 87836
+sha256 = "047c734f901bc383c4dee4b55880cb0bd4bc19c9621d4442f3f207749a416c7f"
 
 [[sources]]
 path = "tools/check_mappings.py"

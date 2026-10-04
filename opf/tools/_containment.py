@@ -161,8 +161,12 @@ def precheck_special_files(root):
     walk cannot certify. ACCEPTED: a regular file or directory; a DANGLING symlink (every open of it
     fails at once, so no read of it can block); a symlink to a REGULAR file, inside or outside the
     root (a plain read of a regular file does not block); a symlink to a directory INSIDE the root,
-    whose resolved target subtree is walked even when that target is git-ignored, under the TARGET
-    path's OWN ignore status, never the link's (QA round 9, claude MD1), and at most once per ignore
+    whose resolved target subtree is walked even when that target is git-ignored, with the
+    ignored-only leniencies applied ONLY when BOTH the link path and the target path are
+    git-ignored (QA round 9 claude MD1, QA round 10 claude MD2: the classification follows the
+    PATHS themselves, in both directions, because the contents are reachable under both the
+    link's path and the target's own path, and a non-ignored path on either side means a gate's
+    fixed-path read of non-ignored content can reach them), and at most once per ignore
     classification (a visited set keyed by device, inode and classification bounds link cycles), so
     linked-in contents, which a gate can reach through the link's own certified path, are checked
     rather than trusted; and a GIT-IGNORED symlink
@@ -412,9 +416,14 @@ def precheck_special_files(root):
                         if link_rel == ".":
                             link_rel = ""
                         # Walked even when the TARGET is ignored (a gate can reach it through
-                        # the link's own certified path), under the TARGET path's OWN ignore
-                        # status, never the link's (QA round 9, claude MD1).
-                        stack.append((real, link_rel, _rel_ignored(link_rel)))
+                        # the link's own certified path). LENIENT only when BOTH the link path
+                        # and the target path are ignored (QA round 9 claude MD1, QA round 10
+                        # claude MD2): the ignore classification follows the PATHS themselves,
+                        # in both directions, because an ignored link to a tracked directory
+                        # (MD1) and a tracked link into an ignored directory (MD2) each leave
+                        # the contents reachable under a NON-ignored path, whose walk must be
+                        # the strict one.
+                        stack.append((real, link_rel, skipped and _rel_ignored(link_rel)))
                     elif not skipped:
                         _refuse(path, "a symlink to a directory outside the repository root (to "
                                       "{}); its contents cannot be certified from this "

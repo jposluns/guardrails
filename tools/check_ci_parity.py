@@ -5060,10 +5060,6 @@ def self_test():
          order_fixture.replace("      - name: A gate\n", "      - name: !!str gate\n", 1)),
         ("inline comment on a step line", "step-comment",
          order_fixture.replace("      - name: A gate\n", "      - name: A gate # note\n", 1)),
-        ("inline comment on a run body line", "step-comment",
-         order_fixture.replace("          python3 -I -B tools/_gen_common.py --precheck\n",
-                               "          python3 -I -B tools/_gen_common.py --precheck "
-                               "# note\n", 1)),
         ("merge key in a with mapping", "step-key",
          order_fixture.replace("      - uses: actions/setup-python@v5\n",
                                "      - uses: actions/setup-python@v5\n        with:\n"
@@ -5080,6 +5076,20 @@ def self_test():
         if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
             failures.append("32h unmodelled scalar, comment or step form not refused ({}): "
                             "{!r} {!r}".format(label, got_problems, got_diagnostics))
+    # QA round 10: inside a literal block a '#' is CONTENT, so a run body line is kept
+    # VERBATIM (never comment-stripped); a disguised precheck line therefore no longer matches
+    # the canonical body and the job fails the order question, in agreement with what the shell
+    # actually runs.
+    commented_body = order_fixture.replace(
+        "          python3 -I -B tools/_gen_common.py --precheck\n",
+        "          python3 -I -B tools/_gen_common.py --precheck # note\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(
+        commented_body, "fixture.yml")
+    if not any("no canonical special-file precheck step" in problem
+               for problem in got_problems):
+        failures.append("32h a '#' on a run body line is literal content; the disguised "
+                        "precheck must not be credited, got {!r} {!r}".format(
+                            got_problems, got_diagnostics))
     replaced_tree = order_fixture + ("      - uses: actions/checkout@v4\n"
                                      "        with:\n          ref: refs/heads/other\n")
     got_problems, got_diagnostics = workflow_precheck_order_problems(replaced_tree, "fixture.yml")
@@ -5134,6 +5144,75 @@ def self_test():
             failures.append("32i round-9 reproduction ({}) not refused: {!r} {!r}".format(
                 label, got_problems, got_diagnostics))
 
+    # QA round 10 (codex 1 and claude MJ1 of round 10, the whole-file line grammar): an
+    # env:/with: entry with NO colon used to receive an empty-value pass, so a quoted scalar
+    # opened there (or an escaped mapping key decoding to BASH_ENV, an anchored key, a quoted or
+    # exact duplicate key, a double-quoted value) let the round-9 guard and the YAML engine read
+    # DIFFERENT steps: each hostile fixture below returned ([], []) at the round-9 guard. Under
+    # the line grammar every such line is refused by name, and a simply single-quoted uses:
+    # value now DECODES to the same checkout as the plain spelling (round-10 codex minor).
+    # These vectors fail without the round-10 grammar change.
+    count += 1
+    for opener in ("            'x", "            - 'x", "            ? 'x",
+                   "            !!str 'x"):
+        no_colon = currency_shape.replace(
+            "      - uses: actions/checkout@v4\n",
+            "      - uses: actions/checkout@v4\n        with:\n"
+            "          fetch-depth:\n" + opener + "\n", 1).replace(
+            "          python3 -I -B tools/_gen_common.py --precheck\n",
+            "          python3 -I -B tools/_gen_common.py --precheck\n"
+            "      - name: Close\n        run: |\n          '\n", 1)
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            no_colon, "currency-fixture.yml")
+        if not any(diagnostic.code in ("step-key", "step-shape")
+                   for diagnostic in got_diagnostics):
+            failures.append("32j a no-colon with: entry opening a scalar ({!r}) must be "
+                            "refused, got {!r} {!r}".format(opener.strip(), got_problems,
+                                                            got_diagnostics))
+    for label, mutated_fixture in (
+        ("an escaped env key decoding to BASH_ENV",
+         currency_shape.replace(
+             "      - name: Standards staleness\n",
+             "      - name: Standards staleness\n        env:\n"
+             "          \"\\u0042ASH_ENV\": .github/skip.sh\n", 1)),
+        ("an anchored with: key",
+         currency_shape.replace(
+             "      - uses: actions/checkout@v4\n",
+             "      - uses: actions/checkout@v4\n        with:\n"
+             "          &foo fetch-depth: 0\n", 1)),
+        ("a quoted duplicate with: key",
+         currency_shape.replace(
+             "      - uses: actions/checkout@v4\n",
+             "      - uses: actions/checkout@v4\n        with:\n"
+             "          fetch-depth: 1\n          \"fetch-depth\": 0\n", 1)),
+        ("an escaped with: key",
+         currency_shape.replace(
+             "      - uses: actions/checkout@v4\n",
+             "      - uses: actions/checkout@v4\n        with:\n"
+             "          \"fetch-dep\\u0074h\": 0\n", 1)),
+        ("an exact duplicate with: key",
+         currency_shape.replace(
+             "      - uses: actions/checkout@v4\n",
+             "      - uses: actions/checkout@v4\n        with:\n"
+             "          fetch-depth: 1\n          fetch-depth: 0\n", 1)),
+        ("a double-quoted scalar value",
+         currency_shape.replace("          python-version: '3.14'\n",
+                                "          python-version: \"3.14\"\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "currency-fixture.yml")
+        if not any(diagnostic.code == "step-key" for diagnostic in got_diagnostics):
+            failures.append("32j {} must be a step-key refusal, got {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    quoted_uses = currency_shape.replace("      - uses: actions/checkout@v4\n",
+                                         "      - uses: 'actions/checkout@v4'\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(
+        quoted_uses, "currency-fixture.yml")
+    if got_problems or got_diagnostics:
+        failures.append("32j a simply quoted uses: value must decode to the same checkout as "
+                        "the plain spelling, got {!r} {!r}".format(got_problems,
+                                                                   got_diagnostics))
+
     # codex round-4 finding 4: a workflows directory path no path call accepts (an embedded NUL) is a
     # read-error diagnostic, never a raw ValueError. Fails without the (OSError, ValueError) arm.
     count += 1
@@ -5159,429 +5238,513 @@ def self_test():
 
 
 
-_YAML_KEY_RE = re.compile(
-    r"""^(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<plain>[^\s'"#][^:]*?))\s*:(?=\s|$)""")
-
-
-def _yaml_mapping_key(stripped):
-    """(normalized key, canonical) for a YAML mapping line (QA round 6, codex M3 = claude M1): a
-    double-quoted, single-quoted or space-before-colon spelling is the SAME YAML key as the plain
-    one, so key checks normalize before comparing; canonical is True only for the plain `key:`
-    spelling (no quoting, no space before the colon). (None, False) for a line that is not a
-    mapping entry this parse can read."""
-    match = _YAML_KEY_RE.match(stripped)
-    if not match:
-        return None, False
-    for group in ("dq", "sq", "plain"):
-        key = match.group(group)
-        if key is not None:
-            return key, group == "plain" and stripped.startswith(key + ":")
-    return None, False
-
+# D-400-SPECIAL-FILE-PRECHECK order, QA round 10 (premise change): rounds 8, 9 and 10 each
+# found a YAML form the piecemeal per-line value allowlist accepted while a real YAML parser read
+# it differently (escaped-quote names, escaped mapping keys decoding to BASH_ENV, a with: entry
+# with no colon opening a multi-line scalar that hid the precheck step). Extending that allowlist
+# one form per round was not converging, so the order guard now holds every line of each guarded
+# workflow file to a WHOLE-FILE LINE GRAMMAR (_workflow_line_grammar): a line that matches no
+# production is refused with its line number and a named reason, and the step model is built ONLY
+# from lines the grammar accepted.
+_GRAMMAR_ENTRY_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*):(.*)$")
+# A plain scalar: no quote character, no backslash, no '#', no ':', and none of the YAML
+# indicator characters & * ! | > % backtick [ ] ; '-' may lead only when not followed by a space
+# (a '- ' opens a sequence item), and braces, '@', ',', '(', ')', '=' may not LEAD the scalar
+# (GitHub expressions such as ${{ matrix.os }} and uses: values need them mid-scalar,
+# where YAML block context treats them as literal text).
+_GRAMMAR_PLAIN_RE = re.compile(
+    r"^(?:[A-Za-z0-9_/.$]|-(?=[^ ]))[A-Za-z0-9 _.,/=()@${}-]*$")
+# A single-quoted scalar: one opening quote, an interior with no quote character of EITHER kind
+# and no backslash (a doubled quote is a YAML ESCAPE that keeps the scalar open), one closing
+# quote, nothing after. Double-quoted scalars are not modelled at all.
+_GRAMMAR_QUOTED_RE = re.compile(r"""^'[^'"\\]*'$""")
+# A single-line flow sequence of plain items: the ONE flow form the real workflows use
+# (branches: [main]; types: [opened, synchronize, reopened, edited]; os: [ubuntu-latest,
+# macos-latest]).
+_GRAMMAR_FLOW_SEQ_RE = re.compile(r"^\[[A-Za-z0-9_.-]+(?:, [A-Za-z0-9_.-]+)*\]$")
 
 WORKFLOW_LEVEL_KEYS = ("jobs", "name", "on", "permissions")
 JOB_LEVEL_KEYS = ("name", "runs-on", "steps", "strategy")
+STEP_KEYS = ("name", "uses", "run", "env", "with")
 
 
-# QA round 9 (codex 1 = claude MJ1): the ONLY modelled quoted scalar is one opening quote, an
-# interior with no quote character of EITHER kind and no backslash, then one closing quote with
-# nothing after it. In YAML a trailing doubled single quote is an ESCAPE, not a close, so an
-# endswith test called the OPEN scalars 'name'' and \'\'\' closed and the round-8 guard credited a
-# precheck step the YAML engine did not have; a backslash does the same inside double quotes.
-_MODELLED_QUOTED_RE = re.compile(r"""^(?:'[^'"\\]*'|"[^'"\\]*")$""")
+def _grammar_context_code(indent):
+    """The diagnostic code for a grammar or structure refusal at a given indent: the code names
+    the modelled level the refused line sits at (workflow keys at indent 0, job ids at 2, job
+    keys at 4, step content deeper), matching the codes the earlier piecemeal parse used so the
+    vectors pin the same classifications."""
+    if indent <= 0:
+        return "workflow-key"
+    if indent == 2:
+        return "job-id"
+    if indent == 4:
+        return "job-key"
+    return "step-key"
 
 
-def _unmodelled_value(value):
-    """A reason string when a modelled mapping line's VALUE carries YAML this parse cannot read,
-    else None. The parse ACCEPTS only the scalar forms it fully models and REFUSES everything
-    else by name (QA round 8, codex 7 = claude M1; tightened QA round 9, codex 1 = claude MJ1):
-    a plain scalar with no quote character and no backslash anywhere in it, or a single- or
-    double-quoted scalar matching _MODELLED_QUOTED_RE (clean interior, closed, nothing after).
-    Refused by name: an anchor or alias, a tag, a flow collection, a block scalar, any other
-    quote-bearing quoted value (an escaped quote pair keeps the scalar OPEN and swallows the
-    following lines, so this parse and the YAML engine would read DIFFERENT steps), and a plain
-    scalar carrying a quote or backslash (there the comment stripper's quote model and the YAML
-    engine's can disagree about where a comment starts). An empty value (a bare block-mapping
-    key) is modelled."""
-    value = value.strip()
-    if not value:
-        return None
-    head = value[0]
-    if head in ("&", "*"):
-        return "a YAML anchor or alias"
-    if head == "!":
-        return "a YAML tag"
-    if head in (chr(91), chr(123)):
-        return "a flow-style collection"
-    if head in ("|", ">"):
-        return "a block scalar"
-    if head in ("'", chr(34)):
-        if _MODELLED_QUOTED_RE.fullmatch(value) is None:
-            return ("a quoted scalar outside the modelled form (one opening quote, an interior "
-                    "with no quote character, backslash or escape, one closing quote, nothing "
-                    "after); YAML escape rules make any other quote-bearing form ambiguous to "
-                    "this parse")
-        return None
-    if "'" in value or chr(34) in value or chr(92) in value:
-        return ("a plain scalar carrying a quote character or backslash, which this parse's "
-                "comment and quote handling could read differently from the YAML engine")
-    return None
+def _workflow_line_grammar(text, source):
+    """(root, diagnostics) for one workflow file under the QA round 10 LINE GRAMMAR. Every line
+    of the file must match exactly ONE production, or it is refused with its line number and a
+    named reason. The productions:
+
+      blank    an empty line;
+      comment  a full-line comment at any indent (spaces, then '#', then anything to the end);
+      mapping  '<indent><key>:' or '<indent><key>: <value>', where <key> matches
+               [A-Za-z0-9_][A-Za-z0-9_.-]* (plain only: no quotes, no escapes, no anchors, no
+               tags, no merge keys) and <value> is a plain scalar (_GRAMMAR_PLAIN_RE), a
+               single-quoted scalar with no quote inside (_GRAMMAR_QUOTED_RE, stored DECODED),
+               or a single-line flow sequence of plain items (_GRAMMAR_FLOW_SEQ_RE);
+      item     '<indent>- ' followed by exactly one mapping production (the item opens a nested
+               mapping two columns deeper);
+      block    '<indent><key>: |' or '<indent><key>: |-', then a literal block whose first line
+               sits exactly two spaces past the key (that sets the block's YAML indentation) and
+               whose lines are consumed as OPAQUE text, never comment-stripped (inside a literal
+               block a '#' is content), until the indent returns to the key's column.
+
+    Nothing else is accepted: no tabs, no trailing whitespace, no flow collections beyond the one
+    bracketed form above, no multi-line, folded ('>', '|+') or double-quoted scalars, no document
+    markers or directives, no anchors, aliases, tags or merge keys, no inline comments, and no
+    indentation that is not a multiple of two spaces with each nesting step exactly two columns.
+    Duplicate keys within one mapping (compared exactly, since keys are plain) are refused. A
+    refused line's deeper subtree is skipped: the file already fails, and the whole-file shadow
+    scan in workflow_precheck_order_problems still covers every skipped line.
+
+    root is ('map', entries); entries are (key, line, node) tuples where node is ('scalar', text
+    or None for a bare key with no nested content), ('flowseq', items), ('block', lines,
+    line_numbers), ('map', entries) or ('seq', ((line, map_node), ...))."""
+    diagnostics = []
+    toks = []
+
+    def refuse(number, raw, indent, dash, keyed, detail):
+        if "#" in raw:
+            code = "step-comment"
+            detail = ("inline comments are outside the line grammar, because where a comment "
+                      "starts depends on quote state this parse does not model; " + detail)
+        elif dash and not keyed:
+            code = "step-shape"
+        else:
+            code = _grammar_context_code(indent)
+        diagnostics.append(_diagnostic(source, number, code,
+                           "line outside the workflow line grammar: {!r}; {}".format(
+                               raw.strip(), detail)))
+        toks.append({"n": number, "ind": indent, "dash": dash, "bad": True})
+
+    lines = text.split("\n")
+    total = len(lines)
+    i = 0
+    while i < total:
+        raw = lines[i]
+        number = i + 1
+        i += 1
+        if raw == "":
+            continue
+        if "\t" in raw:
+            diagnostics.append(_diagnostic(source, number, "yaml-tab",
+                               "tabs are outside the supported YAML subset"))
+            toks.append({"n": number, "ind": len(raw) - len(raw.lstrip(" \t")),
+                         "dash": False, "bad": True})
+            continue
+        body = raw.lstrip(" ")
+        indent = len(raw) - len(body)
+        if body.startswith("#"):
+            continue
+        if body != body.rstrip(" "):
+            refuse(number, raw, indent, False, False, "trailing whitespace")
+            continue
+        if indent % 2:
+            refuse(number, raw, indent, False, False,
+                   "indentation is not a multiple of two spaces")
+            continue
+        dash = False
+        key_col = indent
+        if body == "-" or body.startswith("- "):
+            dash = True
+            key_col = indent + 2
+            body = body[2:]
+            if not body or body[0] in (" ", "-"):
+                refuse(number, raw, indent, True, False,
+                       "a sequence item must carry exactly one mapping entry after '- '")
+                continue
+        match = _GRAMMAR_ENTRY_RE.match(body)
+        if match is None:
+            refuse(number, raw, indent, dash, False,
+                   "only the mapping productions '<key>:' and '<key>: <value>' are modelled, "
+                   "with a plain key ([A-Za-z0-9_][A-Za-z0-9_.-]*): no quoted or escaped keys, "
+                   "no anchors, aliases, tags or merge keys, no flow collections, no document "
+                   "markers or directives")
+            continue
+        key, rest = match.group(1), match.group(2)
+        if rest == "":
+            vkind, value = "none", None
+        elif not rest.startswith(" "):
+            refuse(number, raw, indent, dash, True,
+                   "a mapping value must follow its key as ': <value>' (exactly one space)")
+            continue
+        else:
+            value = rest[1:]
+            if value in ("|", "|-"):
+                content, numbers = [], []
+                block_ind = key_col + 2
+                first = True
+                while i < total:
+                    nxt = lines[i]
+                    if nxt == "":
+                        i += 1
+                        continue
+                    if "\t" in nxt:
+                        diagnostics.append(_diagnostic(source, i + 1, "yaml-tab",
+                                           "tabs are outside the supported YAML subset"))
+                        i += 1
+                        continue
+                    nbody = nxt.lstrip(" ")
+                    nind = len(nxt) - len(nbody)
+                    if nind <= key_col:
+                        break
+                    if nxt != nxt.rstrip(" "):
+                        diagnostics.append(_diagnostic(source, i + 1, "step-key",
+                                           "trailing whitespace on a literal block line"))
+                    elif first and nind != block_ind:
+                        diagnostics.append(_diagnostic(source, i + 1, "step-key",
+                                           "the first line of a literal block must sit exactly "
+                                           "two spaces past its key; that first line sets the "
+                                           "block's YAML indentation"))
+                    elif nind < block_ind:
+                        diagnostics.append(_diagnostic(source, i + 1, "step-key",
+                                           "a literal block line shallower than the block's "
+                                           "first line; a YAML engine would end the block "
+                                           "there"))
+                    else:
+                        first = False
+                        content.append(nxt.strip())
+                        numbers.append(i + 1)
+                    i += 1
+                toks.append({"n": number, "ind": indent, "dash": dash, "bad": False,
+                             "key": key, "key_col": key_col, "vkind": "block",
+                             "value": (tuple(content), tuple(numbers))})
+                continue
+            if _GRAMMAR_FLOW_SEQ_RE.match(value):
+                vkind, value = "flowseq", tuple(value[1:-1].split(", "))
+            elif value.startswith("'") or value.startswith(chr(34)):
+                if _GRAMMAR_QUOTED_RE.match(value):
+                    vkind, value = "scalar", value[1:-1]
+                else:
+                    refuse(number, raw, indent, dash, True,
+                           "a quoted value is modelled only as ONE single-quoted scalar with "
+                           "no quote character of either kind, no backslash and no escape "
+                           "inside, and nothing after the close (a doubled quote is a YAML "
+                           "escape that keeps the scalar OPEN; double-quoted scalars are not "
+                           "modelled)")
+                    continue
+            elif _GRAMMAR_PLAIN_RE.match(value):
+                vkind = "scalar"
+            else:
+                refuse(number, raw, indent, dash, True,
+                       "the value is outside the modelled scalar forms: a plain scalar with no "
+                       "quote character, backslash, '#', ':' or YAML indicator (and no leading "
+                       "'&', '*', '!', '|', '>', '%', '@', backtick, flow bracket or "
+                       "brace), a single-quoted scalar with no quote inside, a literal block "
+                       "header '|' or '|-', or a single-line flow sequence of plain items")
+                continue
+        toks.append({"n": number, "ind": indent, "dash": dash, "bad": False, "key": key,
+                     "key_col": key_col, "vkind": vkind, "value": value})
+
+    pos = 0
+    tcount = len(toks)
+
+    def skip_deeper(limit):
+        nonlocal pos
+        while pos < tcount and toks[pos]["ind"] > limit:
+            pos += 1
+
+    def parse_nested(key_col):
+        if pos < tcount and toks[pos]["ind"] > key_col:
+            t = toks[pos]
+            if t["ind"] != key_col + 2:
+                diagnostics.append(_diagnostic(source, t["n"],
+                                   _grammar_context_code(t["ind"]),
+                                   "nested content must sit exactly two spaces past its parent "
+                                   "key (line at indent {}, parent key at indent {})".format(
+                                       t["ind"], key_col)))
+                skip_deeper(key_col)
+                return ("scalar", None)
+            if t["dash"]:
+                return parse_seq(key_col + 2)
+            return parse_map(key_col + 2, None)
+        return ("scalar", None)
+
+    def parse_seq(ind):
+        nonlocal pos
+        items = []
+        while pos < tcount:
+            t = toks[pos]
+            if t["ind"] < ind:
+                break
+            if t["ind"] > ind:
+                diagnostics.append(_diagnostic(source, t["n"],
+                                   _grammar_context_code(t["ind"]),
+                                   "line is indented past its sequence context"))
+                skip_deeper(ind)
+                continue
+            if t["bad"]:
+                pos += 1
+                skip_deeper(t["ind"])
+                continue
+            if not t["dash"]:
+                diagnostics.append(_diagnostic(source, t["n"], _grammar_context_code(ind),
+                                   "a mapping entry sits where a '- ' sequence item is "
+                                   "expected"))
+                pos += 1
+                skip_deeper(t["ind"])
+                continue
+            pos += 1
+            items.append((t["n"], parse_map(ind + 2, t)))
+        return ("seq", tuple(items))
+
+    def parse_map(ind, start):
+        nonlocal pos
+        entries = []
+        seen = set()
+
+        def add(t):
+            if t["vkind"] == "none":
+                child = parse_nested(t["key_col"])
+            elif t["vkind"] == "block":
+                child = ("block", t["value"][0], t["value"][1])
+            elif t["vkind"] == "flowseq":
+                child = ("flowseq", t["value"])
+            else:
+                child = ("scalar", t["value"])
+            if t["vkind"] != "none" and pos < tcount and toks[pos]["ind"] > t["key_col"]:
+                diagnostics.append(_diagnostic(source, toks[pos]["n"],
+                                   _grammar_context_code(toks[pos]["ind"]),
+                                   "content is nested under a key that already carries a "
+                                   "value"))
+                skip_deeper(t["key_col"])
+            if t["key"] in seen:
+                diagnostics.append(_diagnostic(source, t["n"],
+                                   _grammar_context_code(t["key_col"]),
+                                   "duplicate key {!r}; a repeated YAML key re-opens a mapping "
+                                   "this parse has already read, so the parse and the YAML "
+                                   "engine would read different workflows".format(t["key"])))
+            else:
+                seen.add(t["key"])
+                entries.append((t["key"], t["n"], child))
+
+        if start is not None:
+            add(start)
+        while pos < tcount:
+            t = toks[pos]
+            if t["ind"] < ind:
+                break
+            if t["ind"] > ind:
+                diagnostics.append(_diagnostic(source, t["n"],
+                                   _grammar_context_code(t["ind"]),
+                                   "line is indented past its mapping context"))
+                skip_deeper(ind)
+                continue
+            if t["bad"]:
+                pos += 1
+                skip_deeper(t["ind"])
+                continue
+            if t["dash"]:
+                diagnostics.append(_diagnostic(source, t["n"], _grammar_context_code(ind),
+                                   "a '- ' sequence item sits where a mapping entry is "
+                                   "expected"))
+                pos += 1
+                skip_deeper(t["key_col"])
+                continue
+            pos += 1
+            add(t)
+        return ("map", tuple(entries))
+
+    root = parse_map(0, None)
+    return root, diagnostics
+
+
+def _workflow_step(item_map, line, source, diagnostics, run_line_numbers):
+    """One step dict (uses, run, env, withs, keys, line) from a grammar-accepted step mapping.
+    Semantic rules on top of the grammar: the first entry must be a non-empty name: or a uses:;
+    only STEP_KEYS are modelled (an if:, continue-on-error:, shell: or timeout-minutes: above
+    all can disable, soften or reinterpret the step without touching its run body); name: and
+    uses: must carry a modelled scalar (stored DECODED, so a simply quoted
+    'actions/checkout@v4' is the same checkout as the plain spelling); run: must carry a
+    plain scalar or a literal block (its body OPAQUE, kept verbatim); env:/with: must be block
+    mappings of scalar entries, and an env entry naming an execution-control variable is
+    refused (env-override)."""
+    step = dict(uses=None, run=[], env=[], withs=[], keys=set(), line=line)
+    entries = item_map[1]
+    first = entries[0] if entries else None
+    if (first is None or first[0] not in ("name", "uses")
+            or (first[0] == "name" and (first[2][0] != "scalar" or not first[2][1]))):
+        diagnostics.append(_diagnostic(source, line, "step-shape",
+                           "step must begin with a non-empty name: or uses:"))
+    for key, number, child in entries:
+        if key not in STEP_KEYS:
+            diagnostics.append(_diagnostic(source, number, "step-key",
+                               "unsupported step key {!r}; a key this parse does not model "
+                               "(if:, continue-on-error:, shell:, timeout-minutes:, ...) could "
+                               "disable or soften the step".format(key)))
+            continue
+        step["keys"].add(key)
+        if key in ("name", "uses"):
+            if child[0] != "scalar" or not child[1]:
+                diagnostics.append(_diagnostic(source, number, "step-key",
+                                   "step key {}: must carry a modelled non-empty scalar "
+                                   "value".format(key)))
+            elif key == "uses":
+                step["uses"] = child[1]
+        elif key == "run":
+            if child[0] == "block":
+                step["run"].extend(child[1])
+                run_line_numbers.update(child[2])
+            elif child[0] == "scalar" and child[1]:
+                step["run"].append(child[1])
+                run_line_numbers.add(number)
+            else:
+                diagnostics.append(_diagnostic(source, number, "run-shape",
+                                   "run: must carry a plain scalar or a literal block"))
+        else:
+            if child[0] != "map":
+                diagnostics.append(_diagnostic(source, number, "step-key",
+                                   "{}: must be the bare key of a block mapping of KEY: value "
+                                   "entries".format(key)))
+                continue
+            for entry_key, entry_number, entry_child in child[1]:
+                if entry_child[0] != "scalar" or entry_child[1] is None:
+                    diagnostics.append(_diagnostic(source, entry_number, "step-key",
+                                       "{} entry {!r} must carry a modelled scalar "
+                                       "value".format(key, entry_key)))
+                    continue
+                if key == "with":
+                    step["withs"].append((entry_number, entry_key, entry_child[1]))
+                else:
+                    step["env"].append(entry_key)
+                    if (entry_key in ("BASH_ENV", "ENV", "SHELLOPTS", "PATH")
+                            or entry_key.startswith(("PYTHON", "LD_", "BASH_FUNC"))):
+                        diagnostics.append(_diagnostic(source, entry_number, "env-override",
+                                           "step env entry {!r} names an execution-control "
+                                           "variable; it can neuter a shell or python step "
+                                           "without touching its run body".format(entry_key)))
+    return step
+
+
+def _workflow_step_model(text, source):
+    """(jobs, run_line_numbers, diagnostics): the per-job step model, built ONLY from lines the
+    line grammar accepted. Semantic allowlists on top of the grammar, kept from the earlier
+    rounds: workflow-level keys must be the plain spellings of WORKFLOW_LEVEL_KEYS (an env: or
+    defaults: there is an inherited execution control that can neuter the precheck step without
+    touching its run body; QA round 5 claude M1, round 6 codex M3); jobs: must be a bare key
+    over a block mapping of job ids; job-level keys must be the plain spellings of
+    JOB_LEVEL_KEYS (an env:, defaults:, if:, continue-on-error: or container: above all); name:
+    and runs-on: must carry modelled scalars; steps: must be a block sequence of step mappings
+    (see _workflow_step). The strategy: subtree is grammar-parsed but not semantically modelled
+    (the byte-canon matrix uses it); the on: and permissions: subtrees likewise."""
+    root, diagnostics = _workflow_line_grammar(text, source)
+    jobs = {}
+    run_line_numbers = set()
+    jobs_node = None
+    for key, number, child in root[1]:
+        if key not in WORKFLOW_LEVEL_KEYS:
+            diagnostics.append(_diagnostic(source, number, "workflow-key",
+                               "unmodelled workflow-level key {!r}; only the plain spellings of "
+                               "{} are modelled, and anything else (an env: or defaults: above "
+                               "all) can neuter the precheck step without touching its run "
+                               "body".format(key, ", ".join(WORKFLOW_LEVEL_KEYS))))
+        elif key == "jobs":
+            if child[0] != "map" or not child[1]:
+                diagnostics.append(_diagnostic(source, number, "workflow-key",
+                                   "jobs: must be the bare key of a block mapping of job ids; "
+                                   "a value there can carry whole jobs this parse cannot see"))
+            else:
+                jobs_node = child
+    for job_id, job_line, job_child in (jobs_node[1] if jobs_node is not None else ()):
+        if job_child[0] != "map":
+            diagnostics.append(_diagnostic(source, job_line, "job-id",
+                               "job {!r} must be a block mapping of job-level "
+                               "keys".format(job_id)))
+            jobs[job_id] = []
+            continue
+        steps = []
+        jobs[job_id] = steps
+        for job_key, job_key_line, job_key_child in job_child[1]:
+            if job_key not in JOB_LEVEL_KEYS:
+                diagnostics.append(_diagnostic(source, job_key_line, "job-key",
+                                   "unmodelled job-level key {!r}; only the plain spellings of "
+                                   "{} are modelled, and anything else (an env:, defaults:, "
+                                   "if:, continue-on-error: or container: above all) can "
+                                   "disable the job or neuter its precheck step without "
+                                   "touching the step's run body".format(
+                                       job_key, ", ".join(JOB_LEVEL_KEYS))))
+            elif job_key == "steps":
+                if job_key_child[0] != "seq":
+                    diagnostics.append(_diagnostic(source, job_key_line, "job-key",
+                                       "steps: must be the bare key of a block sequence of "
+                                       "steps"))
+                else:
+                    for item_line, item_map in job_key_child[1]:
+                        steps.append(_workflow_step(item_map, item_line, source, diagnostics,
+                                                    run_line_numbers))
+            elif job_key in ("name", "runs-on"):
+                if job_key_child[0] != "scalar" or not job_key_child[1]:
+                    diagnostics.append(_diagnostic(source, job_key_line, "job-key",
+                                       "job-level key {}: must carry a modelled scalar "
+                                       "value".format(job_key)))
+    return jobs, run_line_numbers, diagnostics
 
 
 def workflow_precheck_order_problems(text, source):
-    """(problems, diagnostics) for ONE workflow file (D-400-SPECIAL-FILE-PRECHECK order): every job
-    must carry the canonical special-file precheck step (PRECHECK_STEP_RUN_LINES, exactly those run
-    lines in that order) as its first post-checkout run step. After the checkout step and before the
-    precheck step only infrastructure uses: steps (actions/setup-python) may appear; before checkout,
-    only PRE_CHECKOUT_RUN_LINES may run (the tree does not exist yet, so nothing there can read it)
-    and no action other than checkout itself may appear. The parse is the deliberately narrow step
-    layout quality.yml and currency.yml use (steps at indent 6, step keys at indent 8, literal-block
-    run bodies deeper); a tab, an orphan step, a step without name: or uses:, or a folded/empty run
-    is a diagnostic (cannot-evaluate), and a tools path on a line this parse did not capture as a run
-    line is a diagnostic too (the same shadow principle extract_ci applies), so a gate cannot hide
-    from the ORDER question in unmodelled YAML. Inside a step, the only modelled keys are name:,
-    uses:, run: and the env:/with: mappings (their indent-10+ entries consumed); ANY OTHER step key
-    (an if:, continue-on-error:, shell:, or timeout-minutes: above all, each of which can disable,
-    soften, or reinterpret the step without touching its run body) and any line outside those shapes
-    is a step-key diagnostic (cannot-evaluate), the same rule extract_ci applies, so a job cannot
-    carry a switched-off precheck step that still matches the canonical body. Full structural
-    validation of quality.yml stays extract_ci's job; this pass answers order, across every workflow
-    file. INHERITED EXECUTION CONTROLS (QA round 5, claude M1): GitHub applies workflow- and
-    job-level env: and defaults: (and a job-level if: or continue-on-error:) to every step, so a
-    BASH_ENV, ENV, PATH or PYTHON* value, or a defaults.run.shell override, can neuter the
-    canonical precheck step without touching its run body. Refused here, never a clean order pass:
-    a workflow-level env: or defaults: key (workflow-key); a job-level env:, defaults:, if:,
-    continue-on-error: or container: key (job-key); an env entry in ANY step whose name is an
-    execution-control variable (BASH_ENV, ENV, SHELLOPTS, PATH, PYTHON*, LD_* or BASH_FUNC*) or
-    that is not a KEY: value entry (env-override); and any env: mapping at all on the precheck
-    step itself (a problem). A step-level env: with other names stays modelled (quality.yml
-    carries several). Residual: an execution-control variable this list does not name, and
-    semantics GitHub adds later, stay outside this parse; the canonical step body itself is pinned
-    by PRECHECK_STEP_RUN_LINES. QA round 9 (codex 1 = claude MJ1, claude m2): every scalar this
-    parse reads is held to the strict allowlist in _unmodelled_value (plain with no quote or
-    backslash, or simply-quoted with a clean interior, closed, nothing after); an INLINE comment
-    on a step line or a run body line is refused, never silently stripped and modelled (where a
-    comment starts depends on quote state, and inside a literal block a # is literal text); and
-    an ACTION step after the precheck is refused (a second actions/checkout there replaces the
-    certified tree). Residual (claude m2): a post-precheck run: line that rewrites the tree
-    before a later gate reads it stays outside this ORDER question; extract_ci classifies every
-    run line and an unclassifiable one is cannot-evaluate, but a classified line's writes are
-    not modelled here."""
-    problems, diagnostics = [], []
-    jobs = {}
-    workflow_keys = set()
-    job_keys = set()
-    mapping_keys = set()
-    run_line_numbers = set()
-    in_jobs = False
-    in_steps = False
-    current_job = None
-    step = None
-    mapping = None
-    lines = text.split("\n")
-    index = 0
-    while index < len(lines):
-        raw = lines[index]
-        number = index + 1
-        if "\t" in raw:
-            diagnostics.append(_diagnostic(
-                source, number, "yaml-tab",
-                "tabs are outside the supported YAML subset"))
-            index += 1
-            continue
-        code = _strip_comment(raw)
-        if not code.strip():
-            index += 1
-            continue
-        stripped = code.strip()
-        indent = len(code) - len(code.lstrip(" "))
-        if indent == 0:
-            in_jobs = stripped == "jobs:"
-            in_steps = False
-            current_job = None
-            step = None
-            # QA round 6 (codex M3 = claude M1): workflow-level keys are an ALLOWLIST over the
-            # NORMALIZED key; an unmodelled key (env:, defaults:, ...), or a non-canonical
-            # spelling of a modelled one ("jobs":, env :), is a refusal, because an inherited
-            # execution control there applies to every step and can neuter the precheck without
-            # touching its run body.
-            key, canonical = _yaml_mapping_key(stripped)
-            if key is None or key not in WORKFLOW_LEVEL_KEYS or not canonical:
-                diagnostics.append(_diagnostic(
-                    source, number, "workflow-key",
-                    "unmodelled or non-canonically spelled workflow-level key {!r}; only the "
-                    "plain spellings of {} are modelled, and anything else (an env: or defaults: "
-                    "above all) can neuter the precheck step without touching its run "
-                    "body".format(stripped, ", ".join(WORKFLOW_LEVEL_KEYS))))
-            else:
-                # QA round 8 (codex 7 = claude M1): a DUPLICATE workflow-level key, or a value on
-                # jobs:, can carry whole jobs this parse never sees (a repeated jobs: re-opens the
-                # mapping, and a flow value holds them on the key line), so both are refusals, and
-                # every other modelled key's value must be one this parse can read.
-                if key in workflow_keys:
-                    diagnostics.append(_diagnostic(
-                        source, number, "workflow-key",
-                        "duplicate workflow-level key {!r}; a repeated YAML key re-opens a "
-                        "mapping this parse has already read, so the parse and the YAML engine "
-                        "would read different workflows".format(stripped)))
-                workflow_keys.add(key)
-                if key == "jobs" and stripped != "jobs:":
-                    diagnostics.append(_diagnostic(
-                        source, number, "workflow-key",
-                        "jobs: must be the bare block-mapping key; a value there ({!r}) can "
-                        "carry whole jobs this parse cannot see".format(stripped)))
-                elif key != "jobs":
-                    reason = _unmodelled_value(stripped.split(":", 1)[1])
-                    if reason is not None:
-                        diagnostics.append(_diagnostic(
-                            source, number, "workflow-key",
-                            "workflow-level key {!r} carries {}, which this parse cannot "
-                            "read".format(stripped, reason)))
-            index += 1
-            continue
-        if not in_jobs:
-            index += 1
-            continue
-        if indent == 2 and re.fullmatch(r"[A-Za-z0-9_-]+:", stripped):
-            current_job = stripped[:-1]
-            # QA round 7 (codex M2 = claude M1): a duplicate job id re-opens a job this parse
-            # has already ordered; the second mapping would silently shadow the first.
-            if current_job in jobs:
-                diagnostics.append(_diagnostic(
-                    source, number, "job-id",
-                    "duplicate job id {!r}; a repeated YAML key re-opens a job this parse has "
-                    "already ordered".format(current_job)))
-            jobs[current_job] = []
-            job_keys = set()
-            in_steps = False
-            step = None
-            index += 1
-            continue
-        if indent < 4:
-            # QA round 7 (codex M2 = claude M1): inside jobs:, EVERY line above the job-content
-            # indent must be a canonical plain job id ([A-Za-z0-9_-]+: with nothing after the
-            # colon). A quoted or spaced id, a flow-style job mapping, an anchor, an alias or a
-            # merge key could carry a WHOLE JOB this parse cannot see; such a line is refused
-            # here, never skipped and never credited to the previous job.
-            diagnostics.append(_diagnostic(
-                source, number, "job-id",
-                "unrecognized line at job level: {!r}; only the plain canonical job-id "
-                "spelling ([A-Za-z0-9_-]+: with no value) is modelled, and a quoted or spaced "
-                "id, flow-style mapping, anchor, alias or merge key there could carry a whole "
-                "job this parse cannot see".format(stripped)))
-            index += 1
-            continue
-        if current_job is None:
-            diagnostics.append(_diagnostic(
-                source, number, "orphan-job-content",
-                "job content appears without a job mapping"))
-            index += 1
-            continue
-        if indent == 4:
-            in_steps = stripped == "steps:"
-            step = None
-            # QA round 6 (codex M3 = claude M1): job-level keys are an ALLOWLIST over the
-            # NORMALIZED key, so a quoted "env": or a spaced defaults : cannot slip an inherited
-            # execution control past a spelling blocklist.
-            key, canonical = _yaml_mapping_key(stripped)
-            if key is None or key not in JOB_LEVEL_KEYS or not canonical:
-                diagnostics.append(_diagnostic(
-                    source, number, "job-key",
-                    "unmodelled or non-canonically spelled job-level key {!r}; only the plain "
-                    "spellings of {} are modelled, and anything else (an env:, defaults:, if:, "
-                    "continue-on-error: or container: above all) can disable the job or neuter "
-                    "its precheck step without touching the step's run "
-                    "body".format(stripped, ", ".join(JOB_LEVEL_KEYS))))
-            else:
-                # QA round 7 (codex M2 = claude M1) and QA round 8 (codex 7 = claude M1): a
-                # DUPLICATE job-level key re-opens a mapping this parse has already read (the
-                # YAML engine keeps ONE of two steps: blocks while this parse reads both), and
-                # an anchor, alias, tag, flow value, block scalar or unclosed quoted scalar on a
-                # modelled job-level key can define, reference or swallow structure this parse
-                # cannot see; each is refused, never consumed silently.
-                if key in job_keys:
-                    diagnostics.append(_diagnostic(
-                        source, number, "job-key",
-                        "duplicate job-level key {!r}; a repeated YAML key re-opens a mapping "
-                        "this parse has already read, so the parse and the YAML engine would "
-                        "read different steps".format(stripped)))
-                job_keys.add(key)
-                reason = _unmodelled_value(stripped.split(":", 1)[1])
-                if reason is not None:
-                    diagnostics.append(_diagnostic(
-                        source, number, "job-key",
-                        "job-level key {!r} carries {}, which can carry structure this parse "
-                        "cannot see".format(stripped, reason)))
-            index += 1
-            continue
-        if not in_steps:
-            index += 1
-            continue
-        # QA round 9 (codex 1 = claude MJ1 class): a step line carrying an INLINE comment is
-        # refused, never silently stripped and modelled: where a comment starts depends on quote
-        # state, and this parse's stripper and the YAML engine can disagree about that state, so
-        # the only safe reading of a commented step line is refusal. A whole-line comment stays
-        # accepted (blank after stripping for this parse, absent for the YAML engine too).
-        if raw.rstrip() != code:
-            diagnostics.append(_diagnostic(
-                source, number, "step-comment",
-                "inline comment on a step line: {!r}; step lines are modelled without inline "
-                "comments, because where a comment starts depends on quote state this parse "
-                "does not model".format(raw.strip())))
-        if indent == 6 and stripped.startswith("- "):
-            step = dict(uses=None, run=[], env=[], withs=[], keys=set(), line=number)
-            mapping = None
-            jobs[current_job].append(step)
-            item = stripped[2:]
-            if item.startswith("uses:"):
-                step["uses"] = item[5:].strip()
-                step["keys"].add("uses")
-            elif not (item.startswith("name:") and item[5:].strip()):
-                diagnostics.append(_diagnostic(
-                    source, number, "step-shape",
-                    "step must begin with a non-empty name: or uses:"))
-            else:
-                step["keys"].add("name")
-            # QA round 8 (codex 7 = claude M1): an unclosed quoted scalar (or an anchor, alias,
-            # tag or flow value) on the step's first key can swallow or redefine the following
-            # lines, so the parse and the YAML engine would read different steps.
-            reason = _unmodelled_value(item.split(":", 1)[1] if ":" in item else "")
-            if reason is not None:
-                diagnostics.append(_diagnostic(
-                    source, number, "step-key",
-                    "step line {!r} carries {}, which this parse cannot read".format(
-                        stripped, reason)))
-            index += 1
-            continue
-        if step is None:
-            diagnostics.append(_diagnostic(
-                source, number, "step-structure",
-                "line is outside the supported step structure: {!r}".format(stripped)))
-            index += 1
-            continue
-        if indent == 8 and stripped in ("env:", "with:"):
-            mapping = stripped[:-1]
-            # QA round 8 (codex 7 = claude M1): a duplicate step key re-opens a mapping this
-            # parse has already read; the parse and the YAML engine would read different steps.
-            if mapping in step["keys"]:
-                diagnostics.append(_diagnostic(
-                    source, number, "step-key",
-                    "duplicate step key {!r} in one step; a repeated YAML key re-opens a "
-                    "mapping this parse has already read".format(stripped)))
-            step["keys"].add(mapping)
-            mapping_keys = set()
-            index += 1
-            continue
-        if indent == 8 and stripped.startswith("uses:"):
-            if "uses" in step["keys"]:
-                diagnostics.append(_diagnostic(
-                    source, number, "step-key",
-                    "duplicate step key {!r} in one step; a repeated YAML key re-opens a "
-                    "mapping this parse has already read".format(stripped)))
-            step["keys"].add("uses")
-            step["uses"] = stripped[5:].strip()
-            reason = _unmodelled_value(stripped[5:])
-            if reason is not None:
-                diagnostics.append(_diagnostic(
-                    source, number, "step-key",
-                    "step line {!r} carries {}, which this parse cannot read".format(
-                        stripped, reason)))
-            mapping = None
-            index += 1
-            continue
-        if indent == 8 and stripped.startswith("run:"):
-            # QA round 8 (codex 7 = claude M1): a repeated run: makes this parse read BOTH
-            # bodies as one list while the YAML engine keeps only one of them.
-            if "run" in step["keys"]:
-                diagnostics.append(_diagnostic(
-                    source, number, "step-key",
-                    "duplicate step key {!r} in one step; a repeated YAML key re-opens a "
-                    "mapping this parse has already read".format(stripped)))
-            step["keys"].add("run")
-            mapping = None
-            value = stripped[4:].strip()
-            if value in ("|", "|-", "|+"):
-                index += 1
-                while index < len(lines):
-                    body = _strip_comment(lines[index])
-                    if not body.strip():
-                        index += 1
-                        continue
-                    if len(body) - len(body.lstrip(" ")) <= 8:
-                        break
-                    # QA round 9: inside a YAML literal block a # is LITERAL TEXT, so a stripped
-                    # inline comment makes this parse read a run body the YAML engine does not
-                    # have; refused, never silently stripped.
-                    if lines[index].rstrip() != body:
-                        diagnostics.append(_diagnostic(
-                            source, index + 1, "step-comment",
-                            "inline comment on a run body line: {!r}; inside a literal block a "
-                            "# is literal text, so stripping it would make this parse and the "
-                            "YAML engine read different run bodies".format(
-                                lines[index].strip())))
-                    step["run"].append(body.strip())
-                    run_line_numbers.add(index + 1)
-                    index += 1
-                continue
-            if not value or value in (">", ">-", ">+"):
-                diagnostics.append(_diagnostic(
-                    source, number, "run-shape",
-                    "run: must carry a plain scalar or a literal block"))
-                index += 1
-                continue
-            reason = _unmodelled_value(value)
-            if reason is not None:
-                diagnostics.append(_diagnostic(
-                    source, number, "step-key",
-                    "run: value {!r} carries {}, which this parse cannot read".format(
-                        value, reason)))
-            step["run"].append(value)
-            run_line_numbers.add(number)
-            index += 1
-            continue
-        if indent >= 10 and mapping is not None:
-            # QA round 7 (claude m-a, m-c) and QA round 8 (codex 7): with: entries are collected
-            # for the setup-python allowlist below; a duplicate entry key, or a value this parse
-            # cannot read (an anchor on a setup-python input above all), is refused at the entry.
-            entry_key = stripped.split(":", 1)[0].strip()
-            # QA round 9: a merge key pulls whole entries from an anchor this parse cannot see.
-            if entry_key == "<<":
-                diagnostics.append(_diagnostic(
-                    source, number, "step-key",
-                    "merge key {!r} in a {} mapping; a merge key pulls in entries this parse "
-                    "cannot see".format(stripped, mapping)))
-            if entry_key in mapping_keys:
-                diagnostics.append(_diagnostic(
-                    source, number, "step-key",
-                    "duplicate {} entry {!r}; a repeated YAML key re-opens a mapping this "
-                    "parse has already read".format(mapping, stripped)))
-            mapping_keys.add(entry_key)
-            reason = _unmodelled_value(stripped.split(":", 1)[1] if ":" in stripped else "")
-            if reason is not None:
-                diagnostics.append(_diagnostic(
-                    source, number, "step-key",
-                    "{} entry {!r} carries {}, which this parse cannot read".format(
-                        mapping, stripped, reason)))
-            if mapping == "with":
-                step["withs"].append((number, stripped))
-            if mapping == "env":
-                step["env"].append(stripped)
-                key = stripped.split(":", 1)[0].strip().strip("'").strip('"')
-                if (key in ("BASH_ENV", "ENV", "SHELLOPTS", "PATH")
-                        or key.startswith(("PYTHON", "LD_", "BASH_FUNC"))
-                        or ":" not in stripped):
-                    diagnostics.append(_diagnostic(
-                        source, number, "env-override",
-                        "step env entry {!r} names an execution-control variable (or is not a "
-                        "KEY: value entry); it can neuter a shell or python step without "
-                        "touching its run body".format(stripped)))
-            index += 1
-            continue
-        diagnostics.append(_diagnostic(
-            source, number, "step-key",
-            "unsupported step key or shape: {!r}; a key this parse does not model (if:, "
-            "continue-on-error:, shell:, ...) could disable or soften the step".format(stripped)))
-        index += 1
+    """(problems, diagnostics) for ONE workflow file (D-400-SPECIAL-FILE-PRECHECK order): every
+    job must carry the canonical special-file precheck step (PRECHECK_STEP_RUN_LINES, exactly
+    those run lines in that order) as its first post-checkout run step. After the checkout step
+    and before the precheck only actions/setup-python may appear (with the plain
+    python-version: input only, and NO env: mapping on any step at or before the precheck: a
+    NODE_OPTIONS or BASH_ENV value there runs uncertified code or poisons the environment
+    first; QA rounds 5 to 7); before checkout only PRE_CHECKOUT_RUN_LINES may run and no action
+    other than checkout itself; the precheck step itself may carry no env: mapping at all; and
+    after the precheck no ACTION step at all is modelled (QA round 9, claude m2: a second
+    actions/checkout above all replaces the certified tree; an actions/upload-artifact step
+    would be refused the same way and needs a reviewed guard change to adopt).
+
+    QA round 10 (premise change; the round 8 to 10 codex and claude majors): the per-line value
+    allowlist of rounds 8 and 9 is REPLACED by the whole-file line grammar in
+    _workflow_line_grammar. Every line of the file must match exactly one production there
+    (blank; full-line comment; plain-keyed mapping line carrying a restricted plain scalar, a
+    simple single-quoted scalar or a single-line flow sequence of plain items; a '- ' sequence
+    item of the same form; a literal block 'key: |' or 'key: |-' consumed as opaque text), or
+    the guard refuses with the line number and a named reason and the file cannot pass.
+    Indentation must step by exactly two spaces and duplicate keys within one mapping are
+    refused. The step model is built ONLY from accepted lines (_workflow_step_model), and this
+    ordering question runs on that model. A literal block body is OPAQUE: a '#' there is shell
+    content kept verbatim (never comment-stripped), so a disguised precheck run line simply
+    does not match the canonical body, in agreement with what the shell runs.
+
+    KNOWN-REFUSED COMMON FORMS (QA round 10, claude m1): the grammar refuses forms real-world
+    workflows commonly use; this repository's own workflows use none of them and every refusal
+    is loud and named, but an adopter would hit: an inline comment on a structural line (the
+    'uses: pkg@<sha> # vX.Y.Z' SHA-pin idiom), a double-quoted scalar, any quoted scalar
+    carrying a quote or backslash (a step name with an apostrophe; a one-line run: with a
+    quoted argument, which belongs in a literal block instead), folded ('>') and keep ('|+')
+    block scalars, multi-line scalars of every kind, flow mappings, flow sequences beyond one
+    line of plain items, anchors, aliases, tags, merge keys, directives, document markers,
+    tabs, quoted or escaped mapping keys, non-two-space indentation, and plain values carrying
+    ':' or '#'.
+
+    INHERITED EXECUTION CONTROLS (QA round 5, claude M1; round 6, codex M3 = claude M1): GitHub
+    applies workflow- and job-level env: and defaults: (and a job-level if: or
+    continue-on-error:) to every step, so those levels are ALLOWLISTS over the grammar's plain
+    keys: a workflow-level key outside WORKFLOW_LEVEL_KEYS (workflow-key), a job-level key
+    outside JOB_LEVEL_KEYS (job-key), a step key outside STEP_KEYS (step-key), and a step env
+    entry naming an execution-control variable (BASH_ENV, ENV, SHELLOPTS, PATH, PYTHON*, LD_*
+    or BASH_FUNC*; env-override) are each refused, never a clean order pass. Residuals: an
+    execution-control variable that list does not name, and semantics GitHub adds later, stay
+    outside this parse (the canonical step body itself is pinned by PRECHECK_STEP_RUN_LINES);
+    and a post-precheck run: line that rewrites the tree before a later gate reads it stays
+    outside this ORDER question (QA round 9, claude m2). Full structural validation of
+    quality.yml stays extract_ci's job; this pass answers order, across every workflow file,
+    and the whole-file shadow scan (TOOL_RE over every line not captured as a run line) still
+    refuses a tools path wherever the model did not capture it."""
+    jobs, run_line_numbers, diagnostics = _workflow_step_model(text, source)
+    problems = []
     for number, raw in enumerate(text.split("\n"), 1):
         code = _strip_comment(raw)
         if not code.strip() or number in run_line_numbers:
@@ -5620,15 +5783,14 @@ def workflow_precheck_order_problems(text, source):
             # python-version-file:, ...) can install and run committed code or read the checkout
             # before the precheck step runs.
             if s["uses"] and s["uses"].startswith("actions/setup-python@"):
-                for with_number, with_line in s["withs"]:
-                    with_key, with_canonical = _yaml_mapping_key(with_line)
-                    if with_key != "python-version" or not with_canonical:
+                for with_number, with_key, with_value in s["withs"]:
+                    if with_key != "python-version":
                         problems.append(where + " passes setup-python input {!r} (line {}) at or "
                                         "before the special-file precheck; only the plain "
                                         "python-version: input is modelled there, because an "
                                         "unmodelled input (pip-install:, python-version-file:, "
                                         "...) can run committed code or read the checkout before "
-                                        "the precheck runs".format(with_line, with_number))
+                                        "the precheck runs".format(with_key, with_number))
             if not s["env"]:
                 continue
             if s is job_steps[precheck]:

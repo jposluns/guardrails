@@ -1369,6 +1369,28 @@ def _self_test_main_isolated():
             _entry_expect("an ignored link, sorting after its tracked target directory, over a "
                           "non-ignored out-of-root link", orderlink_tree, "opf", 2,
                           "outside the repository root")
+            # (s15) QA round 10 (claude MD2): the CONVERSE of s14. A NON-ignored (here
+            # tracked) link into an IGNORED directory must walk that directory STRICTLY: its
+            # contents are reachable under the link's own non-ignored path, so the ignored-only
+            # leniencies (an out-of-root directory link above all) must not apply there. The
+            # ignore classification of a link-walked subtree follows the paths themselves in
+            # BOTH directions: lenient only when both the link path and the target path are
+            # ignored. Fails without the round-10 rule (exit 0 in every walk order).
+            md2link_tree = _mini_tree("tracked-link-ignored")
+            if md2link_tree is not None:
+                (md2link_tree / "build").mkdir()
+                (tmp / "ext-md2-target").mkdir(exist_ok=True)
+                (md2link_tree / "build" / "ext").symlink_to(tmp / "ext-md2-target")
+                (md2link_tree / ".gitignore").write_text("/build/\n", encoding="utf-8")
+                (md2link_tree / "docs").mkdir()
+                (md2link_tree / "docs" / "link").symlink_to(md2link_tree / "build")
+                if gm._git(md2link_tree, "add", "--", "docs/link",
+                           ".gitignore").returncode != 0:
+                    md2link_tree = None
+            _entry_expect("a tracked link into an ignored directory over an out-of-root link",
+                          md2link_tree, "gen", 2, "outside the repository root")
+            _entry_expect("a tracked link into an ignored directory over an out-of-root link",
+                          md2link_tree, "opf", 2, "outside the repository root")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1394,7 +1416,7 @@ def _self_test_main_isolated():
           "subprocess, refuses a FIFO, a link to a FIFO, a FIFO behind a planted nested .git or an "
           "in-root directory link, an outside-root directory link, a git-ignored link to a FIFO, a "
           "FIFO behind an in-root link into an ignored directory, and a symlinked tools/ or opf/ "
-          "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), while a dangling link, a venv-like "
+          "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), walks a tracked link into an ignored directory strictly in both directions (round 10), while a dangling link, a venv-like "
           "ignored tree and a git-ignored outside-root directory link pass; a multi-newline "
           "rev-parse answer fails closed, one trailing newline stays accepted, and a NUL root is "
           "git-cannot-answer in both copies, with mutants proving the vectors discriminate")
