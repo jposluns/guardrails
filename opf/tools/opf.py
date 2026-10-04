@@ -2710,7 +2710,7 @@ def _self_test_runtime_supervisor_unit(tmp):
         for call, generation in calls:
             func = call.func
             named = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if named in ("waitpid", "wait4", "waitid"):
+            if named in ("waitpid", "wait4", "waitid", "_bounded_wait"):
                 index = 1 if named == "waitid" else 0
                 if len(call.args) > index and isinstance(call.args[index], ast.Name):
                     # A waited name may already be reaped: its number is no
@@ -2772,6 +2772,15 @@ def _self_test_runtime_supervisor_unit(tmp):
                               "parent instead (_pidfd_handoff_recv, D-385-PIDFD-HANDOFF; "
                               "QA9 codex blocker 1, QA12 claude m1)".format(
                                   owner, named, call.lineno))
+            elif named == "_bounded_wait" and any(
+                    keyword.arg == "forked" for keyword in call.keywords) \
+                    and (total or not (call.args and allowed(call.args[0], call.lineno))):
+                # QA21: forked=True licenses the bounded wait's expiry SIGKILL,
+                # so the declaration is pinned exactly like a numeric kill.
+                faults.append("{} declares forked=True on a bounded wait (line {}) whose "
+                              "target it cannot prove is its own fork; its expiry kill "
+                              "would reach an adopted child (D-385-CURRENT-CHILD)".format(
+                                  owner, call.lineno))
             elif named == "_pidfd_handoff_send":
                 target = call.args[1] if len(call.args) > 1 else None
                 licensed = (not total and isinstance(target, ast.Name)
@@ -3396,7 +3405,15 @@ def _self_test_runtime_decoy_unit():
 _RUNTIME_WAIT_OWNERS = ("_self_test_runtime_probe", "_self_test_runtime_supervisor_unit",
                         "_self_test_runtime_report_channel", "_self_test_runtime_escape_probe",
                         "_runtime_late_wait", "_runtime_decoy_reap", "_runtime_escape_cases",
-                        "_kill_proved_child", "_reap_pidfd")
+                        "_kill_proved_child", "_reap_pidfd", "_bounded_wait", "_watchdog_completion_case",
+                        "_watchdog_overlap_case", "_zombie_survival_control", "_pidfd_handoff_fork_send")
+
+# The closed exemption list of the whole-file audits (QA21): (file, function, reason). An exemption
+# holds only while _self_test_runtime_wait_unit re-proves its reason: _fixture_wait passes its
+# caller's flags through, and every call of it in _opf_emit.py must spell os.WNOHANG (a WNOHANG poll).
+_RUNTIME_WAIT_EXEMPT = (
+    ("_opf_emit.py", "_fixture_wait", "a flags pass-through whose every caller passes os.WNOHANG"),
+)
 
 
 def _runtime_wait_audit(source, owners=None):
@@ -3410,7 +3427,8 @@ def _runtime_wait_audit(source, owners=None):
     the finally of the first, and attributes them only through _runtime_names_pid (no `in` test on a
     pid); and _self_test_runtime_escape_probe names its retained directory with add_note. Like
     _runtime_supervisor_signal_audit it is a tripwire over ordinary spellings, not a proof of absence.
-    Returns the list of faults."""
+    QA21 widens its use to every top-level function of opf.py and _opf_emit.py (owners None), where
+    the completion cases wait only through _bounded_wait. Returns the list of faults."""
     import ast
     tree = ast.parse(source)
     defs = [node for node in tree.body if isinstance(node, ast.FunctionDef)
@@ -3513,6 +3531,17 @@ _RUNTIME_WAIT_REVERTS = (
     ("_self_test_runtime_report_channel", "proc.communicate(timeout=_RUNTIME_REAP_SECONDS)", "proc.communicate()"),
     ("_RUNTIME_SUPERVISOR", "pump.join(max(0.0, deadline - time.monotonic()) + 1.0)", "pump.join()"),
     ("_RUNTIME_SUPERVISOR", "sock.settimeout(left)", "pass"),
+    ("_bounded_wait", "os.waitpid(pid, os.WNOHANG)", "os.waitpid(pid, 0)"),
+    ("_bounded_wait", "os.WEXITED | os.WNOWAIT | os.WNOHANG", "os.WEXITED | os.WNOWAIT"),
+    ("_watchdog_completion_case", "_bounded_wait(dead, forked=True)", "os.waitpid(dead, 0)"),
+    ("_watchdog_completion_case", "_bounded_wait(interrupted_own, nowait=True, forked=True)",
+     "os.waitid(os.P_PID, interrupted_own, os.WEXITED | os.WNOWAIT)"),
+    ("_watchdog_completion_case", "stolen.append(_bounded_wait(pid, 4.0))", "stolen.append(os.waitpid(pid, 0))"),
+    ("_watchdog_completion_case", "                    _bounded_wait(subject)\n",
+     "                    os.waitpid(subject, 0)\n"),
+    ("_watchdog_overlap_case", "_bounded_wait(pid, nowait=True)", "os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)"),
+    ("_zombie_survival_control", "_bounded_wait(zombie, forked=True)", "os.waitpid(zombie, 0)"),
+    ("_pidfd_handoff_fork_send", "_bounded_wait(pid, forked=True)", "os.waitpid(pid, 0)"),
 )
 
 
@@ -3524,7 +3553,12 @@ def _self_test_runtime_wait_unit():
     os.waitid and os.waitpid replaced by models in which the child is never reaped and any blocking
     call is recorded and refused, and pidfd_send_signal by a recorder, _kill_proved_child on this
     process's own declared fork must send one SIGKILL, make no blocking call, return within its bound
-    and name the pid as unreaped; the real route then kills and reaps it. Returns the faults."""
+    and name the pid as unreaped; the real route then kills and reaps it. QA21 (class-wide over the
+    whole self-test path): the audit also runs over EVERY top-level function of this file and of
+    _opf_emit.py, and only the closed _RUNTIME_WAIT_EXEMPT list may answer, each entry with its reason
+    re-proved here; _bounded_wait on this process's own wedged fork must fault within its bound,
+    SIGKILL and reap it only when declared forked, and never signal it otherwise; _reap_pidfd must
+    report a waitid failure other than ECHILD as un-reaped. Returns the faults."""
     import ast
     import signal
     import time
@@ -3532,6 +3566,16 @@ def _self_test_runtime_wait_unit():
     source = Path(__file__).read_text(encoding="utf-8")
     found = _runtime_wait_audit(source, _RUNTIME_WAIT_OWNERS) + _runtime_wait_audit(_RUNTIME_SUPERVISOR)
     faults += ["the bounded-wait audit of the committed source found: {}".format(miss) for miss in found]
+    emit_source = Path(__file__).with_name("_opf_emit.py").read_text(encoding="utf-8")
+    for filename, text in (("opf.py", source), ("_opf_emit.py", emit_source)):
+        exempt = {name for where, name, _reason in _RUNTIME_WAIT_EXEMPT if where == filename}
+        faults += ["the whole-file bounded-wait audit of {} found: {}".format(filename, miss)
+                   for miss in _runtime_wait_audit(text) if miss.split(" ", 1)[0] not in exempt]
+    for node in ast.walk(ast.parse(emit_source)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_fixture_wait" \
+                and "WNOHANG" not in ast.dump(node):
+            faults.append("the _fixture_wait exemption no longer holds: _opf_emit.py line {} calls it "
+                          "without os.WNOHANG".format(node.lineno))
     segments = {node.name: ast.get_source_segment(source, node) for node in ast.parse(source).body
                 if isinstance(node, ast.FunctionDef) and node.name in _RUNTIME_WAIT_OWNERS}
     segments["_RUNTIME_SUPERVISOR"] = _RUNTIME_SUPERVISOR
@@ -3580,6 +3624,44 @@ def _self_test_runtime_wait_unit():
     leftover = []
     if not _kill_proved_child(kid, forked=True, unreaped=leftover) or leftover:
         faults.append("the real route did not kill and reap this process's own child ({})".format(leftover))
+    for declared in (False, True):
+        wedged = os.fork()
+        if wedged == 0:
+            time.sleep(60)
+            os._exit(1)
+        begin = time.monotonic()
+        try:
+            _bounded_wait(wedged, 0.3, forked=declared)
+            message = None
+        except AssertionError as exc:
+            message = str(exc)
+        took = time.monotonic() - begin
+        alive = os.waitid(os.P_PID, wedged, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None if not declared else None
+        if message is None or "pid {} ".format(wedged) not in message or took > 2.0:
+            faults.append("a wedged own fork did not fault a 0.3 s bounded wait in time (forked={}, {!r}, "
+                          "{:.1f} s)".format(declared, message, took))
+        if declared and "SIGKILLed through its pidfd and reaped" not in (message or ""):
+            faults.append("a declared own fork was not SIGKILLed and reaped on expiry ({!r})".format(message))
+        if not declared and (alive is not True or "not signalled" not in (message or "")):
+            faults.append("an undeclared target was signalled on expiry ({!r}, alive {})".format(message, alive))
+        if not declared:
+            _kill_proved_child(wedged, forked=True, unreaped=faults)
+    quick = os.fork()
+    if quick == 0:
+        os._exit(7)
+    waited = _bounded_wait(quick, forked=True)
+    if waited[0] != quick or os.waitstatus_to_exitcode(waited[1]) != 7:
+        faults.append("a prompt own fork's bounded wait lost its status ({})".format(waited))
+    bad = os.open(os.devnull, os.O_RDONLY)
+    os.close(bad)
+    if _reap_pidfd(bad, 0.2) is not False:
+        faults.append("_reap_pidfd took a waitid EBADF as nothing to reap (only ECHILD means that)")
+    stranger = os.pidfd_open(os.getpid(), 0)
+    try:
+        if _reap_pidfd(stranger, 0.2) is not True:
+            faults.append("_reap_pidfd did not take ECHILD (not this process's child) as nothing to reap")
+    finally:
+        os.close(stranger)
     return faults
 
 
@@ -3887,8 +3969,9 @@ def _reap_pidfd(fd, bound):
     WEXITED | WNOHANG) polls, slept between on a poll() of the pidfd (readable once the child
     exits) bounded by what is left, never a blocking waitid or waitpid, which a traced or
     wedged child could hold past every outer bound. Returns True once the child is reaped or
-    is no longer this process's to reap (ECHILD or any other waitid failure, the disposition
-    of the former blocking reap), False when the bound ran out with it un-reaped."""
+    is no longer this process's to reap (ECHILD only), False when the bound ran out with it
+    un-reaped or when waitid failed any other way (EBADF, EINVAL and the like: the reap's
+    state is unknown, so the caller's fault names the child rather than calling it reaped)."""
     import select
     import time
     deadline = time.monotonic() + bound
@@ -3896,14 +3979,62 @@ def _reap_pidfd(fd, bound):
         try:
             if os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG) is not None:
                 return True
-        except OSError:
+        except ChildProcessError:
             return True
+        except OSError:
+            return False
         left = deadline - time.monotonic()
         if left <= 0.0:
             return False
         poller = select.poll()
         poller.register(fd, select.POLLIN)
         poller.poll(min(left, 0.1) * 1000.0)
+
+
+_CASE_WAIT_SECONDS = 15.0
+
+
+def _bounded_wait(pid, bound=None, *, nowait=False, forked=False):
+    """The ONE wait route of the completion cases and their fixtures (QA21, class-wide; audited by
+    _runtime_wait_audit and pinned by _self_test_runtime_wait_unit): wait for this process's child
+    `pid` for at most `bound` seconds (default _CASE_WAIT_SECONDS, under the 40 s bound of each
+    completion case) by WNOHANG polls, never a blocking os.waitpid or os.waitid, which a wedged,
+    stopped or traced child could hold past every outer bound. With `nowait` the child is left
+    un-reaped (waitid WEXITED | WNOWAIT) and waitid's result is returned; otherwise it is reaped and
+    os.waitpid's (pid, status) pair is returned. os.waitpid and os.waitid are looked up at each
+    poll, so a case's patch of either still applies, and ECHILD propagates as before. On expiry the
+    child is SIGKILLed ONLY when the call site declares `forked=True` (the site's own direct
+    fork-bound name, pinned like a numeric kill by _self_test_runtime_supervisor_unit) and then only
+    through _kill_proved_child, whose waitid proof and bounded pidfd reap apply; an undeclared
+    target (an adopted orphan under _case_subreaper included) is never signalled
+    (D-385-CURRENT-CHILD). Either way AssertionError names the pid: the case's fault."""
+    import time
+    bound = _CASE_WAIT_SECONDS if bound is None else bound
+    deadline = time.monotonic() + bound
+    pause = 0.001
+    while True:
+        if nowait:
+            ended = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+            if ended is not None:
+                return ended
+        else:
+            waited = os.waitpid(pid, os.WNOHANG)
+            if waited[0] != 0:
+                return waited
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            break
+        time.sleep(min(pause, left))
+        pause = min(pause * 2.0, 0.05)
+    unreaped = []
+    if not forked:
+        disposal = "not signalled: the call site does not declare it its own fork"
+    elif _kill_proved_child(pid, forked=True, unreaped=unreaped):
+        disposal = "; ".join(unreaped) or "SIGKILLed through its pidfd and reaped"
+    else:
+        disposal = "not signalled: it is no longer proved this process's own un-reaped child"
+    raise AssertionError("child pid {} did not {} within {} s ({})".format(
+        pid, "exit" if nowait else "exit and get reaped", bound, disposal))
 
 
 def _child_subreaper_flag():
@@ -4100,7 +4231,7 @@ def _pidfd_handoff_fork_send(conn, child_main):
         try:
             os.kill(pid, signal.SIGKILL)
         finally:
-            os.waitpid(pid, 0)
+            _bounded_wait(pid, forked=True)
         raise
     return pid
 
@@ -4795,11 +4926,11 @@ def _zombie_survival_control():
     if zombie == 0:
         os._exit(0)
     try:
-        os.waitid(os.P_PID, zombie, os.WEXITED | os.WNOWAIT)
+        _bounded_wait(zombie, nowait=True, forked=True)
         assert Path("/proc", str(zombie)).exists(), "the zombie fixture left no /proc entry"
         assert not _live_not_zombie(zombie), "the survival predicate accepted a zombie"
     finally:
-        os.waitpid(zombie, 0)
+        _bounded_wait(zombie, forked=True)
 
 
 def _watchdog_completion_case(mode):
@@ -5100,7 +5231,7 @@ def _watchdog_completion_case(mode):
 
             def compete(pid, flags):
                 if not stolen:
-                    worker = threading.Thread(target=lambda: stolen.append(os.waitpid(pid, 0)))
+                    worker = threading.Thread(target=lambda: stolen.append(_bounded_wait(pid, 4.0)))
                     worker.start()
                     worker.join(5)
                     assert not worker.is_alive(), "reaper fixture exceeded its bound"
@@ -5310,7 +5441,7 @@ def _watchdog_completion_case(mode):
         # zombie stimulus for the ownership boundary.
         child = emit._FixtureProcess(time.monotonic() + 5, subject=lambda: None)
         pid = child.start()
-        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        _bounded_wait(pid, nowait=True)
         # Positive control: an owned leader with the caller's own-fork
         # declaration permits signalling; WITHOUT the declaration the
         # numeric boundary refuses even this live owned leader, because
@@ -5322,7 +5453,7 @@ def _watchdog_completion_case(mode):
             assert emit._fixture_signal(pid, signal.SIGKILL, group=False,
                                         forked=True)
             assert kill.called
-        os.waitpid(pid, 0)
+        _bounded_wait(pid)
         child.collected = True  # deliberate external collection of the guardian
         child.close()
         # Negative control covers numeric, group AND pidfd paths after real ECHILD.
@@ -5354,7 +5485,7 @@ def _watchdog_completion_case(mode):
         import time
         child = emit._FixtureProcess(time.monotonic() + 5, subject=lambda: None)
         pid = child.start()                   # deliberate zombie stimulus, not a test verdict
-        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        _bounded_wait(pid, nowait=True)
         with patch.object(os, "kill") as kill:
             assert emit._fixture_child_reaped(pid) is False
         child.collected = True  # the assertion above deliberately consumed its status
@@ -6382,7 +6513,7 @@ def _watchdog_completion_case(mode):
         interrupted_own = os.fork()
         if interrupted_own == 0:
             os._exit(0)
-        os.waitid(os.P_PID, interrupted_own, os.WEXITED | os.WNOWAIT)
+        _bounded_wait(interrupted_own, nowait=True, forked=True)
         real_waitpid = os.waitpid
 
         def interrupting_waitpid(pid, flags):
@@ -6740,7 +6871,7 @@ def _watchdog_completion_case(mode):
                 # Guardian-side: reap the exited subject, then wedge BEFORE any
                 # group kill: the state a drain stalled mid-cleanup leaves behind.
                 if os.getpid() != caller:
-                    os.waitpid(subject, 0)
+                    _bounded_wait(subject)
                     scratch = Path(directory, "wedged.tmp")
                     scratch.write_text(str(os.getpid()), encoding="ascii")
                     scratch.rename(wedged)  # atomic: never a partial PID
@@ -7382,7 +7513,7 @@ def _watchdog_completion_case(mode):
             assert emit._fixture_child_reaped(child.pid) is False, \
                 "the flip did not reproduce the owner-less guardian"
             os.kill(child.pid, signal.SIGKILL)  # hygiene for the demonstrated leak
-            os.waitpid(child.pid, 0)
+            _bounded_wait(child.pid, forked=True)
             emit._fixture_abort_launch(child)   # hygiene: releases control/peer/report
             if child.pidfd is not None:
                 os.close(child.pidfd)
@@ -7978,7 +8109,7 @@ def _watchdog_completion_case(mode):
                        if entry[0] == "pidfd"), \
                 ("a descriptor other than the held subject pidfd was "
                  "signalled", recorded)
-            waited, status_raw = os.waitpid(leader, 0)
+            waited, status_raw = _bounded_wait(leader, forked=True)
             assert waited == leader and os.WIFSIGNALED(status_raw) \
                 and os.WTERMSIG(status_raw) == signal.SIGKILL, (waited, status_raw)
             os.close(fd)
@@ -8000,7 +8131,7 @@ def _watchdog_completion_case(mode):
         if leader == 0:
             os._exit(0)
         fd = os.pidfd_open(leader)
-        os.waitpid(leader, 0)  # reaped: the number is free to be recycled
+        _bounded_wait(leader, forked=True)  # reaped: the number is free to be recycled
         recorded.clear()
         with patch.object(os, "killpg", rec_killpg), \
                 patch.object(signal, "pidfd_send_signal", rec_pidfd):
@@ -8061,7 +8192,7 @@ def _watchdog_completion_case(mode):
                 "an adopted current child was signalled (D-385-CURRENT-CHILD)"
             os.close(release_r)
             os.close(release_w)
-            os.waitpid(leader, 0)
+            _bounded_wait(leader, forked=True)
             os.close(fd)
             await_state(descendant, (None, "Z"),
                         "the zombie-leg EOF release did not complete")
@@ -8122,7 +8253,7 @@ def _watchdog_completion_case(mode):
         assert decoy in delivered and skipped == [] and unverifiable == [], \
             (delivered, skipped, unverifiable)
         assert handoff_sends == [(decoy_fd, signal.SIGKILL)], handoff_sends
-        waited, status_raw = os.waitpid(decoy, 0)
+        waited, status_raw = _bounded_wait(decoy, forked=True)
         assert waited == decoy and os.WIFSIGNALED(status_raw) \
             and os.WTERMSIG(status_raw) == signal.SIGKILL, (waited, status_raw)
         os.close(decoy_fd)  # EBADF here would mean the census closed it
@@ -8183,7 +8314,7 @@ def _watchdog_completion_case(mode):
                             os._exit(125)
                         time.sleep(0.005)
                     os.kill(leader, signal.SIGKILL)
-                    os.waitpid(leader, 0)       # REAPED: the number is unpinned
+                    _bounded_wait(leader, forked=True)       # REAPED: the number is unpinned
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -8244,7 +8375,7 @@ def _watchdog_completion_case(mode):
                 "the census killed the descendant without a handoff (D-385)"
             os.close(fd)
             os.kill(guardian, signal.SIGCONT)
-            os.waitpid(guardian, 0)
+            _bounded_wait(guardian, forked=True)
             # D-385-CURRENT-CHILD: with the guardian collected the DISCLOSED
             # survivor reparents to this subreaper case process, but adoption
             # licenses NO signal -- the helper refuses the undeclared target
@@ -8292,7 +8423,7 @@ def _watchdog_completion_case(mode):
                 "the high-fd escalation lost its contract"
         assert recorded[0] == ("pidfd", fd, signal.SIGSTOP), recorded
         assert ("pidfd", fd, signal.SIGKILL) in recorded, recorded
-        waited, status_raw = os.waitpid(leader, 0)
+        waited, status_raw = _bounded_wait(leader)
         assert waited == leader and os.WIFSIGNALED(status_raw) \
             and os.WTERMSIG(status_raw) == signal.SIGKILL, (waited, status_raw)
         os.close(fd)
@@ -8448,7 +8579,7 @@ def _watchdog_completion_case(mode):
             os.close(fd)
             os.close(gfd)  # caller-owned: EBADF would mean the census closed it
             os.kill(guardian, signal.SIGCONT)
-            os.waitpid(guardian, 0)
+            _bounded_wait(guardian, forked=True)
 
         # Leg 8 (fix 2y, codex F3): TimeoutError/InterruptedError -- OSError
         # subclasses carrying deadline/cancellation semantics -- PROPAGATE
@@ -8498,8 +8629,8 @@ def _watchdog_completion_case(mode):
             refuses(InterruptedError, lambda: emit._fixture_group_pinned(
                 sentinel, zombie))
         os.kill(sentinel, signal.SIGKILL)
-        os.waitpid(sentinel, 0)
-        os.waitpid(zombie, 0)
+        _bounded_wait(sentinel, forked=True)
+        _bounded_wait(zombie, forked=True)
     elif mode == "census-verify":
         import socket
         import time
@@ -8649,7 +8780,7 @@ def _watchdog_completion_case(mode):
             # process's own un-reaped child; never trust the bare number.
             assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
                 "the release refused the frozen guardian"
-            os.waitpid(guardian, 0)
+            _bounded_wait(guardian)
 
         # Leg 1 (codex BLOCKER 2 / gemini F2): an unreadable /proc entry is
         # NEVER proof of exit: the member is accounted (named), unsignalled,
@@ -8857,7 +8988,7 @@ def _watchdog_completion_case(mode):
         assert state(survivor) not in (None, "Z"), (
             "the observation-only verifier signalled the survivor")
         os.kill(survivor, signal.SIGKILL)  # hygiene for the NAMED survivor
-        os.waitpid(survivor, 0)
+        _bounded_wait(survivor, forked=True)
 
         # Leg 5 (D-385-PIDFD-HANDOFF, the unit flip): on a MODELLED /proc
         # (patched stat reads) the census licenses delivery by the handoff
@@ -9088,7 +9219,7 @@ def _watchdog_completion_case(mode):
             os.close(guardian_fd)
             assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
                 "the leg-1 release refused the frozen guardian"
-            os.waitpid(guardian, 0)
+            _bounded_wait(guardian)
 
         # Leg 1f (QA9 codex blocker 1 / claude F3; reshaped by
         # D-385-PIDFD-HANDOFF after QA10 codex blocker / claude m1): a pid a
@@ -9139,7 +9270,7 @@ def _watchdog_completion_case(mode):
                 "the leg-1f hygiene refused the decoy"
             assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
                 "the leg-1f release refused the frozen guardian"
-            os.waitpid(guardian, 0)
+            _bounded_wait(guardian)
 
         # Leg 1g (D-385-PIDFD-HANDOFF, fail closed): a forking parent that
         # sends NO descriptor is refused -- the receiver fails closed with a
@@ -9173,7 +9304,7 @@ def _watchdog_completion_case(mode):
                 raise AssertionError("a descriptor-less handoff was accepted")
         assert "passed 0 descriptors" in named and "leg-1g" in named, named
         assert sent == [], ("the descriptor-less handoff was signalled", sent)
-        waited, raw = os.waitpid(sender, 0)
+        waited, raw = _bounded_wait(sender, forked=True)
         assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
         assert state(bystander) in ("S", "R"), (
             "the payload-named bystander did not survive the refusal",
@@ -9206,7 +9337,7 @@ def _watchdog_completion_case(mode):
                     os._exit(123)
                 handoff_peer.close()
                 os.read(hold_read, 1)  # hold the zombie until the refusal
-                os.waitpid(departed, 0)
+                _bounded_wait(departed, forked=True)
                 os._exit(0)
             except BaseException:
                 os._exit(125)
@@ -9228,7 +9359,7 @@ def _watchdog_completion_case(mode):
         assert sent == [], ("the exited handoff target was signalled", sent)
         os.write(hold_write, b"g")
         os.close(hold_write)
-        waited, raw = os.waitpid(sender, 0)
+        waited, raw = _bounded_wait(sender, forked=True)
         assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
 
         # Leg 1i (QA11 codex BLOCKER): the SENDER proves, in the kernel,
@@ -9277,7 +9408,7 @@ def _watchdog_completion_case(mode):
         assert "closed without a handoff message" in named \
             and "leg-1i" in named, named
         assert sent == [], ("the foreign-target handoff was signalled", sent)
-        waited, raw = os.waitpid(sender, 0)
+        waited, raw = _bounded_wait(sender, forked=True)
         assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
         assert state(uncle) in ("S", "R"), (
             "the refused handoff's target did not survive untouched",
@@ -9558,7 +9689,7 @@ def _watchdog_completion_case(mode):
                 os._exit(125)
         os.close(victim_write)
         handoff_peer.close()
-        waited, raw = os.waitpid(sender, 0)
+        waited, raw = _bounded_wait(sender, forked=True)
         assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
         victim = int(os.read(victim_read, 16))
         os.close(victim_read)
@@ -9919,7 +10050,7 @@ def _watchdog_completion_case(mode):
         else:
             raise AssertionError("the recorded failure was not re-raised")
         finally:
-            os.waitpid(dead, 0)
+            _bounded_wait(dead, forked=True)
         assert "subject tree killed" in relabel, (
             "the recorded census kill was not disclosed", relabel)
         assert "subject-only kill" not in relabel, (
@@ -9964,7 +10095,7 @@ def _watchdog_completion_case(mode):
             os.close(guardian_fd)
             assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
                 "the leg-4 release refused the frozen guardian"
-            os.waitpid(guardian, 0)
+            _bounded_wait(guardian)
 
         # Leg 5 (round 24, codex boundary): at the _escalate tier the same
         # subject-freeze fault records only what actually ran -- the
@@ -10003,7 +10134,7 @@ def _watchdog_completion_case(mode):
         await_state(subject, (None, "Z"),
                     "the recorded subject kill never ran (round 24: the "
                     "freeze fault skipped the held-pidfd SIGKILL)")
-        os.waitpid(subject, 0)
+        _bounded_wait(subject, forked=True)
         bound = time.monotonic() + 30
         while True:
             waited, raw = os.waitpid(guardian, os.WNOHANG)
@@ -10061,7 +10192,7 @@ def _watchdog_completion_case(mode):
         assert state(subject) not in (None, "Z"), (
             "the subject was addressed by a cleanup that never ran")
         os.kill(subject, signal.SIGKILL)  # hygiene: the retry owns this subject
-        os.waitpid(subject, 0)
+        _bounded_wait(subject, forked=True)
         os.close(guardian_fd)
         os.close(subject_fd)
 
@@ -10102,7 +10233,7 @@ def _watchdog_completion_case(mode):
         # Both kill paths were injected to fail: the frozen guardian remains
         # for this hygiene kill.
         os.kill(guardian, signal.SIGKILL)
-        os.waitpid(guardian, 0)
+        _bounded_wait(guardian, forked=True)
         os.close(guardian_fd)
 
         # Leg 8 (round 24, claude F2): under a double fault -- the member
@@ -10163,7 +10294,7 @@ def _watchdog_completion_case(mode):
             # target (the retired adoption proof killed it right here) -- and
             # the hygiene kill runs through the HELD handoff descriptor its
             # forking guardian sent, the one licensed route.
-            os.waitpid(guardian, 0)
+            _bounded_wait(guardian)
             assert not _kill_proved_child(leader), \
                 "an adopted current child was signalled (D-385-CURRENT-CHILD)"
             assert _kill_proved_child(leader, pidfd=leader_fd), \
@@ -10486,7 +10617,7 @@ def _watchdog_completion_case(mode):
         # Every guardian-directed signal was stubbed, none delivered: the
         # guardian survives for this hygiene kill.
         os.kill(guardian, signal.SIGKILL)
-        waited, raw = os.waitpid(guardian, 0)
+        waited, raw = _bounded_wait(guardian, forked=True)
         assert waited == guardian and os.WIFSIGNALED(raw), (waited, raw)
         os.close(guardian_fd)
 
@@ -16048,7 +16179,7 @@ def _watchdog_completion_case(mode):
         assert fake.subject_pidfd is not None, "the receipt pidfd was lost"
         os.close(fake.subject_pidfd)
         os.kill(subject, signal.SIGKILL)
-        waited, raw = os.waitpid(subject, 0)
+        waited, raw = _bounded_wait(subject, forked=True)
         assert (waited == subject and os.WIFSIGNALED(raw)
                 and os.WTERMSIG(raw) == signal.SIGKILL), (waited, raw)
         os.close(subject_fd)
@@ -16084,7 +16215,7 @@ def _watchdog_overlap_case(mode):
                 if mode == "success":
                     # A's entire tree has exited successfully, with bytes buffered,
                     # but its caller still holds wfd. B must fork in this window.
-                    ended = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+                    ended = _bounded_wait(pid, nowait=True)
                     assert ended.si_code == os.CLD_EXITED and ended.si_status == 0
                 paused.set()
                 assert resume.wait(10), "A was not resumed"
