@@ -710,7 +710,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
         # preservation homes validate_plan requires (spec 14.2).
         identity = {"store_root": ".", "machine_rel": managed[0],
                     "adoption": doc["ancestry"]["adoption"]}
-        effects = schema.derive_effects(ordered, source_rows, schema.store_manifest(identity))
+        effects = schema.derive_effects(ordered, source_rows, schema.store_manifest(identity), run_id)
         _check_planned_effects(doc, ordered, source_rows, effects, managed)
         proposal = {
             "format": schema.PLAN_FORMAT, "schema": schema.SCHEMA_VERSION,
@@ -1384,6 +1384,8 @@ def self_test():
             self.assertEqual(p["effects"]["replacements"], sorted(
                 [{"path": ".working/toml/manifest.toml", "old_digest": old, "new_digest": new}
                  for _, old, new in chain], key=lambda r: sorted(r.items())))
+            self.assertFalse(any(row["path"].startswith(".working/archive/")
+                                 for row in p["effects"]["creations"]))
             # Scaffolded bytes other than the default manifest leave the chain underivable, so it
             # refuses.
             init, render, pack = self.base_ops()
@@ -1399,6 +1401,10 @@ def self_test():
             p = tomllib.loads(result.plan.decode())
             self.assertEqual([(row["entry"], row["old_digest"], row["new_digest"]) for row in p["ops"]
                               if row["op"] == "register-unmanaged"], chain)
+            # Apply archives the live manifest before its first rewrite (spec 14.2), so that copy of
+            # the observed bytes is a bound creation (spec 14.1); a scaffolded manifest has none.
+            preserved = store.retire_preimage(p["run_id"], ".working/toml/manifest.toml")
+            self.assertIn({"path": preserved, "digest": digests[0]}, p["effects"]["creations"])
 
         def test_control_area_never_selected(self):
             # Spec 14.2 carries no homes qualifier: in a legacy (homes 1) layout the store control area,

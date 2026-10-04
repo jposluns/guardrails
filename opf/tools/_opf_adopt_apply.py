@@ -84,32 +84,31 @@ subprocess kill-injection is not exercised for the registration ops of slice 4.
 Registration ops (slice 4): each rewrites ONE existing file whole, never by text substitution, under the
 record writer's byte-reproduction discipline: the bytes it rewrites (live, or the previous link of a
 register-unmanaged chain in this same transaction) must hash to the row's old_digest (drift refuses into a
-fresh plan) and re-emit unchanged byte-exact through emit_checked (a comment or non-canonical
-serialization refuses, untouched); the postimage must hash to the row's new_digest, the bytes the one
-approval bound. register-unmanaged rewrites the frozen store manifest that the plan's store identity names,
-reproducing the planner's own rendering (the kept path appended to [unmanaged].paths), and its reparse must
-equal the prior manifest plus exactly that entry and validate; an entry in the spec 14.2 store control area
-(every homes generation), at a protected destination, overlapping the machine store or a declared view,
-already registered, written by this transaction, or not a regular file at apply refuses. repoint-consumer
+fresh plan) and re-emit unchanged byte-exact through emit_checked (a comment or non-canonical serialization
+refuses, untouched); the postimage must hash to the row's new_digest, the bytes the one approval bound.
+register-unmanaged rewrites the frozen store manifest that the plan's store identity names, reproducing the
+planner's own rendering (the kept path appended to [unmanaged].paths), and its reparse must equal the prior
+manifest plus exactly that entry and validate; an entry in the spec 14.2 store control area (every homes
+generation), at a protected destination, overlapping the machine store, a declared view or an entry already
+registered (manifest paths compared under one lexical, casefolded spelling), written by this transaction, not
+a regular file at apply, or whose bytes no longer hash to its approved source digest refuses. repoint-consumer
 re-emits the caller's planned postimage model of a canonical TOML consumer, and refuses without the store
-identity's valid manifest, at any of those reserved store paths, or at a file kept under [unmanaged]. The first
-rewrite of a path is preserve-first: its live bytes are archived at this run's adoption archive, then
-overwritten through a `write` pinned to them, so the reversal (the journal restoring the recorded old
-bytes) and the archived copy agree byte-exact; a chain's later links only replace that one write's planned
-bytes. Every refusal is raised while composing, before the transaction opens, with nothing written; the
-journal's own staged-digest pin re-checks the bytes inside the transaction. Disclosed residuals of slice 4:
-the store-posture gate below refuses every resolved store (no lease join yet), and both ops need a store
-manifest (live, or created earlier in this transaction by init-store, which no slice executes yet), so until
-the lease join lands they execute only in the self-test's fixtures, behind a stand-in for that join which
-swallows only the in-root resolved-store refusal, while the unpatched shell refuses them; the planned
-consumer model is the caller's (the stage driver's), bound only through new_digest; a consumer in any format
-but TOML refuses, since TOML's is this slice's one canonical emitter; a kept file is re-observed as a regular
-file but its bytes are not compared with the plan's source digest, which the row does not carry; the
-preserve-first archive copy of each rewritten file (.working/archive/adoption/<run-id>/<path>) is a creation
-the plan's derived effects (_opf_adopt.derive_effects) do not yet list, a seam between the preserve-first
-rule and the plan v2 effects that a later slice settles (a second archive copy at one path refuses, as a
-second create of one staged path); and binding the rows, the store table and the consumer models to the
-one approved plan is the stage driver's.
+identity's valid manifest, at any of those reserved store paths, or at a file kept under [unmanaged]. The
+first rewrite of a path is preserve-first: its live bytes are archived at this run's adoption archive, then
+overwritten through a `write` pinned to them, so the reversal (the journal restoring the recorded old bytes)
+and the archived copy agree byte-exact; a chain's later links only replace that one write's planned bytes.
+Every refusal is raised while composing, before the transaction opens, with nothing written; the journal's own
+staged-digest pin re-checks the bytes inside the transaction. Disclosed residuals of slice 4: the
+store-posture gate below refuses every resolved store (no lease join yet), and both ops need a store manifest
+(live, or created earlier in this transaction by init-store, which no slice executes yet), so until the lease
+join lands they execute only in the self-test's fixtures, behind a stand-in for that join which swallows only
+the in-root resolved-store refusal, while the unpatched shell refuses them; the planned consumer model is the
+caller's (the stage driver's), bound only through new_digest; a consumer in any format but TOML refuses, since
+TOML's is this slice's one canonical emitter; the preserve-first archive copy of each rewritten file
+(.working/archive/adoption/<run-id>/<path>) is a creation the plan's derived effects list
+(_opf_adopt.rewrite_preservations), so apply creates no file the plan does not bind; repoint-consumer reads
+the live manifest's [unmanaged] and [views] without a plan digest for it; and binding the rows, the store
+table, the kept files' source digests and the consumer models to the one approved plan is the stage driver's.
 
 Outcome model: single-sourced from `_opf_store` exactly as the sibling `_opf_adopt` does; the inventory
 grading is the doctor's own shared validator (`_opf_check._evidence_rows`), so a malformed inventory or a
@@ -165,6 +164,30 @@ def _sha256(data):
 
 def _within(path, home):
     return path == home or path.startswith(home + "/")
+
+
+def _manifest_spelling(path):
+    """One comparable spelling of a root-relative path: the manifest validators (_opf_store's
+    _is_contained_relpath) admit empty and `.` components and contained `..` steps in [unmanaged] paths and
+    view targets, so `ci/./x`, `ci//x` and `ci/a/../x` all name `ci/x`. Each is reduced lexically and
+    casefolded, as protected_destination compares its names, so no equivalent spelling slips an overlap
+    guard (a case-only difference names one file on a case-insensitive filesystem; refusing it on a
+    case-sensitive one is the fail-closed side)."""
+    parts = []
+    for comp in path.split("/"):
+        if comp in ("", "."):
+            continue
+        if comp == ".." and parts:
+            parts.pop()
+        else:
+            parts.append(comp)
+    return "/".join(parts).casefold()
+
+
+def _overlaps(path, other):
+    """Whether two root-relative paths name one file, or one contains the other, under _manifest_spelling."""
+    a, b = _manifest_spelling(path), _manifest_spelling(other)
+    return _within(a, b) or _within(b, a)
 
 
 # --- run identity (the homes grammar, _opf_store; `adopt-<YYYYMMDD>T<HHMMSS>Z-<hash16>`, spec 4.2) ----
@@ -1036,14 +1059,16 @@ class RegistrationContext:
     store identity (its `store` table; the manifest every register-unmanaged row rewrites is
     _opf_adopt.store_manifest of it, never a caller-supplied path), and the planned postimage MODEL of each
     repoint-consumer path, which the handler re-emits and digest-checks against the row before staging it.
-    `rewrites` holds the one write op each rewritten path has in this transaction, so a register-unmanaged
-    chain extends that one write link by link (one op per path) and a second repointing of one consumer
-    refuses."""
+    `kept` maps each kept path to its approved source digest (the plan's keep source rows), against which
+    register-unmanaged re-checks the kept file's live bytes. `rewrites` holds the one write op each
+    rewritten path has in this transaction, so a register-unmanaged chain extends that one write link by link
+    (one op per path) and a second repointing of one consumer refuses."""
 
-    def __init__(self, ops, store_table=None, consumers=None):
+    def __init__(self, ops, store_table=None, consumers=None, kept=None):
         self.ops = ops
         self.store = store_table
         self.consumers = dict(consumers or {})
+        self.kept = dict(kept or {})
         self.rewrites = {}
 
 
@@ -1135,6 +1160,9 @@ def _store_model(context, manifest):
             raise AdoptApplyError("the store manifest {!r} the plan's store identity names is absent at "
                                   "apply; a fresh plan with its own approval is the remedy "
                                   "(spec 14.1)".format(manifest))
+    # For a LIVE manifest this parse guard is redundant with the posture gate, which refuses an unparseable
+    # manifest first ("the store posture cannot be evaluated"); it is reachable only for a manifest created
+    # earlier in this transaction (a redundant pair, disclosed).
     try:
         model = tomllib.loads(data.decode("utf-8"))
     except (AttributeError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
@@ -1153,8 +1181,11 @@ def _reserved_store_path(path, context, model):
     or lie within them), a protected destination (_opf_adopt.protected_destination: .git and .aiqt at any
     depth, the store pointers, the store tree's .gitignore), the machine store subtree, or a declared view
     target of `model`, each in either containment direction; the control area and protected names are
-    composed under the product root and the frozen store root alike. This covers every area the planner's
-    keep path refuses (_opf_adopt_plan._decisions: the control area, a declared view, the machine store)."""
+    composed under the product root and the frozen store root alike, and the machine store and view
+    targets are compared under _manifest_spelling. This covers every area the planner's keep path refuses
+    (_opf_adopt_plan._decisions: the control area, a declared view, the machine store). protected_destination
+    also refuses every control-area path but this run's own archive, so for those paths the two checks are a
+    redundant pair (disclosed); this run's archive is the control-area check's alone."""
     run_id = context.ops.run_id
     for root in sorted({".", context.store["store_root"]}):
         if schema._in_control_area(path, root):
@@ -1163,10 +1194,10 @@ def _reserved_store_path(path, context, model):
         if why is not None:
             return "{!r} is a protected destination: {}".format(path, why)
     machine = schema.store_manifest(context.store).rsplit("/", 1)[0]
-    if _within(path, machine) or _within(machine, path):
+    if _overlaps(path, machine):
         return "{!r} overlaps the machine store {!r}".format(path, machine)
     views = [v["target"] for v in model.get("views", {}).values()]
-    hit = [v for v in views if _within(path, v) or _within(v, path)]
+    hit = [v for v in views if _overlaps(path, v)]
     if hit:
         return "{!r} overlaps the declared view {!r}".format(path, hit[0])
     return None
@@ -1194,8 +1225,9 @@ def _compose_register_unmanaged(op_row, context):
     from this transaction's pending chain link, a manifest this transaction creates (the chain then
     extends that create), or the live tree, and required to equal old_digest; its bytes must be canonical
     (the byte-reproduction precondition) and VALID; the entry must not be a reserved store path
-    (_reserved_store_path), already registered, or written by this transaction, and the kept file must be a
-    regular file at apply; the postimage is the planner's own rendering (_opf_adopt_plan's registration
+    (_reserved_store_path), overlap an entry already registered, or be written by this transaction, and the
+    kept file must be a regular file at apply whose bytes hash to its approved source digest (context.kept);
+    the postimage is the planner's own rendering (_opf_adopt_plan's registration
     binding: the kept path appended to [unmanaged].paths, emitted through emit_checked), and its reparse
     must equal the prior model plus exactly that one entry (the allowed-delta postcondition, type-aware),
     validate as a manifest, and hash to new_digest, else nothing is composed. Reversal is the journaled
@@ -1213,8 +1245,9 @@ def _compose_register_unmanaged(op_row, context):
         raise AdoptApplyError("the store manifest {!r} is not a valid manifest; nothing is registered "
                               "(fail-closed)".format(manifest))
     collision = _reserved_store_path(entry, context, model)
-    if collision is None and entry in model.get("unmanaged", {}).get("paths", []):
-        collision = "{!r} is already registered [unmanaged]".format(entry)
+    registered = [k for k in model.get("unmanaged", {}).get("paths", []) if _overlaps(entry, k)]
+    if collision is None and registered:
+        collision = "{!r} is already registered [unmanaged] (as {!r})".format(entry, registered[0])
     if collision is None and any(op.get("op") in ("create", "write", "remove")
                                  and _within(op.get("path", ""), entry) for op in context.ops.ops):
         collision = ("{!r} is written by this transaction, and a kept file stays exactly where it is, "
@@ -1230,6 +1263,15 @@ def _compose_register_unmanaged(op_row, context):
                               "symlink or a special entry); Keep registers a file that stays where it is, so "
                               "a fresh plan with its own approval is the remedy (spec 14.1, "
                               "14.2)".format(entry))
+    approved = context.kept.get(entry)
+    if not schema._is_digest(approved):
+        raise AdoptApplyError("no approved source digest binds the kept file {!r}; Keep registers only the "
+                              "bytes the plan approved (fail-closed)".format(entry))
+    _fst, kept_bytes = _read_live(context.ops.root_fd, entry)
+    if not isinstance(kept_bytes, bytes) or "sha256:" + _sha256(kept_bytes) != approved:
+        raise AdoptApplyError("the kept file {!r} is drifted: its live bytes no longer match its approved "
+                              "source digest, so it is never registered; a fresh plan with its own approval "
+                              "is the remedy (spec 14.1)".format(entry))
     planned = copy.deepcopy(model)
     planned.setdefault("unmanaged", {}).setdefault("paths", []).append(entry)
     try:
@@ -1271,7 +1313,7 @@ def _compose_repoint_consumer(op_row, context):
     reserved = _reserved_store_path(path, context, model)
     if reserved is not None:
         raise AdoptApplyError("repoint-consumer refused: {}, never a consumer (fail-closed)".format(reserved))
-    kept = [k for k in model.get("unmanaged", {}).get("paths", []) if _within(path, k) or _within(k, path)]
+    kept = [k for k in model.get("unmanaged", {}).get("paths", []) if _overlaps(path, k)]
     if kept:
         raise AdoptApplyError("repoint-consumer {!r} overlaps the [unmanaged] entry {!r}: ordinary tooling "
                               "never rewrites a kept file (spec 14.2 Keep; fail-closed)".format(path, kept[0]))
@@ -3057,6 +3099,8 @@ def _self_test_checks():
     old_consumer = dict(paths=dict(rules="legacy/RULES.md"), name="ci")
     new_consumer = dict(paths=dict(rules=store.moved_dest("legacy/RULES.md")), name="ci")
 
+    planted = {}
+
     def reg_fixture(temp, manifest_text=None, extra=None):
         root = Path(temp).resolve()
         files = {keep: b"kept\n", keep2: b"kept too\n", notes: b"Rules: see legacy/RULES.md\n",
@@ -3067,6 +3111,8 @@ def _self_test_checks():
         for rel, payload in files.items():
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_bytes(payload)
+        planted.clear()
+        planted.update(files)
         return root, files
 
     def bound(raw, entries, init=None):
@@ -3101,8 +3147,11 @@ def _self_test_checks():
                     new_digest=plan_digest(body))
 
     def compose_reg(rows, consumers=None, store_table=reg_store, before_row=None):
+        # the kept files' approved source digests: the fixture's planted bytes, as the plan's keep sources
+        # bind them (the stage driver's), so a kept file drifts only where a vector makes it
         def compose(ops):
-            context = RegistrationContext(ops, store_table, consumers)
+            context = RegistrationContext(ops, store_table, consumers,
+                                          dict((p, plan_digest(b)) for p, b in planted.items()))
             for i, row in enumerate(rows):
                 if before_row is not None:
                     before_row(i, ops, context)
@@ -3178,13 +3227,29 @@ def _self_test_checks():
               after.get(archive_rel(rid, man)) == files[man]
               and after.get(archive_rel(rid, consumer)) == files[consumer])
         check("reg-bundle-verifies", verify_bundle(root, rid).status == VALID)
-        # an otherwise-valid link (a planted kept file, the planner-bound digests over the committed
-        # manifest) in a later phase refuses on the stage rule alone.
+        # every file apply created is a bound effect (spec 14.1): the archive copies are exactly the
+        # creations the plan's own derivation lists for these rows (_opf_adopt.rewrite_preservations).
+        effects = schema.derive_effects(rows + [repoint_row(files)], [], man, rid)
+        archived = dict((p, plan_digest(b)) for p, b in after.items() if _within(p, _archive_root(rid)))
+        check("reg-archive-copies-are-bound-effects", len(archived) == 2 and archived == dict(
+            (row["path"], row["digest"]) for row in effects["creations"]))
+
+    # the stage rule: a committed base transaction that archived no manifest (one consumer repointing), then
+    # an otherwise-valid link (a planted kept file, the planner-bound digests over the live manifest) in a
+    # later phase. Without the rule it commits, rewriting the manifest; with it the tree stays unchanged.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = reg_fixture(temp, extra={"adopter/LATE.md": b"late\n"})
+        with lease_join():
+            base_txn, base_why = attempt(run_adopt_transaction, root, rid, compose_reg(
+                [repoint_row(files)], dict([(consumer, new_consumer)])))
+        before = snapshot(root)
         with lease_join():
             late = refusal(run_adopt_transaction, root, rid, compose_reg(
-                bound(after[man], ["adopter/LATE.md"])), phase="completion")
-        check("reg-outside-apply-stage-refused", late is not None and "apply stage" in late
-              and plan_digest((root / man).read_bytes()) == rows[-1]["new_digest"])
+                chain(files, ["adopter/LATE.md"])), phase="completion")
+        check("reg-outside-apply-stage-refused", base_txn == rid and base_why is None and late is not None
+              and "apply stage" in late)
+        check("reg-outside-apply-stage-writes-nothing", snapshot(root) == before
+              and not (root / JOURNAL_REL / (rid + ".completion")).exists())
 
     # the first-adoption chain: a manifest CREATED earlier in this transaction (the init-store scaffold the
     # planner's binding starts from when no store resolves) is extended by the bound links, the chain folded
@@ -3200,6 +3265,9 @@ def _self_test_checks():
               txn == rid and why is None and txn_state(root, rid) == "complete"
               and plan_digest((root / man).read_bytes()) == rows[-1]["new_digest"]
               and (root / keep).read_bytes() == files[keep] and not (root / archive_rel(rid, man)).exists())
+        check("reg-created-manifest-chain-binds-no-archive-copy", not any(
+            _within(row["path"], _archive_root(rid))
+            for row in schema.derive_effects([init] + rows, [], man, rid)["creations"]))
 
     commented = "# a hand comment\n" + _opf_init.build_manifest()
     this_archive = archive_rel(rid, "x.md")
@@ -3214,6 +3282,23 @@ def _self_test_checks():
     def swap_model(i, ops, context):
         if i == 1:
             context.consumers[consumer] = dict(new_consumer, name="ci2")
+
+    def with_manifest(**tables):
+        return emit_checked(dict(tomllib.loads(_opf_init.build_manifest()), **tables))
+
+    def aliased_view(target, alias):
+        views = tomllib.loads(_opf_init.build_manifest())["views"]
+        return with_manifest(views=dict((k, dict(v, target=alias) if v["target"] == target else v)
+                                        for k, v in views.items()))
+
+    def drift_kept(i, ops, context):
+        context.kept[keep] = plan_digest(b"approved, then edited\n")
+
+    def unbind_kept(i, ops, context):
+        context.kept.pop(keep, None)
+
+    hooks = {"consumer-twice": swap_model, "entry-kept-drifted": drift_kept, "entry-kept-unbound": unbind_kept}
+    decisions_toml = ".working/DECISIONS.toml"
 
     flips = [
         # the byte-reproduction precondition: a comment makes the manifest non-canonical; the row carries
@@ -3279,18 +3364,52 @@ def _self_test_checks():
         ("consumer-twice", lambda f: [repoint_row(f), dict(
             repoint_row(f, planned=dict(new_consumer, name="ci2")), old_digest=repoint_row(f)["new_digest"])],
          "two plan rows", dict(tracked), None, None),
+        # repoint-consumer over an invalid store manifest (a stray table) that the posture gate admits
+        ("consumer-store-manifest-invalid", lambda f: [repoint_row(f)], "not a valid manifest", tracked,
+         with_manifest(stray=dict(key=1)), None),
+        # the kept file's live bytes against its approved source digest: drifted, or bound by none
+        ("entry-kept-drifted", lambda f: chain(f, [keep]), "approved source digest", None, None, None),
+        ("entry-kept-unbound", lambda f: chain(f, [keep]), "no approved source digest", None, None, None),
+        # an entry overlapping one already registered, in the contains direction and under an alias
+        ("entry-within-registered", lambda f: chain(f, [keep]), "already registered", None,
+         with_manifest(unmanaged=dict(paths=["adopter"])), None),
+        ("entry-registered-alias", lambda f: chain(f, [keep]), "already registered", None,
+         with_manifest(unmanaged=dict(paths=["adopter/./KEEP.md"])), None),
+        # a case-only spelling of the machine store (one directory on a case-insensitive filesystem)
+        ("entry-in-machine-store-case", lambda f: chain(f, [".WORKING/toml/x.md"]), "machine store", None,
+         None, {".WORKING/toml/x.md": b"x\n"}),
+        # a declared view target spelled with a `.` component still reserves its path, for both ops
+        ("entry-is-aliased-view-target", lambda f: chain(f, [decisions_toml]), "declared view", None,
+         aliased_view(decisions_toml, ".working/./DECISIONS.toml"), {decisions_toml: b"x\n"}),
+        ("consumer-is-aliased-view-target", lambda f: [repoint_row(f, path=decisions_toml)], "declared view",
+         dict([(decisions_toml, new_consumer)]), aliased_view(decisions_toml, ".working//DECISIONS.toml"),
+         {decisions_toml: planted_consumer}),
     ]
+    # an [unmanaged] entry naming the consumer under each equivalent spelling the manifest validator admits
+    flips += [("consumer-kept-unmanaged-alias-{}".format(i), lambda f: [repoint_row(f)], "[unmanaged] entry",
+               tracked, with_manifest(unmanaged=dict(paths=[alias])), None)
+              for i, alias in enumerate(("ci/./consumer.toml", "ci//consumer.toml", "ci/x/../consumer.toml",
+                                         "./ci/consumer.toml", "CI/consumer.toml"))]
     flips += [("entry-in-control-{}".format(i), (lambda e: lambda f: chain(f, [e]))(e), "control area", None,
                None, {e: b"x\n"}) for i, e in enumerate(control)]
     flips += [("entry-protected-{}".format(i), (lambda e: lambda f: chain(f, [e]))(e), "protected destination",
                None, None, {e: b"x\n"}) for i, e in enumerate(protected)]
-    flips += [("entry-store-pointer", lambda f: chain(f, [".opf.toml"]), "protected destination", None, None,
-               None)]
+    # entry-in-control-1..5 also meet protected_destination, whose message names the control area too (a
+    # redundant pair, disclosed at _reserved_store_path); entry-in-control-0, this run's own archive, is the
+    # control-area check's alone.
     for label, rows, keyword, consumers, manifest_text, extra in flips:
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
             reg_refusal(temp, rows, keyword, label, consumers,
                         None if label == "no-store-identity" else reg_store, manifest_text, extra,
-                        swap_model if label == "consumer-twice" else None)
+                        hooks.get(label))
+    # the committed store pointer as an entry: a planted pointer naming the product root itself, so the store
+    # still resolves in-root and only the protected-destination rule refuses the registration.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        pointer = '[store]\ntarget = "dir:{}"\n'.format(Path(temp).resolve()).encode("utf-8")
+        check("reg-entry-store-pointer-resolves-in-root", store.resolve_store(
+            reg_fixture(temp, extra={".opf.toml": pointer})[0]).status == store.RESOLVED)
+        reg_refusal(temp, lambda f: chain(f, [".opf.toml"]), "protected destination", "entry-store-pointer",
+                    extra={".opf.toml": pointer})
     # repoint-consumer without a usable store identity: none at all, or one whose manifest is absent.
     for label, table in (("consumer-no-store-identity", None),
                          ("consumer-store-manifest-absent", dict(reg_store, machine_rel=".working/other"))):
