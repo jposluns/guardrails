@@ -1724,7 +1724,7 @@ def main():
     # still holds a write end); either way the join is bounded and the report
     # carries what arrived.
     for pump in pumps:
-        pump.join()
+        pump.join(max(0.0, deadline - time.monotonic()) + 1.0)
     for key in ("stdout", "stderr"):
         pairs[key][0].close()
     report["stdout"] = base64.b64encode(b"".join(gathered["stdout"])).decode("ascii")
@@ -1878,11 +1878,17 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
             # refused. Drain the socket in a thread so a large report cannot deadlock
             # against communicate() draining the supervisor's stdio pipes.
             collected = {}
+            budget = timeout + _RUNTIME_REAP_SECONDS + 30
+            drained_by = time.monotonic() + budget + 5
 
             def drain():
                 parts = []
                 try:
                     while True:
+                        left = drained_by - time.monotonic()
+                        if left <= 0.0:
+                            break
+                        report_r.settimeout(left)
                         chunk = report_r.recv(65536)
                         if not chunk:
                             break
@@ -1891,21 +1897,39 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
                     pass
                 collected["raw"] = b"".join(parts)
 
+            def settle():
+                # Join the pump BEFORE closing report_r, so the drain thread never races a
+                # reused fd number (QA8 claude nit). The join is bounded: every recv carries a
+                # timeout ending at `drained_by`; a reader still alive past it is shut down
+                # (EOF to its recv, its fd number still held) and joined once more, briefly.
+                pump.join(max(0.0, drained_by - time.monotonic()) + 1.0)
+                if pump.is_alive():
+                    try:
+                        report_r.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    pump.join(1.0)
+                return not pump.is_alive()
+
             pump = threading.Thread(target=drain)
             pump.start()
-            budget = timeout + _RUNTIME_REAP_SECONDS + 30
             try:
                 sup_out, sup_err = proc.communicate(timeout=budget)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                # Join the pump BEFORE closing report_r: the write end died with the
-                # killed supervisor, so recv reaches EOF and the join is prompt, and
-                # the drain thread never races a reused fd number (QA8 claude nit).
-                pump.join()
+                proc.kill()   # the probe's own supervisor child; its reap is bounded too
+                try:
+                    proc.communicate(timeout=_RUNTIME_REAP_SECONDS)
+                    unreaped = ""
+                except subprocess.TimeoutExpired:
+                    unreaped = " and was not reaped within {} s of its kill".format(_RUNTIME_REAP_SECONDS)
+                settle()
                 report_r.close()
-                return "{} {}: the probe supervisor did not finish within {} s".format(name, argv, budget)
-            pump.join()
+                return "{} {}: the probe supervisor did not finish within {} s{}".format(
+                    name, argv, budget, unreaped)
+            if not settle():
+                report_r.close()
+                return "{} {}: the probe's report reader did not stop by its {} s deadline".format(
+                    name, argv, budget + 5)
             report_r.close()
             report_raw = collected.get("raw", b"")
             written = []
@@ -2346,7 +2370,7 @@ def _self_test_runtime_supervisor_unit(tmp):
         # pre-fix `os.kill(child, signal.SIGKILL)` ever returns (QA8 claude m3).
         if child_fd is not None:
             try:
-                _kill_proved_child(child, pidfd=child_fd)
+                _kill_proved_child(child, pidfd=child_fd, unreaped=faults)
             finally:
                 os.close(child_fd)
     took = time.monotonic() - begin
@@ -2452,7 +2476,7 @@ def _self_test_runtime_supervisor_unit(tmp):
                               "recorder sees, so the report-only reap is not pinned by this check")
         # Hygiene through the descriptor opened on this process's OWN fork above.
         try:
-            _kill_proved_child(kid, pidfd=kid_fd)
+            _kill_proved_child(kid, pidfd=kid_fd, unreaped=faults)
         finally:
             os.close(kid_fd)
 
@@ -2491,15 +2515,22 @@ def _self_test_runtime_supervisor_unit(tmp):
     if undeclared or undeclared_sent:
         faults.append("the ownership helper signalled an undeclared target (sent {}): the retired "
                       "adoption license is back (D-385-CURRENT-CHILD)".format(undeclared_sent))
-    if not _kill_proved_child(probe_kid, forked=True):
+    if not _kill_proved_child(probe_kid, forked=True, unreaped=faults):
         faults.append("the ownership helper refused this process's own declared live un-reaped child")
         try:
             kid_fd = os.pidfd_open(probe_kid, 0)
-            signal.pidfd_send_signal(kid_fd, signal.SIGKILL)
-            os.close(kid_fd)
-            os.waitpid(probe_kid, 0)
         except OSError:
-            pass
+            kid_fd = None
+        if kid_fd is not None:
+            try:
+                signal.pidfd_send_signal(kid_fd, signal.SIGKILL)
+                if not _reap_pidfd(kid_fd, _PIDFD_REAP_SECONDS):
+                    faults.append("this process's own child pid {} was not reaped within {} s of its "
+                                  "SIGKILL".format(probe_kid, _PIDFD_REAP_SECONDS))
+            except OSError:
+                pass
+            finally:
+                os.close(kid_fd)
 
     # QA8 claude m3: regression pin for the QA7 blocker, widened by QA9
     # claude F1 and by QA10 (D-385-PIDFD-HANDOFF). Parse this host file and
@@ -3098,17 +3129,29 @@ def _self_test_runtime_report_channel(tmp):
                           "concurrent run could drain or forge the report")
         gate.write_text("go", encoding="ascii")
         parts = []
+        heard_by = time.monotonic() + 60
         while True:
-            chunk = report_r.recv(65536)
+            left = heard_by - time.monotonic()
+            if left <= 0.0:
+                break
+            report_r.settimeout(left)
+            try:
+                chunk = report_r.recv(65536)
+            except TimeoutError:
+                break
             if not chunk:
                 break
             parts.append(chunk)
         raw = b"".join(parts)
         try:
-            sup_out, sup_err = proc.communicate(timeout=60)
+            sup_out, sup_err = proc.communicate(timeout=max(0.0, heard_by - time.monotonic()) + 1.0)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
+            proc.kill()   # this check's own supervisor child
+            try:
+                proc.communicate(timeout=_RUNTIME_REAP_SECONDS)
+            except subprocess.TimeoutExpired:
+                return faults + ["the report-channel supervisor did not finish, and was not reaped within "
+                                 "{} s of its kill".format(_RUNTIME_REAP_SECONDS)]
             return faults + ["the report-channel supervisor did not finish"]
     finally:
         report_r.close()
@@ -3192,7 +3235,7 @@ def _self_test_runtime_escape_probe(tmp):
         deadline = time.monotonic() + _RUNTIME_LATE_BOUND
         hold = os.open(str(late / "LIVE-own"), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         try:
-            fcntl.flock(hold, fcntl.LOCK_EX)
+            fcntl.flock(hold, fcntl.LOCK_EX | fcntl.LOCK_NB)   # created O_EXCL just above: none can hold it
             own = subprocess.Popen([sys.executable, "-I", "-B", "-c",
                                     "import sys\nimport time\n\ntime.sleep(1)\nopen(sys.argv[1], 'w').close()\n",
                                     str(late / "LATE-own-own")], pass_fds=(hold,), stdin=subprocess.DEVNULL,
@@ -3216,6 +3259,13 @@ def _self_test_runtime_escape_probe(tmp):
             landed = sorted(name for name in os.listdir(str(Path(tmp, "tree", "opf", "tools")))
                             if name.startswith("LATE-"))
             live = _runtime_late_wait(late, 0)
+        except BaseException as exc:
+            # An interrupt (or any failure) before `live` was established leaves `tmp` in place: name
+            # it in the propagated exception, then kill and reap, within a bound, the case's own writer.
+            exc.add_note("the escape probe's fixture directory {} is left in place, not removed".format(tmp))
+            if own.returncode is None:
+                _runtime_decoy_reap(own, "the case's own writer")
+            raise
         finally:
             if live == []:
                 shutil.rmtree(tmp)
@@ -3341,6 +3391,198 @@ def _self_test_runtime_decoy_unit():
     return faults
 
 
+# The functions on the escape probe's and the supervisor unit's paths whose every wait must carry a bound
+# (QA20, class-wide), audited by _runtime_wait_audit and pinned by _self_test_runtime_wait_unit.
+_RUNTIME_WAIT_OWNERS = ("_self_test_runtime_probe", "_self_test_runtime_supervisor_unit",
+                        "_self_test_runtime_report_channel", "_self_test_runtime_escape_probe",
+                        "_runtime_late_wait", "_runtime_decoy_reap", "_runtime_escape_cases",
+                        "_kill_proved_child", "_reap_pidfd")
+
+
+def _runtime_wait_audit(source, owners=None):
+    """A parse-tree audit of the top-level functions of `source` named in `owners` (every one when
+    None) for an UNBOUNDED wait: a .wait(), .communicate(), .join() or .acquire() with neither
+    argument nor keyword (or an explicit None); an os.waitpid, os.wait4 or os.waitid whose options do
+    not carry WNOHANG; an fcntl.flock or fcntl.lockf without LOCK_NB; a select.select without its
+    timeout; and a .recv() in a scope that never calls .settimeout(). It also pins the production
+    WIRING (codex QA20 minor 3): _kill_proved_child and _self_test_runtime_supervisor_unit reap through
+    _reap_pidfd; _runtime_escape_cases reaps both decoys through _runtime_decoy_reap, the second in
+    the finally of the first, and attributes them only through _runtime_names_pid (no `in` test on a
+    pid); and _self_test_runtime_escape_probe names its retained directory with add_note. Like
+    _runtime_supervisor_signal_audit it is a tripwire over ordinary spellings, not a proof of absence.
+    Returns the list of faults."""
+    import ast
+    tree = ast.parse(source)
+    defs = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+            and (owners is None or node.name in owners)]
+    faults = ["{} is not defined, so its waits are unaudited".format(name)
+              for name in sorted(set(owners or ()) - {node.name for node in defs})]
+    nested = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+    def own(scope):
+        stack = [node for node in (scope.body if isinstance(scope.body, list) else [scope.body])
+                 if not isinstance(node, nested)]
+        while stack:
+            node = stack.pop()
+            yield node
+            stack.extend(child for child in ast.iter_child_nodes(node) if not isinstance(child, nested))
+
+    def calls(scope, name):
+        return [node for node in ast.walk(scope) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == name]
+
+    for top in defs:
+        for scope in [top] + [node for node in ast.walk(top) if isinstance(node, nested) and node is not top]:
+            nodes = list(own(scope))
+            where = "{} line {}".format(top.name, getattr(scope, "lineno", "?"))
+            timed = any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "settimeout" for node in nodes)
+            for node in nodes:
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                    continue
+                attr, base = node.func.attr, node.func.value
+                spelled = ast.dump(node)
+                module = base.id if isinstance(base, ast.Name) else None
+                bounds = list(node.args) + [kw.value for kw in node.keywords if kw.arg in ("timeout", None)]
+                if attr in ("wait", "communicate", "join", "acquire") and module not in ("os", "str") and (
+                        not bounds or all(isinstance(each, ast.Constant) and each.value is None
+                                          for each in bounds)):
+                    faults.append("{}: an unbounded .{}() (line {})".format(where, attr, node.lineno))
+                elif module == "os" and attr in ("wait", "wait3"):
+                    faults.append("{}: a blocking os.{} (line {})".format(where, attr, node.lineno))
+                elif module == "os" and attr in ("waitpid", "wait4", "waitid") and "WNOHANG" not in spelled:
+                    faults.append("{}: os.{} without WNOHANG (line {})".format(where, attr, node.lineno))
+                elif module == "fcntl" and attr in ("flock", "lockf") and "LOCK_NB" not in spelled:
+                    faults.append("{}: fcntl.{} without LOCK_NB (line {})".format(where, attr, node.lineno))
+                elif module == "select" and attr == "select" and len(node.args) < 4:
+                    faults.append("{}: select.select without a timeout (line {})".format(where, node.lineno))
+                elif attr == "recv" and not timed:
+                    faults.append("{}: a .recv() in a scope with no settimeout (line {})".format(
+                        where, node.lineno))
+        if top.name in ("_kill_proved_child", "_self_test_runtime_supervisor_unit") and not calls(top, "_reap_pidfd"):
+            faults.append("{} does not reap through the bounded _reap_pidfd".format(top.name))
+        if top.name == "_self_test_runtime_escape_probe" and not any(
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_note"
+                for handler in ast.walk(top) if isinstance(handler, ast.ExceptHandler) for node in ast.walk(handler)):
+            faults.append("an interrupt in the escape probe's late wait does not name its retained directory")
+        if top.name == "_runtime_escape_cases":
+            reaped = {ast.dump(call.args[0]) for call in calls(top, "_runtime_decoy_reap") if call.args}
+            named = {ast.dump(call.args[1]) for call in calls(top, "_runtime_names_pid") if len(call.args) > 1}
+            for decoy in ("decoy", "tokened"):
+                if ast.dump(ast.Name(id=decoy, ctx=ast.Load())) not in reaped:
+                    faults.append("_runtime_escape_cases does not reap {} through _runtime_decoy_reap".format(decoy))
+                if ast.dump(ast.Attribute(value=ast.Name(id=decoy, ctx=ast.Load()), attr="pid",
+                                          ctx=ast.Load())) not in named:
+                    faults.append("_runtime_escape_cases does not attribute {} through _runtime_names_pid".format(decoy))
+            if not any(isinstance(node, ast.Try) and calls(ast.Module(body=node.body, type_ignores=[]),
+                                                           "_runtime_decoy_reap")
+                       and calls(ast.Module(body=node.finalbody, type_ignores=[]), "_runtime_decoy_reap")
+                       for node in ast.walk(top)):
+                faults.append("_runtime_escape_cases does not reap the second decoy in the finally of the first")
+            for node in ast.walk(top):
+                if isinstance(node, ast.Compare) and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops) \
+                        and any(isinstance(part, ast.Attribute) and part.attr == "pid" for part in ast.walk(node)):
+                    faults.append("_runtime_escape_cases attributes a pid by an `in` test (line {})".format(node.lineno))
+    return faults
+
+
+# Revert vectors for _self_test_runtime_wait_unit: (function, committed text, reverted text). Each revert
+# restores one unbounded wait or one bypass of a bounded helper at its PRODUCTION call site.
+_RUNTIME_WAIT_REVERTS = (
+    ("_kill_proved_child", "not _reap_pidfd(fd, bound)", "not os.waitid(os.P_PIDFD, fd, os.WEXITED)"),
+    ("_reap_pidfd", "os.WEXITED | os.WNOHANG", "os.WEXITED"),
+    ("_self_test_runtime_supervisor_unit", "if not _reap_pidfd(kid_fd, _PIDFD_REAP_SECONDS):",
+     "if os.waitpid(probe_kid, 0):"),
+    ("_runtime_escape_cases", 'reaps.append(_runtime_decoy_reap(decoy, "the marker-carrying decoy"))',
+     "decoy.kill()\n            decoy.wait()"),
+    ("_runtime_escape_cases", 'reaps.append(_runtime_decoy_reap(tokened, "the exact-token decoy"))',
+     "tokened.kill()\n                tokened.wait()"),
+    ("_runtime_escape_cases", "        finally:   # an interrupt in the first reap must not skip the second\n",
+     "        except ValueError:\n            pass\n        if True:\n"),
+    ("_runtime_escape_cases", "named = _runtime_names_pid(found, decoy.pid)",
+     "named = next((miss for miss in found if str(decoy.pid) in miss), None)"),
+    ("_runtime_escape_cases", "named = _runtime_names_pid(found, tokened.pid)",
+     "named = next((miss for miss in found if str(tokened.pid) in miss), None)"),
+    ("_self_test_runtime_escape_probe", "own.wait(timeout=max(0.0, deadline - time.monotonic()))", "own.wait()"),
+    ("_self_test_runtime_escape_probe", "fcntl.LOCK_EX | fcntl.LOCK_NB)", "fcntl.LOCK_EX)"),
+    ("_self_test_runtime_escape_probe", "exc.add_note(", "print("),
+    ("_self_test_runtime_probe", "proc.communicate(timeout=_RUNTIME_REAP_SECONDS)", "proc.communicate()"),
+    ("_self_test_runtime_probe", "pump.join(max(0.0, drained_by - time.monotonic()) + 1.0)", "pump.join()"),
+    ("_self_test_runtime_probe", "report_r.settimeout(left)", "pass"),
+    ("_self_test_runtime_report_channel", "report_r.settimeout(left)", "pass"),
+    ("_self_test_runtime_report_channel", "proc.communicate(timeout=_RUNTIME_REAP_SECONDS)", "proc.communicate()"),
+    ("_RUNTIME_SUPERVISOR", "pump.join(max(0.0, deadline - time.monotonic()) + 1.0)", "pump.join()"),
+    ("_RUNTIME_SUPERVISOR", "sock.settimeout(left)", "pass"),
+)
+
+
+def _self_test_runtime_wait_unit():
+    """Pin the bounded waits of the escape probe's and the supervisor unit's paths (QA20, class-wide).
+    WIRING: _runtime_wait_audit over this file's committed _RUNTIME_WAIT_OWNERS and _RUNTIME_SUPERVISOR
+    finds nothing, and finds each _RUNTIME_WAIT_REVERTS revert applied to its production function, so
+    reverting a call site (not only a helper) turns this red. BEHAVIOUR (codex's reproduction): with
+    os.waitid and os.waitpid replaced by models in which the child is never reaped and any blocking
+    call is recorded and refused, and pidfd_send_signal by a recorder, _kill_proved_child on this
+    process's own declared fork must send one SIGKILL, make no blocking call, return within its bound
+    and name the pid as unreaped; the real route then kills and reaps it. Returns the faults."""
+    import ast
+    import signal
+    import time
+    faults = []
+    source = Path(__file__).read_text(encoding="utf-8")
+    found = _runtime_wait_audit(source, _RUNTIME_WAIT_OWNERS) + _runtime_wait_audit(_RUNTIME_SUPERVISOR)
+    faults += ["the bounded-wait audit of the committed source found: {}".format(miss) for miss in found]
+    segments = {node.name: ast.get_source_segment(source, node) for node in ast.parse(source).body
+                if isinstance(node, ast.FunctionDef) and node.name in _RUNTIME_WAIT_OWNERS}
+    segments["_RUNTIME_SUPERVISOR"] = _RUNTIME_SUPERVISOR
+    for owner, committed, reverted in _RUNTIME_WAIT_REVERTS:
+        segment = segments.get(owner) or ""
+        if segment.count(committed) != 1:
+            faults.append("the revert vector for {} does not match its source once ({!r})".format(owner, committed))
+        elif not _runtime_wait_audit(segment.replace(committed, reverted)):
+            faults.append("the bounded-wait audit missed a revert in {} ({!r} to {!r})".format(
+                owner, committed, reverted))
+    kid = os.fork()
+    if kid == 0:
+        time.sleep(60)
+        os._exit(1)
+    real_waitid, real_waitpid, real_send = os.waitid, os.waitpid, signal.pidfd_send_signal
+    blocking, sent, unreaped = [], [], []
+
+    def stuck_waitid(idtype, ident, options):
+        if not options & os.WNOHANG:
+            blocking.append("waitid")
+            raise ChildProcessError("a blocking waitid, refused by the model")
+        return real_waitid(idtype, ident, options) if options & os.WNOWAIT else None
+
+    def stuck_waitpid(pid, options):
+        if not options & os.WNOHANG:
+            blocking.append("waitpid")
+            raise ChildProcessError("a blocking waitpid, refused by the model")
+        return (0, 0)
+
+    begin = time.monotonic()
+    os.waitid, os.waitpid = stuck_waitid, stuck_waitpid
+    signal.pidfd_send_signal = lambda fd, sig: sent.append(sig)
+    try:
+        signalled = _kill_proved_child(kid, forked=True, reap_bound=0.3, unreaped=unreaped)
+    finally:
+        os.waitid, os.waitpid, signal.pidfd_send_signal = real_waitid, real_waitpid, real_send
+    took = time.monotonic() - begin
+    if blocking:
+        faults.append("_kill_proved_child made a blocking {} reap".format(" and ".join(blocking)))
+    if signalled is not True or sent != [signal.SIGKILL] or len(unreaped) != 1 \
+            or "pid {} ".format(kid) not in unreaped[0]:
+        faults.append("a never-reaped SIGKILL target was not one signal and one named unreaped pid "
+                      "(returned {}, sent {}, unreaped {})".format(signalled, sent, unreaped))
+    if took > 2.0:
+        faults.append("the never-reaped SIGKILL target held _kill_proved_child {:.1f} s past a 0.3 s bound".format(took))
+    leftover = []
+    if not _kill_proved_child(kid, forked=True, unreaped=leftover) or leftover:
+        faults.append("the real route did not kill and reap this process's own child ({})".format(leftover))
+    return faults
+
+
 def _runtime_escape_cases(tmp):
     """The cases of _self_test_runtime_escape_probe, which then waits for their escaped writers; returns
     the list of discrepancies."""
@@ -3389,10 +3631,13 @@ def _runtime_escape_cases(tmp):
         signalled = decoy.poll()
         tokened = token_decoy.get("proc")
         token_signalled = tokened.poll() if tokened is not None else None
-        faults = [_runtime_decoy_reap(decoy, "the marker-carrying decoy")]
-        if tokened is not None:
-            faults.append(_runtime_decoy_reap(tokened, "the exact-token decoy"))
-    faults = [fault for fault in faults if fault]
+        reaps = []
+        try:
+            reaps.append(_runtime_decoy_reap(decoy, "the marker-carrying decoy"))
+        finally:   # an interrupt in the first reap must not skip the second
+            if tokened is not None:
+                reaps.append(_runtime_decoy_reap(tokened, "the exact-token decoy"))
+    faults = [fault for fault in reaps if fault]
     if signalled is not None:
         faults.append("the unrelated same-uid marker-carrying process outside the probe subtree was "
                       "signalled (rc {})".format(signalled))
@@ -3465,6 +3710,7 @@ def _runtime_escape_cases(tmp):
         faults.append("with SIGCHLD ignored by the caller, a failing module was not named (got {})"
                       .format("; ".join(ignored[:3]) or "nothing"))
     faults += _self_test_runtime_decoy_unit()
+    faults += _self_test_runtime_wait_unit()
     faults += _self_test_runtime_supervisor_unit(tmp)
     faults += _self_test_runtime_report_channel(tmp)
     unit = Path(tmp, "snapunit")
@@ -3569,7 +3815,7 @@ def _aggregator_self_test():
     return EXIT_OK
 
 
-def _kill_proved_child(pid, sig=None, pidfd=None, *, forked=False):
+def _kill_proved_child(pid, sig=None, pidfd=None, *, forked=False, reap_bound=None, unreaped=None):
     """The ONE route for a self-test signal whose target pid came from a file, an earlier
     /proc read, or any other record that liveness alone cannot authenticate (QA8 codex
     blocker; shared-uid pool rule): signal `pid` only through a pidfd whose target a
@@ -3590,10 +3836,13 @@ def _kill_proved_child(pid, sig=None, pidfd=None, *, forked=False):
     way the waitid proof still gates the send: ECHILD or any other pidfd or waitid failure
     means NOTHING is signalled and False is returned, so a forged or recycled pid can never
     redirect a self-test signal to an unrelated same-uid process. `sig` defaults to SIGKILL;
-    a SIGKILL target is then reaped through the SAME pidfd (waitid(P_PIDFD, ..., WEXITED),
-    race-free against pid reuse). A caller-supplied `pidfd` stays owned (and closed) by the
-    caller; otherwise the fd is opened and closed here. Returns True only when the signal
-    was sent."""
+    a SIGKILL target is then reaped through the SAME pidfd (race-free against pid reuse) by
+    _reap_pidfd, for at most `reap_bound` seconds (default _PIDFD_REAP_SECONDS), never a
+    blocking waitid: a target still un-reaped then is named in the caller's `unreaped` list
+    when one is given (the self-test callers pass their faults), and the call still returns
+    True, since the signal was sent. A caller-supplied `pidfd` stays owned (and closed) by
+    the caller; otherwise the fd is opened and closed here. Returns True only when the
+    signal was sent."""
     import signal as signal_module
     if sig is None:
         sig = signal_module.SIGKILL
@@ -3620,15 +3869,41 @@ def _kill_proved_child(pid, sig=None, pidfd=None, *, forked=False):
             signal_module.pidfd_send_signal(fd, sig)
         except OSError:
             return False
-        if sig == signal_module.SIGKILL:
-            try:
-                os.waitid(os.P_PIDFD, fd, os.WEXITED)
-            except OSError:
-                pass
+        bound = _PIDFD_REAP_SECONDS if reap_bound is None else reap_bound
+        if sig == signal_module.SIGKILL and not _reap_pidfd(fd, bound) and unreaped is not None:
+            unreaped.append("pid {} was not reaped within {} s of its SIGKILL through its pidfd".format(
+                pid, bound))
         return True
     finally:
         if opened:
             os.close(fd)
+
+
+_PIDFD_REAP_SECONDS = 5.0
+
+
+def _reap_pidfd(fd, bound):
+    """Reap the child behind pidfd `fd`, waiting at most `bound` seconds: waitid(P_PIDFD, ...,
+    WEXITED | WNOHANG) polls, slept between on a poll() of the pidfd (readable once the child
+    exits) bounded by what is left, never a blocking waitid or waitpid, which a traced or
+    wedged child could hold past every outer bound. Returns True once the child is reaped or
+    is no longer this process's to reap (ECHILD or any other waitid failure, the disposition
+    of the former blocking reap), False when the bound ran out with it un-reaped."""
+    import select
+    import time
+    deadline = time.monotonic() + bound
+    while True:
+        try:
+            if os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG) is not None:
+                return True
+        except OSError:
+            return True
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            return False
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+        poller.poll(min(left, 0.1) * 1000.0)
 
 
 def _child_subreaper_flag():
