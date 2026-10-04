@@ -567,8 +567,9 @@ class ApplyOps:
     def preserve(self, source_path, plan_digest):
         """Preserve one plan-enumerated source at apply: re-observe its live bytes, require them to equal
         the plan digest (a drifted source MUST NOT be archived, spec 14.2), and create the byte-identical
-        copy, at the source's own mode, at `.working/archive/adoption/<run-id>/<source-path>`. The source
-        itself stays live and frozen: a non-occupying source's retirement preimage. Returns (bytes, mode)."""
+        copy, at the source's mode masked by ARCHIVE_MODE_MASK, at
+        `.working/archive/adoption/<run-id>/<source-path>`. The source itself stays live and frozen: a
+        non-occupying source's retirement preimage. Returns (bytes, the source's unmasked mode)."""
         expected = _plan_hex(plan_digest)
         fst, data = _read_live(self.root_fd, source_path)
         if fst is None:
@@ -1041,7 +1042,9 @@ def _compose_enable_hook(op_row, ops):
     read, so an unsupported platform or a non-settings file refuses with nothing read and nothing
     written, however settings-shaped its content). The plugin_entry must match the pack-member grammar
     dispatch already validated, re-proved here because OP_HANDLERS is a public table and a direct
-    caller skips dispatch. The registration file must then be present, regular,
+    caller skips dispatch; for the same reason a row that is not a table carrying string
+    registration_path, plugin_entry, old_digest and new_digest refuses first, never an uncaught
+    KeyError or AttributeError. The registration file must then be present, regular,
     contained and hash to the row's
     old_digest: drift refuses into a fresh plan, never a merge over unknown content (threat 3).
     merge_registration computes the merged bytes and refuses every unrecognized format or shape, conflicting
@@ -1052,6 +1055,12 @@ def _compose_enable_hook(op_row, ops):
     archived copy agree byte-exact. A verified no-op (the canonical entry already registered, so new_digest
     equals old_digest) composes nothing. Configuration only: nothing here or in the journal runs, loads or
     activates the registered hook (threat 6). Every refusal precedes the first appended op."""
+    fields = ("registration_path", "plugin_entry", "old_digest", "new_digest")
+    if not isinstance(op_row, dict) or not all(isinstance(op_row.get(k), str) for k in fields):
+        raise AdoptApplyError("enable-hook row is not a table carrying string registration_path, "
+                              "plugin_entry, old_digest and new_digest, re-proved here so a caller of the "
+                              "handler table that skips dispatch gets an attributed refusal; nothing read "
+                              "or written (fail-closed)")
     path = op_row["registration_path"]
     if schema._in_control_area(path) or schema.protected_destination(path, ops.run_id) is not None:
         raise AdoptApplyError("enable-hook {!r} names the store control area or a protected destination, "
@@ -3025,6 +3034,30 @@ def _self_test_checks():
               why is not None and "pack-member grammar" in why)
         check("hook-multiword-entry-direct-handler-writes-nothing",
               snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
+
+    # the row-shape re-proof IN the handler: a malformed row handed straight to OP_HANDLERS (a field
+    # missing, or a path that is not a string) refuses attributed, never an uncaught KeyError or
+    # AttributeError, with the tree unchanged and no transaction opened. Removing the shape guard
+    # admits no write, but the uncaught exception then escapes to the harness, which fails closed
+    # to exit 2 in place of the attributed refusal (as for the absent-registration guard).
+    def hook_row_without(field):
+        row = hook_row()
+        del row[field]
+        return row
+
+    malformed = [("no-plugin-entry", hook_row_without("plugin_entry"), "string registration_path"),
+                 ("non-string-path", dict(hook_row(), registration_path=None), "string registration_path"),
+                 ("no-new-digest", hook_row_without("new_digest"), "string registration_path")]
+    for label, row, keyword in malformed:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root = hook_fixture(temp)
+            before = snapshot(root)
+            why = refusal(run_adopt_transaction, root, rid,
+                          compose_hook([row], handler=OP_HANDLERS["enable-hook"]))
+            check("hook-malformed-row-{}-direct-handler-refused".format(label),
+                  why is not None and keyword in why)
+            check("hook-malformed-row-{}-direct-handler-writes-nothing".format(label),
+                  snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
 
     # the reversal: an injected failure at the final op (the inventory publication, AFTER the registration
     # write landed) rolls the transaction back, restoring the prior registration byte-exact.
