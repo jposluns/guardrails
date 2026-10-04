@@ -3374,14 +3374,35 @@ def _close_every(closes):
     failure is re-raised only after every step ran, so one raising close
     can neither skip nor hide a later one. Census-exception leg 1n probes
     every position with a release-then-raise close and requires the first
-    of two injected failures to be the one re-raised."""
+    of two injected failures to be the one re-raised.
+    Cancellation keeps priority over an ordinary failure (QA13 codex 3 /
+    claude m3: a cancellation raised by a later close must not be lost
+    behind an earlier ordinary failure). Every step still runs -- the
+    contract is that no descriptor is stranded -- but if any close raised a
+    pending cancellation (TimeoutError, InterruptedError or
+    KeyboardInterrupt), the FIRST such cancellation is the one re-raised,
+    with the first ordinary failure kept reachable beneath it as its
+    context; otherwise the first ordinary failure is re-raised. (The
+    sibling _opf_emit.close_held re-raises a cancellation AT ONCE because
+    its contract permits dropping later hops to never delay a cancellation;
+    this helper must close every descriptor, so it defers the re-raise to
+    the end while preserving the same priority.)"""
     first = None
+    cancellation = None
     for close in closes:
         try:
             close()
         except BaseException as exc:
-            if first is None:
+            if isinstance(exc, (TimeoutError, InterruptedError,
+                                KeyboardInterrupt)):
+                if cancellation is None:
+                    cancellation = exc
+            elif first is None:
                 first = exc
+    if cancellation is not None:
+        if first is not None and cancellation.__context__ is None:
+            cancellation.__context__ = first
+        raise cancellation
     if first is not None:
         raise first
 
@@ -8361,6 +8382,46 @@ def _watchdog_completion_case(mode):
                 fault_positions, probe_closed, probe_reads)
             for write_end in probe_writes:
                 os.close(write_end)
+
+        # Leg 1n-cancel (QA13 codex 3 / claude m3): a cancellation raised by
+        # a LATER close keeps priority over an ordinary earlier failure,
+        # while EVERY close still runs (no descriptor is stranded). The
+        # first step raises an ordinary OSError, the second raises
+        # KeyboardInterrupt, the third returns: _close_every must re-raise
+        # the CANCELLATION (never the earlier OSError) and keep that OSError
+        # reachable beneath it as context. A revert that re-raises the first
+        # failure alone surfaces the OSError and drops the cancellation. No
+        # real descriptor is used here -- the helper only runs callbacks, and
+        # leg 1n above already pins the no-descriptor-stranded property on
+        # real pidfds -- so the close sweep sees no new open/close site.
+        cancel_ran = []
+
+        def cancel_step(tag, raises):
+            cancel_ran.append(tag)
+            if raises is not None:
+                raise raises
+        try:
+            _close_every([
+                lambda: cancel_step(
+                    "a", OSError(5, "release-then-raise ordinary close")),
+                lambda: cancel_step(
+                    "b", KeyboardInterrupt("release-then-raise cancel close")),
+                lambda: cancel_step("c", None)])
+        except KeyboardInterrupt as exc:
+            assert isinstance(exc.__context__, OSError) and (
+                "ordinary close" in str(exc.__context__)), (
+                "the earlier ordinary failure was not kept beneath the "
+                "cancellation", repr(exc.__context__))
+        except BaseException as exc:
+            raise AssertionError(
+                "an ordinary failure displaced the later cancellation "
+                "(QA13 codex 3 / claude m3)", repr(exc))
+        else:
+            raise AssertionError(
+                "the later cancellation did not propagate")
+        assert cancel_ran == ["a", "b", "c"], (
+            "a raising step skipped a later step under cancellation",
+            cancel_ran)
 
         # Leg 1o (QA12 codex blocker 1): the sender REFUSES from a child
         # SUBREAPER outright -- this case process is one (QA8), and a
