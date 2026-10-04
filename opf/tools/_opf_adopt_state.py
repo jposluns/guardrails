@@ -1,8 +1,9 @@
 """The homes-1 adoption control area and the bounded adoption state the doctor reads (OPF-SPEC 4.2, 11, 14.2, 17).
 
 A store that has adopted (its `.working/imported/adoption/` home exists) registers, on homes 1, each ADMITTED
-run AT FILE LEVEL: the paths its committed inventories list, plus the recorded Move destinations of its
-non-occupying move rows. C-CONTAINMENT recognizes exactly those files as OPF control area; every other path
+run AT FILE LEVEL: the paths its committed inventories list, the base inventory's rows and, once its
+retirement is recorded, the retirement inventory's rows (the plan's recorded Move destinations).
+C-CONTAINMENT recognizes exactly those files as OPF control area; every other path
 under the adoption homes, the run's own evidence bundle, its adoption archive and the Move root included, is
 graded as an unregistered path (spec 4.2, 17). A run is admitted from its COMMITTED, immutable adoption
 evidence ALONE, the bundle under the adoption home and the run archive, which travel with every clone; the
@@ -25,19 +26,28 @@ rows of its frozen plan) are bounded adoption state until their retirement is re
 source whose live bytes still match its plan digest is `bounded` (reported as migration_incomplete, never
 failed), one whose bytes differ is `drifted`, and one that is gone is `absent`; both of the latter fail at
 required AND stay reported as migration_incomplete, because the approved source remains unresolved (spec 11).
-A retirement is recorded only in committed evidence: a live, VALID, sealed retirement inventory BOUND to
-its phase by its exact member set: it lists exactly the retirement preimage of every non-occupying retire
-and move row, each at its plan digest and holding exactly those bytes in the run archive, and nothing
-else, so the base inventory copied to the retirement name (it lists at least the plan and the approval)
-never reads as retired, and a marker row that contradicts a base inventory row refuses by name. Any other
-retirement evidence is CANNOT-EVALUATE, never read as retired. A recorded retirement ends the bounded state of the
-retire and move rows only. A migrate source retires through its import, which a later activation reads, so
-it stays bounded until then.
+A retirement is recorded only in committed evidence: a live, VALID, sealed retirement inventory in the
+spec shape, the one the retirement-phase transaction derives from its own create ops (spec 4.2, 14.2).
+That transaction creates only the plan's recorded Move destinations (retire and migrate preimages are
+preserved at APPLY and claimed by the base inventory, spec 14.1 check 3, so the retirement record never
+re-lists them), so the record holds one row per non-occupying move row, naming its recorded Move
+destination at the moved source's plan (preimage) digest, and nothing else; a retire-only plan's record
+lists no files. That shape binds the record to its phase: a base inventory copied to the retirement name
+lists at least the plan and the approval, never Move destinations, so it never reads as retired. A marker
+row that also appears in the base inventory must agree with it in size and digest (contradictory
+committed records are never reused as proof), and every listed destination must hold its recorded bytes
+live. Any other retirement evidence is CANNOT-EVALUATE, never read as retired. Before a recorded
+retirement the Move destination does not exist (the retirement-phase transaction creates it), so a file
+at a plan Move destination is then a finding and the destination is not registered; after it, the
+destination is registered and byte-verified through the retirement inventory. A recorded retirement ends
+the bounded state of the retire and move rows only. A migrate source retires through its import, which a
+later activation reads, so it stays bounded until then.
 
 Read-only and bounded by construction: the reader opens no journal and writes nothing. Every file read is
 contained, no-follow, single-link and bounded by the 16 MiB per-file read cap
 (`_opf_adopt_apply._read_live`); EVERY byte read counts against the READ_CEILING whole-call byte budget,
-with a FAILED read charged at the whole per-file cap, since what it consumed is unknown (fail-closed); an
+with a FAILED read charged exactly the bytes its chunk loop consumed before failing (a refusal before the
+first byte charges nothing); an
 exhausted budget refuses the next read before it happens, and one adoption_state
 call additionally refuses past RUN_CEILING run directories or SOURCE_CEILING frozen sources
 (CANNOT-EVALUATE, fail-closed). A store without the adoption home costs exactly one lstat and keeps the
@@ -58,6 +68,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     raise SystemExit(2)
 
 import collections
+import os
 import stat
 import tomllib
 import types
@@ -126,22 +137,44 @@ def _read_budgeted(root_fd, rel, budget):
     """apply._read_live under the whole-reader byte budget: EVERY byte the adoption state reads counts
     against READ_CEILING, and an exhausted budget refuses BEFORE the next read (fail-closed), so no tree
     makes the doctor read without bound and nothing is read past exhaustion (at most the one crossing
-    read, itself under the per-file cap, exceeds the ceiling). A read that FAILS is charged at the whole
-    per-file cap: how many bytes it consumed before failing (for example a file over the cap, read up to
-    the cap before refusing) is unknown, so the unknown is charged fail-closed."""
+    read, itself bounded by the per-file cap plus one chunk, exceeds the ceiling). A read that FAILS is
+    charged exactly the bytes it consumed: the chunk loop below is `_journal._read_fd` with each chunk
+    counted as soon as os.read returns it (the seam _journal's own self-test interposes on), so a refusal
+    before the first byte (an absent parent, a symlink, a special or multiply-linked file) charges
+    nothing, and a per-file-cap or mid-read failure charges every chunk it read, the crossing chunk
+    included."""
     if budget[0] < 0:
         raise apply.AdoptApplyError("the adoption-state read ceiling of {} bytes is exhausted; {!r} is "
                                     "not read (fail-closed)".format(READ_CEILING, rel))
+    consumed = [0]
+    real_read_fd = _journal._read_fd
+
+    def counting_read_fd(fd, cap=None):
+        chunks = []
+        total = 0
+        while True:
+            try:
+                block = os.read(fd, _journal._READ_CHUNK)
+            except OSError as exc:
+                raise _journal.JournalError("read error on a contained file descriptor ({})".format(exc))
+            if not block:
+                return b"".join(chunks)
+            total += len(block)
+            consumed[0] += len(block)
+            if cap is not None and total > cap:
+                raise _journal.JournalError(
+                    "contained file exceeds the {}-byte read cap (fail-closed)".format(cap))
+            chunks.append(block)
+
+    _journal._read_fd = counting_read_fd
     try:
         fst, data = apply._read_live(root_fd, rel)
-    except apply.AdoptApplyError:
-        budget[0] -= _journal._MAX_PRODUCT_READ_BYTES
-        raise
-    if data is not None:
-        budget[0] -= len(data)
-        if budget[0] < 0:
-            raise apply.AdoptApplyError("reading {!r} exceeds the adoption-state read ceiling of {} bytes; "
-                                        "fail-closed".format(rel, READ_CEILING))
+    finally:
+        _journal._read_fd = real_read_fd
+        budget[0] -= consumed[0]
+    if data is not None and budget[0] < 0:
+        raise apply.AdoptApplyError("reading {!r} exceeds the adoption-state read ceiling of {} bytes; "
+                                    "fail-closed".format(rel, READ_CEILING))
     return fst, data
 
 
@@ -151,7 +184,8 @@ def adoption_state(root_fd, machine_rel, *, in_repo):
 
     `.working/imported/adoption` absent: NOT_ADOPTING after exactly one lstat, so the legacy grading runs
     unchanged. Present: every run-id child is admitted or refused (_admit_run); an admitted run contributes
-    the file paths its proven inventories list (plus its recorded Move destinations) to `registered` and its
+    the file paths its proven inventories list to `registered` (its recorded Move destinations only once
+    its retirement is recorded, since the retirement-phase transaction is what creates them) and its
     frozen sources to `frozen`, each graded against its plan digest. A refused run record is a finding (the
     run homes are then graded as unregistered paths); an input that cannot be read, a plan that does not
     describe this store, or an exceeded ceiling is a cannot-evaluate."""
@@ -189,7 +223,6 @@ def adoption_state(root_fd, machine_rel, *, in_repo):
             registered.extend(run_registered)
     claims = {}
     for run_id in runs:
-        registered.extend(move_destinations(plans[run_id]))
         try:
             retired, retired_registered = _retired(root_fd, run_id, plans[run_id], rows[run_id], budget)
         except apply.AdoptApplyError as exc:
@@ -198,7 +231,24 @@ def adoption_state(root_fd, machine_rel, *, in_repo):
             cannot.append(_PREFIX + "adoption run {}: the retirement state cannot be evaluated ({}); "
                           "fail-closed".format(run_id, exc))
             continue
-        registered.extend(retired_registered)
+        if retired:
+            registered.extend(retired_registered)
+        else:
+            # Before the recorded retirement the retirement-phase transaction has not run, so nothing
+            # exists at a plan Move destination (spec 14.2); an entry there is a premature, unexplained
+            # record (a finding) and the destination is not registered.
+            for dest in move_destinations(plans[run_id]):
+                try:
+                    dst = _journal._lstat_contained(root_fd, dest)
+                except (_journal.JournalError, OSError) as exc:
+                    cannot.append(_PREFIX + "cannot observe the Move destination {!r} of adoption run {} "
+                                  "({}); fail-closed".format(dest, run_id, exc))
+                    continue
+                if dst is not None:
+                    findings.append(_PREFIX + "{!r} exists before the recorded retirement of adoption run "
+                                    "{}: the retirement-phase transaction creates the Move destination "
+                                    "(spec 14.2), so an earlier entry there is unexplained".format(
+                                        dest, run_id))
         for path, (hexdigest, disposition) in frozen_sources(plans[run_id], retired).items():
             claims.setdefault(path, []).append((run_id, hexdigest, disposition))
     if len(claims) > SOURCE_CEILING:
@@ -357,13 +407,17 @@ def _admit_run(root_fd, run_id, machine_rel, in_repo, budget):
 def _retired(root_fd, run_id, plan_doc, base_rows, budget):
     """(recorded, registered): whether the run's retirement is recorded, and the file paths its retirement
     inventory registers, decided from COMMITTED evidence alone (never the journal). Recorded ONLY when a
-    live, VALID, sealed `inventory-retirement.toml` is BOUND to the retirement phase by its exact member
-    set: it lists exactly the retirement preimage of every non-occupying retire and move row of the plan,
-    each at its plan digest and live in the run archive byte for byte, and nothing else, so the base
-    inventory copied to the retirement name never reads as retired (it lists at least the plan and the
-    approval), and a marker row that contradicts a base inventory row refuses by name. An absent marker is
-    not retired. Every other state raises AdoptApplyError: whether the run retired is then unknown
-    (CANNOT-EVALUATE), never read as retired."""
+    live, VALID, sealed `inventory-retirement.toml` holds the shape the retirement-phase transaction
+    derives from its own create ops (spec 4.2, 14.2): one row per non-occupying move row of the plan,
+    naming its recorded Move destination at the moved source's plan (preimage) digest, and nothing else;
+    a retire-only plan's record lists no files. Retire and migrate preimages are preserved at APPLY and
+    claimed by the base inventory (spec 14.1 check 3), never re-listed here, and that shape binds the
+    record to its phase: a base inventory copied to the retirement name lists at least the plan and the
+    approval, never Move destinations. A marker row that also appears in the base inventory must agree
+    with it in size and digest (contradictory committed records are never reused as proof), and every
+    listed destination must hold its recorded bytes live. An absent marker is not retired. Every other
+    state raises AdoptApplyError: whether the run retired is then unknown (CANNOT-EVALUATE), never read
+    as retired."""
     rel = apply.inventory_rel(run_id, RETIREMENT_PHASE)
     fst, data = _read_budgeted(root_fd, rel, budget)
     if fst is None:
@@ -376,46 +430,55 @@ def _retired(root_fd, run_id, plan_doc, base_rows, budget):
         raise apply.AdoptApplyError("{!r} is not the sealed canonical inventory of its own rows (a hand "
                                     "edit, a reordering or stale bytes); whether the run retired is "
                                     "unknown".format(rel))
-    # The plan half: the marker records the retirement preimage of EVERY non-occupying retire
-    # and move row at its plan digest, so a drifted source is never silently read as retired.
-    preimages = {}
+    # The shape half: the record lists EVERY recorded Move destination of the plan's non-occupying move
+    # rows at the moved source's plan (preimage) digest, so a record of a different run state, a drifted
+    # relocation or an old-shape marker is never silently read as retired.
+    dests = {}
     for row in plan_doc.get("sources", ()):
-        if row.get("disposition") not in RETIRED_BY_RETIREMENT or row.get("occupying") is not False:
+        if row.get("disposition") != "move" or row.get("occupying") is not False:
             continue
-        path = row.get("path")
-        if not (isinstance(path, str) and path.startswith(store.WORKING_DIRNAME + "/")):
-            continue
-        preimages[apply.archive_rel(run_id, path)] = apply._plan_hex(row.get("digest"))
+        dest = row.get("preservation")
+        if isinstance(dest, str) and dest.startswith(MOVED_ROOT + "/"):
+            dests[dest] = apply._plan_hex(row.get("digest"))
     marker_rows = dict((row["path"], row) for row in doc["file"])
-    for pre in sorted(preimages):
-        row = marker_rows.get(pre)
-        if row is None or row["sha256"] != preimages[pre]:
-            raise apply.AdoptApplyError("{!r} does not record the retirement preimage {!r} at its plan "
-                                        "digest, so it is not consistent with the plan's retire and move "
-                                        "rows (spec 14.2); whether the run retired is unknown".format(rel, pre))
-    # The phase-binding half (QA round 3): the marker's member set is EXACTLY the plan-derived preimage
-    # set, so the base inventory copied to the retirement name (it lists at least the plan and the
-    # approval) never reads as retired; a row that contradicts a base inventory row refuses by name.
-    for path in sorted(set(marker_rows) - set(preimages)):
-        row, base = marker_rows[path], base_rows.get(path)
-        if base is not None and (row["size"] != base["size"] or row["sha256"] != base["sha256"]):
-            raise apply.AdoptApplyError("{!r} contradicts the base inventory row of {!r}; whether the "
-                                        "run retired is unknown".format(rel, path))
-        raise apply.AdoptApplyError("{!r} lists {!r}, which is not a retirement preimage of the plan's "
-                                    "retire and move rows; the retirement record holds exactly those "
-                                    "preimages, so a misplaced or stale record never reads as retired; "
-                                    "whether the run retired is unknown".format(rel, path))
-    # The preimages the marker records are live committed evidence in the run archive, byte for byte (a
-    # preimage the base inventory also lists was byte-verified at admission).
+    for dest in sorted(dests):
+        row = marker_rows.get(dest)
+        if row is None or row["sha256"] != dests[dest]:
+            raise apply.AdoptApplyError("{!r} does not record the Move destination {!r} at the moved "
+                                        "source's plan digest, so it is not the inventory the plan's "
+                                        "retirement-phase transaction derives (spec 14.2); whether the "
+                                        "run retired is unknown".format(rel, dest))
+    # The phase-binding half: the member set is EXACTLY the plan's recorded Move destinations (the only
+    # files the retirement-phase transaction creates), so the base inventory copied to the retirement
+    # name (it lists at least the plan and the approval) and an old-shape marker that re-lists archive
+    # preimages never read as retired.
+    for path in sorted(set(marker_rows) - set(dests)):
+        raise apply.AdoptApplyError("{!r} lists {!r}, which is not a recorded Move destination of the "
+                                    "plan's move rows; the retirement-phase transaction creates only "
+                                    "those files and its derived inventory lists exactly them, so a "
+                                    "misplaced, stale or copied record never reads as retired; whether "
+                                    "the run retired is unknown".format(rel, path))
+    # Base reconciliation (QA round 4): a marker row and a base inventory row for the SAME path must
+    # agree in size and digest BEFORE any verification is reused; contradictory committed records are
+    # never read as retirement proof.
+    for path in sorted(marker_rows):
+        base = base_rows.get(path)
+        if base is not None and (marker_rows[path]["size"] != base["size"]
+                                 or marker_rows[path]["sha256"] != base["sha256"]):
+            raise apply.AdoptApplyError("{!r} contradicts the base inventory row of {!r} (size or digest "
+                                        "differ); whether the run retired is unknown".format(rel, path))
+    # The destinations the marker records are live committed evidence, byte for byte (a destination the
+    # base inventory also lists was byte-verified at admission at the SAME size and digest, reconciled
+    # above).
     for path in sorted(marker_rows):
         if path in base_rows:
             continue
         fst, live = _read_budgeted(root_fd, path, budget)
         if fst is None:
-            raise apply.AdoptApplyError("the retirement preimage {!r} its retirement inventory records is "
-                                        "absent; whether the run retired is unknown".format(path))
+            raise apply.AdoptApplyError("the recorded Move destination {!r} its retirement inventory "
+                                        "lists is absent; whether the run retired is unknown".format(path))
         if len(live) != marker_rows[path]["size"] or apply._sha256(live) != marker_rows[path]["sha256"]:
-            raise apply.AdoptApplyError("the retirement preimage {!r} does not match its retirement "
+            raise apply.AdoptApplyError("the recorded Move destination {!r} does not match its retirement "
                                         "inventory row; whether the run retired is unknown".format(path))
     return True, [rel] + sorted(marker_rows)
 
@@ -440,8 +503,10 @@ def frozen_sources(plan_doc, retired):
 
 def move_destinations(plan_doc):
     """The recorded Move destinations of one admitted plan's non-occupying move rows: their `preservation`
-    paths beneath the Move root, registered at file level beside the inventory-listed paths. Any other
-    spelling registers nothing (fail-closed: the path is then graded as unregistered)."""
+    paths beneath the Move root. The retirement-phase transaction creates exactly these files (spec 14.2),
+    so they are registered at file level only through the recorded retirement inventory that lists them;
+    before that, an entry at one of them is a finding. Any other spelling registers nothing (fail-closed:
+    the path is then graded as unregistered)."""
     out = []
     for row in plan_doc.get("sources", ()):
         if row.get("disposition") != "move" or row.get("occupying") is not False:
@@ -572,8 +637,12 @@ def _self_test_checks():
         seq = [0]
 
         def listed(rid_):
+            # The apply-stage creates (spec 14.1 check 3): the plan, the approval and the retirement
+            # preimages preserved at APPLY for the retire and migrate rows; never a Move-root path (the
+            # retirement-phase transaction is what creates the Move destination, spec 14.2).
             h = apply.evidence_home_rel(rid_)
-            return [h + "/" + apply.PLAN_NAME, h + "/" + apply.APPROVAL_NAME, apply.archive_rel(rid_, mig), moved]
+            return [h + "/" + apply.PLAN_NAME, h + "/" + apply.APPROVAL_NAME,
+                    apply.archive_rel(rid_, old), apply.archive_rel(rid_, note), apply.archive_rel(rid_, mig)]
 
         def commit(root, rid_, phase=None, complete=True):
             """(Re)record the (run, phase) adoption transaction in the machine-local journal, exactly as
@@ -611,21 +680,27 @@ def _self_test_checks():
             h = apply.evidence_home_rel(rid_)
             write(root, h + "/" + apply.PLAN_NAME, plan_bytes if plan_bytes is not None else runs[rid_][0])
             write(root, h + "/" + apply.APPROVAL_NAME, approval_bytes if approval_bytes is not None else runs[rid_][1])
-            write(root, apply.archive_rel(rid_, mig), sources[mig])
-            write(root, moved, sources[move])   # the bytes a real apply copies there
+            for src in (old, note, mig):
+                write(root, apply.archive_rel(rid_, src), sources[src])   # preserved at APPLY (14.1 check 3)
             relist(root, rid_)
 
-        def retire(root, rid_, dispositions=(old, note, move), extra_rows=None):
-            """Record the run's retirement in committed evidence: the retirement preimage of each retire
-            and move row in the run archive, and the sealed retirement inventory listing them at the plan
-            digests, plus the journal transaction a real apply would also leave (never read)."""
-            rows = []
-            for src in dispositions:
-                pre = apply.archive_rel(rid_, src)
-                write(root, pre, sources[src])
-                rows.append(apply.inventory_row(pre, sources[src]))
-            rows.extend(extra_rows or [])
-            write(root, apply.inventory_rel(rid_, RETIREMENT_PHASE), apply.emit_inventory(rid_, rows))
+        def retire(root, rid_):
+            """Record the run's retirement exactly as the retirement-phase transaction does (spec 14.2):
+            the REAL compose path (apply.ApplyOps at the retirement phase) creates the plan's recorded
+            Move destination from the frozen source bytes and seals the inventory DERIVED from its own
+            create ops, so the record lists exactly the plan's Move destinations; the fixture publishes
+            those staged bytes, plus the journal transaction a real apply would also leave (never read)."""
+            fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                shell = apply.ApplyOps(fd, rid_, RETIREMENT_PHASE)
+                shell.create(moved, sources[move])
+                shell.seal()
+            finally:
+                os.close(fd)
+            check("retirement-shell-reproves", apply.check_apply_ops(
+                rid_, RETIREMENT_PHASE, shell.ops, shell.staged) == [])
+            for rel_, data in sorted(shell.staged.items()):
+                write(root, rel_, data)
             commit(root, rid_, RETIREMENT_PHASE)
 
         def tree(adopted=(None,)):
@@ -718,20 +793,36 @@ def _self_test_checks():
         rep = contain(root)
         check("admitted-homes-strays-graded", named(rep.findings, home + "/stray.md", "unregistered")
               and named(rep.findings, apply._archive_root(rid) + "/stray.md", "unregistered")
-              and named(rep.findings, MOVED_ROOT + "/hide", "unregistered") and len(rep.findings) == 3
-              and rep.cannot == [])
+              and any(MOVED_ROOT in m and "unregistered" in m for m in rep.findings)
+              and len(rep.findings) == 3 and rep.cannot == [])
+        # Once the retirement is recorded the registered destination sits beside the stray: the stray
+        # stays graded one by one, never silently covered by the Move root.
+        retire(root, rid)
+        rep = contain(root)
+        check("retired-move-root-stray-still-graded",
+              named(rep.findings, MOVED_ROOT + "/hide", "unregistered") and rep.cannot == [])
 
-        # S2c (QA round 3): the committed inventory a real apply derives (derive_rows over the
-        # transaction's own create ops, the Move-root create included) is byte-identical to the fixture's
-        # inventory and admits unchanged, so a legitimate store still passes under the Move-root row
-        # verification.
+        # S2c (QA rounds 3 and 4): the committed inventories the vectors verify are the ones the REAL
+        # compose path derives. The base: an ApplyOps apply-stage shell over an empty scratch root
+        # creates every listed path with the fixture bytes and seals; check_apply_ops accepts the
+        # finished list and the inventory it derives from its own create ops is byte-identical to the
+        # fixture's, which admits unchanged. The retirement inventory of every retired fixture is
+        # derived the same way (retire() composes the real retirement-phase ApplyOps create of the Move
+        # destination and seals), so the doctor's shape check runs against the real writer's output.
         root = tree()
-        staged = dict((rel_, (root / rel_).read_bytes()) for rel_ in listed(rid))
-        ops_list = [dict(op="create", path=rel_,
-                         poststate={"content-sha256": apply._sha256(staged[rel_])}) for rel_ in listed(rid)]
-        derived = apply.emit_inventory(rid, apply.derive_rows(rid, ops_list, staged))
+        scratch = base / "s2c"
+        scratch.mkdir()
+        sfd = os.open(str(scratch), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            shell = apply.ApplyOps(sfd, rid)
+            for rel_ in listed(rid):
+                shell.create(rel_, (root / rel_).read_bytes())
+            shell.seal()
+        finally:
+            os.close(sfd)
         check("derived-inventory-is-the-committed-inventory",
-              derived == (root / apply.inventory_rel(rid)).read_bytes())
+              apply.check_apply_ops(rid, None, shell.ops, shell.staged) == []
+              and shell.staged[apply.inventory_rel(rid)] == (root / apply.inventory_rel(rid)).read_bytes())
         rep = contain(root)
         check("derived-inventory-admits", rep.findings == [] and rep.cannot == [])
 
@@ -795,9 +886,11 @@ def _self_test_checks():
         check("keep-row-not-frozen", rep.findings == [unregistered.format(keep)])
 
         # S10: a recorded retirement ends the bounded state of the retire AND move rows; a migrate source
-        # stays bounded. Recorded means committed evidence only (QA round 2): a sealed retirement inventory
-        # consistent with the plan (every retire and move preimage at its plan digest, live in the run
-        # archive) and with the base inventory; anything else is CANNOT-EVALUATE, never read as retired.
+        # stays bounded. Recorded means committed evidence only (QA rounds 2 and 4): a sealed retirement
+        # inventory in the shape the retirement-phase transaction derives from its own create ops, exactly
+        # the plan's recorded Move destinations at the moved source's plan digest and nothing else,
+        # reconciled with the base inventory and live byte for byte; anything else is CANNOT-EVALUATE,
+        # never read as retired.
         marker = apply.inventory_rel(rid, RETIREMENT_PHASE)
         root = tree()
         write(root, marker, apply.emit_inventory(rid, []))
@@ -808,6 +901,19 @@ def _self_test_checks():
         rep = contain(root)
         check("unproven-retirement-never-hides-vanished-sources", named(rep.cannot, marker)
               and bounded(rep) == [])
+        # A retire-only plan's record lists no files (the retirement-phase transaction of a plan without
+        # a move row creates nothing but its own inventory): the SAME empty sealed marker reads as
+        # retired at the unit seam once the plan carries no move row; the fixture plan always has one, so
+        # the doctor-level vector above stays CANNOT.
+        plan_doc_fix = tomllib.loads(runs[rid][0].decode("utf-8"))
+        retire_only = dict(plan_doc_fix, sources=[dict(r) for r in plan_doc_fix["sources"]
+                                                  if r.get("disposition") != "move"])
+        unit_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            unit = reader._retired(unit_fd, rid, retire_only, {}, [reader.READ_CEILING])
+        finally:
+            os.close(unit_fd)
+        check("retire-only-plan-empty-record-retired", unit == (True, [marker]))
         root = tree()
         retire(root, rid)
         rep = contain(root)
@@ -827,27 +933,35 @@ def _self_test_checks():
         os.symlink("inventory.toml", root / marker)
         rep = contain(root)
         check("retirement-marker-symlink-cannot", rep.cannot != [] and bounded(rep) == [])
-        # S10c (QA round 2): each half of the retirement consistency has its own failing vector. Half 1,
-        # plan consistency: a marker missing one retire or move preimage row, and the base inventory
-        # misplaced at the retirement name, are each CANNOT, never read as retired.
+        # S10c (QA rounds 2 and 4): each half of the retirement shape has its own failing vector. Half 1,
+        # the member set: a marker that does not name the plan's Move destination, the base inventory
+        # misplaced at the retirement name, and an old-shape marker that re-lists the archive preimages
+        # the base inventory already claims (spec 4.2: every payload file is claimed by exactly one row)
+        # are each CANNOT, never read as retired.
         root = tree()
-        retire(root, rid, dispositions=(old, note))
+        retire(root, rid)
+        write(root, marker, apply.emit_inventory(rid, []))
         rep = contain(root)
-        check("retirement-missing-preimage-cannot", named(rep.cannot, marker, "preimage")
+        check("retirement-missing-destination-cannot", named(rep.cannot, marker, "destination")
               and bounded(rep) == [])
         root = tree()
         write(root, marker, (root / apply.inventory_rel(rid)).read_bytes())
         rep = contain(root)
         check("retirement-marker-is-base-inventory-cannot", named(rep.cannot, marker)
               and bounded(rep) == [])
-        # QA round 3, phase binding: a base inventory CRAFTED to also list live retire and move preimages
-        # admits, and copying it unchanged to the retirement name must still be CANNOT, never retired: the
-        # retirement record's member set is exactly the plan-derived preimages, and a copied base lists at
-        # least the plan and the approval.
         root = tree()
-        for src in (old, note, move):
-            write(root, apply.archive_rel(rid, src), sources[src])
-        relist(root, rid, listed(rid) + [apply.archive_rel(rid, src) for src in (old, note, move)])
+        write(root, marker, apply.emit_inventory(rid, [apply.inventory_row(
+            apply.archive_rel(rid, src), sources[src]) for src in (old, note, move)]))
+        rep = contain(root)
+        check("retirement-preimage-shape-is-stale-cannot", named(rep.cannot, marker, "Move destination")
+              and bounded(rep) == [])
+        # QA round 3, phase binding: a base inventory CRAFTED to also list a live archive preimage of the
+        # move row admits, and copying it unchanged to the retirement name must still be CANNOT, never
+        # retired: the retirement record's member set is exactly the plan's Move destinations, and a
+        # copied base lists at least the plan and the approval.
+        root = tree()
+        write(root, apply.archive_rel(rid, move), sources[move])
+        relist(root, rid, listed(rid) + [apply.archive_rel(rid, move)])
         rep = contain(root)
         check("crafted-base-with-preimages-admits", rep.findings == [] and rep.cannot == []
               and bounded(rep) == sorted((old, note, mig, move)))
@@ -863,25 +977,68 @@ def _self_test_checks():
         rep = contain(root)
         check("retirement-marker-not-sealed-cannot", named(rep.cannot, marker, "sealed")
               and bounded(rep) == [])
-        # Half 2, base consistency: a marker row contradicting a base inventory row, and a row neither
-        # the base inventory nor the plan records, are each CANNOT.
+        # Half 2, base reconciliation (codex round 4): a marker row and a base inventory row for the SAME
+        # path must agree in size and digest before any verification is reused. A digest contradiction (a
+        # crafted base listing the destination at live but wrong bytes while the marker carries the plan
+        # digest) and a size-only contradiction (the marker row 100 bytes larger at the same digest) are
+        # each CANNOT, never read as retired.
         root = tree()
-        retire(root, rid, extra_rows=[dict(path=plan_rel, size=len(runs[rid][0]), sha256="0" * 64)])
+        write(root, moved, b"wrong moved bytes\n")
+        relist(root, rid, listed(rid) + [moved])
+        write(root, marker, apply.emit_inventory(rid, [apply.inventory_row(moved, sources[move])]))
         rep = contain(root)
         check("retirement-contradicts-base-cannot", named(rep.cannot, marker, "contradicts")
               and bounded(rep) == [])
         root = tree()
-        retire(root, rid, extra_rows=[dict(path=apply.archive_rel(rid, keep), size=len(sources[keep]),
-                                           sha256=hashlib.sha256(sources[keep]).hexdigest())])
+        write(root, moved, sources[move])
+        relist(root, rid, listed(rid) + [moved])
+        write(root, marker, apply.emit_inventory(rid, [dict(apply.inventory_row(moved, sources[move]),
+                                                            size=len(sources[move]) + 100)]))
         rep = contain(root)
-        check("retirement-foreign-row-cannot", named(rep.cannot, marker) and bounded(rep) == [])
-        # The recorded preimages are live committed evidence: a tampered preimage is CANNOT.
+        check("retirement-size-contradiction-cannot", named(rep.cannot, marker, "contradicts")
+              and bounded(rep) == [])
+        # A row that is neither a recorded Move destination nor base-claimed is CANNOT (the shape allows
+        # nothing else).
         root = tree()
         retire(root, rid)
-        write(root, apply.archive_rel(rid, old), b"evil\n")
+        write(root, marker, apply.emit_inventory(rid, [
+            apply.inventory_row(moved, sources[move]),
+            apply.inventory_row(apply.archive_rel(rid, keep), sources[keep])]))
         rep = contain(root)
-        check("retirement-preimage-tampered-cannot", any("preimage" in m and rid in m for m in rep.cannot)
+        check("retirement-foreign-row-cannot", named(rep.cannot, marker) and bounded(rep) == [])
+        # The recorded destination is live committed evidence (QA round 4): after the recorded
+        # retirement its bytes must equal the retirement row and the plan preimage digest, so tampered
+        # bytes, a deleted destination, and a marker whose row is self-consistent with wrong live bytes
+        # but not at the plan digest are each CANNOT.
+        root = tree()
+        retire(root, rid)
+        write(root, moved, b"evil\n")
+        rep = contain(root)
+        check("retirement-destination-tampered-cannot",
+              any("does not match its retirement inventory row" in m and rid in m for m in rep.cannot)
               and bounded(rep) == [])
+        root = tree()
+        retire(root, rid)
+        os.unlink(root / moved)
+        rep = contain(root)
+        check("retirement-destination-absent-cannot",
+              any("absent" in m and rid in m for m in rep.cannot) and bounded(rep) == [])
+        root = tree()
+        write(root, moved, b"evil\n")
+        write(root, marker, apply.emit_inventory(rid, [apply.inventory_row(moved, b"evil\n")]))
+        rep = contain(root)
+        check("retirement-destination-not-at-plan-digest-cannot",
+              named(rep.cannot, marker, "plan digest") and bounded(rep) == [])
+        # Before a recorded retirement the Move destination does not exist (QA round 4): a file there,
+        # with or without a crafted base row claiming it, is a premature-record finding and the run's
+        # sources stay bounded.
+        root = tree()
+        write(root, moved, sources[move])
+        relist(root, rid, listed(rid) + [moved])
+        rep = contain(root)
+        check("crafted-base-moved-row-still-premature-finding",
+              named(rep.findings, moved, "before the recorded retirement")
+              and bounded(rep) == sorted((old, note, mig, move)) and rep.cannot == [])
 
         # S11: every record case refuses admission; the run homes are then graded and nothing is bounded.
         def record(name, mutate, verdict, *words):
@@ -952,18 +1109,25 @@ def _self_test_checks():
         record("archive-row-absent", drop(apply.archive_rel(rid, mig)), "finding", "absent")
         record("archive-row-tampered", put(apply.archive_rel(rid, mig), b"evil\n"), "finding",
                "does not match")
-        # QA round 3: a row under the shared Move root is committed evidence: a LISTED Move-root file
-        # that no move row of this run's plan explains, tampered bytes at the recorded destination, and
-        # its deletion each refuse admission.
+        # QA rounds 3 and 4: a base inventory in the spec shape never lists a Move-root row (the
+        # retirement-phase transaction is what creates the destination), but a crafted base that does
+        # list one is still committed evidence: a listed Move-root file that no move row of this run's
+        # plan explains, tampered bytes at the listed destination, and its deletion each refuse
+        # admission.
         evil = MOVED_ROOT + "/hide/evil.sh"
 
         def plant_unexplained(root):
             write(root, evil, b"evil\n")
             relist(root, rid, listed(rid) + [evil])
 
+        def craft_moved_base(root):
+            write(root, moved, sources[move])
+            relist(root, rid, listed(rid) + [moved])
+
         record("moved-row-unexplained", plant_unexplained, "finding", "no move row")
-        record("moved-row-tampered", put(moved, b"evil\n"), "finding", "does not match")
-        record("moved-row-absent", drop(moved), "finding", "absent")
+        record("moved-row-tampered", both(craft_moved_base, put(moved, b"evil\n")), "finding",
+               "does not match")
+        record("moved-row-absent", both(craft_moved_base, drop(moved)), "finding", "absent")
 
         # Stale identity: a plan that does not describe this in-repo store cannot be evaluated.
         root = tree()
@@ -1013,11 +1177,13 @@ def _self_test_checks():
         root = tree()
         write(root, apply.JOURNAL_REL + "/txn/intent.toml", b"x = 1\n")
         before = snapshot(root)
-        # The journal-free property is pinned at the contained-read seam (QA round 3): component-wise
-        # opens never spell JOURNAL_REL, so an os.open spy can never see it; the spies below record every
-        # contained lstat and read BY ITS RELATIVE PATH, so one injected journal read fails this vector.
+        # The journal-free property is pinned at the contained-read seam (QA rounds 3 and 4):
+        # component-wise opens never spell JOURNAL_REL, so an os.open spy can never see it; the spies
+        # below record every contained lstat, read AND directory listing BY ITS RELATIVE PATH, so one
+        # injected journal read or journal directory listing fails this vector.
         touched = []
         real_rc, real_ls = _journal._read_contained, _journal._lstat_contained
+        real_list = _opf_check._list_contained
 
         def spy_read(fd, rel, **kwargs):
             touched.append(rel)
@@ -1027,6 +1193,10 @@ def _self_test_checks():
             touched.append(rel)
             return real_ls(fd, rel)
 
+        def spy_list(fd, rel):
+            touched.append(rel)
+            return real_list(fd, rel)
+
         effect = None
         try:
             with mock.patch.object(apply, "journal_state", side_effect=AssertionError("journal consulted")), \
@@ -1035,6 +1205,7 @@ def _self_test_checks():
                     mock.patch.object(_journal, "classify_state", side_effect=AssertionError("journal read")), \
                     mock.patch.object(_journal, "read_frames", side_effect=AssertionError("journal read")), \
                     mock.patch.object(_journal, "_read_contained", spy_read), \
+                    mock.patch.object(_opf_check, "_list_contained", spy_list), \
                     mock.patch.object(_journal, "_lstat_contained", spy_lstat), apply._composing():
                 rep = contain(root)
         except (apply.AdoptApplyError, AssertionError) as exc:
@@ -1066,9 +1237,9 @@ def _self_test_checks():
         check("read-ceiling-cannot", any("read ceiling" in m for m in rep.cannot))
         # QA round 2: an exhausted budget refuses BEFORE reading, so the one crossing read is the last.
         check("exhausted-budget-stops-reading", len(reads) == 1)
-        # QA round 3: bytes a FAILED read consumed count too: the whole per-file cap is charged, so with
-        # the first inventory over a small per-file cap the call budget exhausts and the second run's
-        # read is refused before it happens.
+        # QA rounds 3 and 4: bytes a FAILED read consumed count too, charged exactly: the first
+        # inventory read crosses the small per-file cap having consumed its whole (single-chunk) read,
+        # the call budget exhausts and the second run's read is refused before it happens.
         root = tree(adopted=(rid, rid_b))
         failed_reads = []
         with mock.patch.object(reader, "READ_CEILING", 8), \
@@ -1078,6 +1249,32 @@ def _self_test_checks():
             rep = contain(root)
         check("failed-read-charges-budget", len(failed_reads) == 1
               and any("exhausted" in m for m in rep.cannot))
+        # QA round 4 (exact accounting, codex and claude): a refusal BEFORE the first byte charges
+        # nothing, and a per-file-cap crossing charges exactly the bytes its chunk loop consumed (the
+        # whole 10-byte file here), never the per-file cap.
+        root = tree(adopted=())
+        write(root, ".working/ten.md", b"0123456789")
+        os.symlink("ten.md", root / ".working/link.md")
+        charge_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            b1 = [1024]
+            try:
+                reader._read_budgeted(charge_fd, ".working/link.md", b1)
+                refused = False
+            except apply.AdoptApplyError:
+                refused = True
+            check("failed-read-before-first-byte-charges-nothing", refused and b1 == [1024])
+            b2 = [1024]
+            with mock.patch.object(_journal, "_MAX_PRODUCT_READ_BYTES", 4):
+                try:
+                    reader._read_budgeted(charge_fd, ".working/ten.md", b2)
+                    capped = None
+                except apply.AdoptApplyError as exc:
+                    capped = str(exc)
+            check("failed-read-charged-exactly-consumed", capped is not None
+                  and "read cap" in capped and b2 == [1024 - 10])
+        finally:
+            os.close(charge_fd)
         # The crossing read itself is reported (the check AFTER the read): a read that succeeds and lands
         # past the ceiling raises, even when it is the call's final read.
         root = tree(adopted=())
@@ -1095,12 +1292,18 @@ def _self_test_checks():
         check("crossing-final-read-reported", crossed is not None and "exceeds" in crossed
               and crossing[0] == -2)
 
-        # S18 (QA round 1): the move row, frozen by the real planner: bounded, drifted and vanished grade
-        # exactly as retire does, and its recorded Move destination is registered at file level.
+        # S18 (QA rounds 1 and 4): the move row, frozen by the real planner: bounded, drifted and
+        # vanished grade exactly as retire does. Before the recorded retirement the plan's Move
+        # destination does not exist, so a file there is a named premature finding; the destination is
+        # registered, byte-verified, only through the recorded retirement inventory (S10).
         root = tree()
+        rep = contain(root)
+        check("move-source-bounded-no-premature-finding", rep.findings == [] and rep.cannot == []
+              and named(rep.migration_incomplete, move))
         write(root, store.moved_dest(move), sources[move])
         rep = contain(root)
-        check("move-destination-registered", rep.findings == [] and rep.cannot == []
+        check("premature-move-destination-finding",
+              named(rep.findings, store.moved_dest(move), "before the recorded retirement")
               and named(rep.migration_incomplete, move))
         root = tree()
         write(root, move, b"to move, edited\n")
@@ -1117,7 +1320,6 @@ def _self_test_checks():
         # the bundle and the run archive but no machine-local journal (spec 4.2), grades exactly as the
         # original store, retirement included.
         root = tree()
-        write(root, store.moved_dest(move), sources[move])
         original = contain(root)
         shutil.rmtree(root / ".aiqt")
         cloned = contain(root)

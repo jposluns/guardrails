@@ -228,14 +228,23 @@ committed adoption evidence alone, the bundle under `.working/imported/adoption/
 the run archive, which travel with every clone, and MUST NOT read the machine-local journal, so
 a clone without journals grades exactly as the original store. That evidence check verifies
 internal consistency: the sealed inventories, plan and approval bound to the run id of the
-directory they sit in, the listed bundle, archive and Move-root bytes at their recorded digests
-(a Move-root row counts only as a move destination the run's own plan records), and a
-retirement recorded only by a sealed retirement inventory bound to its phase by listing exactly
-the retirement preimages of the plan's retire and move rows, consistent with the base
-inventory. It detects accidents, an interrupted apply, a hand edit that is non-canonical or
-that changes listed bytes, a misplaced or stale record, not deliberate forgery: a hand edit
-that re-emits a canonical, self-consistent record, and any other crafted self-consistent
-bundle, is outside the accident-detection model, consistent with the rest of OPF. Tooling
+directory they sit in, and the listed bundle, archive and Move-root bytes at their recorded
+digests (a Move-root row counts only as a move destination the run's own plan records). A
+retirement is recorded only by a sealed retirement inventory in the shape the retirement-phase
+transaction derives from its own create ops: one row per non-occupying move row of the plan,
+naming that row's recorded Move destination at the moved source's preimage digest, and nothing
+else, so a retire-only plan's record lists no files. Retire and migrate preimages are preserved
+at apply and claimed by the base inventory, never re-listed by the retirement record; that
+shape also binds the record to its phase, because a base inventory copied to the retirement
+name lists at least the plan and the approval, which are never Move destinations. A retirement
+row that also names a base inventory row agrees with it in size and digest, each listed
+destination holds its recorded bytes live, and before a recorded retirement a file at a plan
+Move destination is a containment finding, since only the retirement-phase transaction creates
+that path. The whole check detects accidents: an interrupted apply, a hand edit that is
+non-canonical or that changes listed bytes, and a misplaced or stale record. It does not detect
+deliberate forgery: a hand edit that re-emits a canonical, self-consistent record, and any
+other crafted self-consistent bundle, is outside the accident-detection model, consistent with
+the rest of OPF. Tooling
 that carries the section 9.2 ceiling refuses an above-ceiling declaration as a fail-closed
 INVALID finding; tooling released before that ceiling grades such a store as legacy instead, a
 disclosed residual of section 9.2. Activated 1.3.0
