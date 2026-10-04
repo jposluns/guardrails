@@ -122,7 +122,7 @@ def _bootstrap():
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
         import _opf_write_guard  # the in-place writers' shared cleanliness gate and single-writer lease
         import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
-        import _opf_adopt_apply  # OPF-ADOPT U1: the apply shell (zero executable ops)
+        import _opf_adopt_apply  # OPF-ADOPT U1+U5: the apply shell (the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
