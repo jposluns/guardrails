@@ -3422,7 +3422,8 @@ _RUNTIME_WAIT_OWNERS = ("_self_test_runtime_probe", "_self_test_runtime_supervis
                         "_watchdog_overlap_case", "_zombie_survival_control", "_pidfd_handoff_fork_send")
 
 # The closed exemption list of the whole-module audits (QA21, QA22): (file, function or method, the
-# exact call it excuses, reason). An entry excuses only that one call in that one scope, holds only while
+# exact call it excuses, reason). An entry excuses only ONE occurrence of that call in that one scope (a
+# second call spelled the same way there is a fault, claude QA22 minor 2), holds only while
 # _self_test_runtime_wait_unit re-proves its reason, and an entry that excuses nothing is itself a fault.
 _RUNTIME_WAIT_EXEMPT = (
     ("_opf_emit.py", "_fixture_wait", "os.waitpid(pid, flags)",
@@ -3436,23 +3437,29 @@ _RUNTIME_WAIT_EXEMPT = (
 )
 
 
-def _runtime_wait_modules():
+def _runtime_wait_modules(overrides=None):
     """The source files the `opf --self-test` path imports and runs (QA22), derived from its entry, not
     listed by hand: this file, the module of every _self_tests() entry, and the transitive closure of
     their imports that resolve to a `<name>.py` beside this file. A module is RUN when it is this file,
     an entry's module, or a module whose self_test a run module names (`m.self_test`, or `from m
     import self_test`); the others are only imported. Returns ({filename: source}, run filenames,
     faults); an entry whose module has no readable, parseable source is a fault, so a missing module
-    fails the audit instead of shrinking it. Residuals: a module brought in only by importlib or
-    __import__, a package directory (the vendored marko), and a module outside this directory."""
+    fails the audit instead of shrinking it. Every module is walked exactly once, the entry module
+    included (QA23: this file was loaded to find _self_tests() and then skipped as already loaded, so
+    its own imports, check_opf_init and check_opf_prompt_pack, never joined the set). `overrides`
+    ({filename: source}) stands in for files beside this one, for the unit's mutation vectors only.
+    Residuals: a module brought in only by importlib or __import__, a package directory (the vendored
+    marko), and a module outside this directory."""
     import ast
     here = Path(__file__).resolve().parent
+    overrides = overrides or {}
     faults, trees, sources = [], {}, {}
 
     def load(name):
         if name not in trees:
             try:
-                sources[name + ".py"] = (here / (name + ".py")).read_text(encoding="utf-8")
+                sources[name + ".py"] = overrides[name + ".py"] if name + ".py" in overrides \
+                    else (here / (name + ".py")).read_text(encoding="utf-8")
                 trees[name] = ast.parse(sources[name + ".py"])
             except (OSError, SyntaxError, ValueError) as exc:
                 trees[name] = None
@@ -3468,10 +3475,13 @@ def _runtime_wait_modules():
             roots.add(owner.attr if isinstance(owner, ast.Attribute) else getattr(owner, "id", "?"))
     if entry is None or len(roots) < 2:
         faults.append("the self-test entry _self_tests() names no helper module, so no module set derives from it")
-    todo, runs = sorted(roots), {}
+    todo, runs, walked = sorted(roots), {}, set()
     while todo:
         name = todo.pop()
-        tree = load(name) if name not in trees else None
+        if name in walked:
+            continue
+        walked.add(name)
+        tree = load(name)
         if tree is None:
             continue
         aliases, imported, runs[name] = {}, set(), set()
@@ -3488,7 +3498,8 @@ def _runtime_wait_modules():
             if isinstance(node, ast.Attribute) and node.attr.startswith("self_test"):
                 base = getattr(node.value, "id", getattr(node.value, "attr", None))
                 runs[name].add(aliases.get(base, base))
-        todo += sorted(each for each in imported if each not in trees and (here / (each + ".py")).is_file())
+        todo += sorted(each for each in imported if each not in walked
+                       and (each + ".py" in overrides or (here / (each + ".py")).is_file()))
     run, grown = set(roots), True
     while grown:
         grown = {each for name in run for each in runs.get(name, ()) if each in runs} - run
@@ -3510,7 +3521,10 @@ def _runtime_wait_audit(source, owners=None):
     .recv_into, .recvfrom, .recvfrom_into or .recvmsg only after a finite settimeout or a
     setblocking(False) on the SAME receiver earlier in its scope, or anywhere in an enclosing scope, or
     on the socket a wrap_socket of it returned; and every _fixture_wait (the exempt pass-through)
-    carrying WNOHANG. os.wait and os.wait3 always fault. Each fault names the call as spelled. It also
+    carrying WNOHANG. A flag counts only when its expression evaluates, from int constants and os./fcntl.
+    attributes combined by |, & and ^, to a value with that flag's bit set (codex QA22 minor 2:
+    `os.WNOHANG & 0` mentions the flag and is zero); a flag expression that cannot be evaluated so (a
+    variable, a bare name) faults. os.wait and os.wait3 always fault. Each fault names the call as spelled. It also
     pins the production WIRING (codex QA20 minor 3): _kill_proved_child and
     _self_test_runtime_supervisor_unit reap through _reap_pidfd; _runtime_escape_cases reaps both
     decoys through _runtime_decoy_reap, the second in the finally of the first, and attributes them only
@@ -3520,10 +3534,15 @@ def _runtime_wait_audit(source, owners=None):
     `import os as o`, `from os import waitpid`), getattr, functools.partial, an unbound method call
     (`Popen.wait(proc)`), a timeout held in a variable that is None at run time, a settimeout(None)
     after the settimeout it counts, an enclosing scope's settimeout that runs only after the nested
-    recv, a call into a module outside the audited set, and blocking calls outside the list above
-    (queue get, Future.result, os.read on a pipe, subprocess.run without timeout, signal.sigwaitinfo,
-    selectors, socket.recv_fds, Condition.wait_for). Returns the list of faults."""
+    recv, a call into a module outside the audited set, a huge or infinite literal taken as finite
+    (`proc.wait(1e999)`, `proc.wait(10**9)`, `communicate(timeout=float('inf'))`), the os functions
+    reached through another module name (`posix.waitpid`), a poller not bound by a plain assignment from
+    select.poll/epoll/devpoll (`with select.epoll() as ep: ep.poll()`), and blocking calls outside the
+    list above (queue get, Future.result, os.read on a pipe, subprocess.run without timeout,
+    signal.sigwaitinfo, selectors, socket.recv_fds, Condition.wait_for). Returns the list of faults."""
     import ast
+    import fcntl
+    import operator
     tree = ast.parse(source)
     defs = [node for node in tree.body if isinstance(node, ast.FunctionDef)
             and (owners is None or node.name in owners)]
@@ -3568,9 +3587,23 @@ def _runtime_wait_audit(source, owners=None):
         return not (isinstance(value, ast.Constant) and (value.value is None or (
             isinstance(value.value, (int, float)) and value.value < 0)))
 
+    combine = {ast.BitOr: operator.or_, ast.BitAnd: operator.and_, ast.BitXor: operator.xor}
+
+    def bits(value):
+        if isinstance(value, ast.Constant) and type(value.value) is int:
+            return value.value
+        if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) \
+                and value.value.id in ("os", "fcntl"):
+            found = getattr(os if value.value.id == "os" else fcntl, value.attr, None)
+            return found if type(found) is int else None
+        if isinstance(value, ast.BinOp) and type(value.op) in combine:
+            left, right = bits(value.left), bits(value.right)
+            return None if left is None or right is None else combine[type(value.op)](left, right)
+        return None
+
     def spells(value, flag):
-        return value is not None and any(flag in (getattr(node, "attr", None), getattr(node, "id", None))
-                                         for node in ast.walk(value))
+        found = bits(value) if value is not None else None
+        return found is not None and bool(found & getattr(os if flag == "WNOHANG" else fcntl, flag))
 
     memo = {}
 
@@ -3727,12 +3760,16 @@ _RUNTIME_WAIT_UNBOUNDED = (
     "poller.poll()", "poller.poll(None)", "poller.poll(-1)", "lock.acquire()", "proc.wait()", "worker.join(None)",
     "os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)", "fcntl.flock(fd, fcntl.LOCK_EX)", "sock.recv(1)",
     "_fixture_wait(pid, 0)", "emit._fixture_wait(pid, 0)", "os.wait()", "select.select([fd], [], [])",
+    "os.waitpid(pid, os.WNOHANG & 0)", "fcntl.flock(fd, fcntl.LOCK_EX | (fcntl.LOCK_NB & 0))",
+    "os.waitpid(pid, flags)", "os.waitpid(pid, WNOHANG)", "_fixture_wait(pid, os.WNOHANG ^ os.WNOHANG)",
 )
 _RUNTIME_WAIT_BOUNDED = (
     "os.waitpid(pid, os.WNOHANG)", "proc.communicate(b'x', 1.0)", "proc.communicate(timeout=1.0)",
     "lock.acquire(False)", "lock.acquire(True, 1.0)", "lock.acquire(blocking=False)", "lock.acquire(timeout=1.0)",
     "select.select([fd], [], [], 0.5)", "poller.poll(10)", "other.recv(1)", "proc.wait(1.0)",
     "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", "worker.join(timeout=1.0)", "_fixture_wait(pid, os.WNOHANG)",
+    "os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG)", "fcntl.flock(fd, fcntl.LOCK_UN)",
+    "fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
 )
 _RUNTIME_WAIT_PROBE = """import fcntl
 import os
@@ -3765,31 +3802,69 @@ def _runtime_wait_vector_faults():
     return faults
 
 
-def _runtime_wait_module_faults():
+# _runtime_wait_audit's findings per module source text: the traversal vectors re-audit mostly
+# unchanged modules, and a source text always yields the same findings.
+_RUNTIME_WAIT_AUDITED = {}
+
+
+def _runtime_wait_module_faults(overrides=None):
     """The whole-module audit (QA22): _runtime_wait_audit over every module _runtime_wait_modules
     derives from the self-test entry. A fault is excused only by its own _RUNTIME_WAIT_EXEMPT entry,
-    whose reason is re-proved here, or as test-only code (a top-level `_t_*`, `_st_*` or `self_test*`
-    function) of a module the entry imports but never runs, which no module it runs names.
-    An exemption that excuses nothing is a fault. Returns the faults."""
+    once (a second call it would match is a fault), whose reason is re-proved here, or as test-only
+    code: a top-level `_t_*`, `_st_*` or `self_test*` function of a module the entry imports but never
+    runs, whose name is mentioned, in any audited module, only inside other such excused functions or
+    a top-level `if __name__ == '__main__':` block. The excusal is transitive (claude QA22 minor 3):
+    a mention from any other code (a run module, a helper of the unrun module itself, a module body)
+    withdraws it, and so does a mention from a function whose own excusal was withdrawn, to a fixed
+    point. An exemption that excuses nothing is a fault. `overrides` reaches _runtime_wait_modules.
+    Returns the faults."""
     import ast
-    sources, run, faults = _runtime_wait_modules()
+    sources, run, faults = _runtime_wait_modules(overrides)
     trees = {filename: ast.parse(text) for filename, text in sources.items()}
-    named = {}
+    excused = {(filename, node.name) for filename, tree in trees.items() if filename not in run
+               for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and node.name.startswith(("_t_", "_st_", "self_test"))}
+    mentions = set()
     for filename, tree in trees.items():
+        imports, froms = {}, {}
         for node in ast.walk(tree):
-            label = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", None)
-            if label is not None and isinstance(node, (ast.Attribute, ast.Name)):
-                named.setdefault(label, set()).add(filename)
+            if isinstance(node, ast.Import):
+                imports.update((alias.asname or alias.name.split(".")[0], alias.name.split(".")[0] + ".py")
+                               for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                froms.update((alias.asname or alias.name, (node.module.split(".")[0] + ".py", alias.name))
+                             for alias in node.names)
+        for top in tree.body:
+            if isinstance(top, ast.If) and ast.unparse(top.test) == "__name__ == '__main__'":
+                continue
+            owner = (filename, top.name) if (filename, getattr(top, "name", None)) in excused else None
+            for node in ast.walk(top):
+                # A bare name reaches its own module's function (or the one it was imported as), `m.f`
+                # reaches module m's f (m imported, or named as an audited module, as _bootstrap binds
+                # them; `a.m.f` by its last part m), and any other `x.f` reaches every audited module's f.
+                if isinstance(node, ast.Name):
+                    mentions |= {((filename, node.id), owner), (froms.get(node.id, (filename, node.id)), owner)}
+                elif isinstance(node, ast.Attribute):
+                    base = getattr(node.value, "id", getattr(node.value, "attr", None))
+                    module = imports.get(base, base + ".py" if base is not None and base + ".py" in trees else None)
+                    mentions.add(((module, node.attr), owner))
+    withdrawn = True
+    while withdrawn:
+        live = {target for target, owner in mentions if owner not in excused}
+        withdrawn = {each for each in excused if each in live or (None, each[1]) in live}
+        excused -= withdrawn
     used = set()
     for filename in sorted(sources):
-        for miss in _runtime_wait_audit(sources[filename]):
+        if sources[filename] not in _RUNTIME_WAIT_AUDITED:
+            _RUNTIME_WAIT_AUDITED[sources[filename]] = _runtime_wait_audit(sources[filename])
+        for miss in _RUNTIME_WAIT_AUDITED[sources[filename]]:
             scope, spelled = miss.split(" ", 1)[0], miss.split("`")[1] if "`" in miss else None
             top = scope.split(".")[0]
-            entry = next((entry for entry in _RUNTIME_WAIT_EXEMPT if entry[:3] == (filename, scope, spelled)), None)
+            entry = next((entry for entry in _RUNTIME_WAIT_EXEMPT
+                          if entry[:3] == (filename, scope, spelled) and entry not in used), None)
             if entry is not None:
                 used.add(entry)
-            elif not (filename not in run and top.startswith(("_t_", "_st_", "self_test"))
-                      and not named.get(top, set()) & run):
+            elif (filename, top) not in excused:
                 faults.append("the whole-module bounded-wait audit of {} found: {}".format(filename, miss))
     faults += ["the bounded-wait exemption {} {} `{}` excuses nothing".format(*entry[:3])
                for entry in _RUNTIME_WAIT_EXEMPT if entry not in used]
@@ -3821,6 +3896,61 @@ def _runtime_wait_module_faults():
     return faults
 
 
+def _runtime_wait_traversal_faults():
+    """Mutation vectors of the whole-module audit (QA23), each fed through _runtime_wait_modules'
+    overrides so no file is written: every local module this file imports is in the audited set; a new
+    sibling module holding `os.waitpid(pid, 0)`, imported only by this file, is one located fault (the
+    entry module's imports are walked); a second `self._go.wait()` in _FixtureProcess._launch and a
+    second exempt flock in reconcile_and_claim_stale are each one fault (an exemption excuses one call);
+    an unrun module's test-only blocking function is excused while only test code mentions it, and is
+    one fault once a non-test helper of its own module reaches it (the excusal is transitive).
+    Returns the faults."""
+    import ast
+    here = Path(__file__).resolve().parent
+    entry = (here / "opf.py").read_text(encoding="utf-8")
+    faults, (sources, _run, _faults) = [], _runtime_wait_modules()
+    local = {(alias.name if isinstance(node, ast.Import) else node.module).split(".")[0]
+             for node in ast.walk(ast.parse(entry)) if isinstance(node, ast.Import)
+             or (isinstance(node, ast.ImportFrom) and node.level == 0 and node.module)
+             for alias in (node.names if isinstance(node, ast.Import) else [None])}
+    missing = sorted(name + ".py" for name in local
+                     if (here / (name + ".py")).is_file() and name + ".py" not in sources)
+    if missing:
+        faults.append("the audited module set omits modules opf.py imports: {}".format(", ".join(missing)))
+
+    def edited(filename, old, new):
+        text = (here / filename).read_text(encoding="utf-8")
+        if text.count(old) != 1:
+            faults.append("the traversal vector's anchor {!r} does not match {} once".format(old, filename))
+        return text.replace(old, new)
+
+    oplock = (here / "_opf_oplock.py").read_text(encoding="utf-8")
+    block = "\n\ndef _st_wait_vector_block(pid):\n    os.waitpid(pid, 0)\n"
+    vectors = (
+        ("a sibling imported only by opf.py", "_wait_vector_sibling.py", "block",
+         {"opf.py": entry + "\n\nimport _wait_vector_sibling\n",
+          "_wait_vector_sibling.py": "import os\n\n\ndef block(pid):\n    os.waitpid(pid, 0)\n"}),
+        ("a second exempt park", "_opf_emit.py", "_FixtureProcess._launch",
+         {"_opf_emit.py": edited("_opf_emit.py", "            self._go.wait()\n",
+                                 "            self._go.wait()\n            self._go.wait()\n")}),
+        ("a second exempt flock", "_journal.py", "reconcile_and_claim_stale",
+         {"_journal.py": edited("_journal.py", "        fcntl.flock(afd, fcntl.LOCK_EX)\n",
+                                "        fcntl.flock(afd, fcntl.LOCK_EX)\n        fcntl.flock(afd, fcntl.LOCK_EX)\n")}),
+        ("a test-only wait reached by its module's helper", "_opf_oplock.py", "_st_wait_vector_block",
+         {"_opf_oplock.py": oplock + block + "\n\ndef wait_vector_helper(pid):\n    return _st_wait_vector_block(pid)\n"}),
+        ("a test-only wait mentioned only by test code", None, None,
+         {"_opf_oplock.py": oplock + block + "\n\ndef _st_wait_vector_caller(pid):\n    return _st_wait_vector_block(pid)\n"}),
+    )
+    for label, filename, scope, overrides in vectors:
+        found = _runtime_wait_module_faults(overrides)
+        if filename is None and found:
+            faults.append("the whole-module audit did not excuse {} ({})".format(label, found))
+        elif filename is not None and not (len(found) == 1 and "audit of {} found: {} ".format(filename, scope)
+                                           in found[0]):
+            faults.append("the whole-module audit did not flag {} once ({})".format(label, found))
+    return faults
+
+
 def _self_test_runtime_wait_unit():
     """Pin the bounded waits of the escape probe's and the supervisor unit's paths (QA20, class-wide).
     WIRING: _runtime_wait_audit over this file's committed _RUNTIME_WAIT_OWNERS and _RUNTIME_SUPERVISOR
@@ -3846,6 +3976,7 @@ def _self_test_runtime_wait_unit():
     found = _runtime_wait_audit(source, _RUNTIME_WAIT_OWNERS) + _runtime_wait_audit(_RUNTIME_SUPERVISOR)
     faults += ["the bounded-wait audit of the committed source found: {}".format(miss) for miss in found]
     faults += _runtime_wait_module_faults()
+    faults += _runtime_wait_traversal_faults()
     faults += _runtime_wait_vector_faults()
     segments = {node.name: ast.get_source_segment(source, node) for node in ast.parse(source).body
                 if isinstance(node, ast.FunctionDef) and node.name in _RUNTIME_WAIT_OWNERS}
