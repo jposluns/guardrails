@@ -23,9 +23,10 @@ PR-C2 adds explicit HTTPS gathering and non-executing quarantine through the laz
 public gather_release() wrapper. Observations confer no trust or apply authority.
 
 Apply, trust verification, acceptance capture, the adoption doctor, behavioral probes, and the CLI
-entry point remain later slices. In particular, enable-hook remains a vocabulary row only: this
-module neither computes a harness-specific registration merge nor activates a hook. A VALID frozen
-proposal is not execution authorization or an ADOPTED_AND_VALID verdict.
+entry point remain later slices. The enable-hook row's handler lives in the apply engine
+(_opf_adopt_apply, over the pure merge core of _opf_adopt_hook); this module neither computes a
+harness-specific registration merge nor activates a hook. A VALID frozen proposal is not execution
+authorization or an ADOPTED_AND_VALID verdict.
 
 Base-neutral by construction (H-7 ratified): the adoption receipt is a STORE-LEVEL artefact whose vocabulary
 stays adopter-neutral. Nothing here is an AIQT-profile-specific record type; `product` is the only identity
@@ -328,6 +329,23 @@ def _is_token(value):
                    or ch in ("\u2028", "\u2029") for ch in value)
 
 
+_HOOK_ENTRY_CHARS_RE = re.compile(r"[A-Za-z0-9._/-]+\Z")
+
+
+def _is_hook_entry(value):
+    """The narrow pack-member grammar the enable-hook `plugin_entry` is held to until the adoption
+    trust gate checks it against the digest-verified installed pack (the _opf_adopt_hook threat
+    model, item 1: a plan row must never register arbitrary command text). The platform runs the
+    registered value as a command, so the grammar admits ONE shell word naming a pack member -- a
+    contained file-path token over the portable filename characters plus `/` -- and nothing a shell
+    parses further: no whitespace, no quote, no shell metacharacter, no control character (all
+    outside the character class, which also refuses `~`, `$`, backtick and glob characters), and
+    never `-`-led (option injection). Traversal, absolute and Windows forms are refused by the
+    contained-filepath half."""
+    return (_is_contained_filepath(value) and bool(_HOOK_ENTRY_CHARS_RE.match(value))
+            and not value.startswith("-"))
+
+
 def _is_timestamp(value):
     return isinstance(value, str) and bool(_TS_RE.match(value))
 
@@ -351,6 +369,8 @@ def _is_schema_version(value):
 #   "filepath"  a contained relpath that names a FILE operand -> _is_contained_filepath (rejects `.`).
 #   "dirpath"   a contained relpath that names a DIRECTORY / store root -> _is_contained_relpath (allows `.`).
 #   "digest"    sha256:hex -> _is_digest.  "token" a non-empty single-line str -> _is_token.
+#   "hook-entry" the enable-hook command token -> _is_hook_entry (the pack-member grammar: one shell
+#               word of portable filename characters, never arbitrary command text).
 #   "members"   a list of {path (file), digest} tables, each path relative to the op's target or store_root:
 #               the exact files an install-pack, init-store or render-views row writes.
 # Path-field classification, grounded in each field's meaning: a create/retire/move/import/enable-hook/
@@ -363,7 +383,7 @@ _FIELD_KINDS = {
     "content_digest": "digest", "source_digest": "digest", "preimage_digest": "digest",
     "old_digest": "digest", "new_digest": "digest",
     "receipt_core_digest": "digest",
-    "source_member": "token", "plugin_entry": "token", "note": "token",
+    "source_member": "token", "plugin_entry": "hook-entry", "note": "token",
     "members": "members",
 }
 
@@ -430,14 +450,17 @@ ADOPT_OPS = (
     AdoptOp(
         "enable-hook", ("registration_path", "plugin_entry", "old_digest", "new_digest"), ("write",),
         "restore the prior registration bytes (the pre-merge registration surface)",
-        ("DECLARED ONLY in PR-A, neither implemented nor executed here; writes executable-on-load "
-         "configuration, so it is threat-modelled before implementation and surfaced in the one informed "
-         "yes; a structured JSON merge, re-emitted byte-exact, never a blind append",)),
+        ("writes executable-on-load configuration, threat-modelled in _opf_adopt_hook and surfaced in the "
+         "one informed yes; the live registration bytes match old_digest (drift refuses); a structured JSON "
+         "merge, re-emitted byte-exact, never a blind append, whose bytes match new_digest",)),
     AdoptOp(
         "render-views", ("store_root", "members"), ("create", "write"),
-        "remove the views this op created (the render engine refuses to write over an invalid store)",
-        ("delegates to the render engine, which itself refuses to write over an invalid store; it writes "
-         "exactly its members, one per declared view destination",)),
+        "remove the views this op created, each from its journaled absent preimage",
+        ("composes create-only view publications into the journaled apply transaction; the render engine's "
+         "read-only planner supplies the bytes and the U6 source gate refuses an unsound store; every "
+         "destination is observed absent (an occupied view destination refuses fail-closed; its "
+         "preserve-then-render write joins with the file ops, so the declared write effect is not yet "
+         "exercised); it writes exactly its members, one per declared view destination",)),
     AdoptOp(
         "record-adoption", ("receipt_path", "receipt_core_digest"), ("create", "write"),
         "remove or restore the receipt artefacts to their prior state",
@@ -583,7 +606,33 @@ def store_manifest(store):
     return _compose(store["store_root"], store["machine_rel"] + "/" + MANIFEST_NAME)
 
 
-def derive_effects(ops, sources, manifest=None):
+def rewrite_preservations(ops, manifest, run_id, root="."):
+    """The preserve-first archive copies the apply engine creates for the registration ops it executes
+    (spec 14.2: a live file is overwritten only after its byte-identical copy lands at the run's adoption
+    archive): one per repoint-consumer row, of the consumer's old bytes, and one for the frozen store
+    manifest when a register-unmanaged chain rewrites a LIVE manifest, of the first link's old bytes. A
+    manifest an init-store member scaffolds in this program is created, not overwritten, so its chain
+    preserves nothing. Each copy lies at the run's adoption preimage home composed under the frozen store
+    root, as a source preservation does. Without a usable run id (already a finding) or manifest path, the
+    rows that need one add nothing. enable-hook, the one other rewriting op, executes in no slice yet; its
+    slice settles its own preservation."""
+    out = []
+    created = set(_compose(row["store_root"], m["path"]) for row in ops if row["op"] == "init-store"
+                  for m in row["members"])
+    chain = [row for row in ops if row["op"] == "register-unmanaged"]
+    if manifest is not None and chain and manifest not in created:
+        home = _preimage_home(run_id, manifest)
+        if home is not None:
+            out.append({"path": _compose(root, home), "digest": chain[0]["old_digest"]})
+    for row in ops:
+        if row["op"] == "repoint-consumer":
+            home = _preimage_home(run_id, row["path"])
+            if home is not None:
+                out.append({"path": _compose(root, home), "digest": row["old_digest"]})
+    return out
+
+
+def derive_effects(ops, sources, manifest=None, run_id=None, root="."):
     """The exact file-level effects a plan names (spec 14.1: creations, replacements, removals and consumer
     repointings), derived purely from already-VALID op and source rows so the bound summary cannot drift
     from the program. Every member an install-pack, init-store or render-views row writes is a creation at
@@ -593,9 +642,11 @@ def derive_effects(ops, sources, manifest=None):
     (`manifest`, from store_manifest), so it is a replacement there from its old to its new digest; with no
     usable manifest path (a malformed store table, already a finding) it adds nothing. A source preserved
     under the adoption archive (every retire and migrate source, and every occupying source, spec 14.2) adds
-    that archive copy as a creation, and a migrate source's later removal is a removal. Each list is sorted,
-    so the derivation is deterministic. Which stage performs an effect (apply, or the recorded retirement
-    after a green check) is the engine's, not recorded here."""
+    that archive copy as a creation, and a migrate source's later removal is a removal. Given the plan's
+    `run_id` and frozen store `root`, the preserve-first archive copy of each file a registration op
+    overwrites (rewrite_preservations) is a creation too, so every file apply creates is bound. Each list is
+    sorted, so the derivation is deterministic. Which stage performs an effect (apply, or the recorded
+    retirement after a green check) is the engine's, not recorded here."""
     creations, replacements, removals, repointings = [], [], [], []
     for row in ops:
         name = row["op"]
@@ -626,6 +677,7 @@ def derive_effects(ops, sources, manifest=None):
             creations.append({"path": row["preservation"], "digest": row["digest"]})
         if row["disposition"] == "migrate":
             removals.append({"path": row["path"], "digest": row["digest"]})
+    creations += rewrite_preservations(ops, manifest, run_id, root)
 
     def order(rows):
         return sorted(rows, key=lambda r: sorted(r.items()))
@@ -804,6 +856,8 @@ def _valid_field(field, value):
         return _is_digest(value)
     if kind == "token":
         return _is_token(value)
+    if kind == "hook-entry":
+        return _is_hook_entry(value)
     if kind == "members":
         if not isinstance(value, list) or not value:
             return False
@@ -1242,7 +1296,7 @@ def _cross_check_plan(plan, missing, sources_clean, findings):
             if protected is not None:
                 findings.append("plan source {!r} preservation is protected: {}".format(
                     row["path"], protected))
-    effects = derive_effects(ops, sources, store_manifest(plan.get("store")))
+    effects = derive_effects(ops, sources, store_manifest(plan.get("store")), run_id, root)
     if "effects" not in missing and plan["effects"] != effects:
         findings.append("plan effects do not equal the effects its ops and sources name")
     _effect_collision_findings(plan, effects, findings)
@@ -1464,16 +1518,19 @@ def _effect_collision_findings(plan, effects, findings):
 
 def _control_area_effect_findings(plan, effects, findings):
     """No effect writes the store control area, in any homes generation (spec 14.2), save the plan's own
-    preservation copies at this run's adoption preimage homes and move destinations strictly beneath the Move
-    archive. Any other creation, replacement or repointing that equals, contains or lies within a control
-    root is refused, so a committed adoption-archive or Move-archive original is never overwritten and
-    nothing unbound is planted there. Removals are source paths, which _validate_plan_sources keeps out of
-    the control area. Called only on clean source rows and run id."""
+    preservation copies at this run's adoption preimage homes (its sources' and its rewrite_preservations)
+    and move destinations strictly beneath the Move archive. Any other creation, replacement or repointing
+    that equals, contains or lies within a control root is refused, so a committed adoption-archive or
+    Move-archive original is never overwritten and nothing unbound is planted there. Removals are source
+    paths, which _validate_plan_sources keeps out of the control area. Called only on clean source rows and
+    run id."""
     frozen = _frozen_store(plan)
     root = frozen[0] if frozen is not None else "."
     moved_root = _compose(root, ARCHIVE_REL + "/moved") + "/"
     allowed = set(row["preservation"] for row in plan["sources"]
                   if row["disposition"] in ("retire", "migrate") or row["occupying"])
+    allowed.update(row["path"] for row in rewrite_preservations(
+        plan["ops"], store_manifest(plan.get("store")), plan["run_id"], root))
     allowed.update(row["destination"] for row in plan["ops"]
                    if row["op"] == "move-file" and row["destination"].startswith(moved_root))
     for kind in ("creations", "replacements", "repointings"):
@@ -2207,7 +2264,8 @@ def self_test():
         p = copy.deepcopy(base)
         mutate(p)
         if refresh:  # re-derive effects, so the vector isolates the one check it names
-            p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p.get("store")))
+            p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p.get("store")),
+                                          p.get("run_id"), (_frozen_store(p) or (".",))[0])
         return validate_plan(p, homes=homes).status
     _D5 = "sha256:" + "5" * 64
     _extra_retire = {"op": "retire-file", "path": "legacy/OTHER.md", "preimage_digest": _D5}
@@ -2477,6 +2535,24 @@ def self_test():
     check("token-unparsed-policies", UNPARSED_POLICIES == ("retain-verbatim",))
     check("token-skip-policies", SKIP_POLICIES == ("no-skip", "attributed-skip"))
 
+    # 15h (U7 QA round 1): plugin_entry is held to the pack-member grammar, ONE shell word of
+    # portable filename characters, so a plan row can never carry arbitrary command text (the
+    # _opf_adopt_hook threat model, item 1). Each refusing vector FAILS if the grammar reverts to
+    # the generic token rule (every one of them passes _is_token).
+    for ok_label, ok in (("name", "opf-governance"), ("short", "opf"),
+                         ("path", ".aiqt/core/hooks/opf-governance"), ("mixed", "a/b-c_d.e")):
+        row_ok = canonical_op("enable-hook"); row_ok["plugin_entry"] = ok
+        check("op-enable-hook-entry-{}-valid".format(ok_label), validate_op(row_ok).status == VALID)
+    for bad_label, bad in (
+            ("pipe", "a|b"), ("space", "a b"),
+            ("semicolon", "a;b"), ("command-substitution", "$(a)"), ("backtick", "`a`"),
+            ("redirect", "a>b"), ("quote", "a'b"), ("double-quote", 'a"b'),
+            ("ampersand", "a&b"), ("dash-led", "-a"), ("traversal", "../a"),
+            ("absolute", "/a"), ("tilde", "~/a"), ("glob", "a*")):
+        row_bad = canonical_op("enable-hook"); row_bad["plugin_entry"] = bad
+        check("op-enable-hook-entry-{}-invalid".format(bad_label),
+              validate_op(row_bad).status == INVALID)
+
     # 16: plan-v2 exactness (U8 fix round 2). Each vector FAILS if its corresponding check is reverted.
     _D7 = "sha256:" + "7" * 64
     _repoint = lambda path: {"op": "repoint-consumer", "path": path, "old_digest": _D5,  # noqa: E731
@@ -2502,7 +2578,8 @@ def self_test():
     def _sub_findings(base, mutate=lambda p: None):
         p = copy.deepcopy(base)
         mutate(p)
-        p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p["store"]))
+        p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p["store"]), p["run_id"],
+                                      _frozen_store(p)[0])
         findings = []
         _validate_plan_sources(p["sources"], p["run_id"], 1, findings, _frozen_store(p)[0])
         _cross_check_plan(p, [], not findings, findings)
@@ -2602,6 +2679,34 @@ def self_test():
     check("plan-v2-re-adoption-keep-chain-valid", _mutated(re_create, lambda p: None, True) == VALID)
     check("plan-v2-re-adoption-manifest-creation-invalid",
           _mutated(re_create, lambda p: p["ops"].append(_create(_MANIFEST)), True) == INVALID)
+    # 17c: every file apply creates is a bound effect (spec 14.1 exact creations). Apply archives each file a
+    # registration op overwrites before it writes (spec 14.2), so a repointed consumer and a LIVE manifest a
+    # keep chain rewrites each add their archive copy at the run's preimage home, of the old bytes; the
+    # manifest init-store scaffolds is created, so its chain adds none. A plan whose effects omit either copy
+    # is refused, and with them the copies sit in the control area as the plan's own preservations.
+    _rid = base_plan["run_id"]
+    _reg = {"op": "register-unmanaged", "entry": "adopter/KEEP.md", "old_digest": _D0, "new_digest": _D4}
+    check("effects-repoint-preserves-consumer", derive_effects(
+        [_repoint("docs/consumer.md")], [], _MANIFEST, _rid)["creations"]
+        == [{"path": retire_preimage(_rid, "docs/consumer.md"), "digest": _D5}])
+    check("effects-live-manifest-chain-preserves-manifest", derive_effects(
+        [_reg, dict(_reg, entry="adopter/KEEP2.md", old_digest=_D4, new_digest=_D7)], [], _MANIFEST,
+        _rid)["creations"] == [{"path": retire_preimage(_rid, _MANIFEST), "digest": _D0}])
+    check("effects-scaffolded-manifest-chain-preserves-nothing", derive_effects(
+        [base_plan["ops"][1], _reg], [], _MANIFEST, _rid)["creations"]
+        == derive_effects([base_plan["ops"][1]], [], _MANIFEST, _rid)["creations"])
+    check("effects-sub-store-preservation-composed", derive_effects(
+        [_repoint("docs/consumer.md")], [], _MANIFEST, _rid, "sub")["creations"]
+        == [{"path": "sub/" + retire_preimage(_rid, "docs/consumer.md"), "digest": _D5}])
+
+    def _unpreserved(p):
+        p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p["store"]))
+    _repointed = copy.deepcopy(base_plan)
+    _repointed["ops"].append(_repoint("docs/consumer.md"))
+    check("plan-v2-effects-omit-consumer-preservation-invalid",
+          _mutated(_repointed, _unpreserved) == INVALID)
+    check("plan-v2-effects-omit-manifest-preservation-invalid",
+          _mutated(re_create, _unpreserved) == INVALID)
 
     # 18: K1 fix round 1. Each refusal vector FAILS if its fix is reverted; the counter-vectors guard the
     # predicate against over-refusal. (Fix 1, the product-root store_root gate, is plan-v2-sub-store-root-
