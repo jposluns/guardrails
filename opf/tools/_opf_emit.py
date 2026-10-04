@@ -1987,7 +1987,7 @@ class _FixtureProcess:
             left = until - time.monotonic()
             if left <= 0.0:
                 return False
-            time.sleep(min(pause, left))
+            time.sleep(min(pause, left, 0.05))
             pause = min(pause * 2.0, 0.05)
         return True
 

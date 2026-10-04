@@ -1713,7 +1713,7 @@ def main():
                 report["survivors"].append(
                     "module pid {} did not exit within {}s of SIGKILL".format(proc.pid, reap_seconds))
         report["rc"] = proc.returncode
-    time.sleep(settle)
+    time.sleep(min(settle, 1.0))
     try:
         _reap(report, reap_seconds, reap_rounds)
     except OSError as exc:
@@ -3445,6 +3445,46 @@ _RUNTIME_WAIT_EXEMPT = (
     ("_journal.py", "reconcile_and_claim_stale", "fcntl.flock(afd, fcntl.LOCK_EX)",
      "production stale-lock arbitration, outside this test-only bound: its holders are opf processes "
      "breaking the same stale lock, and a multiply-linked arbitration inode is refused before it"),
+    # QA25: the hits of the completed blocking-API set, each read at its site.
+    ("_opf_adopt_observe.py", "_resolve.worker", "result.put(outcome)",
+     "the one put into the worker's own fresh queue.Queue(maxsize=1), which nothing else fills"),
+    ("_opf_adopt_observe.py", "_runner_check.run_shell",
+     "with subprocess.Popen([bash, '--noprofile', '--norc', '-c', body, str(runner)], cwd=caller_cwd, env=env, "
+     "stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, "
+     "pass_fds=(marker.fileno(),))",
+     "the exit's wait follows communicate(timeout) or, on expiry, a SIGKILL of the shell's own session "
+     "group and a bounded communicate, so the shell has exited or been killed"),
+    ("_opf_pack_manifest.py", "_runner_check.run_shell",
+     "with subprocess.Popen([bash, '--noprofile', '--norc', '-c', body, str(runner)], cwd=tmp, env=env, "
+     "stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, "
+     "pass_fds=(marker.fileno(),))",
+     "the same run_shell shape: communicate(timeout), then a session-group SIGKILL on expiry"),
+    ("_opf_adopt_observe.py", "self_test.Server.serve", "self.listener.accept()",
+     "Server.__init__ sets the listener's settimeout(0.05) before it starts this daemon thread"),
+    ("_opf_adopt_observe.py", "self_test.run_case.tracked_fetch.fetch", "time.sleep(config['delay_before_resolve'])",
+     "a vector's configured delay; the vector table's one delay_before_resolve is 0.60 s"),
+    ("_opf_emit.py", "_FixtureProcess._recv_subject", "socket.recv_fds(self.control, 32, 1)",
+     "runs only after poll(500) reports the control socket readable"),
+    ("_opf_emit.py", "_st_guardian_close_reuse.drive.<lambda>", "sock.sendall(b'G')",
+     "one byte into a fresh socketpair whose buffer nothing else fills"),
+    ("opf.py", "_self_test_dispatch_probe", "with concurrent.futures.ThreadPoolExecutor(max_workers=8)",
+     "the exit joins workers whose one child each is subprocess.run(timeout=120)"),
+    ("opf.py", "_self_test_runtime_probe", "with concurrent.futures.ThreadPoolExecutor(max_workers=8)",
+     "the exit joins workers whose supervisor is collected by communicate(timeout=budget), then a reap bound"),
+    ("opf.py", "_pidfd_handoff_recv", "socket.recv_fds(conn, 256, 8)",
+     "the first receive runs only after poll(30000) returned an event (no event is a refusal)"),
+    ("opf.py", "_pidfd_handoff_recv", "socket.recv_fds(conn, 256, 8)",
+     "the second receive runs only when poll(0) returned an event"),
+)
+
+# Whole functions that run only as a bounded private subprocess (QA25): their child-side parks
+# (`time.sleep(3600)` until the case's own parent kills them) are excused as time.sleep findings
+# only, while the regression runner launches each through run_status_owned with a timeout (re-proved).
+_RUNTIME_WAIT_CHILD_SCOPES = (
+    ("opf.py", "_watchdog_completion_case", "return opf._watchdog_completion_case(",
+     "a completion case runs in a run_status_owned child bounded at 40 s"),
+    ("opf.py", "_watchdog_deadline_case", "return opf._watchdog_deadline_case(",
+     "a deadline case runs in a run_status_owned child bounded at 10 s"),
 )
 
 
@@ -3518,6 +3558,10 @@ def _runtime_wait_modules(overrides=None):
     return sources, {name + ".py" for name in run if trees.get(name) is not None}, faults
 
 
+# The longest literal time.sleep the bounded-wait audit accepts without a bound of its own (QA25).
+_RUNTIME_SLEEP_CEILING = 5.0
+
+
 def _runtime_wait_audit(source, owners=None):
     """A parse-tree audit for an UNBOUNDED wait. It visits EVERY ast.Call (and every `with` item) by
     one ast.walk (QA24: complete by construction, so no syntactic position such as a default, a
@@ -3526,42 +3570,60 @@ def _runtime_wait_audit(source, owners=None):
     finding is only ATTRIBUTED, for its name and for _RUNTIME_WAIT_EXEMPT, to the scope that executes
     it: the innermost function or lambda whose BODY holds it (`Class.method`, `outer.inner`,
     `outer.<lambda>`), else `<module>`, so a default, decorator or annotation of a function (and a class
-    body) belongs to the scope that defines it, which runs it at definition time. A bound counts only when it is the timeout of
-    that call's own signature (codex QA21 minor 2): .wait(timeout) and .join(timeout) in slot 0 or
-    timeout=; .communicate in slot 1 or timeout= (communicate(input) is unbounded); .acquire only as
-    blocking False or a finite timeout (acquire(True) is unbounded), and a `with` on a lock (QA24: a
-    name or attribute whose last part says lock, mutex, sem or cond, or that a threading Lock, RLock,
-    Semaphore, BoundedSemaphore or Condition constructor is assigned to) is an acquisition with no
-    bound, a fault for _RUNTIME_WAIT_EXEMPT to answer; os.waitpid/wait4 options in slot
-    1 and os.waitid options in slot 2 carrying WNOHANG; fcntl.flock/lockf carrying LOCK_NB (or LOCK_UN);
-    select.select with a finite slot-3 timeout (None is unbounded); a poll() of a select.poll/epoll
-    receiver with a finite timeout (poll(), None or a negative constant is unbounded); a .recv,
-    .recv_into, .recvfrom, .recvfrom_into or .recvmsg only after a finite settimeout or a
-    setblocking(False) on the SAME receiver (or on the socket a wrap_socket of it returned) that
-    DOMINATES it (codex QA23 minor 2): the bound is its own expression statement in a statement list
-    that also holds, later, a statement enclosing the receive (in its own scope, or the definition of
-    the function or lambda holding it in an enclosing scope), so a bound under an `if`, a loop, a
-    `try` body or a handler does not count for a receive after that statement; and every _fixture_wait (the exempt pass-through)
-    carrying WNOHANG. A flag counts only when its expression evaluates, from int constants and os./fcntl.
-    attributes combined by |, & and ^, to a value with that flag's bit set (codex QA22 minor 2:
-    `os.WNOHANG & 0` mentions the flag and is zero); a flag expression that cannot be evaluated so (a
-    variable, a bare name) faults. os.wait and os.wait3 always fault. Each fault names the call as spelled. It also
+    body) belongs to the scope that defines it, which runs it at definition time.
+
+    THE DEFINING SET (QA25): these calls are what the audit means by a blocking wait. Each is a fault
+    unless bounded by the timeout of its own signature (or a non-blocking flag) as stated, or answered
+    by _RUNTIME_WAIT_EXEMPT or _RUNTIME_WAIT_CHILD_SCOPES:
+      * subprocess.run, call, check_call and check_output: a finite timeout=; subprocess.getoutput and
+        getstatusoutput always (they take no timeout). Popen.wait and .wait()/.join() of anything: a
+        finite slot 0 or timeout=; .communicate: slot 1 or timeout= (communicate(input) is unbounded).
+      * os.wait and os.wait3 always; os.waitpid and os.wait4 options in slot 1, os.waitid options in
+        slot 2, and every _fixture_wait (the exempt pass-through), carrying WNOHANG.
+      * threading: .join and .wait (Thread, Event, Condition, Barrier) as above; Condition.wait_for: a
+        finite slot 1 or timeout=; .acquire: blocking False or a finite timeout (acquire(True) is
+        unbounded); fcntl.flock/lockf carrying LOCK_NB (or LOCK_UN).
+      * queue: .get of a receiver a `*Queue(...)` constructor bound: block False or a finite timeout;
+        .put likewise, unless that queue was built with no arguments (unbounded: put never waits).
+      * select.select: a finite slot-3 timeout; .poll() of a select.poll/epoll/devpoll receiver and
+        .select() of a `*Selector()` receiver (assigned, or bound by `with ... as`): a finite timeout
+        (none, None or a negative constant is unbounded); signal.pause, sigwait and sigwaitinfo always.
+      * socket .recv, .recv_into, .recvfrom, .recvfrom_into, .recvmsg, .accept, .connect, .sendall, and
+        socket.recv_fds(sock, ...): only after a finite settimeout or a setblocking(False) on the SAME
+        receiver (or on the socket a wrap_socket of it returned) that DOMINATES it (codex QA23 minor 2):
+        the bound is its own expression statement in a statement list that also holds, later, a
+        statement enclosing the call, so a bound under an `if`, a loop, a `try` body or a handler does
+        not count after it. A bound never crosses a scope (codex QA24 1): bound and call run in ONE
+        function, lambda or class body, so a parameter, local or class attribute shadowing the receiver
+        cannot inherit it, and a store to the receiver (or its root name) between them in that scope
+        voids it. A method of an imported module (sqlite3.connect, os.path.join) is not a socket.
+      * time.sleep: only a literal, a module constant assigned once to a literal, or a min() holding one,
+        at most _RUNTIME_SLEEP_CEILING seconds, or a sleep in the child branch `if kid == 0:` of
+        `kid = os.fork()` in that scope (a forked kid its parent kills).
+      * context-manager acquisition: a `with` on a lock (a name, attribute, subscript or call whose last
+        part says lock, mutex, sem or cond, or that a threading Lock, RLock, Semaphore,
+        BoundedSemaphore or Condition constructor is bound to; claude QA24 minor 1), and a `with` whose
+        exit waits (a Popen or a *PoolExecutor/Pool constructor, or a name one is bound to).
+    A flag counts only when its expression evaluates, from int constants and os./fcntl. attributes
+    combined by |, &, ^, to a value with that flag's bit set (codex QA22 minor 2: `os.WNOHANG & 0`
+    mentions the flag and is zero); one that cannot be evaluated so (a variable, a bare name) faults.
+    Each fault names the call as spelled. It also
     pins the production WIRING (codex QA20 minor 3): _kill_proved_child and
     _self_test_runtime_supervisor_unit reap through _reap_pidfd; _runtime_escape_cases reaps both
     decoys through _runtime_decoy_reap, the second in the finally of the first, and attributes them only
     through _runtime_names_pid (no `in` test on a pid); and _self_test_runtime_escape_probe names its
     retained directory with add_note. Like _runtime_supervisor_signal_audit it is a tripwire over
-    ordinary spellings, NOT a proof of absence. Disclosed spelling residuals: an alias (`w = os.waitpid`,
-    `import os as o`, `from os import waitpid`), getattr, functools.partial, an unbound method call
+    ordinary spellings, NOT a proof of absence. Disclosed residuals: an alias (`w = os.waitpid`,
+    `import os as o`, `from subprocess import run`), getattr, functools.partial, an unbound method call
     (`Popen.wait(proc)`), a timeout held in a variable that is None at run time, a settimeout(None)
-    after the settimeout it counts, a receiver name rebound between the bound and the receive, a lock
-    whose name and constructor say nothing (`with guard:` for `guard = make()`), an exit that waits
-    (`with subprocess.Popen(...)`, `with proc:`), a call into a module outside the audited set, a huge or infinite literal taken as finite
-    (`proc.wait(1e999)`, `proc.wait(10**9)`, `communicate(timeout=float('inf'))`), the os functions
-    reached through another module name (`posix.waitpid`), a poller not bound by a plain assignment from
-    select.poll/epoll/devpoll (`with select.epoll() as ep: ep.poll()`), and blocking calls outside the
-    list above (queue get, Future.result, os.read on a pipe, subprocess.run without timeout,
-    signal.sigwaitinfo, selectors, socket.recv_fds, Condition.wait_for). Returns the list of faults."""
+    after the settimeout it counts, a rebinding through `global`/`nonlocal` or after the call in a
+    loop, a lock or waiter whose name and constructor say nothing (`with guard:` for `guard =
+    make()`), a call into a module outside the audited set, a huge or infinite literal taken as
+    finite (`proc.wait(1e999)`, `communicate(timeout=float('inf'))`), the os functions reached through
+    another module name (`posix.waitpid`), a queue or selector not bound from its constructor in the
+    same source, and blocking calls outside the defining set (Future.result, os.read on a pipe, a
+    plain socket .send/.sendto/.sendmsg/socket.send_fds into a full buffer, kqueue control, input()).
+    Returns the list of faults."""
     import ast
     import fcntl
     import operator
@@ -3599,8 +3661,33 @@ def _runtime_wait_audit(source, owners=None):
             node = parent
         return tree
 
-    def dominates(bound, node):
-        # The bound's statement precedes, in its own statement list, a statement enclosing node.
+    def home(node):
+        # The scope a name in node resolves in: scope_of, with a class body its own scope too.
+        scope = scope_of(node)
+        while node in up and up[node] is not scope:
+            parent = up[node]
+            if isinstance(parent, ast.ClassDef) and any(node is statement for statement in parent.body):
+                return parent
+            node = parent
+        return scope
+
+    stores = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Store):
+            stores.setdefault(ast.unparse(node), []).append(node)
+
+    def dominates(bound, node, receiver=None):
+        # The bound's statement precedes, in its own statement list, a statement enclosing node, and
+        # both run in ONE scope (QA24 codex 1: a bound never crosses a function, lambda or class
+        # boundary, so a parameter or local shadowing the receiver cannot inherit it), with no store to
+        # the receiver or to its root name between them in that scope (no rebinding).
+        if home(bound) is not home(node):
+            return False
+        if receiver is not None:
+            root = receiver.split(".")[0].split("[")[0]
+            if any(bound.lineno < store.lineno <= node.lineno and home(store) is home(node)
+                   for store in stores.get(receiver, []) + stores.get(root, [])):
+                return False
         block, index = slots[bound]
         while node in up:
             if node in slots and slots[node][0] == block and slots[node][1] > index:
@@ -3623,6 +3710,18 @@ def _runtime_wait_audit(source, owners=None):
             return False
         return not (isinstance(value, ast.Constant) and (value.value is None or (
             isinstance(value.value, (int, float)) and value.value < 0)))
+
+    def short(value):
+        # A sleep is short only as a literal (or a min() holding one) within the stated ceiling.
+        if isinstance(value, ast.Call) and getattr(value.func, "id", None) == "min" and not value.keywords:
+            return any(short(each) for each in value.args)
+        if isinstance(value, ast.Name) and constants.get(value.id) is not None:
+            value = constants[value.id]   # a module constant assigned once, to a literal
+        return isinstance(value, ast.Constant) and type(value.value) in (int, float) \
+            and 0 <= value.value <= _RUNTIME_SLEEP_CEILING
+
+    def off(value):
+        return isinstance(value, ast.Constant) and value.value in (False, 0) and value.value is not None
 
     combine = {ast.BitOr: operator.or_, ast.BitAnd: operator.and_, ast.BitXor: operator.xor}
 
@@ -3654,22 +3753,56 @@ def _runtime_wait_audit(source, owners=None):
                         and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
                         and node.value.func.attr == "wrap_socket" and node.value.args),
                        key=lambda node: node.lineno):
-        if any(dominates(bound, node) for bound in bounds.get(ast.unparse(node.value.args[0]), ())):
+        wrapped = ast.unparse(node.value.args[0])
+        if any(dominates(bound, node, wrapped) for bound in bounds.get(wrapped, ())):
             for target in node.targets:
                 bounds.setdefault(ast.unparse(target), []).append(node)
+    def last(value):
+        # The last name part of a receiver or a callee: `a.b[0]` and `a.b(x)` both give b.
+        while isinstance(value, (ast.Subscript, ast.Call)):
+            value = value.value if isinstance(value, ast.Subscript) else value.func
+        return value.attr if isinstance(value, ast.Attribute) else getattr(value, "id", None)
+
+    # Every binding of a value a constructor made: `x = C()`, `x: T = C()`, `f(x=C())` and `with C() as x`.
+    made = [(target, node.value) for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and isinstance(node.value, ast.Call)
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])]
+    made += [(ast.Name(id=node.arg), node.value) for node in ast.walk(tree)
+             if isinstance(node, ast.keyword) and node.arg and isinstance(node.value, ast.Call)]
+    made += [(item.optional_vars, item.context_expr) for node in ast.walk(tree)
+             if isinstance(node, (ast.With, ast.AsyncWith)) for item in node.items
+             if item.optional_vars is not None and isinstance(item.context_expr, ast.Call)]
     makers = ("Lock", "RLock", "Semaphore", "BoundedSemaphore", "Condition")
-    locks = {getattr(target, "attr", getattr(target, "id", None)) for node in ast.walk(tree)
-             if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Call)
-             and getattr(node.value.func, "attr", getattr(node.value.func, "id", None)) in makers
-             for target in (node.targets if isinstance(node, ast.Assign) else [node.target])}
-    locks |= {node.arg for node in ast.walk(tree) if isinstance(node, ast.keyword) and node.arg
-              and isinstance(node.value, ast.Call)
-              and getattr(node.value.func, "attr", getattr(node.value.func, "id", None)) in makers}
-    pollers = {ast.unparse(target) for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))
-               and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
-               and node.value.func.attr in ("poll", "epoll", "devpoll")
-               and isinstance(node.value.func.value, ast.Name) and node.value.func.value.id == "select"
-               for target in (node.targets if isinstance(node, ast.Assign) else [node.target])}
+    locks = {last(target) for target, value in made if last(value.func) in makers}
+    pollers = {ast.unparse(target) for target, value in made if isinstance(value.func, ast.Attribute)
+               and value.func.attr in ("poll", "epoll", "devpoll")
+               and isinstance(value.func.value, ast.Name) and value.func.value.id == "select"}
+    selectors = {ast.unparse(target) for target, value in made
+                 if re.search("Selector$", last(value.func) or "")}
+    queues = {last(target) for target, value in made if re.search("Queue$", last(value.func) or "")}
+    waiters = {last(target) for target, value in made if last(value.func) in ("Popen",)
+               or re.search("PoolExecutor$|^Pool$", last(value.func) or "")}
+    modules = {alias.asname or alias.name.split(".")[0] for node in ast.walk(tree)
+               if isinstance(node, ast.Import) for alias in node.names}
+    sockets = ("recv", "recv_into", "recvfrom", "recvfrom_into", "recvmsg", "accept", "connect", "sendall")
+    unbounded = {last(target) for target, value in made if re.search("Queue$", last(value.func) or "")
+                 and not value.args and not value.keywords}
+    constants = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
+                and isinstance(node.value, ast.Constant):
+            constants[node.targets[0].id] = node.value if node.targets[0].id not in constants else None
+    forks = {target.id for target, value in made if isinstance(target, ast.Name) and ast.unparse(value) == "os.fork()"}
+
+    def parked(node):
+        # A sleep in the child branch (`if kid == 0:` for `kid = os.fork()`) of a fork the parent kills.
+        while node in up:
+            parent = up[node]
+            if isinstance(parent, ast.If) and any(node is statement for statement in parent.body) \
+                    and ast.unparse(parent.test) in {"{} == 0".format(kid) for kid in forks}:
+                return True
+            node = parent
+        return False
     found = []
     for node in (node for root in ([tree] if owners is None else defs) for node in ast.walk(root)):
         if not isinstance(node, (ast.Call, ast.With, ast.AsyncWith)):
@@ -3678,9 +3811,17 @@ def _runtime_wait_audit(source, owners=None):
         where = "{} line {}".format(names.get(scope, "<lambda>"), getattr(scope, "lineno", 0))
         for item in node.items if isinstance(node, (ast.With, ast.AsyncWith)) else ():
             held = item.context_expr
-            last = held.attr if isinstance(held, ast.Attribute) else getattr(held, "id", None)
-            if isinstance(held, (ast.Name, ast.Attribute)) and (
-                    last in locks or re.search("(?i)lock|mutex|sem|cond", last)):
+            named = last(held) or ""
+            if isinstance(held, ast.Call) and (named == "Popen" or named in waiters
+                                               or re.search("PoolExecutor$|^Pool$", named)):
+                found.append((node.lineno, "{}: a with-statement whose exit waits with no bound `with {}` "
+                              "(line {})".format(where, ast.unparse(held), node.lineno)))
+            elif isinstance(held, (ast.Name, ast.Attribute, ast.Subscript)) and named in waiters:
+                found.append((node.lineno, "{}: a with-statement whose exit waits with no bound `with {}` "
+                              "(line {})".format(where, ast.unparse(held), node.lineno)))
+            elif isinstance(held, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)) and (
+                    named in locks or re.search("(?i)lock|mutex|sem|cond", named)):
+                # QA24 claude minor 1: `with h.locks[0]:` and `with h.lock_for(x):` acquire as well.
                 found.append((node.lineno, "{}: a with-statement lock acquisition with no bound `with {}` "
                               "(line {})".format(where, ast.unparse(held), node.lineno)))
         if isinstance(node, ast.Call):
@@ -3699,6 +3840,20 @@ def _runtime_wait_audit(source, owners=None):
                 elif label in ("waitpid", "wait4", "waitid") and not spells(
                         argument(node, 2 if label == "waitid" else 1, "options"), "WNOHANG"):
                     fault = "os.{} without WNOHANG".format(label)
+            elif module == "subprocess" and label in ("getoutput", "getstatusoutput"):
+                fault = "a subprocess.{}, which takes no timeout".format(label)
+            elif module == "subprocess" and label in ("run", "call", "check_call", "check_output") \
+                    and not finite(argument(node, None, "timeout")):
+                fault = "subprocess.{} without a finite timeout".format(label)
+            elif module == "time" and label == "sleep" and not short(argument(node, 0, "secs")) \
+                    and not parked(node):
+                fault = "a time.sleep not provably at most {} s".format(_RUNTIME_SLEEP_CEILING)
+            elif module == "signal" and label in ("pause", "sigwait", "sigwaitinfo"):
+                fault = "a blocking signal.{}".format(label)
+            elif module == "socket" and label == "recv_fds" and node.args and not any(
+                    dominates(bound, node, ast.unparse(node.args[0]))
+                    for bound in bounds.get(ast.unparse(node.args[0]), ())):
+                fault = "a socket.{}() with no settimeout on {} dominating it".format(label, ast.unparse(node.args[0]))
             elif module == "fcntl" and label in ("flock", "lockf"):
                 operation = argument(node, 1, "operation", "cmd")
                 if not spells(operation, "LOCK_NB") and not spells(operation, "LOCK_UN"):
@@ -3706,19 +3861,30 @@ def _runtime_wait_audit(source, owners=None):
             elif module == "select" and label == "select":
                 if not finite(argument(node, 3, "timeout")):
                     fault = "select.select without a finite timeout"
+            elif module in modules:
+                pass   # a module function (sqlite3.connect, os.path.join), not a method of a waitable
             elif label in ("wait", "join") and module != "str" and not isinstance(base, ast.Constant) \
                     and not finite(argument(node, 0, "timeout")):
                 fault = "an unbounded .{}()".format(label)
+            elif label == "wait_for" and not finite(argument(node, 1, "timeout")):
+                fault = "an unbounded .wait_for()"
+            elif label == "get" and last(base) in queues and not finite(argument(node, 1, "timeout")) \
+                    and not off(argument(node, 0, "block")):
+                fault = "a blocking queue .get()"
+            elif label == "put" and last(base) in queues - unbounded and not finite(argument(node, 2, "timeout")) \
+                    and not off(argument(node, 1, "block")):
+                fault = "a blocking queue .put()"
+            elif label == "select" and ast.unparse(base) in selectors and not finite(argument(node, 0, "timeout")):
+                fault = "a selector's select() without a finite timeout"
             elif label == "communicate" and not finite(argument(node, 1, "timeout")):
                 fault = "an unbounded .communicate() (its slot 0 is input, not a timeout)"
-            elif label == "acquire" and not finite(argument(node, 1, "timeout")) and not (
-                    isinstance(argument(node, 0, "blocking"), ast.Constant)
-                    and argument(node, 0, "blocking").value in (False, 0)):
+            elif label == "acquire" and not finite(argument(node, 1, "timeout")) \
+                    and not off(argument(node, 0, "blocking")):
                 fault = "an unbounded .acquire()"
             elif label == "poll" and ast.unparse(base) in pollers and not finite(argument(node, 0, "timeout")):
                 fault = "a select poller's poll() without a finite timeout"
-            elif label in ("recv", "recv_into", "recvfrom", "recvfrom_into", "recvmsg") \
-                    and not any(dominates(bound, node) for bound in bounds.get(ast.unparse(base), ())):
+            elif label in sockets and not any(dominates(bound, node, ast.unparse(base))
+                                              for bound in bounds.get(ast.unparse(base), ())):
                 fault = "a .{}() with no settimeout on {} dominating it".format(label, ast.unparse(base))
             if fault:
                 found.append((node.lineno, "{}: {} `{}` (line {})".format(
@@ -3803,6 +3969,13 @@ _RUNTIME_WAIT_UNBOUNDED = (
     "_fixture_wait(pid, 0)", "emit._fixture_wait(pid, 0)", "os.wait()", "select.select([fd], [], [])",
     "os.waitpid(pid, os.WNOHANG & 0)", "fcntl.flock(fd, fcntl.LOCK_EX | (fcntl.LOCK_NB & 0))",
     "os.waitpid(pid, flags)", "os.waitpid(pid, WNOHANG)", "_fixture_wait(pid, os.WNOHANG ^ os.WNOHANG)",
+    # QA25: one or more of each family the completed defining set added.
+    "subprocess.run(cmd)", "subprocess.call(cmd)", "subprocess.check_call(cmd, timeout=None)",
+    "subprocess.check_output(cmd)", "subprocess.getoutput(cmd)", "subprocess.getstatusoutput(cmd)",
+    "os.wait3(0)", "os.wait4(pid, 0)", "ready.wait()", "lock.wait_for(ready)", "jobs.get()", "jobs.get(True, None)",
+    "jobs.put(1)", "sel.select()", "sel.select(None)", "sock.accept()", "sock.connect(addr)", "sock.sendall(b'x')",
+    "socket.recv_fds(sock, 1, 1)", "time.sleep(60)", "time.sleep(delay)", "signal.pause()",
+    "signal.sigwaitinfo({signal.SIGCHLD})",
 )
 _RUNTIME_WAIT_BOUNDED = (
     "os.waitpid(pid, os.WNOHANG)", "proc.communicate(b'x', 1.0)", "proc.communicate(timeout=1.0)",
@@ -3811,16 +3984,30 @@ _RUNTIME_WAIT_BOUNDED = (
     "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", "worker.join(timeout=1.0)", "_fixture_wait(pid, os.WNOHANG)",
     "os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG)", "fcntl.flock(fd, fcntl.LOCK_UN)",
     "fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+    "subprocess.run(cmd, timeout=5)", "subprocess.check_output(cmd, timeout=5.0)", "ready.wait(1.0)",
+    "lock.wait_for(ready, 1.0)", "jobs.get(timeout=1.0)", "jobs.get(False)", "jobs.put(1, timeout=1.0)",
+    "jobs.put(1, block=False)", "free.put(1)", "sel.select(0.5)", "other.accept()", "other.connect(addr)",
+    "other.sendall(b'x')", "socket.recv_fds(other, 1, 1)", "time.sleep(0.5)", "time.sleep(min(delay, 0.05))",
+    "os.path.join(cmd, addr)",
 )
 _RUNTIME_WAIT_PROBE = """import fcntl
 import os
+import queue
 import select
+import selectors
+import signal
+import socket
+import subprocess
+import time
 
 
 class Probe:
     class Inner:
-        def probe(self, pid, proc, lock, fd, sock, other, worker, emit):
+        def probe(self, pid, proc, lock, fd, sock, other, worker, emit, cmd, addr, delay, ready):
             poller = select.poll()
+            jobs = queue.Queue(maxsize=4)
+            free = queue.Queue()
+            sel = selectors.DefaultSelector()
             other.settimeout(1.0)
             {}
 """
@@ -3845,7 +4032,21 @@ _RUNTIME_WAIT_POSITIONS = (
     ("def qa(sock):\n    def inner():\n        return sock.recv(1)\n    sock.settimeout(1)\n    return inner\n",
      "qa.inner"),
     ("def qa(sock):\n    sock.settimeout(1)\n    if sock:\n        return sock.recv(1)\n", None),
-    ("def qa(sock):\n    sock.settimeout(1)\n    def inner():\n        return sock.recv(1)\n    return inner\n", None),
+    # QA25 (codex QA24 1): a bound never crosses a function, lambda or class boundary, nor a rebinding.
+    ("def qa(sock):\n    sock.settimeout(1)\n    def inner():\n        return sock.recv(1)\n    return inner\n",
+     "qa.inner"),
+    ("sock.settimeout(0.01)\n\n\ndef qa(sock):\n    return sock.recv(1)\n", "qa"),
+    ("sock.settimeout(0.01)\n\n\nclass Qa:\n    data = sock.recv(1)\n", "<module>"),
+    ("def qa(sock, spare):\n    sock.settimeout(1)\n    sock = spare\n    return sock.recv(1)\n", "qa"),
+    ("def qa(sock):\n    sock.settimeout(1)\n    return lambda: sock.recv(1)\n", "qa.<lambda>"),
+    # QA25 (claude QA24 minor 1): a lock reached through a subscript or a call; an exit that waits.
+    ("def qa(h):\n    with h.launch_locks[0]:\n        pass\n", "qa"),
+    ("def qa(h):\n    with h.lock_for('x'):\n        pass\n", "qa"),
+    ("def qa(cmd):\n    with subprocess.Popen(cmd) as proc:\n        pass\n", "qa"),
+    ("def qa(cmd):\n    proc = subprocess.Popen(cmd)\n    with proc:\n        pass\n", "qa"),
+    ("def qa():\n    with concurrent.futures.ThreadPoolExecutor() as pool:\n        pass\n", "qa"),
+    ("def qa():\n    kid = os.fork()\n    if kid == 0:\n        time.sleep(60)\n", None),
+    ("def qa():\n    kid = os.fork()\n    if kid != 0:\n        time.sleep(60)\n", "qa"),
     ("def qa(lock, path):\n    with open(path) as handle:\n        return lock.acquire(timeout=1.0), handle\n", None),
     ("def qa(pid, status=os.waitpid(1, os.WNOHANG)):\n    pass\n", None),
 )
@@ -3878,6 +4079,22 @@ def _runtime_wait_vector_faults():
 # _runtime_wait_audit's findings per module source text: the traversal vectors re-audit mostly
 # unchanged modules, and a source text always yields the same findings.
 _RUNTIME_WAIT_AUDITED = {}
+
+
+def _runtime_wait_unexcused(filename, found):
+    """The audit findings `found` in `filename` that neither a _RUNTIME_WAIT_EXEMPT entry (by file, scope
+    and call as spelled) nor a _RUNTIME_WAIT_CHILD_SCOPES sleep excusal answers (QA25: the owner pass and
+    its revert vectors see the same answers as the whole-module pass, which alone counts each use)."""
+    kept = []
+    for miss in found:
+        scope, spelled = miss.split(" ", 1)[0], miss.split("`")[1] if "`" in miss else None
+        if any(entry[:3] == (filename, scope, spelled) for entry in _RUNTIME_WAIT_EXEMPT):
+            continue
+        if ": a time.sleep not provably" in miss and any(
+                each[:2] == (filename, scope.split(".")[0]) for each in _RUNTIME_WAIT_CHILD_SCOPES):
+            continue
+        kept.append(miss)
+    return kept
 
 
 def _runtime_wait_module_faults(overrides=None):
@@ -3944,12 +4161,22 @@ def _runtime_wait_module_faults(overrides=None):
             top = scope.split(".")[0]
             entry = next((entry for entry in _RUNTIME_WAIT_EXEMPT
                           if entry[:3] == (filename, scope, spelled) and entry not in used), None)
+            child = next((each for each in _RUNTIME_WAIT_CHILD_SCOPES if each[:2] == (filename, top)), None)
             if entry is not None:
                 used.add(entry)
+            elif child is not None and ": a time.sleep not provably" in miss:
+                used.add(child)
             elif (filename, top) not in excused:
                 faults.append("the whole-module bounded-wait audit of {} found: {}".format(filename, miss))
     faults += ["the bounded-wait exemption {} {} `{}` excuses nothing".format(*entry[:3])
-               for entry in _RUNTIME_WAIT_EXEMPT if entry not in used]
+               for entry in _RUNTIME_WAIT_EXEMPT + _RUNTIME_WAIT_CHILD_SCOPES if entry not in used]
+    for filename, name, launch, _reason in _RUNTIME_WAIT_CHILD_SCOPES:
+        launched = [node for node in ast.walk(trees.get(filename, ast.Module(body=[], type_ignores=[])))
+                    if isinstance(node, ast.Constant) and isinstance(node.value, str) and launch in node.value]
+        bounded = "run_status_owned(" in sources.get(filename, "") and "timeout=timeout)" in sources.get(filename, "")
+        if not launched or not bounded:
+            faults.append("the child-scope exemption of {} no longer holds: it is not launched as a bounded "
+                          "run_status_owned case".format(name))
     emit = trees.get("_opf_emit.py")
     process = next((node for node in ast.walk(emit) if isinstance(node, ast.ClassDef)
                     and node.name == "_FixtureProcess"), None) if emit is not None else None
@@ -3973,6 +4200,10 @@ def _runtime_wait_module_faults(overrides=None):
     busy = sorted({ast.unparse(node) for holder in held for statement in holder.body
                    for node in ast.walk(statement) if isinstance(node, ast.Call)
                    and getattr(node.func, "attr", None) not in ("set", "is_set")})
+    # codex QA24 minor 2: a holder that loops (or awaits) is not proved to finish, so it is a fault too.
+    busy += sorted({"a {} at line {}".format(type(node).__name__, node.lineno) for holder in held
+                    for statement in holder.body for node in ast.walk(statement)
+                    if isinstance(node, (ast.While, ast.For, ast.AsyncFor, ast.Await, ast.With, ast.AsyncWith))})
     made = {ast.unparse(node.value) for node in ast.walk(emit if emit is not None else ast.Module(body=[], type_ignores=[]))
             if isinstance(node, ast.Assign)
             and any(ast.unparse(target).endswith("._launch_lock") for target in node.targets)}
@@ -4000,7 +4231,8 @@ def _runtime_wait_traversal_faults():
     one fault once a non-test helper of its own module reaches it (the excusal is transitive). QA24:
     a wait in a default argument of an audited module's function is one fault at `<module>`, and a
     re-export of a test-only wait and a test-only decorator applied at import each withdraw the
-    excusal. Returns the faults."""
+    excusal. QA25: restoring the unbounded git_input subprocess.run in check_opf_init, or a new
+    subprocess.run without timeout in a run module, is one fault. Returns the faults."""
     import ast
     here = Path(__file__).resolve().parent
     entry = (here / "opf.py").read_text(encoding="utf-8")
@@ -4045,6 +4277,13 @@ def _runtime_wait_traversal_faults():
         ("a test-only decorator applied at import (claude QA23 minor 2)", "_opf_oplock.py", "_st_wait_vector_deco",
          {"_opf_oplock.py": oplock + "\n\ndef _st_wait_vector_deco(fn):\n    os.waitpid(-1, 0)\n    return fn\n"
           "\n\n@_st_wait_vector_deco\ndef _st_wait_vector_decorated():\n    pass\n"}),
+        ("the unbounded git_input subprocess.run restored (claude QA24 1)", "check_opf_init.py",
+         "_suite_isolated.git_input",
+         {"check_opf_init.py": edited("check_opf_init.py", ", timeout=_opf_observe._GIT_TIMEOUT_S)", ")")}),
+        ("a new subprocess.run without timeout in a run module (QA25)", "_opf_check.py", "qa_run",
+         {"_opf_check.py": edited("_opf_check.py", '\n\nif __name__ == "__main__":\n',
+                                  "\n\ndef qa_run(cmd):\n    import subprocess\n    return subprocess.run(cmd)\n"
+                                  '\n\nif __name__ == "__main__":\n')}),
         ("a test-only wait mentioned only by test code", None, None,
          {"_opf_oplock.py": oplock + block + "\n\ndef _st_wait_vector_caller(pid):\n    return _st_wait_vector_block(pid)\n"}),
     )
@@ -4080,7 +4319,8 @@ def _self_test_runtime_wait_unit():
     import time
     faults = []
     source = Path(__file__).read_text(encoding="utf-8")
-    found = _runtime_wait_audit(source, _RUNTIME_WAIT_OWNERS) + _runtime_wait_audit(_RUNTIME_SUPERVISOR)
+    found = _runtime_wait_unexcused("opf.py", _runtime_wait_audit(source, _RUNTIME_WAIT_OWNERS)) \
+        + _runtime_wait_audit(_RUNTIME_SUPERVISOR)
     faults += ["the bounded-wait audit of the committed source found: {}".format(miss) for miss in found]
     faults += _runtime_wait_module_faults()
     faults += _runtime_wait_traversal_faults()
@@ -4092,7 +4332,7 @@ def _self_test_runtime_wait_unit():
         segment = segments.get(owner) or ""
         if segment.count(committed) != 1:
             faults.append("the revert vector for {} does not match its source once ({!r})".format(owner, committed))
-        elif not _runtime_wait_audit(segment.replace(committed, reverted)):
+        elif not _runtime_wait_unexcused("opf.py", _runtime_wait_audit(segment.replace(committed, reverted))):
             faults.append("the bounded-wait audit missed a revert in {} ({!r} to {!r})".format(
                 owner, committed, reverted))
     kid = os.fork()
@@ -4533,11 +4773,15 @@ def _bounded_wait(pid, bound=None, *, nowait=False, forked=False):
         left = deadline - time.monotonic()
         if left <= 0.0:
             break
-        time.sleep(min(pause, left))
+        time.sleep(min(pause, left, 0.05))
         pause = min(pause * 2.0, 0.05)
+    import signal
     unreaped = []
     if not forked:
         disposal = "not signalled: the call site does not declare it its own fork"
+    elif not (hasattr(os, "pidfd_open") and hasattr(os, "P_PIDFD") and hasattr(os, "WNOWAIT")
+              and hasattr(signal, "pidfd_send_signal")):
+        disposal = "not signalled: pidfd signalling is unsupported here, so no kill can be proved safe"
     elif _kill_proved_child(pid, forked=True, unreaped=unreaped):
         disposal = "; ".join(unreaped) or "SIGKILLed through its pidfd and reaped"
     else:

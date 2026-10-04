@@ -198,9 +198,15 @@ def _suite_isolated(invoke):
             # dropped), so an inherited GIT_INDEX_FILE / GIT_DIR / GIT_WORK_TREE / GIT_OBJECT_DIRECTORY /
             # GIT_COMMON_DIR cannot redirect this write to a caller's external index or repository; it stays
             # hermetic like the other fixture calls, which all route through the same scrub (test-hermeticity).
-            proc = subprocess.run([git, "-C", str(root)] + list(args), input=data,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  env=_opf_observe._scrubbed_env())
+            # Bounded like every other fixture git call (QA24): on expiry run() kills git and waits for
+            # git alone, not for EOF from a descendant still holding its pipes, and the gate fails.
+            try:
+                proc = subprocess.run([git, "-C", str(root)] + list(args), input=data,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      env=_opf_observe._scrubbed_env(), timeout=_opf_observe._GIT_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                raise OSError("fixture git (stdin) timed out after {} s at {!r}".format(
+                    _opf_observe._GIT_TIMEOUT_S, str(root))) from None
             if proc.returncode != 0:
                 raise OSError("fixture git (stdin) failed at {!r}: {}".format(
                     str(root), proc.stderr.decode("utf-8", "replace")))
