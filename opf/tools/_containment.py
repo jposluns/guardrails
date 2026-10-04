@@ -66,8 +66,9 @@ def _git_lines(root, args):
     own walk of that root fails closed by name). Callers treat None as git-absent and fall
     back on the fail-closed side: a fixed-location root, a walk with NO ignore filter (more refusals,
     never fewer). stdin is closed and the call is bounded, so this probe itself cannot be parked by a
-    hostile tree; the ignore-control files git WOULD read with a plain blocking open are screened by
-    the caller before the one query that reads them (see precheck_special_files)."""
+    hostile tree; the ignore-control files and nested .git markers git WOULD read with a plain
+    blocking open are screened by the caller before the one query that reads them (see
+    precheck_special_files)."""
     import subprocess
     # QA round 7 (codex M4 = claude M2): every GIT_* variable is scrubbed from the child
     # environment, as check_portability and scrub_git_environment already do. An inherited
@@ -161,21 +162,29 @@ def precheck_special_files(root):
     walk cannot certify. ACCEPTED: a regular file or directory; a DANGLING symlink (every open of it
     fails at once, so no read of it can block); a symlink to a REGULAR file, inside or outside the
     root (a plain read of a regular file does not block); a symlink to a directory INSIDE the root,
-    whose resolved target subtree is walked even when that target is git-ignored, with the
-    ignored-only leniencies applied ONLY when BOTH the link path and the target path are
-    git-ignored (QA round 9 claude MD1, QA round 10 claude MD2: the classification follows the
-    PATHS themselves, in both directions, because the contents are reachable under both the
-    link's path and the target's own path, and a non-ignored path on either side means a gate's
-    fixed-path read of non-ignored content can reach them), and at most once per ignore
-    classification (a visited set keyed by device, inode and classification bounds link cycles), so
-    linked-in contents, which a gate can reach through the link's own certified path, are checked
-    rather than trusted; and a GIT-IGNORED symlink
+    whose contents are walked UNDER THE LINK'S OWN LOGICAL PATH with the link path's ignore
+    classification (QA round 11 codex MAJOR: the ignore status and the tracked-shadow test follow
+    the path AS GIT NAMES IT, never the target's spelling; substituting the target's path let a
+    second link regain the ignored-only leniencies under that spelling, so a tracked path through
+    two chained links reached an uncertified tree; the target's own subtree is independently
+    walked under its own path and classification, which keeps QA round 9 claude MD1 and QA round
+    10 claude MD2 covered in both directions), at most 64 link-walks per run (a directory-link
+    cycle, a link to its own ancestor, or a heavier aliasing is refused by name, fail-closed,
+    never walked forever or certified in part), so linked-in contents, which a gate can reach
+    through the link's own certified path, are checked rather than trusted; and a GIT-IGNORED
+    symlink
     to a directory outside the root THAT SHADOWS NO TRACKED CONTENT (git ls-files under the link's
     own path answers empty), or a git-ignored unresolvable symlink, both accepted un-walked (a
     developer's .venv link shadows nothing; an unresolvable link cannot block, every open of it
     fails at once); a git-ignored out-of-root directory link that DOES shadow tracked content is
     refused by name, because a gate's fixed-path read of that tracked content would follow it out
-    of the certified tree.
+    of the certified tree. Independently of the walk, every TRACKED logical path (index or HEAD)
+    is resolved COMPONENT BY COMPONENT, lstat and readlink only (nothing is opened, so the
+    classification itself cannot block), and REFUSED BY THE LOGICAL PATH when any link step leaves
+    the root, when resolution exceeds 40 link steps (a loop), or when the object it resolves to is
+    a special file (QA round 11, codex MAJOR: the object a tracked path resolves to is always
+    classified, however many directory links re-spell the route); a tracked path with a missing or
+    dangling component stays accepted (every open of it fails at once).
 
     SCOPE: the whole tree under root, except the repository's OWN git dir (the one `git rev-parse
     --absolute-git-dir` names; git's own metadata is outside the tools' read set, but git itself
@@ -208,7 +217,12 @@ def precheck_special_files(root):
     ignore list, a first pass refuses any in-tree .gitignore that is, or resolves to, a special file,
     or is a symlink git cannot resolve other than a dangling one: git computes the ignore list by
     OPENING those files with a plain blocking read, so they are screened ahead of the one git query
-    that reads them. When git cannot answer at all (an exported tree with no repository; any git
+    that reads them. The same pass screens every nested .git entry (QA round 11, claude m2): a
+    .git that is, or resolves to, a special file, and a .git directory whose HEAD is, or resolves
+    to, one, are refused by name BEFORE that query, because git's ignore probe opens a nested .git
+    file and .git/HEAD with plain blocking reads while deciding whether the directory is a nested
+    repository; without this screen the refusal still came, but only after the query's 60-second
+    bound had expired. When git cannot answer at all (an exported tree with no repository; any git
     failure), the walk runs with NO ignore filter: strictly more refusals, never fewer.
 
     ENTRY POINTS. This module is invoked directly (--precheck) as the FIRST post-checkout run step of
@@ -270,6 +284,29 @@ def precheck_special_files(root):
         # special file inside it is refused by name (git's own reads of such a layout are
         # bounded by the _git_lines timeout).
         return own_git_dir is not None and os.path.realpath(path) == own_git_dir
+    def _screen_pre_git(path, what):
+        # lstat, then stat for a symlink: classification without ever opening, so this screen
+        # itself cannot block. Refuses, by name, an entry that is (or resolves to) a special
+        # file, and a non-dangling symlink that cannot be resolved; returns the resolved mode,
+        # or None when the entry is missing or dangles (git's own open of it fails at once).
+        try:
+            checked = os.lstat(path).st_mode
+        except FileNotFoundError:
+            return None
+        if stat.S_ISLNK(checked):
+            try:
+                checked = os.stat(path).st_mode
+            except (FileNotFoundError, NotADirectoryError):
+                return None
+            except OSError as exc:
+                _refuse(path, "{} that is a symlink git cannot resolve ({}); git opens it "
+                              "with a plain blocking read".format(what, exc))
+        for is_kind, kind in _SPECIAL_KINDS:
+            if is_kind(checked):
+                _refuse(path, "{} that is (or resolves to) {}; git opens it with a plain "
+                              "blocking read".format(what, kind))
+        return checked
+
     try:
         real_root = os.path.realpath(root)
         for dirpath, dirnames, filenames in os.walk(root, onerror=_raise, followlinks=False):
@@ -277,39 +314,36 @@ def precheck_special_files(root):
                            if not (d == ".git" and os.path.realpath(dirpath) == real_root
                                    and _own_git(os.path.join(dirpath, d)))]
             for name in dirnames + filenames:
-                if name != ".gitignore":
-                    continue
-                path = os.path.join(dirpath, name)
-                try:
-                    checked = os.lstat(path).st_mode
-                except FileNotFoundError:
-                    continue
-                if stat.S_ISLNK(checked):
-                    try:
-                        checked = os.stat(path).st_mode
-                    except (FileNotFoundError, NotADirectoryError):
-                        continue
-                    except OSError as exc:
-                        _refuse(path, "an ignore-control file that is a symlink git cannot resolve "
-                                      "({}); git opens it to compute the ignore list".format(exc))
-                for is_kind, kind in _SPECIAL_KINDS:
-                    if is_kind(checked):
-                        _refuse(path, "an ignore-control file that is (or resolves to) {}; git opens "
-                                      "it with a plain blocking read to compute the ignore "
-                                      "list".format(kind))
+                if name == ".gitignore":
+                    _screen_pre_git(os.path.join(dirpath, name),
+                                    "an ignore-control file (git reads it to compute the "
+                                    "ignore list)")
+                elif name == ".git":
+                    # QA round 11 (claude m2): git's ignore query (ls-files --others) probes
+                    # every nested .git while deciding whether its directory is a nested
+                    # repository: it OPENS a .git file (a gitfile) and a .git/HEAD with plain
+                    # blocking reads, so both are screened BEFORE the one git query that reads
+                    # them. Without this screen the walk below still refused such a plant, but
+                    # only after that query's 60-second bound had expired. The repository's
+                    # OWN root .git dir is already pruned above (git's reads of its own
+                    # metadata are the operator-domain residual the SCOPE section names).
+                    path = os.path.join(dirpath, name)
+                    mode = _screen_pre_git(path, "a nested .git marker (git reads it while "
+                                                 "probing for a nested repository)")
+                    if mode is not None and stat.S_ISDIR(mode):
+                        _screen_pre_git(os.path.join(path, "HEAD"),
+                                        "a nested .git HEAD (git reads it while probing for "
+                                        "a nested repository)")
         ignored = _ignored_paths(root)
         tracked_state = []
 
-        def _shadows_tracked(rel):
-            # claude M2 (QA round 5): an ignored out-of-root directory link is allowed only when it
-            # shadows NO tracked content; one planted over a tracked path redirects a gate's
-            # fixed-path read of that content to a tree this walk cannot certify, so it is refused.
-            # ONE cached read-only git query; when git cannot answer, the caller refuses (fail-closed).
+        def _tracked():
+            # QA round 6 (claude M3): a path shadows tracked content when it has entries in the
+            # INDEX or in HEAD; asking the index alone lets a staged removal (git rm --cached)
+            # hide a shadowing link, so both are unioned. An unborn HEAD (no commit yet)
+            # contributes nothing; any other ls-tree failure is git-cannot-answer (None), on
+            # which every caller fails closed. One cached read-only git query set per walk.
             if not tracked_state:
-                # QA round 6 (claude M3): a path shadows tracked content when it has entries in the
-                # INDEX or in HEAD; asking the index alone lets a staged removal (git rm --cached)
-                # hide a shadowing link, so both are unioned. An unborn HEAD (no commit yet)
-                # contributes nothing; any other ls-tree failure is git-cannot-answer (refuse).
                 out = _git_lines(root, ["ls-files", "-z"])
                 head = _git_lines(root, ["ls-tree", "-r", "-z", "--name-only", "HEAD"])
                 if head is None and _git_lines(root, ["rev-parse", "--verify", "--quiet",
@@ -320,39 +354,92 @@ def precheck_special_files(root):
                 else:
                     tracked_state.append(sorted(
                         {os.fsdecode(raw) for raw in out.split(b"\0") + head.split(b"\0") if raw}))
-            tracked = tracked_state[0]
+            return tracked_state[0]
+
+        def _shadows_tracked(rel):
+            # claude M2 (QA round 5): an ignored out-of-root directory link is allowed only when it
+            # shadows NO tracked content; one planted over a tracked path redirects a gate's
+            # fixed-path read of that content to a tree this walk cannot certify, so it is refused.
+            # When git cannot answer (None), the caller refuses (fail-closed).
+            tracked = _tracked()
             if tracked is None:
                 return None
             spec = rel.replace(os.sep, "/")
             return any(entry == spec or entry.startswith(spec + "/") for entry in tracked)
 
-        def _rel_ignored(rel):
-            # QA round 9 (claude MD1): a walked directory's ignore status comes from the PATH
-            # ITSELF (its own rel path and ancestors against git's ignore list), never from the
-            # ignore status of a LINK that led there: the stack is LIFO, so an ignored link to a
-            # tracked directory could otherwise enter that directory's subtree FIRST under the
-            # ignored-only leniencies, and the visited set would then skip the non-ignored walk
-            # of the same subtree, applying the leniencies to content that is not ignored.
-            if ignored is None or not rel:
-                return False
-            parts = rel.split(os.sep)
-            return any(os.sep.join(parts[:i]) in ignored for i in range(1, len(parts) + 1))
+        def _classify_tracked(spec):
+            # QA round 11 (codex MAJOR): resolve root/<spec> COMPONENT BY COMPONENT with lstat
+            # and readlink only (nothing is opened, so the classification itself cannot block).
+            # Returns the mode of the object the tracked path resolves to, or None when a
+            # component is missing or dangles (every open of that path fails at once). Refuses,
+            # BY THE LOGICAL PATH, a link step that leaves the root (a '..' above it, or an
+            # absolute target outside it, compared on the RAW target string: a lexically
+            # normalized '..' can disagree with the kernel when it follows a link, so '..' is
+            # only ever applied to the physical, already-resolved prefix), a resolution of more
+            # than 40 link steps (a loop), and a component no lstat or readlink call can
+            # classify.
+            logical = os.path.join(os.fspath(root), spec.replace("/", os.sep))
+            pending = list(reversed(spec.split("/")))
+            cur = real_root
+            hops = 0
+            mode = None
+            while pending:
+                comp = pending.pop()
+                if comp in ("", os.curdir):
+                    continue
+                if comp == os.pardir:
+                    step = os.path.dirname(cur)
+                    if step != real_root and not step.startswith(real_root + os.sep):
+                        _refuse(logical, "a tracked path that resolves through a link leaving "
+                                         "the repository root (a '..' step above {}); what a "
+                                         "gate's read of it reaches cannot be certified from "
+                                         "this root".format(cur))
+                    cur, mode = step, None
+                    continue
+                candidate = os.path.join(cur, comp)
+                try:
+                    mode = os.lstat(candidate).st_mode
+                except (FileNotFoundError, NotADirectoryError):
+                    return None
+                except OSError as exc:
+                    _refuse(logical, "a tracked path with a component this walk cannot "
+                                     "classify ({})".format(exc))
+                if stat.S_ISLNK(mode):
+                    hops += 1
+                    if hops > 40:
+                        _refuse(logical, "a tracked path whose resolution takes more than 40 "
+                                         "link steps (a link loop); what it resolves to "
+                                         "cannot be certified")
+                    try:
+                        target = os.readlink(candidate)
+                    except OSError as exc:
+                        _refuse(logical, "a tracked path through a symlink this walk cannot "
+                                         "read ({})".format(exc))
+                    if os.path.isabs(target):
+                        if target != real_root and not target.startswith(real_root + os.sep):
+                            _refuse(logical, "a tracked path that resolves through a link "
+                                             "leaving the repository root (to {}); what a "
+                                             "gate's read of it reaches cannot be certified "
+                                             "from this root".format(target))
+                        pending.extend(reversed(target[len(real_root):].split(os.sep)))
+                        cur = real_root
+                    else:
+                        pending.extend(reversed(target.split(os.sep)))
+                    mode = None
+                    continue
+                cur = candidate
+            if mode is None:
+                try:
+                    mode = os.lstat(cur).st_mode
+                except OSError as exc:
+                    _refuse(logical, "a tracked path with a component this walk cannot "
+                                     "classify ({})".format(exc))
+            return mode
 
-        visited = set()
+        link_walks = 0
         stack = [(os.fspath(root), "", False)]
         while stack:
             dirpath, relbase, under_ignored = stack.pop()
-            try:
-                dir_stat = os.stat(dirpath)
-            except FileNotFoundError:
-                continue
-            # QA round 9 (claude MD1), second independent guard: the visited key carries the
-            # ignore CLASSIFICATION, so even when one real directory is reached under both
-            # classifications, the NON-ignored walk (strictly more refusals) still happens.
-            dir_key = (dir_stat.st_dev, dir_stat.st_ino, under_ignored)
-            if dir_key in visited:
-                continue
-            visited.add(dir_key)
             try:
                 with os.scandir(dirpath) as scan:
                     entries = sorted(scan, key=lambda item: item.name)
@@ -412,18 +499,27 @@ def precheck_special_files(root):
                 if stat.S_ISDIR(target_mode):
                     real = os.path.realpath(path)
                     if real == real_root or real.startswith(real_root + os.sep):
-                        link_rel = os.path.relpath(real, real_root)
-                        if link_rel == ".":
-                            link_rel = ""
-                        # Walked even when the TARGET is ignored (a gate can reach it through
-                        # the link's own certified path). LENIENT only when BOTH the link path
-                        # and the target path are ignored (QA round 9 claude MD1, QA round 10
-                        # claude MD2): the ignore classification follows the PATHS themselves,
-                        # in both directions, because an ignored link to a tracked directory
-                        # (MD1) and a tracked link into an ignored directory (MD2) each leave
-                        # the contents reachable under a NON-ignored path, whose walk must be
-                        # the strict one.
-                        stack.append((real, link_rel, skipped and _rel_ignored(link_rel)))
+                        # QA round 11 (codex MAJOR): descend through an in-root directory link
+                        # by the link's OWN LOGICAL path and ignore classification, never the
+                        # target's spelling: substituting the target's path (round 10) let a
+                        # second link, ignored only under that spelling, regain the
+                        # ignored-only leniencies while the shadow test saw only the
+                        # target-relative rel, so a tracked path through two chained links
+                        # reached an uncertified tree. The target's own subtree is still
+                        # walked under its own path and classification by the physical
+                        # descent, which keeps QA round 9 claude MD1 and QA round 10 claude
+                        # MD2 covered in both directions. Link-walks are COUNTED, never
+                        # deduplicated (a dedup keyed on the target identity is exactly what
+                        # lost the logical spelling): a directory-link cycle (a link to its
+                        # own ancestor above all) or a tree aliased through more than 64 links
+                        # is refused by name, fail-closed.
+                        link_walks += 1
+                        if link_walks > 64:
+                            _refuse(path, "a symlinked directory traversal past this walk's "
+                                          "bound of 64 (a directory-link cycle, a link to its "
+                                          "own ancestor, or a heavily aliased tree); the "
+                                          "logical paths through it cannot all be certified")
+                        stack.append((path, rel, skipped))
                     elif not skipped:
                         _refuse(path, "a symlink to a directory outside the repository root (to "
                                       "{}); its contents cannot be certified from this "
@@ -433,6 +529,20 @@ def precheck_special_files(root):
                                       "root (to {}) that shadows tracked content; a gate's read of "
                                       "that tracked path would follow it to a tree this walk "
                                       "cannot certify".format(real))
+        # QA round 11 (codex MAJOR), the independent layer the walk's leniencies cannot blunt:
+        # every TRACKED logical path is resolved component by component and the OBJECT it
+        # resolves to is classified, however many directory links re-spell the route. When git
+        # cannot answer there is no tracked list, and the walk above has already run with NO
+        # ignore filter, where every out-of-root directory link is refused outright.
+        for spec in (_tracked() or ()):
+            final_mode = _classify_tracked(spec)
+            if final_mode is None:
+                continue
+            for is_kind, kind in _SPECIAL_KINDS:
+                if is_kind(final_mode):
+                    _refuse(os.path.join(os.fspath(root), spec.replace("/", os.sep)),
+                            "a tracked path that resolves, through the links on its route, to "
+                            "{} (a special file, not a regular file)".format(kind))
     except (OSError, ValueError) as exc:  # ValueError: a root path no path call accepts (an embedded NUL)
         print("error: cannot walk the repository tree {} ({}); fail-closed (an unreadable or "
               "unwalkable entry, even inside a git-ignored directory, stops the checks by design; "

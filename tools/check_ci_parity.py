@@ -4721,6 +4721,8 @@ def self_test():
         "        run: git config --global core.autocrlf true",
         "      - uses: actions/checkout@v4",
         "      - uses: actions/setup-python@v5",
+        "        with:",
+        "          python-version: '3.14'",
         "      - name: Special-file precheck",
         "        run: |",
         "          " + bootstrap_tools,
@@ -4750,7 +4752,8 @@ def self_test():
          "pre-checkout"),
         ("precheck ahead of checkout",
          order_fixture.replace("      - uses: actions/checkout@v4\n"
-                               "      - uses: actions/setup-python@v5\n", "", 1).replace(
+                               "      - uses: actions/setup-python@v5\n        with:\n"
+                               "          python-version: '3.14'\n", "", 1).replace(
                                "      - name: A gate",
                                "      - uses: actions/checkout@v4\n"
                                "      - name: A gate", 1),
@@ -4930,13 +4933,11 @@ def self_test():
     for label, mutated_fixture in (
         ("pip-install input on setup-python",
          order_fixture.replace(
-             "      - uses: actions/setup-python@v5\n",
-             "      - uses: actions/setup-python@v5\n        with:\n"
+             "          python-version: '3.14'\n",
              "          python-version: '3.14'\n          pip-install: -e .\n", 1)),
         ("python-version-file input on setup-python",
          order_fixture.replace(
-             "      - uses: actions/setup-python@v5\n",
-             "      - uses: actions/setup-python@v5\n        with:\n"
+             "          python-version: '3.14'\n",
              "          python-version-file: .python-version\n", 1)),
     ):
         got_problems, got_diagnostics = workflow_precheck_order_problems(
@@ -4945,9 +4946,8 @@ def self_test():
             failures.append("32e unmodelled setup-python input not refused ({}): {!r} {!r}".format(
                 label, got_problems, got_diagnostics))
     versioned = order_fixture.replace(
-        "      - uses: actions/setup-python@v5\n",
-        "      - uses: actions/setup-python@v5\n        with:\n"
-        "          python-version: '3.14'\n", 1)
+        "          python-version: '3.14'\n",
+        "          python-version: 3.14\n", 1)
     got_problems, got_diagnostics = workflow_precheck_order_problems(versioned, "fixture.yml")
     if got_problems or got_diagnostics:
         failures.append("32e the plain python-version: input must stay modelled, got "
@@ -5007,8 +5007,7 @@ def self_test():
          + chr(125) + "]\n"),
         ("anchor inside a setup-python with entry", "step-key",
          order_fixture.replace(
-             "      - uses: actions/setup-python@v5\n",
-             "      - uses: actions/setup-python@v5\n        with:\n"
+             "          python-version: '3.14'\n",
              "          python-version: &version '3.14'\n", 1)),
         ("duplicate run key in one step", "step-key",
          order_fixture.replace(
@@ -5061,8 +5060,8 @@ def self_test():
         ("inline comment on a step line", "step-comment",
          order_fixture.replace("      - name: A gate\n", "      - name: A gate # note\n", 1)),
         ("merge key in a with mapping", "step-key",
-         order_fixture.replace("      - uses: actions/setup-python@v5\n",
-                               "      - uses: actions/setup-python@v5\n        with:\n"
+         order_fixture.replace("          python-version: '3.14'\n",
+                               "          python-version: '3.14'\n"
                                "          <<: python-version\n", 1)),
         ("flow mapping where a step is expected", "step-shape",
          order_fixture.replace("      - name: A gate\n        run: python3 -I -B tools/a.py\n",
@@ -5212,6 +5211,66 @@ def self_test():
         failures.append("32j a simply quoted uses: value must decode to the same checkout as "
                         "the plain spelling, got {!r} {!r}".format(got_problems,
                                                                    got_diagnostics))
+
+    # QA round 11 (claude m1, m3): setup-python at or before the precheck must carry EXACTLY ONE
+    # non-empty, literal python-version: input (with none, or an expression that evaluates
+    # empty, setup-python falls back to reading the checkout's .python-version file BEFORE the
+    # precheck step runs), and the KNOWN-REFUSED disclosure names the most common refused forms,
+    # the inline action-pin comment first, including the indentless-sequence and
+    # padded-flow-sequence layouts it previously left out. The three setup-python vectors return
+    # ([], []) without the round-11 change; the two layout vectors pin the disclosed refusals as
+    # refusals.
+    count += 1
+    for label, needle, mutated_fixture in (
+        ("no with: block on setup-python",
+         "without exactly one non-empty python-version",
+         order_fixture.replace("      - uses: actions/setup-python@v5\n        with:\n"
+                               "          python-version: '3.14'\n",
+                               "      - uses: actions/setup-python@v5\n", 1)),
+        ("empty python-version", "without exactly one non-empty python-version",
+         order_fixture.replace("          python-version: '3.14'\n",
+                               "          python-version: ''\n", 1)),
+        ("expression python-version", "can evaluate empty",
+         order_fixture.replace("          python-version: '3.14'\n",
+                               "          python-version: ${{ vars.AIQT_PYTHON }}\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(needle in problem for problem in got_problems):
+            failures.append("32k setup-python without a pinned literal python-version not "
+                            "refused ({}): {!r} {!r}".format(label, got_problems,
+                                                             got_diagnostics))
+    disclosure = " ".join(workflow_precheck_order_problems.__doc__.split())
+    comment_at = disclosure.find("inline comment")
+    indentless_at = disclosure.find("INDENTLESS sequence")
+    if (comment_at == -1 or indentless_at == -1 or comment_at > indentless_at
+            or "padded inside its brackets" not in disclosure):
+        failures.append("32k the KNOWN-REFUSED disclosure must name the inline action-pin "
+                        "comment first and include the indentless-sequence and padded "
+                        "flow-sequence layouts")
+    indentless = "\n".join((
+        "name: Quality",
+        "jobs:",
+        "  one:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "    - uses: actions/checkout@v4",
+        "    - name: Special-file precheck",
+        "      run: |",
+        "        " + bootstrap_tools,
+        "        python3 -I -B tools/_gen_common.py --precheck",
+    )) + "\n"
+    got_problems, got_diagnostics = workflow_precheck_order_problems(indentless, "fixture.yml")
+    if not got_diagnostics:
+        failures.append("32k the indentless steps: layout must be refused loudly, got {!r} "
+                        "{!r}".format(got_problems, got_diagnostics))
+    padded = order_fixture.replace("    steps:\n",
+                                   "    strategy:\n      matrix:\n"
+                                   "        os: [ ubuntu-latest ]\n    steps:\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(padded, "fixture.yml")
+    if not got_diagnostics:
+        failures.append("32k a flow sequence padded inside its brackets must be refused "
+                        "loudly, got {!r} {!r}".format(got_problems, got_diagnostics))
 
     # codex round-4 finding 4: a workflows directory path no path call accepts (an embedded NUL) is a
     # read-error diagnostic, never a raw ValueError. Fails without the (OSError, ValueError) arm.
@@ -5696,8 +5755,11 @@ def workflow_precheck_order_problems(text, source):
     """(problems, diagnostics) for ONE workflow file (D-400-SPECIAL-FILE-PRECHECK order): every
     job must carry the canonical special-file precheck step (PRECHECK_STEP_RUN_LINES, exactly
     those run lines in that order) as its first post-checkout run step. After the checkout step
-    and before the precheck only actions/setup-python may appear (with the plain
-    python-version: input only, and NO env: mapping on any step at or before the precheck: a
+    and before the precheck only actions/setup-python may appear (with EXACTLY ONE non-empty,
+    literal python-version: input and no other input; QA round 11, claude m1: with no explicit
+    version, or an expression that can evaluate empty, setup-python falls back to READING the
+    checkout's .python-version file, a read of the checkout before the precheck step runs; and
+    NO env: mapping on any step at or before the precheck: a
     NODE_OPTIONS or BASH_ENV value there runs uncertified code or poisons the environment
     first; QA rounds 5 to 7); before checkout only PRE_CHECKOUT_RUN_LINES may run and no action
     other than checkout itself; the precheck step itself may carry no env: mapping at all; and
@@ -5718,16 +5780,22 @@ def workflow_precheck_order_problems(text, source):
     content kept verbatim (never comment-stripped), so a disguised precheck run line simply
     does not match the canonical body, in agreement with what the shell runs.
 
-    KNOWN-REFUSED COMMON FORMS (QA round 10, claude m1): the grammar refuses forms real-world
-    workflows commonly use; this repository's own workflows use none of them and every refusal
-    is loud and named, but an adopter would hit: an inline comment on a structural line (the
-    'uses: pkg@<sha> # vX.Y.Z' SHA-pin idiom), a double-quoted scalar, any quoted scalar
-    carrying a quote or backslash (a step name with an apostrophe; a one-line run: with a
-    quoted argument, which belongs in a literal block instead), folded ('>') and keep ('|+')
-    block scalars, multi-line scalars of every kind, flow mappings, flow sequences beyond one
-    line of plain items, anchors, aliases, tags, merge keys, directives, document markers,
-    tabs, quoted or escaped mapping keys, non-two-space indentation, and plain values carrying
-    ':' or '#'.
+    KNOWN-REFUSED COMMON FORMS (QA round 10 claude m1; QA round 11 claude m3): the grammar
+    refuses forms real-world workflows commonly use; this repository's own workflows use none
+    of them and every refusal is loud and named. The most common first: an inline comment on a
+    structural line (above all the 'uses: pkg@<sha> # vX.Y.Z' action SHA-pin idiom), an
+    INDENTLESS sequence (a '- ' item at the same column as its steps: key, the layout GitHub's
+    starter workflows generate; it is two-space indentation, so it is refused as a sequence
+    where a value is expected, not by an indent message), a double-quoted scalar, any quoted
+    scalar carrying a quote or backslash (a step name with an apostrophe; a one-line run: with
+    a quoted argument, which belongs in a literal block instead), a flow sequence padded inside
+    its brackets ('[ main ]'), folded ('>') and keep ('|+') block scalars, multi-line scalars
+    of every kind, flow mappings, flow sequences beyond one line of plain items, anchors,
+    aliases, tags, merge keys, directives, document markers, tabs, quoted or escaped mapping
+    keys, non-two-space indentation, and plain values carrying ':' or '#'. Refusal CODES name
+    the modelled level of the refused line's indent alone (_grammar_context_code), so a refused
+    line under a non-jobs subtree can carry a job-key or step-key code; the quoted line text in
+    the diagnostic is the authoritative locator.
 
     INHERITED EXECUTION CONTROLS (QA round 5, claude M1; round 6, codex M3 = claude M1): GitHub
     applies workflow- and job-level env: and defaults: (and a job-level if: or
@@ -5783,6 +5851,7 @@ def workflow_precheck_order_problems(text, source):
             # python-version-file:, ...) can install and run committed code or read the checkout
             # before the precheck step runs.
             if s["uses"] and s["uses"].startswith("actions/setup-python@"):
+                versions = []
                 for with_number, with_key, with_value in s["withs"]:
                     if with_key != "python-version":
                         problems.append(where + " passes setup-python input {!r} (line {}) at or "
@@ -5791,6 +5860,26 @@ def workflow_precheck_order_problems(text, source):
                                         "unmodelled input (pip-install:, python-version-file:, "
                                         "...) can run committed code or read the checkout before "
                                         "the precheck runs".format(with_key, with_number))
+                    else:
+                        versions.append((with_number, with_value))
+                # QA round 11 (claude m1): the one modelled input must be PRESENT, non-empty and
+                # literal. With no explicit version (or an expression that evaluates empty),
+                # setup-python falls back to READING THE CHECKOUT'S .python-version file, a read
+                # of the checkout before the precheck step runs, which is exactly what this
+                # allowlist exists to stop.
+                if len(versions) != 1 or not versions[0][1].strip():
+                    problems.append(where + " runs setup-python (step at line {}) at or before "
+                                    "the special-file precheck without exactly one non-empty "
+                                    "python-version: input; with no explicit version, "
+                                    "setup-python reads the checkout's .python-version file "
+                                    "before the precheck runs".format(s["line"]))
+                elif "${{" in versions[0][1]:
+                    problems.append(where + " passes setup-python python-version: {!r} (line {}) "
+                                    "at or before the special-file precheck; an expression "
+                                    "there can evaluate empty, and an empty version makes "
+                                    "setup-python read the checkout's .python-version file "
+                                    "before the precheck runs".format(versions[0][1],
+                                                                      versions[0][0]))
             if not s["env"]:
                 continue
             if s is job_steps[precheck]:

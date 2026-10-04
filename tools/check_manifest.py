@@ -1391,6 +1391,132 @@ def _self_test_main_isolated():
                           md2link_tree, "gen", 2, "outside the repository root")
             _entry_expect("a tracked link into an ignored directory over an out-of-root link",
                           md2link_tree, "opf", 2, "outside the repository root")
+            # (s16) QA round 11 (codex MAJOR): a tracked path that resolves to a FIFO through
+            # TWO chained directory links. The round-10 walk replaced a walked link's logical
+            # path with its target's spelling, so the second link regained ignored status (the
+            # ignore list names only /build/ext) and the shadow test saw only that spelling:
+            # both entries certified a tree whose tracked docs/link/ext/f.md is an external
+            # FIFO. Fails without the round-11 logical-path walk and tracked-path resolution
+            # (exit 0).
+            twolink_tree = _mini_tree("tracked-two-link")
+            if twolink_tree is not None:
+                (twolink_tree / "build").mkdir()
+                (twolink_tree / "build" / ".keep").write_text("", encoding="utf-8")
+                (twolink_tree / "docs" / "link" / "ext").mkdir(parents=True)
+                (twolink_tree / "docs" / "link" / "ext" / "f.md").write_text(
+                    "x\n", encoding="utf-8")
+                (twolink_tree / ".gitignore").write_text("/build/ext\n", encoding="utf-8")
+                (tmp / "ext-twolink-target").mkdir(exist_ok=True)
+                os.mkfifo(tmp / "ext-twolink-target" / "f.md")
+                if gm._git(twolink_tree, "add", "--", ".gitignore", "build/.keep",
+                           "docs/link/ext/f.md").returncode != 0:
+                    twolink_tree = None
+            if twolink_tree is not None:
+                shutil.rmtree(twolink_tree / "docs" / "link")
+                (twolink_tree / "docs" / "link").symlink_to("../build")
+                (twolink_tree / "build" / "ext").symlink_to(tmp / "ext-twolink-target")
+            _entry_expect("a tracked path to a FIFO through two directory links", twolink_tree,
+                          "gen", 2,
+                          twolink_tree / "docs" / "link" / "ext" if twolink_tree else None)
+            _entry_expect("a tracked path to a FIFO through two directory links", twolink_tree,
+                          "opf", 2,
+                          twolink_tree / "docs" / "link" / "ext" if twolink_tree else None)
+            # (s17) the MIRROR walk order of s16 (the physical target directory sorts last, so
+            # it pops first and its ignored out-of-root link is accepted leniently before the
+            # alias spelling is ever seen): the logical-path walk must refuse under the alias
+            # spelling whichever side pops first, and the tracked-path resolution refuses
+            # independently of walk order. Fails without the round-11 change (exit 0: the
+            # round-10 target-identity dedup dropped whichever spelling came second).
+            mirror_tree = _mini_tree("tracked-two-link-mirror")
+            if mirror_tree is not None:
+                (mirror_tree / "zbuild").mkdir()
+                (mirror_tree / "zbuild" / ".keep").write_text("", encoding="utf-8")
+                (mirror_tree / "alink" / "link" / "ext").mkdir(parents=True)
+                (mirror_tree / "alink" / "link" / "ext" / "f.md").write_text(
+                    "x\n", encoding="utf-8")
+                (mirror_tree / ".gitignore").write_text("/zbuild/ext\n", encoding="utf-8")
+                (tmp / "ext-mirror-target").mkdir(exist_ok=True)
+                os.mkfifo(tmp / "ext-mirror-target" / "f.md")
+                if gm._git(mirror_tree, "add", "--", ".gitignore", "zbuild/.keep",
+                           "alink/link/ext/f.md").returncode != 0:
+                    mirror_tree = None
+            if mirror_tree is not None:
+                shutil.rmtree(mirror_tree / "alink" / "link")
+                (mirror_tree / "alink" / "link").symlink_to("../zbuild")
+                (mirror_tree / "zbuild" / "ext").symlink_to(tmp / "ext-mirror-target")
+            _entry_expect("the mirror ordering of the two-link tracked FIFO", mirror_tree,
+                          "gen", 2,
+                          mirror_tree / "alink" / "link" / "ext" if mirror_tree else None)
+            _entry_expect("the mirror ordering of the two-link tracked FIFO", mirror_tree,
+                          "opf", 2,
+                          mirror_tree / "alink" / "link" / "ext" if mirror_tree else None)
+            # (s18) a THREE-link chain: a/l1 -> b, b/l2 -> c, c/l3 -> an external FIFO
+            # directory, with tracked a/l1/l2/l3/f.md and each hop ignored only under its
+            # physical spelling. Fails without the round-11 change (exit 0).
+            chain_tree = _mini_tree("tracked-three-link")
+            if chain_tree is not None:
+                (chain_tree / "a" / "l1" / "l2" / "l3").mkdir(parents=True)
+                (chain_tree / "a" / "l1" / "l2" / "l3" / "f.md").write_text(
+                    "x\n", encoding="utf-8")
+                (chain_tree / "b").mkdir()
+                (chain_tree / "b" / ".keep").write_text("", encoding="utf-8")
+                (chain_tree / "c").mkdir()
+                (chain_tree / "c" / ".keep").write_text("", encoding="utf-8")
+                (chain_tree / ".gitignore").write_text("/b/l2\n/c/l3\n", encoding="utf-8")
+                (tmp / "ext-chain-target").mkdir(exist_ok=True)
+                os.mkfifo(tmp / "ext-chain-target" / "f.md")
+                if gm._git(chain_tree, "add", "--", ".gitignore", "b/.keep", "c/.keep",
+                           "a/l1/l2/l3/f.md").returncode != 0:
+                    chain_tree = None
+            if chain_tree is not None:
+                shutil.rmtree(chain_tree / "a" / "l1")
+                (chain_tree / "a" / "l1").symlink_to("../b")
+                (chain_tree / "b" / "l2").symlink_to("../c")
+                (chain_tree / "c" / "l3").symlink_to(tmp / "ext-chain-target")
+            _entry_expect("a tracked path to a FIFO through three chained links", chain_tree,
+                          "gen", 2,
+                          chain_tree / "a" / "l1" / "l2" / "l3" if chain_tree else None)
+            _entry_expect("a tracked path to a FIFO through three chained links", chain_tree,
+                          "opf", 2,
+                          chain_tree / "a" / "l1" / "l2" / "l3" if chain_tree else None)
+            # (s19) a tracked path through a LINK LOOP, both links ignored: the walk accepts an
+            # ignored unresolvable link (every open of it fails at once), so only the
+            # tracked-path resolution can classify what tracked l1/f.md resolves through, and
+            # it must refuse the loop by the logical path. Fails without the round-11
+            # tracked-path resolution (exit 0).
+            loop_tree = _mini_tree("tracked-link-loop")
+            if loop_tree is not None:
+                (loop_tree / "l1").mkdir()
+                (loop_tree / "l1" / "f.md").write_text("x\n", encoding="utf-8")
+                (loop_tree / ".gitignore").write_text("/l1\n/l2\n", encoding="utf-8")
+                if (gm._git(loop_tree, "add", "--", ".gitignore").returncode != 0
+                        or gm._git(loop_tree, "add", "-f", "--",
+                                   "l1/f.md").returncode != 0):
+                    loop_tree = None
+            if loop_tree is not None:
+                shutil.rmtree(loop_tree / "l1")
+                (loop_tree / "l1").symlink_to("l2")
+                (loop_tree / "l2").symlink_to("l1")
+            _entry_expect("a tracked path through an ignored link loop", loop_tree, "gen", 2,
+                          loop_tree / "l1" / "f.md" if loop_tree else None)
+            _entry_expect("a tracked path through an ignored link loop", loop_tree, "opf", 2,
+                          loop_tree / "l1" / "f.md" if loop_tree else None)
+            # (s20) QA round 11 (claude m2): a FIFO planted at a NESTED .git/HEAD is screened
+            # BEFORE the ignore query: git's ls-files probe opens that HEAD with a plain
+            # blocking read while deciding whether docs/sub is a nested repository, so without
+            # the screen the refusal came only after the probe's 60-second bound expired.
+            # Fails without the round-11 screen (the 30-second subprocess bound reports a
+            # hang).
+            nestedhead_tree = _mini_tree("nested-git-head-fifo")
+            if nestedhead_tree is not None:
+                (nestedhead_tree / "docs" / "sub" / ".git").mkdir(parents=True)
+                os.mkfifo(nestedhead_tree / "docs" / "sub" / ".git" / "HEAD")
+            _entry_expect("a FIFO at a nested .git HEAD", nestedhead_tree, "gen", 2,
+                          nestedhead_tree / "docs" / "sub" / ".git" / "HEAD"
+                          if nestedhead_tree else None)
+            _entry_expect("a FIFO at a nested .git HEAD", nestedhead_tree, "opf", 2,
+                          nestedhead_tree / "docs" / "sub" / ".git" / "HEAD"
+                          if nestedhead_tree else None)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1416,7 +1542,7 @@ def _self_test_main_isolated():
           "subprocess, refuses a FIFO, a link to a FIFO, a FIFO behind a planted nested .git or an "
           "in-root directory link, an outside-root directory link, a git-ignored link to a FIFO, a "
           "FIFO behind an in-root link into an ignored directory, and a symlinked tools/ or opf/ "
-          "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), walks a tracked link into an ignored directory strictly in both directions (round 10), while a dangling link, a venv-like "
+          "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), walks a tracked link into an ignored directory strictly in both directions (round 10), resolves every tracked logical path component by component so a FIFO behind two or three chained directory links, in either walk order, and a tracked path through an ignored link loop are refused by the logical path, and screens a nested .git and its HEAD before the ignore query (round 11), while a dangling link, a venv-like "
           "ignored tree and a git-ignored outside-root directory link pass; a multi-newline "
           "rev-parse answer fails closed, one trailing newline stays accepted, and a NUL root is "
           "git-cannot-answer in both copies, with mutants proving the vectors discriminate")
