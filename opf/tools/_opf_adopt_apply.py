@@ -983,25 +983,44 @@ def _absent_journal_dirs(root_fd):
 
 def _remove_journal_dirs(root_fd, created):
     """Deepest first, remove the journal directories this run created, once its refusal has released the
-    lock, so the refusal leaves the tree as it found it. rmdir only: a directory that is no longer empty (a
-    transaction record, a retained or concurrent run's lock) or no longer reachable stays in place, as do
-    its ancestors, never forced."""
+    lock, so the refusal leaves the tree as it found it. rmdir only, never forced: a directory that is no
+    longer empty (a transaction record, a retained or concurrent run's lock) stays in place. A directory
+    the walk cannot reach (an ancestor it cannot open, such as one created with mode 000 under a 0777
+    umask) or cannot remove never ends the sweep: every shallower one is still attempted, since an empty
+    ancestor is removable through its own parent. Returns what stays, each with its reason (a removal whose
+    parent fsync failed included, as possibly not durable), omitting anything beneath a directory this
+    sweep removed and fsynced or found absent (an rmdir succeeds only on an empty directory); [] when the
+    tree is as found."""
+    left = []
+    gone = []
     for rel in reversed(created):
         try:
             pfd, name = _journal._open_parent(root_fd, rel)
         except FileNotFoundError:
             continue    # never created: a preparation that failed part-way
-        except (_journal.JournalError, OSError):
-            return
-        try:
-            os.rmdir(name, dir_fd=pfd)
-            os.fsync(pfd)
-        except FileNotFoundError:
+        except (_journal.JournalError, OSError) as exc:
+            left.append((rel, "not reached: {}".format(exc)))
             continue
-        except OSError:
-            return
+        try:
+            try:
+                os.rmdir(name, dir_fd=pfd)
+            except FileNotFoundError:
+                gone.append(rel)
+                continue
+            except OSError as exc:
+                left.append((rel, "not removed: {}".format(exc)))
+                continue
+            try:
+                os.fsync(pfd)
+            except OSError as exc:
+                left.append((rel, "removed, but the removal may not be durable: its parent fsync "
+                                  "failed: {}".format(exc)))
+                continue
+            gone.append(rel)
         finally:
             _journal._close_fd_quietly(pfd)
+    return ["{} ({})".format(rel, why) for rel, why in left
+            if not any(rel.startswith(g + "/") for g in gone)]
 
 
 def run_adopt_transaction(product_root, run_id, compose, phase=None):
@@ -1013,8 +1032,11 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     lock so observation and the journal's own capture are contiguous, compose(ops) fills a fresh ApplyOps
     against the live tree, the derived inventory seals it, and check_apply_ops re-proves every invariant;
     a refusal there releases the lock and removes the journal directories this run created
-    (_remove_journal_dirs), so it leaves the tree as it found it; disclosed: a directory a concurrent run
-    has populated meanwhile stays. A failure that may have left the transaction open RETAINS the lock (and
+    (_remove_journal_dirs), so it leaves the tree as it found it; a directory that cleanup cannot remove
+    (disclosed: one a concurrent run has populated meanwhile stays) turns the refusal into one that names
+    every directory left behind, never a silent "nothing written". Disclosed too: a concurrent run that
+    prepared the journal but has not yet taken its lock can find the directory removed by that cleanup,
+    and then refuses at the lock. A failure that may have left the transaction open RETAINS the lock (and
     the journal) so every later run refuses into reconcile().
     A transaction opened from inside the stage driver's composition (a plan op handler opening its own)
     refuses before anything else: one run takes one base transaction. Returns the transaction name."""
@@ -1031,7 +1053,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     journal_root = _journal_root(product_root)
     jr_fd = None
     created = []
-    held = retain = done = False
+    failure = None
+    held = retain = done = entered = False
     try:
         try:
             _journal.require_containment()
@@ -1059,7 +1082,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         try:
             try:
                 _journal.acquire_lock(journal_root, SESSION_ID)
-            except _journal.JournalError as exc:
+            except (_journal.JournalError, OSError) as exc:
                 raise AdoptApplyError("cannot take the adoption journal lock ({}); nothing "
                                       "written (fail-closed)".format(exc))
             held = True
@@ -1074,6 +1097,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 return data
 
             header = dict(kind=KIND, run_id=run_id, phase=phase or "base", operation=OPERATION)
+            entered = True      # from here the journal may hold this transaction's records by design
             try:
                 _journal.run_transaction(root_fd, jr_fd, journal_root, txn, header, ops.ops,
                                          staged_reader, SESSION_ID)
@@ -1085,6 +1109,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 except _journal.JournalError:
                     state = None
                 if state == "nothing-opened":
+                    entered = False
                     raise AdoptApplyError("the adoption transaction was refused before it opened ({}); "
                                           "nothing written (fail-closed)".format(exc))
                 if state == "rolled-back":
@@ -1102,12 +1127,23 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                     _journal.release_lock(journal_root)
                 except (_journal.JournalError, OSError):
                     pass   # a leftover lock refuses the next run into reconcile(), never a silent seize
+    except BaseException as exc:
+        failure = exc
+        raise
     finally:
         if jr_fd is not None:
             _journal._close_fd_quietly(jr_fd)
+        left = []
         if created and not (done or retain):
-            _remove_journal_dirs(root_fd, created)
+            left = _remove_journal_dirs(root_fd, created)
         store._close_fd_exc_safe(root_fd)
+        if left and not entered:
+            note = ("the refusal's cleanup is INCOMPLETE, so this run DID leave journal directories it "
+                    "created behind: {}; inspect and remove them (fail-closed)".format("; ".join(left)))
+            if failure is not None and not isinstance(failure, Exception):
+                failure.add_note(note)    # an interrupt still propagates as itself, with the leftovers named
+            else:
+                raise AdoptApplyError("{}; {}".format(failure, note) if failure else note) from failure
 
 
 # --- the dispatch table: EVERY op refuses not-yet-executable in this slice -----------------------------
@@ -3577,6 +3613,67 @@ def _self_test_checks():
         with landed(composing), mock.patch.object(_journal, "ensure_journal_dirs", partial_journal):
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-partial-journal-refusal-tree-untouched", "cannot prepare" in (err or "")
+              and _snapshot(root) == before)
+        shutil.rmtree(root / ".aiqt", ignore_errors=True)
+        # a first directory the cleanup walk cannot open (mode 000, as a 0777 umask makes it; the walk is
+        # also refused by patch, so the vector holds under any uid) is still removed through its parent: the
+        # unreachable deeper directories never end the sweep (red against a cleanup that stops at them).
+        real_open_parent = _journal._open_parent
+        sealed = []
+
+        def sealed_journal(root_fd, journal_rel):
+            os.mkdir(journal_rel.split("/")[0], 0o000, dir_fd=root_fd)
+            sealed.append(journal_rel)
+            raise PermissionError("an injected journal preparation fault")
+
+        def sealed_walk(root_fd, relpath):
+            if sealed and "/" in relpath and relpath.split("/")[0] == JOURNAL_REL.split("/")[0]:
+                raise _journal.JournalError("cannot open contained directory component (injected EACCES)")
+            return real_open_parent(root_fd, relpath)
+        with landed(composing), mock.patch.object(_journal, "ensure_journal_dirs", sealed_journal), \
+                mock.patch.object(_journal, "_open_parent", sealed_walk):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-sealed-journal-ancestor-removed", sealed and "cannot prepare" in (err or "")
+              and "INCOMPLETE" not in (err or "") and _snapshot(root) == before)
+        if os.path.lexists(root / ".aiqt"):
+            os.chmod(root / ".aiqt", 0o700)
+        shutil.rmtree(root / ".aiqt", ignore_errors=True)
+        # a directory the cleanup cannot remove (populated meanwhile) is named in the refusal, with every
+        # ancestor it keeps, never a bare "nothing written" (red against a cleanup that reports nothing).
+
+        def populated_journal(root_fd, journal_rel):
+            os.makedirs(root / journal_rel)
+            (root / journal_rel / "stray").write_bytes(b"populated meanwhile\n")
+            raise OSError("an injected journal preparation fault")
+        with landed(composing), mock.patch.object(_journal, "ensure_journal_dirs", populated_journal):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        rels = ["/".join(JOURNAL_REL.split("/")[:i + 1]) for i in range(len(JOURNAL_REL.split("/")))]
+        check("driver-apply-incomplete-cleanup-named", "cannot prepare" in (err or "")
+              and "cleanup is INCOMPLETE" in (err or "")
+              and all("{} (not removed".format(r) in (err or "") for r in rels)
+              and (root / JOURNAL_REL / "stray").is_file())
+        shutil.rmtree(root / ".aiqt", ignore_errors=True)
+        # a removal whose parent fsync fails is reported as possibly not durable, never as clean.
+        real_fsync = os.fsync
+
+        def fsync_failing(fd):
+            if (root / ".aiqt").exists():
+                return real_fsync(fd)
+            raise OSError("an injected fsync fault")
+        with landed(composing), mock.patch.object(_journal, "ensure_journal_dirs", partial_journal), \
+                mock.patch.object(os, "fsync", fsync_failing):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-cleanup-fsync-failure-named", "cannot prepare" in (err or "")
+              and "may not be durable" in (err or "") and _snapshot(root) == before)
+        shutil.rmtree(root / ".aiqt", ignore_errors=True)
+        # a lock-file failure other than a held lock (here the journal directory vanishing under a peer's
+        # cleanup) is the named lock refusal, not a raw OSError past the driver.
+
+        def vanishing_lock(journal_root, session_id):
+            raise FileNotFoundError(2, "No such file or directory", str(journal_root / "lock"))
+        with landed(composing), mock.patch.object(_journal, "acquire_lock", vanishing_lock):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-lock-oserror-named-refusal", "cannot take the adoption journal lock" in (err or "")
               and _snapshot(root) == before)
         shutil.rmtree(root / ".aiqt", ignore_errors=True)
         del seen[:]
