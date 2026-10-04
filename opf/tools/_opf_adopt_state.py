@@ -30,13 +30,14 @@ A retirement is recorded only in committed evidence: a live, VALID, sealed retir
 spec shape, the one the retirement-phase transaction derives from its own create ops (spec 4.2, 14.2).
 That transaction creates only the plan's recorded Move destinations (retire and migrate preimages are
 preserved at APPLY and claimed by the base inventory, spec 14.1 check 3, so the retirement record never
-re-lists them), so the record holds one row per non-occupying move row, naming its recorded Move
-destination at the moved source's plan (preimage) digest, and nothing else; a retire-only plan's record
-lists no files. That shape binds the record to its phase: a base inventory copied to the retirement name
-lists at least the plan and the approval, never Move destinations, so it never reads as retired. A marker
-row that also appears in the base inventory must agree with it in size and digest (contradictory
-committed records are never reused as proof), and every listed destination must hold its recorded bytes
-live. Any other retirement evidence is CANNOT-EVALUATE, never read as retired. Before a recorded
+re-lists them), so the record holds one row per move row of the plan, occupying or not, whose recorded
+Move destination (its `move-file` op's destination) lies beneath the Move root, naming that destination
+at the moved source's plan digest, and nothing else. Those are the bytes the relocation writes: the
+frozen live source of a non-occupying move, the committed archive copy of an occupying one. A plan
+without such a move row has a record that lists no files. That shape binds the record to its phase: a
+base inventory copied to the retirement name lists at least the plan and the approval, never Move
+destinations, so it never reads as retired. A marker row whose path the base inventory also lists is a
+path claimed twice (spec 4.2), and every listed destination must hold its recorded bytes live. Any other retirement evidence is CANNOT-EVALUATE, never read as retired. Before a recorded
 retirement the Move destination does not exist (the retirement-phase transaction creates it), so a file
 at a plan Move destination is then a finding and the destination is not registered; after it, the
 destination is registered and byte-verified through the retirement inventory. A recorded retirement ends
@@ -408,13 +409,13 @@ def _retired(root_fd, run_id, plan_doc, base_rows, budget):
     """(recorded, registered): whether the run's retirement is recorded, and the file paths its retirement
     inventory registers, decided from COMMITTED evidence alone (never the journal). Recorded ONLY when a
     live, VALID, sealed `inventory-retirement.toml` holds the shape the retirement-phase transaction
-    derives from its own create ops (spec 4.2, 14.2): one row per non-occupying move row of the plan,
-    naming its recorded Move destination at the moved source's plan (preimage) digest, and nothing else;
-    a retire-only plan's record lists no files. Retire and migrate preimages are preserved at APPLY and
-    claimed by the base inventory (spec 14.1 check 3), never re-listed here, and that shape binds the
-    record to its phase: a base inventory copied to the retirement name lists at least the plan and the
-    approval, never Move destinations. A marker row that also appears in the base inventory must agree
-    with it in size and digest (contradictory committed records are never reused as proof), and every
+    derives from its own create ops (spec 4.2, 14.2): one row per move row of the plan, occupying or not,
+    whose recorded Move destination lies beneath the Move root, naming that destination at the moved
+    source's plan digest (_move_creates), and nothing else; a plan without such a move row has a record
+    that lists no files. Retire and migrate preimages are preserved at APPLY and claimed by the base
+    inventory (spec 14.1 check 3), never re-listed here, and that shape binds the record to its phase: a
+    base inventory copied to the retirement name lists at least the plan and the approval, never Move
+    destinations. A marker row whose path the base inventory also lists is a path claimed twice, and every
     listed destination must hold its recorded bytes live. An absent marker is not retired. Every other
     state raises AdoptApplyError: whether the run retired is then unknown (CANNOT-EVALUATE), never read
     as retired."""
@@ -430,16 +431,10 @@ def _retired(root_fd, run_id, plan_doc, base_rows, budget):
         raise apply.AdoptApplyError("{!r} is not the sealed canonical inventory of its own rows (a hand "
                                     "edit, a reordering or stale bytes); whether the run retired is "
                                     "unknown".format(rel))
-    # The shape half: the record lists EVERY recorded Move destination of the plan's non-occupying move
-    # rows at the moved source's plan (preimage) digest, so a record of a different run state, a drifted
+    # The shape half: the record lists EVERY recorded Move destination of the plan's move rows, occupying
+    # or not, at the moved source's plan digest, so a record of a different run state, a drifted
     # relocation or an old-shape marker is never silently read as retired.
-    dests = {}
-    for row in plan_doc.get("sources", ()):
-        if row.get("disposition") != "move" or row.get("occupying") is not False:
-            continue
-        dest = row.get("preservation")
-        if isinstance(dest, str) and dest.startswith(MOVED_ROOT + "/"):
-            dests[dest] = apply._plan_hex(row.get("digest"))
+    dests = dict((dest, apply._plan_hex(digest)) for dest, digest in _move_creates(plan_doc).items())
     marker_rows = dict((row["path"], row) for row in doc["file"])
     for dest in sorted(dests):
         row = marker_rows.get(dest)
@@ -458,21 +453,17 @@ def _retired(root_fd, run_id, plan_doc, base_rows, budget):
                                     "those files and its derived inventory lists exactly them, so a "
                                     "misplaced, stale or copied record never reads as retired; whether "
                                     "the run retired is unknown".format(rel, path))
-    # Base reconciliation (QA round 4): a marker row and a base inventory row for the SAME path must
-    # agree in size and digest BEFORE any verification is reused; contradictory committed records are
-    # never read as retirement proof.
-    for path in sorted(marker_rows):
-        base = base_rows.get(path)
-        if base is not None and (marker_rows[path]["size"] != base["size"]
-                                 or marker_rows[path]["sha256"] != base["sha256"]):
-            raise apply.AdoptApplyError("{!r} contradicts the base inventory row of {!r} (size or digest "
-                                        "differ); whether the run retired is unknown".format(rel, path))
-    # The destinations the marker records are live committed evidence, byte for byte (a destination the
-    # base inventory also lists was byte-verified at admission at the SAME size and digest, reconciled
-    # above).
+    # One claim per path (spec 4.2, QA round 5): every payload file is claimed by exactly one row, and the
+    # apply-stage transaction never creates a Move destination, so a marker row whose path the base
+    # inventory also lists, at the same or at different bytes, is a path claimed twice; it is never read
+    # as retirement proof.
     for path in sorted(marker_rows):
         if path in base_rows:
-            continue
+            raise apply.AdoptApplyError("{!r} lists {!r}, which the base inventory also claims (a path "
+                                        "claimed twice, spec 4.2); whether the run retired is "
+                                        "unknown".format(rel, path))
+    # The destinations the marker records are live committed evidence, byte for byte.
+    for path in sorted(marker_rows):
         fst, live = _read_budgeted(root_fd, path, budget)
         if fst is None:
             raise apply.AdoptApplyError("the recorded Move destination {!r} its retirement inventory "
@@ -501,20 +492,31 @@ def frozen_sources(plan_doc, retired):
     return out
 
 
-def move_destinations(plan_doc):
-    """The recorded Move destinations of one admitted plan's non-occupying move rows: their `preservation`
-    paths beneath the Move root. The retirement-phase transaction creates exactly these files (spec 14.2),
-    so they are registered at file level only through the recorded retirement inventory that lists them;
-    before that, an entry at one of them is a finding. Any other spelling registers nothing (fail-closed:
-    the path is then graded as unregistered)."""
-    out = []
-    for row in plan_doc.get("sources", ()):
-        if row.get("disposition") != "move" or row.get("occupying") is not False:
+def _move_creates(plan_doc):
+    """{destination: plan digest} of the files one admitted plan's retirement-phase transaction creates
+    (spec 14.2 Move): the `destination` of EVERY `move-file` op, occupying source or not, that lies beneath
+    the Move root (the retained evidence its derived inventory lists; a destination outside the store is
+    not evidence and gets no row), at the op's `source_digest`, the moved source's plan digest. Those are
+    the bytes the relocation writes: the frozen live source for a non-occupying source, the committed
+    archive copy (verified at that same digest) for an occupying one. The destination is read from the
+    op, never from the source row's `preservation`, which names the adoption archive copy for an occupying
+    source. Any other spelling contributes nothing (fail-closed: the path is then graded as unregistered)."""
+    out = {}
+    for op in plan_doc.get("ops", ()):
+        if not isinstance(op, dict) or op.get("op") != "move-file":
             continue
-        dest = row.get("preservation")
+        dest = op.get("destination")
         if isinstance(dest, str) and dest.startswith(MOVED_ROOT + "/"):
-            out.append(dest)
+            out[dest] = op.get("source_digest")
     return out
+
+
+def move_destinations(plan_doc):
+    """The recorded Move destinations of one admitted plan's move rows, occupying or not (_move_creates).
+    The retirement-phase transaction creates exactly these files (spec 14.2), so they are registered at
+    file level only through the recorded retirement inventory that lists them; before that, an entry at
+    one of them is a finding."""
+    return sorted(_move_creates(plan_doc))
 
 
 def grade_frozen(root_fd, path, hexdigest, budget=None):
@@ -595,8 +597,10 @@ def _self_test_checks():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
 
-    def freeze(root, head, nonce):
+    def freeze(root, head, nonce, srcs=None, decs=None):
         """(run id, plan bytes, approval bytes) from the real planner and approval capture, or None."""
+        srcs = sources if srcs is None else srcs
+        decs = decisions if decs is None else decs
         bindings = dict(schema.canonical_plan_bindings(), revision=head)
         views = sorted(v["target"] for v in legacy_manifest["views"].values())
         rows = [dict(op="init-store", store_root=".", members=[dict(
@@ -604,8 +608,8 @@ def _self_test_checks():
                 dict(op="render-views", store_root=".",
                      members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views]),
                 schema.enforcement_install_op(bindings["enforcement"])]
-        sheet = dict(sources=sorted(sources), targets=[".opf/hooks/pre-commit"], product="opf",
-                     decisions=[dict(path=p, disposition=d, actor="fixture") for p, d in sorted(decisions.items())],
+        sheet = dict(sources=sorted(srcs), targets=[".opf/hooks/pre-commit"], product="opf",
+                     decisions=[dict(path=p, disposition=d, actor="fixture") for p, d in sorted(decs.items())],
                      ops=rows, bindings=bindings)
         obs = planner.investigate(root, sources=sheet["sources"], targets=sheet["targets"])
         if obs.status != store.VALID:
@@ -888,8 +892,8 @@ def _self_test_checks():
         # S10: a recorded retirement ends the bounded state of the retire AND move rows; a migrate source
         # stays bounded. Recorded means committed evidence only (QA rounds 2 and 4): a sealed retirement
         # inventory in the shape the retirement-phase transaction derives from its own create ops, exactly
-        # the plan's recorded Move destinations at the moved source's plan digest and nothing else,
-        # reconciled with the base inventory and live byte for byte; anything else is CANNOT-EVALUATE,
+        # the plan's recorded Move destinations at the moved source's plan digest and nothing else, no
+        # path the base inventory also claims, and live byte for byte; anything else is CANNOT-EVALUATE,
         # never read as retired.
         marker = apply.inventory_rel(rid, RETIREMENT_PHASE)
         root = tree()
@@ -907,7 +911,8 @@ def _self_test_checks():
         # the doctor-level vector above stays CANNOT.
         plan_doc_fix = tomllib.loads(runs[rid][0].decode("utf-8"))
         retire_only = dict(plan_doc_fix, sources=[dict(r) for r in plan_doc_fix["sources"]
-                                                  if r.get("disposition") != "move"])
+                                                  if r.get("disposition") != "move"],
+                           ops=[dict(r) for r in plan_doc_fix["ops"] if r.get("op") != "move-file"])
         unit_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
         try:
             unit = reader._retired(unit_fd, rid, retire_only, {}, [reader.READ_CEILING])
@@ -977,17 +982,17 @@ def _self_test_checks():
         rep = contain(root)
         check("retirement-marker-not-sealed-cannot", named(rep.cannot, marker, "sealed")
               and bounded(rep) == [])
-        # Half 2, base reconciliation (codex round 4): a marker row and a base inventory row for the SAME
-        # path must agree in size and digest before any verification is reused. A digest contradiction (a
-        # crafted base listing the destination at live but wrong bytes while the marker carries the plan
-        # digest) and a size-only contradiction (the marker row 100 bytes larger at the same digest) are
-        # each CANNOT, never read as retired.
+        # Half 2, one claim per path (codex round 4, QA round 5): a marker row whose path a base inventory
+        # row also claims is a path claimed twice (spec 4.2). A digest contradiction (a crafted base
+        # listing the destination at live but wrong bytes while the marker carries the plan digest), a
+        # size-only contradiction (the marker row 100 bytes larger at the same digest) and an agreeing
+        # double claim (both rows at the same size and digest) are each CANNOT, never read as retired.
         root = tree()
         write(root, moved, b"wrong moved bytes\n")
         relist(root, rid, listed(rid) + [moved])
         write(root, marker, apply.emit_inventory(rid, [apply.inventory_row(moved, sources[move])]))
         rep = contain(root)
-        check("retirement-contradicts-base-cannot", named(rep.cannot, marker, "contradicts")
+        check("retirement-contradicts-base-cannot", named(rep.cannot, marker, "claimed twice")
               and bounded(rep) == [])
         root = tree()
         write(root, moved, sources[move])
@@ -995,7 +1000,16 @@ def _self_test_checks():
         write(root, marker, apply.emit_inventory(rid, [dict(apply.inventory_row(moved, sources[move]),
                                                             size=len(sources[move]) + 100)]))
         rep = contain(root)
-        check("retirement-size-contradiction-cannot", named(rep.cannot, marker, "contradicts")
+        check("retirement-size-contradiction-cannot", named(rep.cannot, marker, "claimed twice")
+              and bounded(rep) == [])
+        root = tree()
+        write(root, moved, sources[move])
+        relist(root, rid, listed(rid) + [moved])
+        write(root, marker, apply.emit_inventory(rid, [apply.inventory_row(moved, sources[move])]))
+        for src in (old, note, move):
+            os.unlink(root / src)
+        rep = contain(root)
+        check("retirement-path-claimed-twice-agreeing-cannot", named(rep.cannot, marker, "claimed twice")
               and bounded(rep) == [])
         # A row that is neither a recorded Move destination nor base-claimed is CANNOT (the shape allows
         # nothing else).
@@ -1007,7 +1021,7 @@ def _self_test_checks():
         rep = contain(root)
         check("retirement-foreign-row-cannot", named(rep.cannot, marker) and bounded(rep) == [])
         # The recorded destination is live committed evidence (QA round 4): after the recorded
-        # retirement its bytes must equal the retirement row and the plan preimage digest, so tampered
+        # retirement its bytes must equal the retirement row and the moved source's plan digest, so tampered
         # bytes, a deleted destination, and a marker whose row is self-consistent with wrong live bytes
         # but not at the plan digest are each CANNOT.
         root = tree()
@@ -1039,6 +1053,111 @@ def _self_test_checks():
         check("crafted-base-moved-row-still-premature-finding",
               named(rep.findings, moved, "before the recorded retirement")
               and bounded(rep) == sorted((old, note, mig, move)) and rep.cannot == [])
+
+        def state_of(root):
+            fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                return reader.adoption_state(fd, mrel, in_repo=True)
+            finally:
+                os.close(fd)
+
+        # QA round 5: a Move destination is registered only once its retirement is recorded, never before
+        # (the retirement-phase transaction is what creates it); after, it is registered through the
+        # retirement inventory that lists it.
+        root = tree()
+        before = state_of(root)
+        retire(root, rid)
+        after = state_of(root)
+        check("move-destination-registered-only-once-retired",
+              moved not in before.registered and before.cannot == ()
+              and moved in after.registered and after.cannot == ())
+
+        # S10d (QA round 5): EVERY move row contributes its Move destination to the retirement record,
+        # occupying or not. The real planner freezes a plan with an occupying move (a view target, archived
+        # and removed at apply, its `preservation` naming the adoption archive copy) and a non-occupying
+        # one, each to its default destination under the Move root; the retirement-phase ApplyOps shell
+        # creates both destinations with the bytes the relocation writes (the committed archive copy, the
+        # frozen live source) and seals the inventory derived from its own create ops; that record reads
+        # as retired.
+        occ = ".working/TODO.md"
+        occ_sources = dict(((move, sources[move]), (occ, b"legacy todo\n")))
+        occ_decisions = dict(((move, "move"), (occ, "move")))
+        occ_root = base / "plan-occ"
+        for rel, data in occ_sources.items():
+            write(occ_root, rel, data)
+        occ_head = apply._selftest_git_commit(occ_root)
+        frozen_o = freeze(occ_root, occ_head, "0011223344556677", occ_sources, occ_decisions) if occ_head else None
+        check("occupying-fixture-frozen-by-the-real-planner", frozen_o is not None)
+        if frozen_o is not None:
+            rid_o = frozen_o[0]
+            plan_o = tomllib.loads(frozen_o[1].decode("utf-8"))
+            occ_dest, occ_arch = store.moved_dest(occ), apply.archive_rel(rid_o, occ)
+            rows_o = dict((r["path"], r) for r in plan_o["sources"])
+            ops_o = dict((r["source"], r["destination"]) for r in plan_o["ops"] if r["op"] == "move-file")
+            check("occupying-move-shape-from-the-real-planner",
+                  rows_o[occ]["occupying"] is True and rows_o[occ]["preservation"] == occ_arch
+                  and rows_o[move]["occupying"] is False and rows_o[move]["preservation"] == moved
+                  and ops_o == dict(((occ, occ_dest), (move, moved)))
+                  and reader.move_destinations(plan_o) == sorted((occ_dest, moved)))
+            home_o = apply.evidence_home_rel(rid_o)
+            base_o = [home_o + "/" + apply.PLAN_NAME, home_o + "/" + apply.APPROVAL_NAME, occ_arch]
+            marker_o = apply.inventory_rel(rid_o, RETIREMENT_PHASE)
+
+            def occ_tree():
+                # After apply: the occupying source is archived and replaced by its managed view, the
+                # non-occupying source stays live and frozen, and the base inventory lists the plan, the
+                # approval and the archive copy.
+                seq[0] += 1
+                root_ = base / ("t" + str(seq[0]))
+                write(root_, mrel + "/manifest.toml", manifest_text.encode("utf-8"))
+                write(root_, move, sources[move])
+                write(root_, occ, b"rendered view\n")
+                write(root_, base_o[0], frozen_o[1])
+                write(root_, base_o[1], frozen_o[2])
+                write(root_, occ_arch, occ_sources[occ])
+                relist(root_, rid_o, base_o)
+                return root_
+
+            def occ_retire(root_, creates):
+                fd = os.open(str(root_), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    shell = apply.ApplyOps(fd, rid_o, RETIREMENT_PHASE)
+                    for rel_, data_ in creates:
+                        shell.create(rel_, data_)
+                    shell.seal()
+                finally:
+                    os.close(fd)
+                ok = apply.check_apply_ops(rid_o, RETIREMENT_PHASE, shell.ops, shell.staged) == []
+                for rel_, data_ in sorted(shell.staged.items()):
+                    write(root_, rel_, data_)
+                commit(root_, rid_o, RETIREMENT_PHASE)
+                return ok, shell.staged[marker_o]
+
+            root = occ_tree()
+            rep = contain(root)
+            check("occupying-run-admits-before-retirement", rep.findings == [] and rep.cannot == []
+                  and bounded(rep) == [move])
+            write(root, occ_dest, occ_sources[occ])
+            rep = contain(root)
+            check("occupying-destination-premature-finding",
+                  named(rep.findings, occ_dest, "before the recorded retirement") and rep.cannot == [])
+            root = occ_tree()
+            ok, record_o = occ_retire(root, [(occ_dest, (root / occ_arch).read_bytes()),
+                                             (moved, (root / move).read_bytes())])
+            os.unlink(root / move)   # the relocation's pinned removal of the non-occupying source
+            check("occupying-retirement-record-derived", ok and [r["path"] for r in tomllib.loads(
+                record_o.decode("utf-8"))["file"]] == sorted((occ_dest, moved)))
+            rep = contain(root)
+            st_o = state_of(root)
+            check("occupying-retirement-reads-retired", rep.findings == [] and rep.cannot == []
+                  and bounded(rep) == [] and occ_dest in st_o.registered and moved in st_o.registered)
+            # A record that omits the occupying move's destination is not the derived record: CANNOT.
+            root = occ_tree()
+            occ_retire(root, [(moved, (root / move).read_bytes())])
+            os.unlink(root / move)
+            rep = contain(root)
+            check("occupying-destination-omitted-cannot",
+                  named(rep.cannot, marker_o, repr(occ_dest), "Move destination") and bounded(rep) == [])
 
         # S11: every record case refuses admission; the run homes are then graded and nothing is bounded.
         def record(name, mutate, verdict, *words):

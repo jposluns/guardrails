@@ -229,18 +229,22 @@ the run archive, which travel with every clone, and MUST NOT read the machine-lo
 a clone without journals grades exactly as the original store. That evidence check verifies
 internal consistency: the sealed inventories, plan and approval bound to the run id of the
 directory they sit in, and the listed bundle, archive and Move-root bytes at their recorded
-digests (a Move-root row counts only as a move destination the run's own plan records). A
-retirement is recorded only by a sealed retirement inventory in the shape the retirement-phase
-transaction derives from its own create ops: one row per non-occupying move row of the plan,
-naming that row's recorded Move destination at the moved source's preimage digest, and nothing
-else, so a retire-only plan's record lists no files. Retire and migrate preimages are preserved
-at apply and claimed by the base inventory, never re-listed by the retirement record; that
-shape also binds the record to its phase, because a base inventory copied to the retirement
-name lists at least the plan and the approval, which are never Move destinations. A retirement
-row that also names a base inventory row agrees with it in size and digest, each listed
-destination holds its recorded bytes live, and before a recorded retirement a file at a plan
-Move destination is a containment finding, since only the retirement-phase transaction creates
-that path. The whole check detects accidents: an interrupted apply, a hand edit that is
+digests (a Move-root row counts only as a move destination the run's own plan records).
+A retirement is recorded only by a sealed retirement inventory in the shape the
+retirement-phase transaction derives from its own create ops: one row per move row of the plan,
+occupying or not, whose recorded Move destination (its move-file destination) lies beneath
+.working/archive/moved/, naming that destination at the moved source's plan digest, and nothing
+else, so the record of a plan without such a move row lists no files. Those are the bytes the
+relocation writes: the frozen live source of a non-occupying move, and for an occupying move
+the committed archive copy the base inventory claims at that same digest. Retire and migrate
+preimages are preserved at apply and claimed by the base inventory, never re-listed by the
+retirement record; that shape also binds the record to its phase, because a base inventory
+copied to the retirement name lists at least the plan and the approval, which are never Move
+destinations. A retirement row whose path a base inventory row also names is a path claimed
+twice, which is cannot-evaluate; each listed destination holds its recorded bytes live, and
+before a recorded retirement a file at a plan Move destination, occupying or not, is a
+containment finding, since only the retirement-phase transaction creates that path.
+The whole check detects accidents: an interrupted apply, a hand edit that is
 non-canonical or that changes listed bytes, and a misplaced or stale record. It does not detect
 deliberate forgery: a hand edit that re-emits a canonical, self-consistent record, and any
 other crafted self-consistent bundle, is outside the accident-detection model, consistent with
