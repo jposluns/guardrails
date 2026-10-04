@@ -45,6 +45,15 @@ hardening step (VC-4-HARDEN) has not landed, and wiring a live store verb before
 into the `opf-check` self-test leg ONLY, exactly as the earlier units did. Assurance rides `--self-test`
 over synthetic whole stores; the observation seam under test is exercised directly.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_check.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import bisect
 import collections
 import hashlib
@@ -52,7 +61,6 @@ import ipaddress
 import os
 import re
 import stat
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
