@@ -2,8 +2,8 @@
 """Render .aiqt/core/renderers.toml: the manifest-covered RENDERER/GENERATOR DECLARATION (VER-CORE 6.5,
 R9-5). Offline, stdlib only, fail-closed.
 
-For each declared adapter renderer (gen_agents, gen_adapters, gen_claude, gen_cursor, gen_rules,
-gen_skill) this tool STATICALLY PARSES (ast, never import) the generator's module-level RENDERER_DECL
+For each declared adapter renderer (gen_agents, gen_adapters, gen_claude, gen_cursor, gen_rules, gen_skill,
+gen_worker_pack) this tool STATICALLY PARSES (ast, never import) the generator's module-level RENDERER_DECL
 literal ({"renderer-id": <str>, "semantics-revision": <int>}) and its GENSRC_OUTPUTS targets (recovered
 through gen_gensrc's own validated loader, the house import-reuse pattern), computes the ORDERED PACK-LOCAL
 IMPORT CLOSURE (the entrypoint plus every tools/<module>.py it transitively imports, entrypoint first then
@@ -12,7 +12,9 @@ the rest bytewise), and computes a FRAMED generator-code digest over per-file re
 Any edit anywhere in a closure changes the framed digest, forcing a declaration diff at the Step-4 delta
 gate; check_manifest.py recomputes the ARTIFACTS roster from these targets.
 
-Fail-closed (GateError -> exit 2): a missing/malformed RENDERER_DECL or GENSRC_OUTPUTS; a pack-local
+Fail-closed (GateError -> exit 2): a tools/*.py that declares RENDERER_DECL but is absent from RENDERERS
+(a --check against a fresh run proves the file current, never the roster complete, since both read the
+same RENDERERS); a missing/malformed RENDERER_DECL or GENSRC_OUTPUTS; a pack-local
 import that cannot be statically resolved (a relative import, or a wildcard `from <pack-local> import *`);
 an unreadable closure member; or any other cannot-evaluate. DISCLOSED RESIDUAL (disclose-guard-residuals):
 the closure is computed from statically-parsed Import/ImportFrom nodes only. A truly-dynamic pack-local
@@ -30,6 +32,7 @@ cannot-evaluate.
 """
 import ast
 import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -43,7 +46,9 @@ GENSRC_OUTPUTS = (
      "sources": ("tools/",), "regenerate": "python3 tools/gen_renderers.py"},
 )
 RENDERERS_REL = ".aiqt/core/renderers.toml"
-# The declared adapter renderers, in a fixed bytewise renderer-id order for a deterministic render.
+# The declared adapter renderers, in a fixed hand-kept order (not sorted by renderer-id or by file name) for a
+# deterministic render; reordering changes the bytes of renderers.toml. build_rows fails closed when a
+# tools/*.py file declares RENDERER_DECL but is absent here (_declared_renderer_stems).
 RENDERERS = ("gen_agents", "gen_adapters", "gen_claude", "gen_cursor", "gen_rules", "gen_skill",
              "gen_worker_pack")
 
@@ -94,6 +99,36 @@ def _read_renderer_decl(path, where):
     if not isinstance(rev, int) or isinstance(rev, bool) or rev < 0:
         raise GateError("{}: semantics-revision must be a non-negative integer".format(where))
     return rid, rev
+
+
+def _declared_renderer_stems(tools_dir):
+    """Every tools/<stem>.py carrying a top-level RENDERER_DECL assignment (Assign or AnnAssign), listed by
+    an explicit os.scandir (a glob returns nothing on an unreadable directory and would pass clean) and
+    parsed with ast, never imported. Fail-closed (GateError) on an unlistable directory or an unreadable or
+    unparsable *.py file, since either could hide a declaration."""
+    try:
+        with os.scandir(tools_dir) as it:
+            names = sorted(e.name for e in it if e.name.endswith(".py") and e.is_file())
+    except OSError as exc:
+        raise GateError("tools/: cannot list for RENDERER_DECL ({})".format(exc))
+    stems = []
+    for name in names:
+        where = "tools/" + name
+        try:
+            tree = ast.parse((tools_dir / name).read_text(encoding="utf-8"), filename=where)
+        except (OSError, SyntaxError, ValueError) as exc:
+            raise GateError("{}: cannot parse for RENDERER_DECL ({})".format(where, exc))
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            if any(isinstance(t, ast.Name) and t.id == "RENDERER_DECL" for t in targets):
+                stems.append(name[:-3])
+                break
+    return stems
 
 
 def _local_imports(path, tools_dir, where):
@@ -163,8 +198,14 @@ def framed_code_digest(closure, root):
 def build_rows(root):
     """One row per declared renderer: renderer-id, entrypoint, semantics-revision, targets (from the
     generator's GENSRC_OUTPUTS, verbatim including a tree's trailing '/'), the ordered import closure, and
-    the framed code-digest. Fail-closed on any malformed declaration or unresolvable import."""
+    the framed code-digest. Fail-closed on an incomplete roster (a tools/*.py declares RENDERER_DECL but is
+    absent from RENDERERS), any malformed declaration, or an unresolvable import."""
     tools_dir = root / "tools"
+    unlisted = [stem for stem in _declared_renderer_stems(tools_dir) if stem not in RENDERERS]
+    if unlisted:
+        raise GateError("renderer roster incomplete: {} declare(s) RENDERER_DECL but are absent from "
+                        "RENDERERS; add each to RENDERERS".format(
+                            ", ".join("tools/{}.py".format(s) for s in unlisted)))
     rows = []
     seen_ids = set()
     for stem in RENDERERS:
@@ -245,6 +286,8 @@ def main():
 #   (c) a mutated renderers.toml is caught by --check (exit 1);
 #   (d) a wildcard import of a pack-local module fails closed (exit 2), an unresolvable-closure case;
 #   (e) a missing/malformed RENDERER_DECL fails closed (exit 2).
+#   (g) a tools/*.py that declares RENDERER_DECL but is absent from RENDERERS fails --check (exit 2), even
+#       when renderers.toml is otherwise current (roster completeness, not only freshness).
 
 _HELPER = "VALUE = 1\n"
 
@@ -276,6 +319,13 @@ _ENTRY_BADID = ('from selfhelper import VALUE\n'
                 '    {"target": "OUT.md", "kind": "file",\n'
                 '     "sources": ("src.txt",), "regenerate": "python3 tools/gen_alpha.py"},\n'
                 ')\n')
+
+
+_ENTRY_UNLISTED = ('RENDERER_DECL = {"renderer-id": "beta", "semantics-revision": 1}\n'
+                   'GENSRC_OUTPUTS = (\n'
+                   '    {"target": "BETA.md", "kind": "file",\n'
+                   '     "sources": ("src.txt",), "regenerate": "python3 tools/gen_beta.py"},\n'
+                   ')\n')
 
 
 def _fixture(base, entry_body, helper_body=_HELPER):
@@ -355,6 +405,18 @@ def self_test_main():
         _fixture(badid, _ENTRY_BADID)
         if run_quiet(badid, check=False) != 2:
             failures.append("non-slug renderer-id 'Bad ID' expected exit 2 (fail-closed, this round's #3)")
+
+        # (g) roster completeness: renderers.toml is generated current for the listed gen_alpha, then
+        # tools/gen_beta.py appears declaring RENDERER_DECL without being listed in RENDERERS. A freshness
+        # comparison alone would pass, since both sides read the same RENDERERS; --check must fail closed.
+        unlisted = tmp / "unlisted"
+        _fixture(unlisted, _ENTRY_GOOD)
+        if run_quiet(unlisted, check=False) != 0:
+            failures.append("roster completeness: fixture generation expected exit 0")
+        (unlisted / "tools" / "gen_beta.py").write_text(_ENTRY_UNLISTED, encoding="utf-8")
+        if run_quiet(unlisted, check=True) != 2:
+            failures.append("an unlisted tools/gen_beta.py declaring RENDERER_DECL expected --check exit 2 "
+                            "(roster incomplete, fail-closed)")
     finally:
         RENDERERS = saved
         shutil.rmtree(tmp, ignore_errors=True)
@@ -367,7 +429,8 @@ def self_test_main():
     print("SELF-TEST PASS: a conformant renderer set generates and regenerates drift-clean and is "
           "deterministic; a helper edit inside a closure changes the framed code-digest; a mutated "
           "renderers.toml fails --check (exit 1); and a wildcard pack-local import, a missing "
-          "RENDERER_DECL, and a non-slug renderer-id each fail closed (exit 2)")
+          "RENDERER_DECL, a non-slug renderer-id, and an unlisted generator declaring RENDERER_DECL "
+          "each fail closed (exit 2)")
     return 0
 
 
