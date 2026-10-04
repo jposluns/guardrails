@@ -14,7 +14,9 @@ gate; check_manifest.py recomputes the ARTIFACTS roster from these targets.
 
 Fail-closed (GateError -> exit 2): a tools/*.py that declares RENDERER_DECL but is absent from RENDERERS
 (a --check against a fresh run proves the file current, never the roster complete, since both read the
-same RENDERERS); a missing/malformed RENDERER_DECL or GENSRC_OUTPUTS; a pack-local
+same RENDERERS); a tools/*.py binding RENDERER_DECL by any static form other than a plain top-level
+assignment, or a *.py entry that is not a regular file (_declared_renderer_stems, which also discloses
+the dynamic-binding residual); a missing/malformed RENDERER_DECL or GENSRC_OUTPUTS; a pack-local
 import that cannot be statically resolved (a relative import, or a wildcard `from <pack-local> import *`);
 an unreadable closure member; or any other cannot-evaluate. DISCLOSED RESIDUAL (disclose-guard-residuals):
 the closure is computed from statically-parsed Import/ImportFrom nodes only. A truly-dynamic pack-local
@@ -33,6 +35,7 @@ cannot-evaluate.
 import ast
 import hashlib
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -101,23 +104,129 @@ def _read_renderer_decl(path, where):
     return rid, rev
 
 
+# A readable name for the construct that binds RENDERER_DECL, for the fail-closed message.
+_BINDER_FORMS = {"Assign": "an assignment", "AnnAssign": "an annotated assignment",
+                 "AugAssign": "an augmented assignment", "NamedExpr": "an assignment expression (walrus)",
+                 "Delete": "a del statement", "For": "a for-loop target", "AsyncFor": "a for-loop target",
+                 "comprehension": "a comprehension target", "withitem": "a with-as target"}
+_BLOCK_FORMS = {"If": "an if/else", "Try": "a try", "TryStar": "a try", "With": "a with",
+                "AsyncWith": "a with", "For": "a for", "AsyncFor": "a for", "While": "a while",
+                "Match": "a match", "FunctionDef": "a def", "AsyncFunctionDef": "a def",
+                "ClassDef": "a class"}
+
+
+def _unsupported_binding(tree):
+    """The description of the first binding of RENDERER_DECL in `tree` that is NOT a plain top-level
+    Assign or AnnAssign to the bare name, or None when there is none. Modelled on gen_gensrc's
+    _read_declaration walk: a Store/Del-context Name covers tuple/list/starred unpacking, a conditional
+    or try/with/loop-nested assignment, an augmented assignment, del, a walrus, and a for/with/
+    comprehension target; the string-name binders (import alias incl. a dotted root, a wildcard import,
+    def/class, except-as, match capture, a parameter, global/nonlocal) are matched by their str field."""
+    allowed = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            allowed.update(id(t) for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            allowed.add(id(node.target))
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+
+    def _where(node):
+        # The innermost enclosing compound statement, if the binder is not a top-level statement.
+        anc = parents.get(id(node))
+        while anc is not None and not isinstance(anc, ast.Module):
+            name = type(anc).__name__
+            if name in _BLOCK_FORMS and anc is not node:
+                return " inside {} block".format(_BLOCK_FORMS[name])
+            anc = parents.get(id(anc))
+        return ""
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if (node.id != "RENDERER_DECL" or not isinstance(node.ctx, (ast.Store, ast.Del))
+                    or id(node) in allowed):
+                continue
+            binder, unpack = parents.get(id(node)), False
+            while isinstance(binder, (ast.Tuple, ast.List, ast.Starred)):
+                unpack = True
+                binder = parents.get(id(binder))
+            kind = type(binder).__name__
+            form = _BINDER_FORMS.get(kind, "a {} statement".format(kind))
+            if unpack:
+                form = "a tuple, list or starred unpacking in " + form
+            if kind in ("comprehension", "withitem"):
+                binder = parents.get(id(binder))
+            return form + _where(binder)
+        if isinstance(node, ast.alias):
+            bound = node.asname if node.asname is not None else node.name.partition(".")[0]
+            if bound == "RENDERER_DECL" or (node.asname is None and node.name == "*"):
+                return ("a wildcard import" if node.name == "*" else "an import") + _where(node)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == "RENDERER_DECL":
+                return "a def/class" + _where(node)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == "RENDERER_DECL":
+                return "an except-as" + _where(node)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            if node.name == "RENDERER_DECL":
+                return "a match capture" + _where(node)
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest == "RENDERER_DECL":
+                return "a match capture" + _where(node)
+        elif isinstance(node, ast.arg):
+            if node.arg == "RENDERER_DECL":
+                return "a parameter" + _where(node)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if "RENDERER_DECL" in node.names:
+                return "a global/nonlocal declaration" + _where(node)
+    return None
+
+
 def _declared_renderer_stems(tools_dir):
-    """Every tools/<stem>.py carrying a top-level RENDERER_DECL assignment (Assign or AnnAssign), listed by
-    an explicit os.scandir (a glob returns nothing on an unreadable directory and would pass clean) and
-    parsed with ast, never imported. Fail-closed (GateError) on an unlistable directory or an unreadable or
-    unparsable *.py file, since either could hide a declaration."""
+    """Every tools/<stem>.py carrying a plain top-level RENDERER_DECL assignment (Assign or AnnAssign to the
+    bare name), listed by an explicit os.scandir (a glob returns nothing on an unreadable directory and would
+    pass clean) and parsed with ast, never imported. Discovery is flat: only the entries directly in tools/
+    whose names end in '.py'; a subdirectory's contents are out of scope.
+
+    Fail-closed (GateError) on an unlistable directory; on a *.py entry that is not a regular file once
+    symlinks are followed (a dangling or looping symlink, a symlink to a directory or other non-file, or a
+    directory, FIFO, socket or device named *.py), since a candidate is enumerated by NAME before its type
+    is checked and is never skipped; on an unreadable or unparsable *.py file; and on any statically
+    visible binding of RENDERER_DECL other than a plain top-level Assign or AnnAssign (see
+    _unsupported_binding), each of which could hide a declaration. A symlink to a regular file is read
+    through. RENDERER_DECL is a RESERVED name: the walk is conservative and also refuses an unrelated
+    function-local reuse of it, which fails in the safe direction.
+
+    DISCLOSED RESIDUAL (disclose-guard-residuals): a truly dynamic binding (setattr on the module,
+    globals()["RENDERER_DECL"] = ..., exec, or an import-time side effect of another module) is beyond
+    static analysis; this function does not detect it and does not claim to."""
     try:
         with os.scandir(tools_dir) as it:
-            names = sorted(e.name for e in it if e.name.endswith(".py") and e.is_file())
+            names = sorted(e.name for e in it if e.name.endswith(".py"))
     except OSError as exc:
         raise GateError("tools/: cannot list for RENDERER_DECL ({})".format(exc))
     stems = []
     for name in names:
         where = "tools/" + name
+        path = tools_dir / name
         try:
-            tree = ast.parse((tools_dir / name).read_text(encoding="utf-8"), filename=where)
+            mode = os.stat(path).st_mode  # follows a symlink: a dangling or looping link raises here
+        except OSError as exc:
+            raise GateError("{}: cannot resolve this *.py entry to scan it for RENDERER_DECL (a dangling "
+                            "or looping symlink?) ({})".format(where, exc))
+        if not stat.S_ISREG(mode):
+            raise GateError("{}: this *.py entry is not a regular file (or a symlink to one), so it cannot "
+                            "be scanned for RENDERER_DECL and is refused rather than skipped".format(where))
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=where)
         except (OSError, SyntaxError, ValueError) as exc:
             raise GateError("{}: cannot parse for RENDERER_DECL ({})".format(where, exc))
+        form = _unsupported_binding(tree)
+        if form is not None:
+            raise GateError("{}: RENDERER_DECL is bound by {}; only a plain top-level assignment to the "
+                            "name is a supported declaration".format(where, form))
         for node in tree.body:
             if isinstance(node, ast.Assign):
                 targets = node.targets
@@ -288,6 +397,11 @@ def main():
 #   (e) a missing/malformed RENDERER_DECL fails closed (exit 2).
 #   (g) a tools/*.py that declares RENDERER_DECL but is absent from RENDERERS fails --check (exit 2), even
 #       when renderers.toml is otherwise current (roster completeness, not only freshness).
+#   (h) every unsupported static binding of RENDERER_DECL in an unlisted tools/*.py (unpacking, starred,
+#       conditional, try, with, loop, walrus, augmented, del, import-as, wildcard import, global) fails
+#       --check (exit 2) instead of reading as "no declaration".
+#   (i) a *.py entry that is a dangling symlink, a looping symlink, a symlink to a directory, a directory,
+#       or a FIFO fails --check (exit 2) instead of being skipped.
 
 _HELPER = "VALUE = 1\n"
 
@@ -326,6 +440,27 @@ _ENTRY_UNLISTED = ('RENDERER_DECL = {"renderer-id": "beta", "semantics-revision"
                    '    {"target": "BETA.md", "kind": "file",\n'
                    '     "sources": ("src.txt",), "regenerate": "python3 tools/gen_beta.py"},\n'
                    ')\n')
+
+
+_DECL_LITERAL = '{"renderer-id": "beta", "semantics-revision": 1}'
+# (h) one unlisted tools/gen_beta.py body per unsupported static binding form; each must fail closed.
+_UNSUPPORTED_BINDINGS = (
+    ("tuple unpacking", "RENDERER_DECL, = ({},)\n".format(_DECL_LITERAL)),
+    ("list unpacking", "[RENDERER_DECL] = [{}]\n".format(_DECL_LITERAL)),
+    ("starred unpacking", "*RENDERER_DECL, = ({},)\n".format(_DECL_LITERAL)),
+    ("conditional", "if True:\n    RENDERER_DECL = {}\n".format(_DECL_LITERAL)),
+    ("try block", "try:\n    RENDERER_DECL = {}\nexcept Exception:\n    pass\n".format(_DECL_LITERAL)),
+    ("with block", "import contextlib\nwith contextlib.nullcontext({}) as RENDERER_DECL:\n    pass\n"
+                   .format(_DECL_LITERAL)),
+    ("for loop", "for RENDERER_DECL in ({},):\n    pass\n".format(_DECL_LITERAL)),
+    ("assignment expression", "(RENDERER_DECL := {})\n".format(_DECL_LITERAL)),
+    ("augmented assignment", "RENDERER_DECL |= {}\n".format(_DECL_LITERAL)),
+    ("del", "del RENDERER_DECL\n"),
+    ("import-as", "from selfhelper import VALUE as RENDERER_DECL\n"),
+    ("wildcard import", "from selfhelper import *\n"),
+    ("global statement", "def f():\n    global RENDERER_DECL\n    RENDERER_DECL = {}\n"
+                         .format(_DECL_LITERAL)),
+)
 
 
 def _fixture(base, entry_body, helper_body=_HELPER):
@@ -417,6 +552,47 @@ def self_test_main():
         if run_quiet(unlisted, check=True) != 2:
             failures.append("an unlisted tools/gen_beta.py declaring RENDERER_DECL expected --check exit 2 "
                             "(roster incomplete, fail-closed)")
+
+        # (h) an unsupported static binding of RENDERER_DECL is refused, never read as absence.
+        for label, body in _UNSUPPORTED_BINDINGS:
+            case = tmp / ("binding-" + label.replace(" ", "-"))
+            _fixture(case, _ENTRY_GOOD)
+            if run_quiet(case, check=False) != 0:
+                failures.append("binding {}: fixture generation expected exit 0".format(label))
+            (case / "tools" / "gen_beta.py").write_text(body, encoding="utf-8")
+            if run_quiet(case, check=True) != 2:
+                failures.append("an unlisted tools/gen_beta.py binding RENDERER_DECL by {} expected --check "
+                                "exit 2 (unsupported binding, fail-closed)".format(label))
+
+        # (i) a *.py entry that is not a regular file is refused, never skipped.
+        def _dangling(p):
+            p.symlink_to("missing.py")
+
+        def _looping(p):
+            p.symlink_to(p.name)
+
+        def _to_dir(p):
+            (p.parent / "adir").mkdir()
+            p.symlink_to("adir")
+
+        def _fifo(p):
+            os.mkfifo(str(p))
+
+        for label, make in (("dangling symlink", _dangling), ("looping symlink", _looping),
+                            ("symlink to a directory", _to_dir), ("directory", Path.mkdir),
+                            ("FIFO", _fifo)):
+            case = tmp / ("entry-" + label.replace(" ", "-"))
+            _fixture(case, _ENTRY_GOOD)
+            if run_quiet(case, check=False) != 0:
+                failures.append("entry {}: fixture generation expected exit 0".format(label))
+            try:
+                make(case / "tools" / "gen_beta.py")
+            except (OSError, AttributeError, NotImplementedError) as exc:
+                failures.append("entry {}: cannot build the fixture ({})".format(label, exc))
+                continue
+            if run_quiet(case, check=True) != 2:
+                failures.append("a tools/gen_beta.py that is a {} expected --check exit 2 (non-regular "
+                                "*.py entry, fail-closed)".format(label))
     finally:
         RENDERERS = saved
         shutil.rmtree(tmp, ignore_errors=True)
@@ -429,8 +605,9 @@ def self_test_main():
     print("SELF-TEST PASS: a conformant renderer set generates and regenerates drift-clean and is "
           "deterministic; a helper edit inside a closure changes the framed code-digest; a mutated "
           "renderers.toml fails --check (exit 1); and a wildcard pack-local import, a missing "
-          "RENDERER_DECL, a non-slug renderer-id, and an unlisted generator declaring RENDERER_DECL "
-          "each fail closed (exit 2)")
+          "RENDERER_DECL, a non-slug renderer-id, an unlisted generator declaring RENDERER_DECL, {} "
+          "unsupported RENDERER_DECL binding forms, and 5 non-regular *.py entries each fail closed "
+          "(exit 2)".format(len(_UNSUPPORTED_BINDINGS)))
     return 0
 
 
