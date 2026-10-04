@@ -1170,7 +1170,9 @@ def _render_views(op_row, context=None):
     fail-closed in this slice (spec 14.2: adopter content is never absorbed, deleted or overwritten; the
     preserve-then-render write for a plan-enumerated occupying source composes with the file-ops slice).
     The journal then captures each create's absent prestate under its lock and digest-verifies the written
-    poststate, so a destination raced between compose and apply rolls the whole transaction back. Every
+    poststate: a destination raced in between compose and that capture is refused there as a prestate
+    violation before the transaction's INTENT publishes (nothing opened), and the create itself is
+    exclusive and no-follow; an arbitrary concurrent writer is outside the journal's model. Every handler
     refusal is CANNOT-EVALUATE, raised before anything is composed."""
     try:
         _render_views_compose(op_row, context)
@@ -3297,6 +3299,9 @@ def _finish_ops_self_test(check):
                       receipt=dict(receipt, release=dict(receipt["release"], manifest_sha256=stray)))
     refuses_untouched("record-anchor-disagreement-refused", [record], "agreeing independent",
                       receipt=dict(receipt, release=dict(receipt["release"], anchor_agreement=False)))
+    refuses_untouched("record-anchor-unobserved-refused", [record], "agreeing independent",
+                      receipt=dict(receipt, release=dict(receipt["release"], independent_anchor_observed=False,
+                                                         anchor_agreement=True)))
     refuses_untouched("record-unbound-core-digest-refused",
                       [dict(record, receipt_core_digest=stray)], "receipt_core_digest")
     refuses_untouched("record-receipt-outside-bundle-refused",
@@ -3408,7 +3413,7 @@ def _finish_ops_self_test(check):
         with lease_stand_in():
             txn, why = run(root, [row], **rctx(root))
         check("render-views-occupied-destination-preserved",
-              txn is None and "occupied" in (why or "")
+              txn is None and "are occupied; adopter content is never absorbed" in (why or "")
               and (root / views[0]).read_bytes() == adopter and snapshot(root) == before)
 
         def refuses_uncomposed(label, name, needle, rrow=row, changelog=True, **changes):
@@ -3435,6 +3440,15 @@ def _finish_ops_self_test(check):
         # write the delegated engine would have left in place.
         refuses_uncomposed("render-views-authored-residual-refused", "residual", "C-CHANGELOG-GATES",
                            changelog=False)
+        # a drifted root VERSION is an authored residual too: no declared view targets VERSION, so
+        # C-VERSION-FILE is not render-views' own and refuses with nothing written.
+        root = built_store(temp, "version")
+        (root / "VERSION").write_bytes(b"9.9.9\n")
+        before = snapshot(root)
+        with lease_stand_in():
+            txn, why = run(root, [row], **rctx(root))
+        check("render-views-drifted-version-residual-refused",
+              txn is None and "C-VERSION-FILE" in (why or "") and snapshot(root) == before)
         # a context product root other than the transaction's own root refuses by directory identity, so
         # composed views can never land in a tree the store checks never saw.
         refuses_uncomposed("render-views-foreign-product-root-refused", "foreign",
@@ -3445,15 +3459,17 @@ def _finish_ops_self_test(check):
         root = built_store(temp, "identity")
         genuine = store.resolve_store(root)
 
-        def res_variant(**changes):
+        def res_variant(status=genuine.status, **changes):
             fields = dict(store_root=genuine.store_root, machine_dir=genuine.machine_dir,
                           machine_rel=genuine.machine_rel, pointer_source=genuine.pointer_source,
                           target=genuine.target, product_root=genuine.product_root)
             fields.update(changes)
-            return store.Resolution(genuine.status, genuine.detail, **fields)
+            return store.Resolution(status, genuine.detail, **fields)
 
         for label, fake in (("render-views-pointer-source-refused", res_variant(pointer_source="committed")),
-                            ("render-views-foreign-store-root-refused", res_variant(store_root=oracle))):
+                            ("render-views-foreign-store-root-refused", res_variant(store_root=oracle)),
+                            ("render-views-unresolved-status-refused",
+                             res_variant(status=store.CANNOT_EVALUATE))):
             before = snapshot(root)
             with lease_stand_in(), mock.patch.object(store, "resolve_store", return_value=fake):
                 txn, why = run(root, [row], **rctx(root))
