@@ -2513,7 +2513,7 @@ platform." Wire all four, not only the platform you run on.
     `transition` acts; it is never laundered", and names no operation for it, and the specification
     defines no writer operation for any other integrity defect. The writer refuses a file that is
     not canonical (section 8.8, item 2), its final doctor must report VALID (item 7), so a defect
-    that the operation's result still holds stops it, and the content of most repairs, such as a
+    that the final doctor detects in the operation's result prevents successful completion, and the content of most repairs, such as a
     removed record's original content, cannot be derived from a request and the schema rules as
     item 4 requires; which sanctioned act allocates a repair's new ID, as for a missing receipt, is
     open point 31. So this prompt adds no writer operation for any of them, and it prescribes no
