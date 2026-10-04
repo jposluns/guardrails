@@ -922,73 +922,195 @@ def _main_isolated(report_path=None):
             {"hook_event_name": "PreToolUse", "cwd": str(tb.root), "tool_name": "Bash",
              "tool_input": None})), "deny")
 
+        # ---------- component 2b: ground-truth differential against real bash ----------
+        # ONE registry of shell-command cases: (id, raw [% is newline], scanner verdict, bash mode). EVERY
+        # row's scanner verdict is asserted; every row with a bash mode is ALSO run through real bash with a
+        # sleep-before-create `touch` shim FIRST on a fixed PATH, so a background child (marker ABSENT when
+        # bash returns, PRESENT after a bounded wait) is discriminated from a foreground/waited run and from
+        # no run at all. Bash modes: "detach" (a non-waited background child: strict discrimination), "ran"
+        # (the marked touch executed; its timing inside a substitution cannot prove background, but a real
+        # positive observation, never vacuous), "nodetach" (the marker is planted INSIDE the region that must
+        # be DATA; it must NEVER appear and bash must exit 0), None (scanner-only). A bash timeout, or a
+        # required marker observation that does not hold, is cannot-evaluate and FAILS (never counted harmless).
         import time as _time
         import shutil as _shutil
+        import random as _random
+        import signal as _signal
         _mkr2 = lambda raw: raw.replace("%", chr(10))
-        _DET_RAW = []
-        for _cid, _raw in [
-          ("trunc/fg-heredoc-cmdsub-nested-then-detach-denies", "msg=$(cat <<'EOF'%hello%EOF%)%touch MARK &%cat <<EOF%done%EOF"),
-          ("trunc/fg-heredoc-cmdsub-body-then-detach-denies", "body=$(cat <<'EOF'%notes%EOF%)%touch MARK &%wait%cat <<EOF%x%EOF"),
-          ("trunc/fg-heredoc-backtick-nested-then-detach-denies", "v=`cat <<EOF%1%EOF%`%touch MARK &%cat <<EOF%x%EOF"),
-          ("trunc/fg-heredoc-subshell-nested-then-detach-denies", "(cd . && cat <<EOF%hi%EOF%)%touch MARK &%cat <<EOF%ok%EOF"),
-          ("trunc/fg-heredoc-cmdsub-wait-delim-then-detach-denies", "x=$(cat <<'wait'%hi%wait%)%touch MARK &%wait"),
-          ("trunc/fg-heredoc-cmdsub-samedelim-then-detach-denies", "x=$(cat <<E%hello%E%)%touch MARK &%printf B%wait%E"),
-          ("trunc/fg-heredoc-subshell-samedelim-then-detach-denies", "(cat <<E%hello%E%)%touch MARK &%wait%E"),
-          ("trunc/fg-heredoc-case-pattern-paren-then-detach-denies", "cat <<EOF $(case x in x) true%touch MARK &%;; esac)%EOF"),
-          ("trunc/fg-heredoc-subscript-procsub-then-detach-denies", "cat <<EOF a[ <(%touch MARK &%)%EOF"),
-          ("trunc/fg-cr-before-hash-detach-denies", "touch MARK x" + chr(13) + chr(35) + "y &"),
-          ("trunc/fg-vt-before-hash-detach-denies", "touch MARK x" + chr(11) + chr(35) + "y &"),
-          ("trunc/fg-ff-before-hash-detach-denies", "touch MARK x" + chr(12) + chr(35) + "y &"),
-          ("trunc/fg-nbsp-before-hash-detach-denies", "touch MARK x" + chr(160) + chr(35) + "y &"),
-          ("trunc/fg-ansi-c-balanced-detach-denies", "touch MARK $'x\\'y' &"),
-          ("trunc/fg-dq-cmdsub-amp-detach-denies", "echo " + chr(34) + "$(touch MARK &)" + chr(34)),
+        _cr, _vt, _ff, _nb = chr(13), chr(11), chr(12), chr(160)
+        GT = []
+        _scanv = {}
+        for _cid, _raw, _sw, _mode in [
+          ("trunc/fg-heredoc-cmdsub-nested-then-detach-denies", "msg=$(cat <<'EOF'%hello%EOF%)%touch MARK &%cat <<EOF%done%EOF", "deny", "detach"),
+          ("trunc/fg-heredoc-cmdsub-body-then-detach-denies", "body=$(cat <<'EOF'%notes%EOF%)%touch MARK &%cat <<EOF%x%EOF", "deny", "detach"),
+          ("trunc/fg-heredoc-backtick-nested-then-detach-denies", "v=`cat <<EOF%1%EOF%`%touch MARK &%cat <<EOF%x%EOF", "deny", "detach"),
+          ("trunc/fg-heredoc-subshell-nested-then-detach-denies", "(cd . && cat <<EOF%hi%EOF%)%touch MARK &%cat <<EOF%ok%EOF", "deny", "detach"),
+          ("trunc/fg-heredoc-cmdsub-wait-delim-then-detach-denies", "x=$(cat <<'wait'%hi%wait%)%touch MARK &%true", "deny", "detach"),
+          ("trunc/fg-heredoc-cmdsub-samedelim-then-detach-denies", "x=$(cat <<E%hello%E%)%touch MARK &%printf B", "deny", "detach"),
+          ("trunc/fg-heredoc-subshell-samedelim-then-detach-denies", "(cat <<E%hello%E%)%touch MARK &%printf B", "deny", "detach"),
+          ("trunc/fg-heredoc-case-pattern-paren-then-detach-denies", "cat <<EOF $(case x in x) true%touch MARK &%;; esac)%EOF", "deny", "ran"),
+          ("trunc/fg-heredoc-subscript-procsub-then-detach-denies", "cat <<EOF a[ <(%touch MARK &%)%EOF", "deny", "ran"),
+          ("trunc/fg-cr-before-hash-detach-denies", "touch MARK y" + _cr + "#z &", "deny", "detach"),
+          ("trunc/fg-vt-before-hash-detach-denies", "touch MARK y" + _vt + "#z &", "deny", "detach"),
+          ("trunc/fg-ff-before-hash-detach-denies", "touch MARK y" + _ff + "#z &", "deny", "detach"),
+          ("trunc/fg-nbsp-before-hash-detach-denies", "touch MARK y" + _nb + "#z &", "deny", "detach"),
+          ("trunc/fg-ansi-c-balanced-detach-denies", "touch MARK $'x\\'y' &", "deny", "detach"),
+          ("trunc/fg-dq-cmdsub-amp-detach-denies", "echo " + chr(34) + "$(touch MARK &)" + chr(34), "deny", "ran"),
+          ("trunc/fg-heredoc-cmdsub-nested-harmless-allows", "x=$(cat <<'EOF'%touch MARK &%EOF%)%echo x", "allow", "nodetach"),
+          ("trunc/fg-heredoc-cmdsub-apostrophe-allows", "x=$(cat <<'EOF'%it's touch MARK &%EOF%)", "allow", "nodetach"),
+          ("trunc/fg-heredoc-subshell-amp-body-allows", "(cat <<'EOF'%Tom & Jerry touch MARK &%EOF%)", "allow", "nodetach"),
+          ("trunc/fg-dq-amp-marker-harmless-allows", "echo " + chr(34) + "touch MARK & later" + chr(34), "allow", "nodetach"),
+          ("trunc/fg-sq-amp-marker-harmless-allows", "echo 'touch MARK & later'", "allow", "nodetach"),
+          ("trunc/fg-heredoc-quoted-marker-harmless-allows", "cat <<'EOF'%touch MARK & body%EOF", "allow", "nodetach"),
+          ("trunc/fg-comment-marker-harmless-allows", "echo ok # touch MARK & later", "allow", "nodetach"),
+          ("trunc/fg-commit-nested-marker-harmless-allows", "echo " + chr(34) + "$(cat <<'EOF'%touch MARK & msg%EOF%)" + chr(34), "allow", "nodetach"),
+          ("trunc/fg-param-marker-harmless-allows", "echo " + chr(34) + "${x:-touch MARK & def}" + chr(34), "allow", "nodetach"),
+          ("trunc/fg-heredoc-opline-cmdsub-closed-overdenies", "cat <<EOF $(echo hi)%A & B%EOF", "deny", None),
+          ("trunc/fg-ansi-c-benign-allows", "echo $'\\'t' && ls", "allow", None),
         ]:
-            check(_cid, fg(_mkr2(_raw)), "deny")
-            _DET_RAW.append(_raw)
-        _HARM_RAW = []
-        for _cid, _raw in [
-          ("trunc/fg-heredoc-cmdsub-nested-harmless-allows", "x=$(cat <<'EOF'%A & B%EOF%)%echo x"),
-          ("trunc/fg-heredoc-cmdsub-apostrophe-allows", "x=$(cat <<'EOF'%it's fine%EOF%)"),
-          ("trunc/fg-heredoc-subshell-amp-body-allows", "(cat <<'EOF'%Tom & Jerry%EOF%)"),
-          ("trunc/fg-ansi-c-benign-allows", "echo $'\\'t' && ls"),
-        ]:
-            check(_cid, fg(_mkr2(_raw)), "allow")
-            _HARM_RAW.append(_raw)
-        check("trunc/fg-heredoc-opline-cmdsub-closed-overdenies", fg("cat <<EOF $(echo hi)" + chr(10) + "A & B" + chr(10) + "EOF"), "deny")
+            _scanv[_cid] = fg(_mkr2(_raw))
+            check(_cid, _scanv[_cid], _sw)
+            GT.append((_cid, _raw, _sw, _mode))
         check("trunc/scan-ansi-c-balanced-detach", aiqt_hooks._orch_foreground_detach("true $'x\\'y' & echo ok"), True)
         check("trunc/scan-dq-cmdsub-amp-detach", aiqt_hooks._orch_foreground_detach("echo " + chr(34) + "$(sleep 5 &)" + chr(34)), True)
-        _bash_r2 = _shutil.which("bash")
-        def _gt_detaches(raw):
-            cmd = _mkr2(raw)
-            d = tempfile.mkdtemp(prefix="gtr2.", dir=str(tmp))
+        _fixed_path = "/usr/bin:/bin"
+        _bash = _shutil.which("bash", path=_fixed_path)  # finding E: availability on the SAME fixed PATH
+        _SHIM_SLEEP, _WAIT, _TIMEOUT = 0.25, 0.60, 6.0
+        _real_touch = next((p for p in ("/usr/bin/touch", "/bin/touch") if os.path.exists(p)), None)
+
+        def _gt_run(cmd, shim_dir):
+            """Run cmd under bash in a fresh temp HOME/cwd on the fixed PATH with the sleep-first touch shim.
+            Returns a dict discriminating a background child from a foreground/waited run and from no run."""
+            d = tempfile.mkdtemp(prefix="gt.", dir=str(tmp))
+            mark = os.path.join(d, "MARK")
+            env = dict(PATH=shim_dir + ":" + _fixed_path, HOME=d)
+            timed_out, exit_code, pgid = False, None, None
             try:
-                env = {"PATH": "/usr/bin:/bin", "HOME": d}
+                proc = subprocess.Popen(["bash", "-c", cmd], cwd=d, env=env,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, start_new_session=True)
+                pgid = proc.pid  # start_new_session: the child leads its own group (pgid == pid)
                 try:
-                    subprocess.run(["bash", "-c", cmd], cwd=d, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                    exit_code = proc.wait(timeout=_TIMEOUT)
                 except subprocess.TimeoutExpired:
-                    pass
-                for _ in range(25):
-                    if os.path.exists(os.path.join(d, "MARK")):
-                        return True
-                    _time.sleep(0.02)
-                return os.path.exists(os.path.join(d, "MARK"))
+                    timed_out = True
+                at_return = os.path.exists(mark)
+                appeared = at_return
+                if not appeared:
+                    deadline = _time.time() + _WAIT
+                    while _time.time() < deadline:
+                        if os.path.exists(mark):
+                            appeared = True
+                            break
+                        _time.sleep(0.01)
+                return dict(timed_out=timed_out, exit_code=exit_code, at_return=at_return,
+                            present=appeared, detached=(not at_return) and appeared)
             finally:
+                if pgid is not None:
+                    try:
+                        os.killpg(pgid, _signal.SIGKILL)  # reap a lingering background child before cleanup
+                    except OSError:
+                        pass
                 _shutil.rmtree(d, ignore_errors=True)
+
+        def _gt_eval(raw, mode, shim_dir):
+            """('ok'|'bad'|'cannot', result-dict) for one bash mode. A timeout is cannot-evaluate."""
+            r = _gt_run(_mkr2(raw), shim_dir)
+            if r["timed_out"]:
+                return "cannot", r
+            if mode == "detach":
+                return ("ok" if r["detached"] else "bad"), r
+            if mode == "ran":
+                return ("ok" if r["present"] else "bad"), r
+            return ("ok" if (not r["present"] and r["exit_code"] == 0) else "bad"), r
+
         _UNV = "UNVERIFIABLE"
-        if not _bash_r2:
-            _gt_bash_ok, _gt_det_ok, _gt_harm_ok, _gt_flip_ok = _UNV, _UNV, _UNV, _UNV
+        if not _bash or not _real_touch:
+            _gt_bash_ok = _UNV
+            _gt_det_ok = _gt_harm_ok = _gt_cannot_ok = _gt_flip_ok = _gt_flip_real_ok = _UNV
+            _gt_fuzz_ok = _UNV
         else:
             _gt_bash_ok = True
-            _det_bash = {r: _gt_detaches(r) for r in _DET_RAW}
-            _harm_bash = {r: _gt_detaches(r) for r in _HARM_RAW}
-            _weak = lambda cmd: None
-            _gt_det_ok = all(_det_bash[r] and fg(_mkr2(r)) == "deny" for r in _DET_RAW)
-            _gt_harm_ok = all((not _harm_bash[r]) and fg(_mkr2(r)) == "allow" for r in _HARM_RAW)
-            _gt_flip_ok = any(_det_bash[r] and _weak(_mkr2(r)) is None for r in _DET_RAW)
+            _shim_dir = tempfile.mkdtemp(prefix="gtshim.", dir=str(tmp))
+            _shim = os.path.join(_shim_dir, "touch")
+            with open(_shim, "w", encoding="utf-8") as _sf:
+                _sf.write("#!/bin/sh\nsleep " + str(_SHIM_SLEEP) + "\nexec "
+                          + _real_touch + " " + chr(34) + "$@" + chr(34) + "\n")
+            os.chmod(_shim, 0o755)
+            _res = dict((cid, _gt_eval(raw, mode, _shim_dir))
+                        for cid, raw, _sw, mode in GT if mode)
+            _cannot = [cid for cid, pair in _res.items() if pair[0] == "cannot"]
+            _det_rows = [cid for cid, raw, _sw, mode in GT if mode in ("detach", "ran")]
+            _harm_rows = [cid for cid, raw, _sw, mode in GT if mode == "nodetach"]
+            _rawof = dict((cid, raw) for cid, raw, _sw, mode in GT)
+            _gt_det_ok = all(_res[cid][0] == "ok" and _scanv[cid] == "deny" for cid in _det_rows)
+            _gt_harm_ok = all(_res[cid][0] == "ok" and _scanv[cid] == "allow" for cid in _harm_rows)
+            _gt_cannot_ok = (len(_cannot) == 0)
+            # REAL FLIP: the SAME differential predicate must PASS for the real scanner and FAIL for a
+            # weakened one (the out-of-subset rule removed, so OUT allows). A bash-confirmed detach row the
+            # weak scanner allows is a reintroduced bypass the differential has to catch.
+            def _weak(cmd):
+                v = aiqt_hooks._orch_safe_subset_scan(cmd)
+                return None if v == "OUT" else v
+            _confirmed = [cid for cid in _det_rows if _res[cid][0] == "ok"]
+            def _all_denied_by(fn):
+                return all(fn(_mkr2(_rawof[cid])) is not None for cid in _confirmed)
+            _gt_flip_real_ok = bool(_confirmed) and _all_denied_by(aiqt_hooks._orch_foreground_detach_kind)
+            _gt_flip_ok = bool(_confirmed) and (not _all_denied_by(_weak))
+            # BOUNDED DIFFERENTIAL FUZZ (fixed seed): compose commands from grammar fragments around one
+            # marker detach and run each through BOTH the scanner and real bash. The soundness invariant is
+            # one-directional: whenever bash actually backgrounds the marker (strict discrimination), the
+            # scanner MUST deny. A fixed seed makes the corpus deterministic; the seed and count are printed.
+            M = "touch MARK &"
+            _odd = (_cr, _vt, _ff, _nb)
+            def _fuzz_make(rng):
+                base = rng.choice([
+                    M,
+                    "true ; " + M,
+                    ": ; " + M,
+                    "(" + M + ")",
+                    "( : ; " + M + " )",
+                    "x=$(" + M + ")",
+                    "echo " + chr(34) + "$(" + M + ")" + chr(34),
+                    "v=`" + M + "`",
+                    "echo $((1+1)) ; " + M,
+                    "echo $'a\\tb' ; " + M,
+                    "touch MARK y" + rng.choice(_odd) + "#z &",
+                    "case x in x) " + M + " ;; esac",
+                    "echo '" + M + "'",
+                    "echo " + chr(34) + M + chr(34),
+                    "echo ok # " + M,
+                    "cat <<'EOF'\n" + M + "\nEOF",
+                    "cat <<EOF\n" + M + "\nEOF",
+                    "echo " + chr(34) + "$(cat <<'EOF'\n" + M + "\nEOF\n)" + chr(34),
+                    "echo " + chr(34) + "${x:-" + M + "}" + chr(34),
+                    "echo " + chr(34) + "$((6 & 3))" + chr(34) + " ; " + M,
+                ])
+                pre = "".join(rng.choice([" ", "\t", ""]) for _ in range(rng.randint(0, 2)))
+                return pre + base
+            _FUZZ_SEED, _FUZZ_COUNT = 20251101, 80
+            _rng = _random.Random(_FUZZ_SEED)
+            _fuzz_false_allow, _fuzz_timeouts, _fuzz_detaches = [], 0, 0
+            for _ in range(_FUZZ_COUNT):
+                _c = _fuzz_make(_rng)
+                _r = _gt_run(_c, _shim_dir)
+                if _r["timed_out"]:
+                    _fuzz_timeouts += 1
+                    continue
+                if _r["detached"]:
+                    _fuzz_detaches += 1
+                    if aiqt_hooks._orch_foreground_detach_kind(_c) is None:
+                        _fuzz_false_allow.append(_c)
+            _gt_fuzz_ok = (not _fuzz_false_allow) and (_fuzz_timeouts == 0) and (_fuzz_detaches > 0)
+            print("GT-FUZZ seed={0} count={1} detaches={2} false_allows={3} timeouts={4}".format(
+                _FUZZ_SEED, _FUZZ_COUNT, _fuzz_detaches, len(_fuzz_false_allow), _fuzz_timeouts))
         check("gt/bash-available", _gt_bash_ok, True)
         check("gt/detach-cases-all-denied", _gt_det_ok, True)
         check("gt/harmless-cases-no-detach-and-allowed", _gt_harm_ok, True)
+        check("gt/no-cannot-evaluate", _gt_cannot_ok, True)
         check("gt/flip-catches-reintroduced-bypass", _gt_flip_ok, True)
+        check("gt/flip-real-scanner-denies-detaches", _gt_flip_real_ok, True)
+        check("gt/fuzz-no-false-allow", _gt_fuzz_ok, True)
         # ---------- component 3b: the untracked wait-loop guard (trkasy, deny) ----------
         w = Fixture(tmp, "waitloop")
         # predicate direct checks (three-valued): the four-conjunct truth table.
