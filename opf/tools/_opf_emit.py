@@ -4834,6 +4834,9 @@ def self_test():
     # #378 P1: the guardian's subject-pidfd close, green, and red by REUSE alone under the pre-fix body.
     failures.extend(_st_guardian_close_reuse())
 
+    # A loaded module ending the process, at load or in a later call into it, is exit 2 via the backstop.
+    failures.extend(_st_loaded_exit())
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
@@ -4861,14 +4864,65 @@ def _selected_mode(args):
     return "misuse"
 
 
+# What in-process loaded code can raise to end the process: SystemExit (any code, including 0 or None),
+# KeyboardInterrupt and GeneratorExit. None of them is an Exception, so an `except Exception` lets them pass.
+_PROCESS_ENDING = (SystemExit, KeyboardInterrupt, GeneratorExit)
+
+
+def _backstop(run):
+    """Return run()'s status, mapping a process-ending exception that escapes it to exit 2 (cannot
+    evaluate) with a named message, never the escaping code's own status (SystemExit 0 or None included).
+    The self-test loads in-repo code in this process (the _byte_canon authority and the shared _journal.py
+    close harness) and calls into it; this is the one entry backstop for both, at load and in any later
+    call. Residuals, not covered: os._exit, atexit handlers, threads the loaded code starts, interpreter
+    shutdown, and a process exit raised while this module's own top-level imports run, before this guard
+    is entered (the code loaded is reviewed in-repo code)."""
+    try:
+        return run()
+    except _PROCESS_ENDING as exc:
+        code = exc.code if isinstance(exc, SystemExit) else None
+        print("error: _opf_emit self-test cannot evaluate: in-process code ended the process ({} {!r}); "
+              "fail-closed".format(type(exc).__name__, code), file=sys.stderr)
+        return 2
+
+
+def _st_loaded_exit():
+    """Each process-ending exception from a module loaded the way the self-test loads its siblings, at
+    load or in a later call, yields exit 2 through _backstop. Returns the failures."""
+    import importlib.util
+    import tempfile
+    failures = []
+    with tempfile.TemporaryDirectory(prefix="opf-emit-loaded-exit-") as tmp:
+        for index, (label, body, call) in enumerate((
+                ("load SystemExit(0)", "raise SystemExit(0)\n", False),
+                ("load SystemExit(None)", "raise SystemExit\n", False),
+                ("load KeyboardInterrupt", "raise KeyboardInterrupt\n", False),
+                ("load GeneratorExit", "raise GeneratorExit\n", False),
+                ("call SystemExit(0)", "def run():\n    raise SystemExit(0)\n", True))):
+            path = Path(tmp) / "loaded_exit_{}.py".format(index)
+            path.write_text(body, encoding="utf-8")
+
+            def run(path=path, call=call):
+                spec = importlib.util.spec_from_file_location("_opf_emit_loaded_exit", path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if call:
+                    module.run()
+                return 0
+            got = _backstop(run)
+            if got != 2:
+                failures.append("loaded-exit/{}: expected exit 2, got {!r}".format(label, got))
+    return failures
+
+
 def main():
     if _selected_mode(sys.argv[1:]) == "self-test":
-        return self_test()
+        return _backstop(self_test)
     print("usage: _opf_emit.py --self-test (a library module; no live mode)", file=sys.stderr)
     return 2
 
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
-        sys.exit(self_test())
+        sys.exit(_backstop(self_test))
     sys.exit(main())

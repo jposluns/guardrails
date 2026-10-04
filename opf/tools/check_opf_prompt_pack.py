@@ -356,12 +356,8 @@ def _close_vectors(tmp):
     the pre-fix body (fdopen taking fd, `fd = None` as the with body's first statement) and must be red by
     NOFIRE alone: the failed wrapper's own close released fd first, so the finally's close was a second
     close. Returns the failures."""
-    import importlib.util
     import inspect
-    spec = importlib.util.spec_from_file_location("_prompt_pack_close_harness",
-                                                  Path(__file__).resolve().parent / "_journal.py")
-    harness = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(harness)
+    harness = _load_sibling("_prompt_pack_close_harness", Path(__file__).resolve().parent / "_journal.py")
     member = Path(tmp) / "close-member.md"
     member.write_bytes(b"member\n")
     sent = harness._StSentinel("in flight at _read_regular")
@@ -413,14 +409,68 @@ def _close_vectors(tmp):
     return failures
 
 
-def self_test():
-    """Run the vectors behind main()'s cannot-evaluate backstop, so the canonical `--self-test` entry maps an
-    exception escaping them to exit 2 exactly as `main(["--self-test"])` does."""
+def _load_sibling(name, path):
+    """Load a sibling FILE by explicit path (so this runs under `python3 -I`) and return the module."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# What in-process loaded code can raise to end the process: SystemExit (any code, including 0 or None),
+# KeyboardInterrupt and GeneratorExit. None of them is an Exception, so an `except Exception` lets them pass.
+_PROCESS_ENDING = (SystemExit, KeyboardInterrupt, GeneratorExit)
+
+
+def _backstop(run):
+    """Return run()'s status, mapping an escaping exception to exit 2 (cannot evaluate), never a false 0.
+    The self-test loads in-repo code in this process (the shared _journal.py close harness) and calls into
+    it, so a process-ending exception from that code, at load or in a later call, is cannot-evaluate with a
+    named message, not the loaded code's own status. Residuals, not covered: os._exit, atexit handlers,
+    threads the loaded code starts, interpreter shutdown, and a process exit raised while
+    this module's own top-level imports run, before this guard is entered (the code loaded is
+    reviewed in-repo code)."""
     try:
-        return _self_test_vectors()
+        return run()
+    except _PROCESS_ENDING as exc:
+        code = exc.code if isinstance(exc, SystemExit) else None
+        print("check_opf_prompt_pack: cannot evaluate: in-process code ended the process ({} {!r})".format(
+            type(exc).__name__, code), file=sys.stderr)
+        return 2
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0
         print("check_opf_prompt_pack: cannot evaluate: unexpected error ({!r})".format(exc), file=sys.stderr)
         return 2
+
+
+def _loaded_exit_vectors(tmp):
+    """A loaded module that ends the process, at load or in a later call into it, yields exit 2 through the
+    self-test backstop, never its own status (SystemExit 0 and None included). Returns the failures."""
+    failures = []
+    for index, (label, body, call) in enumerate((
+            ("load SystemExit(0)", "raise SystemExit(0)\n", False),
+            ("load SystemExit(None)", "raise SystemExit\n", False),
+            ("load KeyboardInterrupt", "raise KeyboardInterrupt\n", False),
+            ("load GeneratorExit", "raise GeneratorExit\n", False),
+            ("call SystemExit(0)", "def run():\n    raise SystemExit(0)\n", True))):
+        path = Path(tmp) / "loaded_exit_{}.py".format(index)
+        path.write_text(body, encoding="utf-8")
+
+        def run(path=path, call=call):
+            module = _load_sibling("_prompt_pack_loaded_exit", path)
+            if call:
+                module.run()
+            return 0
+        got = _backstop(run)
+        if got != 2:
+            failures.append("loaded-exit vector {}: expected exit 2, got {!r}".format(label, got))
+    return failures
+
+
+def self_test():
+    """Run the vectors behind main()'s cannot-evaluate backstop, so the canonical `--self-test` entry maps an
+    exception escaping them to exit 2 exactly as `main(["--self-test"])` does."""
+    return _backstop(_self_test_vectors)
 
 
 def _self_test_vectors():
@@ -515,6 +565,11 @@ sys.exit(0)
             print("{} close-vectors: {}".format("FAIL" if close_failures else "PASS",
                                                 "; ".join(close_failures) or "3 green, 1 pre-fix red"))
             failures.extend(close_failures)
+            loaded_failures = _loaded_exit_vectors(tmp)
+            count += 5
+            print("{} loaded-exit-vectors: {}".format("FAIL" if loaded_failures else "PASS",
+                                                      "; ".join(loaded_failures) or "5 exit 2"))
+            failures.extend(loaded_failures)
         count += 1
         if compute_digest("1.0.0", []) != "sha256:" + _sha(b"opf.prompt-pack/v1\nversion 1.0.0\n"):
             failures.append("digest-definition")

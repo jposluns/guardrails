@@ -75,6 +75,32 @@ def _drift(msg):
     sys.exit(1)
 
 
+# What in-process loaded code can raise to end the process: SystemExit (any code, including 0 or None),
+# KeyboardInterrupt and GeneratorExit. None of them is an Exception, so an `except Exception` lets them pass.
+_PROCESS_ENDING = (SystemExit, KeyboardInterrupt, GeneratorExit)
+
+
+def _in_loaded(what, call, *args):
+    """Run `call` (a load of in-repo code in this process, or a call this gate makes into it) so that the
+    loaded code can never end the gate with its own status: a process-ending exception becomes CANNOT-
+    EVALUATE (exit 2) naming `what`, and any other exception is CANNOT-EVALUATE too. Residuals, not
+    covered: os._exit, atexit handlers, threads the loaded code starts, interpreter shutdown, and a
+    process exit raised while this module's own top-level imports run, before this guard is entered
+    (the code loaded is reviewed in-repo code)."""
+    try:
+        return call(*args)
+    except _PROCESS_ENDING as exc:
+        code = exc.code if isinstance(exc, SystemExit) else None
+        _cant("{} ended the process ({} {!r}); fail-closed".format(what, type(exc).__name__, code))
+    except Exception as exc:
+        _cant("{} failed: {}".format(what, exc))
+
+
+def _missing_views(live_reserved, views):
+    """The pinned views whose .working/ path is not a member of the loaded validator's _RESERVED tuple."""
+    return [view for view in views if (".working/" + view) not in live_reserved]
+
+
 def _read(rel):
     p = ROOT / rel
     if not p.is_file():
@@ -178,18 +204,16 @@ def _checks():
 
     # Value-based membership: load the pure validator and confirm the ACTUAL _RESERVED tuple contains
     # every pinned view path (the source-text checks above cannot see the view comprehension). runpy sets
-    # __name__ to the module path, not "__main__", so the self-test does not run on load; any load failure
-    # is fail-closed.
-    try:
-        ns = runpy.run_path(str(ROOT / "opf/tools/_opf_init_contract.py"))
-    except Exception as exc:
-        _cant("could not load the validator to verify _RESERVED membership: {}".format(exc))
+    # __name__ to the module path, not "__main__", so the self-test does not run on load; any load failure,
+    # including the loaded module ending the process (SystemExit 0 or None too), is fail-closed (exit 2).
+    ns = _in_loaded("loading the validator to verify _RESERVED membership", runpy.run_path,
+                    str(ROOT / "opf/tools/_opf_init_contract.py"))
     live_reserved = ns.get("_RESERVED")
     if not isinstance(live_reserved, tuple):
         _cant("validator _RESERVED is not a tuple at load time")
-    for view in src_views:
-        if (".working/" + view) not in live_reserved:
-            _drift("pinned view not a member of the validator _RESERVED set: .working/{}".format(view))
+    missing = _in_loaded("the validator _RESERVED membership test", _missing_views, live_reserved, src_views)
+    for view in missing:
+        _drift("pinned view not a member of the validator _RESERVED set: .working/{}".format(view))
 
     # C-D2A: the shipped D2a success wording is present (D2b must not silently retrofit an envelope).
     if "tracking and rendering are pending." not in opf:
@@ -240,6 +264,32 @@ def _expect(condition, message=None):
         raise AssertionError(message)
 
 
+def _self_test_loaded_exit():
+    """A loaded module that ends the process, at load or in a later call the gate makes into it, yields
+    this gate's CANNOT-EVALUATE exit 2, never its own status (SystemExit 0 and None included)."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="opf-init-contract-selftest-") as tmp:
+        cases = (
+            ("load SystemExit(0)", "raise SystemExit(0)\n", None),
+            ("load SystemExit(None)", "raise SystemExit\n", None),
+            ("load KeyboardInterrupt", "raise KeyboardInterrupt\n", None),
+            ("load GeneratorExit", "raise GeneratorExit\n", None),
+            ("call SystemExit(0)", "class R(tuple):\n    def __contains__(self, item):\n"
+                                   "        raise SystemExit(0)\n_RESERVED = R()\n", "_RESERVED"),
+        )
+        for index, (label, body, member) in enumerate(cases):
+            path = Path(tmp) / "loaded_exit_{}.py".format(index)
+            path.write_text(body, encoding="utf-8")
+            try:
+                ns = _in_loaded("self-test " + label, runpy.run_path, str(path))
+                if member is not None:
+                    _in_loaded("self-test " + label, _missing_views, ns[member], ("a.md",))
+            except SystemExit as exc:
+                _expect(exc.code == 2, "{}: expected exit 2, got {!r}".format(label, exc.code))
+            else:
+                _expect(False, "{}: the loaded code's exit was not reached".format(label))
+
+
 def _self_test():
     # Git-free / source-free: exercise the matchers on in-memory text, including the comment-evasion cases.
     _expect(_has_line("KEEP_SCHEMA = 1  # comment", "KEEP_SCHEMA = 1"), "exact line ignores comment")
@@ -261,6 +311,7 @@ def _self_test():
     labels = ["F{:02d}".format(n) for n in range(1, 31)]
     _expect(labels[0] == "F01" and labels[-1] == "F30" and len(labels) == 30, "F-range")
     _expect(ACTOR_LINE.count('"') == 8, "actor line shape")
+    _self_test_loaded_exit()
     sys.stdout.write("PASS check_opf_init_contract self-test\n")
     sys.exit(0)
 
