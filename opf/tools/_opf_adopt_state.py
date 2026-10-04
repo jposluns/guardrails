@@ -545,11 +545,37 @@ def self_test():
               file=sys.stderr)
         return 2
     try:
-        return _self_test_checks()
+        return _hermetic(_self_test_checks)
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("OPF-ADOPT-STATE SELF-TEST: harness error ({!r}); failing closed to exit 2".format(exc),
               file=sys.stderr)
         return 2
+
+
+def _hermetic(run):
+    """Self-test only (QA round 6): run `run()` hermetically. The process environment is REPLACED, never
+    inherited: PATH holds only the resolved git's directory and the platform default, HOME and
+    XDG_CONFIG_HOME name a private empty directory (no global git config, hooks path, excludes file or
+    attributes file reaches a fixture), GIT_CONFIG_NOSYSTEM drops the system git config wherever a git
+    call carries it, every other ambient GIT_* variable is gone, TMPDIR pins the resolved temporary root,
+    the locale is C and the zone UTC, and the umask is 022. The environment and the umask are restored
+    afterwards."""
+    import shutil
+    import tempfile
+    git = shutil.which("git")
+    temp_root = tempfile.gettempdir()
+    path = os.pathsep.join(([os.path.dirname(git)] if git else []) + [os.defpath])
+    saved_env, saved_umask = dict(os.environ), os.umask(0o022)
+    try:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-state-home-") as home:
+            os.environ.clear()
+            os.environ.update(PATH=path, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"),
+                              GIT_CONFIG_NOSYSTEM="1", TMPDIR=temp_root, LC_ALL="C", LANG="C", TZ="UTC")
+            return run()
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_env)
+        os.umask(saved_umask)
 
 
 def _self_test_checks():
@@ -597,10 +623,13 @@ def _self_test_checks():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
 
-    def freeze(root, head, nonce, srcs=None, decs=None):
-        """(run id, plan bytes, approval bytes) from the real planner and approval capture, or None."""
+    def freeze(root, head, nonce, srcs=None, decs=None, dests=None):
+        """(run id, plan bytes, approval bytes) from the real planner and approval capture, or None.
+        `dests` maps a move source to its explicit destination (spec 14.2); any other move takes the
+        default."""
         srcs = sources if srcs is None else srcs
         decs = decisions if decs is None else decs
+        dests = {} if dests is None else dests
         bindings = dict(schema.canonical_plan_bindings(), revision=head)
         views = sorted(v["target"] for v in legacy_manifest["views"].values())
         rows = [dict(op="init-store", store_root=".", members=[dict(
@@ -608,8 +637,11 @@ def _self_test_checks():
                 dict(op="render-views", store_root=".",
                      members=[dict(path=v, digest=digest(v.encode("utf-8"))) for v in views]),
                 schema.enforcement_install_op(bindings["enforcement"])]
-        sheet = dict(sources=sorted(srcs), targets=[".opf/hooks/pre-commit"], product="opf",
-                     decisions=[dict(path=p, disposition=d, actor="fixture") for p, d in sorted(decs.items())],
+        sheet = dict(sources=sorted(srcs), targets=[".opf/hooks/pre-commit"] + sorted(dests.values()),
+                     product="opf",
+                     decisions=[dict(path=p, disposition=d, actor="fixture",
+                                     **(dict(destination=dests[p]) if p in dests else {}))
+                                for p, d in sorted(decs.items())],
                      ops=rows, bindings=bindings)
         obs = planner.investigate(root, sources=sheet["sources"], targets=sheet["targets"])
         if obs.status != store.VALID:
@@ -805,6 +837,18 @@ def _self_test_checks():
         rep = contain(root)
         check("retired-move-root-stray-still-graded",
               named(rep.findings, MOVED_ROOT + "/hide", "unregistered") and rep.cannot == [])
+        # QA round 6: a stray DIRECTLY beside the registered destination, in that destination's own
+        # directory, is graded by name at file level; the registered row beside it never covers it.
+        root = tree()
+        retire(root, rid)
+        for src in (old, note, move):
+            os.unlink(root / src)   # the retirement's pinned removals
+        os.rmdir(root / note.rsplit("/", 1)[0])
+        beside = moved.rsplit("/", 1)[0] + "/evil.sh"
+        write(root, beside, b"evil\n")
+        rep = contain(root)
+        check("retired-stray-beside-move-destination-graded",
+              named(rep.findings, beside, "unregistered") and len(rep.findings) == 1 and rep.cannot == [])
 
         # S2c (QA rounds 3 and 4): the committed inventories the vectors verify are the ones the REAL
         # compose path derives. The base: an ApplyOps apply-stage shell over an empty scratch root
@@ -1159,6 +1203,58 @@ def _self_test_checks():
             check("occupying-destination-omitted-cannot",
                   named(rep.cannot, marker_o, repr(occ_dest), "Move destination") and bounded(rep) == [])
 
+        # S10e (QA round 6): only a destination beneath the Move root is retained evidence. The real
+        # planner freezes a plan whose moves name explicit destinations outside the store, one occupying
+        # (a view target) and one not, beside a default move. The relocation writes the outside
+        # destinations, which no inventory lists, and the retirement-phase ApplyOps shell creates the one
+        # Move-root destination and seals; that record reads as retired. Without the Move-root filter in
+        # _move_creates the outside destinations would be demanded as rows and the run could never retire.
+        ext, ext_dest, occx_dest = ".working/EXT.md", "adopter/EXT.md", "adopter/TODO-old.md"
+        x_sources = dict(((move, sources[move]), (occ, b"legacy todo\n"), (ext, b"external\n")))
+        x_decisions = dict(((move, "move"), (occ, "move"), (ext, "move")))
+        x_root = base / "plan-ext"
+        for rel, data in x_sources.items():
+            write(x_root, rel, data)
+        x_head = apply._selftest_git_commit(x_root)
+        frozen_x = freeze(x_root, x_head, "8899aabbccddeeff", x_sources, x_decisions,
+                          dict(((ext, ext_dest), (occ, occx_dest)))) if x_head else None
+        check("explicit-destination-fixture-frozen-by-the-real-planner", frozen_x is not None)
+        if frozen_x is not None:
+            rid_x = frozen_x[0]
+            plan_x = tomllib.loads(frozen_x[1].decode("utf-8"))
+            occx_arch = apply.archive_rel(rid_x, occ)
+            rows_x = dict((r["path"], r) for r in plan_x["sources"])
+            ops_x = dict((r["source"], r["destination"]) for r in plan_x["ops"] if r["op"] == "move-file")
+            check("explicit-destination-shape-from-the-real-planner",
+                  rows_x[occ]["occupying"] is True and rows_x[ext]["occupying"] is False
+                  and ops_x == dict(((move, moved), (ext, ext_dest), (occ, occx_dest)))
+                  and reader.move_destinations(plan_x) == [moved])
+            home_x = apply.evidence_home_rel(rid_x)
+            base_x = [home_x + "/" + apply.PLAN_NAME, home_x + "/" + apply.APPROVAL_NAME, occx_arch]
+            seq[0] += 1
+            root = base / ("t" + str(seq[0]))
+            write(root, mrel + "/manifest.toml", manifest_text.encode("utf-8"))
+            write(root, move, sources[move])
+            write(root, ext, x_sources[ext])
+            write(root, occ, b"rendered view\n")
+            write(root, base_x[0], frozen_x[1])
+            write(root, base_x[1], frozen_x[2])
+            write(root, occx_arch, x_sources[occ])
+            relist(root, rid_x, base_x)
+            rep = contain(root)
+            check("explicit-destination-run-admits-before-retirement", rep.findings == [] and rep.cannot == []
+                  and bounded(rep) == [move] and named(rep.migration_incomplete, ext))
+            write(root, ext_dest, x_sources[ext])
+            write(root, occx_dest, x_sources[occ])
+            retire(root, rid_x)   # the real retirement-phase shell: the one Move-root destination, sealed
+            os.unlink(root / move)
+            os.unlink(root / ext)
+            rep = contain(root)
+            st_x = state_of(root)
+            check("explicit-destination-outside-store-reads-retired", rep.findings == []
+                  and rep.cannot == [] and rep.migration_incomplete == [] and moved in st_x.registered
+                  and ext_dest not in st_x.registered and occx_dest not in st_x.registered)
+
         # S11: every record case refuses admission; the run homes are then graded and nothing is bounded.
         def record(name, mutate, verdict, *words):
             root = tree()
@@ -1460,20 +1556,35 @@ def _self_test_checks():
         import opf as _opf_cli
 
         def git_commit_all(root):
+            # Plumbing only (QA round 6): stage the whole tree, then write-tree, commit-tree and
+            # update-ref, so no hook, template or signing runs; the system and global git config are
+            # both dropped and the identity and date pinned, on top of the hermetic environment.
             git = shutil.which("git")
             if git is None:
                 return False
             env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
-            env.update(GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+            env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                       GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
                        GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid",
                        GIT_AUTHOR_DATE="2026-01-01T00:00:00Z", GIT_COMMITTER_DATE="2026-01-01T00:00:00Z")
-            add = subprocess.run([git, "-C", str(root), "add", "-A"], stdin=subprocess.DEVNULL,
-                                 capture_output=True, env=env, timeout=60)
-            done = subprocess.run([git, "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
-                                   "-c", "maintenance.auto=false", "-c", "commit.gpgsign=false", "commit",
-                                   "-q", "-m", "fixture"], stdin=subprocess.DEVNULL, capture_output=True,
-                                  env=env, timeout=60)
-            return add.returncode == 0 and done.returncode == 0
+            where = str(root)
+            try:
+                subprocess.run([git, "-C", where, "add", "-A"], stdin=subprocess.DEVNULL, capture_output=True,
+                               env=env, timeout=60, check=True)
+                tree_id = subprocess.run([git, "-C", where, "write-tree"], stdin=subprocess.DEVNULL,
+                                         capture_output=True, env=env, timeout=60,
+                                         check=True).stdout.decode("ascii").strip()
+                parent = subprocess.run([git, "-C", where, "rev-parse", "--verify", "HEAD^{commit}"],
+                                        stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=60,
+                                        check=True).stdout.decode("ascii").strip()
+                made = subprocess.run([git, "-C", where, "commit-tree", "--no-gpg-sign", "-p", parent, "-m",
+                                       "fixture", tree_id], stdin=subprocess.DEVNULL, capture_output=True,
+                                      env=env, timeout=60, check=True).stdout.decode("ascii").strip()
+                subprocess.run([git, "-C", where, "update-ref", "HEAD", made], stdin=subprocess.DEVNULL,
+                               capture_output=True, env=env, timeout=60, check=True)
+            except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+                return False
+            return True
 
         e2e = base / "e2e"
         e2e.mkdir()

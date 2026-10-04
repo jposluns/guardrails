@@ -241,9 +241,10 @@ preimages are preserved at apply and claimed by the base inventory, never re-lis
 retirement record; that shape also binds the record to its phase, because a base inventory
 copied to the retirement name lists at least the plan and the approval, which are never Move
 destinations. A retirement row whose path a base inventory row also names is a path claimed
-twice, which is cannot-evaluate; each listed destination holds its recorded bytes live, and
-before a recorded retirement a file at a plan Move destination, occupying or not, is a
-containment finding, since only the retirement-phase transaction creates that path.
+twice and MUST yield cannot-evaluate; a listed destination that does not hold its recorded bytes
+live MUST yield cannot-evaluate, and before a recorded retirement a file at a plan Move
+destination, occupying or not, MUST be a containment finding, since only the retirement-phase
+transaction creates that path.
 The whole check detects accidents: an interrupted apply, a hand edit that is
 non-canonical or that changes listed bytes, and a misplaced or stale record. It does not detect
 deliberate forgery: a hand edit that re-emits a canonical, self-consistent record, and any
@@ -267,7 +268,7 @@ is a lowercase letter followed by up to 31 lowercase letters or digits. Each hol
 `format = "opf.evidence.inventory/v1"` and a `file` array whose rows have exactly `path` (a
 canonical store-relative file path spelled from `.working/`), `size` (a nonnegative integer), and
 `sha256` (64 lowercase hex digits). A row may name a member of its own bundle other than a
-bundle-root inventory, a default Move destination under `.working/archive/moved/`, or, for an
+bundle-root inventory, a Move destination, default or explicit, under `.working/archive/moved/`, or, for an
 adoption bundle, a preserved file of the same run, a retire preimage or an archived occupying
 source, under `.working/archive/adoption/<run-id>/`.
 The owning writer or migration MUST derive each inventory from the run's transaction record or
