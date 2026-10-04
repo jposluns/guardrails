@@ -23,9 +23,10 @@ PR-C2 adds explicit HTTPS gathering and non-executing quarantine through the laz
 public gather_release() wrapper. Observations confer no trust or apply authority.
 
 Apply, trust verification, acceptance capture, the adoption doctor, behavioral probes, and the CLI
-entry point remain later slices. In particular, enable-hook remains a vocabulary row only: this
-module neither computes a harness-specific registration merge nor activates a hook. A VALID frozen
-proposal is not execution authorization or an ADOPTED_AND_VALID verdict.
+entry point remain later slices. The enable-hook row's handler lives in the apply engine
+(_opf_adopt_apply, over the pure merge core of _opf_adopt_hook); this module neither computes a
+harness-specific registration merge nor activates a hook. A VALID frozen proposal is not execution
+authorization or an ADOPTED_AND_VALID verdict.
 
 Base-neutral by construction (H-7 ratified): the adoption receipt is a STORE-LEVEL artefact whose vocabulary
 stays adopter-neutral. Nothing here is an AIQT-profile-specific record type; `product` is the only identity
@@ -422,9 +423,9 @@ ADOPT_OPS = (
     AdoptOp(
         "enable-hook", ("registration_path", "plugin_entry", "old_digest", "new_digest"), ("write",),
         "restore the prior registration bytes (the pre-merge registration surface)",
-        ("DECLARED ONLY in PR-A, neither implemented nor executed here; writes executable-on-load "
-         "configuration, so it is threat-modelled before implementation and surfaced in the one informed "
-         "yes; a structured JSON merge, re-emitted byte-exact, never a blind append",)),
+        ("writes executable-on-load configuration, threat-modelled in _opf_adopt_hook and surfaced in the "
+         "one informed yes; the live registration bytes match old_digest (drift refuses); a structured JSON "
+         "merge, re-emitted byte-exact, never a blind append, whose bytes match new_digest",)),
     AdoptOp(
         "render-views", ("store_root", "members"), ("create", "write"),
         "remove the views this op created (the render engine refuses to write over an invalid store)",

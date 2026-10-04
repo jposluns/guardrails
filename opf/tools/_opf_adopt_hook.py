@@ -9,7 +9,8 @@ registration file as structured JSON, computes the merged model inserting exactl
 `plugin_entry`, re-emits deterministically, and returns (old_bytes, new_bytes, new_digest) with NO
 filesystem write, journal transaction, subprocess, or network use. The op wiring (verify old_digest
 against live bytes, require the produced bytes to hash to the plan's approval-bound new_digest,
-publish through the journal `write` primitive, reversal restoring the prior bytes) is the next slice.
+publish through the journal `write` primitive, reversal restoring the prior bytes) is the enable-hook
+handler of _opf_adopt_apply (PR3 slice 2).
 
 v1 registration family: the Claude Code `settings.json`-family shape ONLY (the canonical operand in
 _opf_adopt is `.claude/settings.json`). Any other format or shape refuses fail-closed; further
@@ -788,7 +789,7 @@ def _entry_occurrences(model, plugin_entry):
 
 def merge_registration(old_bytes, plugin_entry):
     """Compute the merged registration for `old_bytes` + `plugin_entry`, purely. No filesystem write:
-    the caller (the enable-hook op wiring, next slice) publishes new_bytes through the journal only
+    the caller (the enable-hook handler of _opf_adopt_apply) publishes new_bytes through the journal only
     after the plan's approval-bound new_digest matches. THE ENTRY GATE comes first (fix 5: one
     gate per public function, never per-dunder hardening): old_bytes must be EXACTLY bytes and
     plugin_entry EXACTLY str, both by type identity, and anything else (a bytearray, a bytes or
@@ -981,7 +982,7 @@ def self_test():
     old = _emit(canonical_registration())
 
     # 0: vocabulary and seam consistency. The insertion pins are inside their own closed sets, and the
-    # op row this library serves still declares exactly the inputs the wiring slice will bind.
+    # op row this library serves still declares exactly the inputs the apply engine's wiring binds.
     check("entry-event-in-vocab", ENTRY_EVENT in HOOK_EVENTS)
     check("events-unique", len(set(HOOK_EVENTS)) == len(HOOK_EVENTS))
     check("top-keys-unique-and-recognize-hooks",
@@ -2423,7 +2424,7 @@ def main():
     if "--self-test" in args or "--selftest" in args:
         return self_test()
     print("usage: _opf_adopt_hook.py --self-test (a pure library module; the enable-hook op wiring "
-          "is a later slice)", file=sys.stderr)
+          "is _opf_adopt_apply's)", file=sys.stderr)
     return 2
 
 
