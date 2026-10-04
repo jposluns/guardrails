@@ -1,0 +1,32 @@
+# The hooks published in .preview/ and the rules each one's own module docstring names.
+#
+# A preview hook is not a shipped control: it is not part of the plugin and nothing installs it.
+# tools/gen_enforceability.py reads this file and lists every entry in .aiqt/enforceability.json under
+# "previews"; a preview never changes a rule's status. Every hook file in .preview/ must have exactly one
+# entry here and every entry must name a published file, and each rule listed must be named by its slug
+# in that hook's module docstring. An entry whose docstring names no rule lists none. Edit this file,
+# then run tools/gen_enforceability.py.
+
+[[preview]]
+id = "clock-inject"
+rules = ["clmobs", "tstamp"]
+
+[[preview]]
+id = "future-stamp-write"
+rules = ["recfst", "tstamp"]
+
+[[preview]]
+id = "record-remove-check"
+rules = []
+
+[[preview]]
+id = "stamp-truth-stop"
+rules = ["clmobs", "tstamp"]
+
+[[preview]]
+id = "unbounded-wait"
+rules = []
+
+[[preview]]
+id = "ungated-record"
+rules = []

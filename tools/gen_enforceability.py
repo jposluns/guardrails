@@ -14,7 +14,17 @@ HONEST BOUNDARY. See the BOUNDARY constant below, emitted verbatim into the ledg
 STATUS DERIVATION. A non-empty `gates` array makes a rule gate-linked; else a non-empty `hooks` array
 makes it hook-linked; else prose-only. The label names the most deterministic linkage point only; the
 two arrays carry the FULL linkage, so the precedence collapses nothing (a rule cited by both a hook and
-a gate reads gate-linked yet still lists its hook).
+a gate reads gate-linked yet still lists its hook). Each gate and hook row carries its class letter, so a
+rule linked only through class c gates reads as such from its rows.
+
+PREVIEW HOOKS. The hooks published in .preview/ are not shipped controls: they are not in the plugin and
+nothing installs them. .aiqt/core/hooks/preview.toml declares each one and the corpus ids its own module
+docstring names (an entry may name none). The ledger lists every declared preview at the top level and, per
+rule, the ids of the previews that name it; a preview never changes a status. The declaration is checked
+fail-closed against .preview/ in both directions (a published hook with no entry, or an entry with no
+published hook, exits 2) and each declared corpus id must resolve in the corpus AND its slug must appear in
+that hook's own module docstring, so a link the hook does not itself name cannot be declared. Those .preview/
+reads are validation only and never change the ledger bytes, so .preview/ is not a GENSRC_OUTPUTS source.
 
 GRADING RUBRIC (the class letter grades a control's DECISION PROCEDURE against the rule's violation
 surface; the a-versus-c line is TOTALITY over the examined class, not determinism of the scan):
@@ -58,6 +68,7 @@ lexical scan of trusted, controlled roster files; a `python3 -I -B tools/*.py` t
 argument, a heredoc, or an eval string may be miscounted. The authoritative single-source of the roster
 (generating both runners from this manifest) is deferred.
 """
+import ast
 import json
 import re
 import sys
@@ -73,6 +84,9 @@ LEDGER_REL = ".aiqt/enforceability.json"
 GATES_MANIFEST_REL = ".aiqt/core/gates/manifest.toml"
 HOOKS_MANIFEST_REL = ".aiqt/core/hooks/manifest.toml"
 RULES_DIR_REL = ".aiqt/core/rules"
+PREVIEW_DECL_REL = ".aiqt/core/hooks/preview.toml"
+PREVIEW_DIR_REL = ".preview"
+PREVIEW_KEYS = {"id", "rules"}
 # The Quality roster: the local mirror plus its CI workflow. Reading them to scan their gate steps is a
 # VALIDATION-ONLY read that never changes the ledger bytes, so they are deliberately NOT GENSRC_OUTPUTS
 # sources (the exclusion gen_gensrc's docstring defines; gen_hooks reading the corpus to cross-check ids
@@ -102,8 +116,11 @@ BOUNDARY = (
     "half of every claim. None of the statuses means a rule is enforced: gate-linked means at least one "
     "deterministic repository gate cites the rule, hook-linked means at least one runtime hook cites it "
     "and no gate does, prose-only means no shipped control cites it and the rule binds through the "
-    "governing prose alone. Nothing in this file is a completeness or coverage measure, and deriving a "
-    "score from it misreads it.")
+    "governing prose alone. Each gate and hook row carries its class letter; a rule linked only through "
+    "class c gates is linked only for a recognizable subset of its surface. A preview is not a shipped "
+    "control: the previews list names hooks published in .preview/ for manual installation, outside the "
+    "plugin, whose own description names the rule, and a preview never changes a status. Nothing in this "
+    "file is a completeness or coverage measure, and deriving a score from it misreads it.")
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces. Sources are the content-bearing inputs the
@@ -111,7 +128,7 @@ BOUNDARY = (
 GENSRC_OUTPUTS = (
     {"target": ".aiqt/enforceability.json", "kind": "file",
      "sources": (".aiqt/core/rules/", ".aiqt/core/hooks/manifest.toml",
-                 ".aiqt/core/gates/manifest.toml"),
+                 ".aiqt/core/gates/manifest.toml", ".aiqt/core/hooks/preview.toml"),
      "regenerate": "python3 tools/gen_enforceability.py"},
 )
 
@@ -189,6 +206,77 @@ def load_gates_manifest(path, root):
                              "control)".format(where, "/".join(sorted(CLASSES))))
         _req_str(gate, "residue", where)  # required, never empty: the gate's honest residue gap
     return gates
+
+
+def _published_previews(root):
+    """The stems of the hook files published in .preview/ (every *.py entry), or an empty set when the
+    directory is absent. A .preview path that is present but unreadable raises OSError (fail-closed)."""
+    try:
+        names = sorted(entry.name for entry in (root / PREVIEW_DIR_REL).iterdir())
+    except FileNotFoundError:
+        return set()
+    return {name[:-3] for name in names if name.endswith(".py")}
+
+
+def _module_docstring(path):
+    """The module docstring of a preview hook file (empty when it has none). A file that does not parse
+    raises ValueError (SyntaxError subclasses it), an unreadable one OSError: both fail closed."""
+    return ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))) or ""
+
+
+def load_previews(root, slugs):
+    """Parse and validate the preview declaration against .preview/ and the corpus; return its entries
+    sorted by id, each as {id, file, rules}. `slugs` maps corpus id to slug. An absent declaration with no
+    published preview hook is an empty list; every other disagreement raises ValueError (exit 2)."""
+    published = _published_previews(root)
+    decl = root / PREVIEW_DECL_REL
+    if not _exists(decl):
+        if published:
+            raise ValueError("{} is absent but .preview/ publishes hook(s): {}".format(
+                PREVIEW_DECL_REL, ", ".join(sorted(published))))
+        return []
+    data = load_toml(decl)
+    top_extra = set(data) - {"preview"}
+    if top_extra:
+        raise ValueError("{}: unknown top-level key(s): {}".format(PREVIEW_DECL_REL,
+                                                                  ", ".join(sorted(top_extra))))
+    entries = data.get("preview", [])
+    if not isinstance(entries, list):
+        raise ValueError("{}: preview must be an array of tables".format(PREVIEW_DECL_REL))
+    out = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != PREVIEW_KEYS:
+            raise ValueError("{}: every [[preview]] must be a table with exactly the keys {}".format(
+                PREVIEW_DECL_REL, ", ".join(sorted(PREVIEW_KEYS))))
+        pid = _req_str(entry, "id", "{}: [[preview]]".format(PREVIEW_DECL_REL))
+        where = "{}: [[preview]] {}".format(PREVIEW_DECL_REL, pid)
+        if not ID_RE.match(pid):
+            raise ValueError("{}: id must match ^[a-z][a-z0-9-]*$".format(where))
+        if any(p["id"] == pid for p in out):
+            raise ValueError("{}: duplicate preview id".format(where))
+        rules = entry["rules"]
+        if not isinstance(rules, list) or not all(isinstance(r, str) for r in rules):
+            raise ValueError("{}: rules must be a list of corpus-id strings (it may be empty)".format(where))
+        if rules != sorted(set(rules)):
+            raise ValueError("{}: rules must be unique and sorted".format(where))
+        rel = "{}/{}.py".format(PREVIEW_DIR_REL, pid)
+        if pid not in published:
+            raise ValueError("{}: no published preview hook {}".format(where, rel))
+        doc = None
+        for rule in rules:
+            if rule not in slugs:
+                raise ValueError("{}: cites corpus-id '{}' not in .aiqt/core/rules/".format(where, rule))
+            if doc is None:
+                doc = _module_docstring(root / rel)
+            if not re.search(r"(?<![a-z0-9-]){}(?![a-z0-9-])".format(re.escape(slugs[rule])), doc):
+                raise ValueError("{}: the module docstring of {} does not name rule '{}' (slug {})".format(
+                    where, rel, rule, slugs[rule]))
+        out.append({"id": pid, "file": rel, "rules": rules})
+    undeclared = sorted(published - {p["id"] for p in out})
+    if undeclared:
+        raise ValueError("{}: published preview hook(s) with no entry: {}".format(
+            PREVIEW_DECL_REL, ", ".join(undeclared)))
+    return sorted(out, key=lambda p: p["id"])
 
 
 def roster_scripts(root):
@@ -292,10 +380,12 @@ def build_ledger(root):
         raise ValueError("cannot build the ledger: no {} to load".format(rules_dir))
     corpus = load_corpus(rules_dir)
     corpus_ids = {str(fm["corpus-id"]) for _src, fm, _rel in corpus}
+    slugs = {str(fm["corpus-id"]): str(fm["slug"]) for _src, fm, _rel in corpus}
     _plugin, hooks = load_manifest(root / HOOKS_MANIFEST_REL)
     gates = load_gates_manifest(root / GATES_MANIFEST_REL, root)
     roster_union, per_file = roster_scripts(root)
     cross_checks(gates, hooks, corpus_ids, roster_union, per_file)
+    previews = load_previews(root, slugs)
 
     entries = []
     for src, fm, _rel in sorted(corpus, key=lambda t: str(t[1]["corpus-id"])):
@@ -315,8 +405,9 @@ def build_ledger(root):
             "status": status,
             "hooks": [_hook_row(h) for h in rule_hooks],
             "gates": [_gate_row(g) for g in rule_gates],
+            "previews": [p["id"] for p in previews if cid in p["rules"]],
         })
-    obj = {"version": 1, "boundary": BOUNDARY, "rules": entries}
+    obj = {"version": 1, "boundary": BOUNDARY, "rules": entries, "previews": previews}
     return json.dumps(obj, indent=2, sort_keys=True) + "\n"
 
 
@@ -377,6 +468,13 @@ def main():
 #       enumerate that script, so its manifest entry reads as a linkage claim with no roster step and
 #       fails closed (exit 2): proves the F-148 comment strip (the quoted-argument / heredoc residual
 #       stays a disclosed limit and is deliberately not asserted here).
+#   (q) a tree with published preview hooks and a matching declaration lists every preview at the top
+#       level and per rule, and a rule named only by a preview stays prose-only (a preview is never a
+#       shipped control); with no .preview/ and no declaration every rule lists no preview,
+#   (r) a published preview hook with no declaration entry, (s) an entry naming no published hook, (t) an
+#       entry citing a rule whose slug the hook's own docstring does not name, (u) an entry citing an
+#       unknown corpus-id, and (v) published preview hooks with the declaration absent each fail closed
+#       (exit 2).
 # These cases exercise this tool's OWN logic (the gates manifest shape, the class-d ledger boundary, the
 # hook and gate no-orphan checks, the roster reconciliation, and drift). The corpus and hooks-manifest
 # read-failure paths and the empty-hook-residue path are validated fail-closed by the reused loaders
@@ -468,6 +566,32 @@ jobs:
       - run: python3 -I -B tools/g_alpha.py --check
       - run: python3 -I -B tools/g_empty.py
 """
+
+
+_PREVIEW_ONE = '''"""A self-test preview hook motivated by the selftest-rule-dd rule."""
+'''
+_PREVIEW_TWO = '''"""A self-test preview hook whose docstring names no rule."""
+'''
+_PREVIEW_DECL = """[[preview]]
+id = "p-one"
+rules = ["ruledd"]
+
+[[preview]]
+id = "p-two"
+rules = []
+"""
+
+
+def _add_previews(base):
+    """Publish two preview hooks in .preview/ (one naming rule dd by slug, one naming no rule), a README
+    that is not a hook, and a declaration matching them."""
+    preview = base / ".preview"
+    preview.mkdir()
+    (preview / "README.md").write_text("# self-test preview channel\n", encoding="utf-8")
+    (preview / "p-one.py").write_text(_PREVIEW_ONE, encoding="utf-8")
+    (preview / "p-two.py").write_text(_PREVIEW_TWO, encoding="utf-8")
+    (base / PREVIEW_DECL_REL).write_text(_PREVIEW_DECL, encoding="utf-8")
+    return base
 
 
 def _build(base):
@@ -571,6 +695,8 @@ def self_test_main():
                 failures.append("conformant tree: the hook+gate rule must list BOTH its hook and its gate")
             if obj.get("boundary") != BOUNDARY:
                 failures.append("conformant tree: the boundary string is absent or altered")
+            if obj.get("previews") != [] or any(e.get("previews") != [] for e in by_id.values()):
+                failures.append("conformant tree: with no .preview/ every rule must list no preview")
 
         # (b) Mutated ledger fails --check (exit 1).
         if ledger.is_file():
@@ -724,6 +850,51 @@ def self_test_main():
         if run_quiet(pinl, check=True) != 2:
             failures.append("a manifest script named only in a roster inline comment must not enumerate "
                             "(F-148 strip); expected exit 2 (a linkage claim with no roster step)")
+        # (q) Published preview hooks with a matching declaration: listed at the top level and per rule,
+        #     and a rule named only by a preview keeps its prose-only status.
+        qtree = _add_previews(_build(tmp / "previews"))
+        if run_quiet(qtree, check=False) != 0:
+            failures.append("preview tree: generation expected exit 0")
+        else:
+            qobj = json.loads((qtree / LEDGER_REL).read_text(encoding="utf-8"))
+            want = [{"id": "p-one", "file": ".preview/p-one.py", "rules": ["ruledd"]},
+                    {"id": "p-two", "file": ".preview/p-two.py", "rules": []}]
+            if qobj.get("previews") != want:
+                failures.append("preview tree: top-level previews {!r}, expected {!r}".format(
+                    qobj.get("previews"), want))
+            qby = {e["corpus-id"]: e for e in qobj.get("rules", [])}
+            if qby.get("ruledd", {}).get("previews") != ["p-one"]:
+                failures.append("preview tree: rule dd must list the preview that names it")
+            if qby.get("ruledd", {}).get("status") != "prose-only":
+                failures.append("preview tree: a preview must never change a status (rule dd prose-only)")
+            if qby.get("ruleaa", {}).get("previews") != []:
+                failures.append("preview tree: a rule no preview names must list none")
+
+        # (r) A published preview hook with no declaration entry fails closed.
+        rtree = _add_previews(_build(tmp / "preview-undeclared"))
+        (rtree / ".preview" / "p-three.py").write_text(_PREVIEW_TWO, encoding="utf-8")
+        if run_quiet(rtree, check=False) != 2:
+            failures.append("a published preview hook with no declaration entry expected exit 2")
+        # (s) A declaration entry naming no published hook fails closed.
+        stree = _add_previews(_build(tmp / "preview-unpublished"))
+        (stree / ".preview" / "p-two.py").unlink()
+        if run_quiet(stree, check=False) != 2:
+            failures.append("a declaration entry with no published hook expected exit 2")
+        # (t) A declared rule the hook's own docstring does not name fails closed.
+        ttree = _add_previews(_build(tmp / "preview-unnamed-rule"))
+        replace_in(ttree / PREVIEW_DECL_REL, 'id = "p-two"\nrules = []', 'id = "p-two"\nrules = ["rulecc"]')
+        if run_quiet(ttree, check=False) != 2:
+            failures.append("a declared rule the preview's docstring does not name expected exit 2")
+        # (u) A declared unknown corpus-id fails closed.
+        utree = _add_previews(_build(tmp / "preview-unknown-cid"))
+        replace_in(utree / PREVIEW_DECL_REL, 'rules = ["ruledd"]', 'rules = ["nosuch9"]')
+        if run_quiet(utree, check=False) != 2:
+            failures.append("a declared unknown corpus-id expected exit 2")
+        # (v) Published preview hooks with the declaration absent fail closed.
+        vtree = _add_previews(_build(tmp / "preview-no-decl"))
+        (vtree / PREVIEW_DECL_REL).unlink()
+        if run_quiet(vtree, check=False) != 2:
+            failures.append("published preview hooks with no declaration expected exit 2")
     finally:
         if unread_manifest is not None:
             os.chmod(unread_manifest, 0o644)  # restore even on an unexpected early exit
@@ -745,7 +916,10 @@ def self_test_main():
           "gates manifest, a duplicate gate id, a duplicate gate script, an absent gates manifest, an "
           "absent roster file, a roster with zero scripts, an unknown corpus-id in the hooks manifest, an "
           "unknown gates-manifest top-level key, an unknown [[gate]] entry key, and a manifest script "
-          "named only inside a roster inline comment all fail closed (exit 2)" + note)
+          "named only inside a roster inline comment all fail closed (exit 2); preview hooks are listed "
+          "at the top level and per rule without changing a status, and an undeclared or unpublished "
+          "preview, a declared rule the hook's docstring does not name, an unknown declared corpus-id, "
+          "and an absent declaration beside published previews all fail closed (exit 2)" + note)
     return 0
 
 
