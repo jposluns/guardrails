@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OPF adoption apply engine, slice 1: the apply SHELL with ZERO executable operations (OPF-SPEC 1.3.0).
+"""OPF adoption apply engine, slices 1 and 3: the apply SHELL and init-store, its one executable op (spec 1.3.0).
 
 This slice (the clean-start adoption track's first apply unit) supplies the engine SKELETON only, shaped
 by spec 1.3.0 sections 4.2, 5.7 and 14: run identity; the evidence-bundle, archive and Move homes, all
@@ -10,8 +10,9 @@ phase, never rewritten; the homes-1 bundle verification the completion checks ca
 C-EVIDENCE-ENUM is inactive (spec 14.1), which RE-READS the inventories and payload digests from disk;
 the preserve-first composition of spec 14.2; live re-observation of every operand; one journaled
 transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed eleven-op
-ADOPT_OPS vocabulary in which EVERY op returns a refusing not-yet-executable verdict. No operation
-executes: the file ops, init-store composition, trust verification, approval capture, hook activation,
+ADOPT_OPS vocabulary in which every op but init-store returns a refusing not-yet-executable verdict. Slice 3
+lands init-store, composed over the coupled-init substrate (_init_store). No other operation
+executes: the file ops, trust verification, approval capture, hook activation,
 rendering, receipt writing, the completion checks, retirement, and the MUTATING CLI subcommands (approve,
 apply, complete, reconcile) remain later slices; the read-only `opf adopt` subcommands plan and status
 shipped with K9a. Live outside the self-test fixtures today: `opf adopt status` opens and lists the
@@ -65,20 +66,26 @@ approved work takes a fresh plan with its own run id (spec 14.1).
 Single-writer lease (spec 5.7): this slice carries NO lease join, so a transaction REFUSES, before writing
 anything, when the product root resolves a store (RESOLVED) or when a pointer names a store outside the
 product root, and EVERY other store posture that cannot be evaluated (a malformed or unreadable pointer,
-multiple machine stores, an undiscoverable root) refuses too (spec 14.2: an unreadable declaration or
-detected input fails closed). Only the two first-adoption states adoption exists for are admitted:
-NOT-ADOPTED, and a present `.working/` at the DEFAULT location carrying no valid manifest, re-proved by a
-fresh discovery. A first adoption has no store and so no lease home; the pre-store single-writer control is
-the coupled-init substrate's operation lock, which joins with the init-store slice. Disclosed residuals of
-this slice, none of them a relaxation: bundle MEMBERSHIP (an off-inventory file inside a bundle) is not
-reconciled here, only listed payloads; containment registration of the archive, Move and evidence homes on
+multiple machine stores, an undiscoverable root) refuses too (spec 14.2: an unreadable declaration or detected
+input fails closed). Only the two first-adoption states adoption exists for are admitted: NOT-ADOPTED, and a
+present `.working/` at the DEFAULT location carrying no valid manifest, re-proved by a fresh discovery. A
+first adoption has no store and so no lease home; the pre-store single-writer control is the coupled-init
+substrate's operation lock, which init-store takes through the substrate it composes. Disclosed residuals of
+these slices, none of them a relaxation: init-store runs only over an ABSENT `.working/` (the substrate's own
+fresh-init precondition) or resumes the substrate's one partial operation, so it cannot yet run after this
+shell's base transaction has published the evidence bundle or an archive copy under `.working/`, nor beside a
+dispositioned source frozen in place there; ordering it against the base transaction, or having the substrate
+admit plan-enumerated control-area and frozen paths, is a later decision, and until then such a run refuses,
+never a blind init; a resumed partial init operation is not bound to the adoption run that started it (no
+adoption record names the init operation id yet); bundle MEMBERSHIP (an off-inventory file inside a bundle) is
+not reconciled here, only listed payloads; containment registration of the archive, Move and evidence homes on
 homes 1 is part of the 1.3.0 activation, not this slice; investigation does not read this journal (the
 planner's ancestry disclosure lists durable OPF history outside .working, and `.aiqt/adopt/journal` is one
 more such home), so the stage driver's plan stage must refuse over a non-clean adoption journal through
 journal_clean_or_refuse; the shipped `retire-file` vocabulary row is a single `remove`, while spec 1.3.0
-preserves the retirement preimage at apply and removes only after the green check, a vocabulary split for
-the op slices; interruption is exercised in-process through the journal's kill-point seam, and
-subprocess kill-injection arrives with the first executable operations.
+preserves the retirement preimage at apply and removes only after the green check, a vocabulary split for the
+op slices; the shell's interruption is exercised in-process through the journal's kill-point seam, while
+init-store's is the substrate's own subprocess kill-point child.
 
 Outcome model: single-sourced from `_opf_store` exactly as the sibling `_opf_adopt` does; the inventory
 grading is the doctor's own shared validator (`_opf_check._evidence_rows`), so a malformed inventory or a
@@ -102,6 +109,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal              # noqa: E402
 import _opf_adopt as schema  # noqa: E402
+import _opf_init_operation as init_op  # noqa: E402
 import _opf_store as store   # noqa: E402
 import _optlevel             # noqa: E402
 from _opf_emit import EmitError, emit_checked  # noqa: E402
@@ -997,12 +1005,169 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         store._close_fd_exc_safe(root_fd)
 
 
-# --- the dispatch table: EVERY op refuses not-yet-executable in this slice -----------------------------
+# --- init-store: composed over the coupled-init substrate (slice 3) ---------------------------------------
+
+def _init_store_scaffold():
+    """(manifest path, manifest digest, scaffold paths) of the store the coupled-init substrate writes: the
+    default machine store's manifest and the exact digest of the default manifest (`_opf_init.build_manifest`,
+    baseline record types only, every module tier off), and every store-tree path its create-only publication
+    can write (its machine-store sources, its bootstrap provenance and the default manifest's declared views;
+    the root pointer lies outside the store tree)."""
+    import _opf_init
+    manifest = _opf_init.build_manifest().encode("utf-8")
+    views = tomllib.loads(manifest.decode("utf-8"))["views"].values()
+    machine = "{}/{}".format(store.WORKING_DIRNAME, store.DEFAULT_MACHINE_SUBDIR)
+    paths = {p for p in init_op.BOOTSTRAP_SOURCE_ROSTER if _within(p, store.WORKING_DIRNAME)}
+    paths.add(init_op.PROVENANCE_RELPATH)
+    paths.update(view["target"] for view in views)
+    return "{}/{}".format(machine, store.MANIFEST_NAME), "sha256:" + _sha256(manifest), frozenset(paths)
+
+
+def _init_store_partial(product_root):
+    """Whether the substrate records exactly ONE partial init operation and nothing else, which its own
+    resume finishes under the ORIGINAL operation id (no init history is False). A completed operation (the
+    store is already initialized), more than one operation, or a record the substrate cannot evaluate
+    refuses: init-store never adopts over an initialized store or picks among histories."""
+    import _opf_init_substrate
+    try:
+        survey = _opf_init_substrate.classify_init_operations(str(product_root))
+    except (_opf_init_substrate.InitSubstrateError, OSError) as exc:
+        raise AdoptApplyError("the coupled-init substrate cannot be classified ({}); "
+                              "fail-closed".format(exc))
+    ops = survey.operations if survey.status == _opf_init_substrate.OPERATIONS else ()
+    if not ops:
+        return False
+    names = [p for _s, p in ops[0].phases]
+    if len(ops) != 1 or ops[0].status != _opf_init_substrate.INTACT or names[-1:] == [init_op.PHASES[-1]]:
+        raise AdoptApplyError("the coupled-init substrate already records init history ({} operation(s), "
+                              "first {} at {}); init-store runs only over NOT-ADOPTED or resumes its one "
+                              "partial operation (fail-closed)".format(
+                                  len(ops), ops[0].status, names[-1] if names else "no phase"))
+    return True
+
+
+def _init_store_working_or_refuse(root_fd, plan):
+    """The blind-init guard (spec 14, 14.2): every foreign file beneath `.working/` must carry a plan
+    disposition BEFORE init-store, and the coupled-init substrate creates the store only over an ABSENT
+    `.working/`. So an undispositioned foreign file refuses as a blind init over populated content, and a
+    present `.working/` holding only dispositioned sources (frozen in place until the green completion
+    check) or this run's control-area homes refuses too, attributed to that composition limit."""
+    try:
+        model, present = init_op.observe_inventory(root_fd)
+    except init_op.InitOperationError as exc:
+        raise AdoptApplyError("the .working tree cannot be observed ({}); fail-closed".format(exc))
+    if not present:
+        return
+    dispositioned = {row.get("path") for row in plan["sources"] if isinstance(row, dict)}
+    foreign = sorted(e["path"] for e in model["entries"] if e["kind"] == "file"
+                     and e["path"] not in dispositioned and not schema._in_control_area(e["path"]))
+    if foreign:
+        raise AdoptApplyError("undispositioned foreign .working content {}: every foreign .working file "
+                              "carries a plan disposition first, never a blind init over populated content "
+                              "(spec 14; nothing written)".format(", ".join(foreign)))
+    raise AdoptApplyError("the coupled-init substrate creates the store only over an absent .working, and "
+                          ".working holds {} entries (dispositioned sources frozen in place or this run's "
+                          "control-area homes); init-store does not yet compose over them (a disclosed "
+                          "residual of this slice; nothing written)".format(len(model["entries"])))
+
+
+def _init_store(op_row, context=None):
+    """init-store (spec 14): scaffold the default machine store by COMPOSING the coupled-init substrate's
+    journaled, create-only, resumable operation (`_opf_init_operation.run_init_operation`), never the thin
+    `opf init` CLI path (create-only with no lock, lease, rollback or adoption policy) and never re-implemented
+    here. `context` carries `product_root` (absolute), `plan` (its `store` identity and `sources`
+    dispositions), `ancestral` (the pinned evidence commit of a re-adoption's counters seed, else None) and
+    `recover` (default False: the substrate's EXPLICIT confirmed-dead lock recovery, never implicit).
+
+    Preconditions, all before the substrate runs: the row targets the frozen default machine store at the
+    product root and binds the default manifest's exact digest (so no record type the writer cannot author
+    and no module tier is enabled), and every member is a path the substrate writes; a re-adoption names an
+    ancestral seed (counters are seeded from the pinned high-water, never from zero, and a snapshot missing
+    a namespace refuses inside the substrate) and a first adoption names none; the adoption journal is clean
+    (reconcile-first). Then exactly one partial substrate operation is RESUMED under its original operation
+    id (the substrate re-verifies it byte-exact against its immutable plan), else the store posture must be
+    one of the shell's two first-adoption states (NOT-ADOPTED, or the default `.working/` with no manifest)
+    and the blind-init guard must pass. These pre-lock observations never authorize: the
+    substrate re-observes all of them under its own operation mutex, the pre-store single-writer control.
+
+    VALID only when the substrate reached VIEWS-READY and every member's live bytes match the row's digest.
+    That is THIS OP's verdict; a bootstrap `views-ready` milestone alone is never adoption success (spec 14),
+    which still needs render-views, record-adoption and the completion checks. Every other outcome refuses
+    CANNOT-EVALUATE. The substrate never rolls back: a run it fails, or a member mismatch after it
+    published, leaves its created files preserved for its own resume, never a silent repair."""
+    try:
+        return _init_store_run(op_row, context)
+    except AdoptApplyError as exc:
+        return schema._cannot("init-store refused: {}".format(exc))
+
+
+def _init_store_run(op_row, context):
+    ctx = context if isinstance(context, dict) else {}
+    product_root, plan, ancestral = ctx.get("product_root"), ctx.get("plan"), ctx.get("ancestral")
+    recover = ctx.get("recover", False)
+    if not isinstance(recover, bool):
+        raise AdoptApplyError("its context recover flag {!r} is not a bool (fail-closed)".format(recover))
+    if not (isinstance(plan, dict) and isinstance(plan.get("store"), dict)
+            and isinstance(plan.get("sources"), list)):
+        raise AdoptApplyError("its context carries no approved plan store identity and sources (fail-closed)")
+    manifest_rel, manifest_digest, scaffold = _init_store_scaffold()
+    frozen = plan["store"]
+    machine = manifest_rel.rsplit("/", 1)[0]
+    if op_row["store_root"] != "." or frozen.get("store_root") != "." or frozen.get("machine_rel") != machine:
+        raise AdoptApplyError("the coupled-init substrate scaffolds only the default machine store {} at the "
+                              "product root (row store_root {!r}, plan store {!r})".format(
+                                  machine, op_row["store_root"], frozen))
+    members = {m["path"]: m["digest"] for m in op_row["members"]}
+    if members.get(manifest_rel) != manifest_digest:
+        raise AdoptApplyError("the row does not bind the default manifest {} the substrate scaffolds "
+                              "(baseline record types only, every module tier off)".format(manifest_rel))
+    stray = sorted(set(members) - scaffold)
+    if stray:
+        raise AdoptApplyError("member(s) {} name files the coupled-init substrate never writes".format(stray))
+    kind = frozen.get("adoption")
+    if kind not in schema.ADOPTION_KINDS:
+        raise AdoptApplyError("plan store adoption {!r} is outside {}".format(kind, schema.ADOPTION_KINDS))
+    if kind == "re-adoption" and not isinstance(ancestral, str):
+        raise AdoptApplyError("a re-adoption seeds its counters from a pinned ancestral snapshot, never from "
+                              "zero (decision 6), and no evidence commit was supplied")
+    if kind == "first-adoption" and ancestral is not None:
+        raise AdoptApplyError("a first adoption has no ancestry, so an ancestral counters seed contradicts it")
+    root_fd = _open_product_root(product_root)
+    try:
+        journal_clean_or_refuse(root_fd, _journal_root(product_root))
+        if not _init_store_partial(product_root):
+            _store_posture_or_refuse(product_root)
+            _init_store_working_or_refuse(root_fd, plan)
+    finally:
+        store._close_fd_exc_safe(root_fd)
+    result = init_op.run_init_operation(str(product_root), ancestral=ancestral, recover=recover)
+    if result.status != init_op.VIEWS_READY:
+        raise AdoptApplyError("the coupled-init substrate ended {} ({}); its evidence is preserved for its own "
+                              "resume".format(result.status, (result.primary_failure or {}).get("detail")))
+    _init_store_members_or_refuse(product_root, members, result.operation_id)
+    return schema._ok()
+
+
+def _init_store_members_or_refuse(product_root, members, operation_id):
+    """The postcondition: every member's LIVE bytes, re-read contained, match the row's digest."""
+    root_fd = _open_product_root(product_root)
+    try:
+        for path in sorted(members):
+            live = observe_live(root_fd, path)
+            if live["kind"] != "file" or "sha256:" + live["sha256"] != members[path]:
+                raise AdoptApplyError("operation {} published {} whose live bytes do not match the row's "
+                                      "member digest; the scaffold is preserved, never repaired".format(
+                                          operation_id, path))
+    finally:
+        store._close_fd_exc_safe(root_fd)
+
+
+# --- the dispatch table: every op but init-store refuses not-yet-executable -----------------------------
 
 def _not_yet_executable(op_row, context=None):
-    """The one slice-1 handler behind every dispatch entry: a refusing not-yet-executable verdict. Later
-    slices replace individual OP_HANDLERS entries with real executors; the self-test pins every entry to
-    THIS handler and every canonical row to a refusing status, so a silently-enabled op is a red."""
+    """The refusing not-yet-executable verdict behind every dispatch entry no slice has landed yet. Each
+    landing slice replaces its OP_HANDLERS entry with a real executor; the self-test pins every OTHER entry
+    to THIS handler and every canonical row to a refusing status, so a silently-enabled op is a red."""
     name = op_row.get("op") if isinstance(op_row, dict) else None
     return schema.AdoptValidation(store.CANNOT_EVALUATE, [
         "op {!r} is not yet executable in this build; a later adoption slice lands it "
@@ -1013,7 +1178,7 @@ def _not_yet_executable(op_row, context=None):
 # ADOPT_OPS_BY_NAME in BOTH directions so it can neither drop nor invent an op.
 OP_HANDLERS = {
     "install-pack": _not_yet_executable,
-    "init-store": _not_yet_executable,
+    "init-store": _init_store,
     "create-file": _not_yet_executable,
     "plant-governance": _not_yet_executable,
     "register-unmanaged": _not_yet_executable,
@@ -1029,7 +1194,7 @@ OP_HANDLERS = {
 def dispatch(op_row, context=None):
     """Validate, then dispatch ONE plan op row. A malformed row propagates the validator's refusing
     verdict; an op with no registered handler (dispatch-roster drift) is CANNOT-EVALUATE, never a skip.
-    In this slice every handler refuses, so dispatch never has a side effect."""
+    Only init-store executes (given its context); every other handler refuses with no side effect."""
     checked = schema.validate_op(op_row)
     if checked.status != store.VALID:
         return checked
@@ -1062,8 +1227,9 @@ def self_test():
     statuses, byte comparisons and journal states; each check asserting a refusal of the executable shell
     or of apply input also matches one reason keyword so the refusal is attributed to the rule under test
     (validator and dispatch gradings are asserted on their returned status, with a named finding matched
-    where that finding is itself the contract). No git, no network, no subprocess; every write lands
-    under its own TemporaryDirectory."""
+    where that finding is itself the contract). No network; only the init-store vectors use git (real
+    fixture repositories, which the substrate binds) and a subprocess (the substrate's own kill-point child);
+    every write lands under its own TemporaryDirectory."""
     try:
         _journal.require_containment()
     except _journal.JournalError as exc:
@@ -1122,12 +1288,19 @@ def _self_test_checks():
     now = datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc)
     VALID, INVALID, CANNOT = store.VALID, store.INVALID, store.CANNOT_EVALUATE
 
-    # 0: the dispatch roster reconciles against the closed vocabulary in BOTH directions, every entry is
-    # pinned to the refusing handler, and every canonical row refuses. A silently-enabled op is a red; the
-    # slice that legitimately lands an op updates these pins in the same change.
+    # 0: the dispatch roster reconciles against the closed vocabulary in BOTH directions, every entry but the
+    # landed init-store is pinned to the refusing handler, and every canonical row refuses (init-store's for
+    # want of a plan context, before anything is observed). A silently-enabled op is a red; the slice that
+    # legitimately lands an op updates these pins in the same change.
+    landed = frozenset(("init-store",))
     check("handlers-cover-vocabulary", set(OP_HANDLERS) == set(schema.ADOPT_OPS_BY_NAME))
-    check("handlers-all-refusing", all(h is _not_yet_executable for h in OP_HANDLERS.values()))
-    for name in sorted(schema.ADOPT_OP_NAMES):
+    check("handlers-all-refusing-but-init-store",
+          all(h is _not_yet_executable for n, h in OP_HANDLERS.items() if n not in landed))
+    check("handler-init-store-landed", OP_HANDLERS["init-store"] is _init_store)
+    res = dispatch(schema.canonical_op("init-store"))
+    check("op-init-store-refuses-without-context",
+          res.status == CANNOT and any("no approved plan" in f for f in res.findings))
+    for name in sorted(schema.ADOPT_OP_NAMES - landed):
         res = dispatch(schema.canonical_op(name))
         check("op-{}-refuses-not-yet-executable".format(name),
               res.status == CANNOT and any("not yet executable" in f for f in res.findings))
@@ -2706,13 +2879,170 @@ def _self_test_checks():
     check("apply-non-table-refused",
           nontable.status == CANNOT and any("not a table" in f for f in nontable.findings))
 
+    # 11: init-store over the coupled-init substrate (slice 3; real git fixtures, see _init_store_self_test).
+    _init_store_self_test(check)
+
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
         for f in failures:
             print("  FAILED: {}".format(f))
         return 1
-    print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; zero executable ops)".format(checked[0]))
+    print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; one executable op, init-store)".format(
+        checked[0]))
     return 0
+
+
+def _init_store_self_test(check):
+    """Slice 3: init-store composed over the coupled-init substrate. The precondition vectors are pure; the
+    executing vectors run over REAL git fixtures (the substrate binds the repository and HEAD) under the
+    substrate's own pinned git lifecycle, and the interrupted run is the substrate's own kill-point child.
+    Each refusal is attributed by a reason keyword and judged with the tree unchanged."""
+    import shutil
+    import tempfile
+    import _opf_init
+    import _opf_oplock
+    from _opf_schema import high_water
+    valid, cannot = store.VALID, store.CANNOT_EVALUATE
+    manifest_rel, manifest_digest, scaffold = _init_store_scaffold()
+    row = dict(op="init-store", store_root=".", members=[dict(path=manifest_rel, digest=manifest_digest)])
+
+    def ctx(root, adoption="first-adoption", sources=(), ancestral=None):
+        plan = dict(store=dict(store_root=".", machine_rel=manifest_rel.rsplit("/", 1)[0], adoption=adoption),
+                    sources=[dict(path=p) for p in sources])
+        return dict(product_root=root, plan=plan, ancestral=ancestral)
+
+    def refused(res, needle):
+        return res.status == cannot and any(needle in f for f in res.findings)
+
+    # The handler's own derivations pin the substrate's: its manifest path, a default manifest enabling only
+    # the baseline types with every module tier off (no type the record writer cannot author), and a
+    # scaffold set that is exactly what the substrate writes beneath the store tree.
+    default = tomllib.loads(_opf_init.build_manifest())
+    check("init-store-manifest-is-the-substrate-manifest", manifest_rel == init_op._MANIFEST_RELPATH)
+    check("init-store-default-manifest-baseline-only", not any(default["modules"].values())
+          and set(default["types"]) == set(store.BASELINE_TYPES))
+    check("init-store-scaffold-covers-manifest-and-provenance",
+          manifest_rel in scaffold and init_op.PROVENANCE_RELPATH in scaffold
+          and all(_within(p, store.WORKING_DIRNAME) for p in scaffold))
+    check("init-store-row-validates", schema.validate_op(row).status == valid)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        bare = os.path.join(tmp, "bare")
+        os.mkdir(bare)
+        stray = dict(row, members=row["members"] + [dict(path=".working/notes.md", digest="sha256:" + "0" * 64)])
+        other = ctx(bare)
+        other["plan"]["store"]["machine_rel"] = store.WORKING_DIRNAME + "/other"
+        check("init-store-no-context-refused", refused(dispatch(row), "no approved plan"))
+        check("init-store-zero-manifest-digest-refused",
+              refused(dispatch(schema.canonical_op("init-store"), ctx(bare)), "default manifest"))
+        check("init-store-stray-member-refused", refused(dispatch(stray, ctx(bare)), "never writes"))
+        check("init-store-other-machine-store-refused", refused(dispatch(row, other), "default machine store"))
+        check("init-store-readoption-without-seed-refused",
+              refused(dispatch(row, ctx(bare, "re-adoption")), "never from"))
+        check("init-store-first-adoption-with-seed-refused",
+              refused(dispatch(row, ctx(bare, ancestral="0" * 40)), "no ancestry"))
+        check("init-store-preconditions-wrote-nothing", os.listdir(bare) == [])
+    if shutil.which("git") is None:
+        check("init-store-git-available", False)
+        return
+    _opf_oplock._st_with_git_lifecycle(lambda: _init_store_git_checks(check, row, ctx, refused, high_water))
+
+
+def _init_store_git_checks(check, row, ctx, refused, high_water):
+    """The executing init-store vectors over real git fixtures (see _init_store_self_test)."""
+    import tempfile
+    valid = store.VALID
+    snap, ops_dir = init_op._tree_snapshot, init_op._ops_dir
+
+    def op_ids(root):
+        return sorted(os.listdir(ops_dir(root))) if os.path.isdir(ops_dir(root)) else []
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-init-") as base:
+        base = os.path.realpath(base)
+        env = init_op._st_git_env(base)
+        # A first adoption over NOT-ADOPTED: the substrate publishes the default store, which then resolves
+        # at the product root with the row's manifest bytes. A rerun refuses over the initialized store.
+        root = init_op._plain_repo(os.path.join(base, "fresh"), env)
+        res = dispatch(row, ctx(root))
+        published = None
+        if os.path.isfile(os.path.join(root, row["members"][0]["path"])):
+            with open(os.path.join(root, row["members"][0]["path"]), "rb") as fh:
+                published = "sha256:" + _sha256(fh.read())
+        check("init-store-first-adoption-views-ready", res.status == valid and len(op_ids(root)) == 1
+              and store.resolve_store(root).status == store.RESOLVED
+              and published == row["members"][0]["digest"])
+        before = snap(root)
+        check("init-store-initialized-store-refused",
+              refused(dispatch(row, ctx(root)), "already records init history") and snap(root) == before)
+        # The postcondition: a member digest the substrate's published bytes do not match refuses AFTER it
+        # published (the substrate never rolls back, so the scaffold stays for inspection, never repaired).
+        root = init_op._plain_repo(os.path.join(base, "member"), env)
+        wrong = dict(row, members=row["members"] + [dict(path=store.WORKING_DIRNAME + "/TODO.md",
+                                                         digest="sha256:" + "0" * 64)])
+        check("init-store-member-mismatch-refused", refused(dispatch(wrong, ctx(root)), "do not match")
+              and store.resolve_store(root).status == store.RESOLVED)
+        # Reconcile-first: an unreadable adoption journal lock refuses before the substrate is touched.
+        root = init_op._plain_repo(os.path.join(base, "journal"), env)
+        os.makedirs(os.path.join(root, JOURNAL_REL))
+        with open(os.path.join(root, JOURNAL_REL, "lock"), "wb") as fh:
+            fh.write(b"not a lock\n")
+        before = snap(root)
+        check("init-store-journal-first", refused(dispatch(row, ctx(root)), "adoption journal")
+              and snap(root) == before and op_ids(root) == [])
+        # The blind-init flip: the SAME fixture plus one undispositioned foreign .working file refuses with the
+        # tree unchanged and no substrate operation recorded; dispositioning it names the composition limit.
+        root = init_op._plain_repo(os.path.join(base, "blind"), env)
+        os.makedirs(os.path.join(root, store.WORKING_DIRNAME))
+        with open(os.path.join(root, store.WORKING_DIRNAME, "notes.md"), "wb") as fh:
+            fh.write(b"adopter notes\n")
+        before = snap(root)
+        check("init-store-undispositioned-working-refused",
+              refused(dispatch(row, ctx(root)), "undispositioned foreign") and snap(root) == before
+              and op_ids(root) == [])
+        check("init-store-dispositioned-working-refused-by-composition",
+              refused(dispatch(row, ctx(root, sources=[".working/notes.md"])), "absent .working")
+              and snap(root) == before and op_ids(root) == [])
+        # Resume: the substrate's own child is SIGKILLed mid-publication, leaving one partial operation. The
+        # retry is refused until recovery is explicit (a dead owner's lock is never seized implicitly), then
+        # resumes the ORIGINAL operation id to VIEWS-READY, never a second operation.
+        root = init_op._plain_repo(os.path.join(base, "resume"), env)
+        init_op._child(root, env, kill="source:2")
+        partial, interrupted = op_ids(root), store.resolve_store(root).status
+        implicit = dispatch(row, ctx(root))
+        res = dispatch(row, dict(ctx(root), recover=True))
+        check("init-store-killed-run-left-one-partial", len(partial) == 1 and interrupted != store.RESOLVED)
+        check("init-store-resume-needs-explicit-recovery",
+              refused(implicit, "operation mutex") and op_ids(root) == partial)
+        check("init-store-resumes-original-operation", res.status == valid and op_ids(root) == partial
+              and store.resolve_store(root).status == store.RESOLVED)
+        # The counters flip: a re-adoption whose ancestral store allocated WL-7 seeds from that pinned
+        # high-water (the next WL is 8, never a reused 1); the same fixture with a snapshot missing a baseline
+        # namespace refuses inside the substrate (UNKNOWN, never zero) with the tree unchanged.
+        values = dict.fromkeys(store.BASELINE_TYPES.values(), 0)
+        values.update(WL=7, BI=3)
+        missing = dict(values)
+        del missing["HO"]
+        for name, counters in (("readopt", values), ("unknown", missing)):
+            root = init_op._plain_repo(os.path.join(base, name), env)
+            os.makedirs(os.path.join(root, store.WORKING_DIRNAME, "toml"))
+            with open(os.path.join(root, init_op.COUNTERS_RELPATH), "wb") as fh:
+                fh.write(init_op._counters_toml(counters))
+            init_op._git(["add", "-A"], root, env)
+            init_op._git(["commit", "-q", "-m", "adopted"], root, env)
+            evidence = init_op._head(root, env)
+            init_op._git(["rm", "-q", "-r", store.WORKING_DIRNAME], root, env)
+            init_op._git(["commit", "-q", "-m", "deleted"], root, env)
+            before = snap(root)
+            res = dispatch(row, ctx(root, "re-adoption", ancestral=evidence))
+            if name == "readopt":
+                seeded = dict()
+                if res.status == valid:
+                    with open(os.path.join(root, init_op.COUNTERS_RELPATH), "rb") as fh:
+                        seeded = tomllib.loads(fh.read().decode("utf-8"))["counters"]
+                check("init-store-readoption-seeds-ancestral-high-water", res.status == valid
+                      and high_water(seeded, "WL") + 1 == 8 and seeded.get("BI") == 3)
+            else:
+                check("init-store-missing-namespace-refused", refused(res, "UNKNOWN") and snap(root) == before)
 
 
 def main():
