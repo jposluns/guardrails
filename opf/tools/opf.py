@@ -1751,6 +1751,33 @@ def _runtime_flag_forms(tree):
     return [[flag] for flag in flags] + [["--self-test", flag] for flag in flags]
 
 
+def _runtime_probe_runs(directory, table=None, names=None):
+    """The runtime probe's (module, argv) run list and the read/parse misses of building it, exactly
+    as _self_test_runtime_probe dispatches it: every *.py module in `directory` (restricted by
+    `names`), with each _DISPATCH_REFUSED and _DISPATCH_REFUSED_WORDS form, the bare form unless
+    `table` declares one, and each undeclared `--` flag form the module's own source spells
+    (_runtime_flag_forms). Shared with _aggregator_outer_bound (QA27 codex M3 / claude M1) so the
+    aggregator's derived outer budget counts the SAME runs the probe will make, never a hand
+    estimate."""
+    import _optlevel
+    table = _DISPATCH_FORMS if table is None else table
+    directory = Path(directory).resolve()
+    misses, runs = [], []
+    for name in sorted(name for name in os.listdir(str(directory))
+                       if name.endswith(".py") and (names is None or name in names)):
+        forms = list(_DISPATCH_REFUSED) + list(_DISPATCH_REFUSED_WORDS) + (
+            [[]] if () not in table.get(name, ()) else [])
+        try:
+            extra = _runtime_flag_forms(_optlevel.parse((directory / name).read_bytes(), name))
+        except (OSError, SyntaxError, ValueError) as exc:
+            misses.append("{}: cannot be read or parsed for its `--` forms ({})".format(name, type(exc).__name__))
+            extra = []
+        forms += [argv for argv in extra if argv not in forms and argv != ["--self-test"]
+                  and tuple(argv) not in table.get(name, ())]
+        runs += [(name, argv) for argv in forms]
+    return misses, runs
+
+
 def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
                              timeout=_RUNTIME_TIMEOUT, spy=None):
     """The authority over the self-test argument refusal, by behaviour: run EVERY *.py module in `directory`,
@@ -1814,22 +1841,9 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
     if tree is None:
         tree = directory.parent.parent if (directory.parent.parent / ".git").exists() else directory
     host = Path(__file__).name
-    modules = sorted(name for name in os.listdir(str(directory))
-                     if name.endswith(".py") and (names is None or name in names))
-    if names is None and not modules:
+    misses, runs = _runtime_probe_runs(directory, table, names)
+    if names is None and not runs and not misses:
         return ["no *.py module found in {}".format(directory)]
-    misses, runs = [], []
-    for name in modules:
-        forms = list(_DISPATCH_REFUSED) + list(_DISPATCH_REFUSED_WORDS) + (
-            [[]] if () not in table.get(name, ()) else [])
-        try:
-            extra = _runtime_flag_forms(_optlevel.parse((directory / name).read_bytes(), name))
-        except (OSError, SyntaxError, ValueError) as exc:
-            misses.append("{}: cannot be read or parsed for its `--` forms ({})".format(name, type(exc).__name__))
-            extra = []
-        forms += [argv for argv in extra if argv not in forms and argv != ["--self-test"]
-                  and tuple(argv) not in table.get(name, ())]
-        runs += [(name, argv) for argv in forms]
     usage = (str(__doc__) + "\n").encode("utf-8")
 
     def child(run):
@@ -4072,6 +4086,10 @@ _RUNTIME_WAIT_POSITIONS = (
     ("sock.settimeout(0.01)\n\n\nclass Qa:\n    data = sock.recv(1)\n", "<module>"),
     ("def qa(sock, spare):\n    sock.settimeout(1)\n    sock = spare\n    return sock.recv(1)\n", "qa"),
     ("def qa(sock):\n    sock.settimeout(1)\n    return lambda: sock.recv(1)\n", "qa.<lambda>"),
+    # QA27 (claude QA26 minor 5): the rebinding check orders by (line, column), not line alone. A
+    # same-line store AFTER the bound still voids it; a same-line store BEFORE the bound does not.
+    ("def qa(sock, spare):\n    sock.settimeout(1); sock = spare\n    return sock.recv(1)\n", "qa"),
+    ("def qa(sock, spare):\n    sock = spare; sock.settimeout(1)\n    return sock.recv(1)\n", None),
     # QA25 (claude QA24 minor 1): a lock reached through a subscript or a call; an exit that waits.
     ("def qa(h):\n    with h.launch_locks[0]:\n        pass\n", "qa"),
     ("def qa(h):\n    with h.lock_for('x'):\n        pass\n", "qa"),
@@ -22017,19 +22035,69 @@ KNOWN_VERBS = ("init", "adopt", "import", "doctor", "render", "migrate", "sync",
 _INT_LIMIT_SELF_TESTS = frozenset({"opf-release", "opf-emit", "opf-schema", "opf-fuzz"})
 
 
+def _aggregator_outer_bound():
+    """The aggregator's outer budget, DERIVED at call time from its own probes' run lists, per-run
+    budgets and worker counts (QA27 codex M3 / claude M1: the retired hand-estimated 2400 s row sat
+    far below one runtime-probe pass), so the kill-timeout rule holds by construction: the outer kill
+    can fire only past the unit's slowest intended path. The terms, each an upper bound built from
+    the committed constants of the stage it budgets: (1) the runtime probe over this directory's real
+    modules -- _runtime_probe_runs counts the SAME runs the probe dispatches, each budgeted one whole
+    supervisor lifetime (its timeout, the settle, the communicate slack and drain tail, and the
+    bounded kill-and-reap of an expired supervisor) across the probe's 8-worker pool, PLUS the serial
+    named-writer repeat (every run again, one at a time, each with its own tree snapshot) the probe
+    makes when the tree changed; (2) the dispatch probes, every run bounded by subprocess.run's 120 s
+    timeout, counted from the same form tables and fixtures they dispatch, across their 8-worker
+    pool; (3) the escape probe's fixture runs (the _RUNTIME_FIXTURES forms rebuilt from their
+    in-memory sources, parallel and serial legs both), its escaped writers' _RUNTIME_LATE_BOUND wait
+    and its decoy reaps; (4) a flat 900 s for the static stages (the entry scan, the floor probe, the
+    tree snapshots around the parallel pass) and margin. A module list or fixture that cannot be
+    enumerated or parsed contributes its base forms (the probes fail on it on their own); the floor
+    keeps the bound at least the retired estimate."""
+    import math
+    import _optlevel
+    per_run = float(_RUNTIME_TIMEOUT) + _RUNTIME_SETTLE + 2.0 * _RUNTIME_REAP_SECONDS + 37.0
+    snapshot = 60.0   # one _runtime_snapshot of the tree per serial named-writer repeat, generously
+    base = len(_DISPATCH_REFUSED) + len(_DISPATCH_REFUSED_WORDS) + 1
+    try:
+        _misses, runs = _runtime_probe_runs(Path(__file__).resolve().parent)
+        tries = len(runs)
+    except OSError:
+        tries = 0
+    fixture_tries = 0
+    for name, source, _want in _RUNTIME_FIXTURES:
+        try:
+            fixture_tries += base + len(_runtime_flag_forms(_optlevel.parse(source.encode("utf-8"), name)))
+        except (SyntaxError, ValueError):
+            fixture_tries += base
+    dispatch_tries = sum(base + 1 + sum(1 for argv in declared if argv and argv[0] == "--self-test")
+                         for declared in _DISPATCH_FORMS.values())
+    dispatch_tries += sum(base + 1 + len(declared or ()) for _name, _source, declared, _want in _DISPATCH_FIXTURES)
+    runtime = (math.ceil(tries / 8.0) + tries) * per_run + tries * snapshot
+    escape = (math.ceil(fixture_tries / 8.0) + fixture_tries) * (per_run + snapshot) \
+        + _RUNTIME_LATE_BOUND + 120.0
+    dispatch = math.ceil(dispatch_tries / 8.0) * 125.0
+    return max(runtime + escape + dispatch + 900.0, 2400.0)
+
+
 # QA26: the hard outer bound of every registered self-test unit. The GUARANTEE that
 # `opf.py --self-test` cannot hang is BY CONSTRUCTION, not by audit: run_self_tests_isolated runs
 # every registered unit in its OWN forked child process group through _run_unit_bounded, and at the
 # unit's budget below the parent SIGKILLs that whole group and records a named exit-2 failure,
 # whatever the unit was doing (an unbounded waitpid, a blocking recv, an Event.wait():
-# _unit_bound_self_test's vectors). Everything a unit runs in-process or forks without leaving the
-# group (the run_status_owned launches, the _FixtureProcess paths, the probes) dies with the group;
-# only a process that leaves it on purpose (the escape probe's setsid writers) is outside, and those
-# are never signalled (the escaped-writer design). Each budget was sized from this tree's measured
-# runtime (2026-10-04, noted per row where it is not obvious) with a wide margin and sits ABOVE
-# every bound the unit sets internally (the kill-timeout rule), so the outer kill fires only on a
-# unit that has outlived its own slowest intended path; the suite's total wall time is bounded by
-# this table's sum.
+# _unit_bound_self_test's vectors). What the kill reaches, exactly (QA27 codex M5 / claude minor 1):
+# everything a unit runs in-process or forks WITHOUT leaving the group dies with the group; what
+# leaves the group on purpose does not -- the _FixtureProcess guardian (its os.setpgid(0, 0)) and its
+# subject (its os.setsid()), every start_new_session=True launch (the runtime-probe supervisors and
+# the run_shell checks), the escape probe's setsid writers -- and none of those is ever signalled
+# (the escaped-writer design). What such an escapee can NEVER do (QA27 codex B1/M5, claude M3): hold
+# the suite's stdout or stderr, or block this parent. Each unit and every descendant it forks
+# inherit only the unit's OWN pipe pair, which _run_unit_bounded relays to the caller's streams
+# through a bounded, never-blocking writer and closes when the unit ends, so the parent never blocks
+# on the caller's streams and an escapee is left holding a pipe whose read end is gone. Each budget
+# sits ABOVE the unit's own end-to-end internal budget (the kill-timeout rule), stated per row from
+# the unit's committed timeouts, windows and worker counts (the aggregator's is computed at call
+# time by _aggregator_outer_bound from its probes' own run lists), so the outer kill fires only on a
+# unit that has outlived its own slowest intended path.
 _UNIT_OUTER_BOUNDS = {
     "opf-store": 180.0,
     "opf-schema": 180.0,
@@ -22047,25 +22115,34 @@ _UNIT_OUTER_BOUNDS = {
     "opf-journal": 180.0,
     "opf-watchdog-isolation": 6000.0,      # its blocked matrix budgets 31 * 180 s internally
     "opf-watchdog-regressions": 10800.0,   # the sum of its per-case bounds dominates (blocked-isolation alone 5610 s)
-    "opf-aggregator": 2400.0,              # its probes bound each module child at 120 s over an 8-worker pool
+    "opf-aggregator": _aggregator_outer_bound,   # derived at call time from its probes' own run lists (QA27)
     "opf-retained-close-offpath": 300.0,
     "opf-close-exc-safe-vectors": 600.0,
     "opf-cli": 600.0,
-    "opf-unit-bound": 300.0,               # its own case windows total about 110 s worst case
+    # opf-unit-bound (QA27 claude minor 4, re-derived): three blocking cases (a 10 s pid report, a
+    # 30 s window, a 10 s verdict read, a 10 s reap and up to two 10 s ended() scans: about 90 s each
+    # worst), three disabled-bound flip cases (an 8 s window, the report, the reap and the scans:
+    # about 60 s each worst) and the in-process vocabulary case (a 30 s budget): about 480 s end to
+    # end, so 600 holds the kill-timeout rule.
+    "opf-unit-bound": 600.0,
 }
 _UNIT_OUTER_DEFAULT = 120.0   # a label outside the table (the aggregator's synthetic units)
 
 # Test-only flip (QA26): True disables the outer deadline, so a blocking unit hangs its runner.
 # _unit_bound_self_test proves the committed value is False and that flipping it True (in a prober
-# child whose own INLINE deadline then kills it, so the flip can never hang the suite) makes the
-# blocking vector hang: the deadline branch below is the live mechanism, masked by nothing.
+# child whose own INLINE deadline then kills it, so the flip can never hang the suite) makes each
+# blocking vector hang: the deadline branch below is the live mechanism, masked by nothing. Even a
+# COMMITTED True cannot leave the suite's output held (QA27 claude M3): a hung unit's leftovers hold
+# only their unit's pipe, never the caller's streams.
 _UNIT_BOUND_DISABLED = False
 
 
 def _unit_outer_bound(label):
-    """The outer budget of one registered unit: its _UNIT_OUTER_BOUNDS row, else the default.
-    _unit_bound_self_test requires every registered label to have its own row."""
-    return _UNIT_OUTER_BOUNDS.get(label, _UNIT_OUTER_DEFAULT)
+    """The outer budget of one registered unit: its _UNIT_OUTER_BOUNDS row (a float, or a zero-argument
+    derivation called here: the aggregator's), else the default. _unit_bound_self_test requires every
+    registered label to have its own row."""
+    bound = _UNIT_OUTER_BOUNDS.get(label, _UNIT_OUTER_DEFAULT)
+    return float(bound()) if callable(bound) else bound
 
 
 def _unit_child_code(label, fn, guard_idlimit):
@@ -22099,31 +22176,133 @@ def _unit_child_code(label, fn, guard_idlimit):
     return code
 
 
+def _unit_relay_flush(stream):
+    """Flush `stream`'s own buffered text without ever blocking (QA27 codex B1): the descriptor's
+    blocking flag is dropped around the flush, so a caller stream nobody reads (a full pipe) keeps
+    what does not fit buffered instead of blocking this parent. A stream without a descriptor (a
+    test's StringIO) flushes as itself."""
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        fd = None
+    if fd is None:
+        try:
+            stream.flush()
+        except Exception:
+            pass
+        return
+    try:
+        blocking = os.get_blocking(fd)
+    except OSError:
+        return
+    try:
+        os.set_blocking(fd, False)
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    finally:
+        try:
+            os.set_blocking(fd, blocking)
+        except OSError:
+            pass
+
+
+def _unit_relay_write(stream, data, deadline):
+    """Deliver a unit's relayed bytes (or its runner's own diagnostic) to the caller's stream without
+    ever blocking past `deadline` (QA27 codex B1: no parent-side write may outlive its bound). A
+    stream without a usable descriptor (a test's redirect_stderr StringIO) takes the text directly.
+    Otherwise the stream's own buffer is flushed non-blockingly first (so the relay cannot overtake
+    it), then the bytes are written with the descriptor's blocking flag dropped, between bounded
+    writability polls; whatever the caller has not accepted by the deadline is DROPPED -- the exit
+    code, never the relayed text, is the suite's contract."""
+    import select
+    import time
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        fd = None
+    if fd is None:
+        try:
+            stream.write(data.decode("utf-8", "replace"))
+        except Exception:
+            pass
+        return
+    _unit_relay_flush(stream)
+    while data:
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            return
+        try:
+            if not select.select([], [fd], [], min(left, 0.2))[1]:
+                continue
+            blocking = os.get_blocking(fd)
+            try:
+                os.set_blocking(fd, False)
+                try:
+                    wrote = os.write(fd, data[:65536])
+                except (BlockingIOError, InterruptedError):
+                    wrote = 0
+            finally:
+                os.set_blocking(fd, blocking)
+        except OSError:
+            return
+        data = data[wrote:]
+
+
 def _run_unit_bounded(label, fn, bound, guard_idlimit=False):
     """Run one self-test unit in its OWN forked child process group under the hard outer deadline
-    `bound` seconds (QA26). The child setpgid(0, 0)s, runs _unit_child_code and _exits with the
-    unit's code; an exception escaping the unit is printed and exits 2 (fail closed), so a raising
-    unit no longer aborts the suite. The parent waits on a pidfd it opened on its OWN direct fork:
-    waitid(P_PIDFD, ..., WEXITED | WNOHANG) polls between poll()s of the pidfd bounded by what is
-    left, never a blocking wait, and never a wait spelled on the pid itself, so the pid stays
-    fork-pinned for the expiry kill (an inherited SIG_IGN on SIGCHLD would auto-reap and blind the
-    poll, so the parent holds SIG_DFL for the wait and restores the caller's disposition after; the
-    child forked first, so the unit still sees what the caller set). At the deadline the parent
+    `bound` seconds (QA26), with the unit's stdout and stderr on the unit's OWN pipe pair (QA27 codex
+    B1/M5, claude M3): the child dup2s the pipes over 1 and 2 and rebinds sys.stdout and sys.stderr
+    fresh (the parent's unflushed buffered text stays the parent's to write, so there is no pre-fork
+    flush to block on and no duplicated output), runs _unit_child_code and _exits with the unit's
+    code; an exception escaping the unit is printed and exits 2 (fail closed), so a raising unit no
+    longer aborts the suite. The parent relays the pipes to the caller's streams through
+    _unit_relay_write, a bounded, never-blocking writer, so neither a full caller pipe nor an escaped
+    descendant that kept the unit's pipe can block this parent or hold the suite's streams: when the
+    unit ends, the parent drains briefly and CLOSES its read ends, whoever still holds the write
+    ends. SIGCHLD is held at SIG_DFL from BEFORE the fork to the reap (QA27 codex B2 / claude minor
+    2: an inherited SIG_IGN would auto-reap and blind the poll, and an inherited reaping HANDLER
+    could reap the leader between a poll and the kill, un-pinning pgid == pid); the child restores
+    the caller's disposition first thing, so the unit still sees what the caller set. The parent
+    waits only by WNOHANG waitid polls -- on the pidfd it opened on its OWN direct fork when the
+    host gives one, else on the pid spelling -- never a blocking wait and never a reap before the
+    exit, so the leader is still un-reaped at the instant of any kill. At the deadline the parent
     SIGKILLs the unit's WHOLE process group FIRST (its leader, this call's own un-waited fork, is
-    still un-reaped, so pgid == pid cannot have been recycled), then reaps the leader through the
-    SAME pidfd (_reap_pidfd), and returns 2 with a named failure, so the suite never hangs whatever
-    the unit was doing. Without pidfd support the leader is still killed and reaped at the bound
-    through _bounded_wait's proved route (group members it leaves are that route's disclosed
-    residual; the Linux CI leg has pidfd). Nothing the unit does not own is signalled: the kill
-    reaches only the unit's group, which a deliberate escapee (the escape probe's setsid writers)
-    has already left. _UNIT_BOUND_DISABLED is the test-only flip _unit_bound_self_test proves
-    live."""
+    un-reaped under the held SIG_DFL, so pgid == pid cannot have been recycled: the numeric killpg
+    licence), then reaps the leader -- through the SAME pidfd, or on a host without pidfd support
+    (QA27 codex M4 / claude M2) through the same bounded WNOHANG poll on the fork-pinned pid, so a
+    pidfd-less host kills AND reaps the stuck unit too -- then drains and closes the unit's pipes
+    and returns 2 with a named failure, so the suite never hangs whatever the unit was doing. A
+    missing os.pidfd_open, an ENOSYS from it, or a waitid without P_PIDFD (EINVAL) all take the pid
+    spelling inside the same loop; no AttributeError or OSError escapes to the caller
+    (run_self_tests_isolated also fails any residual runner exception closed by name). Nothing the
+    unit does not own is signalled: the kill reaches only the unit's group, which a deliberate
+    escapee has already left. _UNIT_BOUND_DISABLED is the test-only flip _unit_bound_self_test
+    proves live."""
     import select
     import signal
     import time
-    sys.stdout.flush()
-    sys.stderr.flush()
-    pid = os.fork()
+    previous = signal.getsignal(signal.SIGCHLD)
+    held = previous is not None and previous != signal.SIG_DFL
+    if held:
+        try:
+            signal.signal(signal.SIGCHLD, signal.SIG_DFL)   # BEFORE the fork: no reaper can race the kill
+        except (OSError, RuntimeError, ValueError):
+            held = False
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        for each in (out_r, out_w, err_r, err_w):
+            os.close(each)
+        if held:
+            signal.signal(signal.SIGCHLD, previous)
+        _unit_relay_write(sys.stderr, "opf self-test: {} could not fork its unit process "
+                          "({}); failing closed\n".format(label, exc).encode("utf-8", "replace"),
+                          time.monotonic() + 5.0)
+        return EXIT_MALFORMED
     if pid == 0:
         code = EXIT_MALFORMED
         try:
@@ -22131,6 +22310,22 @@ def _run_unit_bounded(label, fn, bound, guard_idlimit=False):
                 os.setpgid(0, 0)
             except OSError:
                 pass
+            os.close(out_r)
+            os.close(err_r)
+            os.dup2(out_w, 1)
+            os.dup2(err_w, 2)
+            os.close(out_w)
+            os.close(err_w)
+            # Fresh stream objects over the unit's own pipes: the parent's buffered text is neither
+            # flushed here (QA27 codex B1) nor duplicated, and nothing this unit runs or forks ever
+            # holds the caller's streams (QA27 codex M5).
+            sys.stdout = sys.__stdout__ = open(1, "w", buffering=1, closefd=False)
+            sys.stderr = sys.__stderr__ = open(2, "w", buffering=1, closefd=False)
+            if held:
+                try:
+                    signal.signal(signal.SIGCHLD, previous)   # the unit sees the caller's disposition
+                except (OSError, RuntimeError, ValueError, TypeError):
+                    pass
             code = _unit_child_code(label, fn, guard_idlimit)
         except BaseException:
             import traceback
@@ -22144,81 +22339,136 @@ def _run_unit_bounded(label, fn, bound, guard_idlimit=False):
                 pass
             os._exit(code if type(code) is int and code in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED)
                      else EXIT_MALFORMED)
+    os.close(out_w)
+    os.close(err_w)
     try:
         os.setpgid(pid, pid)   # both sides set it, so whichever runs first creates the group
     except OSError:
         pass
-    previous = signal.getsignal(signal.SIGCHLD)
-    flipped = previous == signal.SIG_IGN
-    if flipped:
-        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    fd = None
+    pipes = {out_r: sys.stdout, err_r: sys.stderr}
     try:
-        try:
-            fd = os.pidfd_open(pid, 0)   # this process's own direct, un-waited fork
-        except OSError:
-            fd = None
-        if fd is not None:
+        if hasattr(os, "pidfd_open"):
             try:
-                poller = select.poll()
-                poller.register(fd, select.POLLIN)
-                deadline = time.monotonic() + bound
+                fd = os.pidfd_open(pid, 0)   # this process's own direct, un-waited fork
+            except OSError:
+                fd = None   # ENOSYS, EMFILE and the like: the pid spelling below still kills and reaps
+        poller = select.poll()
+        if fd is not None:
+            poller.register(fd, select.POLLIN)
+        for source in pipes:
+            os.set_blocking(source, False)
+            poller.register(source, select.POLLIN)
+        deadline = time.monotonic() + bound
+
+        def pump(budget):
+            # Relay every byte already in the unit's pipes, never blocking past `budget`; an EOF
+            # (the whole group is gone) retires that pipe here, its read end closed.
+            for source in list(pipes):
                 while True:
                     try:
-                        ended = os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG)
-                    except ChildProcessError:
-                        print("opf self-test: {} unit process was reaped out from under its runner; "
-                              "failing closed".format(label), file=sys.stderr)
-                        return EXIT_MALFORMED
-                    if ended is not None:
-                        if ended.si_code == os.CLD_EXITED:
-                            code = ended.si_status
-                            if code in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED):
-                                return code
-                            print("opf self-test: {} unit process exited {}; failing closed"
-                                  .format(label, code), file=sys.stderr)
-                            return EXIT_MALFORMED
-                        print("opf self-test: {} unit process was killed by signal {}; failing "
-                              "closed".format(label, ended.si_status), file=sys.stderr)
-                        return EXIT_MALFORMED
-                    left = deadline - time.monotonic()
-                    if left <= 0.0 and not _UNIT_BOUND_DISABLED:
+                        chunk = os.read(source, 65536)
+                    except (BlockingIOError, InterruptedError):
                         break
-                    poller.poll(min(left, 0.1) * 1000.0)
-                # Expiry. The group first -- pid is this call's own un-waited, un-reaped fork, so
-                # pgid == pid is still reserved -- then reap the leader through the SAME pidfd.
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                tail = "" if _reap_pidfd(fd, 5.0) else "; its leader was not reaped within 5.0 s"
-                print("opf self-test: {} exceeded its {} s outer bound; its process group was "
-                      "SIGKILLed and its leader reaped through the runner's own pidfd (QA26 hard "
-                      "outer bound{})".format(label, bound, tail), file=sys.stderr)
-                return EXIT_MALFORMED
-            finally:
-                os.close(fd)
-        # A pidfd-less host: the leader is still killed and reaped at the bound through
-        # _bounded_wait's proved route (this wait follows every kill above, so the pid's
-        # fork-bound licence there is untouched).
+                    except OSError:
+                        chunk = b""
+                    if chunk:
+                        _unit_relay_write(pipes[source], chunk, budget)
+                        continue
+                    poller.unregister(source)
+                    os.close(source)
+                    del pipes[source]
+                    break
+
+        def finish(code):
+            # The bounded tail drain: an escapee still holding a write end cannot stall this parent
+            # past it, and the read ends close in this call's finally whatever it kept.
+            pump(time.monotonic() + 2.0)
+            return code
+
+        def diagnose(message):
+            _unit_relay_write(sys.stderr, (message + "\n").encode("utf-8", "replace"),
+                              time.monotonic() + 5.0)
+
+        use_pidfd = fd is not None
+        while True:
+            pump(deadline)
+            try:
+                if use_pidfd:
+                    ended = os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG)
+                else:
+                    ended = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG)
+            except ChildProcessError:
+                diagnose("opf self-test: {} unit process was reaped out from under its runner; "
+                         "failing closed".format(label))
+                return finish(EXIT_MALFORMED)
+            except OSError:
+                if use_pidfd:
+                    use_pidfd = False   # a waitid without P_PIDFD (EINVAL): the pid spelling takes over
+                    continue
+                diagnose("opf self-test: {} unit process cannot be waited for; failing closed"
+                         .format(label))
+                return finish(EXIT_MALFORMED)
+            if ended is not None:
+                if ended.si_code == os.CLD_EXITED:
+                    code = ended.si_status
+                    if code in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED):
+                        return finish(code)
+                    diagnose("opf self-test: {} unit process exited {}; failing closed"
+                             .format(label, code))
+                    return finish(EXIT_MALFORMED)
+                diagnose("opf self-test: {} unit process was killed by signal {}; failing "
+                         "closed".format(label, ended.si_status))
+                return finish(EXIT_MALFORMED)
+            left = deadline - time.monotonic()
+            if left <= 0.0:
+                if not _UNIT_BOUND_DISABLED:
+                    break
+                left = 0.1   # the flipped test branch: keep polling (and relaying), never a negative poll
+            poller.poll(min(left, 0.1) * 1000.0)
+        # Expiry. The group first -- pid is this call's own un-waited, un-reaped fork (nothing could
+        # reap it under the held SIG_DFL), so pgid == pid is still reserved -- then reap the leader:
+        # through the SAME pidfd when there is one, else by the same WNOHANG poll on the fork-pinned
+        # pid (QA27 codex M4 / claude M2: the pidfd-less host kills and reaps too).
         try:
-            _waited, status = _bounded_wait(pid, bound, forked=True)
-        except AssertionError as exc:
-            print("opf self-test: {} exceeded its {} s outer bound; {} (QA26 hard outer bound)"
-                  .format(label, bound, exc), file=sys.stderr)
-            return EXIT_MALFORMED
-        if os.WIFEXITED(status):
-            code = os.WEXITSTATUS(status)
-            if code in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED):
-                return code
-            print("opf self-test: {} unit process exited {}; failing closed".format(label, code),
-                  file=sys.stderr)
-            return EXIT_MALFORMED
-        print("opf self-test: {} unit process was killed by signal {}; failing closed".format(
-            label, os.WTERMSIG(status) if os.WIFSIGNALED(status) else status), file=sys.stderr)
-        return EXIT_MALFORMED
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        if use_pidfd:
+            reaped = _reap_pidfd(fd, 5.0)
+        else:
+            reaped = False
+            reap_by = time.monotonic() + 5.0
+            while time.monotonic() < reap_by:
+                try:
+                    if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG) is not None:
+                        reaped = True
+                        break
+                except ChildProcessError:
+                    reaped = True
+                    break
+                except OSError:
+                    break
+                time.sleep(0.02)
+        diagnose("opf self-test: {} exceeded its {} s outer bound; its process group was "
+                 "SIGKILLed and its leader reaped through the runner's own {} (QA26 hard outer "
+                 "bound{})".format(label, bound, "pidfd" if use_pidfd else "WNOHANG poll",
+                                          "" if reaped else "; its leader was not reaped within 5.0 s"))
+        return finish(EXIT_MALFORMED)
     finally:
-        if flipped:
-            signal.signal(signal.SIGCHLD, previous)
+        if fd is not None:
+            os.close(fd)
+        for source in list(pipes):
+            try:
+                os.close(source)
+            except OSError:
+                pass
+            del pipes[source]
+        if held:
+            try:
+                signal.signal(signal.SIGCHLD, previous)
+            except (OSError, RuntimeError, ValueError, TypeError):
+                pass
 
 
 def _unit_bound_self_test():
@@ -22226,11 +22476,14 @@ def _unit_bound_self_test():
     unit -- an unbounded os.waitpid, a blocking socket recv, a threading Event.wait() -- run through
     _run_unit_bounded under a 2 s budget is killed AT that budget: exit 2, the named failure names
     the unit and its outer bound, and the unit's whole process group (a parked inner fork included)
-    is gone; (2) the committed _UNIT_BOUND_DISABLED flip is False, and flipping it True makes the
-    SAME blocking vector hang (the prober child is still running well past its budget at the end of
-    its window), so the deadline branch is what kills it, masked by nothing; the prober runs in its
-    own process group under this test's INLINE deadline and killpg, independent of the flipped
-    branch, so the flip can never hang the suite; (3) every registered unit has its own
+    is gone; (2) the committed _UNIT_BOUND_DISABLED flip is False, and flipping it True makes EACH
+    of those blocking vectors hang (QA27 codex medium 6: waitpid, recv and Event all discriminate;
+    the prober child is still running well past its budget at the end of its window), so the
+    deadline branch is what kills it, masked by nothing; the prober runs in its own process group
+    under this test's INLINE deadline and killpg, independent of the flipped branch, so the flip can
+    never hang the suite; (3) a unit returning the out-of-vocabulary int 3 is exit 2 WITH the named
+    'returned out-of-range code' failure (QA27 claude minor 3: the message, not only the code, since
+    the child's _exit mapping masks a removed check); (4) every registered unit has its own
     _UNIT_OUTER_BOUNDS row. Returns 0 clean, 1 on a failure."""
     import signal
     import socket
@@ -22405,13 +22658,26 @@ def _unit_bound_self_test():
                           ("a blocking socket recv", blocker_recv),
                           ("an Event.wait()", blocker_event)):
         faults += run_case(kind, blocker, False, 2.0, 30.0)
-    faults += run_case("the disabled-bound flip", blocker_waitpid, True, 1.0, 8.0)
+        faults += run_case("the disabled-bound flip of " + kind, blocker, True, 1.0, 8.0)
+    # QA27 claude minor 3: the vocabulary failure must be NAMED, not only exit 2 (the child's _exit
+    # mapping yields 2 even with the check removed). In-process: the runner relays the unit child's
+    # stderr into this redirected sys.stderr, so the message is captured here.
+    import contextlib
+    import io
+    sink = io.StringIO()
+    with contextlib.redirect_stderr(sink):
+        code = _run_unit_bounded("synthetic-vocab", lambda: 3, 30.0)
+    text = sink.getvalue()
+    if code != EXIT_MALFORMED or "returned out-of-range code" not in text or "synthetic-vocab" not in text:
+        faults.append("a unit returning 3 did not yield the named out-of-range failure (code "
+                      "{}, stderr tail {!r})".format(code, text[-200:]))
     if faults:
         print("opf unit-bound self-test: FAIL ({})".format("; ".join(faults)[:2000]), file=sys.stderr)
         return EXIT_FINDING
     print("opf unit-bound self-test: PASS (3 blocking vectors SIGKILLed with their groups at their "
-          "outer bounds; the flip removing the bound makes the vector hang, under this test's own "
-          "inline deadline; every registered unit carries a budget row)")
+          "outer bounds; the flip removing the bound makes each of the 3 vectors hang, under this "
+          "test's own inline deadline; a unit returning 3 is named by the vocabulary check; every "
+          "registered unit carries a budget row)")
     return EXIT_OK
 
 def run_self_tests(tests=None):
@@ -22446,13 +22712,25 @@ def run_self_tests_isolated(tests=None):
     and fails the leg closed. These helpers are hermetic w.r.t. the ambient int-limit by construction
     (they pin their own 4300), so running them under the sentinel is exactly the hostile-ambient
     contract they already satisfy."""
+    import time
     if tests is None:
         tests = _self_tests()
     worst = EXIT_OK
     for label, fn in tests:
-        print("== opf self-test: {} ==".format(label))
-        code = _run_unit_bounded(label, fn, _unit_outer_bound(label),
-                                 guard_idlimit=label in _INT_LIMIT_SELF_TESTS)
+        # The header and any runner diagnostic go through the bounded writer too (QA27 codex B1):
+        # no parent-side write may block outside a bound, whoever reads the caller's streams.
+        _unit_relay_write(sys.stdout, "== opf self-test: {} ==\n".format(label).encode("utf-8"),
+                          time.monotonic() + 30.0)
+        try:
+            code = _run_unit_bounded(label, fn, _unit_outer_bound(label),
+                                     guard_idlimit=label in _INT_LIMIT_SELF_TESTS)
+        except Exception as exc:
+            # QA27 codex M4 / claude M2: no AttributeError or OSError may escape as Python's exit 1;
+            # a runner that cannot even run its unit is a named cannot-evaluate, worst 2.
+            _unit_relay_write(sys.stderr, "opf self-test: {} runner failed ({}: {}); "
+                              "failing closed\n".format(label, type(exc).__name__, exc)
+                              .encode("utf-8", "replace"), time.monotonic() + 5.0)
+            code = EXIT_MALFORMED
         if code == EXIT_MALFORMED:
             worst = EXIT_MALFORMED
         elif code == EXIT_FINDING and worst != EXIT_MALFORMED:
