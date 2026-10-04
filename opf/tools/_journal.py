@@ -52,12 +52,20 @@ Exit convention of the CLIs built on this module: 0 clean/NA, 1 finding, 2 malfo
   _journal.py --self-test   the #378 close vectors and the descriptor-helper vectors (read-error
                             conversion, quiet cleanup close)
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _journal.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import json
 import os
 import re
 import stat
-import sys
 import time
 from pathlib import Path
 
