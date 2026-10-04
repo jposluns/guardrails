@@ -1200,6 +1200,16 @@ def _init_store_bundle_paths(root_fd, product_root, run_id, model):
     if checked.status != store.VALID:
         raise AdoptApplyError("the evidence bundle of {} does not verify ({}); fail-closed".format(
             run_id, "; ".join(checked.findings)))
+    return _init_store_bundle_listed(root_fd, model, run_id)
+
+
+def _init_store_bundle_listed(root_fd, model, run_id):
+    """{path: digest} of `run_id`'s bundle files among the observed `.working` entries: the
+    bundle-root inventories plus the payloads they list. The caller has ALREADY verified the
+    bundle (verify_bundle / _verify_bundle_at); an unreadable or malformed inventory still
+    refuses here, never reads as an empty listing."""
+    import _opf_check
+    home = evidence_home_rel(run_id)
     out = {}
     for entry in model["entries"]:
         if entry["kind"] != "file" or not _within(entry["path"], home):
@@ -1221,6 +1231,110 @@ def _init_store_bundle_paths(root_fd, product_root, run_id, model):
             # e.g. archive copies); only those beneath .working can appear in the inventory at all.
             out[row["path"]] = "sha256:" + row["sha256"]
     return out
+
+
+def _init_store_prior_committed_ops(jr_fd, journal_root, prior):
+    """(creates, archivals) a PRIOR adoption run committed in this journal: creates maps path to
+    the bare-hex content sha256 of every `create` op across the prior run's COMPLETE
+    transactions (its init-store transaction, which publishes no adoption artefact, excluded);
+    archivals lists (source_path, hex_sha256, preservation) for every pinned `remove` whose
+    preservation copy the SAME complete transaction created with the same digest -- the
+    committed preserve-first archival shape of spec 14.2. Raises on an unreadable journal
+    (fail-closed, never an empty answer)."""
+    creates, archivals = {}, []
+    for txn_dir in _journal._journal_txn_dirs(jr_fd, journal_root):
+        name = txn_dir.name
+        if name != prior and not name.startswith(prior + "."):
+            continue
+        if name == _txn_name(prior, INIT_STORE_PHASE):
+            continue
+        if _journal.classify_state(jr_fd, txn_dir) != "complete":
+            continue
+        frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir)
+        intent = _journal._first(frames, _journal.F_INTENT)
+        ops = intent.get("ops") if isinstance(intent, dict) else None
+        if not isinstance(ops, list):
+            continue
+        txn_creates = {}
+        for op in ops:
+            if isinstance(op, dict) and op.get("op") == "create" \
+                    and isinstance(op.get("path"), str):
+                hexd = (op.get("poststate") or {}).get("content-sha256")
+                if isinstance(hexd, str):
+                    txn_creates[op["path"]] = hexd
+        for op in ops:
+            if not (isinstance(op, dict) and op.get("op") == "remove"
+                    and isinstance(op.get("path"), str)):
+                continue
+            pin = (op.get("source-poststate") or {}).get("sha256")
+            try:
+                pres = archive_rel(prior, op["path"])
+            except AdoptApplyError:
+                continue
+            if isinstance(pin, str) and txn_creates.get(pres) == pin:
+                archivals.append((op["path"], pin, pres))
+        creates.update(txn_creates)
+    return creates, archivals
+
+
+def _init_store_prior_run_paths(root_fd, run_id, model, machine, jr_fd, journal_root):
+    """{path: digest} of PRIOR REVERSED runs' committed artefacts admissible beneath the control
+    homes, plus whether a proven prior run's COMMITTED archival emptied the machine directory
+    (claude round 4, F1). Spec 14.1 still burns a reversed run id -- a reversed run never
+    reruns -- but a FRESH run may continue over the prior run's committed work, admitted ONLY
+    when each artefact is PROVEN, per prior run id a control-home file names: (1) that run's
+    init-store transaction is terminal ROLLED-BACK in this adoption journal (the one sanctioned
+    way its id was burnt), (2) its evidence bundle verifies (_verify_bundle_at for that run id,
+    re-reading every listed payload), and (3) EVERY listed artefact lies beneath that run's own
+    bundle or archive home and was created by a transaction COMPLETE in this journal, its live
+    bytes digest-matched (so a hand-planted or tampered artefact is never admitted). The whole
+    prior bundle is admitted or none of it. The machine directory is admitted only on such a
+    prior run's COMMITTED archival: a complete transaction that created the preservation copy
+    and removed a machine-store source pinned to the same digest, the copy live and admitted.
+    Anything not so proven stays foreign and refuses; no journal descriptor proves nothing
+    (fail-closed)."""
+    out, machine_archived = {}, False
+    if jr_fd is None or journal_root is None:
+        return out, machine_archived
+    priors = set()
+    for entry in model["entries"]:
+        if entry["kind"] != "file":
+            continue
+        for home in _CONTROL_HOMES:
+            prefix = home + "/" + KIND + "/"
+            if entry["path"].startswith(prefix):
+                rid = entry["path"][len(prefix):].split("/", 1)[0]
+                if rid != run_id and is_run_id(rid):
+                    priors.add(rid)
+    for prior in sorted(priors):
+        txn = _txn_name(prior, INIT_STORE_PHASE)
+        try:
+            if _journal._lstat_contained(root_fd, JOURNAL_REL + "/" + txn) is None:
+                continue
+            if _journal.classify_state(jr_fd, journal_root / txn) != "rolled-back":
+                continue
+        except (_journal.JournalError, OSError) as exc:
+            raise AdoptApplyError("cannot classify prior run {}'s init-store transaction ({}); "
+                                  "fail-closed".format(prior, exc))
+        if _verify_bundle_at(root_fd, prior, evidence_home_rel(prior)).status != store.VALID:
+            continue
+        try:
+            creates, archivals = _init_store_prior_committed_ops(jr_fd, journal_root, prior)
+        except (_journal.JournalError, OSError) as exc:
+            raise AdoptApplyError("cannot search the adoption journal for prior run {}'s "
+                                  "committed transactions ({}); fail-closed".format(prior, exc))
+        listed = _init_store_bundle_listed(root_fd, model, prior)
+        homes = (evidence_home_rel(prior), _archive_root(prior))
+        admitted = {path: digest for path, digest in listed.items()
+                    if any(_within(path, h) for h in homes)
+                    and creates.get(path) == _plan_hex(digest)}
+        if not admitted or set(admitted) != set(listed):
+            continue   # an artefact not proven committed keeps the whole bundle foreign
+        out.update(admitted)
+        for source_path, hexd, pres in archivals:
+            if _within(source_path, machine) and admitted.get(pres) == "sha256:" + hexd:
+                machine_archived = True
+    return out, machine_archived
 
 
 def _init_store_archival_committed(jr_fd, journal_root, source_path, digest, preservation):
@@ -1273,10 +1387,18 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
     destination is an ordinary managed path"): the occupying row's preservation copy must lie
     LIVE at its recorded destination, digest-matched, and the archival transaction must be
     COMMITTED in this adoption journal (_init_store_archival_committed) -- a validated row
-    alone proves planned work, not completed archival. Only then is the emptied, pre-existing
+    alone proves planned work, not completed archival. A PRIOR run's committed artefacts (its
+    verified evidence bundle and archive copies) are admitted, and the machine home with them,
+    only through _init_store_prior_run_paths: that run's init-store transaction terminal
+    ROLLED-BACK, its bundle verified, every artefact created by a COMPLETE transaction of this
+    journal, and the machine home only on its committed archival -- so a fresh run continues a
+    reversed run's committed work without re-running its burnt id (claude round 4, F1;
+    spec 14.1). Only then is the emptied, pre-existing
     directory admitted as a pre-existing planned directory, its mode pre-checked HERE against
     the planned one (before the run's intent opens, so a wrong-mode tree never burns the run
-    id), which the substrate re-verifies and preserves. Every consumed
+    id, and at the FULL stat.S_IMODE the substrate compares, so a special bit such as setgid
+    02755 refuses here too, codex round 4), which the substrate re-verifies and preserves.
+    Every consumed
     sources-row field (path, digest, disposition, occupying, preservation) is validated
     fail-closed through the planner's own _validate_plan_sources BEFORE it justifies anything: a
     malformed row refuses, never reads as non-occupying or authorizes a copy. Returns
@@ -1303,12 +1425,14 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
                 and any(_within(pres, home) for home in _CONTROL_HOMES):
             copies[pres] = digest
     bundle = _init_store_bundle_paths(root_fd, product_root, plan["run_id"], model)
+    prior, prior_machine = _init_store_prior_run_paths(root_fd, plan["run_id"], model, machine,
+                                                       jr_fd, journal_root)
     admitted, foreign = [], []
     for entry in model["entries"]:
         if entry["kind"] != "file":
             continue
         path = entry["path"]
-        want = frozen.get(path) or copies.get(path) or bundle.get(path)
+        want = frozen.get(path) or copies.get(path) or bundle.get(path) or prior.get(path)
         if want is None or want != entry["digest"]:
             foreign.append(path)
             continue
@@ -1323,7 +1447,7 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
     dirs = {e["path"] for e in model["entries"] if e["kind"] == "directory"}
     stray = sorted(dirs - init_op._admitted_dirs([e["path"] for e in admitted]))
     admitted_dirs = ()
-    if machine in stray and occ_rows:
+    if machine in stray and (occ_rows or prior_machine):
         # Spec 14.2: "After the archival the destination is an ordinary managed path: apply
         # initializes the machine file or renders the view immediately." The archival removed the
         # occupying FILE; its pre-existing parent directory survives (the shell never removes a
@@ -1331,7 +1455,9 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
         # The admission is derived from VERIFIED ARCHIVAL EVIDENCE, never the planned row alone:
         # every occupying machine row's preservation copy must lie LIVE at its recorded
         # destination, digest-matched (it was admitted above), and a COMMITTED adoption
-        # transaction of this journal must record that archival preserve-first. Only then is the
+        # transaction of this journal must record that archival preserve-first -- or, with no
+        # occupying row, a PRIOR reversed run's PROVEN committed archival emptied the directory
+        # (_init_store_prior_run_paths, claude round 4 F1). Only then is the
         # directory admitted as a pre-existing planned directory: the substrate re-verifies it
         # under its mutex (a plain directory, owned, at exactly its planned mode) and PRESERVES
         # it through the run and its reversal.
@@ -1352,23 +1478,27 @@ def _init_store_admitted(root_fd, product_root, plan, jr_fd=None, journal_root=N
         admitted_dirs = (store.WORKING_DIRNAME, machine)
         # The admitted-directory MODE is pre-checked HERE, before the run's intent opens, so a
         # wrong-mode pre-existing tree (a umask-002 adopter) refuses with nothing written and
-        # the run id never burnt; the substrate re-proves the same fact under its mutex.
-        dmode = dict((e["path"], e["mode"]) for e in model["entries"]
-                     if e["kind"] == "directory")
-        try:
-            wst = os.stat(store.WORKING_DIRNAME, dir_fd=root_fd, follow_symlinks=False)
-            dmode[store.WORKING_DIRNAME] = stat.S_IMODE(wst.st_mode) & 0o777
-        except OSError as exc:
-            raise AdoptApplyError("cannot stat .working ({}); fail-closed".format(exc))
+        # the run id never burnt; the substrate re-proves the same fact under its mutex. The
+        # comparison reads the SAME full stat.S_IMODE value the substrate compares (codex
+        # round 4, finding 2): observe_inventory's entries mask to 0o777, so a special bit
+        # (a setgid 02755 directory) would otherwise pass here and burn the run id on the
+        # substrate's own post-intent refusal.
         for dpath in admitted_dirs:
             if dpath == store.WORKING_DIRNAME and admitted:
                 continue   # with admitted files the substrate records the observed mode instead
-            if dmode.get(dpath) != init_op.DIR_MODE:
+            try:
+                dst = os.stat(dpath, dir_fd=root_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise AdoptApplyError("cannot stat {} ({}); fail-closed".format(dpath, exc))
+            if not stat.S_ISDIR(dst.st_mode):
+                raise AdoptApplyError("admitted pre-existing path {} is no longer a directory; "
+                                      "fail-closed (nothing written)".format(dpath))
+            if stat.S_IMODE(dst.st_mode) != init_op.DIR_MODE:
                 raise AdoptApplyError("admitted pre-existing directory {} holds mode {}, not "
                                       "the planned {}; it is preserved as found, never "
                                       "rewritten, and refused BEFORE the run's intent opens "
                                       "(nothing written)".format(
-                                          dpath, "%o" % dmode.get(dpath, 0),
+                                          dpath, "%o" % stat.S_IMODE(dst.st_mode),
                                           "%o" % init_op.DIR_MODE))
     if stray:
         raise AdoptApplyError("foreign .working directory(ies) {} hold no admitted file; a blind "
@@ -1460,6 +1590,43 @@ def _init_store_orphan_or_refuse(product_root, root_fd, jr_fd, journal_root, rec
                       recover=recover)
 
 
+def _fsync_surviving_parent(root_fd, rel):
+    """Make the ABSENCE of the cleanup target `rel` durable: fsync its nearest SURVIVING
+    ancestor directory -- the directory whose entry set records the removal -- walking up past
+    ancestors that were themselves removed, to the product root if need be. A restarted scrub
+    cannot tell a target that never existed from one whose removal a crash separated from its
+    parent fsync, so the barrier is (re-)established for EVERY absent cleanup target before the
+    operation record may be discarded (codex round 4, finding 1). Fail-closed: an ancestor that
+    cannot be classified or fsynced refuses, never reads as durable."""
+    parts = rel.split("/")
+    keep = 0
+    for i in range(len(parts) - 1, 0, -1):
+        prefix = "/".join(parts[:i])
+        try:
+            st = _journal._lstat_contained(root_fd, prefix)
+        except (_journal.JournalError, OSError) as exc:
+            raise AdoptApplyError("cannot observe {} to make {}'s absence durable ({}); "
+                                  "fail-closed".format(prefix, rel, exc))
+        if st is None:
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            raise AdoptApplyError("the surviving ancestor {} of the absent cleanup target {} is "
+                                  "not a directory; fail-closed".format(prefix, rel))
+        keep = i
+        break
+    try:
+        # _open_parent opens the components BEFORE the last, so handing it the surviving
+        # ancestor plus its (removed) child component opens exactly that ancestor, contained.
+        pfd, _name = _journal._open_parent(root_fd, "/".join(parts[:keep + 1]))
+    except (_journal.JournalError, OSError) as exc:
+        raise AdoptApplyError("cannot open the surviving parent of the absent cleanup target {} "
+                              "({}); fail-closed".format(rel, exc))
+    try:
+        os.fsync(pfd)
+    finally:
+        _journal._close_fd_quietly(pfd)
+
+
 def _init_store_scrub(product_root, root_fd, operation_id, members, working_created,
                       machine_created, recover):
     """Clear a REVERSED init-store operation's remnants under the substrate's own mutex, so the
@@ -1472,10 +1639,14 @@ def _init_store_scrub(product_root, root_fd, operation_id, members, working_crea
     reversal), then the lease control file when the interruption left one, then the then-empty
     CREATED planned directories (`.working` and the machine home only when this journal's intent
     created them: an admitted pre-existing directory is preserved as found), and ONLY THEN the
-    operation record (its journals and outcomes stay, preserved attempt evidence). Each affected
-    parent directory is fsynced after the lease unlink and after every directory removal, so
-    the cleanup is DURABLE before the record discard can be: a host crash can never leave the
-    record deletion durable while a directory removal is not. The record is the recovery
+    operation record (its journals and outcomes stay, preserved attempt evidence). Each removal's
+    parent directory is fsynced right after its unlink or rmdir, and a cleanup target already
+    ABSENT on entry -- a restarted scrub cannot tell one that never existed from one whose
+    removal a crash separated from its parent fsync -- has its nearest surviving ancestor
+    fsynced (_fsync_surviving_parent), so EVERY target's absence is durable BEFORE the record
+    discard is issued: the record deletion cannot become durable while a cleanup removal is
+    not, because each removal's durability barrier has already completed when the discard
+    begins (the self-test pins this syscall order). The record is the recovery
     discriminator that lets the next dispatch find the reversed operation again, so it is
     discarded LAST, once every filesystem effect is durably gone; a kill inside the discard itself
     leaves a partial record whose directory still names the operation id, which the next dispatch
@@ -1498,6 +1669,7 @@ def _init_store_scrub(product_root, root_fd, operation_id, members, working_crea
                     path, operation_id)
                 st = _journal._lstat_contained(root_fd, stage_rel)
                 if st is None:
+                    _fsync_surviving_parent(root_fd, stage_rel)
                     continue
                 if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
                     raise AdoptApplyError("the reversed operation's staging name {} is not a "
@@ -1517,11 +1689,14 @@ def _init_store_scrub(product_root, root_fd, operation_id, members, working_crea
                     os.fsync(lfd)
                 finally:
                     _journal._close_fd_quietly(lfd)
+            elif st is None:
+                _fsync_surviving_parent(root_fd, init_op.LEASE_RELPATH)
             created = ([machine] if machine_created else []) \
                 + ([store.WORKING_DIRNAME] if working_created else [])
             for rel in created:
                 st = _journal._lstat_contained(root_fd, rel)
                 if st is None:
+                    _fsync_surviving_parent(root_fd, rel)
                     continue
                 if not stat.S_ISDIR(st.st_mode):
                     raise AdoptApplyError("{} is not a directory at reversal; "
@@ -1937,7 +2112,11 @@ def _init_store(op_row, context=None):
     that finds its rolled-back intent (an interrupted scrub is simply finished). A
     post-publication verification failure executes the same reversal immediately. A reversed or
     completed run never reruns under the same run id: changing approved work takes a fresh plan with
-    its own run id (spec 14.1).
+    its own run id (spec 14.1) -- and that FRESH run admits the reversed run's committed artefacts
+    (its verified evidence bundle, its archive copies, and the machine directory its committed
+    archival emptied) once each is proven (_init_store_prior_run_paths), so an earlier phase's
+    committed work is continued, never re-done, refused as foreign, or stranded (claude round 4,
+    F1).
 
     Preconditions, before anything is written: the row targets the frozen default machine store at
     the product root; its members are EXACTLY the scaffold's complete creation set, every
@@ -4545,6 +4724,74 @@ def _init_store_git_checks(check, ctx, refused):
                       "completed archival")
               and snap(root) == before and op_ids(root) == [])
 
+        # THE COMMITTED-TRANSACTION HALF OF THE ARCHIVAL PROOF (claude round 4, F2): a LIVE
+        # digest-matched preservation copy admits the emptied machine directory ONLY beside a
+        # COMPLETE preserve-AND-remove transaction of this journal. P1: a hand-placed copy with
+        # no archival transaction at all; P3: a REAL archival that ROLLED BACK, the copy then
+        # hand-placed; P4: a COMMITTED preserve-only transaction that never removed the source.
+        # Each refuses with nothing written; each goes green if one conjunct of
+        # _init_store_archival_committed (or the whole call) is dropped.
+        occ_digest = "sha256:" + _sha256(occ_bytes)
+        root = init_op._plain_repo(os.path.join(base, "handcopy"), env)
+        run = rid()
+        occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                       occupying=True, preservation=archive_rel(run, manifest_rel))
+        os.makedirs(os.path.join(root, machine_dir))
+        init_op._write(os.path.join(root, archive_rel(run, manifest_rel)), occ_bytes)
+        os.chmod(os.path.join(root, store.WORKING_DIRNAME), 0o755)
+        os.chmod(os.path.join(root, machine_dir), 0o755)
+        before = snap(root)
+        check("init-store-live-copy-without-archival-refused",
+              refused(dispatch(row, ctx(root, run_id=run, sources=[occ_row])),
+                      "completed archival")
+              and snap(root) == before and op_ids(root) == [])
+
+        root = init_op._plain_repo(os.path.join(base, "rbarchival"), env)
+        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        run = rid()
+        real_staged_verify = _journal._verify_staged_digest
+
+        def failing_inventory_for(txn_run):
+            def failing(op, payload):
+                if op["path"] == inventory_rel(txn_run):
+                    raise _journal.JournalError("injected failure at the inventory publication")
+                return real_staged_verify(op, payload)
+            return failing
+
+        rolled = None
+        _journal._verify_staged_digest = failing_inventory_for(run)
+        try:
+            try:
+                run_adopt_transaction(root, run, lambda ops: ops.archive_occupying(
+                    manifest_rel, occ_digest))
+            except AdoptApplyError as exc:
+                rolled = str(exc)
+        finally:
+            _journal._verify_staged_digest = real_staged_verify
+        os.unlink(os.path.join(root, manifest_rel))
+        init_op._write(os.path.join(root, archive_rel(run, manifest_rel)), occ_bytes)
+        occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                       occupying=True, preservation=archive_rel(run, manifest_rel))
+        before = snap(root)
+        check("init-store-rolled-back-archival-refused",
+              rolled is not None and "rolled back to the prestate" in rolled
+              and refused(dispatch(row, ctx(root, run_id=run, sources=[occ_row])),
+                          "completed archival")
+              and snap(root) == before and op_ids(root) == [])
+
+        root = init_op._plain_repo(os.path.join(base, "presonly"), env)
+        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        run = rid()
+        run_adopt_transaction(root, run, lambda ops: ops.preserve(manifest_rel, occ_digest))
+        os.unlink(os.path.join(root, manifest_rel))
+        occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                       occupying=True, preservation=archive_rel(run, manifest_rel))
+        before = snap(root)
+        check("init-store-preserve-only-transaction-refused",
+              refused(dispatch(row, ctx(root, run_id=run, sources=[occ_row])),
+                      "completed archival")
+              and snap(root) == before and op_ids(root) == [])
+
         # THE ADMITTED-DIRECTORY MODE PRE-CHECK (claude round 3, R3-5): a wrong-mode machine
         # directory (a umask-002 adopter) refuses BEFORE the run's intent opens -- nothing
         # recorded -- and the SAME run id then succeeds once the mode is corrected, proving
@@ -4561,10 +4808,101 @@ def _init_store_git_checks(check, ctx, refused):
         check("init-store-wrong-mode-admitted-dir-refused-pre-intent",
               refused(dispatch(row, ctx(root, run_id=run, sources=[occ_row])), "holds mode")
               and op_ids(root) == [])
+        # THE FULL-S_IMODE PRE-CHECK (codex round 4, finding 2): a setgid 02755 machine
+        # directory is NOT the planned 0755 under the same full stat.S_IMODE comparison the
+        # substrate makes, so it refuses BEFORE the intent too (observe_inventory's 0o777 mask
+        # would have read it as 755); the run id is still unburnt, proven by the 0755 rerun.
+        os.chmod(os.path.join(root, machine_dir), 0o2755)
+        check("init-store-setgid-admitted-dir-refused-pre-intent",
+              refused(dispatch(row, ctx(root, run_id=run, sources=[occ_row])), "holds mode 2755")
+              and op_ids(root) == [])
         os.chmod(os.path.join(root, machine_dir), 0o755)
         res = dispatch(row, ctx(root, run_id=run, sources=[occ_row]))
         check("init-store-unburnt-run-id-reruns-after-mode-fix", res.status == valid
               and store.resolve_store(root).status == store.RESOLVED)
+
+        # THE PRIOR REVERSED RUN'S COMMITTED ARTEFACTS (claude round 4, F1; the orchestrator
+        # ruling): spec 14.1 keeps the reversed run id burnt, and a FRESH run continues the
+        # occupied-machine composition by admitting the PRIOR run's committed artefacts -- the
+        # prior bundle VERIFIES, every artefact was created by a COMPLETE transaction of this
+        # journal, the prior init-store transaction is terminal ROLLED-BACK, and the machine
+        # directory is admitted on the prior run's COMMITTED archival. Both reversal shapes:
+        # the postcondition refusal, and SIGKILL inside the publication plus reconcile().
+        for fixture, kill in (("prior", None), ("prior2", "source:2")):
+            root = init_op._plain_repo(os.path.join(base, fixture), env)
+            init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+            r1 = rid()
+            run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(
+                manifest_rel, occ_digest))
+            occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                           occupying=True, preservation=archive_rel(r1, manifest_rel))
+            if kill is None:
+                reversed_r1 = refused(dispatch(dict(row, members=wrongv),
+                                               ctx(root, run_id=r1, sources=[occ_row])),
+                                      "restoring NOT-ADOPTED")
+                need_recover = False
+            else:
+                reversed_r1 = _init_store_child(root, env, kill, row,
+                                                ctx(root, run_id=r1, sources=[occ_row])) != 0
+                reconcile(root)
+                need_recover = True
+            burnt = refused(dispatch(row, ctx(root, run_id=r1, sources=[occ_row],
+                                              recover=need_recover)), "was reversed")
+            r2 = rid()
+            res = dispatch(row, ctx(root, run_id=r2, recover=need_recover))
+            check("init-store-prior-committed-artefacts-admitted-{}".format(
+                      "reversal" if kill is None else "kill"),
+                  reversed_r1 and burnt and res.status == valid
+                  and store.resolve_store(root).status == store.RESOLVED
+                  and txn_state(root, r2) == "complete"
+                  and live_digest(root, archive_rel(r1, manifest_rel)) == occ_digest
+                  and live_digest(root, manifest_rel) == scaffold[manifest_rel])
+
+        # The negatives stay foreign and refuse with nothing written: a prior bundle that no
+        # longer verifies (a tampered archive copy), and a prior archival that ROLLED BACK with
+        # the copy and a verifying inventory hand-placed afterwards (neither a committed
+        # transaction nor a rolled-back prior init-store transaction proves them).
+        root = init_op._plain_repo(os.path.join(base, "priorbad"), env)
+        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        r1 = rid()
+        run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(
+            manifest_rel, occ_digest))
+        occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
+                       occupying=True, preservation=archive_rel(r1, manifest_rel))
+        tampered = refused(dispatch(dict(row, members=wrongv),
+                                    ctx(root, run_id=r1, sources=[occ_row])),
+                           "restoring NOT-ADOPTED")
+        with open(os.path.join(root, archive_rel(r1, manifest_rel)), "wb") as fh:
+            fh.write(b"tampered copy" + b"\x0a")
+        before = snap(root)
+        check("init-store-prior-unverified-bundle-refused",
+              tampered and refused(dispatch(row, ctx(root, run_id=rid())),
+                                   "undispositioned foreign")
+              and snap(root) == before and op_ids(root) == [])
+
+        root = init_op._plain_repo(os.path.join(base, "priorrb"), env)
+        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        r1 = rid()
+        rolled = None
+        _journal._verify_staged_digest = failing_inventory_for(r1)
+        try:
+            try:
+                run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(
+                    manifest_rel, occ_digest))
+            except AdoptApplyError as exc:
+                rolled = str(exc)
+        finally:
+            _journal._verify_staged_digest = real_staged_verify
+        os.unlink(os.path.join(root, manifest_rel))
+        init_op._write(os.path.join(root, archive_rel(r1, manifest_rel)), occ_bytes)
+        init_op._write(os.path.join(root, inventory_rel(r1)), emit_inventory(
+            r1, [inventory_row(archive_rel(r1, manifest_rel), occ_bytes)]))
+        before = snap(root)
+        check("init-store-prior-rolled-back-archival-refused",
+              rolled is not None and "rolled back to the prestate" in rolled
+              and refused(dispatch(row, ctx(root, run_id=rid())),
+                          "undispositioned foreign")
+              and snap(root) == before and op_ids(root) == [])
 
         # CRASH AT EVERY POINT (round 2): the transaction mkdir, the INTENT, a member's staging
         # write (machine-dir and root-level), between a member's link and its staging unlink,
@@ -4633,6 +4971,145 @@ def _init_store_git_checks(check, ctx, refused):
                   and store.resolve_store(root).status == store.RESOLVED
                   and stage_leftovers(root) == [] and len(op_ids(root)) == 1
                   and outside_store(root) == before)
+
+        # THE SCRUB'S DURABILITY ORDER (codex round 4, finding 1; claude round 4, F3), pinned
+        # by a MOCKED SYSCALL-ORDER TRACE over one real scrub: every cleanup unlink and rmdir
+        # is immediately followed by an fsync of the SAME parent directory (matched by the
+        # descriptor's device and inode, so a dropped parent fsync goes red), a cleanup target
+        # already ABSENT on entry to a RESTARTED scrub has its nearest surviving ancestor
+        # fsynced, and every one of these barriers precedes the record discard.
+        import _opf_init_substrate
+
+        def dir_ident(fd):
+            if not isinstance(fd, int):
+                return None
+            try:
+                fst = os.fstat(fd)
+            except OSError:
+                return None
+            return (fst.st_dev, fst.st_ino)
+
+        def path_ident(dpath):
+            dfd = os.open(dpath, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                return dir_ident(dfd)
+            finally:
+                os.close(dfd)
+
+        def traced_scrub(r):
+            root_fd = _open_product_root(r)
+            intent = None
+            try:
+                jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+                try:
+                    for txn_dir in _journal._journal_txn_dirs(jr_fd, _journal_root(r)):
+                        if not txn_dir.name.endswith("." + INIT_STORE_PHASE):
+                            continue
+                        if _journal.classify_state(jr_fd, txn_dir) != "rolled-back":
+                            continue
+                        frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir)
+                        intent = _journal._first(frames, _journal.F_INTENT)
+                        break
+                finally:
+                    _journal._close_fd_quietly(jr_fd)
+                header = intent["header"]
+                trace = []
+                real_unlink, real_rmdir, real_fsync = os.unlink, os.rmdir, os.fsync
+                real_settle = _opf_init_substrate.settle_operation
+                real_discard = _opf_init_substrate.discard_reversed_operation
+
+                def t_unlink(name, *a, **k):
+                    trace.append(("unlink", dir_ident(k.get("dir_fd"))))
+                    return real_unlink(name, *a, **k)
+
+                def t_rmdir(name, *a, **k):
+                    trace.append(("rmdir", dir_ident(k.get("dir_fd"))))
+                    return real_rmdir(name, *a, **k)
+
+                def t_fsync(fd):
+                    trace.append(("fsync", dir_ident(fd)))
+                    return real_fsync(fd)
+
+                def t_settle(holder, op_id):
+                    trace.append(("discard", None))
+                    return real_settle(holder, op_id)
+
+                def t_discard(holder, op_id):
+                    trace.append(("discard", None))
+                    return real_discard(holder, op_id)
+
+                os.unlink, os.rmdir, os.fsync = t_unlink, t_rmdir, t_fsync
+                os.supports_dir_fd.add(t_unlink)
+                os.supports_dir_fd.add(t_rmdir)
+                _opf_init_substrate.settle_operation = t_settle
+                _opf_init_substrate.discard_reversed_operation = t_discard
+                try:
+                    _init_store_scrub(r, root_fd, header["init_operation_id"],
+                                      members=[op["path"] for op in intent.get("ops", [])
+                                               if isinstance(op, dict)
+                                               and isinstance(op.get("path"), str)],
+                                      working_created=header.get("working_created") is True,
+                                      machine_created=header.get("machine_created")
+                                      is not False,
+                                      recover=True)
+                finally:
+                    os.unlink, os.rmdir, os.fsync = real_unlink, real_rmdir, real_fsync
+                    os.supports_dir_fd.discard(t_unlink)
+                    os.supports_dir_fd.discard(t_rmdir)
+                    _opf_init_substrate.settle_operation = real_settle
+                    _opf_init_substrate.discard_reversed_operation = real_discard
+            finally:
+                store._close_fd_exc_safe(root_fd)
+            return trace
+
+        def before_discard(trace):
+            cut = trace.index(("discard", None)) if ("discard", None) in trace else -1
+            return trace[:cut] if cut >= 0 else None
+
+        def labeled(head):
+            return [e for e in head if e[1] is not None]
+
+        def paired(seq, kind, ident):
+            return any(e == (kind, ident) and i + 1 < len(seq)
+                       and seq[i + 1] == ("fsync", ident)
+                       for i, e in enumerate(seq))
+
+        root = init_op._plain_repo(os.path.join(base, "scrubtrace"), env)
+        rc1 = _init_store_child(root, env, "stage:" + init_op.CHANGELOG_RELPATH, row,
+                                ctx(root, run_id=rid()))
+        reconcile(root)
+        root_id = path_ident(root)
+        working_id = path_ident(os.path.join(root, store.WORKING_DIRNAME))
+        machine_id = path_ident(os.path.join(root, machine_dir))
+        head = before_discard(traced_scrub(root))
+        seq = labeled(head) if head is not None else []
+        check("init-store-scrub-order-removal-then-parent-fsync-then-discard",
+              rc1 != 0 and head is not None
+              and paired(seq, "unlink", root_id)            # the staging leftover
+              and paired(seq, "unlink", machine_id)         # the lease
+              and paired(seq, "rmdir", working_id)          # the created machine directory
+              and paired(seq, "rmdir", root_id))            # the created .working
+        res = dispatch(row, ctx(root, run_id=rid(), recover=True))
+        check("init-store-scrub-order-tree-recovers", res.status == valid
+              and store.resolve_store(root).status == store.RESOLVED)
+
+        root = init_op._plain_repo(os.path.join(base, "scrubtrace2"), env)
+        rc1 = _init_store_child(root, env, "source:2", row, ctx(root, run_id=rid()))
+        reconcile(root)
+        rc2 = _init_store_child(root, env, "scrubdir:" + machine_base, row,
+                                ctx(root, run_id=rid(), recover=True))
+        reconcile(root)
+        working_id = path_ident(os.path.join(root, store.WORKING_DIRNAME))
+        gone = not os.path.lexists(os.path.join(root, machine_dir))
+        head = before_discard(traced_scrub(root))
+        seq = labeled(head) if head is not None else []
+        check("init-store-scrub-restart-absent-target-fsync-before-discard",
+              rc1 != 0 and rc2 != 0 and gone and head is not None
+              and ("fsync", working_id) in seq)             # the removed machine directory's
+        res = dispatch(row, ctx(root, run_id=rid(), recover=True))   # surviving parent
+        check("init-store-scrub-restart-recovers", res.status == valid
+              and store.resolve_store(root).status == store.RESOLVED
+              and stage_leftovers(root) == [] and len(op_ids(root)) == 1)
 
 
 def main():
