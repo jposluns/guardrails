@@ -608,17 +608,20 @@ def _fixture_wait(pid, flags):
 def _fixture_signal(pid, signum, pidfd=None, *, group=True):
     """The sole numeric signal boundary. ECHILD never licenses a signal.
 
-    pidfds pin individual targets. A group leader's members are NEVER
-    signalled here (D-385-PIDFD-HANDOFF: every signal target must arrive as
-    a pidfd its FORKING PARENT opened and handed off over SCM_RIGHTS, and
-    this helper holds no such handoff for any member; the retired ancestry
-    census signalled /proc-discovered members through locally opened,
-    chain-licensed pidfds). Members are instead collected as they reparent
-    to the subreaper caller, each killed as a proved CURRENT child
-    (_fixture_drain); a member that escapes adoption is the disclosed
-    orphan-escape residual. Never a numeric killpg (QA21 codex F3). `group`
-    is retained for call-site symmetry and licenses nothing; concurrent
-    foreign waiters remain outside this trusted test contract.
+    Every caller passes ONLY the pid its own os.fork() just returned,
+    with the pidfd the forking parent opened on it (_launch_fork's child,
+    and the guardian's own subject in _fixture_drain): under
+    D-385-PIDFD-HANDOFF, as read by the D-385-CURRENT-CHILD ruling, a
+    process the caller did NOT fork is never signalled -- an adopted
+    CURRENT child included. The retired drain signalled /proc-discovered
+    adopted descendants here as proved current children; that license is
+    gone: such a descendant is now reaped if it exits on its own, or
+    NAMED, not signalled, in the drain refusal -- the disclosed
+    orphan-escape residual. The numeric os.kill fallback exists only for
+    a pidfd-less host and still targets only the caller's own fork. Never
+    a numeric killpg (QA21 codex F3). `group` is retained for call-site
+    symmetry and licenses nothing; concurrent foreign waiters remain
+    outside this trusted test contract.
     """
     import os
     import signal
@@ -1237,11 +1240,11 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None,
     the leader already exited and is no failure to keep -- re-raised into
     the boundary and kept reachable beneath it (fix 14, QA35 codex MAJOR:
     the EPERM-class faults the send can raise were recorded in the
-    survivor flag only and dropped from that chain); the member census's
-    per-pidfd
-    close routes through the same boundary (fix 7, QA28 codex BLOCKER 2),
-    so a member-send cancellation crossing that close stays outward even
-    when the close itself fails. The "tree"
+    survivor flag only and dropped from that chain); the member census
+    opens and closes NO descriptors of its own -- handoff descriptors stay
+    caller-owned (D-385-PIDFD-HANDOFF) -- so a member-send cancellation
+    propagates outward directly (fix 7's per-pidfd close boundary was
+    retired with the census's local opens). The "tree"
     outcome rests on OBSERVATION, never on the kill sends alone (fix 2z,
     premise change; maintainer ruling PD-335-TREE-CLAIM-STALL): while the
     guardian stays frozen, a bounded verification census
@@ -1366,6 +1369,9 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None,
 
 def _fixture_children():
     """Census by PPID; task/children can transiently omit adopted children.
+    OBSERVATION only (D-385-CURRENT-CHILD): the drain names these pids in
+    its refusal and reaps the exited ones; no census pid is ever a signal
+    target.
     The per-entry stat read goes through os.open/os.read with the descriptor
     close as a _cleanup_boundary step (fix 9, QA30 claude MINOR 2: this
     guardian-side census still read /proc via Path.read_bytes, so the fix-8
@@ -1434,16 +1440,22 @@ def _fixture_cleanup_deadline(execution_deadline=None):
 def _fixture_drain(subject, subject_fd=None, *, deadline=None):
     """Dedicated single-threaded subreaper: every child belongs to this fixture.
 
-    Kill owned leaders, then collect adopted descendants as they reparent here,
-    including nested guardians and descendants in other sessions (no member is ever
-    signalled through a /proc-discovered number: each adopted descendant is killed
-    as a proved CURRENT child, D-385-PIDFD-HANDOFF). Only kernel ECHILD proves
-    completion. /proc read failures refuse; an empty snapshot is retried, never
-    treated as completion or an immediate contradiction. The caller supplies one
-    cleanup deadline, shared by normal and failure paths; absent one, the named
-    minimum grace applies. Expiry yields cannot-evaluate, never success. Syscalls still
-    require kernel progress. Subjects attacking their guardian are outside this
-    trusted harness's contract.
+    Kill ONLY the owned subject -- this guardian's own direct fork, through
+    the descriptor the fork opened -- then COLLECT: adopted descendants that
+    reparent here (nested guardians and descendants in other sessions
+    included) are reaped as they exit, NEVER signalled (D-385-PIDFD-HANDOFF
+    as read by the D-385-CURRENT-CHILD ruling: a process this guardian did
+    not fork is never a signal target, an adopted CURRENT child included;
+    the retired drain SIGKILLed every /proc-census pid here as a proved
+    current child). Only kernel ECHILD proves completion. /proc read
+    failures refuse; an empty snapshot is retried, never treated as
+    completion or an immediate contradiction. The caller supplies one
+    cleanup deadline, shared by normal and failure paths; absent one, the
+    named minimum grace applies. Expiry yields cannot-evaluate, never
+    success: the refusal NAMES every still-live adopted descendant, by pid,
+    as NOT signalled -- the disclosed orphan-escape residual, left running.
+    Syscalls still require kernel progress. Subjects attacking their
+    guardian are outside this trusted harness's contract.
     """
     import os
     import signal
@@ -1459,24 +1471,24 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
             os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
             return status
-        if time.monotonic() >= deadline:
-            raise ChildStatusUnavailable("descendant cleanup deadline: ECHILD not observed")
-        pids = _fixture_children()
-        for pid in pids:
-            fd = subject_fd if pid == subject else _fixture_pidfd(pid)
+        # Reap every child already dead; an adopted live one is never signalled.
+        while True:
             try:
-                if not _fixture_signal(pid, signal.SIGKILL, fd):
-                    raise ChildStatusUnavailable("lost descendant ownership")
-                waited, raw = os.waitpid(pid, os.WNOHANG)
-                if waited == 0:
-                    continue
-                if waited != pid:
-                    raise ChildStatusUnavailable("unexpected descendant wait PID")
-                if pid == subject:
-                    status = raw
-            finally:
-                if fd is not None and fd != subject_fd:
-                    os.close(fd)
+                waited, raw = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                return status
+            if waited == 0:
+                break
+            if waited == subject:
+                status = raw
+        if time.monotonic() >= deadline:
+            residual = sorted(pid for pid in _fixture_children()
+                              if pid != subject)
+            raise ChildStatusUnavailable(
+                "descendant cleanup deadline: ECHILD not observed; adopted "
+                "descendants {} NOT signalled (D-385-CURRENT-CHILD: no "
+                "forking-parent handoff reaches this guardian), left as the "
+                "disclosed orphan-escape residual".format(residual))
         time.sleep(0.005)
 
 
@@ -1706,14 +1718,19 @@ class _FixtureProcess:
       consecutively)               pid wraparound can evade the censuses),
                                    never a proof
 
-    Documented residuals: descendants that leave the subject's group/session
-    survive a WEDGED-guardian escalation (only the subreaper census can find
-    them; the honest-guardian drain still covers them), and ALL descendants
-    of a subject whose guardian is DEAD survive the subject-only
-    kill (no process owns the orphans after the subreaper guardian's death,
-    so a census there could only trust recyclable numbers and unverifiable
-    reparented chains; fix 2y, D2) -- both disclosed in the refusal, never
-    claimed killed. The subject arms PR_SET_PDEATHSIG(SIGKILL) as partial
+    Documented residuals (D-385-PIDFD-HANDOFF, D-385-CURRENT-CHILD): every
+    descendant without a forking-parent handoff survives. Same-group
+    members of a WEDGED-guardian escalation are observed, SKIPPED and
+    NAMED (the runtime holds no member handoffs); descendants that leave
+    the subject's group/session are not even observed; ALL descendants of
+    a subject whose guardian is DEAD survive the subject-only kill (no
+    process owns the orphans after the subreaper guardian's death, so a
+    census there could only trust recyclable numbers and unverifiable
+    reparented chains; fix 2y, D2); and the honest guardian's drain kills
+    ONLY the subject it forked -- an adopted descendant is reaped if it
+    exits within the drain's deadline and otherwise NAMED, not signalled,
+    in the drain refusal -- each disclosed where it arises, never claimed
+    killed. The subject arms PR_SET_PDEATHSIG(SIGKILL) as partial
     extra coverage, failing closed to these residuals where unavailable.
     Hosts without pidfd degrade escalation to guardian-only with the same
     residuals.

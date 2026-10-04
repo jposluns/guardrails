@@ -1595,6 +1595,11 @@ def _children():
 
 
 def _reap(report, reap_seconds, reap_rounds):
+    # D-385-CURRENT-CHILD: this supervisor forked only the module process,
+    # killed and reaped above through its own Popen handle. A census pid is
+    # an ADOPTED descendant it never forked: it is REPORTED, by pid, and
+    # never signalled -- no pidfd is opened on it -- the disclosed
+    # orphan-escape residual. Exited ones are collected with WNOHANG polls.
     deadline = time.monotonic() + reap_seconds
     for _ in range(reap_rounds):
         kids = _children()
@@ -1604,21 +1609,6 @@ def _reap(report, reap_seconds, reap_rounds):
             label = "pid {}".format(pid)
             if label not in report["survivors"]:
                 report["survivors"].append(label)
-            try:
-                fd = os.pidfd_open(pid, 0)
-            except OSError:
-                continue
-            try:
-                try:
-                    os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                except OSError:
-                    continue
-                try:
-                    signal.pidfd_send_signal(fd, signal.SIGKILL)
-                except OSError:
-                    pass
-            finally:
-                os.close(fd)
             try:
                 os.waitpid(pid, os.WNOHANG)
             except OSError:
@@ -1771,14 +1761,15 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
     (_RUNTIME_SUPERVISOR, passed inline as `python3 -I -B -c <source>`, so no supervisor file exists
     anywhere for a probed module to overwrite or pre-plant): the supervisor first resets SIGCHLD to
     SIG_DFL (an inherited SIG_IGN would auto-reap its children, reading a failing module as rc 0 and
-    reopening pid reuse), and _RUNTIME_SETTLE seconds after the module exits it SIGKILLs and reaps, in
+    reopening pid reuse), and _RUNTIME_SETTLE seconds after the module exits it CENSUSES and reaps, in
     bounded rounds and time (every wait a WNOHANG poll, so a traced child, whose exit only its tracer
-    can collect, cannot stall it past the deadline; whatever is still present when the deadline ends is
-    reported as an undrained survivor, a finding, before the supervisor exits), exactly its own
-    un-reaped children, to which every orphaned descendant of the module (a setsid'd, non-dumpable or
-    fork-hopping one included) has reparented; every signal goes through a pidfd whose target a
-    waitid(P_PIDFD, ..., WNOHANG|WNOWAIT) has just proved to still be the supervisor's own child, never
-    a numeric kill, and a host where PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE 0, pidfd signalling or the
+    can collect, cannot stall it past the deadline), exactly its own un-reaped children, to which every
+    orphaned descendant of the module (a setsid'd, non-dumpable or fork-hopping one included) has
+    reparented: an exited one is collected, and a LIVE one is reported by pid as an undrained
+    survivor, a finding -- NEVER signalled (D-385-PIDFD-HANDOFF as read by the D-385-CURRENT-CHILD
+    ruling: an adopted descendant is a process the supervisor never forked, so no signal reaches it;
+    it is left running, the disclosed orphan-escape residual; the only process the supervisor
+    signals is the module child its own Popen forked, through that handle). A host where PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE 0, pidfd signalling or the
     /proc child census is unavailable, or where a census record is unreadable for any reason but a vanished pid, or
     malformed, makes the run a cannot-evaluate discrepancy, never a clean pass and never a wider kill. A form passes only if the module
     refuses it (exit 2, nothing on stdout, and on stderr
@@ -1959,8 +1950,9 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
         if not report.get("drained"):
             survivors.append("children still appearing when the reap rounds ended")
         if survivors:
-            return "{} {}: left a process running after it exited ({}; killed)".format(
-                name, argv, ", ".join(survivors[:4]))
+            return ("{} {}: left a process running after it exited ({}; not signalled: "
+                    "D-385-CURRENT-CHILD leaves an adopted survivor as the disclosed "
+                    "orphan-escape residual)").format(name, argv, ", ".join(survivors[:4]))
         if written:
             return "{} {}: wrote into its fresh {}".format(name, argv, " and ".join(written))
         rc = report.get("rc")
@@ -2133,9 +2125,9 @@ def _runtime_supervisor_signal_audit(source):
     ctypes/libc.kill, posix.kill, __import__("os").kill, `from os import *`, a subprocess or
     os.system kill(1), an unproven pidfd_send_signal, or a wait made unbounded by an explicit
     None (wait(None), wait(timeout=None), a bare communicate(), os.waitpid(pid, 0)). The
-    behavioural checks are the safeguard: the waitid(P_PIDFD, ..., WNOWAIT) ownership proof
-    pinned by _self_test_runtime_supervisor_unit's proof-removed mutant run, and
-    _kill_proved_child's forged-pid refusal."""
+    behavioural checks are the safeguard: the report-only reap pinned by
+    _self_test_runtime_supervisor_unit's kill-restored mutant run, and
+    _kill_proved_child's forged-pid and undeclared-target refusals."""
     import ast
     tree = ast.parse(source)
     os_mods = set()
@@ -2181,13 +2173,17 @@ def _self_test_runtime_supervisor_unit(tmp):
     probe itself passes the source inline with `-c`, so no supervisor file exists at probe time). Pins:
     the source holds no numeric kill (every census signal goes through a pidfd) and resets SIGCHLD to
     SIG_DFL first thing; the census skips a vanished pid but raises on an unreadable or malformed
-    /proc/<pid>/stat record, so an untrustworthy census can never read as clean; and the reap loop
-    drains a real child within its bound through pidfd signalling with every wait a WNOHANG poll, never
-    a blocking waitpid a traced child could stall. The waitid(P_PIDFD, ..., WNOWAIT) ownership proof is
-    load-bearing: a proof-removed mutant signals a modelled non-child where the committed source sends
-    nothing. _kill_proved_child -- the one route for any self-test signal on a pid from a file or an
-    earlier /proc read -- must refuse a FORGED live non-child pid (no signal recorded) and own this
-    process's own forked child, and an AST pin keeps this check's cleanup and the helper free of
+    /proc/<pid>/stat record, so an untrustworthy census can never read as clean; and the reap loop is
+    REPORT-ONLY within its bound (D-385-CURRENT-CHILD: a census pid is an adopted descendant the
+    supervisor never forked, so it is named as an undrained survivor, reaped only once it exits on
+    its own through WNOHANG polls, and never signalled or locally pidfd-opened), never a blocking
+    waitpid a traced child could stall. The report-only reap is load-bearing: a mutant with the
+    retired adopted-descendant kill restored signals a modelled adopted child where the committed
+    source sends nothing. _kill_proved_child -- the one route for any self-test signal on a pid from
+    a file or an earlier /proc read -- must refuse a FORGED live non-child pid (no signal recorded),
+    must refuse even this process's own live child when the call site supplies neither a handoff
+    descriptor nor its forked=True own-fork declaration (the retired adoption license, fail closed),
+    and must own the declared fork; an AST pin keeps this check's cleanup and the helper free of
     numeric kills, so restoring the QA7 reaped-child `os.kill` turns this red (QA8). Returns the list
     of faults."""
     import importlib.util
@@ -2303,30 +2299,49 @@ def _self_test_runtime_supervisor_unit(tmp):
     except OSError:
         child_fd = None
     real_children = sup._children
+    real_signal_module = sup.signal
     report = {"survivors": [], "drained": True}
+    unit_sent = []
+    unit_opens = []
+
+    def unit_pidfd_open(pid, flags=0):
+        unit_opens.append(pid)
+        return real_os.pidfd_open(pid, flags)
+
     begin = time.monotonic()
     try:
         sup._children = unit_census
-        sup.os = shadow(waitpid=unit_waitpid)
+        sup.os = shadow(waitpid=unit_waitpid, pidfd_open=unit_pidfd_open)
+        sup.signal = shadow_for(real_signal_module,
+                                pidfd_send_signal=lambda fd, sig: unit_sent.append(sig))
         sup._reap(report, _RUNTIME_REAP_SECONDS, _RUNTIME_REAP_ROUNDS)
     finally:
         sup.os = real_os
+        sup.signal = real_signal_module
         sup._children = real_children
-        # Clean up the forked child WITHOUT a numeric kill: _reap may already have
-        # reaped it, so signalling its pid could hit an unrelated reused process in a
-        # shared-uid pool (QA7 blocker, shared-pool rule). _kill_proved_child signals
-        # and reaps only through a pidfd that a waitid(WNOWAIT) still proves is our
-        # own un-reaped child; ECHILD (already reaped) or any waitid error means
-        # nothing is signalled. The numeric-kill AST pin below keeps this cleanup red
-        # if the pre-fix `os.kill(child, signal.SIGKILL)` ever returns (QA8 claude m3).
+        # Clean up the forked child WITHOUT a numeric kill, through the descriptor
+        # this process opened on its OWN direct fork above (QA7 blocker, shared-pool
+        # rule; D-385-CURRENT-CHILD: the caller answers for the descriptor's own-fork
+        # provenance). ECHILD (already reaped) or any waitid error means nothing is
+        # signalled. The numeric-kill AST pin below keeps this cleanup red if the
+        # pre-fix `os.kill(child, signal.SIGKILL)` ever returns (QA8 claude m3).
         if child_fd is not None:
             try:
                 _kill_proved_child(child, pidfd=child_fd)
             finally:
                 os.close(child_fd)
     took = time.monotonic() - begin
-    if remaining or not report["drained"] or "pid {}".format(child) not in report["survivors"]:
-        faults.append("the reap unit did not drain and report a real child (survivors {}, drained {})"
+    # D-385-CURRENT-CHILD: the census pid models an ADOPTED descendant, so the
+    # report-only reap must NAME it as an undrained survivor and leave it
+    # running -- never signal it or open a pidfd on it. The retired reap
+    # SIGKILLed it here: the survival requirement below is the revert flip.
+    if unit_sent or unit_opens:
+        faults.append("the report-only reap signalled or locally pidfd-opened an adopted-model "
+                      "census pid (sent {}, opened {}; D-385-CURRENT-CHILD)".format(
+                          unit_sent, unit_opens))
+    if child not in remaining or report["drained"]             or "pid {}".format(child) not in report["survivors"]:
+        faults.append("the report-only reap did not leave the live adopted-model child running and "
+                      "named as an undrained survivor (survivors {}, drained {})"
                       .format(report["survivors"], report["drained"]))
     if not waits or any(not flags & os.WNOHANG for flags in waits):
         faults.append("the reap waited without WNOHANG, so a traced child, whose exit only its tracer "
@@ -2334,25 +2349,23 @@ def _self_test_runtime_supervisor_unit(tmp):
     if took > _RUNTIME_REAP_SECONDS + 2:
         faults.append("the reap unit overran its bound ({:.1f} s)".format(took))
 
-    # QA7 codex 3 / claude m1: the waitid(WNOWAIT) ownership proof is load-bearing.
-    # Model a census naming a pid that is NOT our un-reaped child (a forked child
-    # already reaped, so its pidfd answers ECHILD): the committed supervisor must
-    # send it NO signal, and a mutant with the proof removed must try to signal it,
-    # so deleting the proof turns this check red. No real signal is ever delivered:
-    # pidfd_send_signal is shadowed by a recorder in both runs.
-    gone = os.fork()
-    if gone == 0:
-        os._exit(0)
+    # D-385-CURRENT-CHILD: the report-only reap is load-bearing. Model a census
+    # naming a live pid (this process's own fork stands in for an adopted
+    # descendant; the kernel keeps no provenance either way): the committed
+    # supervisor must send it NO signal, and a mutant with the retired
+    # adopted-descendant kill restored must try to, so reverting the reap turns
+    # this check red. No real signal is ever delivered: pidfd_send_signal is
+    # shadowed by a recorder in both runs.
+    kid = os.fork()
+    if kid == 0:
+        time.sleep(60)
+        os._exit(1)
     try:
-        gone_fd = os.pidfd_open(gone, 0)
+        kid_fd = os.pidfd_open(kid, 0)
     except OSError:
-        gone_fd = None
-    try:
-        os.waitpid(gone, 0)  # reap it: the pidfd now answers ECHILD, never an un-reaped child
-    except OSError:
-        pass
-    if gone_fd is None:
-        faults.append("could not model a non-child pid for the ownership-proof check")
+        kid_fd = None
+    if kid_fd is None:
+        faults.append("could not model an adopted census pid for the report-only reap pin")
     else:
         sent = []
 
@@ -2360,7 +2373,7 @@ def _self_test_runtime_supervisor_unit(tmp):
             sent.append(sig)
 
         def fake_census():
-            return {gone}
+            return set([kid])
 
         def run_reap(module):
             del sent[:]
@@ -2368,10 +2381,10 @@ def _self_test_runtime_supervisor_unit(tmp):
             saved_signal = module.signal
             saved_children = module._children
             module._children = fake_census
-            module.os = shadow_for(saved_os, pidfd_open=lambda pid, flags=0: os.dup(gone_fd))
+            module.os = shadow_for(saved_os, pidfd_open=lambda pid, flags=0: os.dup(kid_fd))
             module.signal = shadow_for(saved_signal, pidfd_send_signal=recording_signal)
             try:
-                module._reap({"survivors": [], "drained": True}, 0.2, 3)
+                module._reap(dict(survivors=[], drained=True), 0.2, 3)
             finally:
                 module.os = saved_os
                 module.signal = saved_signal
@@ -2379,26 +2392,50 @@ def _self_test_runtime_supervisor_unit(tmp):
             return list(sent)
 
         if run_reap(sup):
-            faults.append("the committed supervisor signalled a pid it could not prove is its own "
-                          "un-reaped child")
-        proof = ("                try:\n"
-                 "                    os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)\n"
-                 "                except OSError:\n"
-                 "                    continue\n")
-        if proof not in _RUNTIME_SUPERVISOR:
-            faults.append("the supervisor waitid ownership proof was not found in its expected form, so "
-                          "the ownership-proof mutant check is vacuous")
+            faults.append("the committed supervisor signalled a census pid it never forked "
+                          "(D-385-CURRENT-CHILD: adopted descendants are reported, never signalled)")
+        reporting = ("            try:\n"
+                     "                os.waitpid(pid, os.WNOHANG)\n"
+                     "            except OSError:\n"
+                     "                pass\n")
+        retired = ("            try:\n"
+                   "                fd = os.pidfd_open(pid, 0)\n"
+                   "            except OSError:\n"
+                   "                continue\n"
+                   "            try:\n"
+                   "                try:\n"
+                   "                    os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)\n"
+                   "                except OSError:\n"
+                   "                    continue\n"
+                   "                try:\n"
+                   "                    signal.pidfd_send_signal(fd, signal.SIGKILL)\n"
+                   "                except OSError:\n"
+                   "                    pass\n"
+                   "            finally:\n"
+                   "                os.close(fd)\n"
+                   "            try:\n"
+                   "                os.waitpid(pid, os.WNOHANG)\n"
+                   "            except OSError:\n"
+                   "                pass\n")
+        if _RUNTIME_SUPERVISOR.count(reporting) != 1:
+            faults.append("the report-only reap body was not found in its expected form, so the "
+                          "kill-restored mutant check is vacuous")
         else:
-            mutant_file = base / "_runtime_supervisor_proofless.py"
-            mutant_file.write_text(_RUNTIME_SUPERVISOR.replace(proof, "", 1), encoding="utf-8")
+            mutant_file = base / "_runtime_supervisor_killrestored.py"
+            mutant_file.write_text(_RUNTIME_SUPERVISOR.replace(reporting, retired, 1),
+                                   encoding="utf-8")
             mspec = importlib.util.spec_from_file_location(
-                "_runtime_supervisor_proofless", str(mutant_file))
+                "_runtime_supervisor_killrestored", str(mutant_file))
             mutant = importlib.util.module_from_spec(mspec)
             mspec.loader.exec_module(mutant)
             if not run_reap(mutant):
-                faults.append("removing the waitid ownership proof did not change whether a non-child is "
-                              "signalled, so the proof is not pinned by this check")
-        os.close(gone_fd)
+                faults.append("restoring the retired adopted-descendant kill did not change what the "
+                              "recorder sees, so the report-only reap is not pinned by this check")
+        # Hygiene through the descriptor opened on this process's OWN fork above.
+        try:
+            _kill_proved_child(kid, pidfd=kid_fd)
+        finally:
+            os.close(kid_fd)
 
     # QA8 codex blocker (class check): _kill_proved_child is the single route for a
     # self-test signal whose target pid came from a file or an earlier /proc read.
@@ -2420,8 +2457,23 @@ def _self_test_runtime_supervisor_unit(tmp):
     if probe_kid == 0:
         time.sleep(60)
         os._exit(1)
-    if not _kill_proved_child(probe_kid):
-        faults.append("the ownership helper refused this process's own live un-reaped child")
+    # D-385-CURRENT-CHILD: with neither a handoff descriptor nor the call
+    # site's forked=True own-fork declaration, the helper refuses even this
+    # process's own live child and opens nothing -- the retired adoption
+    # license (a waitid-proved CURRENT child was enough) is the revert this
+    # recorder-backed refusal pins.
+    undeclared_sent = []
+    undeclared_send = signal.pidfd_send_signal
+    signal.pidfd_send_signal = lambda fd, sig: undeclared_sent.append(sig)
+    try:
+        undeclared = _kill_proved_child(probe_kid)
+    finally:
+        signal.pidfd_send_signal = undeclared_send
+    if undeclared or undeclared_sent:
+        faults.append("the ownership helper signalled an undeclared target (sent {}): the retired "
+                      "adoption license is back (D-385-CURRENT-CHILD)".format(undeclared_sent))
+    if not _kill_proved_child(probe_kid, forked=True):
+        faults.append("the ownership helper refused this process's own declared live un-reaped child")
         try:
             kid_fd = os.pidfd_open(probe_kid, 0)
             signal.pidfd_send_signal(kid_fd, signal.SIGKILL)
@@ -3305,19 +3357,31 @@ def _aggregator_self_test():
     return EXIT_OK
 
 
-def _kill_proved_child(pid, sig=None, pidfd=None):
+def _kill_proved_child(pid, sig=None, pidfd=None, *, forked=False):
     """The ONE route for a self-test signal whose target pid came from a file, an earlier
     /proc read, or any other record that liveness alone cannot authenticate (QA8 codex
     blocker; shared-uid pool rule): signal `pid` only through a pidfd whose target a
     waitid(P_PIDFD, ..., WEXITED | WNOHANG | WNOWAIT) has JUST proved is this process's own
-    un-reaped child -- a directly forked one, or a fixture orphan reparented here while this
-    process held PR_SET_CHILD_SUBREAPER (_case_subreaper). ECHILD or any other pidfd or
-    waitid failure means NOTHING is signalled and False is returned, so a forged or recycled
-    pid can never redirect a self-test signal to an unrelated same-uid process. `sig`
-    defaults to SIGKILL; a SIGKILL target is then reaped through the SAME pidfd
-    (waitid(P_PIDFD, ..., WEXITED), race-free against pid reuse). A caller-supplied `pidfd`
-    stays owned (and closed) by the caller; otherwise the fd is opened and closed here.
-    Returns True only when the signal was sent."""
+    un-reaped child. The former ADOPTION license is retired (D-385-PIDFD-HANDOFF as read by
+    the D-385-CURRENT-CHILD ruling): a fixture orphan reparented here under
+    PR_SET_CHILD_SUBREAPER (_case_subreaper) was never forked by this process and is NEVER
+    signalled -- current waitability cannot prove forking parentage -- so without one of the
+    two licenses below the call REFUSES: no pidfd is opened, nothing is signalled, False is
+    returned, and the caller reports the target by name as not signalled (the disclosed
+    orphan-escape residual). The licenses: (1) a caller-supplied `pidfd`, for which the call
+    site answers -- the descriptor the target's FORKING PARENT opened and handed off over
+    SCM_RIGHTS (_pidfd_handoff_recv, the guardian's subject receipt), or one this process
+    opened on its own direct fork -- a static code-review boundary, the same class as the
+    raw-send_fds residual, not a runtime proof; (2) `forked=True`, the call site's
+    declaration that `pid` is this process's OWN direct, un-reaped fork (fork-bound at the
+    site; the same review boundary), which alone licenses the local pidfd_open here. Either
+    way the waitid proof still gates the send: ECHILD or any other pidfd or waitid failure
+    means NOTHING is signalled and False is returned, so a forged or recycled pid can never
+    redirect a self-test signal to an unrelated same-uid process. `sig` defaults to SIGKILL;
+    a SIGKILL target is then reaped through the SAME pidfd (waitid(P_PIDFD, ..., WEXITED),
+    race-free against pid reuse). A caller-supplied `pidfd` stays owned (and closed) by the
+    caller; otherwise the fd is opened and closed here. Returns True only when the signal
+    was sent."""
     import signal as signal_module
     if sig is None:
         sig = signal_module.SIGKILL
@@ -3326,6 +3390,10 @@ def _kill_proved_child(pid, sig=None, pidfd=None):
         return False
     fd, opened = pidfd, False
     if fd is None:
+        if not forked:
+            # D-385-CURRENT-CHILD: no handoff descriptor and no own-fork
+            # declaration -- an adopted current child stays unsignalled.
+            return False
         try:
             fd = os.pidfd_open(pid, 0)
         except OSError:
@@ -3382,11 +3450,9 @@ def _close_every(closes):
     pending cancellation (TimeoutError, InterruptedError or
     KeyboardInterrupt), the FIRST such cancellation is the one re-raised,
     with the first ordinary failure kept reachable beneath it as its
-    context; otherwise the first ordinary failure is re-raised. (The
-    sibling _opf_emit.close_held re-raises a cancellation AT ONCE because
-    its contract permits dropping later hops to never delay a cancellation;
-    this helper must close every descriptor, so it defers the re-raise to
-    the end while preserving the same priority.)"""
+    context; otherwise the first ordinary failure is re-raised. This
+    helper must close every descriptor, so it defers the re-raise to the
+    end while preserving that priority."""
     first = None
     cancellation = None
     for close in closes:
@@ -3452,26 +3518,38 @@ def _pidfd_handoff_send(conn, pid):
     parent, a sibling, a reaped or foreign pid).
     Together these establish that the target is a CURRENT waitable child of
     a process whose subreaper flag is clear AT SEND TIME -- in the senders
-    these files run, a process the sender forked itself (every fixture
-    sender sends BEFORE ever setting the flag) -- with two residuals the
-    kernel cannot exclude, DISCLOSED here. (a) waitid also answers for a
-    ptrace TRACEE, so a sender tracing a non-child would pass both checks
-    (nothing in these files calls ptrace). (b) The flag check is a
-    POINT-IN-TIME read, not history: the kernel keeps no "was ever a
-    subreaper" state, so a sender that WAS a subreaper, ADOPTED an orphan,
-    and then CLEARED the flag (prctl) still holds that orphan as a waitable
-    child and passes both checks -- current waitability cannot prove
-    historical forking parentage (QA13 codex 2). Nothing in these files
-    clears the flag, and every fixture sender sends before setting it, so
-    reaching (b) requires code outside them to drive this helper: the same
-    static code-review boundary as the raw-send_fds residual below, not a
-    runtime adversary this sender can exclude. A holder of the sending
-    endpoint can also skip this helper entirely with a raw socket.send_fds:
-    the SCM_RIGHTS sweep in _self_test_runtime_supervisor_unit refuses that
-    spelling anywhere in the swept files outside this function and the
-    leg-1j misuse fixture, and beyond those files the endpoints of every
-    handoff are the test's OWN fixture processes -- a static code-review
-    boundary, not a runtime adversary. On either refused check the handoff is
+    these files run, a process the sender forked itself (every caller of
+    THIS helper sends BEFORE ever setting the flag; the _opf_emit.py
+    guardian's receipt send runs with the flag already set, through the
+    separately licensed raw sender _fixture_send_subject, and is sound
+    because its target is the os.fork() it performed immediately before)
+    -- with three residuals the kernel cannot exclude, DISCLOSED here.
+    (a) waitid also answers for a ptrace TRACEE, so a sender tracing a
+    non-child would pass both checks (nothing in these files calls
+    ptrace). (b) The flag check is a POINT-IN-TIME read, not history: the
+    kernel keeps no "was ever a subreaper" state, so a sender that WAS a
+    subreaper, ADOPTED an orphan, and then CLEARED the flag (prctl) still
+    holds that orphan as a waitable child and passes both checks --
+    current waitability cannot prove historical forking parentage (QA13
+    codex 2). (c) CLONE_PARENT: a child of the sender can clone a sibling
+    with CLONE_PARENT, making the SENDER its parent without the sender
+    ever forking it or ever having been a subreaper (QA14 claude M2, with
+    the round-13 kernel reproduction: the clone passed both checks on a
+    never-subreaper sender), so a CURRENT waitable child of a clear-flag
+    process is still not proof of forking parentage. Nothing in these
+    files clears the flag, calls ptrace or spells CLONE_PARENT, and every
+    fixture child these senders fork runs only code written here, so
+    reaching (b) or (c) requires code outside these files to drive this
+    helper: the same static code-review boundary as the raw-send_fds
+    residual below, not a runtime adversary this sender can exclude. A
+    holder of the sending endpoint can also skip this helper entirely
+    with a raw socket.send_fds: the SCM_RIGHTS sweep in
+    _self_test_runtime_supervisor_unit refuses that spelling anywhere in
+    the swept files outside this function, the leg-1j misuse fixture and
+    _opf_emit._fixture_send_subject (the guardian's receipt send), and
+    beyond those files the endpoints of every handoff are the test's OWN
+    fixture processes -- a static code-review boundary, not a runtime
+    adversary. On either refused check the handoff is
     REFUSED: the descriptor is closed, NOTHING is sent, and the refusal is a
     loud AssertionError, so a misbehaving holder of the sending endpoint
     cannot launder an arbitrary number into a descriptor THROUGH THIS
@@ -3693,8 +3771,12 @@ def _pidfd_handoff_recv(conn, note):
 
 def _case_subreaper():
     """Make THIS process a child subreaper (PR_SET_CHILD_SUBREAPER, prctl option 36, Linux),
-    so a fixture orphan whose guardian has died reparents HERE and _kill_proved_child's
-    waitid proof can own it. Process-scoped by design: each caller is a dedicated fixture
+    so a fixture orphan whose guardian has died reparents HERE, where it can be OBSERVED
+    and, once it exits, reaped. Adoption licenses NO signal (D-385-CURRENT-CHILD: the
+    retired reading let _kill_proved_child's waitid proof own an adopted orphan); an
+    orphan's cleanup is its forking parent's handoff descriptor, or a release the fixture
+    itself answers to (an EOF on a pipe this case holds), never a signal to a pid this
+    process did not fork. Process-scoped by design: each caller is a dedicated fixture
     process under _watchdog_regression_self_test. Returns True when the flag was set; on a
     host without the flag the ownership proofs fail closed (nothing is signalled) and the
     fixtures' own completion waits name the leftover loudly."""
@@ -4208,13 +4290,17 @@ def _watchdog_completion_case(mode):
     import _opf_emit as emit
     import _optlevel
 
-    # QA8 (codex blocker class): arm PR_SET_CHILD_SUBREAPER so a fixture orphan
-    # (its guardian dead and collected) reparents to THIS case process and
-    # _kill_proved_child's waitid proof can own every hygiene signal below whose
-    # target is not this process itself, a Popen-managed child, or a directly
-    # forked, still-held un-reaped child. The flag is process-scoped by design:
-    # each completion case runs in its own dedicated fixture process under
-    # _watchdog_regression_self_test.
+    # QA8 (codex blocker class) as narrowed by D-385-CURRENT-CHILD: arm
+    # PR_SET_CHILD_SUBREAPER so a fixture orphan (its guardian dead and
+    # collected) reparents to THIS case process, where it can be OBSERVED
+    # and, once it exits, reaped. Adoption licenses NO signal: every hygiene
+    # below signals only this process itself, a Popen-managed child, a
+    # directly forked child the site declares (forked=True), or a target
+    # whose FORKING PARENT handed its pidfd off over SCM_RIGHTS; an adopted
+    # orphan is refused by name and released through its own fixture (a
+    # pipe EOF or file gate), never signalled. The flag is process-scoped
+    # by design: each completion case runs in its own dedicated fixture
+    # process under _watchdog_regression_self_test.
     _case_subreaper()
 
     command = [sys.executable, "-I", "-B", "-c", "return 0"]
@@ -4720,7 +4806,7 @@ def _watchdog_completion_case(mode):
                     children = Path("/proc", str(gpid), "task", str(gpid), "children")
                     subject = int(children.read_text(encoding="ascii").split()[0])
                     await_state(subject, {"Z"}, "subject did not finish after release")
-                    assert _kill_proved_child(gpid, signal.SIGCONT), \
+                    assert _kill_proved_child(gpid, signal.SIGCONT, forked=True), \
                         "the resume refused: the published guardian pid is not our own child"
                     await_state(gpid, {"Z", None}, "guardian did not exit after resume")
                 finally:
@@ -4812,7 +4898,7 @@ def _watchdog_completion_case(mode):
         if leaked:
             # Hygiene through the ownership proof alone: _kill_proved_child re-proves
             # the un-reaped child through a pidfd before SIGKILL and reaps through it.
-            assert _kill_proved_child(leaked_pid), \
+            assert _kill_proved_child(leaked_pid, forked=True), \
                 "the leaked fork child could not be proved and killed"
         assert leaked, "the inline flip did not reproduce the interruptible window"
         flip_child.close()
@@ -5446,10 +5532,96 @@ def _watchdog_completion_case(mode):
             assert failures and "could not confirm subject exit" in failures[0], failures
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without its kill"
-            # Hygiene through the ownership proof alone (QA8): the orphan reparented
-            # to this subreaper case process, so the proof owns it before any signal.
-            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
-            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
+            # D-385-CURRENT-CHILD: the orphan reparented to this subreaper case
+            # process, but adoption licenses NO signal -- the helper must refuse
+            # the undeclared target (the retired proof killed it right here, so
+            # this refusal is the revert flip) and the orphan is RELEASED through
+            # its own file gate instead: the released subject arms, sees its
+            # changed parent and refuses to run (leg 1), exiting on its own.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert state(subject) not in (None, "Z"), \
+                "the refused hygiene still ended the subject"
+            release.write_text("go", encoding="ascii")
+            await_state(subject, (None, "Z"), "the released orphan kept running")
+    elif mode == "drain-adopted":
+        import time
+        # D-385-CURRENT-CHILD (the fail-closed drain flip): _fixture_drain
+        # kills ONLY the subject it was handed -- this case's own direct
+        # fork, through the forking parent's descriptor -- and an ADOPTED
+        # descendant is never signalled: the deadline refusal NAMES it as
+        # NOT signalled and it survives, the disclosed orphan-escape
+        # residual. The retired drain SIGKILLed every /proc-census pid here
+        # as a proved current child: on a revert the adoption-refusal
+        # assert, the survival assert and the refusal-naming assert below
+        # all go red. The orphan parks on a pipe this case holds and is
+        # released by EOF, so the cleanup itself crosses no signal boundary.
+        def state(target):
+            try:
+                stat = Path("/proc", str(target), "stat").read_bytes()
+            except (FileNotFoundError, ProcessLookupError):
+                return None
+            return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
+
+        def await_state(target, wanted, note):
+            bound = time.monotonic() + 30
+            while state(target) not in wanted:
+                assert time.monotonic() < bound, note
+                time.sleep(0.005)
+
+        emit._fixture_subreaper()
+        release_r, release_w = os.pipe()
+        disclose_r, disclose_w = os.pipe()
+        subject = os.fork()
+        if subject == 0:
+            try:
+                os.close(release_w)
+                os.close(disclose_r)
+                orphan = os.fork()
+                if orphan == 0:
+                    os.close(disclose_w)
+                    os.read(release_r, 1)
+                    os._exit(0)
+                os.write(disclose_w, str(orphan).encode("ascii"))
+                os._exit(0)  # exits at once: the orphan reparents to this case
+            except BaseException:
+                os._exit(125)
+        os.close(disclose_w)
+        subject_fd = os.pidfd_open(subject)  # the forking parent's descriptor
+        orphan = int(os.read(disclose_r, 16))  # DISCLOSURE, never a target
+        os.close(disclose_r)
+        # Wait for the adoption: the orphan's parent must become this case.
+        bound = time.monotonic() + 30
+        while True:
+            fields = Path("/proc", str(orphan), "stat").read_bytes()
+            if int(fields.rsplit(b")", 1)[1].split()[1]) == os.getpid():
+                break
+            assert time.monotonic() < bound, "the orphan was never adopted"
+            time.sleep(0.005)
+        # The adoption license is retired: the live adopted child is refused.
+        assert not _kill_proved_child(orphan), \
+            "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+        assert state(orphan) not in (None, "Z"), \
+            "the refused hygiene still ended the orphan"
+        try:
+            emit._fixture_drain(subject, subject_fd,
+                                deadline=time.monotonic() + 1.5)
+        except emit.ChildStatusUnavailable as exc:
+            named = str(exc)
+        else:
+            raise AssertionError(
+                "the drain claimed completion over a live adopted descendant")
+        assert "NOT signalled" in named and str(orphan) in named, named
+        assert state(orphan) not in (None, "Z"), \
+            "the drain signalled an adopted descendant (D-385-CURRENT-CHILD)"
+        # EOF release: the orphan exits on its own and a second drain then
+        # reaches ECHILD cleanly.
+        os.close(release_w)
+        os.close(release_r)
+        await_state(orphan, (None, "Z"), "the EOF release did not complete")
+        emit._fixture_drain(subject, subject_fd,
+                            deadline=time.monotonic() + 10.0)
+        os.close(subject_fd)
     elif mode == "escalation-subject":
         import time
         # QA16 MINOR-2 + QA17 F1: cancelling a wedged guardian is bounded AND kills
@@ -5458,12 +5630,6 @@ def _watchdog_completion_case(mode):
         # sleeper the test has to clean up. The same-group descendant must die with
         # the subject; descendants that LEAVE the group are the documented
         # wedged-guardian residual, out of contract here.
-        def subject_tree():
-            import time as clock
-            if os.fork() == 0:
-                clock.sleep(3600)          # same-group descendant
-            clock.sleep(3600)              # subject: outlives everything unless cancelled
-
         def state(target):
             try:
                 stat = Path("/proc", str(target), "stat").read_bytes()
@@ -5494,7 +5660,28 @@ def _watchdog_completion_case(mode):
 
         def exercise(flip):
             from contextlib import ExitStack
+            # The tree parks on a pipe this case holds (keep_fds threads the
+            # read end through the guardian): closing the write end releases
+            # every surviving member by EOF, so cleanup needs no signal to a
+            # process this case never forked (D-385-CURRENT-CHILD).
+            release_r, release_w = os.pipe()
+
+            def subject_tree():
+                if os.fork() == 0:
+                    os.read(release_r, 1)  # same-group descendant
+                    os._exit(0)
+                os.read(release_r, 1)      # subject: outlives everything unless cancelled
+
+            try:
+                return exercise_held(flip, release_r, release_w, subject_tree)
+            except BaseException:
+                os.close(release_w)
+                raise
+
+        def exercise_held(flip, release_r, release_w, subject_tree):
+            from contextlib import ExitStack
             with ExitStack() as stack:
+                stack.callback(os.close, release_r)  # the tree holds its own copy
                 stack.enter_context(patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0))
                 if flip:
                     # Flip: no-op the escalation's subject-kill step (and the
@@ -5506,7 +5693,9 @@ def _watchdog_completion_case(mode):
                         lambda subject, fd, **license: None))
                     stack.enter_context(patch.object(
                         emit, "_fixture_pdeathsig", lambda: None))
-                child = emit._FixtureProcess(time.monotonic() + 3600, subject=subject_tree)
+                child = emit._FixtureProcess(time.monotonic() + 3600,
+                                             keep_fds=(release_r,),
+                                             subject=subject_tree)
                 pid = child.start()
                 # Hold OUR OWN duplicate of the launcher's guardian pidfd
                 # for the whole exercise: the launcher opened child.pidfd on
@@ -5590,9 +5779,11 @@ def _watchdog_completion_case(mode):
                 assert failures and "escalat" in failures[0], failures
                 assert emit._fixture_child_reaped(pid) is True
                 assert elapsed < 15, elapsed
-                return pid, guardian_fd, subject, descendant, sequence, failures
+                return (pid, guardian_fd, subject, descendant, sequence,
+                        failures, release_w)
 
-        pid, guardian_fd, subject, descendant, sequence, failures = exercise(flip=False)
+        (pid, guardian_fd, subject, descendant, sequence, failures,
+         release_w) = exercise(flip=False)
         # Kill order: freeze first, then the subject census (report-only at
         # runtime -- the banned-killpg recorder proves no numeric group kill
         # ran, QA21 codex F3, and no handoff exists for the subject's own
@@ -5624,26 +5815,36 @@ def _watchdog_completion_case(mode):
             time.sleep(0.005)
         assert state(descendant) not in dead, \
             "the no-handoff census killed the descendant (D-385)"
-        # Hygiene for the DISCLOSED survivor: the guardian is collected, so
-        # the orphan reparented to this subreaper case process and only the
-        # ownership proof licenses its kill (QA8).
-        assert _kill_proved_child(descendant), \
-            "the hygiene refused the orphaned descendant"
+        # D-385-CURRENT-CHILD: the DISCLOSED survivor reparented to this
+        # subreaper case process, but adoption licenses NO signal -- the
+        # helper refuses the undeclared target (the retired adoption proof
+        # killed it right here: this refusal is the revert flip) and the
+        # survivor is released by the pipe EOF, exiting on its own.
+        assert not _kill_proved_child(descendant), \
+            "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+        assert state(descendant) not in dead, \
+            "the refused hygiene still ended the descendant"
+        os.close(release_w)
         bound = time.monotonic() + 30
         while state(descendant) not in dead:
             assert time.monotonic() < bound, state(descendant)
             time.sleep(0.005)
         # Flip: with the subject-kill step removed the subject tree survives and
         # close() itself names the surviving pid.
-        pid, guardian_fd, subject, descendant, sequence, failures = exercise(flip=True)
+        (pid, guardian_fd, subject, descendant, sequence, failures,
+         release_w) = exercise(flip=True)
         assert state(subject) not in dead, "flip: the subject died without its kill step"
         assert "could not confirm subject exit" in failures[0], failures
-        # Clean up the deliberately-leaked tree member by member through the
-        # ownership proof (QA8): both orphans reparented to this subreaper case
-        # process; killing the proved subject reparents (and then proves) the
-        # descendant, never a numeric group kill.
-        assert _kill_proved_child(subject), "the flip cleanup refused the orphaned subject"
-        assert _kill_proved_child(descendant), "the flip cleanup refused the orphaned descendant"
+        # D-385-CURRENT-CHILD: both orphans reparented to this subreaper case
+        # process, and adoption licenses NO signal -- the helper refuses each
+        # undeclared target (the retired adoption proof killed them right
+        # here) and ONE pipe EOF releases the whole parked tree, each member
+        # exiting on its own.
+        assert not _kill_proved_child(subject), \
+            "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+        assert not _kill_proved_child(descendant), \
+            "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+        os.close(release_w)
         bound = time.monotonic() + 30
         while state(subject) not in dead or state(descendant) not in dead:
             assert time.monotonic() < bound, "the flip cleanup did not complete"
@@ -5662,13 +5863,19 @@ def _watchdog_completion_case(mode):
             wedged = Path(directory, "wedged")
             grandchild_file = Path(directory, "grandchild")
 
+            # The descendant parks on a pipe this case holds (keep_fds
+            # threads the read end through the guardian): closing the write
+            # end releases it by EOF, so cleanup needs no signal to a process
+            # this case never forked (D-385-CURRENT-CHILD).
+            release_r, release_w = os.pipe()
+
             def subject_body():
                 # Fork a same-group descendant, then exit: the guardian reaps this
                 # subject while the descendant lives on.
                 pid = os.fork()
                 if pid == 0:
-                    import time as clock
-                    clock.sleep(3600)
+                    os.read(release_r, 1)
+                    os._exit(0)
                 scratch = Path(directory, "grandchild.tmp")
                 scratch.write_text(str(pid), encoding="ascii")
                 scratch.rename(grandchild_file)  # atomic: never a partial PID
@@ -5703,9 +5910,11 @@ def _watchdog_completion_case(mode):
                 wedged.unlink(missing_ok=True)
                 grandchild_file.unlink(missing_ok=True)
                 child = emit._FixtureProcess(time.monotonic() + 3600,
+                                             keep_fds=(release_r,),
                                              subject=subject_body)
                 with patch.object(emit, "_fixture_drain", reap_then_wedge):
                     child.start()
+                os.close(release_r)  # the fixture tree holds its own copy
                 bound = time.monotonic() + 30
                 while not (wedged.exists() and grandchild_file.exists()):
                     assert time.monotonic() < bound, "the drain wedge was not reached"
@@ -5740,11 +5949,17 @@ def _watchdog_completion_case(mode):
             assert "members [{}] unaddressed".format(grandchild) in message, \
                 message
             assert "tree killed" not in message, message
-            # Hygiene through the ownership proof alone (QA8): the surviving
-            # descendant has reparented to this subreaper case process.
-            assert _kill_proved_child(grandchild), \
-                "the hygiene refused the orphaned descendant"
-            await_state(grandchild, (None, "Z"), "the hygiene did not complete")
+            # D-385-CURRENT-CHILD: the surviving descendant reparented to this
+            # subreaper case process, but adoption licenses NO signal -- the
+            # helper refuses the undeclared target (the retired adoption proof
+            # killed it right here: this refusal is the revert flip) and the
+            # survivor is released by the pipe EOF, exiting on its own.
+            assert not _kill_proved_child(grandchild), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert state(grandchild) not in (None, "Z"), \
+                "the refused hygiene still ended the descendant"
+            os.close(release_w)
+            await_state(grandchild, (None, "Z"), "the EOF release did not complete")
     elif mode == "poll-collected":
         import time
         # QA19 F1: a guardian failure FIRST collected by poll() -- the layer's
@@ -5754,17 +5969,7 @@ def _watchdog_completion_case(mode):
         # close() re-raises it after addressing the subject. pdeathsig is
         # disarmed so only close()'s own kill can end the orphaned subject tree.
         with tempfile.TemporaryDirectory(prefix="opf-pollfail-") as directory:
-            descendant_file = Path(directory, "descendant")
-
-            def subject_body():
-                import time as clock
-                pid = os.fork()
-                if pid == 0:
-                    clock.sleep(3600)          # same-group descendant
-                scratch = Path(directory, "descendant.tmp")
-                scratch.write_text(str(pid), encoding="ascii")
-                scratch.rename(descendant_file)  # atomic: never a partial PID
-                clock.sleep(3600)              # the subject outlives its guardian
+            held = {}
 
             def state(target):
                 try:
@@ -5782,16 +5987,33 @@ def _watchdog_completion_case(mode):
             def launch_killed():
                 # Launch, wait for the running subject tree, then SIGKILL the
                 # guardian and collect it through poll(), never through close().
-                descendant_file.unlink(missing_ok=True)
+                # The descendant's FORKING PARENT (the subject) hands off its
+                # pidfd over SCM_RIGHTS (D-385-PIDFD-HANDOFF), the only
+                # delivery license, and the tree parks on a pipe this case
+                # holds, so one EOF releases whatever a leg leaves running
+                # without a signal (D-385-CURRENT-CHILD).
+                release_r, release_w = os.pipe()
+                member_handoff, member_peer = _pidfd_handoff_pair()
+
+                def subject_body():
+                    def descendant_main():
+                        os.read(release_r, 1)  # same-group descendant
+                        os._exit(0)
+                    _pidfd_handoff_fork_send(member_peer, descendant_main)
+                    os.read(release_r, 1)      # the subject outlives its guardian
+
                 with patch.object(emit, "_fixture_pdeathsig", lambda: None):
                     child = emit._FixtureProcess(time.monotonic() + 3600,
+                                                 keep_fds=(release_r,
+                                                           member_peer.fileno()),
                                                  subject=subject_body)
                     child.start()
-                bound = time.monotonic() + 30
-                while not descendant_file.exists():
-                    assert time.monotonic() < bound, "the subject tree never appeared"
-                    time.sleep(0.005)
-                descendant = int(descendant_file.read_text(encoding="ascii"))
+                os.close(release_r)  # the fixture tree holds its own copy
+                member_peer.close()
+                descendant, descendant_fd = _pidfd_handoff_recv(
+                    member_handoff, "the poll-collected descendant")
+                held["descendant"] = descendant
+                held["descendant_fd"] = descendant_fd
                 subject = int(Path("/proc", str(child.pid), "task", str(child.pid),
                                    "children").read_text(encoding="ascii").split()[0])
                 os.kill(child.pid, signal.SIGKILL)
@@ -5809,9 +6031,9 @@ def _watchdog_completion_case(mode):
                     time.sleep(0.005)
                 assert child.collected, "poll() did not record the collection"
                 assert "guardian failed" in polled[0], polled
-                return child, subject, descendant
+                return child, subject, descendant, descendant_fd, release_w
 
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, descendant_fd, release_w = launch_killed()
             # Fix 2y (D2): the guardian is DEAD when poll() collects, so the
             # collection-time receipt kill is SUBJECT-ONLY through the held
             # pidfd -- NO member census, NO new pidfds. The surviving
@@ -5844,10 +6066,22 @@ def _watchdog_completion_case(mode):
                         "close() left the poll-collected failure's subject running")
             assert state(descendant) not in (None, "Z"), \
                 "the no-guardian path census-killed the orphaned descendant"
-            assert _kill_proved_child(descendant), \
-                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
+            # D-385-CURRENT-CHILD: the residual reparented to this subreaper
+            # case process, but adoption licenses NO signal -- the helper
+            # refuses the undeclared target (the retired adoption proof
+            # killed it right here: this refusal is the revert flip) -- and
+            # the cleanup kill runs through the descriptor the descendant's
+            # FORKING PARENT handed off, the one licensed route.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert state(descendant) not in (None, "Z"), \
+                "the refused hygiene still ended the descendant"
+            assert _kill_proved_child(descendant, pidfd=descendant_fd), \
+                "the handoff hygiene refused the descendant"
             await_state(descendant, (None, "Z"),
-                        "the residual hygiene did not complete")
+                        "the handoff hygiene did not complete")
+            os.close(descendant_fd)
+            os.close(release_w)
 
             # Flip (red-on-revert, D2): reintroduce the removed no-guardian
             # member kill -- the pre-fix census killed every /proc-discovered
@@ -5858,9 +6092,11 @@ def _watchdog_completion_case(mode):
             # handoffs), and a bare pidfd_open on a /proc-read number is
             # itself refused by the aggregator's AST probe, so the model
             # reproduces the pre-fix OUTCOME through the sanctioned
-            # ownership proof: kill the subject through the held receipt
-            # pidfd, then kill each observed member once it reparents to
-            # this subreaper case process (_kill_proved_child, QA8).
+            # licensed delivery: kill the subject through the held receipt
+            # pidfd, then each observed member through the descriptor its
+            # FORKING PARENT handed off, once it reparents to this subreaper
+            # case process (D-385-PIDFD-HANDOFF; a declared-fork or bare
+            # adoption kill is refused).
             def census_kill(target, fd, **license):
                 members = []
                 for name in os.listdir("/proc"):
@@ -5877,22 +6113,27 @@ def _watchdog_completion_case(mode):
                 signal.pidfd_send_signal(fd, signal.SIGKILL)
                 bound = time.monotonic() + 30
                 for member in members:
+                    assert member == held["descendant"], member
                     while True:
                         fields = emit._fixture_stat_fields(member)
                         if fields is not emit._FIXTURE_UNREADABLE and (
                                 fields is None or fields[0] == b"Z"
                                 or (int(fields[1]) == os.getpid()
-                                    and _kill_proved_child(member))):
+                                    and _kill_proved_child(
+                                        member, pidfd=held["descendant_fd"]))):
                             break
                         assert time.monotonic() < bound, member
                         time.sleep(0.005)
                 return ("subject-only", None)
 
             with patch.object(emit, "_fixture_escalate_subject", census_kill):
-                child, subject, descendant = launch_killed()
+                child, subject, descendant, descendant_fd, release_w = \
+                    launch_killed()
             await_state(subject, (None, "Z"), "the flip subject survived")
             await_state(descendant, (None, "Z"),
                         "flip: the reintroduced census did not reach the descendant")
+            os.close(descendant_fd)
+            os.close(release_w)
             with patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0):
                 try:
                     child.close()
@@ -5905,7 +6146,8 @@ def _watchdog_completion_case(mode):
             # and the subject tree survives.
             with patch.object(emit._FixtureProcess, "_address_failed_subject",
                               lambda fixture: None):
-                child, subject, descendant = launch_killed()
+                child, subject, descendant, descendant_fd, release_w = \
+                    launch_killed()
             child._failure = None
             child.status = 0
             child.unresolved = False
@@ -5920,13 +6162,19 @@ def _watchdog_completion_case(mode):
                 "flip: the subject died without close()'s kill"
             assert state(descendant) not in (None, "Z"), \
                 "flip: the descendant died without close()'s kill"
-            # Hygiene through the ownership proof alone (QA8): both orphans reparented
-            # to this subreaper case process; the proved subject kill reparents (and
-            # then proves) the descendant, never a numeric group kill.
-            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
-            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
-            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
-            await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
+            # D-385-CURRENT-CHILD: both orphans reparented to this subreaper
+            # case process, and adoption licenses NO signal -- the helper
+            # refuses each undeclared target (the retired adoption proof
+            # killed them right here) and ONE pipe EOF releases the whole
+            # parked tree, each member exiting on its own.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(subject, (None, "Z"), "the EOF release did not complete")
+            await_state(descendant, (None, "Z"), "the EOF release did not complete")
+            os.close(descendant_fd)
     elif mode == "close-cancel":
         import time
         # QA19 F2 + QA20 codex F2 / gemini / claude F2 + QA21 claude
@@ -6419,16 +6667,6 @@ def _watchdog_completion_case(mode):
         with tempfile.TemporaryDirectory(prefix="opf-pollmask-") as directory:
             descendant_file = Path(directory, "descendant")
 
-            def subject_body():
-                import time as clock
-                pid = os.fork()
-                if pid == 0:
-                    clock.sleep(3600)          # same-group descendant
-                scratch = Path(directory, "descendant.tmp")
-                scratch.write_text(str(pid), encoding="ascii")
-                scratch.rename(descendant_file)  # atomic: never a partial PID
-                clock.sleep(3600)              # the subject outlives its guardian
-
             def state(target):
                 try:
                     stat = Path("/proc", str(target), "stat").read_bytes()
@@ -6445,16 +6683,36 @@ def _watchdog_completion_case(mode):
             def launch_killed(patches=()):
                 # Launch, wait for the running subject tree, then SIGKILL the
                 # guardian; the caller collects through poll(), never close().
+                # The tree parks on a pipe this case holds (keep_fds threads
+                # the read end through the guardian): one EOF releases
+                # whatever a leg leaves running, so no leg ever signals a
+                # process this case never forked (D-385-CURRENT-CHILD); the
+                # descendant pid file is DISCLOSURE only, never a signal
+                # target.
                 from contextlib import ExitStack
                 descendant_file.unlink(missing_ok=True)
+                release_r, release_w = os.pipe()
+
+                def subject_body():
+                    pid = os.fork()
+                    if pid == 0:
+                        os.read(release_r, 1)  # same-group descendant
+                        os._exit(0)
+                    scratch = Path(directory, "descendant.tmp")
+                    scratch.write_text(str(pid), encoding="ascii")
+                    scratch.rename(descendant_file)  # atomic: never a partial PID
+                    os.read(release_r, 1)      # the subject outlives its guardian
+
                 with ExitStack() as stack:
                     stack.enter_context(
                         patch.object(emit, "_fixture_pdeathsig", lambda: None))
                     for target, name, value in patches:
                         stack.enter_context(patch.object(target, name, value))
                     child = emit._FixtureProcess(time.monotonic() + 3600,
+                                                 keep_fds=(release_r,),
                                                  subject=subject_body)
                     child.start()
+                os.close(release_r)  # the fixture tree holds its own copy
                 bound = time.monotonic() + 30
                 while not descendant_file.exists():
                     assert time.monotonic() < bound, "the subject tree never appeared"
@@ -6463,7 +6721,7 @@ def _watchdog_completion_case(mode):
                 subject = int(Path("/proc", str(child.pid), "task", str(child.pid),
                                    "children").read_text(encoding="ascii").split()[0])
                 os.kill(child.pid, signal.SIGKILL)
-                return child, subject, descendant
+                return child, subject, descendant, release_w
 
             def poll_failure(child):
                 refusals = []
@@ -6491,7 +6749,7 @@ def _watchdog_completion_case(mode):
             # poll() still records the failure, kills the subject tree
             # pin-first at collection time, and the interrupt lands only after
             # the masked step restored the caller's mask.
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, release_w = launch_killed()
             captured = []
             real_read = emit._FixtureProcess._read_report
 
@@ -6542,10 +6800,15 @@ def _watchdog_completion_case(mode):
             closed = close_grace(child)
             assert closed and "guardian failed" in closed[0], closed
             assert "descendants, if any, unaddressed" in closed[0], closed
-            assert _kill_proved_child(descendant), \
-                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
+            # D-385-CURRENT-CHILD: adoption licenses no signal; the refused
+            # residual is released by the pipe EOF and exits on its own.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert state(descendant) not in (None, "Z"), \
+                "the refused hygiene still ended the descendant"
+            os.close(release_w)
             await_state(descendant, (None, "Z"),
-                        "the residual hygiene did not complete")
+                        "the EOF release did not complete")
 
             # Leg 2: a validation that dies BETWEEN collection and recording
             # (the pre-mask-flag residual, modeled with a synthetic
@@ -6567,7 +6830,7 @@ def _watchdog_completion_case(mode):
                             break
                         time.sleep(0.005)
 
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, release_w = launch_killed()
             poll_cancelled(child)
             assert child.collected and child._failure is None \
                 and child.status is None and child.unresolved, \
@@ -6584,14 +6847,17 @@ def _watchdog_completion_case(mode):
             closed = close_grace(child)
             assert closed and "supervision unresolved" in closed[0], closed
             assert "descendants, if any, unaddressed" in closed[0], closed
-            assert _kill_proved_child(descendant), \
-                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
+            # D-385-CURRENT-CHILD: adoption licenses no signal; the refused
+            # residual is released by the pipe EOF and exits on its own.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
             await_state(descendant, (None, "Z"),
-                        "the residual hygiene did not complete")
+                        "the EOF release did not complete")
 
             # Flip: forge a VALIDATED status (the state the pre-fix close
             # believed blindly) -> close() is silent, the tree survives.
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, release_w = launch_killed()
             poll_cancelled(child)
             child.status = 0
             child.unresolved = False
@@ -6599,11 +6865,15 @@ def _watchdog_completion_case(mode):
             assert not closed, closed
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without close()'s kill"
-            # Hygiene through the ownership proof alone (QA8), member by member.
-            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
-            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
-            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
-            await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
+            # D-385-CURRENT-CHILD: adoption licenses no signal, member by
+            # member; one pipe EOF releases the whole parked tree.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(subject, (None, "Z"), "the EOF release did not complete")
+            await_state(descendant, (None, "Z"), "the EOF release did not complete")
 
             # Leg 2b (QA21 claude F2): an asynchronous exception landing
             # BETWEEN poll()'s two collection-state writes -- after the reap,
@@ -6651,7 +6921,7 @@ def _watchdog_completion_case(mode):
                     sys.settrace(None)
                 assert cancelled, "the trace injection never fired"
 
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, release_w = launch_killed()
             poll_trace_cancelled(child)
             assert child.unresolved and not child.collected, \
                 ("the interrupted state writes lost close()'s ownership",
@@ -6674,32 +6944,39 @@ def _watchdog_completion_case(mode):
                         "the lost-ownership refusal left the subject running")
             assert state(descendant) not in (None, "Z"), \
                 "the lost-ownership path census-killed the orphaned descendant"
-            assert _kill_proved_child(descendant), \
-                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
-            await_state(descendant, (None, "Z"), "the 2b hygiene did not complete")
+            # D-385-CURRENT-CHILD: adoption licenses no signal; the refused
+            # residual is released by the pipe EOF and exits on its own.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(descendant, (None, "Z"), "the 2b EOF release did not complete")
 
             # Flip: forge the pre-fix write order's post-interruption state
             # (collected recorded, unresolved lost, nothing else) -> close()
             # is silent and the subject tree survives.
-            child, subject, descendant = launch_killed()
+            child, subject, descendant, release_w = launch_killed()
             poll_trace_cancelled(child)
             child.collected, child.unresolved = True, False
             closed = close_grace(child)
             assert not closed, closed
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without close()'s kill"
-            # Hygiene through the ownership proof alone (QA8), member by member.
-            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
-            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
-            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
-            await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
+            # D-385-CURRENT-CHILD: adoption licenses no signal, member by
+            # member; one pipe EOF releases the whole parked tree.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(subject, (None, "Z"), "the EOF release did not complete")
+            await_state(descendant, (None, "Z"), "the EOF release did not complete")
 
             # Leg 3 (QA20 claude F3): pidfd-absent host -- a pid-only receipt's
             # poll-collected failure re-raises through close() NAMING the
             # unverifiable cleanup, and the known subject pid is never
             # group-killed unpinned: the surviving tree is the documented
             # residual, cleaned here by hygiene.
-            child, subject, descendant = launch_killed(
+            child, subject, descendant, release_w = launch_killed(
                 patches=((emit, "_fixture_pidfd", lambda pid: None),))
             refusals = poll_failure(child)
             assert refusals and "guardian failed" in refusals[0], refusals
@@ -6712,17 +6989,21 @@ def _watchdog_completion_case(mode):
             assert "subject tree killed" not in closed[0], closed
             assert state(subject) not in (None, "Z"), \
                 "an unpinned pid-only subject was signalled anyway"
-            # Hygiene through the ownership proof alone (QA8), member by member.
-            assert _kill_proved_child(subject), "the residual hygiene refused the orphaned subject"
-            assert _kill_proved_child(descendant), "the residual hygiene refused the orphaned descendant"
-            await_state(subject, (None, "Z"), "the residual hygiene did not complete")
-            await_state(descendant, (None, "Z"), "the residual hygiene did not complete")
+            # D-385-CURRENT-CHILD: adoption licenses no signal, member by
+            # member; one pipe EOF releases the whole parked tree.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(subject, (None, "Z"), "the EOF release did not complete")
+            await_state(descendant, (None, "Z"), "the EOF release did not complete")
 
             # Flip: the pre-fix bare re-raise names nothing.
             def bare(fixture, failure):
                 raise failure
 
-            child, subject, descendant = launch_killed(
+            child, subject, descendant, release_w = launch_killed(
                 patches=((emit, "_fixture_pidfd", lambda pid: None),))
             refusals = poll_failure(child)
             assert refusals, refusals
@@ -6734,11 +7015,15 @@ def _watchdog_completion_case(mode):
                 except emit.ChildStatusUnavailable as exc:
                     closed.append(str(exc))
             assert closed and "subject cleanup unverified" not in closed[0], closed
-            # Hygiene through the ownership proof alone (QA8), member by member.
-            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
-            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
-            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
-            await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
+            # D-385-CURRENT-CHILD: adoption licenses no signal, member by
+            # member; one pipe EOF releases the whole parked tree.
+            assert not _kill_proved_child(subject), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_w)
+            await_state(subject, (None, "Z"), "the EOF release did not complete")
+            await_state(descendant, (None, "Z"), "the EOF release did not complete")
     elif mode == "unpinned-kill":
         import socket
         import time
@@ -6800,13 +7085,19 @@ def _watchdog_completion_case(mode):
 
         with tempfile.TemporaryDirectory(prefix="opf-noguardian-") as directory:
             descendant_file = Path(directory, "descendant")
+            # The descendant parks on a pipe this case holds: one EOF releases
+            # it, so no hygiene ever signals a process this case never forked
+            # (D-385-CURRENT-CHILD); the pid file is DISCLOSURE only.
+            release_r, release_w = os.pipe()
             leader = os.fork()
             if leader == 0:
                 os.setsid()
                 pid = os.fork()
                 if pid == 0:
-                    time.sleep(3600)           # same-group descendant
+                    os.close(release_w)
+                    os.read(release_r, 1)      # same-group descendant
                     os._exit(0)
+                os.close(release_w)
                 scratch = Path(directory, "descendant.tmp")
                 scratch.write_text(str(pid), encoding="ascii")
                 scratch.rename(descendant_file)  # atomic: never a partial PID
@@ -6837,10 +7128,14 @@ def _watchdog_completion_case(mode):
             os.close(fd)
             assert state(descendant) not in (None, "Z"), \
                 "the no-guardian path killed the orphaned descendant"
-            assert _kill_proved_child(descendant), \
-                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
+            # D-385-CURRENT-CHILD: adoption licenses no signal; the refused
+            # residual is released by the pipe EOF and exits on its own.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_r)
+            os.close(release_w)
             await_state(descendant, (None, "Z"),
-                        "the leg-1 hygiene did not complete")
+                        "the leg-1 EOF release did not complete")
 
         # Leg 2: REAPED leader -> nothing pins the freed number against
         # reuse: the member kill is SKIPPED and reported unpinned; the pidfd
@@ -6871,12 +7166,16 @@ def _watchdog_completion_case(mode):
         # firing and the descendant dying without a pin.
         with tempfile.TemporaryDirectory(prefix="opf-zombie-") as directory:
             descendant_file = Path(directory, "descendant")
+            # Pipe-parked descendant again: EOF release, never a signal to a
+            # process this case never forked (D-385-CURRENT-CHILD).
+            release_r, release_w = os.pipe()
             leader = os.fork()
             if leader == 0:
                 os.setsid()
                 pid = os.fork()
                 if pid == 0:
-                    time.sleep(3600)           # same-group descendant
+                    os.close(release_w)
+                    os.read(release_r, 1)      # same-group descendant
                     os._exit(0)
                 scratch = Path(directory, "descendant.tmp")
                 scratch.write_text(str(pid), encoding="ascii")
@@ -6900,12 +7199,16 @@ def _watchdog_completion_case(mode):
             assert recorded and recorded[0] == ("pidfd", fd, signal.SIGSTOP), recorded
             assert state(descendant) not in (None, "Z"), \
                 "an unpinned zombie-leader group was signalled anyway"
-            assert _kill_proved_child(descendant), \
-                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
+            # D-385-CURRENT-CHILD: adoption licenses no signal; the refused
+            # residual is released by the pipe EOF and exits on its own.
+            assert not _kill_proved_child(descendant), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(release_r)
+            os.close(release_w)
             os.waitpid(leader, 0)
             os.close(fd)
             await_state(descendant, (None, "Z"),
-                        "the zombie-leg hygiene did not complete")
+                        "the zombie-leg EOF release did not complete")
 
         # Leg 4 (D-385-PIDFD-HANDOFF): the per-member census delivers ONLY
         # through a forking-parent handoff. A live member with no handoff is
@@ -6984,6 +7287,10 @@ def _watchdog_completion_case(mode):
             opened = Path(directory, "opened")
 
             handoff, handoff_peer = _pidfd_handoff_pair()
+            # The grandchild parks on a pipe this case holds: one EOF
+            # releases it, so the hygiene never signals a process this case
+            # never forked (D-385-CURRENT-CHILD); its pid file is DISCLOSURE.
+            release_r, release_w = os.pipe()
             guardian = os.fork()
             if guardian == 0:
                 try:
@@ -6991,8 +7298,10 @@ def _watchdog_completion_case(mode):
                         os.setsid()
                         grandchild = os.fork()
                         if grandchild == 0:
-                            time.sleep(3600)  # same-group descendant
+                            os.close(release_w)
+                            os.read(release_r, 1)  # same-group descendant
                             os._exit(0)
+                        os.close(release_w)
                         scratch = Path(directory, "grandchild.tmp")
                         scratch.write_text(str(grandchild), encoding="ascii")
                         scratch.rename(grandchild_file)
@@ -7010,7 +7319,7 @@ def _watchdog_completion_case(mode):
                     import ctypes
                     libc = ctypes.CDLL(None, use_errno=True)
                     if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-                        _kill_proved_child(leader)
+                        _kill_proved_child(leader, forked=True)
                         os._exit(125)
                     bound = time.monotonic() + 30
                     while not opened.exists():  # the caller holds the pidfd now
@@ -7080,13 +7389,19 @@ def _watchdog_completion_case(mode):
             os.close(fd)
             os.kill(guardian, signal.SIGCONT)
             os.waitpid(guardian, 0)
-            # Hygiene for the DISCLOSED survivor: with the guardian
-            # collected it reparents to this subreaper case process, and
-            # only the ownership proof licenses its kill (QA8).
-            assert _kill_proved_child(grandchild), \
-                "the leg-5 hygiene refused the orphaned descendant"
+            # D-385-CURRENT-CHILD: with the guardian collected the DISCLOSED
+            # survivor reparents to this subreaper case process, but adoption
+            # licenses NO signal -- the helper refuses the undeclared target
+            # (the retired adoption proof killed it right here) and the
+            # survivor is released by the pipe EOF, exiting on its own.
+            assert not _kill_proved_child(grandchild), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert state(grandchild) not in (None, "Z"), \
+                "the refused hygiene still ended the descendant"
+            os.close(release_r)
+            os.close(release_w)
             await_state(grandchild, (None, "Z"),
-                        "the leg-5 hygiene did not complete")
+                        "the leg-5 EOF release did not complete")
 
         # Leg 6 (fix 2y, claude Finding 1): the escalation contract must hold
         # with a subject pidfd AT OR ABOVE FD_SETSIZE (1024). The layer polls
@@ -7197,7 +7512,7 @@ def _watchdog_completion_case(mode):
                     import ctypes
                     libc = ctypes.CDLL(None, use_errno=True)
                     if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-                        _kill_proved_child(leader)
+                        _kill_proved_child(leader, forked=True)
                         os._exit(125)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
@@ -7381,6 +7696,11 @@ def _watchdog_completion_case(mode):
             forked_file = Path(directory, "forked")
             handoff, handoff_peer = _pidfd_handoff_pair()
             member_handoff, member_peer = _pidfd_handoff_pair()
+            # The raced fork's own FORKING PARENT (the grandchild) hands its
+            # pidfd off the same way (D-385-PIDFD-HANDOFF): the hygiene kill
+            # of the raced survivor runs through THAT descriptor, never an
+            # adoption proof; its pid file stays disclosure only.
+            forked_handoff, forked_peer = _pidfd_handoff_pair()
             guardian = os.fork()
             if guardian == 0:
                 try:
@@ -7394,10 +7714,13 @@ def _watchdog_completion_case(mode):
                                     if time.monotonic() >= bound:
                                         os._exit(125)
                                     time.sleep(0.002)
-                                forked = os.fork()
-                                if forked == 0:
+
+                                def forked_main():
                                     time.sleep(3600)  # forked past the snapshot
                                     os._exit(0)
+
+                                forked = _pidfd_handoff_fork_send(
+                                    forked_peer, forked_main)
                                 scratch = Path(directory, "forked.tmp")
                                 scratch.write_text(str(forked), encoding="ascii")
                                 scratch.rename(forked_file)
@@ -7423,7 +7746,7 @@ def _watchdog_completion_case(mode):
                     import ctypes
                     libc = ctypes.CDLL(None, use_errno=True)
                     if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-                        _kill_proved_child(leader)
+                        _kill_proved_child(leader, forked=True)
                         os._exit(125)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
@@ -7434,6 +7757,7 @@ def _watchdog_completion_case(mode):
                     os._exit(125)
             handoff_peer.close()
             member_peer.close()
+            forked_peer.close()
             leader_fd, grandchild_fd = None, None
             try:
                 leader, leader_fd = _pidfd_handoff_recv(handoff, "the model leader")
@@ -7458,15 +7782,16 @@ def _watchdog_completion_case(mode):
                     closes.append(lambda held=grandchild_fd: os.close(held))
                 closes.append(handoff.close)
                 closes.append(member_handoff.close)
+                closes.append(forked_handoff.close)
                 _close_every(closes)
                 raise
             return (guardian, leader, leader_fd, grandchild, grandchild_fd,
-                    cue, forked_file)
+                    cue, forked_file, forked_handoff)
 
         def release(guardian):
             # Proof-routed resume (QA9 claude F1): the frozen guardian is this
             # process's own un-reaped child; never trust the bare number.
-            assert _kill_proved_child(guardian, signal.SIGCONT), \
+            assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
                 "the release refused the frozen guardian"
             os.waitpid(guardian, 0)
 
@@ -7476,8 +7801,9 @@ def _watchdog_completion_case(mode):
         # PermissionError as an exited process and claimed ("tree", []) with
         # the member alive.
         with tempfile.TemporaryDirectory(prefix="opf-unread-") as directory:
-            guardian, leader, fd, grandchild, gfd, _cue, _forked = frozen_tree(
-                Path(directory), forker=False)
+            (guardian, leader, fd, grandchild, gfd, _cue, _forked,
+             forked_handoff) = frozen_tree(Path(directory), forker=False)
+            forked_handoff.close()
             real_os_open = os.open
             blocked = str(Path("/proc", str(grandchild), "stat"))
 
@@ -7518,22 +7844,29 @@ def _watchdog_completion_case(mode):
                 "the unaccounted member was signalled anyway")
             await_state(leader, (None, "Z"), "the leader kill never landed")
             os.close(fd)
-            os.close(gfd)
             # Release and collect the frozen subreaper guardian FIRST: the NAMED
-            # member then reparents from it to this subreaper case process, and
-            # only the ownership proof licenses its hygiene kill (QA8).
+            # member then reparents from it to this subreaper case process.
+            # D-385-CURRENT-CHILD: adoption licenses NO signal -- the helper
+            # refuses the undeclared target (the retired adoption proof killed
+            # it right here) -- and the hygiene kill runs through the HELD
+            # handoff descriptor its forking parent opened, the one licensed
+            # route.
             release(guardian)
-            assert _kill_proved_child(grandchild), \
-                "the leg-1 hygiene refused the orphaned member"
+            assert not _kill_proved_child(grandchild), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert _kill_proved_child(grandchild, pidfd=gfd), \
+                "the leg-1 handoff hygiene refused the member"
             await_state(grandchild, (None, "Z"),
-                        "the leg-1 hygiene did not complete")
+                        "the leg-1 handoff hygiene did not complete")
+            os.close(gfd)
         # Leg 2 (gemini F1): a leader SIGKILL failing with anything but
         # ProcessLookupError NAMES the surviving leader and never claims the
         # tree. The pre-fix code swallowed the failure and, with a clean
         # census, still claimed ("tree", []) over the live leader.
         with tempfile.TemporaryDirectory(prefix="opf-leaderfail-") as directory:
-            guardian, leader, fd, grandchild, gfd, _cue, _forked = frozen_tree(
-                Path(directory), forker=False)
+            (guardian, leader, fd, grandchild, gfd, _cue, _forked,
+             forked_handoff) = frozen_tree(Path(directory), forker=False)
+            forked_handoff.close()
             real_pidfd_signal = signal.pidfd_send_signal
 
             def failing_leader_kill(target_fd, signum, *args):
@@ -7566,8 +7899,8 @@ def _watchdog_completion_case(mode):
         # "every member addressed" -- with the forked member alive and
         # unaccounted.
         with tempfile.TemporaryDirectory(prefix="opf-forkrace-") as directory:
-            guardian, leader, fd, grandchild, gfd, cue, forked_file = \
-                frozen_tree(Path(directory), forker=True)
+            (guardian, leader, fd, grandchild, gfd, cue, forked_file,
+             forked_handoff) = frozen_tree(Path(directory), forker=True)
             real_listdir = os.listdir
             proc_listings = []
 
@@ -7596,6 +7929,12 @@ def _watchdog_completion_case(mode):
                     leader, fd, guardian_pid=guardian,
                     member_handoffs={grandchild: gfd})
             forked = int(forked_file.read_text(encoding="ascii"))
+            # The raced member arrives as the descriptor its FORKING PARENT
+            # (the grandchild) handed off before dying; the pid file is
+            # disclosure and must agree.
+            sent_pid, forked_fd = _pidfd_handoff_recv(
+                forked_handoff, "the leg-3 raced member")
+            assert sent_pid == forked, (sent_pid, forked)
             assert (outcome[0] == "partial" and outcome[1]
                     and forked in outcome[1][0]), (
                 "the fork-raced member was not observed and named",
@@ -7607,12 +7946,19 @@ def _watchdog_completion_case(mode):
             os.close(fd)
             os.close(gfd)
             # Release and collect the frozen subreaper guardian FIRST: the NAMED
-            # survivor then reparents to this subreaper case process, and only the
-            # ownership proof licenses its hygiene kill (QA8).
+            # survivor then reparents to this subreaper case process.
+            # D-385-CURRENT-CHILD: adoption licenses NO signal -- the helper
+            # refuses the undeclared target (the retired adoption proof killed
+            # it right here) -- and the hygiene kill runs through the handoff
+            # descriptor its forking parent sent, the one licensed route.
             release(guardian)
-            assert _kill_proved_child(forked), \
-                "the leg-3 hygiene refused the orphaned survivor"
-            await_state(forked, (None, "Z"), "the leg-3 hygiene did not complete")
+            assert not _kill_proved_child(forked), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert _kill_proved_child(forked, pidfd=forked_fd), \
+                "the leg-3 handoff hygiene refused the raced survivor"
+            await_state(forked, (None, "Z"),
+                        "the leg-3 handoff hygiene did not complete")
+            os.close(forked_fd)
 
         # Leg 4 (maintainer ruling PD-335-TREE-CLAIM-STALL): the "tree"
         # observation needs TWO CONSECUTIVE clean censuses -- a /proc scan
@@ -7789,7 +8135,11 @@ def _watchdog_completion_case(mode):
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
-        def frozen_pair(directory):
+        def frozen_pair(directory, release=None):
+            # `release` -- an (r, w) pipe this case holds -- parks the model
+            # leader on a read instead of a sleep: the unwind legs (1k, 1m)
+            # end it by EOF, never by a signal to an adopted current child
+            # (D-385-CURRENT-CHILD).
             frozen_file = Path(directory, "frozen")
             handoff, handoff_peer = _pidfd_handoff_pair()
             guardian = os.fork()
@@ -7797,7 +8147,11 @@ def _watchdog_completion_case(mode):
                 try:
                     def leader_main():
                         os.setsid()
-                        time.sleep(3600)
+                        if release is not None:
+                            os.close(release[1])
+                            os.read(release[0], 1)
+                        else:
+                            time.sleep(3600)
                         os._exit(0)
 
                     # Fork-and-send (QA11 codex blocker): only the pid the
@@ -7808,10 +8162,12 @@ def _watchdog_completion_case(mode):
                     # LATER, well after this send), and a failing prctl
                     # reaps the already-forked leader before exiting.
                     leader = _pidfd_handoff_fork_send(handoff_peer, leader_main)
+                    if release is not None:
+                        os.close(release[1])
                     import ctypes
                     libc = ctypes.CDLL(None, use_errno=True)
                     if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-                        _kill_proved_child(leader)
+                        _kill_proved_child(leader, forked=True)
                         os._exit(125)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
@@ -7874,7 +8230,7 @@ def _watchdog_completion_case(mode):
                         "the raising census stranded the frozen subject")
             os.close(fd)
             os.close(guardian_fd)
-            assert _kill_proved_child(guardian, signal.SIGCONT), \
+            assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
                 "the leg-1 release refused the frozen guardian"
             os.waitpid(guardian, 0)
 
@@ -7923,8 +8279,9 @@ def _watchdog_completion_case(mode):
                 "stay running untouched", state(decoy))
             os.close(fd)
             os.close(guardian_fd)
-            assert _kill_proved_child(decoy), "the leg-1f hygiene refused the decoy"
-            assert _kill_proved_child(guardian, signal.SIGCONT), \
+            assert _kill_proved_child(decoy, forked=True), \
+                "the leg-1f hygiene refused the decoy"
+            assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
                 "the leg-1f release refused the frozen guardian"
             os.waitpid(guardian, 0)
 
@@ -7965,7 +8322,7 @@ def _watchdog_completion_case(mode):
         assert state(bystander) in ("S", "R"), (
             "the payload-named bystander did not survive the refusal",
             state(bystander))
-        assert _kill_proved_child(bystander), \
+        assert _kill_proved_child(bystander, forked=True), \
             "the leg-1g hygiene refused the bystander"
 
         # Leg 1h (D-385-PIDFD-HANDOFF, fail closed; reshaped by QA12 codex
@@ -8069,7 +8426,8 @@ def _watchdog_completion_case(mode):
         assert state(uncle) in ("S", "R"), (
             "the refused handoff's target did not survive untouched",
             state(uncle))
-        assert _kill_proved_child(uncle), "the leg-1i hygiene refused the uncle"
+        assert _kill_proved_child(uncle, forked=True), \
+            "the leg-1i hygiene refused the uncle"
 
         # Leg 1j (QA11 codex major 2 / claude m1): one message is one
         # handoff. Every malformed wire shape is refused with a named
@@ -8189,9 +8547,9 @@ def _watchdog_completion_case(mode):
         os.close(pipe_write)
         plain_a.close()
         plain_b.close()
-        assert _kill_proved_child(probe_kid), \
+        assert _kill_proved_child(probe_kid, forked=True), \
             "the leg-1j hygiene refused its first child"
-        assert _kill_proved_child(other_kid), \
+        assert _kill_proved_child(other_kid, forked=True), \
             "the leg-1j hygiene refused its second child"
 
         # Leg 1k (QA11 codex major 3): an await failing AFTER the guardian
@@ -8249,11 +8607,13 @@ def _watchdog_completion_case(mode):
 
         baseline = live_pidfds()
         with tempfile.TemporaryDirectory(prefix="opf-fdleak-") as directory:
+            leak_release = os.pipe()
             pair_globals = _pidfd_handoff_fork_send.__globals__
             pair_globals["_pidfd_handoff_pair"] = holding_pair
             try:
                 with patch.object(Path, "exists", frozen_await_fault):
-                    refuses(RuntimeError, lambda: frozen_pair(Path(directory)))
+                    refuses(RuntimeError,
+                            lambda: frozen_pair(Path(directory), leak_release))
             finally:
                 pair_globals["_pidfd_handoff_pair"] = real_pair
             assert held_pairs, "the holder saw no handoff pair"
@@ -8265,10 +8625,12 @@ def _watchdog_completion_case(mode):
                 "the failing await stranded a descriptor",
                 live_pidfds(), baseline)
             # Hygiene: the model guardian froze with its leader alive. Its
-            # children are read while it is stopped; the ownership proofs
-            # then license both kills -- the guardian directly, each child
-            # once the guardian's death reparents it to this subreaper
-            # case process.
+            # children are read while it is stopped -- DISCLOSURE only. The
+            # guardian is this process's own declared fork; the reparented
+            # leader is an ADOPTED current child, which licenses NO signal
+            # (D-385-CURRENT-CHILD: the retired adoption proof killed it
+            # right here, so the refusals below are the revert flip) -- it
+            # is released by the pipe EOF and exits on its own.
             mine = Path("/proc/self/task", str(os.getpid()),
                         "children").read_text(encoding="ascii").split()
             assert len(mine) == 1, (
@@ -8277,11 +8639,16 @@ def _watchdog_completion_case(mode):
             guardian = int(mine[0])
             orphans = Path("/proc", str(guardian), "task", str(guardian),
                            "children").read_text(encoding="ascii").split()
-            assert _kill_proved_child(guardian), \
+            assert _kill_proved_child(guardian, forked=True), \
                 "the leg-1k hygiene refused the frozen guardian"
             for orphan in orphans:
-                assert _kill_proved_child(int(orphan)), \
-                    "the leg-1k hygiene refused the reparented leader"
+                assert not _kill_proved_child(int(orphan)), \
+                    "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(leak_release[1])
+            for orphan in orphans:
+                await_state(int(orphan), (None, "Z"),
+                            "the leg-1k EOF release did not complete")
+            os.close(leak_release[0])
 
         # Leg 1l (QA11 codex major 3, receiver path; reshaped by QA12 codex
         # blocker 1: the send comes from a dedicated NON-subreaper sender
@@ -8294,6 +8661,11 @@ def _watchdog_completion_case(mode):
         # received pidfd: every received descriptor is closed before the
         # close failure propagates, pinned by the same live-pidfd census.
         victim_read, victim_write = os.pipe()
+        # The victim parks on a pipe this case holds: the hygiene below ends
+        # it by EOF, never by a signal to an adopted current child
+        # (D-385-CURRENT-CHILD); the pid written over victim_write is
+        # DISCLOSURE only.
+        victim_release = os.pipe()
         handoff, handoff_peer = _pidfd_handoff_pair()
         sender = os.fork()
         if sender == 0:
@@ -8302,7 +8674,8 @@ def _watchdog_completion_case(mode):
                 os.close(victim_read)
                 victim = os.fork()
                 if victim == 0:
-                    time.sleep(3600)
+                    os.close(victim_release[1])
+                    os.read(victim_release[0], 1)
                     os._exit(0)
                 if not _pidfd_handoff_send(handoff_peer, victim):
                     os._exit(123)
@@ -8335,8 +8708,16 @@ def _watchdog_completion_case(mode):
         assert live_pidfds() == baseline, (
             "the raising close stranded the received pidfd",
             live_pidfds(), baseline)
-        assert _kill_proved_child(victim), \
-            "the leg-1l hygiene refused the victim"
+        # D-385-CURRENT-CHILD: the victim reparented to this subreaper case
+        # process when its sender exited, but adoption licenses NO signal --
+        # the helper refuses the undeclared target (the retired adoption
+        # proof killed it right here) and the victim is released by EOF.
+        assert not _kill_proved_child(victim), \
+            "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+        os.close(victim_release[1])
+        await_state(victim, (None, "Z"),
+                    "the leg-1l EOF release did not complete")
+        os.close(victim_release[0])
 
         # Leg 1m (QA12 claude m4): an await failing AFTER the leader
         # descriptor was received unwinds frozen_pair with EVERY resource
@@ -8387,11 +8768,13 @@ def _watchdog_completion_case(mode):
 
         baseline = live_handoff_resources()
         with tempfile.TemporaryDirectory(prefix="opf-fdleak2-") as directory:
+            leak_release = os.pipe()  # a pipe: outside the pidfd/socket census
             pair_globals = _pidfd_handoff_fork_send.__globals__
             pair_globals["_pidfd_handoff_pair"] = recording_pair
             try:
                 with patch.object(os, "getpgid", pgid_await_fault):
-                    refuses(RuntimeError, lambda: frozen_pair(Path(directory)))
+                    refuses(RuntimeError,
+                            lambda: frozen_pair(Path(directory), leak_release))
             finally:
                 pair_globals["_pidfd_handoff_pair"] = real_pair
             assert created_pairs, "the recorder saw no handoff pair"
@@ -8402,8 +8785,9 @@ def _watchdog_completion_case(mode):
             assert live_handoff_resources() == baseline, (
                 "the post-receive unwind stranded a descriptor or socket",
                 live_handoff_resources(), baseline)
-            # Hygiene, exactly as in leg 1k: the model guardian froze with
-            # its leader alive; the ownership proofs license both kills.
+            # Hygiene, exactly as in leg 1k: the guardian is this process's
+            # own declared fork; the reparented leader is an ADOPTED current
+            # child -- refused (D-385-CURRENT-CHILD) and released by EOF.
             mine = Path("/proc/self/task", str(os.getpid()),
                         "children").read_text(encoding="ascii").split()
             assert len(mine) == 1, (
@@ -8412,11 +8796,16 @@ def _watchdog_completion_case(mode):
             guardian = int(mine[0])
             orphans = Path("/proc", str(guardian), "task", str(guardian),
                            "children").read_text(encoding="ascii").split()
-            assert _kill_proved_child(guardian), \
+            assert _kill_proved_child(guardian, forked=True), \
                 "the leg-1m hygiene refused the frozen guardian"
             for orphan in orphans:
-                assert _kill_proved_child(int(orphan)), \
-                    "the leg-1m hygiene refused the reparented leader"
+                assert not _kill_proved_child(int(orphan)), \
+                    "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            os.close(leak_release[1])
+            for orphan in orphans:
+                await_state(int(orphan), (None, "Z"),
+                            "the leg-1m EOF release did not complete")
+            os.close(leak_release[0])
 
         # Leg 1n (QA12 codex major 2): _close_every -- the one route for
         # every multi-descriptor cleanup above -- closes EVERY descriptor
@@ -8540,7 +8929,8 @@ def _watchdog_completion_case(mode):
         assert state(own) in ("S", "R"), (
             "the refused handoff's child did not survive untouched",
             state(own))
-        assert _kill_proved_child(own), "the leg-1o hygiene refused its child"
+        assert _kill_proved_child(own, forked=True), \
+            "the leg-1o hygiene refused its child"
 
         # Leg 1p (QA12 claude m4): a send that refuses must not leave the
         # child _pidfd_handoff_fork_send just forked running (or rotting)
@@ -8684,7 +9074,7 @@ def _watchdog_completion_case(mode):
                         "subject SIGKILL")
             os.close(fd)
             os.close(guardian_fd)
-            assert _kill_proved_child(guardian, signal.SIGCONT), \
+            assert _kill_proved_child(guardian, signal.SIGCONT, forked=True), \
                 "the leg-4 release refused the frozen guardian"
             os.waitpid(guardian, 0)
 
@@ -8878,16 +9268,20 @@ def _watchdog_completion_case(mode):
             assert ("subject SIGKILL attempted through its held "
                     "pidfd") in named, named
             assert "SIGKILL sent" not in named, named
-            # Hygiene through the ownership proof alone (QA8). Collect the guardian
-            # FIRST (SIGKILLed by the escalate finally; its delivery is asynchronous,
-            # so the proof must not race it): once it is reaped, the surviving frozen
-            # subject has reparented to this subreaper case process and the proof
-            # owns it.
+            # Collect the guardian FIRST (SIGKILLed by the escalate finally;
+            # its delivery is asynchronous): the surviving frozen subject then
+            # reparents to this subreaper case process. D-385-CURRENT-CHILD:
+            # adoption licenses NO signal -- the helper refuses the undeclared
+            # target (the retired adoption proof killed it right here) -- and
+            # the hygiene kill runs through the HELD handoff descriptor its
+            # forking guardian sent, the one licensed route.
             os.waitpid(guardian, 0)
-            assert _kill_proved_child(leader), \
-                "the leg-8 hygiene refused the orphaned subject"
+            assert not _kill_proved_child(leader), \
+                "an adopted current child was signalled (D-385-CURRENT-CHILD)"
+            assert _kill_proved_child(leader, pidfd=leader_fd), \
+                "the leg-8 handoff hygiene refused the subject"
             await_state(leader, (None, "Z"),
-                        "the leg-8 hygiene did not complete")
+                        "the leg-8 handoff hygiene did not complete")
             os.close(guardian_fd)
             os.close(leader_fd)
 
@@ -14894,6 +15288,7 @@ def _watchdog_regression_self_test():
                         "fd-hygiene-total", "nested-keep", "fd-census",
                         "subject-gc", "guardian-preload", "subject-receipt",
                         "subject-ack", "subject-orphan", "pdeathsig",
+                        "drain-adopted",
                         "escalation-subject", "escalate-reaped",
                         "poll-collected", "close-cancel",
                         "escalate-degraded", "poll-masked",
