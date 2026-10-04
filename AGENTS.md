@@ -1195,7 +1195,7 @@ yields a passing verdict only with a zero exit, a complete structured result wri
 cleanup, and no fault on its error stream, one that unreviewed or unpinned code cannot redirect or silence.
 In process, each channel is covered, unreachable, or disclosed under the gate-discipline rule, a
 fault-to-pass channel never merely disclosed; such review and pinning exempt from this only the channel by
-which loaded code replaces that machinery.
+which loaded code replaces that machinery, disclosed as a residual.
 
 ## Validate federated identity and token flows
 
