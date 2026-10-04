@@ -1143,7 +1143,8 @@ def _entry_named(rel, seen, created, txn, mine, maybe_mine):
     (text, True when it is this run's or may be). The lock is this run's ONLY when it is the inode this
     run's acquire wrote (`mine`); with no such identity it may be this run's only while `maybe_mine` (an
     acquire of this run may have created it), else it is another run's. A changed component of the journal
-    path itself may be this run's: its preparation may have recreated it after `created` was taken."""
+    path itself may be this run's when it is a directory: its preparation may have recreated it after
+    `created` was taken; it creates nothing else there."""
     named = "{} ({})".format(rel, seen[0])
     journal = JOURNAL_REL + "/"
     if rel in created:
@@ -1157,8 +1158,11 @@ def _entry_named(rel, seen, created, txn, mine, maybe_mine):
             return named + ", another run's journal lock, not this run's", False
         return named + ", a journal lock", True
     if rel in _journal_components():
-        return named + ", a component of the journal path that changed since this run began, possibly " \
-                       "recreated by this run", True
+        if seen[0] == "directory":
+            return named + ", a component of the journal path that changed since this run began, possibly " \
+                           "recreated by this run", True
+        return named + ", a component of the journal path that changed since this run began, now a {}, " \
+                       "which this run never creates there".format(seen[0]), False
     if (rel.startswith(journal) and "/" not in rel[len(journal):] and seen[0] != "directory"
             and rel != journal + "lock.break"):
         return named + (", a stray entry: the next run refuses on it as unreadable and reconcile() does not "
@@ -1172,8 +1176,8 @@ def _observed(before, after, created, txn, mine=None, maybe_mine=False):
     journal not fully observed, which is named first and always stands in place of the claim, even when
     both listings failed alike. Then each entry present now that was not (or not as the same type and
     inode), under a lead-in that attributes them to this run only when one of them is (or may be) its
-    own, then each entry gone. `ours` is True when any clause concerns what this run wrote or cannot
-    rule out."""
+    own, then each entry gone, never one at or below a directory either listing could not see. `ours` is
+    True when any clause concerns what this run wrote or cannot rule out."""
     blind = {}
     for listing in (before, after):
         for rel, seen in listing.items():
@@ -1191,7 +1195,9 @@ def _observed(before, after, created, txn, mine=None, maybe_mine=False):
         said.append(("the adoption journal now holds entries it did not hold when this run began: " if ours
                      else "the adoption journal now holds entries it did not hold when this run began, not "
                      "attributed to this run: ") + ", ".join(text for text, _own in named))
-    gone = sorted(rel for rel in before if rel not in after and rel not in blind)
+    unseen = [rel[:-2] if rel.endswith("/*") else rel for rel in blind]
+    gone = sorted(rel for rel in before if rel not in after and not any(
+        rel == top or rel.startswith(top + "/") for top in unseen))
     if gone:
         said.append("entries present when this run began are gone: {}".format(", ".join(gone)))
     return said, ours
@@ -2954,12 +2960,13 @@ def _self_test_checks():
     # 6a10: the closing listing keys the journal by the descriptor it opened, never by its stat by name: a
     # swap timed between that stat and that open, over the journal this run wrote to (swap) or with the
     # original restored there (swap and restore), never reads as "nothing written" and names the change
-    # (red against a listing keyed by the stat before its open).
-    for restore in (False, True):
+    # (red against a listing keyed by the stat before its open). The same swap at `adopt` never states as
+    # gone the journal beneath it, which that listing did not see (red against "gone" for unseen entries).
+    for comp, restore in (("journal", False), ("journal", True), ("adopt", False), ("adopt", True)):
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
             root, files = fixture(temp)
-            jpath = root / JOURNAL_REL
-            os.makedirs(jpath)
+            os.makedirs(root / JOURNAL_REL)
+            jpath = root / JOURNAL_REL if comp == "journal" else root / JOURNAL_REL.rsplit("/", 1)[0]
             armed, started = [], []
             real_capture, real_ensure, real_release, real_open = (
                 _journal.capture_preimages, _journal.ensure_journal_dirs, _journal.release_lock, os.open)
@@ -2974,7 +2981,7 @@ def _self_test_checks():
                 return real_ensure(*args)
 
             def swap_before_open(path, flags, *args, **kwargs):
-                if armed and path == "journal" and flags & os.O_DIRECTORY:
+                if armed and path == comp and flags & os.O_DIRECTORY:
                     armed.clear()
                     os.rename(jpath, root / "retained-journal")
                     if restore:
@@ -2998,11 +3005,12 @@ def _self_test_checks():
             finally:
                 if started:
                     opener.stop()
-            check("pre-intent-journal-stat-open-swap-named" + ("-restore" if restore else ""),
+            held = root / "retained-journal" / ("" if comp == "journal" else "journal")
+            check("pre-intent-{}-stat-open-swap-named".format(comp) + ("-restore" if restore else ""),
                   "refused before it opened" in (err or "") and "nothing written" not in (err or "")
                   and "{} could not be listed (it changed between this listing's stat and its open".format(
-                      JOURNAL_REL) in (err or "") and "this run wrote" in (err or "")
-                  and (root / "retained-journal" / rid / "frames.log").is_file())
+                      jpath.relative_to(root).as_posix()) in (err or "") and "this run wrote" in (err or "")
+                  and " are gone" not in (err or "") and (held / rid / "frames.log").is_file())
     # 6a11: a journal path component that changed since the run began (a concurrent cleanup removed the
     # journal tree after this run took what it creates, so its preparation recreated it) may be this run's:
     # the refusal never hides it under the neutral lead-in (red against attributing it to no one).
@@ -3024,8 +3032,17 @@ def _self_test_checks():
               and "not attributed to this run" not in (err or "") and "this run wrote" in (err or "")
               and "{} (directory), a component of the journal path".format(JOURNAL_REL) in (err or "")
               and "nothing written" not in (err or ""))
+    # 6a11b: only a directory at a journal path component may be this run's recreation; anything else there
+    # is named by its type, never as possibly recreated by this run (red against the label for any type).
+    comp_dir = _entry_named(JOURNAL_REL, ("directory", 1, 2), [], rid, None, False)
+    comp_file = _entry_named(JOURNAL_REL, ("file", 1, 2), [], rid, None, False)
+    check("journal-component-type-named", comp_dir[1] and "possibly recreated by this run" in comp_dir[0]
+          and not comp_file[1] and "possibly recreated" not in comp_file[0]
+          and "{} (file), a component of the journal path that changed since this run began, now a file".format(
+              JOURNAL_REL) in comp_file[0])
     # 6a12: a journal path the closing listing could not reach is said to be unobserved, never to "no
-    # longer resolve" (red against the binding clause that treats an unreached path as absent).
+    # longer resolve" (red against the binding clause that treats an unreached path as absent), and the
+    # journal beneath the unlisted `adopt` is never said to be gone (red against "gone" for unseen entries).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)
         os.makedirs(root / JOURNAL_REL)
@@ -3055,7 +3072,8 @@ def _self_test_checks():
                 opener.stop()
         check("pre-intent-unreached-journal-unobserved", "refused before it opened" in (err or "")
               and "nothing written" not in (err or "") and "no longer resolves" not in (err or "")
-              and "{} could not be observed".format(JOURNAL_REL) in (err or ""))
+              and "{} could not be observed".format(JOURNAL_REL) in (err or "")
+              and " are gone" not in (err or ""))
     # 6a13: an ordinary exception inside acquire, after the lock file exists, is described as an error,
     # never as an interrupt (red against the interrupt wording for every exception).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
