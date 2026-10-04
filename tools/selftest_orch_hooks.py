@@ -892,7 +892,8 @@ def _main_isolated(report_path=None):
               (_verdict(uq), "quote still open" in uq_reason, "detaches a child" in uq_reason),
               ("deny", True, False))
         # The shared fail-closed contract: a missing tool_name, and a cwd that is missing, null, not a
-        # string, or empty, deny (before this fix each reached an allow); a non-Bash tool stays out of scope.
+        # string, or empty, deny (before this fix each reached an allow). The non-Bash row is a CONTROL, not
+        # a regression row: it guards against a new over-deny and passes before and after the fix.
         nocwd = {"hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Bash",
                  "tool_input": {"command": "sleep 5 &"}}
         check("trunc/missing-tool-name-denies", _verdict(aiqt_hooks.orch_truncation_guard(
@@ -906,6 +907,69 @@ def _main_isolated(report_path=None):
         check("trunc/malformed-cwd-empty-denies",
               _verdict(aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=""))), "deny")
         check("trunc/non-bash-tool-allows", raw({"tool_name": "Write", "tool_input": None}), "allow")
+        # A present but empty or non-string tool_name cannot be matched, so it denies (the wrtscp precedent)
+        # instead of reading as a non-Bash tool; before this fix each reached the out-of-scope allow.
+        check("trunc/malformed-tool-name-empty-denies", raw({"tool_name": ""}), "deny")
+        check("trunc/malformed-tool-name-int-denies", raw({"tool_name": 5}), "deny")
+        check("trunc/malformed-tool-name-list-denies", raw({"tool_name": ["Bash"]}), "deny")
+        # A string cwd that is not a readable directory, carries a NUL, or whose repository discovery fails
+        # (an error, a timeout, a git refusal such as a bare repository) denies with a named reason; before
+        # this fix each collapsed to "no root" and was allowed as an out-of-scope session. Only a readable
+        # directory that git confirms is in no repository stays an allow (the CONTROL row, which passes
+        # before and after the fix).
+        def _cwd_case(cwd):
+            res = aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=cwd))
+            why = (res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+            return _verdict(res), why
+        cv, cw = _cwd_case(str(t.root) + "\x00x")
+        check("trunc/cwd-nul-denies", (cv, "NUL" in cw), ("deny", True))
+        cv, cw = _cwd_case(str(tmp / "no-such-dir"))
+        check("trunc/cwd-nonexistent-denies", (cv, "not an existing path" in cw), ("deny", True))
+        (tmp / "cwd-file.txt").write_text("x\n", encoding="utf-8")
+        cv, cw = _cwd_case(str(tmp / "cwd-file.txt"))
+        check("trunc/cwd-regular-file-denies", (cv, "not a directory" in cw), ("deny", True))
+        # An unreadable directory: os.access is patched for this one path only (a root-run self-test would
+        # otherwise read every directory as readable).
+        noread = tmp / "cwd-noread"
+        noread.mkdir()
+        saved_access = aiqt_hooks.os.access
+
+        def _no_access(path, mode, *a, **k):
+            return False if str(path) == str(noread) else saved_access(path, mode, *a, **k)
+        try:
+            aiqt_hooks.os.access = _no_access
+            cv, cw = _cwd_case(str(noread))
+        finally:
+            aiqt_hooks.os.access = saved_access
+        check("trunc/cwd-unreadable-dir-denies", (cv, "cannot read and enter" in cw), ("deny", True))
+        bare = tmp / "cwd-bare.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True,
+                       timeout=30)
+        cv, cw = _cwd_case(str(bare))
+        check("trunc/cwd-bare-repo-discovery-fails-denies", (cv, "discovery failed" in cw), ("deny", True))
+        saved_git = aiqt_hooks._recovery_git
+
+        def _git_timeout(*_a, **_k):
+            raise subprocess.TimeoutExpired(["git"], 5)
+
+        def _git_oserror(*_a, **_k):
+            raise OSError("simulated spawn failure")
+        try:
+            aiqt_hooks._recovery_git = _git_timeout
+            cv, cw = _cwd_case(str(t.root))
+            check("trunc/cwd-discovery-timeout-denies", (cv, "timed out" in cw), ("deny", True))
+            aiqt_hooks._recovery_git = _git_oserror
+            cv, cw = _cwd_case(str(t.root))
+            check("trunc/cwd-discovery-error-denies", (cv, "discovery failed (OSError)" in cw),
+                  ("deny", True))
+        finally:
+            aiqt_hooks._recovery_git = saved_git
+        outside = tmp / "cwd-outside"
+        outside.mkdir()
+        probe = subprocess.run(["git", "-C", str(outside), "rev-parse", "--show-toplevel"],
+                               capture_output=True, text=True, timeout=30)
+        check("trunc/cwd-confirmed-outside-repo-allows",
+              (probe.returncode, _cwd_case(str(outside))[0]), (128, "allow"))
         # The shared dispatcher fails closed on ANY exception while reading stdin: deeply nested JSON raises
         # RecursionError and a read can raise MemoryError, which the old narrow except let escape as a
         # traceback with exit 1 (non-blocking). A PreToolUse hook now exits 2 naming the exception; a Stop
@@ -1794,7 +1858,8 @@ def _main_isolated(report_path=None):
           "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
           "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "
           "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, and fails "
-          "closed on a missing tool_name, an unreadable cwd, a malformed tool_input, run_in_background, or "
+          "closed on a missing or unreadable tool_name, an unreadable cwd or one whose repository discovery "
+          "fails, a malformed tool_input, run_in_background, or "
           "command, and on any stdin the dispatcher cannot parse; the ledger records launches "
           "and completions; the resume "
           "audit arms and clears the mutation barrier on real record state; the prompt stamp "

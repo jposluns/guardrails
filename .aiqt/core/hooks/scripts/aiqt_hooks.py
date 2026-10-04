@@ -8022,6 +8022,60 @@ def _orch_root(data):
     return _recovery_toplevel(cwd)
 
 
+# git's own report that discovery walked up from cwd and found no repository, under the C locale: either the
+# whole parent chain was searched, or discovery stopped at a filesystem boundary
+# (GIT_DISCOVERY_ACROSS_FILESYSTEM is scrubbed with every other GIT_* variable). Any other failure (a bare
+# repository, a git directory, an ownership refusal, a broken gitfile) is NOT this message and is a
+# discovery failure.
+_ORCH_NOT_A_REPO_RE = re.compile(
+    r"fatal: not a git repository \(or any of the parent directories\): \.git\n"
+    r"|fatal: not a git repository \(or any parent up to mount point [^\n]*\)\n"
+    r"Stopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.\n",
+    re.IGNORECASE)
+
+
+def _orch_cwd_scope(cwd):
+    """Locate the session repository for a non-empty string cwd, telling a CONFIRMED non-repository apart
+    from a discovery that could not finish. Returns ('root', toplevel) when git resolves a work-tree
+    toplevel; ('outside', None) ONLY when cwd is an existing directory this process can read and enter AND
+    git's own discovery reports that no repository contains it (_ORCH_NOT_A_REPO_RE, read under the C
+    locale so the message is never translated); ('fail', detail) otherwise: a NUL in the path, a path that
+    cannot be stat'ed or is not a directory, an unreadable directory, or a rev-parse that cannot start,
+    times out, prints an unusable toplevel, or exits non-zero with any other message (a bare repository, a
+    git directory, a dubious-ownership refusal). The probe is the same scrubbed primitive as _orch_root
+    (_recovery_git), so this decides scope exactly as git would from cwd; a directory git itself does not
+    recognize as a repository (for example a damaged .git directory it skips) counts as outside."""
+    if "\x00" in cwd:
+        return ("fail", "contains a NUL character")
+    try:
+        st = os.stat(cwd)
+    except (OSError, ValueError) as exc:
+        return ("fail", "is not an existing path ({})".format(type(exc).__name__))
+    if not stat.S_ISDIR(st.st_mode):
+        return ("fail", "is not a directory")
+    if not os.access(cwd, os.R_OK | os.X_OK):
+        return ("fail", "is a directory this process cannot read and enter")
+    try:
+        result = _recovery_git(cwd, ["rev-parse", "--show-toplevel"],
+                               env_extra={"LC_ALL": "C", "LANGUAGE": ""}, timeout=5)
+    except subprocess.TimeoutExpired:
+        return ("fail", "could not be resolved: repository discovery (git rev-parse --show-toplevel) "
+                        "timed out")
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        return ("fail", "could not be resolved: repository discovery failed ({})".format(type(exc).__name__))
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    if result.returncode == 0:
+        top = stdout[:-1] if stdout.endswith("\n") else stdout   # git's one terminator, as _recovery_toplevel
+        if not top or not os.path.isabs(top):
+            return ("fail", "could not be resolved: repository discovery returned no absolute toplevel")
+        return ("root", top)
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
+    if result.returncode == 128 and _ORCH_NOT_A_REPO_RE.fullmatch(stderr):
+        return ("outside", None)
+    return ("fail", "could not be resolved: repository discovery failed (git rev-parse exited {}: {})"
+            .format(result.returncode, " ".join(stderr.split())[:120] or "no message"))
+
+
 def _orch_registry(root):
     """Load the orchestration registry: ('absent', None) only when a registry file is genuinely NOT PRESENT
     (a clean lstat FileNotFoundError; the suite is inert by design), ('ok', dict) on a schema-valid
@@ -9438,15 +9492,19 @@ def _orch_foreground_detach(command):
     only in the safe direction: the same body quotes cause the quote-shift false-allow below.
 
     KNOWN FALSE-ALLOW RESIDUAL (confirmed against real bash, disclosed in the manifest, which lists the same
-    five cases): the scan reads only the outer quoting level, so a real detach is NOT seen (1) when its `&`
-    sits inside a command substitution or backtick wrapped in double quotes (echo "$(job &)"); (2) inside
-    a string that eval or quote removal re-reads as code (e'v'al 'job &', {eval,} 'job &', \\eval 'job &');
-    (3) after an ANSI-C $'...' quote with an escaped quote that leaves the scan balanced but misaligned;
-    (4) inside an arithmetic subscript that runs a substitution; (5) QUOTE SHIFT: after a quote character
-    that bash reads as data but the scan reads as a quote, above all an apostrophe or double quote in a
-    here-document body (quoted delimiter or not, including the commit-message form); the scan then reads a
-    LATER real bare `&` (between two here-documents, or before a second stray quote that rebalances the
-    scan) as quoted text and allows it."""
+    cases): the scan reads only the outer quoting level, and its quote and comment tracking can diverge from
+    bash's in further ways than those listed here, so this list is NOT complete. Known cases include a real
+    detach that is NOT seen (1) when its `&` sits inside a command substitution or backtick wrapped in
+    double quotes (echo "$(job &)"); (2) inside a string that eval or quote removal re-reads as code
+    (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3) after an ANSI-C $'...' quote with an escaped
+    quote that leaves the scan balanced but misaligned; (4) inside an arithmetic subscript that runs a
+    substitution; (5) QUOTE SHIFT: after a quote character that bash reads as data but the scan reads as a
+    quote, above all an apostrophe or double quote in a here-document body (quoted delimiter or not,
+    including the commit-message form); the scan then reads a LATER real bare `&` (between two
+    here-documents, or before a second stray quote that rebalances the scan) as quoted text and allows it;
+    and (6) COMMENT SHIFT: after a `#` that follows a blank inside an unquoted ${...} parameter expansion,
+    which bash reads as expansion text but the scan reads as a comment start, so a real bare `&` later on
+    that line is skipped (echo ${x:- #} & job, echo ${line%% #*} & job)."""
     return _orch_foreground_detach_kind(command) is not None
 
 
@@ -9550,13 +9608,27 @@ def orch_truncation_guard(data):
     malformed, never read as foreground), and a command that is not a string are each DENIED with a
     reason naming the defect, never silently allowed. REGISTRY SCOPE (a disclosed residual, not a
     fail-closed case): the registry is this suite's scope declaration, so with NO registry file present the
-    guard is inert and allows every Bash call, while a present-but-unreadable or invalid registry keeps it
-    active. A missing tool_name and a cwd that is missing, null, empty, or not a string are checked BEFORE
-    the registry scope (no root can be located without a cwd), so they deny in every session; a readable
-    cwd outside any git repository is out of scope (allow), and a non-Bash tool_name is out of scope."""
+    guard is inert and allows every Bash call that passes the pre-scope checks below, while a
+    present-but-unreadable or invalid registry keeps it active. PRE-SCOPE DENIES, checked BEFORE the
+    registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
+    or not a string; a cwd that is missing, null, empty, or not a string; and a string cwd that contains a
+    NUL, is not an existing directory this process can read, or whose repository discovery fails (an error,
+    a timeout, or any git refusal other than its not-a-repository report: _orch_cwd_scope). Only a readable
+    directory that git's own discovery confirms is in no repository is out of scope (allow), and a
+    non-Bash string tool_name is out of scope."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name("trkasy")
+    if not isinstance(tool_name, str) or not tool_name:
+        # A present but empty or non-string tool_name cannot be matched, so it is not read as a non-Bash
+        # tool (the wrtscp precedent): it is denied, never allowed out of scope.
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (fail-closed): malformed payload: tool_name is {}, not a "
+            "non-empty string, so this guard cannot tell whether the call is a Bash call; it is denied "
+            "rather than allowed unread (check-fails-closed-on-unreadable)."
+            .format("empty" if tool_name == "" else _orch_json_kind(tool_name)),
+            "AIQT guardrail: denied a PreToolUse call with an unreadable tool_name (rule trkasy, "
+            "fail-closed).")
     if tool_name != "Bash":
         return _allow()
     cwd = data.get("cwd")
@@ -9568,9 +9640,18 @@ def orch_truncation_guard(data):
             "registry; it is denied rather than allowed unread (check-fails-closed-on-unreadable). Re-issue "
             "the call with a string cwd.".format(kind),
             "AIQT guardrail: denied a Bash call with no readable cwd (rule trkasy, fail-closed).")
-    root = _orch_root(data)
-    if root is None:
-        return _allow()
+    scope, found = _orch_cwd_scope(cwd)
+    if scope == "fail":
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (fail-closed): this Bash call's cwd {}, so this guard "
+            "cannot establish whether the session is in a repository carrying an orchestration registry; "
+            "it is denied rather than read as out of scope (check-fails-closed-on-unreadable). Re-issue the "
+            "call from an existing, readable directory.".format(found),
+            "AIQT guardrail: denied a Bash call whose cwd could not be resolved to a repository or a "
+            "confirmed non-repository (rule trkasy, fail-closed).")
+    if scope == "outside":
+        return _allow()  # a readable directory git confirms is in no repository: not an orchestrated session
+    root = found
     status, _reg = _orch_registry(root)
     if status == "absent":
         return _allow()  # registry-scoped by design: a disclosed residual (see the docstring)
