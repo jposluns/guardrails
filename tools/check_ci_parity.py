@@ -4564,15 +4564,14 @@ def self_test():
             ("self_test", "splitlines"): 3,
         },
         "tools/selftest_git_fixture_env.py": {
-            ("_archive_reads_use_caller_env", "read_text"): 1,
+            # QA round 6 (claude B1): the five tree-scanning helpers now read through
+            # read_text_nonblocking, so their Path.read_text sites are gone from this pin; the
+            # two remaining read_text sites read a Trace2 event log and a copied fixture this
+            # suite itself created under tempfile, never the repository tree.
             ("_auto_maintenance_children", "read_text"): 1,
             ("_auto_maintenance_children", "splitlines"): 1,
-            ("_binding_calls", "read_text"): 1,
-            ("_caller_env_archive_only", "read_text"): 1,
-            ("_calls_any", "read_text"): 1,
             ("_registered_selftests", "splitlines"): 1,
             ("_require_wrapper_observed", "splitlines"): 1,
-            ("_scrub_scoped_first", "read_text"): 1,
             ("_system_pin_probe", "splitlines"): 1,
             ("_write_report", "open-text"): 1,
             ("prepare", "read_text"): 1,
@@ -4821,6 +4820,58 @@ def self_test():
         failures.append("32c an env: mapping on the precheck step must be refused, got "
                         "{!r} {!r}".format(got_problems, got_diagnostics))
 
+    # QA round 6 (codex M3 = claude M1, claude M4): quoted and space-before-colon spellings are
+    # the SAME YAML key, so the workflow- and job-level checks are an allowlist over the
+    # NORMALIZED key, and ANY env: on a step at or before the precheck is refused (a NODE_OPTIONS
+    # on actions/setup-python runs committed code before the precheck). Each vector fails without
+    # the allowlist-and-normalization change or the at-or-before-precheck env rule.
+    count += 1
+    for label, code_name, mutated_fixture in (
+        ("quoted job env", "job-key",
+         order_fixture.replace("    runs-on: ubuntu-latest\n",
+                               "    runs-on: ubuntu-latest\n    \"env\":\n"
+                               "      BASH_ENV: .aiqt/n.sh\n", 1)),
+        ("spaced job env", "job-key",
+         order_fixture.replace("    runs-on: ubuntu-latest\n",
+                               "    runs-on: ubuntu-latest\n    env :\n"
+                               "      BASH_ENV: .aiqt/n.sh\n", 1)),
+        ("single-quoted job defaults", "job-key",
+         order_fixture.replace("    runs-on: ubuntu-latest\n",
+                               "    runs-on: ubuntu-latest\n    'defaults':\n      run:\n"
+                               "        shell: true {0}\n", 1)),
+        ("unmodelled job key", "job-key",
+         order_fixture.replace("    runs-on: ubuntu-latest\n",
+                               "    runs-on: ubuntu-latest\n    container: alpine\n", 1)),
+        ("quoted workflow env", "workflow-key",
+         order_fixture.replace("jobs:\n", "\"env\":\n  BASH_ENV: .aiqt/n.sh\njobs:\n", 1)),
+        ("quoted jobs spelling", "workflow-key",
+         order_fixture.replace("jobs:\n", "\"jobs\":\n", 1)),
+        ("unmodelled workflow key", "workflow-key",
+         order_fixture.replace("jobs:\n",
+                               "defaults:\n  run:\n    shell: true {0}\njobs:\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
+            failures.append("32d spelling/allowlist mutation not refused ({}): {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    for label, mutated_fixture in (
+        ("NODE_OPTIONS env on setup-python",
+         order_fixture.replace("      - uses: actions/setup-python@v5\n",
+                               "      - uses: actions/setup-python@v5\n        env:\n"
+                               "          NODE_OPTIONS: --require ./.aiqt/n.js\n", 1)),
+        ("env on checkout",
+         order_fixture.replace("      - uses: actions/checkout@v4\n",
+                               "      - uses: actions/checkout@v4\n        env:\n"
+                               "          HARMLESS: one\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any("at or before the special-file precheck" in problem
+                   for problem in got_problems):
+            failures.append("32d {} must be refused, got {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+
     # codex round-4 finding 4: a workflows directory path no path call accepts (an embedded NUL) is a
     # read-error diagnostic, never a raw ValueError. Fails without the (OSError, ValueError) arm.
     count += 1
@@ -4844,6 +4895,30 @@ def self_test():
     )
     return 0
 
+
+
+_YAML_KEY_RE = re.compile(
+    r"""^(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<plain>[^\s'"#][^:]*?))\s*:(?=\s|$)""")
+
+
+def _yaml_mapping_key(stripped):
+    """(normalized key, canonical) for a YAML mapping line (QA round 6, codex M3 = claude M1): a
+    double-quoted, single-quoted or space-before-colon spelling is the SAME YAML key as the plain
+    one, so key checks normalize before comparing; canonical is True only for the plain `key:`
+    spelling (no quoting, no space before the colon). (None, False) for a line that is not a
+    mapping entry this parse can read."""
+    match = _YAML_KEY_RE.match(stripped)
+    if not match:
+        return None, False
+    for group in ("dq", "sq", "plain"):
+        key = match.group(group)
+        if key is not None:
+            return key, group == "plain" and stripped.startswith(key + ":")
+    return None, False
+
+
+WORKFLOW_LEVEL_KEYS = ("jobs", "name", "on", "permissions")
+JOB_LEVEL_KEYS = ("name", "runs-on", "steps", "strategy")
 
 
 def workflow_precheck_order_problems(text, source):
@@ -4906,11 +4981,19 @@ def workflow_precheck_order_problems(text, source):
             in_steps = False
             current_job = None
             step = None
-            if stripped.startswith(("env:", "defaults:")):
+            # QA round 6 (codex M3 = claude M1): workflow-level keys are an ALLOWLIST over the
+            # NORMALIZED key; an unmodelled key (env:, defaults:, ...), or a non-canonical
+            # spelling of a modelled one ("jobs":, env :), is a refusal, because an inherited
+            # execution control there applies to every step and can neuter the precheck without
+            # touching its run body.
+            key, canonical = _yaml_mapping_key(stripped)
+            if key is None or key not in WORKFLOW_LEVEL_KEYS or not canonical:
                 diagnostics.append(_diagnostic(
                     source, number, "workflow-key",
-                    "a workflow-level {}: applies to every step and can neuter the precheck "
-                    "step without touching its run body".format(stripped.split(":")[0])))
+                    "unmodelled or non-canonically spelled workflow-level key {!r}; only the "
+                    "plain spellings of {} are modelled, and anything else (an env: or defaults: "
+                    "above all) can neuter the precheck step without touching its run "
+                    "body".format(stripped, ", ".join(WORKFLOW_LEVEL_KEYS))))
             index += 1
             continue
         if not in_jobs:
@@ -4932,13 +5015,18 @@ def workflow_precheck_order_problems(text, source):
         if indent == 4:
             in_steps = stripped == "steps:"
             step = None
-            if stripped.startswith(("env:", "defaults:", "if:", "continue-on-error:",
-                                    "container:")):
+            # QA round 6 (codex M3 = claude M1): job-level keys are an ALLOWLIST over the
+            # NORMALIZED key, so a quoted "env": or a spaced defaults : cannot slip an inherited
+            # execution control past a spelling blocklist.
+            key, canonical = _yaml_mapping_key(stripped)
+            if key is None or key not in JOB_LEVEL_KEYS or not canonical:
                 diagnostics.append(_diagnostic(
                     source, number, "job-key",
-                    "a job-level {}: is an inherited execution control that can disable the job "
-                    "or neuter its precheck step without touching the step's run "
-                    "body".format(stripped.split(":")[0])))
+                    "unmodelled or non-canonically spelled job-level key {!r}; only the plain "
+                    "spellings of {} are modelled, and anything else (an env:, defaults:, if:, "
+                    "continue-on-error: or container: above all) can disable the job or neuter "
+                    "its precheck step without touching the step's run "
+                    "body".format(stripped, ", ".join(JOB_LEVEL_KEYS))))
             index += 1
             continue
         if not in_steps:
@@ -5049,10 +5137,21 @@ def workflow_precheck_order_problems(text, source):
             problems.append(where + " runs the special-file precheck before checkout, on a tree "
                             "that does not exist yet")
             continue
-        if job_steps[precheck]["env"]:
-            problems.append(where + " carries an env: mapping on the canonical special-file "
-                            "precheck step; a BASH_ENV, ENV or PATH value there can neuter the "
-                            "precheck without touching its run body")
+        for s in job_steps[:precheck + 1]:
+            if not s["env"]:
+                continue
+            if s is job_steps[precheck]:
+                problems.append(where + " carries an env: mapping on the canonical special-file "
+                                "precheck step; a BASH_ENV, ENV or PATH value there can neuter "
+                                "the precheck without touching its run body")
+            else:
+                # QA round 6 (claude M4): a NODE_OPTIONS value on actions/setup-python (or any
+                # variable on a pre-precheck step) can run committed code or poison GITHUB_ENV /
+                # GITHUB_PATH before the precheck step runs, so NO env: at all is modelled there.
+                problems.append(where + " carries an env: mapping on a step at or before the "
+                                "special-file precheck (step at line {}); any variable there can "
+                                "run uncertified code or poison the environment before the "
+                                "precheck runs".format(s["line"]))
         for s in job_steps[:checkout]:
             for line in s["run"]:
                 if line not in PRE_CHECKOUT_RUN_LINES:

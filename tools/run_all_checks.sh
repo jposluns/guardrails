@@ -27,10 +27,11 @@ failed_names=""
 # FIFO above all: a plain read of a FIFO with no writer blocks forever), a symlink to one (a
 # git-ignored link included), an unresolvable (looping) non-ignored symlink, or a non-ignored symlink
 # to a directory outside the repository root is refused by name and the run STOPS here with exit 2; a
-# dangling symlink and a symlink to a regular file pass (neither can block a read), and the contents
-# of git-ignored directories (a stray .venv, editor or build output) are outside the walk: the gates
-# that enumerate and read such content do so through non-blocking, fstat-checked readers that refuse
-# a special file instead of blocking on it (see the precheck docstring for the roster and residual). The
+# dangling symlink and a symlink to a regular file pass (neither can block a read). The walk DESCENDS
+# git-ignored directories (a stray .venv, editor or build output) and every nested .git directory that
+# is not the repository's own git dir, refusing a special file by name wherever it sits; only the
+# contents of an ACCEPTED (ignored, non-shadowing) out-of-root directory link stay outside the walk,
+# covered by the gates' non-blocking, fstat-checked readers (see the precheck docstring). The
 # shell test on the first line is the BOOTSTRAP: python3 would block LOADING the precheck script
 # itself if that path were a FIFO, so a non-regular or symlinked script is refused by name before
 # python3 touches it. Residual: the interpreter binary and THIS runner script are read before the

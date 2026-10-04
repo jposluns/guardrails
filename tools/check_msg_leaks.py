@@ -38,6 +38,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _gen_common import read_source_text  # noqa: E402
 from check_leaks import load_denylist, scan_text  # noqa: E402  shared denylist + scanner (single source)
 from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
@@ -146,7 +147,9 @@ def load_event():
     if not path:
         raise FailClosed("GITHUB_EVENT_PATH is not set")
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"), parse_constant=_reject_json_constant)
+        # read_source_text: a runner-provided path, read through an fstat/S_ISREG-checked
+        # non-blocking reader so a non-regular file is refused by name, never blocked on (QA r6).
+        return json.loads(read_source_text(Path(path)), parse_constant=_reject_json_constant)
     except (OSError, UnicodeError, ValueError) as exc:
         raise FailClosed("cannot read/parse event JSON at {}: {}".format(path, type(exc).__name__))
 

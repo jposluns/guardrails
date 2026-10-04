@@ -168,9 +168,12 @@ def precheck_special_files(root):
     refused by name, because a gate's fixed-path read of that tracked content would follow it out
     of the certified tree.
 
-    SCOPE: the whole tree under root, except every entry named .git (pruned; git's own metadata is
-    outside the tools' read set, but git itself reads it, so a FIFO planted at for example .git/config
-    still hangs the gates that invoke git; removing such a plant needs the operator) and INCLUDING
+    SCOPE: the whole tree under root, except the repository's OWN git dir (the one `git rev-parse
+    --absolute-git-dir` names; git's own metadata is outside the tools' read set, but git itself
+    reads it, so a FIFO planted at for example .git/config still hangs the gates that invoke git;
+    removing such a plant needs the operator). Every OTHER entry named .git, at any depth, is
+    DESCENDED like any directory (QA round 6, claude B1: a gate's tree scan reads into a nested
+    tools/qa/.git like any other path, so a special file there is refused by name), and INCLUDING
     the contents of every git-ignored directory (QA round 5): the walk DESCENDS into ignored
     directories too (scandir and lstat only; no regular file is ever opened and no link is followed
     out of the root), so a special file is refused BY NAME wherever it sits. A socket or FIFO a
@@ -229,10 +232,30 @@ def precheck_special_files(root):
     def _refuse(path, why):
         print("error: {}: refused, {}; remove it; fail-closed".format(path, why), file=sys.stderr)
         raise SystemExit(2)
+    # QA round 6 (claude B1): only the repository's OWN git dir (the one `git rev-parse
+    # --absolute-git-dir` names) is outside the walk; every OTHER entry named .git, at any depth,
+    # is an ordinary directory a gate's tree scan can read into, so it is descended (lstat only)
+    # and a special file inside it is refused by name. When git cannot answer, or answers
+    # malformed, NOTHING named .git is skipped: strictly more refusals, never fewer.
+    own_git_dir = None
+    _dir_out = _git_lines(root, ["rev-parse", "--absolute-git-dir"])
+    if _dir_out is not None:
+        _dir_top = _dir_out[:-1] if _dir_out.endswith(b"\n") else _dir_out
+        if _dir_top and b"\0" not in _dir_top and b"\n" not in _dir_top:
+            try:
+                _dir_text = os.fsdecode(_dir_top)
+                if os.path.isabs(_dir_text):
+                    own_git_dir = os.path.realpath(_dir_text)
+            except (OSError, ValueError):
+                own_git_dir = None
+
+    def _own_git(path):
+        return own_git_dir is not None and os.path.realpath(path) == own_git_dir
     try:
         real_root = os.path.realpath(root)
         for dirpath, dirnames, filenames in os.walk(root, onerror=_raise, followlinks=False):
-            dirnames[:] = [d for d in dirnames if d != ".git"]
+            dirnames[:] = [d for d in dirnames
+                           if not (d == ".git" and _own_git(os.path.join(dirpath, d)))]
             for name in dirnames + filenames:
                 if name != ".gitignore":
                     continue
@@ -263,9 +286,20 @@ def precheck_special_files(root):
             # fixed-path read of that content to a tree this walk cannot certify, so it is refused.
             # ONE cached read-only git query; when git cannot answer, the caller refuses (fail-closed).
             if not tracked_state:
+                # QA round 6 (claude M3): a path shadows tracked content when it has entries in the
+                # INDEX or in HEAD; asking the index alone lets a staged removal (git rm --cached)
+                # hide a shadowing link, so both are unioned. An unborn HEAD (no commit yet)
+                # contributes nothing; any other ls-tree failure is git-cannot-answer (refuse).
                 out = _git_lines(root, ["ls-files", "-z"])
-                tracked_state.append(None if out is None else sorted(
-                    os.fsdecode(raw) for raw in out.split(b"\0") if raw))
+                head = _git_lines(root, ["ls-tree", "-r", "-z", "--name-only", "HEAD"])
+                if head is None and _git_lines(root, ["rev-parse", "--verify", "--quiet",
+                                                      "HEAD"]) is None:
+                    head = b""
+                if out is None or head is None:
+                    tracked_state.append(None)
+                else:
+                    tracked_state.append(sorted(
+                        {os.fsdecode(raw) for raw in out.split(b"\0") + head.split(b"\0") if raw}))
             tracked = tracked_state[0]
             if tracked is None:
                 return None
@@ -291,7 +325,7 @@ def precheck_special_files(root):
                 continue
             for item in entries:
                 name = item.name
-                if name == ".git":
+                if name == ".git" and _own_git(item.path):
                     continue
                 rel = os.path.join(relbase, name) if relbase else name
                 skipped = under_ignored or (ignored is not None and rel in ignored)
@@ -346,7 +380,9 @@ def precheck_special_files(root):
                                       "that tracked path would follow it to a tree this walk "
                                       "cannot certify".format(real))
     except (OSError, ValueError) as exc:  # ValueError: a root path no path call accepts (an embedded NUL)
-        print("error: cannot walk the repository tree {} ({}); fail-closed".format(root, exc), file=sys.stderr)
+        print("error: cannot walk the repository tree {} ({}); fail-closed (an unreadable or "
+              "unwalkable entry, even inside a git-ignored directory, stops the checks by design; "
+              "make it readable or remove it)".format(root, exc), file=sys.stderr)
         raise SystemExit(2)
     _PRECHECKED_ROOTS.add(key)
     return root

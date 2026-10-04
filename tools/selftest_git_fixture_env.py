@@ -72,7 +72,10 @@ import _git_fixture_env  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
 import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
 from _walk import read_text_nonblocking  # noqa: E402  QA r5: tree scans must refuse a special
-# file (for example a FIFO at tools/__pycache__/x.py) by name instead of blocking on it
+# file (for example a FIFO at tools/__pycache__/x.py) by name instead of blocking on it; QA r6
+# (claude B1): EVERY tree scan in this module reads through it, including the nested-.git paths
+# the precheck walk formerly pruned, and the repo-content byte reads go through read_source_bytes.
+from _gen_common import load_toml, read_source_bytes  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
@@ -138,7 +141,7 @@ def _calls_any(member_path, callable_names):
     string can never satisfy the routing check. A member that is unreadable or does not parse is a
     loud failure value, never a silent pass."""
     try:
-        tree = ast.parse(member_path.read_text(encoding="utf-8"))
+        tree = ast.parse(read_text_nonblocking(member_path))
     except (OSError, SyntaxError, ValueError) as exc:
         return "unreadable or unparseable: {}".format(exc)
     for node in ast.walk(tree):
@@ -168,7 +171,7 @@ def _scrub_scoped_first(member_path, func_name, scrub_name):
     or duplicated function, a missing top-level scrub, an earlier launch call, or an unreadable
     or unparseable member is a loud failure value, never a silent pass."""
     try:
-        tree = ast.parse(member_path.read_text(encoding="utf-8"))
+        tree = ast.parse(read_text_nonblocking(member_path))
     except (OSError, SyntaxError, ValueError) as exc:
         return "unreadable or unparseable: {}".format(exc)
 
@@ -215,7 +218,7 @@ def _archive_reads_use_caller_env(member_path, fixture_calls=False):
     With fixture_calls=True, check literal git launches and the hook suite's _git cmd
     builder for git_fixture_env() instead. Other computed commands remain outside coverage."""
     try:
-        tree = ast.parse(member_path.read_text(encoding="utf-8"))
+        tree = ast.parse(read_text_nonblocking(member_path))
     except (OSError, SyntaxError, ValueError) as exc:
         return "unreadable or unparseable: {}".format(exc)
     found = 0
@@ -265,7 +268,7 @@ def _binding_calls(member_path, owner_name, binding, factory, launches=False):
     Syntactic only: aliases, later reassignment and indirect calls are not proved.
     OPF's dict(_scrubbed_env(), HOME=...) is an intentional standalone adapter."""
     try:
-        tree = ast.parse(member_path.read_text(encoding="utf-8"))
+        tree = ast.parse(read_text_nonblocking(member_path))
     except (OSError, SyntaxError, ValueError) as exc:
         return str(exc)
     owners = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
@@ -322,7 +325,7 @@ def _caller_env_archive_only():
                     if not filename.endswith(".py"):
                         continue
                     path = Path(base) / filename
-                    tree = ast.parse(path.read_text(encoding="utf-8"))
+                    tree = ast.parse(read_text_nonblocking(path))
                     parents = {child: node for node in ast.walk(tree)
                                for child in ast.iter_child_nodes(node)}
                     for node in ast.walk(tree):
@@ -497,7 +500,7 @@ def _registered_selftests(root=ROOT):
     if not commands:
         raise ValueError("empty config-injection roster")
     for argv in commands:
-        (root / argv[0]).read_bytes()
+        read_source_bytes(root / argv[0])
     return tuple(sorted(commands))
 
 
@@ -4469,8 +4472,7 @@ def _scan_contract_failures(base):
 
 def _expected_check_ids():
     try:
-        with open(CHECKS_MANIFEST, "rb") as handle:
-            data = tomllib.load(handle)
+        data = load_toml(CHECKS_MANIFEST)
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a
     # RuntimeError) on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).

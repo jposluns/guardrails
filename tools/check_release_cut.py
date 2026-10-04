@@ -542,9 +542,11 @@ def local_report(root, protected=None, before=None):
 
 
 
-# ---- D-400 raw-read lint (QA round 5) -----------------------------------------------------------
-# Every Python gate entry module registered on a non-comment line of the two runners and the two
-# workflow files, plus its in-tree imports (syntactic, transitive), is held to the SHARED
+# ---- D-400 raw-read lint (QA rounds 5 and 6) -----------------------------------------------------
+# Every Python module a registered gate executes -- named on a non-comment line of the two runners
+# or the two workflow files, declared as a `runner` in tools/selftest_checks.toml, present in
+# .preview/ (check_hooks_preview executes each), or one of the two committed hook scripts -- plus
+# its in-tree imports (syntactic, transitive), is held to the SHARED
 # non-blocking readers for file reads: a raw read call (Path.read_text / Path.read_bytes, builtin
 # or io open in a read mode, any other .open(...) in a read mode, or os.open without O_NONBLOCK /
 # O_WRONLY / O_RDWR among its literal flags) outside RAW_READ_ALLOWLIST fails the self-test. The
@@ -583,18 +585,81 @@ def _lint_read_text(path):
     return b"".join(chunks).decode("utf-8")
 
 
+_RAW_READ_HOOK_SCRIPTS = (".aiqt/core/hooks/scripts/aiqt_hooks.py",
+                          "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
+_RAW_READ_SUITE_MANIFEST = "tools/selftest_checks.toml"
+
+
 def _raw_read_entry_modules(root):
-    """Every (opf/)tools/*.py or .github/*.py named on a non-comment line of a registration file;
-    the standalone runner spelling with dollar-here resolves to opf/tools/."""
-    found = set()
+    """(modules, failures): every Python module a REGISTERED gate executes (QA round 6, codex M2 =
+    claude M2), from FOUR registration surfaces: (1) every (opf/)tools/*.py or .github/*.py named
+    on a non-comment line of the two runners and the two workflow files (the dollar-here spelling
+    resolves to opf/tools/); (2) every `runner` of tools/selftest_checks.toml, the suites
+    check_selftest_execution.py dispatches as DATA, which the runner-text regex can never see;
+    (3) every .preview/*.py module check_hooks_preview.py executes with --self-test; and (4) the
+    two committed hook scripts the hook self-tests execute (_RAW_READ_HOOK_SCRIPTS).
+    tools/orch_register.py is NOT enumerated: no registered gate executes it (verified against the
+    runners, the suite manifest, the workflows and check_hooks_preview at QA round 6); register it
+    anywhere and the surfaces above pick it up. A DECLARED module that is missing, unreadable, or
+    not a regular file is a lint FAILURE, never silently dropped: dropping one would silently
+    shrink the enumerated read set (codex M2's FIFO-at-a-module probe)."""
+    import tomllib
+    found, failures = set(), []
+
+    def declare(token, source):
+        try:
+            mode = os.lstat(root / token).st_mode
+            if stat.S_ISLNK(mode):
+                mode = os.stat(root / token).st_mode
+        except (OSError, ValueError) as exc:
+            failures.append("raw-read-lint: {}: declared in {} but missing or unreadable ({}); a "
+                            "declared gate module never drops out of the lint "
+                            "silently".format(token, source, exc))
+            return
+        if not stat.S_ISREG(mode):
+            failures.append("raw-read-lint: {}: declared in {} but not a regular file; a declared "
+                            "gate module never drops out of the lint silently".format(
+                                token, source))
+            return
+        found.add(token)
+
     for rel in _RAW_READ_REGISTRATIONS:
         for line in _lint_read_text(root / rel).splitlines():
             code = line.split("#", 1)[0]
             for token in _RAW_READ_ENTRY_RE.findall(code):
                 token = token.replace("$here/", "opf/tools/")
-                if (root / token).is_file():
-                    found.add(token)
-    return found
+                # a runner or workflow line can NAME a module path in a message; only a path
+                # that is present (a symlink or special file included) is a declaration here
+                if os.path.lexists(root / token):
+                    declare(token, rel)
+    try:
+        manifest = tomllib.loads(_lint_read_text(root / _RAW_READ_SUITE_MANIFEST))
+    except (OSError, ValueError) as exc:  # TOMLDecodeError is a ValueError
+        failures.append("raw-read-lint: {}: unreadable or unparseable ({}); the registered "
+                        "self-test runners cannot be enumerated".format(
+                            _RAW_READ_SUITE_MANIFEST, exc))
+        manifest = {}
+    suites = manifest.get("suite", []) if isinstance(manifest, dict) else []
+    for suite in suites if isinstance(suites, list) else []:
+        runner = suite.get("runner") if isinstance(suite, dict) else None
+        if isinstance(runner, str) and runner.endswith(".py"):
+            declare(runner, _RAW_READ_SUITE_MANIFEST)
+        else:
+            failures.append("raw-read-lint: {}: a suite runner this lint cannot model ({!r}); "
+                            "every registered runner must be an in-tree .py path".format(
+                                _RAW_READ_SUITE_MANIFEST, runner))
+    try:
+        preview_names = sorted(os.listdir(root / ".preview"))
+    except (OSError, ValueError) as exc:
+        failures.append("raw-read-lint: .preview: cannot list the hook-preview directory "
+                        "({})".format(exc))
+        preview_names = []
+    for name in preview_names:
+        if name.endswith(".py"):
+            declare(".preview/" + name, ".preview")
+    for rel in _RAW_READ_HOOK_SCRIPTS:
+        declare(rel, "hook scripts")
+    return found, failures
 
 
 def _raw_read_modules(root):
@@ -602,7 +667,8 @@ def _raw_read_modules(root):
     and, transitively, every in-tree import (resolved against the importer directory, then
     tools/, then opf/tools/, mirroring the sys.path the gates build)."""
     seen = dict()
-    queue = sorted(_raw_read_entry_modules(root))
+    entries, failures = _raw_read_entry_modules(root)
+    queue = sorted(entries)
     while queue:
         rel = queue.pop()
         if rel in seen:
@@ -628,7 +694,7 @@ def _raw_read_modules(root):
                     if (root / candidate).is_file():
                         queue.append(candidate)
                         break
-    return seen
+    return seen, failures
 
 
 def _raw_read_sites(tree):
@@ -692,8 +758,8 @@ def _raw_read_sites(tree):
 
 def _raw_read_lint(root):
     """(failures, (module count, pinned-key count, site count)) for the gate-reachable set."""
-    failures = []
-    modules = _raw_read_modules(root)
+    modules, failures = _raw_read_modules(root)
+    failures = list(failures)
     got_all = dict()
     total = 0
     for rel in sorted(modules):
@@ -715,18 +781,81 @@ def _raw_read_lint(root):
             failures.append("raw-read-lint: {} has {} raw read site(s) but the allowlist pins {}; "
                             "convert the new site or re-pin with a reason".format(
                                 key, count, allowed))
-        elif key.split("::", 1)[0] not in RAW_READ_REASONS:
-            failures.append("raw-read-lint: {} is allowlisted without a RAW_READ_REASONS "
-                            "line".format(key))
+        elif (key not in RAW_READ_SITE_REASONS
+                and key.split("::", 1)[0] not in RAW_READ_REASONS):
+            failures.append("raw-read-lint: {} is allowlisted without a RAW_READ_SITE_REASONS "
+                            "or RAW_READ_REASONS line".format(key))
     for key in sorted(set(RAW_READ_ALLOWLIST) - set(got_all)):
         failures.append("raw-read-lint: stale allowlist entry {} (site converted or removed); "
                         "delete the entry".format(key))
     return failures, (len(modules), len(got_all), total)
 
 
-_RAW_READ_PENDING = ("unconverted pre-existing raw read(s): every in-root input is certified by the D-400\n                     precheck walk, which refuses a special file by name before any gate runs; conversion\n                     to the shared non-blocking readers is tracked by this pin, which only shrinks")
+_RAW_READ_PENDING = ("unconverted pre-existing raw read(s), pending conversion and tracked by this pin, which\n                     only shrinks. The D-400 precheck walk (which descends ignored directories and nested\n                     .git directories and refuses index- or HEAD-shadowing links) certifies IN-ROOT inputs\n                     as defence in depth, but it can never certify a configuration-declared out-of-root\n                     path, the contents of an accepted ignored out-of-root link, or a post-walk write, so\n                     this pin is NOT a per-site certification; sites with a verified per-site reason are\n                     in RAW_READ_SITE_REASONS instead")
 
 RAW_READ_ALLOWLIST = dict((
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_load_gensrc_registry::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_attestation_refs::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_chained_rows::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_checkpoint_union::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_forced_exit_findings::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_merge_pending_findings::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_mode::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_pending_artefact_findings::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_pending_haystack::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_read_jsonl::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::open", 2),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_registry::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_resume_probes::open", 2),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_scope_live::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_turn_state::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_wrtscp_read_json_artifact::open", 1),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::orch_resume_barrier::open", 1),
+    (".preview/clock-inject.py::test_no_wall_clock_verdict::open", 1),
+    (".preview/future-stamp-write.py::r32_check_bash::open", 1),
+    (".preview/future-stamp-write.py::test_no_wall_clock_verdict::open", 1),
+    (".preview/future-stamp-write.py::test_r26_item2_option_arguments_are_not_targets::open", 4),
+    (".preview/future-stamp-write.py::test_r27_perl_stops_parsing_options_at_first_operand::open", 1),
+    (".preview/future-stamp-write.py::test_r27_script_text_naming_store_is_unknown_target::open", 3),
+    (".preview/future-stamp-write.py::test_r28_read_only_sed_mentioning_store_is_no_write::open", 1),
+    (".preview/future-stamp-write.py::test_r29_long_option_abbreviations_resolved::open", 2),
+    (".preview/future-stamp-write.py::test_r30_every_operand_written_under_exchange_or_directory::open", 1),
+    (".preview/future-stamp-write.py::test_r30_install_context_arity_union::open", 1),
+    (".preview/future-stamp-write.py::test_r30_perl_help_and_version_exit_writing_nothing::open", 2),
+    (".preview/future-stamp-write.py::test_r31_help_and_version_exit_on_every_modeled_tool::open", 1),
+    (".preview/future-stamp-write.py::test_r31_literal_counts_only_for_the_write_it_feeds::open", 1),
+    (".preview/future-stamp-write.py::test_r31_literal_shell_c_strings_are_inspected::open", 1),
+    (".preview/future-stamp-write.py::test_r31_relative_targets_resolve_against_cwd_and_cd::open", 1),
+    (".preview/record-remove-check.py::snapshot::open", 1),
+    (".preview/record-remove-check.py::test_16_directory_stdin_guard::os.open", 1),
+    (".preview/record-remove-check.py::test_23_no_internal_names::open", 1),
+    (".preview/record-remove-check.py::test_23_source_house_rules::open", 1),
+    (".preview/record-remove-check.py::test_23_strip_keeps_meaning::open", 1),
+    (".preview/record-remove-check.py::test_23_vendor_byte_identity::open", 1),
+    (".preview/record-remove-check.py::vendor_blocks::open", 1),
+    (".preview/stamp-truth-stop.py::loop7::open", 2),
+    (".preview/stamp-truth-stop.py::read_cursor::os.open", 1),
+    (".preview/stamp-truth-stop.py::test_no_wall_clock_verdict::open", 1),
+    (".preview/stamp-truth-stop.py::test_r28_concurrent_stops_cannot_rearm_counter::open", 2),
+    (".preview/stamp-truth-stop.py::test_r28_lock_unavailable_writes_no_state::open", 3),
+    (".preview/stamp-truth-stop.py::test_r29_disturbed_overlap_stays_bounded::open", 1),
+    (".preview/stamp-truth-stop.py::test_r29_state_io_is_relative_to_the_locked_dir::os.open", 1),
+    (".preview/stamp-truth-stop.py::test_reverse_records_exact_with_offsets::os.open", 1),
+    (".preview/stamp-truth-stop.py::test_state_symlink_not_followed::open", 1),
+    (".preview/stamp-truth-stop.py::write::open", 1),
+    (".preview/unbounded-wait.py::test_14_directory_stdin_guard::os.open", 1),
+    (".preview/unbounded-wait.py::test_15_source_house_rules::open", 1),
+    (".preview/unbounded-wait.py::test_15_vendor_byte_identity::open", 1),
+    (".preview/unbounded-wait.py::test_r1_06_public_name::open", 1),
+    (".preview/unbounded-wait.py::test_r3_06_no_internal_names::open", 1),
+    (".preview/unbounded-wait.py::test_r4_02_strip_keeps_meaning::open", 1),
+    (".preview/unbounded-wait.py::vendor_blocks::open", 1),
+    (".preview/ungated-record.py::test_20_directory_stdin_guard::os.open", 1),
+    (".preview/ungated-record.py::test_21_no_internal_names::open", 1),
+    (".preview/ungated-record.py::test_21_source_house_rules::open", 1),
+    (".preview/ungated-record.py::test_21_vendor_byte_identity::open", 1),
+    (".preview/ungated-record.py::test_r4_02_strip_keeps_meaning::open", 1),
+    (".preview/ungated-record.py::vendor_blocks::open", 1),
     ("opf/tools/_commonmark_headings.py::verify_vendor_manifest::open", 2),
     ("opf/tools/_journal.py::_fsync_contained_dir::os.open", 1),
     ("opf/tools/_journal.py::_fsync_path_dir::os.open", 1),
@@ -919,6 +1048,23 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/opf.py::walk::os.open", 1),
     ("opf/tools/selftest_commonmark_conformance.py::_load_examples::open", 1),
     ("opf/tools/selftest_commonmark_headings.py::sha::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_load_gensrc_registry::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_attestation_refs::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_chained_rows::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_checkpoint_union::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_forced_exit_findings::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_merge_pending_findings::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_mode::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_pending_artefact_findings::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_pending_haystack::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_read_jsonl::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::open", 2),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_registry::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_resume_probes::open", 2),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_scope_live::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_turn_state::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_wrtscp_read_json_artifact::open", 1),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::orch_resume_barrier::open", 1),
     ("tools/_close_selftest.py::devnull::os.open", 1),
     ("tools/_gen_common.py::read_source_bytes::os.open", 1),
     ("tools/_qa_adapter.py::_classify_presence::open", 1),
@@ -951,7 +1097,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_leaks.py::load_denylist::read_text", 1),
     ("tools/check_manifest.py::_self_test_main_isolated::read_bytes", 4),
     ("tools/check_manifest.py::_self_test_main_isolated::read_text", 6),
-    ("tools/check_msg_leaks.py::load_event::read_text", 1),
     ("tools/check_newtab.py::_self_test::read_bytes", 1),
     ("tools/check_opf_standalone_closure.py::self_test_main::read_text", 1),
     ("tools/check_overclaim.py::_asset_closure_self_test::attr.open", 1),
@@ -964,8 +1109,6 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_python_launcher_isolation.py::_read_required_text::read_text", 1),
     ("tools/check_python_launcher_isolation.py::_scan_workflows::read_text", 1),
     ("tools/check_python_launcher_isolation.py::self_test_main::read_text", 2),
-    ("tools/check_record_drift.py::load_registry::open", 1),
-    ("tools/check_record_drift.py::run::read_text", 1),
     ("tools/check_record_sections.py::_self_test_isolated::read_text", 1),
     ("tools/check_record_sections.py::load_config::read_bytes", 1),
     ("tools/check_reference_facts.py::_read::read_text", 1),
@@ -1081,7 +1224,20 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_aiqt_hooks.py::_main_isolated::open", 1),
     ("tools/selftest_aiqt_hooks.py::_main_isolated::read_bytes", 14),
     ("tools/selftest_aiqt_hooks.py::_main_isolated::read_text", 4),
+    ("tools/selftest_ci_status.py::invoke::read_text", 1),
+    ("tools/selftest_git_fixture_env.py::_auto_maintenance_children::read_text", 1),
+    ("tools/selftest_git_fixture_env.py::_config_injection_lane::attr.open", 1),
+    ("tools/selftest_git_fixture_env.py::_config_injection_lane::read_bytes", 5),
+    ("tools/selftest_git_fixture_env.py::_require_wrapper_observed::read_bytes", 1),
+    ("tools/selftest_git_fixture_env.py::_snapshot_git_dir::read_bytes", 1),
+    ("tools/selftest_git_fixture_env.py::launch::read_bytes", 2),
+    ("tools/selftest_git_fixture_env.py::main::read_bytes", 2),
+    ("tools/selftest_git_fixture_env.py::prepare::read_text", 1),
+    ("tools/selftest_git_fixture_env.py::run::read_bytes", 4),
     ("tools/selftest_opf_render.py::_selftest::read_text", 2),
+    ("tools/selftest_orch_hooks.py::_main_isolated::read_text", 19),
+    ("tools/selftest_orch_hooks.py::_spoof_detail::read_text", 1),
+    ("tools/selftest_orch_hooks.py::turn_state::read_text", 1),
 ))
 
 RAW_READ_REASONS = dict((
@@ -1139,14 +1295,12 @@ RAW_READ_REASONS = dict((
     ("tools/check_internal_names.py", _RAW_READ_PENDING),
     ("tools/check_leaks.py", _RAW_READ_PENDING),
     ("tools/check_manifest.py", _RAW_READ_PENDING),
-    ("tools/check_msg_leaks.py", _RAW_READ_PENDING),
     ("tools/check_newtab.py", _RAW_READ_PENDING),
     ("tools/check_opf_standalone_closure.py", _RAW_READ_PENDING),
     ("tools/check_overclaim.py", _RAW_READ_PENDING),
     ("tools/check_portability.py", _RAW_READ_PENDING),
     ("tools/check_python_floor.py", _RAW_READ_PENDING),
     ("tools/check_python_launcher_isolation.py", _RAW_READ_PENDING),
-    ("tools/check_record_drift.py", _RAW_READ_PENDING),
     ("tools/check_record_sections.py", _RAW_READ_PENDING),
     ("tools/check_reference_facts.py", _RAW_READ_PENDING),
     ("tools/check_release_build.py", _RAW_READ_PENDING),
@@ -1182,6 +1336,206 @@ RAW_READ_REASONS = dict((
     ("tools/pin.py", _RAW_READ_PENDING),
     ("tools/selftest_aiqt_hooks.py", _RAW_READ_PENDING),
     ("tools/selftest_opf_render.py", _RAW_READ_PENDING),
+))
+
+
+# QA round 6 (codex B1 family, claude m2): PER-SITE reasons from a closed vocabulary -- (a) a
+# temporary fixture the same test created; (b) /proc or another kernel interface; (c) the site
+# itself already opens O_NONBLOCK / O_DIRECTORY or checks S_ISREG on what it opens; or a
+# disclosed pending-conversion note naming the actual input authority. A site key here
+# overrides the module-level RAW_READ_REASONS line; every NEWLY enumerated module (the suite
+# manifest runners, the .preview modules, the hook scripts) is covered per site.
+RAW_READ_SITE_REASONS = dict((
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_load_gensrc_registry::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_attestation_refs::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_chained_rows::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_checkpoint_union::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_forced_exit_findings::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_merge_pending_findings::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_mode::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_pending_artefact_findings::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_pending_haystack::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_read_jsonl::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_register_authority::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_registry::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_resume_probes::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_scope_live::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_turn_state::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::_wrtscp_read_json_artifact::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".aiqt/core/hooks/scripts/aiqt_hooks.py::orch_resume_barrier::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/clock-inject.py::test_no_wall_clock_verdict::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::r32_check_bash::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_no_wall_clock_verdict::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r26_item2_option_arguments_are_not_targets::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r27_perl_stops_parsing_options_at_first_operand::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r27_script_text_naming_store_is_unknown_target::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r28_read_only_sed_mentioning_store_is_no_write::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r29_long_option_abbreviations_resolved::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r30_every_operand_written_under_exchange_or_directory::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r30_install_context_arity_union::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r30_perl_help_and_version_exit_writing_nothing::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r31_help_and_version_exit_on_every_modeled_tool::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r31_literal_counts_only_for_the_write_it_feeds::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r31_literal_shell_c_strings_are_inspected::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/future-stamp-write.py::test_r31_relative_targets_resolve_against_cwd_and_cd::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/record-remove-check.py::snapshot::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/record-remove-check.py::test_16_directory_stdin_guard::os.open",
+     "(c) the site opens with os.O_DIRECTORY, so the open of anything but a directory fails at once and a directory open cannot block; no file content is read through it"),
+    (".preview/record-remove-check.py::test_23_no_internal_names::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/record-remove-check.py::test_23_source_house_rules::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/record-remove-check.py::test_23_strip_keeps_meaning::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/record-remove-check.py::test_23_vendor_byte_identity::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/record-remove-check.py::vendor_blocks::open",
+     "reads the preview module's own committed file (__file__) to verify its vendored block, an in-root path the D-400 walk certifies; the standalone script cannot import the shared readers; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/stamp-truth-stop.py::loop7::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/stamp-truth-stop.py::read_cursor::os.open",
+     "(c) the site opens with os.O_DIRECTORY, so the open of anything but a directory fails at once and a directory open cannot block; no file content is read through it"),
+    (".preview/stamp-truth-stop.py::test_no_wall_clock_verdict::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/stamp-truth-stop.py::test_r28_concurrent_stops_cannot_rearm_counter::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/stamp-truth-stop.py::test_r28_lock_unavailable_writes_no_state::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/stamp-truth-stop.py::test_r29_disturbed_overlap_stays_bounded::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/stamp-truth-stop.py::test_r29_state_io_is_relative_to_the_locked_dir::os.open",
+     "(c) the site opens with os.O_DIRECTORY, so the open of anything but a directory fails at once and a directory open cannot block; no file content is read through it"),
+    (".preview/stamp-truth-stop.py::test_reverse_records_exact_with_offsets::os.open",
+     "(c) the site opens with os.O_DIRECTORY, so the open of anything but a directory fails at once and a directory open cannot block; no file content is read through it"),
+    (".preview/stamp-truth-stop.py::test_state_symlink_not_followed::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/stamp-truth-stop.py::write::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/unbounded-wait.py::test_14_directory_stdin_guard::os.open",
+     "(c) the site opens with os.O_DIRECTORY, so the open of anything but a directory fails at once and a directory open cannot block; no file content is read through it"),
+    (".preview/unbounded-wait.py::test_15_source_house_rules::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/unbounded-wait.py::test_15_vendor_byte_identity::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/unbounded-wait.py::test_r1_06_public_name::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/unbounded-wait.py::test_r3_06_no_internal_names::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/unbounded-wait.py::test_r4_02_strip_keeps_meaning::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/unbounded-wait.py::vendor_blocks::open",
+     "reads the preview module's own committed file (__file__) to verify its vendored block, an in-root path the D-400 walk certifies; the standalone script cannot import the shared readers; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/ungated-record.py::test_20_directory_stdin_guard::os.open",
+     "(c) the site opens with os.O_DIRECTORY, so the open of anything but a directory fails at once and a directory open cannot block; no file content is read through it"),
+    (".preview/ungated-record.py::test_21_no_internal_names::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/ungated-record.py::test_21_source_house_rules::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/ungated-record.py::test_21_vendor_byte_identity::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/ungated-record.py::test_r4_02_strip_keeps_meaning::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    (".preview/ungated-record.py::vendor_blocks::open",
+     "reads the preview module's own committed file (__file__) to verify its vendored block, an in-root path the D-400 walk certifies; the standalone script cannot import the shared readers; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_load_gensrc_registry::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_attestation_refs::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_chained_rows::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_checkpoint_union::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_forced_exit_findings::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_merge_pending_findings::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_mode::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_pending_artefact_findings::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_pending_haystack::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_read_jsonl::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_register_authority::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_registry::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_resume_probes::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_scope_live::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_turn_state::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_wrtscp_read_json_artifact::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::orch_resume_barrier::open",
+     "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("tools/selftest_ci_status.py::invoke::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_git_fixture_env.py::_auto_maintenance_children::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_git_fixture_env.py::_config_injection_lane::attr.open",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_git_fixture_env.py::_config_injection_lane::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_git_fixture_env.py::_require_wrapper_observed::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_git_fixture_env.py::_snapshot_git_dir::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_git_fixture_env.py::launch::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_git_fixture_env.py::main::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_git_fixture_env.py::prepare::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_git_fixture_env.py::run::read_bytes",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_orch_hooks.py::_main_isolated::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_orch_hooks.py::_spoof_detail::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("tools/selftest_orch_hooks.py::turn_state::read_text",
+     "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("opf/tools/_journal.py::_pid_start::open",
+     "(b) reads /proc/<pid>/stat, a kernel interface; no special file can be planted there"),
+    ("opf/tools/check_opf_homes.py::index_digest::read_bytes",
+     "(a) reads the .git/index of a temporary fixture repository the self-test created"),
+    ("tools/_qa_adapter.py::load_config::read_bytes",
+     "(c) _classify_presence requires S_ISREG BEFORE the open (tools/_qa_adapter.py, load_config, the state check ahead of the read), so the read cannot meet a special file"),
 ))
 
 
@@ -2942,6 +3296,35 @@ def _self_test_isolated(red_on_revert):
         probe = ast.parse("import os\nfd = os.open(p, os.O_RDONLY | os.O_NONBLOCK)\n"
                           "handle = open(p, \"w\")\n")
         check("raw-read-lint-exempts-nonblocking-and-write", _raw_read_sites(probe) == dict())
+        lint_modules, _entry_failures = _raw_read_modules(script.parents[1])
+        check("raw-read-lint-enumerates-suite-runners",
+              all(rel in lint_modules for rel in ("tools/selftest_git_fixture_env.py",
+                                                  "tools/selftest_orch_hooks.py",
+                                                  "tools/selftest_ci_status.py")))
+        check("raw-read-lint-enumerates-hook-modules",
+              all(rel in lint_modules for rel in (".preview/clock-inject.py",
+                                                  *_RAW_READ_HOOK_SCRIPTS)))
+        with tempfile.TemporaryDirectory() as lint_tmp:
+            lint_root = Path(lint_tmp)
+            for rel in (_RAW_READ_REGISTRATIONS + _RAW_READ_HOOK_SCRIPTS
+                        + (_RAW_READ_SUITE_MANIFEST,)):
+                (lint_root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (lint_root / rel).write_text("", encoding="utf-8")
+            (lint_root / ".preview").mkdir()
+            manifest_path = lint_root / _RAW_READ_SUITE_MANIFEST
+            manifest_path.write_text('[[suite]]\nrunner = "tools/selftest_missing.py"\n',
+                                     encoding="utf-8")
+            _entries, entry_failures = _raw_read_entry_modules(lint_root)
+            check("raw-read-lint-declared-missing-runner-fails",
+                  any("selftest_missing" in failure for failure in entry_failures))
+            if hasattr(os, "mkfifo"):
+                os.mkfifo(lint_root / "tools" / "selftest_fifo.py")
+                manifest_path.write_text('[[suite]]\nrunner = "tools/selftest_fifo.py"\n',
+                                         encoding="utf-8")
+                _entries, entry_failures = _raw_read_entry_modules(lint_root)
+                check("raw-read-lint-declared-fifo-runner-fails",
+                      any("selftest_fifo" in failure and "not a regular file" in failure
+                          for failure in entry_failures))
         lint_failures, lint_stats = _raw_read_lint(script.parents[1])
         for failure in lint_failures[:25]:
             print("FAIL " + failure, file=sys.stderr)

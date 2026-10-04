@@ -358,6 +358,35 @@ def main():
 #       change with an unchanged block still passes (exit 0);
 #   (h) an order record disagreeing with the operative constants -> exit 1.
 
+def _copy_live_tree(src, dst):
+    """Copy a checked tree for a self-test fixture, leaving out .git, __pycache__ and every symlink
+    that resolves to a directory OUTSIDE src (QA round 6, claude M5): the live precheck already
+    certified src, so a surviving out-of-root directory link is an ACCEPTED ignored non-shadowing
+    one (a developer's .venv); copying it (or resolving it) into a fixture that loses the source's
+    git ignore status would make the fixture's precheck refuse a layout the live precheck accepts.
+    Every other symlink is copied as a link (symlinks=True), never resolved."""
+    import shutil
+    src_real = os.path.realpath(src)
+
+    def _skip(dirpath, names):
+        skipped = set(name for name in names if name in (".git", "__pycache__"))
+        for name in names:
+            path = os.path.join(dirpath, name)
+            if name in skipped or not os.path.islink(path):
+                continue
+            try:
+                if not os.path.isdir(path):
+                    continue
+            except OSError:
+                continue
+            real = os.path.realpath(path)
+            if real != src_real and not real.startswith(src_real + os.sep):
+                skipped.add(name)
+        return skipped
+
+    shutil.copytree(src, dst, symlinks=True, ignore=_skip)
+
+
 def self_test_main():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _git_fixture_env import fixture_git_lifecycle
@@ -842,14 +871,15 @@ def _self_test_main_isolated():
             import subprocess
             tree = tmp / "precheck-tree"
             try:
-                shutil.copytree(repo_root(), tree, symlinks=True,
-                                ignore=shutil.ignore_patterns(".git", "__pycache__"))
+                _copy_live_tree(repo_root(), tree)
             except (shutil.Error, OSError) as exc:
                 # claude m1 (QA r5): a special or unreadable entry the live precheck allowed (for
                 # example a socket created in an ignored directory after the walk ran) must be the
                 # NAMED fail-closed exit, never a raw shutil.Error traceback.
                 print("error: cannot copy the live tree for the precheck fixture ({}); "
-                      "fail-closed".format(exc), file=sys.stderr)
+                      "fail-closed by design: a special or unreadable entry the live walk could "
+                      "not refuse (for example one created after it ran) stops this self-test; "
+                      "remove it or make it readable".format(exc), file=sys.stderr)
                 raise SystemExit(2)
             if gm._git(tree, "init", "-q").returncode != 0:
                 failures.append("D-400-SPECIAL-FILE-PRECHECK: cannot git-init the precheck tree copy")
@@ -1164,6 +1194,69 @@ def _self_test_main_isolated():
                     named_root = os.path.realpath(ext_home if which == "gen" else ext_home / "opf")
                 _entry_expect("a symlinked {}/ directory".format(moved), redirect_tree, which, 2,
                               named_root)
+            # (s7) QA round 6 (claude B1): the walk prunes ONLY the repository's own git dir, so a
+            # FIFO inside a NESTED .git directory (tools/qa/.git/x.py, invisible to git status) is
+            # refused by name. Fails without the own-git-dir narrowing (the round-5 walk pruned
+            # every entry named .git, exit 0).
+            nested_tree = _mini_tree("nested-git-fifo")
+            if nested_tree is not None:
+                (nested_tree / "tools" / "qa" / ".git").mkdir(parents=True)
+                os.mkfifo(nested_tree / "tools" / "qa" / ".git" / "x.py")
+            _entry_expect("a FIFO inside a nested .git directory", nested_tree, "gen", 2, "x.py")
+            _entry_expect("a FIFO inside a nested .git directory", nested_tree, "opf", 2, "x.py")
+            # (s8) QA round 6 (claude M3): shadowing counts HEAD as well as the index, so a STAGED
+            # REMOVAL (git rm --cached) cannot hide a shadowing out-of-root link. Fails without the
+            # HEAD union (asking only the index accepts this tree, exit 0).
+            staged_tree = _mini_tree("staged-removal-shadow")
+            if staged_tree is not None:
+                (staged_tree / "docs").mkdir()
+                (staged_tree / "docs" / "page.md").write_text("x\n", encoding="utf-8")
+                if (gm._git(staged_tree, "add", "-A").returncode != 0
+                        or gm._git(staged_tree, "-c", "user.name=t", "-c",
+                                   "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                                   "commit", "-q", "-m", "seed").returncode != 0
+                        or gm._git(staged_tree, "rm", "-r", "-q", "--cached",
+                                   "docs").returncode != 0):
+                    staged_tree = None
+            if staged_tree is not None:
+                shutil.rmtree(staged_tree / "docs")
+                (tmp / "ext-staged-target").mkdir(exist_ok=True)
+                (staged_tree / "docs").symlink_to(tmp / "ext-staged-target")
+                (staged_tree / ".gitignore").write_text("docs\n", encoding="utf-8")
+            _entry_expect("a staged-removal shadowing out-of-root link", staged_tree, "gen", 2,
+                          "shadows tracked content")
+            _entry_expect("a staged-removal shadowing out-of-root link", staged_tree, "opf", 2,
+                          "shadows tracked content")
+            # (s9) QA round 6 (claude M5): the live-tree fixture copy (_copy_live_tree) leaves out
+            # an ACCEPTED ignored out-of-root directory link (a developer's .venv ignored via
+            # info/exclude, whose ignore status the copy loses), so the copy neither fails nor
+            # refuses a layout the live precheck accepts. Fails without the copy filter (the
+            # copy's precheck exits 2 naming .venv).
+            venvlink_tree = _mini_tree("venv-link")
+            if venvlink_tree is not None:
+                (tmp / "ext-venv-dir").mkdir(exist_ok=True)
+                (tmp / "ext-venv-dir" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+                (venvlink_tree / ".venv").symlink_to(tmp / "ext-venv-dir")
+                exclude = venvlink_tree / ".git" / "info" / "exclude"
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                exclude.write_text(".venv\n", encoding="utf-8")
+                copy_dst = tmp / "venv-link-copy"
+                try:
+                    _copy_live_tree(venvlink_tree, copy_dst)
+                except (shutil.Error, OSError) as exc:
+                    failures.append("(s9) the fixture copy failed on an accepted ignored "
+                                    "out-of-root link: {}".format(exc))
+                else:
+                    if os.path.lexists(copy_dst / ".venv"):
+                        failures.append("(s9) the fixture copy kept the out-of-root link")
+                    if gm._git(copy_dst, "init", "-q").returncode != 0:
+                        failures.append("(s9) cannot git-init the venv-link copy")
+                    else:
+                        got_rc, got_out = _entry_run(copy_dst, "gen")
+                        if got_rc != 0:
+                            failures.append("(s9) the copy of a tree with an accepted ignored "
+                                            "out-of-root link must pass the precheck, got {!r} "
+                                            "{!r}".format(got_rc, got_out[-300:]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
