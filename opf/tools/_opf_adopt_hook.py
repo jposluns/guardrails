@@ -2130,10 +2130,20 @@ def self_test():
     # parses but exceeds the Python-level emission depth (roughly the interpreter recursion limit)
     # exhausts EMISSION on the changed-merge path (mapped by the merged-emission handler, whose
     # message never claims a verification ran); dropping either RecursionError handler turns
-    # its vector into an uncaught crash here. The parser exhaustion is INJECTED (json.loads raising
-    # RecursionError) rather than provoked by a fixed deep body: the depth at which the json scanner
-    # overflows depends on the build and its C stack, so a fixed body can parse where there is more
-    # headroom and the vector would stop exercising _parse's handler.
+    # its vector red here. Both exhaustions are INJECTED (json.loads, then the emitter's value
+    # walk, raising RecursionError) rather than provoked by a fixed deep body: the depth at which
+    # the json scanner overflows depends on the build and its C stack, and the depth at which
+    # emission overflows depends on the recursion limit (at a higher limit a deep body reaches
+    # the emission byte bound first), so a fixed body can take another refusal path and the
+    # vector would stop exercising its handler. Each input merges cleanly without its injection
+    # and each finding is pinned to the injected text, so an injection that stops firing turns
+    # its vector red, never a false green.
+    def _merge_or_raised(raw):
+        try:
+            return merge_registration(raw, entry)
+        except RecursionError:
+            return None
+
     real_loads = json.loads
 
     def _overflowing_loads(*args, **kwargs):
@@ -2141,23 +2151,47 @@ def self_test():
 
     json.loads = _overflowing_loads
     try:
-        r = merge_registration(b"[]", entry)
+        r = _merge_or_raised(b"{}")
     finally:
         json.loads = real_loads
-    check("deep-nesting-parse-cannot-eval", r.status is CANNOT_EVALUATE and r.new_bytes is None)
-    deep_env = b'{"env":' + b"[" * 2000 + b"]" * 2000 + b"}"
-    r = merge_registration(deep_env, entry)
+    check("deep-nesting-parse-cannot-eval",
+          r is not None and r.status is CANNOT_EVALUATE and r.new_bytes is None
+          and r.findings == ["registration bytes are not strict JSON: injected parser overflow"])
+    real_emit_value = _emit_value
+
+    def _overflowing_emit_value(*args, **kwargs):
+        raise RecursionError("injected emission overflow")
+
+    try:
+        globals()["_emit_value"] = _overflowing_emit_value
+        r = _merge_or_raised(b"{}")
+    finally:
+        globals()["_emit_value"] = real_emit_value
     check("deep-nesting-emission-cannot-eval",
-          r.status is CANNOT_EVALUATE and r.new_bytes is None)
+          r is not None and r.status is CANNOT_EVALUATE and r.new_bytes is None)
     # the emission refusal is reported as an emission refusal, never as a failed verification
     # (catching it in the verification handler turns this red).
     check("deep-nesting-emission-not-reported-as-verification",
-          len(r.findings) == 1
-          and r.findings[0].startswith("merged registration cannot be emitted: ")
-          and "verification" not in r.findings[0])
+          r is not None
+          and r.findings == ["merged registration cannot be emitted: injected emission overflow"])
+    # the byte-bound refusal of a nested body is its own vector: nesting kept far below any
+    # recursion limit (66 levels) under a wide array whose every element emits about 130 bytes
+    # of indentation, so emission always reaches the byte bound and never exhausts recursion.
+    # The bound message is pinned, so dropping the _EmitBoundRefusal handler (the refusal then
+    # falls to the emission handler) turns it red.
+    bound_env = (b'{"env":' + b"[" * 64 + b"[" + b"0," * 19999 + b"0]" + b"]" * 64 + b"}")
+    r = _merge_or_raised(bound_env)
+    check("deep-nesting-emission-byte-bound-refuses",
+          r is not None and r.status is CANNOT_EVALUATE and r.new_bytes is None
+          and r.findings == ["merged registration would exceed {} bytes (the same bound the "
+                             "input is held to, refused by the emitter's running byte "
+                             "count so the over-bound output is never built and an "
+                             "accepted output always no-ops on its next merge)".format(
+                                 MAX_REGISTRATION_BYTES)])
     # a FINDING never recurses over adopter content either: exact bytes nesting an array in
-    # the entry type field just under the parser's own depth limit (found here by bisection,
-    # since the limit depends on the build and its stack) parse, then refuse on the type with
+    # the entry type field just under the parser's own depth limit or the input byte bound,
+    # whichever is lower (found here by bisection, since the parser limit depends on the build
+    # and its stack), parse, then refuse on the type with
     # the fixed array descriptor. A repr-based finding exhausts the stack on it on builds
     # whose repr overflows below the parser limit (round 7: from about 47,000 levels, against
     # a parser limit near 58,000, on CPython 3.14), an uncaught RecursionError.
@@ -2174,7 +2208,12 @@ def self_test():
             return False
         return True
 
-    low, high = 0, 100000
+    # the search is bounded by the input byte bound, not by a guessed depth, so it does not
+    # depend on the stack size: the deepest body merge_registration reads at all fills
+    # MAX_REGISTRATION_BYTES, and where the stack lets the parser accept that depth the vector
+    # uses it. The bisection assumes only that parsing is monotone in depth (a body that
+    # parses still parses with fewer levels).
+    low, high = 0, (MAX_REGISTRATION_BYTES - len(type_head) - len(type_tail)) // 2
     if _parses(_deep_type(high)):
         low = high
     while high - low > 1:

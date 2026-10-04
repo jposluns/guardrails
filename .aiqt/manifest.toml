@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "9835747d7ad7b93824c1843d9e431ac3cc9c01a3098a5b457df5e00af8d04e41"
+tree-sha256 = "8a076798a22625c05b12ee493519e0340361fd029a495f0e62ad4d2520a340d8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2581,8 +2581,8 @@ sha256 = "f0e2b818eeba233ce1cc542d1f60cf42cc65d56e6e34f35ce902ba50b95665d0"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_hook.py"
-bytes = 139378
-sha256 = "a7dfa6d6d72ec8ca5f495d1aa6fd71c75ed3905340d51f419205f5196ed6b0a6"
+bytes = 141792
+sha256 = "89292e6f05f4af932ff52499a4a50f2a3438feabd2f67f331320e44aa79ec530"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_observe.py"
@@ -3311,8 +3311,8 @@ sha256 = "15b9957c36edfb81fd06ab20a36151827fb8efd5e65f735263400783c2cf617f"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 100167
-sha256 = "4173ee1431349658a835c706d6f3cdb16a4bacefb313c629c4f19d87282c897a"
+bytes = 100574
+sha256 = "52ed78165f31396d3f4de5be88caf029655360f2466fc29f2ed7afe09079cd68"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"

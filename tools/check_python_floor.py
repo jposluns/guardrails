@@ -1408,11 +1408,13 @@ def _self_test_cases(base):
             return real_parse(source, *args, **kwargs)
         return parse
 
-    def dump_overflow(node, *args, **kwargs):
-        text = real_dump(node, *args, **kwargs)
-        if deep_marker in text:
-            raise RecursionError("injected ast.dump overflow")
-        return text
+    def dump_overflow(exc_class):
+        def dump(node, *args, **kwargs):
+            text = real_dump(node, *args, **kwargs)
+            if deep_marker in text:
+                raise exc_class("injected ast.dump overflow")
+            return text
+        return dump
 
     shallow = {"tools/demo.py": "VALUE = 1\n"}
     got = []
@@ -1427,15 +1429,17 @@ def _self_test_cases(base):
             ast.parse = real_parse
     check("guard/parser-overflow-cannot-evaluate", got, [(2, True), (2, True)])
     deep = {"tools/demo.py": deep_marker + " = 1\n"}
-    ast.dump = dump_overflow
-    try:
-        code, lines = evaluate(_fixture(base, source=listed, files=deep))
-        got = (code, _has(lines, "tools/demo.py: too complex to evaluate: RecursionError"))
-    except RecursionError:
-        got = "raised RecursionError"
-    finally:
-        ast.dump = real_dump
-    check("guard/deep-tree-cannot-evaluate", got, (2, True))
+    got = []
+    for exc_class in (MemoryError, RecursionError):
+        ast.dump = dump_overflow(exc_class)
+        try:
+            code, lines = evaluate(_fixture(base, source=listed, files=deep))
+            got.append((code, _has(lines, "tools/demo.py: too complex to evaluate: " + exc_class.__name__)))
+        except (MemoryError, RecursionError) as exc:
+            got.append("raised " + type(exc).__name__)
+        finally:
+            ast.dump = real_dump
+    check("guard/deep-tree-cannot-evaluate", got, [(2, True), (2, True)])
 
     path = _fixture(base, files=demo) / "tools" / "demo.py"
     version = below_floor(floor)[0]
@@ -1450,17 +1454,19 @@ def _self_test_cases(base):
     check("dynamic/boundary-continues-at-floor", boundary_observed(prefix, floor + (0,), ()),
           (0, CONTINUED + "\n", ""))
     check("dynamic/boundary-refuses-below-floor", boundary_observed(prefix, version, ())[:2], (2, ""))
-    ast.dump = dump_overflow
-    try:
-        dynamic_findings(_fixture(base, files=deep), ["tools/demo.py"], floor)
-        got = "no exception"
-    except CannotEvaluate as exc:
-        got = "too complex to evaluate: RecursionError" in str(exc)
-    except RecursionError:
-        got = "raised RecursionError"
-    finally:
-        ast.dump = real_dump
-    check("dynamic/deep-tree-cannot-evaluate", got, True)
+    got = []
+    for exc_class in (MemoryError, RecursionError):
+        ast.dump = dump_overflow(exc_class)
+        try:
+            dynamic_findings(_fixture(base, files=deep), ["tools/demo.py"], floor)
+            got.append("no exception")
+        except CannotEvaluate as exc:
+            got.append("too complex to evaluate: " + exc_class.__name__ in str(exc))
+        except (MemoryError, RecursionError) as exc:
+            got.append("raised " + type(exc).__name__)
+        finally:
+            ast.dump = real_dump
+    check("dynamic/deep-tree-cannot-evaluate", got, [True, True])
 
     unguarded = {"tools/demo.py": _entry("import sys\n")}
     check("completeness/off-ignores-unguarded", evaluate(_fixture(base, files=unguarded))[0], 0)
