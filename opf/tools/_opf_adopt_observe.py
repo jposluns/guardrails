@@ -3649,6 +3649,7 @@ def self_test(vectors_only=False):
             if "hold_lookup" in config:
                 config["hold_lookup"].wait(120.0)
             if config.get("stalled_resolver"):
+                resolver_sockets[0].settimeout(1.0)   # the bound dominates the receive (opf.py QA24)
                 resolver_sockets[0].recv(1)
             address = config.get("address", public_ip)
             family = socket.AF_INET6 if ":" in address else socket.AF_INET

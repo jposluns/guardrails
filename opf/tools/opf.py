@@ -3431,6 +3431,17 @@ _RUNTIME_WAIT_EXEMPT = (
     ("_opf_emit.py", "_FixtureProcess._launch", "self._go.wait()",
      "the parked launcher: it holds only its own daemon thread, released by start() or close(), and "
      "start() waits for the launch only through a bounded self._launched.wait"),
+    ("_opf_emit.py", "_fixture_abort_launch", "with fixture._launch_lock",
+     "the launch lock (QA24): every holder only reads or writes flags and sets or tests an Event, so an "
+     "acquisition waits only for a few non-blocking statements; re-proved over every holder"),
+    ("_opf_emit.py", "_FixtureProcess._launch", "with self._launch_lock",
+     "the launch lock, the launcher's read of the cancelled flag (QA24): non-blocking holders, re-proved"),
+    ("_opf_emit.py", "_FixtureProcess._launch", "with self._launch_lock",
+     "the launch lock, the launcher's recorded result (QA24): non-blocking holders, re-proved"),
+    ("_opf_emit.py", "_FixtureProcess._abandon_unfinished_launch", "with self._launch_lock",
+     "the launch lock, close()'s ownership decision (QA24): non-blocking holders, re-proved"),
+    ("_opf_emit.py", "_FixtureProcess._close_coordinated", "with self._launch_lock",
+     "the launch lock, close()'s cancellation (QA24): non-blocking holders, re-proved"),
     ("_journal.py", "reconcile_and_claim_stale", "fcntl.flock(afd, fcntl.LOCK_EX)",
      "production stale-lock arbitration, outside this test-only bound: its holders are opf processes "
      "breaking the same stale lock, and a multiply-linked arbitration inode is refused before it"),
@@ -3508,19 +3519,29 @@ def _runtime_wait_modules(overrides=None):
 
 
 def _runtime_wait_audit(source, owners=None):
-    """A parse-tree audit for an UNBOUNDED wait. With `owners` it audits the top-level functions of
-    `source` so named (and every function nested in them); with None (QA22) it audits the module body
-    and EVERY function, method and lambda at any depth (ast.walk), each named by its qualified name
-    (`Class.method`, `outer.inner`, `outer.<lambda>`). A bound counts only when it is the timeout of
+    """A parse-tree audit for an UNBOUNDED wait. It visits EVERY ast.Call (and every `with` item) by
+    one ast.walk (QA24: complete by construction, so no syntactic position such as a default, a
+    decorator, an annotation, a class body or a lambda default can be skipped): with None the whole
+    module, with `owners` the whole subtree of each top-level function of `source` so named. Each
+    finding is only ATTRIBUTED, for its name and for _RUNTIME_WAIT_EXEMPT, to the scope that executes
+    it: the innermost function or lambda whose BODY holds it (`Class.method`, `outer.inner`,
+    `outer.<lambda>`), else `<module>`, so a default, decorator or annotation of a function (and a class
+    body) belongs to the scope that defines it, which runs it at definition time. A bound counts only when it is the timeout of
     that call's own signature (codex QA21 minor 2): .wait(timeout) and .join(timeout) in slot 0 or
     timeout=; .communicate in slot 1 or timeout= (communicate(input) is unbounded); .acquire only as
-    blocking False or a finite timeout (acquire(True) is unbounded); os.waitpid/wait4 options in slot
+    blocking False or a finite timeout (acquire(True) is unbounded), and a `with` on a lock (QA24: a
+    name or attribute whose last part says lock, mutex, sem or cond, or that a threading Lock, RLock,
+    Semaphore, BoundedSemaphore or Condition constructor is assigned to) is an acquisition with no
+    bound, a fault for _RUNTIME_WAIT_EXEMPT to answer; os.waitpid/wait4 options in slot
     1 and os.waitid options in slot 2 carrying WNOHANG; fcntl.flock/lockf carrying LOCK_NB (or LOCK_UN);
     select.select with a finite slot-3 timeout (None is unbounded); a poll() of a select.poll/epoll
     receiver with a finite timeout (poll(), None or a negative constant is unbounded); a .recv,
     .recv_into, .recvfrom, .recvfrom_into or .recvmsg only after a finite settimeout or a
-    setblocking(False) on the SAME receiver earlier in its scope, or anywhere in an enclosing scope, or
-    on the socket a wrap_socket of it returned; and every _fixture_wait (the exempt pass-through)
+    setblocking(False) on the SAME receiver (or on the socket a wrap_socket of it returned) that
+    DOMINATES it (codex QA23 minor 2): the bound is its own expression statement in a statement list
+    that also holds, later, a statement enclosing the receive (in its own scope, or the definition of
+    the function or lambda holding it in an enclosing scope), so a bound under an `if`, a loop, a
+    `try` body or a handler does not count for a receive after that statement; and every _fixture_wait (the exempt pass-through)
     carrying WNOHANG. A flag counts only when its expression evaluates, from int constants and os./fcntl.
     attributes combined by |, & and ^, to a value with that flag's bit set (codex QA22 minor 2:
     `os.WNOHANG & 0` mentions the flag and is zero); a flag expression that cannot be evaluated so (a
@@ -3533,8 +3554,9 @@ def _runtime_wait_audit(source, owners=None):
     ordinary spellings, NOT a proof of absence. Disclosed spelling residuals: an alias (`w = os.waitpid`,
     `import os as o`, `from os import waitpid`), getattr, functools.partial, an unbound method call
     (`Popen.wait(proc)`), a timeout held in a variable that is None at run time, a settimeout(None)
-    after the settimeout it counts, an enclosing scope's settimeout that runs only after the nested
-    recv, a call into a module outside the audited set, a huge or infinite literal taken as finite
+    after the settimeout it counts, a receiver name rebound between the bound and the receive, a lock
+    whose name and constructor say nothing (`with guard:` for `guard = make()`), an exit that waits
+    (`with subprocess.Popen(...)`, `with proc:`), a call into a module outside the audited set, a huge or infinite literal taken as finite
     (`proc.wait(1e999)`, `proc.wait(10**9)`, `communicate(timeout=float('inf'))`), the os functions
     reached through another module name (`posix.waitpid`), a poller not bound by a plain assignment from
     select.poll/epoll/devpoll (`with select.epoll() as ep: ep.poll()`), and blocking calls outside the
@@ -3543,33 +3565,48 @@ def _runtime_wait_audit(source, owners=None):
     import ast
     import fcntl
     import operator
+    import re
     tree = ast.parse(source)
     defs = [node for node in tree.body if isinstance(node, ast.FunctionDef)
             and (owners is None or node.name in owners)]
     faults = ["{} is not defined, so its waits are unaudited".format(name)
               for name in sorted(set(owners or ()) - {node.name for node in defs})]
-    nested = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
-    names, parents = {tree: "<module>"}, {}
+    names, up, slots = {tree: "<module>"}, {}, {}
 
-    def name_scopes(node, prefix, scope):
+    def name_scopes(node, prefix):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            for index, statement in enumerate(block if isinstance(block, list) else ()):
+                slots[statement] = (id(block), index)
         for child in ast.iter_child_nodes(node):
+            up[child] = node
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-                label = prefix + getattr(child, "name", "<lambda>")
-                names[child] = label
-                parents[child] = scope
-                name_scopes(child, label + ".", scope if isinstance(child, ast.ClassDef) else child)
+                names[child] = prefix + getattr(child, "name", "<lambda>")
+                name_scopes(child, names[child] + ".")
             else:
-                name_scopes(child, prefix, scope)
+                name_scopes(child, prefix)
 
-    name_scopes(tree, "", tree)
+    name_scopes(tree, "")
 
-    def own(scope):
-        stack = [node for node in (scope.body if isinstance(scope.body, list) else [scope.body])
-                 if not isinstance(node, nested)]
-        while stack:
-            node = stack.pop()
-            yield node
-            stack.extend(child for child in ast.iter_child_nodes(node) if not isinstance(child, nested))
+    def scope_of(node):
+        # Attribution only (QA24): the innermost function or lambda whose BODY holds the node runs it.
+        while node in up:
+            parent = up[node]
+            if (isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and any(node is statement for statement in parent.body)) \
+                    or (isinstance(parent, ast.Lambda) and node is parent.body):
+                return parent
+            node = parent
+        return tree
+
+    def dominates(bound, node):
+        # The bound's statement precedes, in its own statement list, a statement enclosing node.
+        block, index = slots[bound]
+        while node in up:
+            if node in slots and slots[node][0] == block and slots[node][1] > index:
+                return True
+            node = up[node]
+        return False
 
     def calls(scope, name):
         return [node for node in ast.walk(scope) if isinstance(node, ast.Call)
@@ -3605,46 +3642,48 @@ def _runtime_wait_audit(source, owners=None):
         found = bits(value) if value is not None else None
         return found is not None and bool(found & getattr(os if flag == "WNOHANG" else fcntl, flag))
 
-    memo = {}
-
-    def timed(scope):
-        if scope in memo:
-            return dict(memo[scope])
-        found = memo[scope] = {}
-        for node in own(scope):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and (
-                    (node.func.attr == "settimeout" and finite(argument(node, 0, "value")))
-                    or (node.func.attr == "setblocking" and isinstance(argument(node, 0, "flag"), ast.Constant)
-                        and not argument(node, 0, "flag").value)):
-                receiver = ast.unparse(node.func.value)
-                found[receiver] = min(found.get(receiver, node.lineno), node.lineno)
-        for node in sorted((node for node in own(scope) if isinstance(node, ast.Assign)
-                            and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
-                            and node.value.func.attr == "wrap_socket" and node.value.args),
-                           key=lambda node: node.lineno):
-            if found.get(ast.unparse(node.value.args[0]), node.lineno) < node.lineno:
-                for target in node.targets:
-                    found.setdefault(ast.unparse(target), node.lineno)
-        return dict(found)
-
+    bounds = {}
+    for node in ast.walk(tree):
+        call = node.value if isinstance(node, ast.Expr) else None
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and (
+                (call.func.attr == "settimeout" and finite(argument(call, 0, "value")))
+                or (call.func.attr == "setblocking" and isinstance(argument(call, 0, "flag"), ast.Constant)
+                    and not argument(call, 0, "flag").value)):
+            bounds.setdefault(ast.unparse(call.func.value), []).append(node)
+    for node in sorted((node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                        and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
+                        and node.value.func.attr == "wrap_socket" and node.value.args),
+                       key=lambda node: node.lineno):
+        if any(dominates(bound, node) for bound in bounds.get(ast.unparse(node.value.args[0]), ())):
+            for target in node.targets:
+                bounds.setdefault(ast.unparse(target), []).append(node)
+    makers = ("Lock", "RLock", "Semaphore", "BoundedSemaphore", "Condition")
+    locks = {getattr(target, "attr", getattr(target, "id", None)) for node in ast.walk(tree)
+             if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Call)
+             and getattr(node.value.func, "attr", getattr(node.value.func, "id", None)) in makers
+             for target in (node.targets if isinstance(node, ast.Assign) else [node.target])}
+    locks |= {node.arg for node in ast.walk(tree) if isinstance(node, ast.keyword) and node.arg
+              and isinstance(node.value, ast.Call)
+              and getattr(node.value.func, "attr", getattr(node.value.func, "id", None)) in makers}
     pollers = {ast.unparse(target) for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))
                and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
                and node.value.func.attr in ("poll", "epoll", "devpoll")
                and isinstance(node.value.func.value, ast.Name) and node.value.func.value.id == "select"
                for target in (node.targets if isinstance(node, ast.Assign) else [node.target])}
-    if owners is None:
-        scopes = [tree] + [node for node in ast.walk(tree) if isinstance(node, nested)]
-    else:
-        scopes = [scope for top in defs for scope in ast.walk(top) if isinstance(scope, nested)]
-    for scope in scopes:
+    found = []
+    for node in (node for root in ([tree] if owners is None else defs) for node in ast.walk(root)):
+        if not isinstance(node, (ast.Call, ast.With, ast.AsyncWith)):
+            continue
+        scope = scope_of(node)
         where = "{} line {}".format(names.get(scope, "<lambda>"), getattr(scope, "lineno", 0))
-        ready, enclosing = timed(scope), parents.get(scope)
-        while enclosing is not None:
-            ready.update((receiver, 0) for receiver in timed(enclosing) if receiver not in ready)
-            enclosing = parents.get(enclosing)
-        for node in own(scope):
-            if not isinstance(node, ast.Call):
-                continue
+        for item in node.items if isinstance(node, (ast.With, ast.AsyncWith)) else ():
+            held = item.context_expr
+            last = held.attr if isinstance(held, ast.Attribute) else getattr(held, "id", None)
+            if isinstance(held, (ast.Name, ast.Attribute)) and (
+                    last in locks or re.search("(?i)lock|mutex|sem|cond", last)):
+                found.append((node.lineno, "{}: a with-statement lock acquisition with no bound `with {}` "
+                              "(line {})".format(where, ast.unparse(held), node.lineno)))
+        if isinstance(node, ast.Call):
             func, fault = node.func, None
             label = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
             base = func.value if isinstance(func, ast.Attribute) else None
@@ -3653,7 +3692,7 @@ def _runtime_wait_audit(source, owners=None):
                 if not spells(argument(node, 1, "flags"), "WNOHANG"):
                     fault = "a _fixture_wait pass-through without WNOHANG"
             elif base is None:
-                continue
+                pass
             elif module == "os":
                 if label in ("wait", "wait3"):
                     fault = "a blocking os.{}".format(label)
@@ -3679,10 +3718,12 @@ def _runtime_wait_audit(source, owners=None):
             elif label == "poll" and ast.unparse(base) in pollers and not finite(argument(node, 0, "timeout")):
                 fault = "a select poller's poll() without a finite timeout"
             elif label in ("recv", "recv_into", "recvfrom", "recvfrom_into", "recvmsg") \
-                    and not ready.get(ast.unparse(base), node.lineno) < node.lineno:
-                fault = "a .{}() with no earlier settimeout on {}".format(label, ast.unparse(base))
+                    and not any(dominates(bound, node) for bound in bounds.get(ast.unparse(base), ())):
+                fault = "a .{}() with no settimeout on {} dominating it".format(label, ast.unparse(base))
             if fault:
-                faults.append("{}: {} `{}` (line {})".format(where, fault, ast.unparse(node), node.lineno))
+                found.append((node.lineno, "{}: {} `{}` (line {})".format(
+                    where, fault, ast.unparse(node), node.lineno)))
+    faults += [text for _line, text in sorted(found)]
     for top in defs:
         if top.name in ("_kill_proved_child", "_self_test_runtime_supervisor_unit") and not calls(top, "_reap_pidfd"):
             faults.append("{} does not reap through the bounded _reap_pidfd".format(top.name))
@@ -3784,12 +3825,44 @@ class Probe:
             {}
 """
 
+# Position vectors (QA24): (source, the scope its one fault is attributed to, or None for no fault).
+# A wait in a default, decorator, class body, annotation or lambda default runs where it is defined.
+_RUNTIME_WAIT_POSITIONS = (
+    ("def qa(pid, status=os.waitpid(1, 0)):\n    pass\n", "<module>"),
+    ("@deco(os.waitpid(1, 0))\ndef qa():\n    pass\n", "<module>"),
+    ("class Qa:\n    status = os.waitpid(1, 0)\n", "<module>"),
+    ("def qa(pid: os.waitpid(1, 0)):\n    pass\n", "<module>"),
+    ("def qa() -> os.wait():\n    pass\n", "<module>"),
+    ("qa = lambda pid, status=os.waitpid(1, 0): 0\n", "<module>"),
+    ("qa = lambda pid: os.waitpid(pid, 0)\n", "<lambda>"),
+    ("class Qa:\n    def method(self, status=os.wait()):\n        pass\n", "<module>"),
+    ("def outer(pid):\n    @deco(os.waitpid(pid, 0))\n    def inner():\n        pass\n", "outer"),
+    ("def qa(lock):\n    with lock:\n        pass\n", "qa"),
+    ("def qa(guard):\n    with guard.launch_lock, open(guard.path):\n        pass\n", "qa"),
+    ("guard = threading.Lock()\n\n\ndef qa():\n    with guard:\n        pass\n", "qa"),
+    ("def qa(sock):\n    if False:\n        sock.settimeout(1)\n    return sock.recv(1)\n", "qa"),
+    ("def qa(sock):\n    for _ in ():\n        sock.settimeout(1)\n    return sock.recv(1)\n", "qa"),
+    ("def qa(sock):\n    def inner():\n        return sock.recv(1)\n    sock.settimeout(1)\n    return inner\n",
+     "qa.inner"),
+    ("def qa(sock):\n    sock.settimeout(1)\n    if sock:\n        return sock.recv(1)\n", None),
+    ("def qa(sock):\n    sock.settimeout(1)\n    def inner():\n        return sock.recv(1)\n    return inner\n", None),
+    ("def qa(lock, path):\n    with open(path) as handle:\n        return lock.acquire(timeout=1.0), handle\n", None),
+    ("def qa(pid, status=os.waitpid(1, os.WNOHANG)):\n    pass\n", None),
+)
+
 
 def _runtime_wait_vector_faults():
     """Each _RUNTIME_WAIT_UNBOUNDED statement in a nested class's method must be one located audit
-    fault naming it, and each _RUNTIME_WAIT_BOUNDED statement none (QA22). Returns the faults."""
+    fault naming it, and each _RUNTIME_WAIT_BOUNDED statement none (QA22); each _RUNTIME_WAIT_POSITIONS
+    source must be one fault attributed to its scope, or none (QA24). Returns the faults."""
     import ast
     faults = []
+    for source, scope in _RUNTIME_WAIT_POSITIONS:
+        found = _runtime_wait_audit(source)
+        if (scope is None and found) or (scope is not None and not (
+                len(found) == 1 and found[0].startswith(scope + " line "))):
+            faults.append("the bounded-wait audit did not find {} in {!r} (found {})".format(
+                "nothing" if scope is None else "one wait of " + scope, source, found))
     for statement in _RUNTIME_WAIT_UNBOUNDED + _RUNTIME_WAIT_BOUNDED:
         found = _runtime_wait_audit(_RUNTIME_WAIT_PROBE.format(statement))
         spelled = "`{}`".format(ast.unparse(ast.parse(statement)))
@@ -3814,9 +3887,11 @@ def _runtime_wait_module_faults(overrides=None):
     code: a top-level `_t_*`, `_st_*` or `self_test*` function of a module the entry imports but never
     runs, whose name is mentioned, in any audited module, only inside other such excused functions or
     a top-level `if __name__ == '__main__':` block. The excusal is transitive (claude QA22 minor 3):
-    a mention from any other code (a run module, a helper of the unrun module itself, a module body)
-    withdraws it, and so does a mention from a function whose own excusal was withdrawn, to a fixed
-    point. An exemption that excuses nothing is a fault. `overrides` reaches _runtime_wait_modules.
+    a mention from any other code (a run module, a helper of the unrun module itself, a module body,
+    and, QA24, the decorators, defaults and annotations of an excused function, which run at import, or
+    a `from m import f`, a re-export included) withdraws it, and so does a mention from a function whose
+    own excusal was withdrawn, to a fixed point. Residual: a name reached only through a string
+    (getattr, `__all__` with `import *`). An exemption that excuses nothing is a fault. `overrides` reaches _runtime_wait_modules.
     Returns the faults."""
     import ast
     sources, run, faults = _runtime_wait_modules(overrides)
@@ -3837,12 +3912,19 @@ def _runtime_wait_module_faults(overrides=None):
         for top in tree.body:
             if isinstance(top, ast.If) and ast.unparse(top.test) == "__name__ == '__main__'":
                 continue
-            owner = (filename, top.name) if (filename, getattr(top, "name", None)) in excused else None
+            excusing = (filename, getattr(top, "name", None)) in excused
+            body = {node for statement in top.body for node in ast.walk(statement)} if excusing else set()
             for node in ast.walk(top):
-                # A bare name reaches its own module's function (or the one it was imported as), `m.f`
-                # reaches module m's f (m imported, or named as an audited module, as _bootstrap binds
-                # them; `a.m.f` by its last part m), and any other `x.f` reaches every audited module's f.
-                if isinstance(node, ast.Name):
+                # Only the BODY of an excused function speaks for it (QA24, claude QA23 minor 2): its
+                # decorators, defaults and annotations run at import, as module code. A bare name reaches
+                # its own module's function (or the one it was imported as), `m.f` reaches module m's f (m
+                # imported, or named as an audited module, as _bootstrap binds them; `a.m.f` by its last
+                # part m), any other `x.f` reaches every audited module's f, and `from m import f` (a
+                # re-export too) reaches m's f.
+                owner = (filename, top.name) if node in body else None
+                if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    mentions |= {((node.module.split(".")[0] + ".py", alias.name), owner) for alias in node.names}
+                elif isinstance(node, ast.Name):
                     mentions |= {((filename, node.id), owner), (froms.get(node.id, (filename, node.id)), owner)}
                 elif isinstance(node, ast.Attribute):
                     base = getattr(node.value, "id", getattr(node.value, "attr", None))
@@ -3885,6 +3967,18 @@ def _runtime_wait_module_faults(overrides=None):
         faults.append("the _FixtureProcess._launch park exemption no longer holds: the launcher is not a daemon "
                       "thread targeting self._launch ({}) or _start has no bounded self._launched.wait ({})"
                       .format(parked, awaited))
+    held = [node for node in ast.walk(emit if emit is not None else ast.Module(body=[], type_ignores=[]))
+            if isinstance(node, ast.With) and any(ast.unparse(item.context_expr).endswith("._launch_lock")
+                                                  for item in node.items)]
+    busy = sorted({ast.unparse(node) for holder in held for statement in holder.body
+                   for node in ast.walk(statement) if isinstance(node, ast.Call)
+                   and getattr(node.func, "attr", None) not in ("set", "is_set")})
+    made = {ast.unparse(node.value) for node in ast.walk(emit if emit is not None else ast.Module(body=[], type_ignores=[]))
+            if isinstance(node, ast.Assign)
+            and any(ast.unparse(target).endswith("._launch_lock") for target in node.targets)}
+    if len(held) != 5 or busy or made != {"threading.Lock()"}:
+        faults.append("the _launch_lock exemption no longer holds: {} holders (5 exempt), holder calls other "
+                      "than set/is_set {}, constructed as {}".format(len(held), busy, sorted(made)))
     journal = next((node for node in ast.walk(trees.get("_journal.py", ast.Module(body=[], type_ignores=[])))
                     if isinstance(node, ast.FunctionDef) and node.name == "reconcile_and_claim_stale"), None)
     locks = [node.lineno for node in ast.walk(journal) if isinstance(node, ast.Call)
@@ -3903,8 +3997,10 @@ def _runtime_wait_traversal_faults():
     entry module's imports are walked); a second `self._go.wait()` in _FixtureProcess._launch and a
     second exempt flock in reconcile_and_claim_stale are each one fault (an exemption excuses one call);
     an unrun module's test-only blocking function is excused while only test code mentions it, and is
-    one fault once a non-test helper of its own module reaches it (the excusal is transitive).
-    Returns the faults."""
+    one fault once a non-test helper of its own module reaches it (the excusal is transitive). QA24:
+    a wait in a default argument of an audited module's function is one fault at `<module>`, and a
+    re-export of a test-only wait and a test-only decorator applied at import each withdraw the
+    excusal. Returns the faults."""
     import ast
     here = Path(__file__).resolve().parent
     entry = (here / "opf.py").read_text(encoding="utf-8")
@@ -3938,6 +4034,17 @@ def _runtime_wait_traversal_faults():
                                 "        fcntl.flock(afd, fcntl.LOCK_EX)\n        fcntl.flock(afd, fcntl.LOCK_EX)\n")}),
         ("a test-only wait reached by its module's helper", "_opf_oplock.py", "_st_wait_vector_block",
          {"_opf_oplock.py": oplock + block + "\n\ndef wait_vector_helper(pid):\n    return _st_wait_vector_block(pid)\n"}),
+        ("a default argument of an audited module's function (codex QA23 1)", "check_opf_init.py", "<module>",
+         {"check_opf_init.py": edited("check_opf_init.py", '\n\nif __name__ == "__main__":\n',
+                                      "\n\ndef qa_default(value=os.waitpid(123, 0)):\n    pass\n"
+                                      '\n\nif __name__ == "__main__":\n')}),
+        ("a re-export of a test-only wait (claude QA23 minor 2)", "_opf_oplock.py", "_st_wait_vector_block",
+         {"_opf_oplock.py": oplock + block,
+          "_opf_emit.py": (here / "_opf_emit.py").read_text(encoding="utf-8")
+          + "\n\nfrom _opf_oplock import _st_wait_vector_block\n"}),
+        ("a test-only decorator applied at import (claude QA23 minor 2)", "_opf_oplock.py", "_st_wait_vector_deco",
+         {"_opf_oplock.py": oplock + "\n\ndef _st_wait_vector_deco(fn):\n    os.waitpid(-1, 0)\n    return fn\n"
+          "\n\n@_st_wait_vector_deco\ndef _st_wait_vector_decorated():\n    pass\n"}),
         ("a test-only wait mentioned only by test code", None, None,
          {"_opf_oplock.py": oplock + block + "\n\ndef _st_wait_vector_caller(pid):\n    return _st_wait_vector_block(pid)\n"}),
     )
