@@ -117,15 +117,17 @@
         the closed legacy-state list. It runs that check once before any write, and a store refused
         there is left unchanged; only then does it recover, within a bound, its own interrupted
         writes and reconcile a dead run's leftover lease as the base rules require, and it runs the
-        check again after them, so a store refused only by that second run can carry their effects.
+        check again after them, so a store refused, or found cannot-evaluate, only by that second run
+        can carry their effects.
         That check searches only the files section 16.1 permits and
         the list catches only what it lists, so legacy state the list omits, or that sits where the
         check does not search, goes undetected; an input it cannot read is cannot-evaluate, never
         admitted.
-        Where it cannot tell whether a file in the adoption evidence area is another
-        implementation's adoption receipt, it reports cannot-evaluate rather than refusing the store
-        as legacy, and it does not see an adoption receipt kept outside that area, so it can refuse
-        as legacy a store whose recorded import status rests on such a receipt.
+        For a partial or complete import status, where it cannot tell whether a file in the
+        adoption evidence area is another implementation's adoption receipt, it reports
+        cannot-evaluate rather than refusing the store as legacy, and it does not see an adoption
+        receipt kept outside that area, so it can refuse as legacy a store whose recorded import
+        status rests on such a receipt.
         It offers no upgrade, repair, or continuity, so a store holding legacy state needs an
         upgrade-capable implementation. The upgrade into base 1.3.0 is still a target that the
         reference tooling does not yet perform, and the reference-tooling residuals above name stores

@@ -2327,7 +2327,10 @@ interrupted during the reversal of an uncommitted apply after that reversal rest
 path's prestate and before it restored that source; a command that performs that recovery MUST
 complete each committed apply forward and finish reversing each uncommitted one, its pre-scan not
 stopping it, and the admission check that follows MUST find no legacy-state item, admitting each
-store that recovery completed forward. A first adoption's fixtures MUST also include a plan over a
+store that recovery completed forward; for each store whose apply that recovery finished reversing,
+the fixture MUST assert that no store manifest remains, that the foreign `worklog.toml` is back at
+its path, byte-identical to its plan digest, and that the check reports the zero-match
+cannot-evaluate result (section 4.5). A first adoption's fixtures MUST also include a plan over a
 foreign per-record file under a `<type>/` directory of the planned machine store, which that plan
 MUST refuse at plan time, naming that path, and a zero-match `.working/` whose
 `.working/imported/adoption/<run-id>/` holds a file at an adoption receipt path of the
@@ -2457,7 +2460,14 @@ The gates in this standard are strong where they are strong and say so where the
   non-green outcome event appended to an adoption receipt, is classed like any other candidate even
   where the implementation journals that write, so one left unparseable stays cannot-evaluate for
   every command of a fresh-only implementation, its own writers included, until it is repaired by
-  hand, and one left parseable is not recognized as torn. A change made after the recheck by
+  hand, and one left parseable is not recognized as torn. A section 14.1 restore after a committed
+  apply is new approved work, not recovery, and the section 16.1 rule that keeps a first adoption's
+  store manifest apart from a foreign source at a candidate path binds only that first adoption, so
+  a restore that copies archived bytes to a candidate path, such as an importer-authored
+  `worklog.toml` restored over the live one, leaves a store that every command of a fresh-only
+  implementation, its own writers included, then refuses as `unsupported-legacy-state` where those
+  bytes show a listed item, or reports as cannot-evaluate where it classes them unreadable,
+  malformed, or contradictory. A change made after the recheck by
   anything that does not take the lease, such as a hand edit or a branch switch, is outside
   admission. Until validation tooling ships, a class claim is self-asserted (section 16).
 
