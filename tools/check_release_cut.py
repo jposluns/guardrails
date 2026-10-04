@@ -1747,6 +1747,14 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "false positive: the leg-1h sender child closes its inherited hold_write copy inside its try and every "
      "path of that child ends in os._exit; the parent's later os.close(hold_write) closes the parent's own "
      "copy, once, after the go-ahead write"),
+    ("opf/tools/opf.py", "run_case", "AFTER", "side", "side", 1,
+     "false positive: the QA26 case runner child (_unit_bound_self_test.run_case, if pid == 0:) closes its "
+     "inherited side copy first thing in its try and every path of that child ends in os._exit, so it never "
+     "reaches the parent's side.close() in the finally; the parent closes its own copy there, once"),
+    ("opf/tools/opf.py", "run_case", "AFTER", "out", "out", 1,
+     "false positive: the QA26 case runner child closes its inherited out copy first thing in its try and "
+     "every path of that child ends in os._exit, so it never reaches the parent's out.close() in the finally; "
+     "the parent closes its own copy there, once"),
     ("opf/tools/opf.py", "_watchdog_completion_case", "AFTER", "victim_read", "victim_read", 1,
      "false positive: the leg-1l sender child closes its inherited victim_read copy inside its try and every "
      "path of that child ends in os._exit; the parent's later os.close(victim_read) closes the parent's own "
