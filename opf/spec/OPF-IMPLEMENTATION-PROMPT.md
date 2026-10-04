@@ -902,13 +902,17 @@ reading, and it blocks activation until the maintainer resolves it.
     says "Ratified `done` MUST create the one-to-one `done` receipt". No writer operation allocates
     that receipt: section 8.8 says of `create` that "`done` receipts and worklog entries are not
     created this way", and `done-with-receipt` moves an item "from `active` or by ratifying
-    `done/proposed`", never one already at unqualified `done`. The specification does not say what
-    the store's lock is; this prompt's writer holds the step 7 lease, which section 5.7 requires
-    before a run mutates the store, and open point 11 keeps the owned lock in the git common
-    directory. Neither names a way for a maintainer's reviewed edit, made with no operation running,
-    to hold it. Ask the maintainer to rule, before step 14, whether such an edit that adds a record
-    and raises its counter, committed through the pre-commit check, meets "under the store's lock",
-    and if not, which sanctioned act allocates the new ID. This point asks for that ruling only; it
+    `done/proposed`", never one already at unqualified `done`. The specification defines no
+    mechanism for the store's lock, but two of its texts bear on the ruling: section 9 (The
+    manifest, storage layout) says of the inline layout "One global store lock MUST serialize
+    writers", and section 8.8, item 3 says "At homes 1 the `counters.toml` advance MUST be an
+    operand of the same journaled transaction, under the held lease". This prompt's writer holds the
+    step 7 lease, which section 5.7 requires before a run mutates the store, and open point 11 keeps
+    the owned lock in the git common directory. Neither names a way for a maintainer's reviewed
+    edit, made with no operation running and in no journaled transaction, to hold it. Ask the
+    maintainer to rule, before step 14, whether such an edit that adds a record and raises its
+    counter, committed through the pre-commit check, meets "under the store's lock", and if not,
+    which sanctioned act allocates the new ID. This point asks for that ruling only; it
     names no repair procedure. Until the ruling, step 14 reports each repair class that needs a new
     ID as not run.
 
@@ -2507,11 +2511,13 @@ platform." Wire all four, not only the platform you run on.
     both before enforcement, and no operation writes those leaves after.
   - R22: section 8.8 says a schema-detectable forgery "must be repaired by the operator before
     `transition` acts; it is never laundered", and names no operation for it, and the specification
-    defines no writer operation for any other integrity defect. None can sensibly exist: the writer
-    refuses a file that is not canonical (section 8.8, item 2), its final doctor must report VALID
-    (item 7), so any defect in the store stops it, and a repair's content cannot be derived from a
-    request and the schema rules as item 4 requires. So this prompt adds no writer operation for any
-    of them, and it prescribes no repair procedure. The validator names each defect it detects and
+    defines no writer operation for any other integrity defect. The writer refuses a file that is
+    not canonical (section 8.8, item 2), its final doctor must report VALID (item 7), so a defect
+    that the operation's result still holds stops it, and the content of most repairs, such as a
+    removed record's original content, cannot be derived from a request and the schema rules as
+    item 4 requires; which sanctioned act allocates a repair's new ID, as for a missing receipt, is
+    open point 31. So this prompt adds no writer operation for any of them, and it prescribes no
+    repair procedure. The validator names each defect it detects and
     its remedy in words (step 6), for example "raise the clean `BI` counter to 91" or "restore
     `WL-40` to bytes that recompute the digest that release 0.4.0 records". The maintainer repairs
     the defect by an ordinary reviewed edit that satisfies the specification: restoring a removed
@@ -2583,12 +2589,15 @@ platform." Wire all four, not only the platform you run on.
     whole, and which returns that span's worklog entries to the mutable unreleased tail, where no
     frozen digest covers them (section 13, "Frozen digests");
   - an edit to a field of a `done`, `reference`, `autonomous_decision` or `maintainer_decision`
-    record, which section 8.5 makes immutable, that keeps the record schema-valid and its links
-    resolving, since no check compares those records' fields with `HEAD`;
+    record, which section 8.5 makes immutable, or an in-place edit to the title, summary, links,
+    refs or registered `x-<vendor>` tables of any other clean record, which this prompt's reading
+    routes through `create` linking `corrects` (Ordering, R1 to R9), that keeps the record
+    schema-valid and its links resolving, since no check compares those records' fields with `HEAD`;
   - a store file that is not canonical, such as one carrying a comment: the validator grades parsed
-    content, and only the byte-reproduction precondition of the writer and the upgrade refuses such
-    a file (section 5.7; section 8.8, item 2), so the next operation that rewrites it refuses (row
-    R22);
+    content, so with the views re-rendered (a source-set digest taken over bytes changes with the
+    comment, open point 6) it reports nothing for it, and only the byte-reproduction precondition of
+    the writer and the upgrade refuses such a file (section 5.7; section 8.8, item 2), so the next
+    operation that rewrites it refuses (row R22);
   - the deletion of `.working/README.md`, which the validator does not require (open point 15).
 
   Adding any of those comparisons is the maintainer's choice. The deletion of `init.toml`, which
@@ -2672,13 +2681,14 @@ Acceptance checks:
   class whose repair adds a record with a new ID, such as a ratified `done` item committed with no
   receipt ever written, follows the maintainer's ruling on open point 31; until the ruling, report
   it as not run, and checklist item 17 then does not pass. A store file that is not canonical is not
-  one of the validator's classes: commit an index carrying a comment, which the pre-commit check
-  allows, since the validator reports nothing for it, and show that the next writer operation that
-  rewrites that index refuses and leaves it untouched, as step 10 tests, and that once a
-  maintainer's reviewed edit restores its canonical bytes, that edit is allowed by the pre-commit
-  check and the same operation succeeds. The defects that no single revision shows, which Residuals
-  above lists, are outside this check: step 6 tests the comparison with `HEAD` that reports a
-  disallowed status change, a lowered counter or a deleted record before commit, and once such a
+  one of the validator's classes: commit an index carrying a comment, with the views re-rendered,
+  which the pre-commit check allows, since the validator reports nothing for it, and show that the
+  next writer operation that rewrites that index refuses and leaves it untouched, as step 10 tests,
+  and that once a maintainer's reviewed edit restores its canonical bytes, with the views
+  re-rendered, that edit is allowed by the pre-commit check and the same operation succeeds. The
+  defects that no single revision shows, which Residuals above lists, are outside this check: step 6
+  tests the comparison with `HEAD` that reports a disallowed status change, a lowered counter or a
+  deleted record before commit, and once such a
   defect is committed it is disclosed, not tested. Every other defect that Residuals above says no
   check reports is disclosed, not tested, apart from the store file that is not canonical, which
   this check tests through the writer's refusal. Report each class by name.
