@@ -2314,7 +2314,7 @@ def _self_test_runtime_supervisor_unit(tmp):
         sup._children = real_children
         # Clean up the forked child WITHOUT a numeric kill: _reap may already have
         # reaped it, so signalling its pid could hit an unrelated reused process in a
-        # shared-uid pool (QA7 blocker, lab_infra rule). _kill_proved_child signals
+        # shared-uid pool (QA7 blocker, shared-pool rule). _kill_proved_child signals
         # and reaps only through a pidfd that a waitid(WNOWAIT) still proves is our
         # own un-reaped child; ECHILD (already reaped) or any waitid error means
         # nothing is signalled. The numeric-kill AST pin below keeps this cleanup red
@@ -3308,7 +3308,7 @@ def _aggregator_self_test():
 def _kill_proved_child(pid, sig=None, pidfd=None):
     """The ONE route for a self-test signal whose target pid came from a file, an earlier
     /proc read, or any other record that liveness alone cannot authenticate (QA8 codex
-    blocker; lab_infra shared-uid rule): signal `pid` only through a pidfd whose target a
+    blocker; shared-uid pool rule): signal `pid` only through a pidfd whose target a
     waitid(P_PIDFD, ..., WEXITED | WNOHANG | WNOWAIT) has JUST proved is this process's own
     un-reaped child -- a directly forked one, or a fixture orphan reparented here while this
     process held PR_SET_CHILD_SUBREAPER (_case_subreaper). ECHILD or any other pidfd or
