@@ -715,7 +715,8 @@ def main():
 #   (f) a git-less root exits 2 (never a filesystem-walk fallback);
 #   (g) raw-byte hashing: a CRLF file's recorded sha256 equals the sha256 of its exact raw bytes;
 #   (h) a missing CLAUDE.md marker pair exits 2;
-#   F-FROZEN-PARTITION: a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES fails closed.
+#   F-FROZEN-PARTITION: a vocabulary class in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class in both,
+#       and a class outside the vocabulary each fail closed.
 
 _OWN_BASE = '''format-version = 1
 
@@ -845,24 +846,32 @@ def _build_fixture(base, own_extra="", extra_files=None, do_commit=True):
 
 
 def _frozen_partition_vector():
-    """F-FROZEN-PARTITION: the shipped class sets partition the vocabulary (the floor renders), and a class
-    appended to RELEASE_CLASSES but recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES makes the floor
-    raise GateError. RELEASE_CLASSES is restored on every path. Returns a failure string or None."""
-    global RELEASE_CLASSES
+    """F-FROZEN-PARTITION: the shipped class sets partition the vocabulary (the floor renders), and each
+    broken partition makes the floor raise GateError: a class appended to RELEASE_CLASSES but recorded in
+    neither FROZEN_CLASSES nor UNFROZEN_CLASSES (undecided); an UNFROZEN_CLASSES class also appended to
+    FROZEN_CLASSES, so the union still equals the vocabulary (overlap); and a class outside the vocabulary
+    appended to FROZEN_CLASSES (extraneous). Every patched global is restored on every path. Returns a
+    failure string or None."""
+    global RELEASE_CLASSES, FROZEN_CLASSES
     try:
         _frozen_text([], [])
     except GateError as exc:
         return ("F-FROZEN-PARTITION: the shipped class sets expected to partition the vocabulary ({})"
                 .format(exc))
-    saved = RELEASE_CLASSES
-    RELEASE_CLASSES = saved + ("zz-undecided",)
-    try:
-        _frozen_text([], [])
-    except GateError:
-        return None
-    finally:
-        RELEASE_CLASSES = saved
-    return "F-FROZEN-PARTITION: an undecided vocabulary class expected GateError from the frozen floor"
+    saved_release, saved_frozen = RELEASE_CLASSES, FROZEN_CLASSES
+    for label, release, frozen in (
+            ("an undecided vocabulary class", saved_release + ("zz-undecided",), saved_frozen),
+            ("a class both frozen and unfrozen", saved_release, saved_frozen + UNFROZEN_CLASSES[:1]),
+            ("a frozen class outside the vocabulary", saved_release, saved_frozen + ("zz-extraneous",))):
+        RELEASE_CLASSES, FROZEN_CLASSES = release, frozen
+        try:
+            _frozen_text([], [])
+        except GateError:
+            continue
+        finally:
+            RELEASE_CLASSES, FROZEN_CLASSES = saved_release, saved_frozen
+        return "F-FROZEN-PARTITION: {} expected GateError from the frozen floor".format(label)
+    return None
 
 
 def self_test_main():
@@ -1124,8 +1133,8 @@ def _self_test_main_isolated():
           "100644 set passes (F-236); and a releases row with an unknown key or a missing mandatory field "
           "each fail closed (exit 2) under the minimal Step-2 row guard (F-237); and an unrecognized option "
           "is a loud exit 2 that writes no output (F-GENMANIFEST-UNKNOWN-OPT); and a vocabulary class "
-          "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES fails the frozen floor closed "
-          "(F-FROZEN-PARTITION)")
+          "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
+          "class outside the vocabulary each fail the frozen floor closed (F-FROZEN-PARTITION)")
     return 0
 
 
