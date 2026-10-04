@@ -3451,10 +3451,21 @@ def _pidfd_handoff_send(conn, pid):
     blocker). ECHILD means the target is NOT even a waitable child (a
     parent, a sibling, a reaped or foreign pid).
     Together these establish that the target is a CURRENT waitable child of
-    a non-subreaper -- a process this sender forked itself, with one
-    residual the kernel cannot exclude, DISCLOSED here: waitid also answers
-    for a ptrace TRACEE, so a sender tracing a non-child would pass both
-    checks (nothing in these files calls ptrace). A holder of the sending
+    a process whose subreaper flag is clear AT SEND TIME -- in the senders
+    these files run, a process the sender forked itself (every fixture
+    sender sends BEFORE ever setting the flag) -- with two residuals the
+    kernel cannot exclude, DISCLOSED here. (a) waitid also answers for a
+    ptrace TRACEE, so a sender tracing a non-child would pass both checks
+    (nothing in these files calls ptrace). (b) The flag check is a
+    POINT-IN-TIME read, not history: the kernel keeps no "was ever a
+    subreaper" state, so a sender that WAS a subreaper, ADOPTED an orphan,
+    and then CLEARED the flag (prctl) still holds that orphan as a waitable
+    child and passes both checks -- current waitability cannot prove
+    historical forking parentage (QA13 codex 2). Nothing in these files
+    clears the flag, and every fixture sender sends before setting it, so
+    reaching (b) requires code outside them to drive this helper: the same
+    static code-review boundary as the raw-send_fds residual below, not a
+    runtime adversary this sender can exclude. A holder of the sending
     endpoint can also skip this helper entirely with a raw socket.send_fds:
     the SCM_RIGHTS sweep in _self_test_runtime_supervisor_unit refuses that
     spelling anywhere in the swept files outside this function and the
@@ -5537,9 +5548,9 @@ def _watchdog_completion_case(mode):
                     raise AssertionError(
                         "numeric killpg is banned: " + repr((pgid, signum)))
 
-                def rec_members(group, signum, anchors, leader=None):
+                def rec_members(group, signum, handoffs, leader=None):
                     delivered, skipped, unverifiable = real_members(
-                        group, signum, anchors, leader=leader)
+                        group, signum, handoffs, leader=leader)
                     sequence.append(("members", group, signum, tuple(delivered),
                                      tuple(skipped or ()) + tuple(unverifiable),
                                      leader))
@@ -5582,9 +5593,10 @@ def _watchdog_completion_case(mode):
                 return pid, guardian_fd, subject, descendant, sequence, failures
 
         pid, guardian_fd, subject, descendant, sequence, failures = exercise(flip=False)
-        # Kill order: freeze first, then the subject's tree (per-member
-        # verified pidfds -- the banned-killpg recorder proves no numeric
-        # group kill ran, QA21 codex F3), then the guardian.
+        # Kill order: freeze first, then the subject census (report-only at
+        # runtime -- the banned-killpg recorder proves no numeric group kill
+        # ran, QA21 codex F3, and no handoff exists for the subject's own
+        # fork), then the guardian.
         assert sequence and sequence[0][0] == "pidfd" and sequence[0][2] == signal.SIGSTOP, sequence
         subject_kills = [index for index, entry in enumerate(sequence)
                          if entry[0] == "members" and entry[1] == subject
@@ -5593,24 +5605,33 @@ def _watchdog_completion_case(mode):
                           if entry[0] == "pidfd" and entry[1] == guardian_fd
                           and entry[2] == signal.SIGKILL]
         assert subject_kills, (sequence, subject)
-        assert descendant in sequence[subject_kills[0]][3], (sequence, descendant)
-        # Fix 2y (codex F1/F2): the census is licensed by the frozen
-        # guardian's subreaper ownership, EXCLUDES the leader (members die
-        # first; the leader dies LAST through its held pidfd), and accounts
-        # every member -- the leader never appears as a census delivery and
-        # nothing was skipped.
-        assert subject not in sequence[subject_kills[0]][3], sequence
-        assert sequence[subject_kills[0]][4] == (), sequence
+        # D-385-PIDFD-HANDOFF (fail-closed): the runtime escalation holds NO
+        # member handoffs, so the census DELIVERS nothing -- the observed
+        # live descendant is SKIPPED and named, the refusal discloses it,
+        # and the descendant survives as the documented residual. The
+        # retired ancestry census delivered the descendant here through a
+        # locally opened pidfd: the two asserts below are the revert flip.
+        assert sequence[subject_kills[0]][3] == (), sequence
+        assert descendant in sequence[subject_kills[0]][4], (sequence, descendant)
         assert sequence[subject_kills[0]][5] == subject, sequence
         assert not guardian_kills or subject_kills[0] < guardian_kills[0], sequence
-        # The whole tree is observed dead: no manual sleeper hygiene remains in
-        # this test. A dead orphan reparents to the nearest subreaper ancestor
-        # (the outer guardian, under the regression runner) and lingers as a
-        # zombie until that ancestor's drain: Z is dead, not surviving.
+        assert "members [{}] unaddressed".format(descendant) in failures[0], \
+            failures
         dead = (None, "Z")
         bound = time.monotonic() + 30
-        while state(subject) not in dead or state(descendant) not in dead:
-            assert time.monotonic() < bound, (state(subject), state(descendant))
+        while state(subject) not in dead:
+            assert time.monotonic() < bound, state(subject)
+            time.sleep(0.005)
+        assert state(descendant) not in dead, \
+            "the no-handoff census killed the descendant (D-385)"
+        # Hygiene for the DISCLOSED survivor: the guardian is collected, so
+        # the orphan reparented to this subreaper case process and only the
+        # ownership proof licenses its kill (QA8).
+        assert _kill_proved_child(descendant), \
+            "the hygiene refused the orphaned descendant"
+        bound = time.monotonic() + 30
+        while state(descendant) not in dead:
+            assert time.monotonic() < bound, state(descendant)
             time.sleep(0.005)
         # Flip: with the subject-kill step removed the subject tree survives and
         # close() itself names the surviving pid.
@@ -5678,7 +5699,7 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
-            def exercise(flip):
+            def exercise():
                 wedged.unlink(missing_ok=True)
                 grandchild_file.unlink(missing_ok=True)
                 child = emit._FixtureProcess(time.monotonic() + 3600,
@@ -5698,34 +5719,32 @@ def _watchdog_completion_case(mode):
                 with ExitStack() as stack:
                     stack.enter_context(
                         patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0))
-                    if flip:
-                        # Flip: skip the group kill for the already-reaped subject
-                        # (the old probe-gated early return): the descendant must
-                        # survive again.
-                        stack.enter_context(patch.object(
-                            emit, "_fixture_escalate_subject",
-                            lambda subject, fd, **license: None))
                     try:
                         child.close()
                     except emit.ChildStatusUnavailable as exc:
                         failures.append(str(exc))
                 assert failures and "escalat" in failures[0], failures
                 assert child.subject_pid is not None, "the subject receipt was lost"
-                return child.subject_pid, grandchild
+                return child.subject_pid, grandchild, failures[0]
 
-            subject, grandchild = exercise(flip=False)
-            await_state(grandchild, (None, "Z"),
-                        "escalation stranded the reaped subject's same-group descendant")
-            subject, grandchild = exercise(flip=True)
+            subject, grandchild, message = exercise()
+            # D-385 fail-closed: the frozen subreaper guardian still pins the
+            # group, so the census RUNS and OBSERVES the descendant -- but no
+            # forking parent handed off its pidfd, so it is skipped, NAMED in
+            # the refusal, and SURVIVES as the disclosed residual. The
+            # retired ancestry census killed the descendant right here and
+            # claimed the tree: on a revert the survival assert and the
+            # tree-claim assert below both go red -- this run IS the flip.
             assert state(grandchild) not in (None, "Z"), \
-                "flip: the descendant died without the group kill"
-            # Hygiene through the ownership proof alone (QA8): the reaped subject may
-            # already be gone (the proof then refuses, which is fine); the surviving
-            # descendant has reparented to this subreaper case process and must die.
-            _kill_proved_child(subject)
+                "a member with no forking-parent handoff was killed (D-385)"
+            assert "members [{}] unaddressed".format(grandchild) in message, \
+                message
+            assert "tree killed" not in message, message
+            # Hygiene through the ownership proof alone (QA8): the surviving
+            # descendant has reparented to this subreaper case process.
             assert _kill_proved_child(grandchild), \
-                "the flip hygiene refused the orphaned descendant"
-            await_state(grandchild, (None, "Z"), "the flip hygiene did not complete")
+                "the hygiene refused the orphaned descendant"
+            await_state(grandchild, (None, "Z"), "the hygiene did not complete")
     elif mode == "poll-collected":
         import time
         # QA19 F1: a guardian failure FIRST collected by poll() -- the layer's
@@ -5831,15 +5850,42 @@ def _watchdog_completion_case(mode):
                         "the residual hygiene did not complete")
 
             # Flip (red-on-revert, D2): reintroduce the removed no-guardian
-            # census -- a member kill anchored on the subject's bare numeric
-            # pid after one freeze probe -- and the orphaned descendant dies
-            # through a freshly opened pidfd on this guardian-dead path,
-            # exactly the unowned kill fix 2y removed.
+            # member kill -- the pre-fix census killed every /proc-discovered
+            # group member on this guardian-dead path -- and the orphaned
+            # descendant dies, exactly the unowned kill fix 2y removed. The
+            # committed census cannot model it any more (under
+            # D-385-PIDFD-HANDOFF it delivers only through forking-parent
+            # handoffs), and a bare pidfd_open on a /proc-read number is
+            # itself refused by the aggregator's AST probe, so the model
+            # reproduces the pre-fix OUTCOME through the sanctioned
+            # ownership proof: kill the subject through the held receipt
+            # pidfd, then kill each observed member once it reparents to
+            # this subreaper case process (_kill_proved_child, QA8).
             def census_kill(target, fd, **license):
+                members = []
+                for name in os.listdir("/proc"):
+                    if not name.isdecimal() or int(name) == int(target):
+                        continue
+                    fields = emit._fixture_stat_fields(int(name))
+                    if (fields is None
+                            or fields is emit._FIXTURE_UNREADABLE
+                            or int(fields[2]) != int(target)
+                            or fields[0] == b"Z"):
+                        continue
+                    members.append(int(name))
                 signal.pidfd_send_signal(fd, signal.SIGSTOP)
-                emit._fixture_kill_group_members(
-                    target, signal.SIGKILL, {target}, leader=target)
                 signal.pidfd_send_signal(fd, signal.SIGKILL)
+                bound = time.monotonic() + 30
+                for member in members:
+                    while True:
+                        fields = emit._fixture_stat_fields(member)
+                        if fields is not emit._FIXTURE_UNREADABLE and (
+                                fields is None or fields[0] == b"Z"
+                                or (int(fields[1]) == os.getpid()
+                                    and _kill_proved_child(member))):
+                            break
+                        assert time.monotonic() < bound, member
+                        time.sleep(0.005)
                 return ("subject-only", None)
 
             with patch.object(emit, "_fixture_escalate_subject", census_kill):
@@ -6696,21 +6742,22 @@ def _watchdog_completion_case(mode):
     elif mode == "unpinned-kill":
         import socket
         import time
-        # QA20 claude F1 + QA21 codex F3: NEVER signal a numeric pid or pgid
-        # whose ownership is not pinned -- a held pidfd does not pin the
-        # NUMBER once the process is reaped, and SIGSTOP delivery to a ZOMBIE
-        # leader cannot stop its parent reaping it and the freed pgid being
-        # recycled. The layer therefore issues NO numeric killpg at all (the
-        # recorder below turns any into a loud failure): group members are
-        # addressed one by one through per-member pidfds, each verified
-        # against /proc (group AND an anchored parent chain) AFTER the pidfd
-        # is opened. Pin-first: only a leader frozen ALIVE (its pidfd
-        # unreadable after the freeze) or a frozen subreaper guardian still
-        # parenting a member (the census pin, QA18 gemini F1) anchors the
-        # member kill; a reaped or ZOMBIE leader with no census license is
-        # reported unpinned and its group members are left disclosed, never
-        # guessed at. The subject's own pidfd SIGKILL always runs against the
-        # pinned identity.
+        # QA20 claude F1 + QA21 codex F3 + D-385-PIDFD-HANDOFF: NEVER
+        # signal a numeric pid or pgid whose ownership is not pinned, and
+        # NEVER a group member whose pidfd its forking parent did not hand
+        # off -- a held pidfd does not pin the NUMBER once the process is
+        # reaped, SIGSTOP delivery to a ZOMBIE leader cannot stop its parent
+        # reaping it and the freed pgid being recycled, and a /proc parent
+        # chain is a retired delivery license. The layer issues NO numeric
+        # killpg at all (the recorder below turns any into a loud failure):
+        # a member is signalled ONLY through the descriptor its FORKING
+        # PARENT opened and handed off over SCM_RIGHTS; /proc only OBSERVES
+        # which members are live. A frozen subreaper guardian still
+        # parenting a member (the census pin, QA18 gemini F1) licenses only
+        # RUNNING the census; an observed live member with no handoff is
+        # reported skipped -- the fail-closed disclosure -- and a reaped or
+        # ZOMBIE leader licenses no census at all. The subject's own pidfd
+        # SIGKILL always runs against the pinned identity.
         recorded = []
         real_pidfd_signal = signal.pidfd_send_signal
 
@@ -6746,10 +6793,10 @@ def _watchdog_completion_case(mode):
         # orphan-escape residual. The pre-fix layer took one freeze probe as
         # a pin, anchored a census on the subject's bare NUMERIC pid (the
         # recycled-anchor class) and killed the descendant here.
-        def banned_census(group, signum, anchors, leader=None):
+        def banned_census(group, signum, handoffs, leader=None):
             raise AssertionError(
                 "the no-guardian path ran a member census: "
-                + repr((group, signum, anchors, leader)))
+                + repr((group, signum, handoffs, leader)))
 
         with tempfile.TemporaryDirectory(prefix="opf-noguardian-") as directory:
             descendant_file = Path(directory, "descendant")
@@ -6812,7 +6859,6 @@ def _watchdog_completion_case(mode):
             ("an unpinned group was signalled", recorded)
         assert ("pidfd", fd, signal.SIGKILL) in recorded, recorded
         os.close(fd)
-        reaped_leader = leader
 
         # Leg 3 (QA21 codex F3): a ZOMBIE leader accepts the pidfd SIGSTOP --
         # delivery proves only that it exists unreaped NOW -- but its parent
@@ -6861,10 +6907,13 @@ def _watchdog_completion_case(mode):
             await_state(descendant, (None, "Z"),
                         "the zombie-leg hygiene did not complete")
 
-        # Leg 4: the per-member census itself refuses foreign parentage: a
-        # live group whose members' parent chains reach NO anchor is never
-        # signalled (a recycled pgid names exactly such a group), while the
-        # same member dies once the true owner anchors the census.
+        # Leg 4 (D-385-PIDFD-HANDOFF): the per-member census delivers ONLY
+        # through a forking-parent handoff. A live member with no handoff is
+        # SKIPPED and accounted -- ([], [decoy], []) (fix 2y codex F2: never
+        # read a refused member as an addressed tree) -- and an OLD-STYLE
+        # ancestry anchor (this very process, the decoy's real parent) in
+        # the map's KEYS licenses nothing: the retired chain walk killed the
+        # decoy here, so the two survival asserts below are the revert flip.
         decoy = os.fork()
         if decoy == 0:
             os.setsid()
@@ -6879,26 +6928,56 @@ def _watchdog_completion_case(mode):
                 pass
             assert time.monotonic() < bound, "the decoy never took its group"
             time.sleep(0.005)
-        # Fix 2y (codex F2): the census ACCOUNTS the live member it refused
-        # to signal -- ([], [decoy]) -- so no caller can read a refused
-        # member as an addressed tree.
         assert emit._fixture_kill_group_members(
-            decoy, signal.SIGKILL, {reaped_leader}) == ([], [decoy], []), \
-            "an unanchored group member was signalled or unaccounted"
+            decoy, signal.SIGKILL, {}) == ([], [decoy], []), \
+            "an unhanded group member was signalled or unaccounted"
+        assert emit._fixture_kill_group_members(
+            decoy, signal.SIGKILL, {os.getpid(): None}) \
+            == ([], [decoy], []), \
+            "an ancestry-style anchor licensed a member kill (D-385)"
         assert state(decoy) not in (None, "Z"), \
-            "the census killed a member outside its anchors"
-        delivered, skipped, unverifiable = emit._fixture_kill_group_members(
-            decoy, signal.SIGKILL, {os.getpid()})
+            "the census killed a member it held no handoff for"
+        # The positive path: this process IS the decoy's forking parent, so
+        # the pidfd it opens is exactly the handoff a forking parent may
+        # supply; the census must deliver through THAT descriptor -- never
+        # one it opened itself (the banned opener turns a local open into a
+        # loud failure) -- and must leave the caller-owned descriptor open.
+        decoy_fd = os.pidfd_open(decoy)
+        handoff_sends = []
+
+        def rec_handoff_send(target_fd, signum, *args):
+            handoff_sends.append((target_fd, signum))
+            return real_pidfd_signal(target_fd, signum, *args)
+
+        def banned_open(target):
+            raise AssertionError(
+                ("the census opened a member pidfd locally (D-385)",
+                 target))
+
+        with patch.object(emit, "_fixture_pidfd", banned_open), \
+                patch.object(signal, "pidfd_send_signal",
+                             rec_handoff_send):
+            delivered, skipped, unverifiable = \
+                emit._fixture_kill_group_members(
+                    decoy, signal.SIGKILL, {decoy: decoy_fd})
         assert decoy in delivered and skipped == [] and unverifiable == [], \
             (delivered, skipped, unverifiable)
+        assert handoff_sends == [(decoy_fd, signal.SIGKILL)], handoff_sends
         waited, status_raw = os.waitpid(decoy, 0)
         assert waited == decoy and os.WIFSIGNALED(status_raw) \
             and os.WTERMSIG(status_raw) == signal.SIGKILL, (waited, status_raw)
+        os.close(decoy_fd)  # EBADF here would mean the census closed it
 
-        # Leg 5: reaped leader, frozen-guardian census -> a surviving
-        # same-group descendant, adopted by the stopped subreaper guardian,
-        # pins the group and the member kill still reaches it through its own
-        # verified pidfd (QA18 gemini F1 preserved under the pin rule).
+        # Leg 5 (D-385-PIDFD-HANDOFF, the fail-closed integration flip):
+        # reaped leader, frozen-guardian census -> the surviving same-group
+        # descendant, adopted by the stopped subreaper guardian, still pins
+        # the group, so the census RUNS -- but no forking parent handed off
+        # the descendant's pidfd, so it is SKIPPED and NAMED, never
+        # signalled: the outcome is ("partial", ([grandchild], [])), the
+        # descendant survives as the disclosed residual, and every pidfd
+        # send of the run goes through the held subject descriptor. The
+        # retired ancestry census killed the descendant here through a
+        # locally opened pidfd; a revert turns the survival assert red.
         with tempfile.TemporaryDirectory(prefix="opf-pin-") as directory:
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
@@ -6987,17 +7066,27 @@ def _watchdog_completion_case(mode):
             with patch.object(os, "killpg", rec_killpg), \
                     patch.object(signal, "pidfd_send_signal", rec_pidfd):
                 assert emit._fixture_escalate_subject(
-                    leader, fd, guardian_pid=guardian) == ("tree", []), \
-                    "the frozen-guardian census did not address the group"
+                    leader, fd, guardian_pid=guardian) \
+                    == ("partial", ([grandchild], [])), \
+                    ("the unhanded member was not reported skipped "
+                     "(D-385 fail-closed)")
             assert not [entry for entry in recorded if entry[0] == "killpg"], recorded
-            assert [entry for entry in recorded
-                    if entry[0] == "pidfd" and entry[2] == signal.SIGKILL], \
-                ("the census-pinned member kill never ran", recorded)
-            await_state(grandchild, (None, "Z"),
-                        "the census-pinned kill stranded the descendant")
+            assert all(entry[1] == fd for entry in recorded
+                       if entry[0] == "pidfd"), \
+                ("a descriptor other than the held subject pidfd was "
+                 "signalled (D-385: no handoff, no member send)", recorded)
+            assert state(grandchild) not in (None, "Z"), \
+                "the census killed the descendant without a handoff (D-385)"
             os.close(fd)
             os.kill(guardian, signal.SIGCONT)
             os.waitpid(guardian, 0)
+            # Hygiene for the DISCLOSED survivor: with the guardian
+            # collected it reparents to this subreaper case process, and
+            # only the ownership proof licenses its kill (QA8).
+            assert _kill_proved_child(grandchild), \
+                "the leg-5 hygiene refused the orphaned descendant"
+            await_state(grandchild, (None, "Z"),
+                        "the leg-5 hygiene did not complete")
 
         # Leg 6 (fix 2y, claude Finding 1): the escalation contract must hold
         # with a subject pidfd AT OR ABOVE FD_SETSIZE (1024). The layer polls
@@ -7059,26 +7148,38 @@ def _watchdog_completion_case(mode):
             "the strand hygiene refused the frozen leader"
         os.close(fd)
 
-        # Leg 7 (fix 2y, codex F1/F2 on the GUARDIAN path): with a frozen
-        # subreaper guardian and a LIVE leader, the census is anchored on the
-        # GUARDIAN alone (never the subject's bare numeric pid), EXCLUDES the
-        # leader (members die first; the leader dies LAST through its held
-        # pidfd), addresses the descendant, and accounts nothing skipped --
-        # only then may the outcome claim the tree ("tree", []).
+        # Leg 7 (fix 2y codex F1/F2 on the GUARDIAN path, under
+        # D-385-PIDFD-HANDOFF): with a frozen subreaper guardian pinning the
+        # group and a LIVE leader, a member whose FORKING PARENT (the
+        # leader) handed off its pidfd is delivered THROUGH THAT descriptor
+        # -- never one the census opened -- the census EXCLUDES the leader
+        # (handed-off members die first; the leader dies LAST through its
+        # held pidfd), and with nothing skipped the outcome may claim the
+        # tree ("tree", []). The retired ancestry census signalled a
+        # DIFFERENT, locally opened descriptor here: the recorded-send
+        # assert on the handed-off fd is the revert flip.
         with tempfile.TemporaryDirectory(prefix="opf-order-") as directory:
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
 
             handoff, handoff_peer = _pidfd_handoff_pair()
+            member_handoff, member_peer = _pidfd_handoff_pair()
             guardian = os.fork()
             if guardian == 0:
                 try:
                     def leader_main():
                         os.setsid()
-                        grandchild = os.fork()
-                        if grandchild == 0:
+
+                        def grandchild_main():
                             time.sleep(3600)  # same-group descendant
                             os._exit(0)
+
+                        # The MEMBER arrives as a descriptor its forking
+                        # parent (this leader) opened immediately after the
+                        # fork and handed off (D-385-PIDFD-HANDOFF); the
+                        # file below is disclosure only.
+                        grandchild = _pidfd_handoff_fork_send(
+                            member_peer, grandchild_main)
                         scratch = Path(directory, "grandchild.tmp")
                         scratch.write_text(str(grandchild), encoding="ascii")
                         scratch.rename(grandchild_file)
@@ -7113,30 +7214,38 @@ def _watchdog_completion_case(mode):
                     time.sleep(0.005)
 
             handoff_peer.close()
-            fd = None
+            member_peer.close()
+            fd, gfd = None, None
             try:
                 leader, fd = _pidfd_handoff_recv(handoff, "the leg-7 leader")
                 await_file(grandchild_file, "the leg-7 grandchild never appeared")
                 grandchild = int(grandchild_file.read_text(encoding="ascii"))
+                member_pid, gfd = _pidfd_handoff_recv(
+                    member_handoff, "the leg-7 member")
+                assert member_pid == grandchild, (member_pid, grandchild)
                 await_file(frozen_file, "the leg-7 guardian never froze")
                 await_state(guardian, ("T",), "the leg-7 guardian did not stop")
             except BaseException:
                 # QA11 claude m3: a failing await after the handoff closes
-                # the received descriptor and the socket instead of
+                # the received descriptors and the sockets instead of
                 # stranding them; QA12 codex major 2: through _close_every,
-                # so a raising close cannot skip the later one.
+                # so a raising close cannot skip the later ones.
                 closes = []
                 if fd is not None:
                     closes.append(lambda held=fd: os.close(held))
+                if gfd is not None:
+                    closes.append(lambda held=gfd: os.close(held))
                 closes.append(handoff.close)
+                closes.append(member_handoff.close)
                 _close_every(closes)
                 raise
             member_calls = []
             real_members = emit._fixture_kill_group_members
 
-            def rec_members(group, signum, anchors, leader=None):
-                result = real_members(group, signum, anchors, leader=leader)
-                member_calls.append((group, signum, set(anchors), leader, result))
+            def rec_members(group, signum, handoffs, leader=None):
+                result = real_members(group, signum, handoffs, leader=leader)
+                member_calls.append((group, signum, dict(handoffs), leader,
+                                     result))
                 return result
 
             recorded.clear()
@@ -7145,22 +7254,28 @@ def _watchdog_completion_case(mode):
                     patch.object(emit, "_fixture_kill_group_members",
                                  rec_members):
                 assert emit._fixture_escalate_subject(
-                    leader, fd, guardian_pid=guardian) == ("tree", []), \
-                    "the live-leader guardian census did not address the tree"
+                    leader, fd, guardian_pid=guardian,
+                    member_handoffs={grandchild: gfd}) == ("tree", []), \
+                    "the handed-off member census did not address the tree"
             assert len(member_calls) == 1, member_calls
-            group, signum, anchors, excluded, result = member_calls[0]
+            group, signum, handoffs, excluded, result = member_calls[0]
             assert group == leader and signum == signal.SIGKILL, member_calls
-            assert anchors == {guardian}, \
-                ("the census took a bare numeric subject anchor", member_calls)
+            assert handoffs == {grandchild: gfd}, \
+                ("the member handoffs were not passed through", member_calls)
             assert excluded == leader, member_calls
             delivered, skipped, unverifiable = result
             assert grandchild in delivered and leader not in delivered \
                 and skipped == [] and unverifiable == [], member_calls
-            # The leader dies LAST, through the held pidfd, after the census.
+            # The member died through the HANDED-OFF descriptor (the retired
+            # ancestry census signalled a locally opened one instead) ...
+            assert ("pidfd", gfd, signal.SIGKILL) in recorded, recorded
+            # ... and the leader dies LAST, through the held pidfd, after
+            # the census (the verification census observes, never sends).
             assert recorded[-1] == ("pidfd", fd, signal.SIGKILL), recorded
             await_state(leader, (None, "Z"), "the leg-7 leader survived")
             await_state(grandchild, (None, "Z"), "the leg-7 descendant survived")
             os.close(fd)
+            os.close(gfd)  # caller-owned: EBADF would mean the census closed it
             os.kill(guardian, signal.SIGCONT)
             os.waitpid(guardian, 0)
 
@@ -7193,7 +7308,7 @@ def _watchdog_completion_case(mode):
 
         with patch.object(os, "listdir", raising_listdir):
             refuses(TimeoutError, lambda: emit._fixture_kill_group_members(
-                sentinel, signal.SIGKILL, {os.getpid()}))
+                sentinel, signal.SIGKILL, {}))
             refuses(TimeoutError, lambda: emit._fixture_group_pinned(
                 sentinel, zombie))
 
@@ -7208,7 +7323,7 @@ def _watchdog_completion_case(mode):
 
         with patch.object(os, "open", raising_open):
             refuses(InterruptedError, lambda: emit._fixture_kill_group_members(
-                sentinel, signal.SIGKILL, {os.getpid()}))
+                sentinel, signal.SIGKILL, {}))
             refuses(InterruptedError, lambda: emit._fixture_group_pinned(
                 sentinel, zombie))
         os.kill(sentinel, signal.SIGKILL)
@@ -7256,19 +7371,23 @@ def _watchdog_completion_case(mode):
             # same-group child when cued through the cue file. The leader --
             # the signal target -- is handed out as a DESCRIPTOR its forking
             # guardian opened immediately after fork (D-385-PIDFD-HANDOFF),
-            # never as a number published through a file.
+            # never as a number published through a file -- and so is the
+            # GRANDCHILD: its forking parent is the leader, which hands its
+            # pidfd off the same way, the only license the member census
+            # accepts for delivery; the grandchild file is disclosure only.
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
             cue = Path(directory, "cue")
             forked_file = Path(directory, "forked")
             handoff, handoff_peer = _pidfd_handoff_pair()
+            member_handoff, member_peer = _pidfd_handoff_pair()
             guardian = os.fork()
             if guardian == 0:
                 try:
                     def leader_main():
                         os.setsid()
-                        grandchild = os.fork()
-                        if grandchild == 0:
+
+                        def grandchild_main():
                             if forker:
                                 bound = time.monotonic() + 30
                                 while not cue.exists():
@@ -7284,6 +7403,9 @@ def _watchdog_completion_case(mode):
                                 scratch.rename(forked_file)
                             time.sleep(3600)          # same-group descendant
                             os._exit(0)
+
+                        grandchild = _pidfd_handoff_fork_send(
+                            member_peer, grandchild_main)
                         scratch = Path(directory, "grandchild.tmp")
                         scratch.write_text(str(grandchild), encoding="ascii")
                         scratch.rename(grandchild_file)
@@ -7311,27 +7433,35 @@ def _watchdog_completion_case(mode):
                 except BaseException:
                     os._exit(125)
             handoff_peer.close()
-            leader_fd = None
+            member_peer.close()
+            leader_fd, grandchild_fd = None, None
             try:
                 leader, leader_fd = _pidfd_handoff_recv(handoff, "the model leader")
                 await_file(grandchild_file, "the model grandchild never appeared")
                 grandchild = int(grandchild_file.read_text(encoding="ascii"))
+                member_pid, grandchild_fd = _pidfd_handoff_recv(
+                    member_handoff, "the model grandchild")
+                assert member_pid == grandchild, (member_pid, grandchild)
                 await_file(frozen_file, "the model guardian never froze")
                 await_state(guardian, ("T",), "the model guardian did not stop")
                 assert state(grandchild) not in (None, "Z"), \
                     "the descendant died early"
             except BaseException:
                 # QA11 claude m3: a failing await after the handoff closes
-                # the received descriptor and the socket instead of
+                # the received descriptors and the sockets instead of
                 # stranding them; QA12 codex major 2: through _close_every,
-                # so a raising close cannot skip the later one.
+                # so a raising close cannot skip the later ones.
                 closes = []
                 if leader_fd is not None:
                     closes.append(lambda held=leader_fd: os.close(held))
+                if grandchild_fd is not None:
+                    closes.append(lambda held=grandchild_fd: os.close(held))
                 closes.append(handoff.close)
+                closes.append(member_handoff.close)
                 _close_every(closes)
                 raise
-            return guardian, leader, leader_fd, grandchild, cue, forked_file
+            return (guardian, leader, leader_fd, grandchild, grandchild_fd,
+                    cue, forked_file)
 
         def release(guardian):
             # Proof-routed resume (QA9 claude F1): the frozen guardian is this
@@ -7346,7 +7476,7 @@ def _watchdog_completion_case(mode):
         # PermissionError as an exited process and claimed ("tree", []) with
         # the member alive.
         with tempfile.TemporaryDirectory(prefix="opf-unread-") as directory:
-            guardian, leader, fd, grandchild, _cue, _forked = frozen_tree(
+            guardian, leader, fd, grandchild, gfd, _cue, _forked = frozen_tree(
                 Path(directory), forker=False)
             real_os_open = os.open
             blocked = str(Path("/proc", str(grandchild), "stat"))
@@ -7356,9 +7486,13 @@ def _watchdog_completion_case(mode):
                     raise PermissionError(13, "injected unreadable census entry")
                 return real_os_open(path, flags, *args, **kwargs)
 
+            # Even WITH the member's handoff supplied, an unreadable entry
+            # is accounted unverifiable BEFORE any handoff lookup and never
+            # signalled (D-385: unverifiable beats delivery).
             with patch.object(os, "open", unreadable):
                 outcome = emit._fixture_escalate_subject(
-                    leader, fd, guardian_pid=guardian)
+                    leader, fd, guardian_pid=guardian,
+                    member_handoffs={grandchild: gfd})
             assert outcome == ("partial", ([], [grandchild])), (
                 "an unreadable entry was read as exited, or accounted as an "
                 "established member (round 24, claude F1)", outcome)
@@ -7384,6 +7518,7 @@ def _watchdog_completion_case(mode):
                 "the unaccounted member was signalled anyway")
             await_state(leader, (None, "Z"), "the leader kill never landed")
             os.close(fd)
+            os.close(gfd)
             # Release and collect the frozen subreaper guardian FIRST: the NAMED
             # member then reparents from it to this subreaper case process, and
             # only the ownership proof licenses its hygiene kill (QA8).
@@ -7397,7 +7532,7 @@ def _watchdog_completion_case(mode):
         # tree. The pre-fix code swallowed the failure and, with a clean
         # census, still claimed ("tree", []) over the live leader.
         with tempfile.TemporaryDirectory(prefix="opf-leaderfail-") as directory:
-            guardian, leader, fd, grandchild, _cue, _forked = frozen_tree(
+            guardian, leader, fd, grandchild, gfd, _cue, _forked = frozen_tree(
                 Path(directory), forker=False)
             real_pidfd_signal = signal.pidfd_send_signal
 
@@ -7408,7 +7543,8 @@ def _watchdog_completion_case(mode):
 
             with patch.object(signal, "pidfd_send_signal", failing_leader_kill):
                 outcome = emit._fixture_escalate_subject(
-                    leader, fd, guardian_pid=guardian)
+                    leader, fd, guardian_pid=guardian,
+                    member_handoffs={grandchild: gfd})
             assert outcome == ("partial", ([leader], [])), (
                 "the failed leader kill was not named", outcome)
             assert state(leader) == "T", (
@@ -7418,6 +7554,7 @@ def _watchdog_completion_case(mode):
             signal.pidfd_send_signal(fd, signal.SIGKILL)  # hygiene: the real kill
             await_state(leader, (None, "Z"), "the leg-2 hygiene did not complete")
             os.close(fd)
+            os.close(gfd)
             release(guardian)
 
         # Leg 3 (claude F1, the fix-2z premise change): a member FORKED
@@ -7429,8 +7566,8 @@ def _watchdog_completion_case(mode):
         # "every member addressed" -- with the forked member alive and
         # unaccounted.
         with tempfile.TemporaryDirectory(prefix="opf-forkrace-") as directory:
-            guardian, leader, fd, grandchild, cue, forked_file = frozen_tree(
-                Path(directory), forker=True)
+            guardian, leader, fd, grandchild, gfd, cue, forked_file = \
+                frozen_tree(Path(directory), forker=True)
             real_listdir = os.listdir
             proc_listings = []
 
@@ -7456,7 +7593,8 @@ def _watchdog_completion_case(mode):
             with patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0), (
                     patch.object(os, "listdir", stale_listdir)):
                 outcome = emit._fixture_escalate_subject(
-                    leader, fd, guardian_pid=guardian)
+                    leader, fd, guardian_pid=guardian,
+                    member_handoffs={grandchild: gfd})
             forked = int(forked_file.read_text(encoding="ascii"))
             assert (outcome[0] == "partial" and outcome[1]
                     and forked in outcome[1][0]), (
@@ -7467,6 +7605,7 @@ def _watchdog_completion_case(mode):
             await_state(leader, (None, "Z"), "the leg-3 leader survived")
             await_state(grandchild, (None, "Z"), "the leg-3 grandchild survived")
             os.close(fd)
+            os.close(gfd)
             # Release and collect the frozen subreaper guardian FIRST: the NAMED
             # survivor then reparents to this subreaper case process, and only the
             # ownership proof licenses its hygiene kill (QA8).
@@ -7518,152 +7657,89 @@ def _watchdog_completion_case(mode):
         os.kill(survivor, signal.SIGKILL)  # hygiene for the NAMED survivor
         os.waitpid(survivor, 0)
 
-        # Leg 5 (QA11 claude M1): the round-10 hop-pinning fix in
-        # _fixture_kill_group_members.anchored is load-bearing, shown on a
-        # MODELLED /proc (patched stat reads and pidfds; pipe read ends
-        # stand in for pidfds -- a written byte marks "exited", pollable
-        # exactly like a real pidfd). Two interleavings over the chain
-        # member -> hop -> anchor:
-        #   (a) the intermediate hop dies after its pidfd is opened and its
-        #       number is recycled beneath the anchor mid-walk: the per-hop
-        #       RE-READ sees the member reparented away and refuses, where
-        #       a mutant that drops the re-read follows the recycled number
-        #       up to the anchor and SIGNALS the member;
-        #   (b) every read is consistent but a pinned hop has EXITED by the
-        #       end of the walk: the FINAL liveness poll over the held
-        #       pidfds refuses, where a mutant that replaces the poll with
-        #       True SIGNALS the member.
-        # In both the member must be SKIPPED with nothing signalled.
-        member, hop_pid, anchor = 4194301, 4194302, 4194303
+        # Leg 5 (D-385-PIDFD-HANDOFF, the unit flip): on a MODELLED /proc
+        # (patched stat reads) the census licenses delivery by the handoff
+        # map ALONE. A live group member outside the map is SKIPPED with
+        # nothing signalled and NO pidfd opened (the banned opener below
+        # turns any local open into a loud failure); an OLD-STYLE ancestry
+        # anchor -- the caller's own pid, which the retired chain walk
+        # accepted after opening the member's pidfd locally -- licenses
+        # nothing when it appears among the map's keys. The retired census
+        # opened the member's pidfd FIRST, so either call turns red on a
+        # revert at the banned opener before any signal could be weighed.
+        member = 4194301
         group = member
 
-        def modelled_census(member_ppid_after_pin, hop_exited):
-            member_reads = []
-            pipes = []
-
-            def fake_stat_fields(target):
-                target = int(target)
-                if target == member:
-                    member_reads.append(True)
-                    # Reads 1-3 (census pre-pin read, census post-pin
-                    # re-read, the walk's first read): parented by the
-                    # intermediate hop. Read 4 is the walk's per-hop
-                    # RE-READ after the hop pidfd was opened.
-                    ppid = (hop_pid if len(member_reads) < 4
-                            else member_ppid_after_pin)
-                    return [b"S", str(ppid).encode("ascii"),
-                            str(group).encode("ascii")]
-                if target == hop_pid:
-                    # The record under the hop's number: the recycled
-                    # process in (a), the pinned hop's own record in (b);
-                    # either way it is parented by the anchor.
-                    return [b"S", str(anchor).encode("ascii"),
-                            str(group).encode("ascii")]
-                return None
-
-            def fake_pidfd(target):
-                read_end, write_end = os.pipe()
-                pipes.append(write_end)
-                if int(target) == hop_pid and hop_exited:
-                    os.write(write_end, b"x")  # the hop's pidfd polls readable
-                return read_end
-
-            modelled_sent = []
-            try:
-                with patch.object(emit, "_fixture_stat_fields",
-                                  fake_stat_fields), \
-                        patch.object(emit, "_fixture_pidfd", fake_pidfd), \
-                        patch.object(os, "listdir",
-                                     lambda path=".": [str(member)]), \
-                        patch.object(signal, "pidfd_send_signal",
-                                     lambda target_fd, signum, *args:
-                                         modelled_sent.append(
-                                             (target_fd, signum))):
-                    outcome = emit._fixture_kill_group_members(
-                        group, signal.SIGKILL, {anchor})
-            finally:
-                for write_end in pipes:
-                    os.close(write_end)
-            return outcome, modelled_sent
-
-        outcome, modelled_sent = modelled_census(
-            member_ppid_after_pin=1, hop_exited=False)
-        assert outcome == ([], [member], []) and modelled_sent == [], (
-            "a hop recycled beneath the anchor mid-walk was not refused by "
-            "the per-hop re-read: the member must be SKIPPED, nothing "
-            "signalled", outcome, modelled_sent)
-        outcome, modelled_sent = modelled_census(
-            member_ppid_after_pin=hop_pid, hop_exited=True)
-        assert outcome == ([], [member], []) and modelled_sent == [], (
-            "a pinned hop that exited before the walk's end was not refused "
-            "by the final liveness poll: the member must be SKIPPED, "
-            "nothing signalled", outcome, modelled_sent)
-
-        # Leg 6 (QA12 codex major 2, close_held): a held-hop close that
-        # RELEASES its descriptor and then RAISES must not strand the later
-        # hops. Modelled chain member -> hop one -> hop two -> anchor (pipe
-        # read ends stand in for the pidfds): the FIRST hop's close is a
-        # release-then-raise probe, and EVERY opened stand-in -- the second
-        # hop and the member's own descriptor included -- must still close
-        # exactly once, with the first failure propagating and nothing
-        # signalled. A close_held reverted to a bare close loop strands the
-        # second hop and turns this red.
-        chain_member, chain_hop_one, chain_hop_two = 4194297, 4194298, 4194299
-        chain = {chain_member: chain_hop_one, chain_hop_one: chain_hop_two,
-                 chain_hop_two: anchor}
-
-        def chain_stat_fields(target):
+        def member_stat_fields(target):
             target = int(target)
-            if target in chain:
-                return [b"S", str(chain[target]).encode("ascii"),
-                        str(chain_member).encode("ascii")]
+            if target == member:
+                return [b"S", str(os.getpid()).encode("ascii"),
+                        str(group).encode("ascii")]
             return None
 
-        model_fds = {}
-        chain_pipes = []
+        def banned_member_pidfd(target):
+            raise AssertionError(
+                ("the handoff-only census opened a member pidfd locally "
+                 "(D-385)", target))
 
-        def chain_pidfd(target):
-            read_end, write_end = os.pipe()
-            chain_pipes.append(write_end)
-            model_fds[int(target)] = read_end
-            return read_end
+        modelled_sent = []
+        with patch.object(emit, "_fixture_stat_fields",
+                          member_stat_fields), \
+                patch.object(emit, "_fixture_pidfd", banned_member_pidfd), \
+                patch.object(os, "listdir",
+                             lambda path=".": [str(member)]), \
+                patch.object(signal, "pidfd_send_signal",
+                             lambda target_fd, signum, *args:
+                                 modelled_sent.append(
+                                     (target_fd, signum))):
+            outcome = emit._fixture_kill_group_members(
+                group, signal.SIGKILL, {})
+            assert outcome == ([], [member], []) and modelled_sent == [], (
+                "a live member with no handoff was not skipped: nothing "
+                "may be signalled (D-385 fail-closed)",
+                outcome, modelled_sent)
+            outcome = emit._fixture_kill_group_members(
+                group, signal.SIGKILL, {os.getpid(): None})
+            assert outcome == ([], [member], []) and modelled_sent == [], (
+                "an ancestry-style anchor key licensed a member kill "
+                "(D-385: the parent-chain license is retired)",
+                outcome, modelled_sent)
 
-        closed = []
+        # Leg 6 (D-385-PIDFD-HANDOFF, the delivery flip): a member IN the
+        # handoff map is signalled through EXACTLY the handed-off
+        # descriptor -- never one the census opened (the banned opener
+        # stays armed) -- and the caller-owned descriptor is not closed by
+        # the census (the recording close below must stay silent for it).
+        handed_fd = 987009
+        closed_by_census = []
         real_close = os.close
 
-        def releasing_close(target_fd):
-            real_close(target_fd)
-            closed.append(target_fd)
-            if target_fd == model_fds.get(chain_hop_one):
-                raise OSError(5, "injected release-then-raise hop close")
+        def recording_close(target_fd):
+            if target_fd == handed_fd:
+                closed_by_census.append(target_fd)
+                return None
+            return real_close(target_fd)
 
-        hop_sent = []
-        try:
-            with patch.object(emit, "_fixture_stat_fields",
-                              chain_stat_fields), \
-                    patch.object(emit, "_fixture_pidfd", chain_pidfd), \
-                    patch.object(os, "listdir",
-                                 lambda path=".": [str(chain_member)]), \
-                    patch.object(os, "close", releasing_close), \
-                    patch.object(signal, "pidfd_send_signal",
-                                 lambda target_fd, signum, *args:
-                                     hop_sent.append((target_fd, signum))):
-                try:
-                    emit._fixture_kill_group_members(
-                        chain_member, signal.SIGKILL, {anchor})
-                except OSError as exc:
-                    assert "release-then-raise hop close" in str(exc), exc
-                else:
-                    raise AssertionError(
-                        "the raising hop close was swallowed")
-        finally:
-            for write_end in chain_pipes:
-                real_close(write_end)
-        assert sorted(closed) == sorted(model_fds.values()), (
-            "a later hop or the member stand-in was stranded by the "
-            "raising close", closed, model_fds)
-        assert hop_sent == [], (
-            "the raising hop close let a signal through", hop_sent)
+        with patch.object(emit, "_fixture_stat_fields",
+                          member_stat_fields), \
+                patch.object(emit, "_fixture_pidfd", banned_member_pidfd), \
+                patch.object(os, "listdir",
+                             lambda path=".": [str(member)]), \
+                patch.object(os, "close", recording_close), \
+                patch.object(signal, "pidfd_send_signal",
+                             lambda target_fd, signum, *args:
+                                 modelled_sent.append(
+                                     (target_fd, signum))):
+            outcome = emit._fixture_kill_group_members(
+                group, signal.SIGKILL, {member: handed_fd})
+        assert outcome == ([member], [], []), (
+            "the handed-off member was not delivered", outcome)
+        assert modelled_sent == [(handed_fd, signal.SIGKILL)], (
+            "delivery did not go through the handed-off descriptor "
+            "(D-385)", modelled_sent)
+        assert closed_by_census == [], (
+            "the census closed the caller-owned handoff descriptor",
+            closed_by_census)
     elif mode == "census-exception":
         import socket
         import time
@@ -9875,11 +9951,15 @@ def _watchdog_completion_case(mode):
         # A resolution regression that silently SHRINKS the computed
         # scope must go red, never pass vacuously: these members are
         # known reachable today.
+        # f:_fixture_pidfd left this closure with D-385-PIDFD-HANDOFF:
+        # the member census opens no pidfd (its targets arrive as handed-off
+        # descriptors), and the remaining openers (_launch_fork,
+        # _fixture_drain) are guardian-side, outside the close lifecycle.
         assert {"f:_fixture_escalate_subject",
                 "f:_fixture_kill_group_members",
                 "f:_fixture_group_pinned", "f:_fixture_verify_group_kill",
                 "f:_fixture_signal", "f:_fixture_stat_fields",
-                "f:_fixture_pidfd", "f:_fixture_mask_cancellation",
+                "f:_fixture_mask_cancellation",
                 "m:_FixtureProcess.close",
                 "m:_FixtureProcess._close_masked",
                 "m:_FixtureProcess._close_coordinated",
@@ -11805,19 +11885,22 @@ def _watchdog_completion_case(mode):
                     and fake._subject_skipped is None), (
                 born.__name__, fake._subject_kill, fake._subject_skipped)
 
-        # Leg 17 (fix 7, QA28 codex BLOCKER 2 / claude BLOCKER 1): the
-        # member census's per-pidfd close is an escalation-path cleanup
-        # too. A cancellation raised at the member SIGKILL send crosses
-        # that close, so a failing os.close must attach beneath it, never
-        # replace it. The pre-fix close was a bare finally outside both
-        # the boundary and the structural scope: the close failure became
-        # the outward exception (reproduced at b4e42add).
+        # Leg 17 (fix 7, QA28 codex BLOCKER 2 / claude BLOCKER 1; reshaped
+        # by D-385-PIDFD-HANDOFF): the member census owns NO cleanup step
+        # any more -- its targets arrive as handed-off descriptors the
+        # CALLER owns, so a cancellation raised at the member SIGKILL send
+        # propagates with nothing that could displace it, the census opens
+        # NO pidfd, and it closes NO descriptor (the caller's handoff fd
+        # must survive the call). The pre-D-385 census opened a pidfd per
+        # member and routed its close through the boundary; both sites are
+        # gone, and this leg pins their absence behaviourally.
         member_fields = [b"S", b"11888", b"11999"]
         real_close = os.close
 
         def member_close(fd):
-            if fd == 4242:
-                raise InterruptedError("member close failure")
+            assert fd != 4242, (
+                "the census closed the caller-owned handoff descriptor "
+                "(D-385-PIDFD-HANDOFF)", fd)
             return real_close(fd)
 
         def member_send(target_fd, signum, *args):
@@ -11825,48 +11908,49 @@ def _watchdog_completion_case(mode):
                 target_fd, signum)
             raise TimeoutError("pending cancellation")
 
+        def banned_member_open(target):
+            raise AssertionError(
+                ("the census opened a member pidfd locally "
+                 "(D-385-PIDFD-HANDOFF)", target))
+
         with patch.object(os, "listdir", lambda path: ["7001"]), (
                 patch.object(emit, "_fixture_stat_fields",
                              lambda target: list(member_fields))), (
-                patch.object(emit, "_fixture_pidfd", lambda pid: 4242)), (
+                patch.object(emit, "_fixture_pidfd", banned_member_open)), (
                 patch.object(signal, "pidfd_send_signal", member_send)), (
                 patch.object(os, "close", member_close)):
             try:
                 emit._fixture_kill_group_members(
-                    11999, signal.SIGKILL, {11888}, leader=11999)
+                    11999, signal.SIGKILL, {7001: 4242}, leader=11999)
             except TimeoutError as exc:
-                assert type(exc.__cause__) is InterruptedError, (
-                    "the member close failure was not kept beneath the "
-                    "pending cancellation", repr(exc.__cause__))
+                assert exc.__cause__ is None and exc.__context__ is None, (
+                    "the handed-off member send's cancellation picked up "
+                    "a cleanup chain no step should exist to raise",
+                    repr(exc.__cause__), repr(exc.__context__))
             except BaseException as exc:
                 raise AssertionError(
-                    "the member pidfd close displaced the pending "
-                    "cancellation (fix 7, QA28 codex BLOCKER 2)",
-                    repr(exc))
+                    "the member-send cancellation was displaced "
+                    "(D-385-PIDFD-HANDOFF: no cleanup step may exist "
+                    "here)", repr(exc))
             else:
                 raise AssertionError("the member census did not propagate")
 
-        # The same displacement at the _escalate tier ALSO mis-recorded
-        # "partial" for a cleanup a cancellation had interrupted, gating
-        # the interrupt owner's idempotent retry: now the cancellation
-        # propagates with the close failure beneath it and NOTHING is
-        # recorded, while the guardian cleanup still runs.
+        # The same property at the _escalate tier -- which at runtime holds
+        # NO member handoffs: a live group member observed by the census is
+        # SKIPPED and recorded ("partial", naming it), never signalled
+        # through a locally opened pidfd. The pre-D-385 tier opened a pidfd
+        # on the /proc-discovered number and delivered the kill; a revert
+        # does so again and turns the banned-open recorder below red.
         helper_kills = []
         fake = types.SimpleNamespace(
             pid=11888, pidfd=1098, subject_pid=11999, subject_pidfd=1099,
             _subject_kill=None, _subject_skipped=None)
 
-        def close_oserror(fd):
-            if fd == 4242:
-                raise OSError(5, "member close failure")
-            return real_close(fd)
-
-        def census_sequence(target_fd, signum, *args):
-            if target_fd in (1098, 1099):
-                return None  # freezes and held-pidfd kills succeed
-            assert target_fd == 4242 and signum == signal.SIGKILL, (
-                target_fd, signum)
-            raise TimeoutError("pending cancellation")
+        def owned_sends_only(target_fd, signum, *args):
+            assert target_fd in (1098, 1099), (
+                ("a member was signalled without a forking-parent "
+                 "handoff (D-385-PIDFD-HANDOFF)"), target_fd, signum)
+            return None  # freezes and held-pidfd kills succeed
 
         def census_helper(pid, signum, pidfd=None, *, group=True):
             helper_kills.append((pid, signum))
@@ -11875,29 +11959,17 @@ def _watchdog_completion_case(mode):
         with patch.object(os, "listdir", lambda path: ["7001"]), (
                 patch.object(emit, "_fixture_stat_fields",
                              lambda target: list(member_fields))), (
-                patch.object(emit, "_fixture_pidfd", lambda pid: 4242)), (
+                patch.object(emit, "_fixture_pidfd", banned_member_open)), (
                 patch.object(emit, "_fixture_group_pinned",
                              lambda group, guardian_pid: True)), (
                 patch.object(signal, "pidfd_send_signal",
-                             census_sequence)), (
-                patch.object(os, "close", close_oserror)), (
+                             owned_sends_only)), (
                 patch.object(emit, "_fixture_signal", census_helper)):
-            try:
-                emit._FixtureProcess._escalate(fake)
-            except TimeoutError as exc:
-                assert type(exc.__cause__) is OSError, (
-                    "the member close failure was not kept beneath the "
-                    "pending cancellation", repr(exc.__cause__))
-            except BaseException as exc:
-                raise AssertionError(
-                    "the member pidfd close displaced the pending "
-                    "cancellation at the _escalate tier (fix 7, QA28 "
-                    "codex BLOCKER 2)", repr(exc))
-            else:
-                raise AssertionError("the escalation did not propagate")
-        assert (fake._subject_kill is None
-                and fake._subject_skipped is None), (
-            "a cancellation-interrupted member cleanup was recorded",
+            emit._FixtureProcess._escalate(fake)
+        assert (fake._subject_kill == "partial"
+                and fake._subject_skipped == ([7001], [])), (
+            "the unhanded live member was not reported skipped "
+            "(D-385-PIDFD-HANDOFF fail-closed)",
             fake._subject_kill, fake._subject_skipped)
         assert helper_kills == [(11888, signal.SIGKILL)], helper_kills
 
@@ -12419,76 +12491,6 @@ def _watchdog_completion_case(mode):
                     patch.object(os, "close", fake_close)):
                 emit._fixture_stat_fields(4321)
 
-        def member_close_driver(cancellation, fault, state):
-            # pending point: the verified member send; cleanup: that
-            # member's pidfd close.
-            def fake_listdir(path):
-                assert str(path) == "/proc", path
-                return ["4242"]
-
-            def fake_stat_fields(target):
-                return [b"S", b"7777", b"6060"]
-
-            def fake_pidfd(target):
-                return 987002
-
-            def fake_send(fd, signum, *args):
-                assert fd == 987002, (fd, signum)
-                raise cancellation
-
-            def fake_close(fd):
-                assert fd == 987002, fd
-                raise fault
-
-            with patch.object(os, "listdir", fake_listdir), (
-                    patch.object(emit, "_fixture_stat_fields",
-                                 fake_stat_fields)), (
-                    patch.object(emit, "_fixture_pidfd",
-                                 fake_pidfd)), (
-                    patch.object(signal, "pidfd_send_signal",
-                                 fake_send)), (
-                    patch.object(os, "close", fake_close)):
-                emit._fixture_kill_group_members(6060, signal.SIGKILL,
-                                                 set([7777]))
-
-        def hop_close_driver(cancellation, fault, state):
-            # pending point: the SECOND ancestry hop's stat read inside
-            # the pinned parent-chain walk; cleanup: the held hop pidfd
-            # close in the walk's own boundary (QA10).
-            def fake_listdir(path):
-                assert str(path) == "/proc", path
-                return ["4242"]
-
-            def fake_stat_fields(target):
-                if int(target) == 4242:
-                    return [b"S", b"5151", b"6060"]
-                assert int(target) == 5151, target
-                raise cancellation
-
-            def fake_pidfd(target):
-                return {4242: 987002, 5151: 987008}[int(target)]
-
-            def fake_send(fd, signum, *args):
-                raise AssertionError(
-                    ("an unanchored member was signalled", fd, signum))
-
-            def fake_close(fd):
-                if fd == 987008:
-                    raise fault
-                assert fd == 987002, fd
-                return None
-
-            with patch.object(os, "listdir", fake_listdir), (
-                    patch.object(emit, "_fixture_stat_fields",
-                                 fake_stat_fields)), (
-                    patch.object(emit, "_fixture_pidfd",
-                                 fake_pidfd)), (
-                    patch.object(signal, "pidfd_send_signal",
-                                 fake_send)), (
-                    patch.object(os, "close", fake_close)):
-                emit._fixture_kill_group_members(6060, signal.SIGKILL,
-                                                 set([7777]))
-
         def subject_kill_driver(cancellation, fault, state):
             # pending point: the subject freeze; cleanup: the
             # held-pidfd SIGKILL (the leg 12 shape, all three types).
@@ -12803,12 +12805,10 @@ def _watchdog_completion_case(mode):
         behavioural_drivers[
             ("f:_fixture_stat_fields",
              "stat descriptor close", 0)] = stat_close_driver
-        behavioural_drivers[
-            ("f:_fixture_kill_group_members",
-             "member pidfd close", 0)] = member_close_driver
-        behavioural_drivers[
-            ("f:_fixture_kill_group_members",
-             "ancestry hop pidfd close", 0)] = hop_close_driver
+        # _fixture_kill_group_members carries NO boundary site any more
+        # (D-385-PIDFD-HANDOFF): it opens and closes no descriptor, so a
+        # member-send cancellation propagates with no cleanup step that
+        # could displace it (leg 17 pins that behaviour directly).
         behavioural_drivers[
             ("f:_fixture_escalate_subject",
              "held-pidfd subject SIGKILL", 0)] = subject_kill_driver

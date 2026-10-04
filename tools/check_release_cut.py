@@ -1765,6 +1765,10 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      _CS_LEGS.format("pidfd (the unpinned-kill leg-5 handler's close of its received fd now lives in a "
                      "_close_every lambda the sweep never enters, run exactly once ahead of that handler's "
                      "raise)")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "gfd", "", 2,
+     _CS_LEGS.format("received member-handoff pidfd (the grandchild's forking parent -- the leader -- opened and "
+                     "sent it, D-385-PIDFD-HANDOFF); each census-verify leg closes its own copy exactly once "
+                     "after the census, which never closes a caller-owned handoff descriptor")),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "guardian_fd", "", 9,
      _CS_LEGS.format("pidfd (os.pidfd_open, or frozen_pair's, which closes its own on a refused handoff and "
                      "otherwise hands it to the one leg that closes it)")),
