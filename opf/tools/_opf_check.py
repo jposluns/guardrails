@@ -299,6 +299,15 @@ _HOMES2_RESIDUALS = (
     "Homes-2 evidence inventories establish local membership, not actor authenticity; losing a whole "
     "bundle, inventory and payload together, requires independent history to detect.",
 )
+# Disclosed only on a report of a homes-1 store that has adopted (its adoption home exists), so a legacy
+# report residuals are unchanged.
+_ADOPTING_RESIDUALS = (
+    "Homes-1 adoption control area (spec 4.2, 17): an admitted adoption run evidence bundle, its adoption "
+    "archive and the Move root are recognized by containment but not re-enumerated by doctor; bundle "
+    "membership, archive copies and Move-root payloads are verified by the completion checks, not here. "
+    "Import and ingest bundles stay unregistered paths until their own activation, and a migrate source "
+    "stays bounded adoption state until the import that retires it is read.",
+)
 
 
 class StoreValidation:
@@ -307,13 +316,15 @@ class StoreValidation:
     dominates VALID, so an unreadable input is never masked by an otherwise-clean read. `checks` is the
     ordered per-check verdict map; `triage` is the spec-11/14.2 partial-import surface; `evaluated_profiles`
     and `unevaluated_profiles` name the profile scope (spec 16); `residuals` are the disclosed by-design
-    uncovered sub-checks, reported but never changing the status."""
+    uncovered sub-checks, reported but never changing the status. `migration_incomplete` (additive) names
+    each bounded adoption-state path reported rather than failed (spec 11/14.2); it never changes the status."""
     __slots__ = ("status", "findings", "cannot_evaluate", "residuals", "checks", "triage",
-                 "evaluated_profiles", "unevaluated_profiles", "by_check", "unattributed")
+                 "evaluated_profiles", "unevaluated_profiles", "by_check", "unattributed",
+                 "migration_incomplete")
 
     def __init__(self, status, findings=None, cannot_evaluate=None, residuals=None, checks=None,
                  triage=None, evaluated_profiles=None, unevaluated_profiles=None,
-                 by_check=None, unattributed=None):
+                 by_check=None, unattributed=None, migration_incomplete=None):
         self.status = status
         self.findings = findings or []
         self.cannot_evaluate = cannot_evaluate or []
@@ -329,6 +340,7 @@ class StoreValidation:
         # fail closed on an internal fault the per-check map does not carry.
         self.by_check = by_check or {}
         self.unattributed = unattributed or []
+        self.migration_incomplete = migration_incomplete or []
 
 
 def exit_code(result):
@@ -349,7 +361,7 @@ class _Report:
     check that never registered `ran` is routed to CANNOT-EVALUATE naming it, so a silently-skipped check is
     never a pass."""
     __slots__ = ("findings", "cannot", "residuals", "checks", "triage", "_current", "by_check",
-                 "unattributed", "required")
+                 "unattributed", "required", "migration_incomplete")
 
     def __init__(self):
         self.findings = []
@@ -361,6 +373,7 @@ class _Report:
         self.by_check = {}                # check-id -> list of the source-attributed message strings it emitted
         self.unattributed = []            # no-current findings/cants + duplicate-ran / unknown-id internal faults
         self.required = REQUIRED_CHECKS   # the closed roster; a homes-2 store widens it via require_homes
+        self.migration_incomplete = []    # bounded adoption-state paths: reported, never a status change
 
     def require_homes(self, homes):
         # Bind the roster to the store's homes generation once the manifest names it. A homes-2 check that
@@ -392,6 +405,11 @@ class _Report:
 
     def triage_path(self, msg):
         self.triage.append(msg)
+
+    def migration_incomplete_path(self, msg):
+        # A bounded adoption-state path (spec 11/14.2): reported rather than failed, so, like triage, it is
+        # never attributed to a check verdict and never changes the status.
+        self.migration_incomplete.append(msg)
 
     def _attribute(self, status, msg):
         # Attribute the verdict AND the message to the current check. A finding/cant emitted with NO current
@@ -439,7 +457,8 @@ class _Report:
             status = VALID
         return StoreValidation(status, self.findings, self.cannot, self.residuals, ordered, self.triage,
                                sorted(evaluated_profiles or []), sorted(unevaluated_profiles or []),
-                               by_check=self.by_check, unattributed=self.unattributed)
+                               by_check=self.by_check, unattributed=self.unattributed,
+                               migration_incomplete=self.migration_incomplete)
 
 
 # --- a lightweight record descriptor for the cross-record checks -------------------------------------
@@ -2298,7 +2317,21 @@ def _legacy_import_staging(machine_rel):
     return _rel(machine_rel, _LEGACY_IMPORTS_DIRNAME), review
 
 
-def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
+def _adoption_state(root_fd, machine_rel, in_repo, rep):
+    """The homes-1 adoption state through the read-only `_opf_adopt_state` reader (spec 4.2, 11, 14.2, 17),
+    or None after a CANNOT-EVALUATE: any fault inside the reader is a named cannot-evaluate, never a silent
+    fallback to the not-adopting grading. The reader is imported lazily, so the doctor gains no top-level
+    import of the adoption modules."""
+    try:
+        import _opf_adopt_state
+        return _opf_adopt_state.adoption_state(root_fd, machine_rel, in_repo=in_repo)
+    except Exception as exc:  # noqa: BLE001  fail-closed barrier around the whole reader
+        rep.cant("C-CONTAINMENT: the adoption state cannot be read ({}); fail-closed".format(
+            _safe_display(repr(exc))))
+        return None
+
+
+def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, *, in_repo=None):
     """C-CONTAINMENT: recursively walk `.working/`, matching every regular file against the managed set
     (the ledgers, the enabled non-ledger type indexes, per-record bodies, the archive tree, declared
     store-scope view targets, and files under a valid declared [unmanaged] path). A path in neither set is
@@ -2309,7 +2342,9 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
     (view targets, the collision-filtered valid_unmanaged, and the malformed / colliding declarations) is
     derived by the pure `classify_containment`, the SINGLE authority for adoption content (F10-1).
     enabled_types / layout are derived inside that helper from the manifest (D2), so they are no longer
-    passed in."""
+    passed in. On homes 1 a store that has adopted also registers each admitted adoption run control area
+    and reports its frozen sources as bounded adoption state (`_opf_adopt_state`); `in_repo` (keyword only,
+    unknown by default) is the store topology the adoption plan identity is checked against."""
     cls = classify_containment(manifest_data, machine_rel)
     # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
     # all colliding findings), exactly as the inline classification emitted them before the extraction.
@@ -2337,6 +2372,45 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
     staged_roots = (imports_root, staging_root) if homes2 else (imports_root,)
     kind_roots = tuple(staging_root + "/" + k for k in _opf_store.STAGING_KINDS) if homes2 else ()
     skipped_roots = cls.evidence_roots + ((_opf_store.JOURNALS_REL,) if homes2 else ())
+    # Homes-1 adoption control area and bounded adoption state (spec 4.2, 11, 14.2, 17), read by the read-only
+    # _opf_adopt_state reader. Without the adoption home it is NOT_ADOPTING after one lstat and every line
+    # below grades exactly as before. Homes 2 registers its evidence roots wholesale above.
+    adoption = None if homes2 else _adoption_state(root_fd, machine_rel, in_repo, rep)
+    adopting = adoption is not None and adoption.adopting
+    frozen = adoption.frozen if adopting else {}
+    adoption_dirs = frozenset()
+    if adopting:
+        import _opf_adopt_state
+        for msg in adoption.cannot:
+            rep.cant(msg)
+        for msg in adoption.findings:
+            rep.finding(msg)
+        rep.residuals.extend(_ADOPTING_RESIDUALS)
+        skipped_roots = skipped_roots + adoption.registered
+        # spec 14.2: an [unmanaged] declaration MUST NOT equal, contain or lie within the control area. A
+        # colliding one is a finding and covers nothing, so every path beneath it is graded.
+        control = _opf_adopt_state.CONTROL_ROOTS
+        collided = [u for u in valid_unmanaged
+                    if _under_any(u, control) or any(_under_any(c, (u,)) for c in control)]
+        for u in collided:
+            rep.finding("C-CONTAINMENT: unmanaged path {!r} equals, contains or lies within the OPF control "
+                        "area ({}) of an adopting store, so it covers nothing (spec 14.2)".format(
+                            u, ", ".join(repr(c) for c in control)))
+        if collided:
+            valid_unmanaged = [u for u in valid_unmanaged if u not in collided]
+            classified_file = managed_file
+
+            def managed_file(p):
+                if _under_any(p, collided) and not _under_any(p, valid_unmanaged):
+                    return False
+                return classified_file(p)
+        # Walked as namespaces so that every entry beneath them other than a registered run home is graded,
+        # plus each strict ancestor directory of a LIVE frozen source, so that its siblings are graded one by
+        # one (an ancestor whose frozen source is gone is graded as one unregistered entry). With no admitted
+        # run the namespaces keep the legacy whole-entry grading.
+        live = [p for p, src in frozen.items() if src.grade != "absent"]
+        adoption_dirs = frozenset(_opf_adopt_state.ADOPTION_NAMESPACES if adoption.runs else ()) | frozenset(
+            p.rsplit("/", i)[0] for p in live for i in range(1, p.count("/")))
 
     unmanaged_files = []
 
@@ -2347,7 +2421,7 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
         # handled by the caller's skip.) Anything else under the store is an UNREGISTERED directory, graded
         # as a stray even when empty (round-14: the walk previously graded files only, so an empty rogue
         # directory, or a tree of only empty dirs, escaped grading entirely).
-        if full == mrel or _under_any(full, staged_roots):
+        if full == mrel or _under_any(full, staged_roots) or full in adoption_dirs:
             return True
         if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
             try:
@@ -2418,12 +2492,26 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
                     "or migration actually running (spec 11:943/14.2)")
     walk(WORKING_DIRNAME, 0)
     for p in sorted(unmanaged_files):
+        if p in frozen:
+            continue      # a frozen source is graded below from the adoption state, whatever the status
         if partial_active:
             rep.triage_path("unregistered path {!r} at the store location (an import or migration is in "
                             "progress; triage per spec 14.2)".format(p))
         else:
             rep.finding("C-CONTAINMENT: unregistered path {!r} at the store location is neither OPF-managed "
                         "nor enumerated as unmanaged (spec 14.2/11)".format(p))
+    # spec 11/14.2: a frozen source whose live bytes match its plan digest is bounded adoption state, reported
+    # rather than failed at any import_status; a drifted or vanished one fails at required, even under a
+    # substantiated partial (never triage). A source the reader could not grade is already a cannot-evaluate.
+    for p in sorted(frozen):
+        src = frozen[p]
+        if src.grade == "bounded":
+            rep.migration_incomplete_path(
+                "migration_incomplete: frozen {} source {!r} of adoption run {}: {}; bounded adoption state "
+                "until its retirement is recorded (spec 11/14.2)".format(src.disposition, p, src.run_id, src.detail))
+        elif src.grade in ("drifted", "absent"):
+            rep.finding("C-CONTAINMENT: frozen {} source {!r} of adoption run {}: {} (spec 11/14.2)".format(
+                src.disposition, p, src.run_id, src.detail))
 
 
 def _check_lease(root_fd, machine_rel, rep):
@@ -3085,7 +3173,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-CONTAINMENT: whole-tree path / unmanaged-path containment (spec 14.2/11) -------------------
     rep.ran("C-CONTAINMENT")
-    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep)
+    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, in_repo=in_repo)
 
     # --- C-VIEW-DRIFT: byte-level drift of every declared deterministic view (spec 5.8/10) ------------
     rep.ran("C-VIEW-DRIFT")

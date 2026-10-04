@@ -110,6 +110,7 @@ def _bootstrap():
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
+    global _opf_adopt_state
     try:
         import _opf_worklog     # manifest-selected worklog intake + WL reference grammar
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
@@ -126,6 +127,7 @@ def _bootstrap():
         import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
         import _opf_adopt_apply  # OPF-ADOPT U1: the apply shell (zero executable ops)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
+        import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
         return EXIT_MALFORMED
@@ -11327,6 +11329,11 @@ def _doctor_report(result):
         print("  CANNOT-EVALUATE: {}".format(c))
     if result.triage:
         print("  partial-import triage entries: {}".format(len(result.triage)))
+    if result.migration_incomplete:
+        print("  migration_incomplete entries (bounded adoption state, reported not failed): {}".format(
+            len(result.migration_incomplete)))
+        for entry in result.migration_incomplete:
+            print("    {}".format(entry))
     print("  residuals (disclosed by-design, not gradeable): {}".format(len(result.residuals)))
 
 
@@ -16201,6 +16208,7 @@ def _self_tests():
     ("opf-absorb", _opf_absorb.self_test),
     ("opf-record", _opf_record.self_test),
     ("opf-adopt-apply", _opf_adopt_apply.self_test),
+    ("opf-adopt-state", _opf_adopt_state.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-journal", _opf_store._journal.self_test),   # #378: the _close_fd_yielding vectors
