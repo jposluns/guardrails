@@ -88,8 +88,10 @@ convention, enforces the composition rules: handlers run under a per-thread comp
 refuses any direct filesystem or process effect and any transaction of their own (so a slice composes
 into `ops`, init-store's substrate included), and composition first runs as a write-free preflight
 before the journal is prepared, so a preflight refusal writes nothing at all; a refusal of the second
-composition, under the journal lock, removes the journal directories the run created (a directory a
-concurrent run has populated meanwhile stays), so it too leaves the tree as it found it. Disclosed:
+composition, under the journal lock, releases the lock and removes the journal directories the run
+created, so it too leaves the tree as it found it, unless a release or a removal fails or may not be
+durable (a directory a concurrent run has populated meanwhile stays): the refusal then names each such
+leftover in place of "nothing written". Disclosed:
 digests bind the approval to one plan, never the actor's authenticity (self-asserted identity and
 same-user tampering stay spec 14.1 residuals); the release, prompt_pack, enforcement and skip_policy
 bindings are worksheet-asserted, so re-derivation proves the worksheet still freezes the plan, not that
@@ -983,7 +985,8 @@ def _absent_journal_dirs(root_fd):
 
 def _remove_journal_dirs(root_fd, created):
     """Deepest first, remove the journal directories this run created, once its refusal has released the
-    lock, so the refusal leaves the tree as it found it. rmdir only, never forced: a directory that is no
+    lock, so a refusal whose sweep returns ([], []) leaves the tree as it found it (the caller names
+    anything else). rmdir only, never forced: a directory that is no
     longer empty (a transaction record, a retained or concurrent run's lock) stays in place. A directory
     the walk cannot reach (an ancestor it cannot open, such as one created with mode 000 under a 0777
     umask) or cannot remove never ends the sweep: every shallower one is still attempted, since an empty
@@ -1022,38 +1025,81 @@ def _remove_journal_dirs(root_fd, created):
              if not any(rel.startswith(g + "/") for g in gone)], unconfirmed)
 
 
-def _failed_lock_state(jr_fd, journal_root):
-    """What an acquire_lock that failed with an OSError left, read beneath the held journal descriptor, so
-    the refusal reports it precisely: acquire_lock creates the lock BEFORE it writes and synchronizes it,
-    so such a failure can leave this run's own lock. That lock is released again (ownership-checked, as
-    every refusal under the lock releases it) and what stays, or a release whose durability is
-    unconfirmed, is named. A lock this run cannot attribute to itself (another run's, or an unreadable
-    one) is never touched."""
-    try:
-        owner = _journal.read_lock_owner_at(jr_fd)
-    except (_journal.JournalError, OSError) as exc:
-        return ("a journal lock is present but unreadable ({}), possibly this run's own unfinished write; it "
-                "is never blind-removed, so the next run and reconcile() both refuse on it".format(exc))
-    if owner is None:
-        return "this run left no journal lock"
-    if not _journal._owner_is_current(owner):
-        return "the journal lock present is another run's (pid {}), not this run's".format(owner.get("pid"))
+_NOTHING_WRITTEN = "nothing written (fail-closed)"
+
+
+def _unreadable_lock(exc):
+    """The clause for a journal lock that cannot be read: never blind-removed, refused by the next run and
+    by reconcile() alike, so no sanctioned path clears it, and the clause says so and names it."""
+    return ("a journal lock is present but unreadable ({}), possibly this run's own unfinished write; it is "
+            "never blind-removed, the next run and reconcile() both refuse on it, and no sanctioned path "
+            "clears it, so {}/lock STAYS".format(exc, JOURNAL_REL))
+
+
+def _release_outcome(jr_fd, journal_root):
+    """Release this run's own journal lock (ownership-checked) and read back, beneath the held journal
+    descriptor, what that left: ("released", None); ("unconfirmed", error) when the lock is gone but its
+    release raised, so it may not be durable; ("stays", why) when this process's lock is still present;
+    ("unreadable", error) when what is present cannot be read."""
     failed = None
     try:
         _journal.release_lock(journal_root)
     except (_journal.JournalError, OSError) as exc:
         failed = exc
     try:
-        released = _journal.read_lock_owner_at(jr_fd) is None
-    except (_journal.JournalError, OSError):
-        released = False
-    if released and failed is None:
+        owner = _journal.read_lock_owner_at(jr_fd)
+    except (_journal.JournalError, OSError) as exc:
+        return "unreadable", exc
+    if owner is not None and _journal._owner_is_current(owner):
+        return "stays", failed or "its release left it"
+    if failed is not None:
+        return "unconfirmed", failed
+    return "released", None
+
+
+def _release_note(jr_fd, journal_root):
+    """The run's normal lock release, at the end of a transaction or a refusal under the lock: None when
+    the lock is released, else the clause naming what stays or what may not be durable, reported exactly
+    as _failed_lock_state reports it on the acquire path, never swallowed."""
+    state, detail = _release_outcome(jr_fd, journal_root)
+    if state == "released":
+        return None
+    if state == "unreadable":
+        return _unreadable_lock(detail)
+    if state == "unconfirmed":
+        return "this run's journal lock was released, but the release may not be durable ({})".format(detail)
+    return ("this run's journal lock STAYS ({}): the next run refuses on it, and reconcile() breaks it once "
+            "this process has exited".format(detail))
+
+
+def _failed_lock_state(jr_fd, journal_root, error):
+    """What an acquire_lock that failed with an OSError left, read beneath the held journal descriptor, so
+    the refusal reports it precisely: acquire_lock creates the lock BEFORE it writes and synchronizes it,
+    so such a failure can leave this run's own lock, and it says so (error.lock_created). Only a lock this
+    call created is released again (ownership-checked, as every refusal under the lock releases it) and
+    what stays, or a release whose durability is unconfirmed, is named. A lock this call did not create
+    (another run's, another thread's of this same process, or any lock when the create itself failed) is
+    never touched, nor is an unreadable one."""
+    if not getattr(error, "lock_created", False):
+        return "this run left no journal lock (its create failed), and no lock present is touched"
+    try:
+        owner = _journal.read_lock_owner_at(jr_fd)
+    except (_journal.JournalError, OSError) as exc:
+        return _unreadable_lock(exc)
+    if owner is None:
+        return "this run left no journal lock"
+    if not _journal._owner_is_current(owner):
+        return "the journal lock present is another run's (pid {}), not this run's".format(owner.get("pid"))
+    state, detail = _release_outcome(jr_fd, journal_root)
+    if state == "released":
         return "this run's own journal lock WAS created, then released again"
-    if released:
+    if state == "unreadable":
+        return _unreadable_lock(detail)
+    if state == "unconfirmed":
         return ("this run's own journal lock WAS created, then released again, but the release may not be "
-                "durable ({})".format(failed))
+                "durable ({})".format(detail))
     return ("this run's own journal lock WAS created and STAYS ({}): the next run refuses on it, and "
-            "reconcile() breaks it once this process has exited".format(failed or "its release left it"))
+            "reconcile() breaks it once this process has exited".format(detail))
 
 
 def run_adopt_transaction(product_root, run_id, compose, phase=None):
@@ -1065,11 +1111,14 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     lock so observation and the journal's own capture are contiguous, compose(ops) fills a fresh ApplyOps
     against the live tree, the derived inventory seals it, and check_apply_ops re-proves every invariant;
     a refusal there releases the lock and removes the journal directories this run created
-    (_remove_journal_dirs), so it leaves the tree as it found it; a directory that cleanup cannot remove
-    (disclosed: one a concurrent run has populated meanwhile stays), or whose removal may not be durable,
-    turns the refusal into one that names each such directory, never a silent "nothing written", and
-    leaves it to the reconcile-first discipline rather than to hand removal. A lock failure past the
-    lock's creation names what it left (_failed_lock_state). Disclosed too: a concurrent run that
+    (_remove_journal_dirs), so it leaves the tree as it found it only when both succeed durably; a
+    directory that cleanup cannot remove (disclosed: one a concurrent run has populated meanwhile stays),
+    or whose removal may not be durable, and a lock release that leaves the lock or may not be durable
+    (_release_note, at the end of a committed transaction too), each turn the outcome into one that names
+    it in place of "nothing written", never beside it; a leftover only the reconcile-first discipline
+    clears is left to it rather than to hand removal, and one no sanctioned path clears is named as such.
+    A lock failure past the lock's creation names what this call's own lock left (_failed_lock_state).
+    Disclosed too: a concurrent run that
     prepared the journal but has not yet taken its lock can find the directory removed by that cleanup,
     and then refuses at the lock. A failure that may have left the transaction open RETAINS the lock (and
     the journal) so every later run refuses into reconcile().
@@ -1089,6 +1138,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     jr_fd = None
     created = []
     failure = None
+    lock_note = None
     held = retain = done = entered = False
     try:
         try:
@@ -1122,7 +1172,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                                       "written (fail-closed)".format(exc))
             except OSError as exc:
                 raise AdoptApplyError("cannot take the adoption journal lock ({}); {} (fail-closed)".format(
-                    exc, _failed_lock_state(jr_fd, journal_root)))
+                    exc, _failed_lock_state(jr_fd, journal_root, exc)))
             held = True
             ops = _compose_checked(root_fd, run_id, phase, compose)
             staged = dict(ops.staged)
@@ -1152,7 +1202,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                                           "nothing written (fail-closed)".format(exc))
                 if state == "rolled-back":
                     raise AdoptApplyError("the adoption transaction was refused and rolled back to the "
-                                          "prestate ({}); nothing written (fail-closed)".format(exc))
+                                          "prestate ({}): the product tree is as it was, and the journal "
+                                          "keeps this transaction's terminal record (fail-closed)".format(exc))
                 retain = True
                 raise AdoptApplyError("the adoption transaction {} FAILED and is {} ({}); the journal lock "
                                       "is retained so the next run refuses into reconcile() "
@@ -1161,10 +1212,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             return txn
         finally:
             if held and not retain:
-                try:
-                    _journal.release_lock(journal_root)
-                except (_journal.JournalError, OSError):
-                    pass   # a leftover lock refuses the next run into reconcile(), never a silent seize
+                lock_note = _release_note(jr_fd, journal_root)
     except BaseException as exc:
         failure = exc
         raise
@@ -1175,22 +1223,35 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         if created and not (done or retain):
             left, unconfirmed = _remove_journal_dirs(root_fd, created)
         store._close_fd_exc_safe(root_fd)
+        said = [lock_note] if lock_note else []
         if (left or unconfirmed) and not entered:
-            said = []
             if left:
                 said.append("the refusal's cleanup is INCOMPLETE: journal directories this run created STAY: "
                             "{}".format("; ".join(left)))
             if unconfirmed:
                 said.append("the refusal's cleanup is UNCONFIRMED: journal directories this run created were "
                             "removed, but the removal may not be durable: {}".format("; ".join(unconfirmed)))
-            note = ("{}. They are left to the reconcile-first discipline, never to hand removal: a later run "
-                    "inspects the adoption journal before it writes, reuses an empty journal directory, and "
-                    "refuses into reconcile() on a held lock or an open transaction there "
-                    "(fail-closed)".format("; ".join(said)))
+            said[-1] += (". They are left to the reconcile-first discipline, never to hand removal: a later run "
+                         "inspects the adoption journal before it writes and reuses an empty journal directory, "
+                         "and a held lock or an open transaction there refuses it into reconcile(); no "
+                         "sanctioned path clears any other leftover named here (a directory not reached, or an "
+                         "entry that is neither a transaction directory nor the journal lock, on which the next "
+                         "run refuses as unreadable and which reconcile() does not touch), so such a leftover "
+                         "stays")
+        if said:
+            note = "; ".join(said) + " (fail-closed)"
             if failure is not None and not isinstance(failure, Exception):
                 failure.add_note(note)    # an interrupt still propagates as itself, with the leftovers named
+            elif failure is None:
+                raise AdoptApplyError("the adoption transaction {} COMMITTED; {}".format(txn, note))
             else:
-                raise AdoptApplyError("{}; {}".format(failure, note) if failure else note) from failure
+                # the refusal's own "nothing written" no longer holds, so it is replaced, never kept
+                # beside the leftovers that contradict it.
+                head = str(failure)
+                if head.endswith("; " + _NOTHING_WRITTEN):
+                    head = head[:-len("; " + _NOTHING_WRITTEN)]
+                raise AdoptApplyError("{}; NOT everything this run wrote is confirmed undone: {}".format(
+                    head, note)) from failure
 
 
 # --- the dispatch table: EVERY op refuses not-yet-executable in this slice -----------------------------
@@ -1592,8 +1653,10 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     BEFORE the journal is prepared, so a handler, receipt, partition or invariant refusal writes nothing at
     all; then ONE base transaction (run_adopt_transaction) composes it again under the journal lock, every
     check re-proved there, and commits it. A refusal of that second composition (a stateful handler, or the
-    tree drifting between the passes) removes the journal directories the run created, so it too leaves
-    the tree as it found it (a directory a concurrent run has populated meanwhile stays, disclosed).
+    tree drifting between the passes) releases the lock and removes the journal directories the run
+    created, so it too leaves the tree as it found it, unless a release or a removal fails or may not be
+    durable (a directory a concurrent run has populated meanwhile stays, disclosed): run_adopt_transaction
+    then names each such leftover in place of "nothing written".
     Returns the transaction name."""
     plan_doc = frozen_plan(plan_bytes)
     approval = _canonical_toml(approval_bytes, "the adoption approval")
@@ -2344,8 +2407,21 @@ def _self_test_checks():
         with mock.patch.object(_journal, "_verify_staged_digest", failing_inventory):
             aborted = refusal(run_adopt_transaction, root, rid, compose_full(files))
         check("abort-rolls-back", aborted is not None and "rolled back" in aborted
+              and "nothing written" not in aborted and "terminal record" in aborted
               and txn_state(root, rid) == "rolled-back" and lock_free(root))
         check("abort-restores-prestate", snapshot(root) == before)
+
+    # 6a: a committed transaction whose lock release fails names the lock that stays, never a silent
+    # success over it (red against a release that swallows its failure).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+
+        def release_refused(journal_root):
+            raise OSError("an injected lock release fault")
+        with mock.patch.object(_journal, "release_lock", release_refused):
+            kept = refusal(run_adopt_transaction, root, rid, compose_full(files))
+        check("commit-lock-release-failure-named", kept is not None and "COMMITTED" in kept
+              and "lock STAYS" in kept and txn_state(root, rid) == "complete" and not lock_free(root))
 
     # 6b: the spec 14.2 apply-side verification checkpoint. A same-length fault injected into the archive
     # copy's own destination write (the staged bytes verify; the DISK bytes differ) is caught by the
@@ -3698,7 +3774,8 @@ def _self_test_checks():
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         rels = ["/".join(JOURNAL_REL.split("/")[:i + 1]) for i in range(len(JOURNAL_REL.split("/")))]
         check("driver-apply-incomplete-cleanup-named", "cannot prepare" in (err or "")
-              and "cleanup is INCOMPLETE" in (err or "")
+              and "cleanup is INCOMPLETE" in (err or "") and "nothing written" not in (err or "")
+              and "no sanctioned path clears" in (err or "")
               and all("{} (not removed".format(r) in (err or "") for r in rels)
               and "remove them" not in (err or "") and "never to hand removal" in (err or "")
               and "reconcile()" in (err or "") and (root / JOURNAL_REL / "stray").is_file())
@@ -3716,7 +3793,8 @@ def _self_test_checks():
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-cleanup-fsync-failure-named", "cannot prepare" in (err or "")
               and "may not be durable" in (err or "") and "cleanup is UNCONFIRMED" in (err or "")
-              and "INCOMPLETE" not in (err or "") and "STAY" not in (err or "") and _snapshot(root) == before)
+              and "nothing written" not in (err or "") and "INCOMPLETE" not in (err or "")
+              and "STAY" not in (err or "") and _snapshot(root) == before)
         shutil.rmtree(root / ".aiqt", ignore_errors=True)
         # a lock-file failure other than a held lock (here the journal directory vanishing under a peer's
         # cleanup) is the named lock refusal, not a raw OSError past the driver.
@@ -3771,7 +3849,53 @@ def _self_test_checks():
         with landed(composing), mock.patch.object(_journal, "_write_all", failing(real_write_all, 1)):
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-lock-unreadable-named", "present but unreadable" in (err or "")
+              and "no sanctioned path clears it" in (err or "") and "lock STAYS" in (err or "")
               and "nothing written" not in (err or "") and lock_path.is_file())
+        if os.path.lexists(lock_path):
+            os.unlink(lock_path)
+        # a lock this call did NOT create (here another thread of this same process takes it before this
+        # call's create fails with EMFILE) is never released, though process identity matches (red against
+        # a release decided by process identity).
+        real_acquire = _journal.acquire_lock
+
+        def peer_thread_first(journal_root, session_id):
+            real_acquire(journal_root, "opf-adopt-selftest-thread")
+            raise OSError(24, "Too many open files")
+        with landed(composing), mock.patch.object(_journal, "acquire_lock", peer_thread_first):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-lock-not-created-untouched", "left no journal lock" in (err or "")
+              and lock_path.is_file())
+        if os.path.lexists(lock_path):
+            os.unlink(lock_path)
+        # the normal release, on a refusal taken under the lock (here before the transaction opens),
+        # names a lock that stays or a release that may not be durable, never "nothing written" over it
+        # (each red against a release that swallows its failure).
+
+        def unopened(*args):
+            raise _journal.JournalError("injected refusal before transaction creation")
+
+        def release_failing(journal_root):
+            raise OSError("an injected lock release fault")
+        with landed(composing), mock.patch.object(_journal, "run_transaction", unopened), \
+                mock.patch.object(_journal, "release_lock", release_failing):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-release-failure-named", "refused before it opened" in (err or "")
+              and "lock STAYS" in (err or "") and "nothing written" not in (err or "") and lock_path.is_file())
+        if os.path.lexists(lock_path):
+            os.unlink(lock_path)
+        syncs = []
+
+        def second_sync_failing(path):
+            syncs.append(path)
+            if len(syncs) == 2:
+                raise OSError("an injected release fsync fault")
+            return real_fsync_dir(path)
+        with landed(composing), mock.patch.object(_journal, "run_transaction", unopened), \
+                mock.patch.object(_journal, "_fsync_path_dir", second_sync_failing):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-release-unconfirmed-named", "refused before it opened" in (err or "")
+              and "released, but the release may not be durable" in (err or "")
+              and "nothing written" not in (err or "") and _snapshot(root) == prior)
         shutil.rmtree(root / ".aiqt", ignore_errors=True)
         del seen[:]
         (root / "keep.md").write_bytes(b"kept, then edited\n")

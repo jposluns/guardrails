@@ -789,7 +789,9 @@ def acquire_lock(journal_root, session_id):
     """O_CREAT|O_EXCL lock with owner identity (9.3 step 2). Raises JournalError (mapped to a refuse-to-
     proceed) when a lock already exists: one open transaction at a time; a possibly-live owner is never
     seized here (breaking a stale lock is the caller's explicit reconcile step in recover). The O_EXCL
-    create is itself the mutual-exclusion point and refuses to follow a final-component symlink."""
+    create is itself the mutual-exclusion point and refuses to follow a final-component symlink. An OSError
+    raised AFTER that create carries lock_created = True, so a caller tells a lock THIS call created (and
+    may release) from one it did not, which process identity alone cannot (two threads of one process)."""
     journal_root = Path(journal_root)
     lock = journal_root / "lock"
     try:
@@ -798,14 +800,18 @@ def acquire_lock(journal_root, session_id):
         raise JournalError("journal lock {} already held: an open transaction exists (run recover)"
                            .format(lock))
     try:
-        owner = {"uid": os.getuid(), "pid": os.getpid(), "session": session_id,
-                 "pid-start": _pid_start(os.getpid()),
-                 "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-        _write_all(fd, json.dumps(owner, sort_keys=True).encode())   # loop: a short write cannot leave a malformed lock
-        os.fsync(fd)
-    finally:
-        _close_fd_yielding(fd)
-    _fsync_path_dir(journal_root)
+        try:
+            owner = {"uid": os.getuid(), "pid": os.getpid(), "session": session_id,
+                     "pid-start": _pid_start(os.getpid()),
+                     "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            _write_all(fd, json.dumps(owner, sort_keys=True).encode())   # loop: a short write cannot leave a malformed lock
+            os.fsync(fd)
+        finally:
+            _close_fd_yielding(fd)
+        _fsync_path_dir(journal_root)
+    except OSError as exc:
+        exc.lock_created = True
+        raise
     _kill_point("after-lock")
     return lock
 
