@@ -87,14 +87,17 @@ stage after a green completion check, and apply takes only its preimage. The dri
 convention, enforces the composition rules: handlers run under a per-thread composition guard that
 refuses any direct filesystem or process effect and any transaction of their own (so a slice composes
 into `ops`, init-store's substrate included), and composition first runs as a write-free preflight
-before the journal is prepared, so every composition refusal writes nothing at all. Disclosed: digests
-bind the approval to one plan, never the actor's authenticity (self-asserted identity and same-user
-tampering stay spec 14.1 residuals); the release, prompt_pack, enforcement and skip_policy bindings are
-worksheet-asserted, so re-derivation proves the worksheet still freezes the plan, not that the tool
-release or packs in use match it (the trust-verification slice observes them); the composition guard is
-an audit hook, not a sandbox (an already-open writable descriptor, ctypes, another thread or an unaudited
-entry point stays outside it); the re-derivation and the transaction are not one snapshot, so each op
-re-observes its own operands under the journal lock; one run takes one base transaction, so an approved
+before the journal is prepared, so a preflight refusal writes nothing at all; a refusal of the second
+composition, under the journal lock, removes the journal directories the run created (a directory a
+concurrent run has populated meanwhile stays), so it too leaves the tree as it found it. Disclosed:
+digests bind the approval to one plan, never the actor's authenticity (self-asserted identity and
+same-user tampering stay spec 14.1 residuals); the release, prompt_pack, enforcement and skip_policy
+bindings are worksheet-asserted, so re-derivation proves the worksheet still freezes the plan, not that
+the tool release or packs in use match it (the trust-verification slice observes them); the composition
+guard is an audit hook, not a sandbox (an already-open writable descriptor, ctypes, a thread already
+running before composition, since starting one is refused, or an unaudited entry point stays outside
+it); the re-derivation and the transaction are not one snapshot, so each op re-observes its own operands
+under the journal lock; one run takes one base transaction, so an approved
 plan applies at most once.
 
 Single-writer lease (spec 5.7): this slice carries NO lease join, so a transaction REFUSES, before writing
@@ -162,6 +165,7 @@ APPLY_STAGE = "apply"
 RECEIPT_STAGE = "receipt"
 # The bound on the one read-only git query that observes the live product revision (observe_revision).
 _GIT_TIMEOUT_SECONDS = 30
+_GIT_DIAGNOSIS_CHARS = 300
 DIR_MODE = 0o755
 FILE_MODE = 0o644
 _NONCE_RE = re.compile(r"^[0-9a-f]{16}\Z")
@@ -962,6 +966,44 @@ def _compose_checked(root_fd, run_id, phase, compose):
     return ops
 
 
+def _absent_journal_dirs(root_fd):
+    """The JOURNAL_REL directories, shallowest first, absent beneath `root_fd` before this run prepares the
+    journal: exactly those ensure_journal_dirs creates, so a refusal before the transaction opens can
+    remove them again (_remove_journal_dirs)."""
+    parts = JOURNAL_REL.split("/")
+    for i in range(len(parts)):
+        try:
+            present = _journal._lstat_contained(root_fd, "/".join(parts[:i + 1]))
+        except (_journal.JournalError, OSError) as exc:
+            raise AdoptApplyError("cannot inspect the adoption journal ({}); fail-closed".format(exc))
+        if present is None:
+            return ["/".join(parts[:j + 1]) for j in range(i, len(parts))]
+    return []
+
+
+def _remove_journal_dirs(root_fd, created):
+    """Deepest first, remove the journal directories this run created, once its refusal has released the
+    lock, so the refusal leaves the tree as it found it. rmdir only: a directory that is no longer empty (a
+    transaction record, a retained or concurrent run's lock) or no longer reachable stays in place, as do
+    its ancestors, never forced."""
+    for rel in reversed(created):
+        try:
+            pfd, name = _journal._open_parent(root_fd, rel)
+        except FileNotFoundError:
+            continue    # never created: a preparation that failed part-way
+        except (_journal.JournalError, OSError):
+            return
+        try:
+            os.rmdir(name, dir_fd=pfd)
+            os.fsync(pfd)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return
+        finally:
+            _journal._close_fd_quietly(pfd)
+
+
 def run_adopt_transaction(product_root, run_id, compose, phase=None):
     """ONE journaled adoption transaction, the run's base transaction or one later phase's, through the
     shared 9.3 engine. Refusals BEFORE anything is written, in order: containment, a non-clean journal
@@ -970,8 +1012,10 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     anything but a committed, INTENT-digest-matched base inventory.toml (spec 4.2). Then, under the journal
     lock so observation and the journal's own capture are contiguous, compose(ops) fills a fresh ApplyOps
     against the live tree, the derived inventory seals it, and check_apply_ops re-proves every invariant;
-    a refusal there releases the lock with nothing written beyond the journal directories. A failure that
-    may have left the transaction open RETAINS the lock so every later run refuses into reconcile().
+    a refusal there releases the lock and removes the journal directories this run created
+    (_remove_journal_dirs), so it leaves the tree as it found it; disclosed: a directory a concurrent run
+    has populated meanwhile stays. A failure that may have left the transaction open RETAINS the lock (and
+    the journal) so every later run refuses into reconcile().
     A transaction opened from inside the stage driver's composition (a plan op handler opening its own)
     refuses before anything else: one run takes one base transaction. Returns the transaction name."""
     denied = getattr(_COMPOSITION, "denied", None)
@@ -986,6 +1030,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     root_fd = _open_product_root(product_root)
     journal_root = _journal_root(product_root)
     jr_fd = None
+    created = []
+    held = retain = done = False
     try:
         try:
             _journal.require_containment()
@@ -1003,13 +1049,13 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                                   "id (spec 14.1); nothing written (fail-closed)".format(run_id, txn))
         if phase is not None:
             _committed_base_or_refuse(root_fd, journal_root, run_id, phase)
+        created = _absent_journal_dirs(root_fd)
         try:
             _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
             jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
         except (_journal.JournalError, OSError) as exc:
             raise AdoptApplyError("cannot prepare the adoption journal {} ({}); nothing "
                                   "written (fail-closed)".format(JOURNAL_REL, exc))
-        held = retain = False
         try:
             try:
                 _journal.acquire_lock(journal_root, SESSION_ID)
@@ -1048,6 +1094,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 raise AdoptApplyError("the adoption transaction {} FAILED and is {} ({}); the journal lock "
                                       "is retained so the next run refuses into reconcile() "
                                       "(fail-closed)".format(txn, state or "in an unreadable state", exc))
+            done = True
             return txn
         finally:
             if held and not retain:
@@ -1058,6 +1105,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     finally:
         if jr_fd is not None:
             _journal._close_fd_quietly(jr_fd)
+        if created and not (done or retain):
+            _remove_journal_dirs(root_fd, created)
         store._close_fd_exc_safe(root_fd)
 
 
@@ -1172,9 +1221,12 @@ def observe_revision(product_root):
                               "never assumed fresh (spec 14.1, fail-closed)".format(exc))
     answer = proc.stdout.decode("ascii", errors="replace").strip() if proc.returncode == 0 else None
     if answer is None or not schema._is_revision(answer):
+        said = "".join(c if c.isprintable() else " " for c in (proc.stderr or b"").decode("utf-8", "replace"))
+        said = " ".join(said.split())[:_GIT_DIAGNOSIS_CHARS]
         raise AdoptApplyError("the live product revision at {} cannot be observed (git rev-parse exit {}: no "
-                              "repository, an unborn HEAD, or an unreadable answer); an unverifiable revision is "
-                              "never assumed fresh (spec 14.1, fail-closed)".format(product_root, proc.returncode))
+                              "repository, an unborn HEAD, a repository git refuses, or an unreadable answer{}); "
+                              "an unverifiable revision is never assumed fresh (spec 14.1, fail-closed)".format(
+                                  product_root, proc.returncode, "; git said: " + said if said else ""))
     return answer
 
 
@@ -1192,7 +1244,8 @@ _EFFECT_EVENTS = frozenset((
     "os.removexattr", "os.fork", "os.forkpty", "os.exec", "os.posix_spawn", "os.spawn", "os.system",
     "os.startfile", "os.kill", "os.killpg", "subprocess.Popen", "pty.spawn", "shutil.copyfile",
     "shutil.copymode", "shutil.copystat", "shutil.copytree", "shutil.chown", "shutil.move", "shutil.rmtree",
-    "shutil.make_archive", "shutil.unpack_archive", "tempfile.mkstemp", "tempfile.mkdtemp"))
+    "shutil.make_archive", "shutil.unpack_archive", "tempfile.mkstemp", "tempfile.mkdtemp",
+    "_thread.start_new_thread", "_thread.start_joinable_thread"))
 
 
 def _composition_audit(event, args):
@@ -1217,9 +1270,10 @@ def _composition_audit(event, args):
 def _composing():
     """Arm the composition guard on this thread for one composition; a composition already armed here (a
     handler re-entering the driver) refuses. After the body, any recorded effect refuses the composition even
-    where a handler caught the guard's own refusal. Disclosed: an audit hook is not a sandbox; a write
-    through an already-open writable descriptor, ctypes, another thread, or an entry point CPython does not
-    audit stays outside it."""
+    where a handler caught the guard's own refusal. Starting a thread is an effect (the guard arms per
+    thread). Disclosed: an audit hook is not a sandbox; a write through an already-open writable descriptor,
+    ctypes, a thread already running before composition, or an entry point CPython does not audit stays
+    outside it."""
     if getattr(_COMPOSITION, "denied", None) is not None:
         raise AdoptApplyError("a composition is already in progress on this thread; a plan op handler may not "
                               "re-enter the stage driver (fail-closed)")
@@ -1454,7 +1508,10 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
     plan source refuses. The compose function first runs as a write-free preflight against the live tree,
     BEFORE the journal is prepared, so a handler, receipt, partition or invariant refusal writes nothing at
     all; then ONE base transaction (run_adopt_transaction) composes it again under the journal lock, every
-    check re-proved there, and commits it. Returns the transaction name."""
+    check re-proved there, and commits it. A refusal of that second composition (a stateful handler, or the
+    tree drifting between the passes) removes the journal directories the run created, so it too leaves
+    the tree as it found it (a directory a concurrent run has populated meanwhile stays, disclosed).
+    Returns the transaction name."""
     plan_doc = frozen_plan(plan_bytes)
     approval = _canonical_toml(approval_bytes, "the adoption approval")
     gate = apply_plan(plan_doc, approval)
@@ -3246,9 +3303,10 @@ def _self_test_checks():
     # landed-op case, apply still refuses while the driver's mandatory receipt stage is unlanded; with it
     # patched in too, apply persists the plan and approval in the run's bundle, dispatches every row in plan
     # order in the apply stage and then the receipt stage, and leaves the frozen retire source in place. The
-    # retirement-partition flip, a handler writing the live tree directly, one swallowing that refusal and
-    # one opening its own transaction each refuse with the WHOLE tree unchanged; a second apply refuses on
-    # the one-apply rule itself.
+    # retirement-partition flip, a handler writing the live tree directly, one swallowing that refusal, one
+    # opening its own transaction and one starting a thread each refuse with the WHOLE tree unchanged, as
+    # does a receipt stage refusing only on the second, locked composition; a second apply, and an approve
+    # of the applied run, refuse on the one-apply rule itself.
     import copy as _copy   # this function binds `copy` as a local name (section 4), shadowing the module
     import shutil
     import _opf_adopt_plan as planner
@@ -3344,6 +3402,12 @@ def _self_test_checks():
         check("driver-approve-unobservable-revision-refused", "revision" in
               (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or ""))
         os.rename(root / "git-aside", root / ".git")
+        # git's own diagnosis (here a repository another user owns) reaches the refusal, printable and bounded.
+        said = b"fatal: detected dubious ownership in repository at '/x'\n\x1b[31m" + b"y" * 2000
+        with mock.patch.object(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 128, b"", said)):
+            err = refusal(observe_revision, root) or ""
+        check("driver-unobservable-revision-names-git-diagnosis", "dubious ownership" in err
+              and "\x1b" not in err and len(err) < 1000)
         # stale observation: a source's bytes change after the plan froze -> refuse into a fresh plan.
         (root / "legacy.md").write_bytes(b"edited after planning\n")
         check("driver-approve-stale-observation-refused", "fresh plan" in
@@ -3429,6 +3493,21 @@ def _self_test_checks():
                 pass
             return schema._ok()
 
+        def threaded(op_row, context):
+            # a handler handing its direct write to a thread of its own, outside the per-thread guard.
+            worker = threading.Thread(target=(Path(str(context["product_root"])) / "via-thread").write_bytes,
+                                      args=(b"written from another thread\n",))
+            worker.start()
+            worker.join()
+            return schema._ok()
+
+        passes = []
+
+        def second_pass_refusing(context):
+            # VALID in the write-free preflight, refusing when the transaction composes again.
+            passes.append(context.get("stage"))
+            return schema._ok() if len(passes) == 1 else schema._cannot("a second-pass refusal")
+
         def landed(handler, stage=receipt):
             stack = contextlib.ExitStack()
             stack.enter_context(mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, handler)))
@@ -3466,6 +3545,40 @@ def _self_test_checks():
             err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-handler-own-transaction-refused", "nested adoption transaction" in (err or "")
               and _snapshot(root) == before)
+        # a handler handing its write to a thread it starts (the guard arms per thread) refuses at the start.
+        with landed(threaded):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-handler-thread-start-refused", "direct effect" in (err or "")
+              and not (root / "via-thread").exists() and _snapshot(root) == before)
+        # a refusal of the SECOND composition, under the journal lock after the preflight passed (a stateful
+        # composer, or the tree drifting between the passes), also leaves the WHOLE tree unchanged: the
+        # journal directories the run created are removed again (red against a driver that leaves them).
+        del passes[:]
+        with landed(composing, stage=second_pass_refusing):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-second-pass-refusal-tree-untouched", "second-pass refusal" in (err or "")
+              and len(passes) == 2 and _snapshot(root) == before)
+        # only the directories the run created: a journal ancestor that predates the run stays in place.
+        shutil.rmtree(root / ".aiqt", ignore_errors=True)   # isolate from a left-behind journal above
+        (root / JOURNAL_REL).parent.mkdir(parents=True)
+        ancestor = _snapshot(root)
+        del passes[:]
+        with landed(composing, stage=second_pass_refusing):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-second-pass-refusal-keeps-prior-dirs", "second-pass refusal" in (err or "")
+              and len(passes) == 2 and _snapshot(root) == ancestor)
+        shutil.rmtree(root / ".aiqt", ignore_errors=True)
+        check("driver-fixture-restored-after-second-pass", _snapshot(root) == before)
+        # a journal preparation that fails part-way (its first directory made) leaves the tree unchanged too.
+
+        def partial_journal(root_fd, journal_rel):
+            os.mkdir(journal_rel.split("/")[0], dir_fd=root_fd)
+            raise OSError("an injected journal preparation fault")
+        with landed(composing), mock.patch.object(_journal, "ensure_journal_dirs", partial_journal):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-partial-journal-refusal-tree-untouched", "cannot prepare" in (err or "")
+              and _snapshot(root) == before)
+        shutil.rmtree(root / ".aiqt", ignore_errors=True)
         del seen[:]
         (root / "keep.md").write_bytes(b"kept, then edited\n")
         with landed(composing):
@@ -3497,6 +3610,10 @@ def _self_test_checks():
             again = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
         check("driver-apply-one-approval-one-apply", "already has its transaction" in (again or "")
               and not seen and _snapshot(root) == applied)
+        # and approve refuses an applied run on the same rule, ahead of freshness.
+        check("driver-approve-after-apply-refused", "already has its transaction" in
+              (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or "")
+              and _snapshot(root) == applied)
 
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
