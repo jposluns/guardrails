@@ -9304,11 +9304,6 @@ _ORCH_HEREDOC_DELIM_STOP = frozenset(" \t\n;&|<>()")
 # process substitution. Text carrying one can still run a command, so an `&` beside it is never skipped as
 # data (an expanded here-document body, or a `${...}` parameter expansion).
 _ORCH_CMDSUB_RE = re.compile(r"\$\(|`|\$\{[\s|]|[<>]\(")
-# The first character after `${` that makes it a parameter expansion: a name, a positional or special
-# parameter, or the `#` length / `!` indirection prefix. Any other (a blank or `|`) is a command-substitution
-# form in current shells and is scanned as code.
-_ORCH_PARAM_START = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_#?@*!$-")
 
 
 def _orch_heredoc_word(command, i):
@@ -9391,50 +9386,6 @@ def _orch_heredoc_bodies(command, start, pending):
     return end, ambiguous
 
 
-def _orch_param_expansion_span(command, i):
-    """(end, data) for the `${` at i. end is the index just after its closing brace (a brace inside a
-    nested `(...)` or a backtick span does not close it), or None when none closes it. data is True only for
-    a plain parameter expansion this scan can skip as data: one whose first character is a parameter start
-    and that holds no newline and no command-substitution opener (`$(`, a backtick, the current-shell form,
-    `<(`, `>(`), whose `&` could still launch work and is therefore scanned as code."""
-    n = len(command)
-    j, depth, paren = i + 2, 1, 0
-    while j < n:
-        ch = command[j]
-        if ch == "\\":
-            j += 2
-            continue
-        if ch in "'`":
-            k = command.find(ch, j + 1)
-            if k == -1:
-                return None, False
-            j = k + 1
-            continue
-        if ch == '"':
-            k = j + 1
-            while k < n and command[k] != '"':
-                k += 2 if command[k] == "\\" else 1
-            if k >= n:
-                return None, False
-            j = k + 1
-            continue
-        if ch == "$" and j + 1 < n and command[j + 1] == "{":
-            depth += 1
-            j += 2
-            continue
-        if ch in "()":
-            paren += 1 if ch == "(" else (-1 if paren else 0)
-        elif ch == "}" and not paren:
-            depth -= 1
-            if depth == 0:
-                body = command[i:j + 1]
-                data = (i + 2 < n and command[i + 2] in _ORCH_PARAM_START and "\n" not in body
-                        and not _ORCH_CMDSUB_RE.search(body))
-                return j + 1, data
-        j += 1
-    return None, False
-
-
 def _orch_foreground_detach(command):
     """True when _orch_foreground_detach_kind reports a detach, an ambiguous scan, or an out-of-subset
     could-not-read (see there). False (None kind) only for a command proven inside the safe subset with no
@@ -9442,97 +9393,112 @@ def _orch_foreground_detach(command):
     return _orch_foreground_detach_kind(command) is not None
 
 
-# Reserved words / constructs that take a command OUT of the safe subset the scanner models exactly. A
-# `case`/`esac` pattern `)`, an `eval`'d string, and a `coproc` each change execution in ways this lexical
-# scan does not model, so their presence as a word at a command position defers to the out-of-subset rule.
-_ORCH_SUBSET_OUT_KW_RE = re.compile(r"(?:case|esac|eval|coproc)(?![A-Za-z0-9_])")
+# Reserved words that bash reconstructs through quote removal or brace expansion can re-interpret a quoted
+# string as code (eval), or background work with no bare `&` byte at all (coproc), so a command word that
+# dequotes to one of these takes the command OUT of the safe subset; a case/esac pattern `)` does too.
+_ORCH_SUBSET_KEYWORDS = frozenset(("case", "esac", "eval", "coproc"))
+
+# Metacharacters whose presence ANYWHERE outside the one nested commit-message template takes a command OUT of
+# the safe subset: a `$` expansion/substitution/ANSI-C or locale quote, a backtick, a backslash escape or line
+# continuation, a `#` comment, and `(` `)` `{` `}` grouping, subshell, or brace expansion. Inside the subset
+# only single quotes, double quotes, and depth-0 here-document bodies carry data, so none of these can appear
+# there; when one does, the scanner stops modelling and the caller denies on any `&` byte (see _orch_any_bare_amp).
+_ORCH_SUBSET_FORBIDDEN = frozenset("$`\\#(){}")
 
 
 def _orch_match_safe_cmdsub_heredoc(command, i):
-    """The ONE nested command-substitution shape the scanner models exactly and treats as safe data: a
-    `cat` reading a QUOTE-delimited here-document, nothing but blanks and the closing `)` after the
-    terminator line, i.e. `$(cat [plain flags] <<['-']'DELIM'<newline>BODY<newline>DELIM<newline>[blanks])`.
-    Returns the index just after that `)`, or None when command[i:] is not exactly that shape.
+    """The ONE nested command-substitution shape the scanner models exactly and treats as safe data, matched
+    by an EXACT template anchored at the opening double quote i:
 
-    This is the git commit-message form `"$(cat <<'EOF' ... EOF)"`. It is provably safe even though a
-    command substitution is otherwise outside the subset: `cat` copies stdin to stdout and NEVER executes
-    its input (unlike `bash <<'EOF'`, which would run the body, so only the literal command word `cat` is
-    accepted); the delimiter is QUOTED, so the body is a literal, never expanded or run; and no command runs
-    after the body, so an `&` anywhere in the body is here-document data, not an operator, and nothing
-    detaches. Any deviation (another reader, an unquoted delimiter, extra tokens on the operator line, or any
-    code between the terminator and the `)`) falls outside this shape and is left for the out-of-subset rule
-    to deny whenever a bare `&` byte is present."""
+        "$(cat <<'DELIM'<newline>BODY<newline>DELIM<newline>)"
+
+    Returns the index just after the closing double quote (just past the `)"`), or None when command[i:] is
+    not EXACTLY this shape. This is the git commit-message form. It is safe even though a command substitution
+    is otherwise OUT: `cat` copies stdin to stdout and NEVER executes it; the delimiter is single-quoted, so
+    BODY is a literal that is neither expanded nor run; the operator line is exactly `"$(cat <<'DELIM'` with
+    one quoted delimiter word and nothing else (no comment, no escape, no extra token); the terminator line is
+    exactly DELIM (a body line that merely starts with DELIM, which bash can match leniently, is rejected);
+    and the next line is exactly `)"`. BODY is therefore opaque data and an `&` anywhere in it is here-document
+    text, never an operator. Any deviation returns None and falls to the out-of-subset rule."""
     n = len(command)
-    if not command.startswith("$(", i):
+    if not command.startswith('"$(cat', i):
         return None
-    j = i + 2
-    while j < n and command[j] in " \t":
-        j += 1
-    if not command.startswith("cat", j):
-        return None
-    j += 3
-    if j < n and command[j] not in " \t<":
-        return None  # a longer word such as `category`, not the command `cat`
-    # Only plain argument/flag text may precede the here-document redirect (no operator, quote, or expansion).
-    while j < n and command[j] not in "<\n&|;()`\"'$>":
-        j += 1
+    j = i + 6
+    k = j
+    while k < n and command[k] in " \t":
+        k += 1
+    if k == j:
+        return None                      # a blank must separate the `cat` command word from the `<<` redirect
+    j = k
     if not command.startswith("<<", j):
         return None
     j += 2
-    strip_tabs = j < n and command[j] == "-"
-    if strip_tabs:
-        j += 1
-    while j < n and command[j] in " \t":
-        j += 1
-    word = _orch_heredoc_word(command, j)
-    if word is None:
+    if j >= n or command[j] != "'":
+        return None                      # only a single-quoted delimiter (no `<<-`, unquoted, or "..." word)
+    end_q = command.find("'", j + 1)
+    if end_q == -1:
         return None
-    delim, quoted, j = word
-    if not quoted:
-        return None  # only a QUOTED delimiter proves the body is literal (never expanded or executed)
-    while j < n and command[j] in " \t":
-        j += 1
+    delim = command[j + 1:end_q]
+    if not delim or "\n" in delim:
+        return None
+    j = end_q + 1
     if j >= n or command[j] != "\n":
-        return None  # extra tokens on the operator line fall outside the modelled shape
+        return None                      # nothing else may follow the delimiter on the operator line
     j += 1
-    while True:  # consume the literal body up to the terminator line
+    while True:                          # consume the opaque body up to a terminator line equal to the delimiter
         eol = command.find("\n", j)
         if eol == -1:
-            return None  # no terminator line: boundary unprovable
+            return None
         line = command[j:eol]
-        if (line.lstrip("\t") if strip_tabs else line) == delim:
+        if line == delim:
             j = eol + 1
             break
+        if line.startswith(delim):
+            return None                  # a line bash might match leniently as the terminator: not the template
         j = eol + 1
-    while j < n and command[j] in " \t\n":
-        j += 1  # only blanks/newlines may precede the closing )
-    return j + 1 if (j < n and command[j] == ")") else None
+    if not command.startswith(')"', j):
+        return None                      # the line after the terminator must be exactly `)"`
+    return j + 2
 
 
 def _orch_any_bare_amp(command):
-    """True when ANY `&` byte in command is not part of a no-detach operator form: `&&` logical-AND, `&>` /
-    `&>>` redirect, or a `<&` / `>&` / `|&` descriptor-duplication / pipe-stderr. This is the out-of-subset
-    rule: when a command carries a construct the scanner does not model exactly, it cannot prove any `&` is
-    quoted or data, so the mere presence of a non-operator `&` byte anywhere denies (could-not-read)."""
+    """The out-of-subset rule (rule B): when a command carries a construct the scanner does not model
+    exactly, it cannot prove ANY `&` is quoted or here-document data, so the mere presence of an `&` byte
+    anywhere denies. There are deliberately NO adjacency exemptions here for `&&`, `>&`, `|&`, or `&>`: an
+    escaped or otherwise unproven operator byte outside the subset was a round-4 bypass, so every `&` byte
+    counts."""
+    return "&" in command
+
+
+def _orch_dequoted_command_word(command, i):
+    """The word beginning at i with its single/double quote CHARACTERS removed (bash quote removal), read up
+    to the next blank, separator, or operator. Used to detect a reserved word that bash reconstructs through
+    quote removal (`e'v'al`, `'eval'`, `ev"a"l`) and would then run as code. Returns the dequoted spelling, or
+    None when a quote in the word is unbalanced (left for the main scan to report)."""
     n = len(command)
-    i = 0
-    while i < n:
-        if command[i] != "&":
-            i += 1
+    out = []
+    j = i
+    while j < n:
+        ch = command[j]
+        if ch in " \t\n;|&<>":
+            break
+        if ch == "'":
+            e = command.find("'", j + 1)
+            if e == -1:
+                return None
+            out.append(command[j + 1:e])
+            j = e + 1
             continue
-        prev = command[i - 1] if i > 0 else ""
-        nxt = command[i + 1] if i + 1 < n else ""
-        if nxt == "&" or prev == "&":      # part of a `&&`
-            i += 1
+        if ch == '"':
+            e = command.find('"', j + 1)
+            if e == -1:
+                return None
+            out.append(command[j + 1:e])
+            j = e + 1
             continue
-        if nxt == ">":                      # `&>` / `&>>`
-            i += 1
-            continue
-        if prev in "<>|":                   # `<&` / `>&` / `|&` and the `2>&1` fd-duplication form
-            i += 1
-            continue
-        return True                         # a bare `&` in no no-detach operator form
-    return False
+        out.append(ch)
+        j += 1
+    return "".join(out)
 
 
 def _orch_safe_subset_scan(command):
@@ -9542,125 +9508,81 @@ def _orch_safe_subset_scan(command):
       'OUT'       a construct OUTSIDE the subset was seen (the caller applies the out-of-subset rule),
       None        the whole command is inside the subset and carries no bare `&` detach.
 
-    THE SAFE SUBSET (where skipping text as data is proven correct): plain words; single-quoted strings;
-    double-quoted strings that contain NO substitution of any kind (`$(`, a backtick, `$((`, or a `${` with
-    an operator); a `${...}` plain parameter expansion carrying no command substitution (its `&` is a word
-    character, _orch_param_expansion_span with data True); here-string operators `<<<` (consumed, never a
-    body); and here-document bodies at nesting depth 0 with a provable physical-line boundary (quoted or
-    unquoted delimiter, no command substitution in an expanded body). The one nested exception is
-    _orch_match_safe_cmdsub_heredoc (a `cat` reading a quoted here-document inside `$(...)`).
+    THE SAFE SUBSET (rule A): a command whose code carries NONE of the metacharacters in
+    _ORCH_SUBSET_FORBIDDEN (a `$`, a backtick, a backslash, a `#`, or `(` `)` `{` `}`) and no `<<<`
+    here-string, where single quotes, double quotes, and depth-0 here-document bodies (under the unambiguous
+    physical-line boundary rule of _orch_heredoc_bodies) carry data; a forbidden byte INSIDE that data takes
+    the command OUT too, so the data regions cannot hide a substitution. A command word that dequotes to a
+    reserved word (case/esac/eval/coproc) is OUT, since bash would reconstruct and run it. A word-glued `[`
+    index subscript or arithmetic is OUT as well. The ONE nested
+    exception is the exact commit-message template matched by _orch_match_safe_cmdsub_heredoc.
 
-    EVERYTHING ELSE is OUT: an ANSI-C `$'...'` quote, a backtick anywhere, any other `$(` command
-    substitution, a `$((` / `((` arithmetic context, a word-glued `[` index subscript or `$[`, a `case` /
-    `esac` / `eval` / `coproc` word, a `${...}` that is scanned as code, and any here-document whose boundary
-    this reader cannot prove on physical lines (a missing terminator, a backslash-newline continuation, an
-    expanded body beside a command substitution, or a delimiter word this reader cannot model). Because a
-    plain subshell `(...)` only ever nests code whose `&` is still a real operator and whose here-document
-    bodies bash still matches on physical lines, `(` and `)` are walked as ordinary word boundaries (no depth
-    is tracked), so no `)` can corrupt a substitution or here-document boundary. OUT never skips text as
-    data; the caller denies on any bare `&` byte, so over-denial outside the subset is in the safe
-    direction."""
-    in_single = in_double = escaped = False
-    pending = []        # here-documents awaiting their body (all at depth 0 in the subset)
-    prev_dup = False    # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
-    word_start = True   # the next unquoted char begins a word (start of string, or after a separator/blank)
+    EVERYTHING ELSE is OUT, and the caller denies on any `&` byte, so over-denial outside the subset is in the
+    safe direction. Inside the subset a bare `&` is a detach; `&&`, `&>` / `&>>`, and a `>&` / `<&` / `|&`
+    descriptor-duplication or pipe-stderr adjacent form are not."""
     i, n = 0, len(command)
+    in_single = in_double = False
+    pending = []        # here-documents awaiting their body (all at depth 0 in the subset)
+    prev_dup = False    # the previous code char was an unquoted >, <, or | (a dup/pipe operator lead)
+    word_start = True   # the next code char begins a word (start of string, or after a separator/blank)
     while i < n:
         ch = command[i]
-        if escaped:
-            escaped, prev_dup, word_start = False, False, False
-            i += 1
-            continue
         if in_single:
             if ch == "'":
                 in_single = False
+            elif ch in _ORCH_SUBSET_FORBIDDEN:
+                return "OUT"
             i += 1
             continue
         if in_double:
-            if ch == "\\":
-                escaped = True
-                i += 1
-                continue
             if ch == '"':
                 in_double = False
-                i += 1
-                continue
-            if ch == "`":
-                return "OUT"   # a backtick command substitution in double quotes is CODE, not modelled here
-            if ch == "$" and command.startswith("(", i + 1):
-                end = _orch_match_safe_cmdsub_heredoc(command, i)
-                if end is not None:
-                    i = end          # the one proven-safe `$(cat <<'EOF' ... EOF)` shape: skip it as data
-                    continue
-                return "OUT"         # any other `$(` (or `$((`) inside double quotes is CODE
-            if ch == "$" and command.startswith("{", i + 1):
-                span_end, data = _orch_param_expansion_span(command, i)
-                if data:
-                    i = span_end
-                    continue
-                return "OUT"         # a `${...}` scanned as code (an operator or a command substitution)
-            i += 1                    # any other char in double quotes is data (an `&` included)
-            continue
-        if ch == "#" and word_start:
-            nl = command.find("\n", i)
-            if nl == -1:
-                break
-            i = nl
-            continue
-        if ch == "\n" and pending:
-            consumed = _orch_heredoc_bodies(command, i + 1, list(pending))
-            if consumed is None:
-                return "OUT"         # a here-document body this reader cannot delimit on physical lines
-            end, ambiguous = consumed
-            if ambiguous:
-                return "OUT"         # an expanded body carries an `&` beside a command substitution
-            pending = []
-            i = end
-            continue
-        if ch in " \t\n":            # bash blanks are only space, tab, and newline (not CR/VT/FF/NBSP)
-            prev_dup, word_start = False, True
+            elif ch in _ORCH_SUBSET_FORBIDDEN:
+                return "OUT"             # a substitution or escape inside double quotes: not modelled here
             i += 1
             continue
-        if ch == "\\":
-            escaped, prev_dup, word_start = True, False, False
-            i += 1
-            continue
+        if word_start and ch not in " \t\n":
+            if _orch_dequoted_command_word(command, i) in _ORCH_SUBSET_KEYWORDS:
+                return "OUT"             # a reserved word at a command position (quote removal included)
+        if ch in _ORCH_SUBSET_FORBIDDEN:
+            return "OUT"
+        if ch == "[" and not word_start:
+            return "OUT"                 # a word-glued `[` subscript (a `<<` inside it is an arithmetic shift)
         if ch == "'":
             in_single, prev_dup, word_start = True, False, False
             i += 1
             continue
         if ch == '"':
+            end = _orch_match_safe_cmdsub_heredoc(command, i)
+            if end is not None:
+                i, prev_dup, word_start = end, False, False   # the one proven-safe template: skip as data
+                continue
             in_double, prev_dup, word_start = True, False, False
             i += 1
             continue
-        if ch == "`":
-            return "OUT"
-        if ch == "$" and command.startswith("'", i + 1):
-            return "OUT"             # ANSI-C $'...'
-        if ch == "$" and command.startswith("(", i + 1):
-            end = _orch_match_safe_cmdsub_heredoc(command, i)
-            if end is not None:
+        if ch in " \t":
+            prev_dup, word_start = False, True
+            i += 1
+            continue
+        if ch == "\n":
+            if pending:
+                consumed = _orch_heredoc_bodies(command, i + 1, list(pending))
+                if consumed is None:
+                    return "OUT"         # a here-document body this reader cannot delimit on physical lines
+                end, ambiguous = consumed
+                if ambiguous:
+                    return "OUT"         # an expanded body carries an `&` beside a command substitution
+                if any(c in _ORCH_SUBSET_FORBIDDEN for c in command[i + 1:end]):
+                    return "OUT"         # a forbidden byte in the body: not modelled as plain data
+                pending = []
+                prev_dup, word_start = False, True
                 i = end
                 continue
-            return "OUT"             # a `$(` command substitution (or `$((`) is CODE
-        if ch == "$" and command.startswith("{", i + 1):
-            span_end, data = _orch_param_expansion_span(command, i)
-            if data:
-                i = span_end
-                continue
-            return "OUT"
-        if ch == "(" and command.startswith("((", i):
-            return "OUT"             # a `((...))` arithmetic context (a `<<` there is a shift, not a body)
-        if ch == "[" and not word_start:
-            return "OUT"             # a word-glued `[` index subscript or a `$[` arithmetic form
-        if ch in "()":
-            prev_dup, word_start = False, True   # a plain subshell boundary: an ordinary word boundary
+            prev_dup, word_start = False, True
             i += 1
             continue
         if ch == "<" and command.startswith("<<<", i):
-            prev_dup, word_start = False, False   # a here-string is a one-word redirection, not a body
-            i += 3
-            continue
+            return "OUT"                 # a here-string is outside the subset
         if ch == "<" and command.startswith("<<", i):
             j = i + 2
             strip_tabs = command.startswith("-", j)
@@ -9669,29 +9591,29 @@ def _orch_safe_subset_scan(command):
                 j += 1
             word = _orch_heredoc_word(command, j)
             if word is None:
-                return "OUT"         # a delimiter word this reader cannot model
-            text, quoted, end = word
+                return "OUT"             # a delimiter word this reader cannot model
+            text, quoted, endw = word
+            if any(c in _ORCH_SUBSET_FORBIDDEN for c in command[i:endw]):
+                return "OUT"             # a forbidden byte in the redirect or the delimiter word
             pending.append((text, strip_tabs, quoted))
             prev_dup, word_start = False, False
-            i = end
+            i = endw
             continue
         if ch == "&":
             nxt = command[i + 1] if i + 1 < n else ""
-            if nxt == "&":           # `&&` logical AND: not a detach
+            if nxt == "&":               # `&&` logical AND: not a detach
                 prev_dup, word_start = False, True
                 i += 2
                 continue
-            if nxt == ">":           # `&>` / `&>>` redirect: not a detach
+            if nxt == ">":               # `&>` / `&>>` redirect: not a detach
                 prev_dup, word_start = False, False
                 i += 1
                 continue
-            if prev_dup:             # `>&` / `<&` / `|&` descriptor-dup or pipe-stderr: not a detach
+            if prev_dup:                 # `>&` / `<&` / `|&` descriptor-dup or pipe-stderr: not a detach
                 prev_dup, word_start = False, False
                 i += 1
                 continue
-            return "detach"          # a bare `&` control operator (a detach)
-        if word_start and _ORCH_SUBSET_OUT_KW_RE.match(command, i):
-            return "OUT"             # a case/esac/eval/coproc word at a command position
+            return "detach"              # a bare `&` control operator (a detach)
         if ch == ";":
             prev_dup, word_start = False, True
             i += 1
@@ -9700,7 +9622,11 @@ def _orch_safe_subset_scan(command):
             prev_dup, word_start = True, True
             i += 1
             continue
-        prev_dup, word_start = ch in "><", False
+        if ch in "<>":
+            prev_dup, word_start = True, False
+            i += 1
+            continue
+        prev_dup, word_start = False, False
         i += 1
     return "ambiguous" if (in_single or in_double) else None
 
