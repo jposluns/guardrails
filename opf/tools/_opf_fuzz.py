@@ -27,8 +27,16 @@ Run standalone (`python3 -I -B opf/tools/_opf_fuzz.py`) or as the `opf-fuzz` leg
 Returns 0 clean, 1 on a failed assertion, 2 on a harness/fail-closed error. Judged on returned
 status/finding VALUES and on raised exception TYPES, never by grepping output (the isolate-verifiers rule).
 """
-import ast
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_fuzz.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
+import ast
 import tomllib
 from pathlib import Path
 

@@ -72,10 +72,18 @@ repo-relative target, so this family gates as self-tests instead (the U1 build-p
 Launched isolated (-I -B) per the Python-launcher-isolation gate; sibling helpers are imported through
 the sys.path insert idiom the repo's tools share.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: opf.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import os
 import stat
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the guarded _opf_* helper bootstrap below
@@ -12726,7 +12734,7 @@ def _cmd_import(rest):
 
 
 def _parse_unoptimized(source):
-    """ast.parse(source) unoptimized on every supported Python (3.11+): optimize=0 where ast.parse has
+    """ast.parse(source) unoptimized on any Python this can run under: optimize=0 where ast.parse has
     that parameter (3.13+), plain ast.parse before, which is equivalent because before 3.13 ast.parse
     never runs the AST optimizer, so it strips no docstring even under python -O or -OO. A bytes
     `source` is decoded as the interpreter decodes a source file, honouring a PEP 263 coding

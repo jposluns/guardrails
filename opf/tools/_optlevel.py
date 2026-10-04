@@ -11,7 +11,7 @@ dependency-closed (it imports nothing upward into `tools/`). Offline, stdlib onl
 import ast
 import sys
 
-# ast.parse gained its optimize parameter in Python 3.13; the tools declare Python 3.11+.
+# ast.parse gained its optimize parameter in Python 3.13; the OPF entry points require 3.14 (python-floor.toml).
 _PARSE_TAKES_OPTIMIZE = sys.version_info >= (3, 13)
 
 
