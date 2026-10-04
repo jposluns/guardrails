@@ -1053,9 +1053,27 @@ def _entry_kind(st):
 def _journal_listing(root_fd):
     """A no-follow listing of the adoption journal tree beneath the held product-root descriptor: each
     JOURNAL_REL component, the direct entries of each ancestor, and every entry beneath the journal root,
-    keyed by relative path to (type, st_dev, st_ino). A directory the walk cannot open or list is keyed
-    `<dir>/*` to ("unlisted", reason), so a listing never stands for what it did not see."""
+    keyed by relative path to (type, st_dev, st_ino). A directory the walk traverses is keyed by the fstat
+    of the descriptor it opened, never by the stat by name before the open: one whose identity differs
+    between the two (swapped in between) is keyed to ("unlisted", reason) and not traversed. A directory
+    the walk cannot open or list is keyed `<dir>/*` to ("unlisted", reason), so a listing never stands for
+    what it did not see."""
     found = {}
+
+    def opened_as(rel, st, fd):
+        """True when the descriptor `fd` opened is the directory `st` stated, keying `rel` by that
+        descriptor's fstat; else `rel` is keyed unlisted, naming the change."""
+        try:
+            fst = os.fstat(fd)
+        except OSError as exc:
+            found[rel] = ("unlisted", str(exc))
+            return False
+        if not stat.S_ISDIR(fst.st_mode) or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+            found[rel] = ("unlisted", "it changed between this listing's stat and its open (st_dev {}, st_ino "
+                          "{}, then st_dev {}, st_ino {})".format(st.st_dev, st.st_ino, fst.st_dev, fst.st_ino))
+            return False
+        found[rel] = (_entry_kind(fst), fst.st_dev, fst.st_ino)
+        return True
 
     def walk(dfd, rel, deep):
         try:
@@ -1078,7 +1096,8 @@ def _journal_listing(root_fd):
                     found[sub + "/*"] = ("unlisted", str(exc))
                     continue
                 try:
-                    walk(cfd, sub, True)
+                    if opened_as(sub, st, cfd):
+                        walk(cfd, sub, True)
                 finally:
                     _journal._close_fd_quietly(cfd)
 
@@ -1104,6 +1123,8 @@ def _journal_listing(root_fd):
                 found[rel + "/*"] = ("unlisted", str(exc))
                 break
             opened.append(cur)
+            if not opened_as(rel, st, cur):
+                break
             walk(cur, rel, i == len(parts) - 1)
     finally:
         for fd in reversed(opened):
@@ -1111,11 +1132,18 @@ def _journal_listing(root_fd):
     return found
 
 
+def _journal_components():
+    """The JOURNAL_REL path components, shallowest first: .aiqt, .aiqt/adopt, .aiqt/adopt/journal."""
+    parts = JOURNAL_REL.split("/")
+    return ["/".join(parts[:i + 1]) for i in range(len(parts))]
+
+
 def _entry_named(rel, seen, created, txn, mine, maybe_mine):
     """One entry present now that the run's first listing did not hold, named with what is true of it:
     (text, True when it is this run's or may be). The lock is this run's ONLY when it is the inode this
     run's acquire wrote (`mine`); with no such identity it may be this run's only while `maybe_mine` (an
-    acquire of this run may have created it), else it is another run's."""
+    acquire of this run may have created it), else it is another run's. A changed component of the journal
+    path itself may be this run's: its preparation may have recreated it after `created` was taken."""
     named = "{} ({})".format(rel, seen[0])
     journal = JOURNAL_REL + "/"
     if rel in created:
@@ -1128,6 +1156,9 @@ def _entry_named(rel, seen, created, txn, mine, maybe_mine):
         if mine is not None or not maybe_mine:
             return named + ", another run's journal lock, not this run's", False
         return named + ", a journal lock", True
+    if rel in _journal_components():
+        return named + ", a component of the journal path that changed since this run began, possibly " \
+                       "recreated by this run", True
     if (rel.startswith(journal) and "/" not in rel[len(journal):] and seen[0] != "directory"
             and rel != journal + "lock.break"):
         return named + (", a stray entry: the next run refuses on it as unreadable and reconcile() does not "
@@ -1170,7 +1201,8 @@ def _journal_unbound(jr_fd, held, after):
     """None when the closing listing observed the journal directory this run wrote to: the journal path
     still resolves to the identity (st_dev, st_ino) of the descriptor the run held, or it is absent and
     that held directory is unlinked (this run's cleanup removed it, empty). Else the clause saying the
-    binding changed, in place of the claim: what the directory this run wrote to now holds is unobserved.
+    binding changed, or could not be observed (the listing could not see the journal path or one of its
+    ancestors), in place of the claim: what the directory this run wrote to now holds is unobserved.
     Called while the descriptor is still held, so its inode cannot be reused by a later directory."""
     if jr_fd is None or held is None:
         return None
@@ -1183,6 +1215,12 @@ def _journal_unbound(jr_fd, held, after):
                 return None
         except OSError:
             pass
+    if now is not None and now[0] == "unlisted" or now is None and any(
+            after.get(r, ("",))[0] == "unlisted" or after.get(r + "/*", ("",))[0] == "unlisted"
+            for r in _journal_components()[:-1]):
+        return ("the adoption journal path {} could not be observed, so whether it still resolves to the "
+                "journal directory this run wrote to (st_dev {}, st_ino {}), and what that directory holds, "
+                "is not known".format(JOURNAL_REL, held[0], held[1]))
     return ("the adoption journal path {} no longer resolves to the journal directory this run wrote to "
             "(st_dev {}, st_ino {}), so what that directory holds was not observed".format(
                 JOURNAL_REL, held[0], held[1]))
@@ -1300,19 +1338,21 @@ def _altered_lock(detail):
             "run refuses on it".format(JOURNAL_REL, detail))
 
 
-def _interrupted_lock_state(jr_fd):
-    """What an interrupt inside acquire_lock left, OBSERVED beneath the held journal descriptor, never
-    presumed: (state, clause). No lock present is "untaken"; a present lock this run cannot tell from
-    another's (the interrupt may have come before or after its create) is named and stays."""
+def _interrupted_lock_state(jr_fd, exc):
+    """What an interrupt, or another exception `exc`, inside acquire_lock left, OBSERVED beneath the held
+    journal descriptor, never presumed: (state, clause). No lock present is "untaken"; a present lock this
+    run cannot tell from another's (`exc` may have come before or after its create) is named and stays. An
+    Exception is described as an error, only any other BaseException as an interrupt."""
     try:
         now = _lock_identity(jr_fd)
     except (_journal.JournalError, OSError) as exc:
         return "unreadable", _unreadable_lock(exc, at_acquire=True)
     if now is None:
         return "untaken", None
-    return "unidentified", ("a journal lock {}/lock is present after this run's lock acquire was interrupted, "
-                            "and this run cannot tell whether it is its own: it stays, and the next run "
-                            "refuses on it".format(JOURNAL_REL))
+    return "unidentified", ("a journal lock {}/lock is present after this run's lock acquire {}, and this run "
+                            "cannot tell whether it is its own: it stays, and the next run refuses on "
+                            "it".format(JOURNAL_REL, "failed with an error ({!r})".format(exc)
+                                        if isinstance(exc, Exception) else "was interrupted"))
 
 
 def _failed_lock_state(jr_fd, journal_root, error):
@@ -1448,8 +1488,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                         raise interrupted
                     raise AdoptApplyError("cannot take the adoption journal lock ({})".format(exc))
                 raise AdoptApplyError("cannot take the adoption journal lock ({}); {}".format(exc, clause))
-            except BaseException:   # an interrupt inside acquire: the lock state is observed, never presumed
-                lock_state, lock_note = _interrupted_lock_state(jr_fd)
+            except BaseException as exc:   # an interrupt or other error inside acquire: observed, never presumed
+                lock_state, lock_note = _interrupted_lock_state(jr_fd, exc)
                 raise
             held = True
             lock_state = "held"
@@ -2911,6 +2951,125 @@ def _self_test_checks():
                 notes = " ".join(getattr(exc, "__notes__", []))
         check("acquire-interrupt-lock-observed", notes is not None and "holds no journal lock" not in notes
               and "lock acquire was interrupted" in notes and not lock_free(root))
+    # 6a10: the closing listing keys the journal by the descriptor it opened, never by its stat by name: a
+    # swap timed between that stat and that open, over the journal this run wrote to (swap) or with the
+    # original restored there (swap and restore), never reads as "nothing written" and names the change
+    # (red against a listing keyed by the stat before its open).
+    for restore in (False, True):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root, files = fixture(temp)
+            jpath = root / JOURNAL_REL
+            os.makedirs(jpath)
+            armed, started = [], []
+            real_capture, real_ensure, real_release, real_open = (
+                _journal.capture_preimages, _journal.ensure_journal_dirs, _journal.release_lock, os.open)
+
+            def capture_then_refuse(*args):
+                real_capture(*args)
+                raise _journal.JournalError("injected refusal after capture, before INTENT")
+
+            def swap_in(*args):
+                if restore:
+                    os.rename(jpath, root / "journal-aside")
+                return real_ensure(*args)
+
+            def swap_before_open(path, flags, *args, **kwargs):
+                if armed and path == "journal" and flags & os.O_DIRECTORY:
+                    armed.clear()
+                    os.rename(jpath, root / "retained-journal")
+                    if restore:
+                        os.rename(root / "journal-aside", jpath)
+                    else:
+                        os.mkdir(jpath)
+                return real_open(path, flags, *args, **kwargs)
+            opener = mock.patch.object(os, "open", swap_before_open)
+
+            def release_then_arm(journal_root):
+                # os.open is wrapped only from here, past require_containment, so the next open of the
+                # journal by name is the closing listing's, right after its stat
+                real_release(journal_root)
+                armed.append(True)
+                started.append(opener.start())
+            try:
+                with mock.patch.object(_journal, "capture_preimages", capture_then_refuse), \
+                        mock.patch.object(_journal, "ensure_journal_dirs", swap_in), \
+                        mock.patch.object(_journal, "release_lock", release_then_arm):
+                    err = refusal(run_adopt_transaction, root, rid, compose_full(files))
+            finally:
+                if started:
+                    opener.stop()
+            check("pre-intent-journal-stat-open-swap-named" + ("-restore" if restore else ""),
+                  "refused before it opened" in (err or "") and "nothing written" not in (err or "")
+                  and "{} could not be listed (it changed between this listing's stat and its open".format(
+                      JOURNAL_REL) in (err or "") and "this run wrote" in (err or "")
+                  and (root / "retained-journal" / rid / "frames.log").is_file())
+    # 6a11: a journal path component that changed since the run began (a concurrent cleanup removed the
+    # journal tree after this run took what it creates, so its preparation recreated it) may be this run's:
+    # the refusal never hides it under the neutral lead-in (red against attributing it to no one).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        os.makedirs(root / JOURNAL_REL)
+        real_ensure = _journal.ensure_journal_dirs
+
+        def cleaned_then_ensure(*args):
+            for rel in reversed(_journal_components()):
+                os.rmdir(root / rel)
+            return real_ensure(*args)
+
+        def compose_refused(ops):
+            raise AdoptApplyError("an injected compose refusal")
+        with mock.patch.object(_journal, "ensure_journal_dirs", cleaned_then_ensure):
+            err = refusal(run_adopt_transaction, root, rid, compose_refused)
+        check("journal-component-recreated-attributed", "injected compose refusal" in (err or "")
+              and "not attributed to this run" not in (err or "") and "this run wrote" in (err or "")
+              and "{} (directory), a component of the journal path".format(JOURNAL_REL) in (err or "")
+              and "nothing written" not in (err or ""))
+    # 6a12: a journal path the closing listing could not reach is said to be unobserved, never to "no
+    # longer resolve" (red against the binding clause that treats an unreached path as absent).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        os.makedirs(root / JOURNAL_REL)
+        armed = []
+        real_capture, real_release, real_open = _journal.capture_preimages, _journal.release_lock, os.open
+
+        def capture_then_refuse(*args):
+            real_capture(*args)
+            raise _journal.JournalError("injected refusal after capture, before INTENT")
+
+        def adopt_unopenable(path, flags, *args, **kwargs):
+            if path == "adopt" and flags & os.O_DIRECTORY:
+                raise PermissionError(13, "an injected open fault")
+            return real_open(path, flags, *args, **kwargs)
+        opener = mock.patch.object(os, "open", adopt_unopenable)
+
+        def release_then_arm(journal_root):
+            real_release(journal_root)      # os.open is wrapped from here: the closing listing's opens
+            armed.append(True)
+            opener.start()
+        try:
+            with mock.patch.object(_journal, "capture_preimages", capture_then_refuse), \
+                    mock.patch.object(_journal, "release_lock", release_then_arm):
+                err = refusal(run_adopt_transaction, root, rid, compose_full(files))
+        finally:
+            if armed:
+                opener.stop()
+        check("pre-intent-unreached-journal-unobserved", "refused before it opened" in (err or "")
+              and "nothing written" not in (err or "") and "no longer resolves" not in (err or "")
+              and "{} could not be observed".format(JOURNAL_REL) in (err or ""))
+    # 6a13: an ordinary exception inside acquire, after the lock file exists, is described as an error,
+    # never as an interrupt (red against the interrupt wording for every exception).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        os.makedirs(root / JOURNAL_REL)
+
+        def created_then_failed(journal_root, session_id):
+            real_acquire(journal_root, session_id)
+            raise ValueError("an injected acquire error")
+        with mock.patch.object(_journal, "acquire_lock", created_then_failed):
+            err = refusal(run_adopt_transaction, root, rid, compose_full(files))
+        check("acquire-error-lock-not-interrupt", "lock acquire failed with an error" in (err or "")
+              and "interrupted" not in (err or "") and "nothing written" not in (err or "")
+              and not lock_free(root))
 
     # 6b: the spec 14.2 apply-side verification checkpoint. A same-length fault injected into the archive
     # copy's own destination write (the staged bytes verify; the DISK bytes differ) is caught by the
