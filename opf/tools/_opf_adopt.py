@@ -321,6 +321,23 @@ def _is_token(value):
                    or ch in ("\u2028", "\u2029") for ch in value)
 
 
+_HOOK_ENTRY_CHARS_RE = re.compile(r"[A-Za-z0-9._/-]+\Z")
+
+
+def _is_hook_entry(value):
+    """The narrow pack-member grammar the enable-hook `plugin_entry` is held to until the adoption
+    trust gate checks it against the digest-verified installed pack (the _opf_adopt_hook threat
+    model, item 1: a plan row must never register arbitrary command text). The platform runs the
+    registered value as a command, so the grammar admits ONE shell word naming a pack member -- a
+    contained file-path token over the portable filename characters plus `/` -- and nothing a shell
+    parses further: no whitespace, no quote, no shell metacharacter, no control character (all
+    outside the character class, which also refuses `~`, `$`, backtick and glob characters), and
+    never `-`-led (option injection). Traversal, absolute and Windows forms are refused by the
+    contained-filepath half."""
+    return (_is_contained_filepath(value) and bool(_HOOK_ENTRY_CHARS_RE.match(value))
+            and not value.startswith("-"))
+
+
 def _is_timestamp(value):
     return isinstance(value, str) and bool(_TS_RE.match(value))
 
@@ -344,6 +361,8 @@ def _is_schema_version(value):
 #   "filepath"  a contained relpath that names a FILE operand -> _is_contained_filepath (rejects `.`).
 #   "dirpath"   a contained relpath that names a DIRECTORY / store root -> _is_contained_relpath (allows `.`).
 #   "digest"    sha256:hex -> _is_digest.  "token" a non-empty single-line str -> _is_token.
+#   "hook-entry" the enable-hook command token -> _is_hook_entry (the pack-member grammar: one shell
+#               word of portable filename characters, never arbitrary command text).
 #   "members"   a list of {path (file), digest} tables, each path relative to the op's target or store_root:
 #               the exact files an install-pack, init-store or render-views row writes.
 # Path-field classification, grounded in each field's meaning: a create/retire/move/import/enable-hook/
@@ -356,7 +375,7 @@ _FIELD_KINDS = {
     "content_digest": "digest", "source_digest": "digest", "preimage_digest": "digest",
     "old_digest": "digest", "new_digest": "digest",
     "receipt_core_digest": "digest",
-    "source_member": "token", "plugin_entry": "token", "note": "token",
+    "source_member": "token", "plugin_entry": "hook-entry", "note": "token",
     "members": "members",
 }
 
@@ -797,6 +816,8 @@ def _valid_field(field, value):
         return _is_digest(value)
     if kind == "token":
         return _is_token(value)
+    if kind == "hook-entry":
+        return _is_hook_entry(value)
     if kind == "members":
         if not isinstance(value, list) or not value:
             return False
@@ -2469,6 +2490,24 @@ def self_test():
         "not_recorded_in_source", "unparsed", "ambiguous", "conflicting", "not_applicable"))
     check("token-unparsed-policies", UNPARSED_POLICIES == ("retain-verbatim",))
     check("token-skip-policies", SKIP_POLICIES == ("no-skip", "attributed-skip"))
+
+    # 15h (U7 QA round 1): plugin_entry is held to the pack-member grammar, ONE shell word of
+    # portable filename characters, so a plan row can never carry arbitrary command text (the
+    # _opf_adopt_hook threat model, item 1). Each refusing vector FAILS if the grammar reverts to
+    # the generic token rule (every one of them passes _is_token).
+    for ok_label, ok in (("name", "opf-governance"), ("short", "opf"),
+                         ("path", ".aiqt/core/hooks/opf-governance"), ("mixed", "a/b-c_d.e")):
+        row_ok = canonical_op("enable-hook"); row_ok["plugin_entry"] = ok
+        check("op-enable-hook-entry-{}-valid".format(ok_label), validate_op(row_ok).status == VALID)
+    for bad_label, bad in (
+            ("pipe", "a|b"), ("space", "a b"),
+            ("semicolon", "a;b"), ("command-substitution", "$(a)"), ("backtick", "`a`"),
+            ("redirect", "a>b"), ("quote", "a'b"), ("double-quote", 'a"b'),
+            ("ampersand", "a&b"), ("dash-led", "-a"), ("traversal", "../a"),
+            ("absolute", "/a"), ("tilde", "~/a"), ("glob", "a*")):
+        row_bad = canonical_op("enable-hook"); row_bad["plugin_entry"] = bad
+        check("op-enable-hook-entry-{}-invalid".format(bad_label),
+              validate_op(row_bad).status == INVALID)
 
     # 16: plan-v2 exactness (U8 fix round 2). Each vector FAILS if its corresponding check is reverted.
     _D7 = "sha256:" + "7" * 64

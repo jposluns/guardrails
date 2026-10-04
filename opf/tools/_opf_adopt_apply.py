@@ -89,8 +89,10 @@ this run's adoption archive and then overwritten through a `write` pinned to the
 journal restoring the recorded prior bytes) and the archived copy agree byte-exact; and an already-merged
 file is a verified no-op that composes nothing. The op writes configuration only and never runs, loads or
 activates the hook. Disclosed residuals of slice 2: the shell's store-posture gate admits only a first
-adoption (no lease join yet), so a re-adoption's enable-hook refuses with it; plugin_entry is bound to the
-plan only through new_digest, and checking it against a digest-verified installed pack is the trust gate's
+adoption (no lease join yet), so a re-adoption's enable-hook refuses with it; the registration target is
+bound to the merge core's closed v1 path allowlist (_opf_adopt_hook.REGISTRATION_PATHS) and plugin_entry
+to the plan-row pack-member grammar (_opf_adopt._is_hook_entry, one shell word, never arbitrary command
+text), while checking the entry against a digest-verified installed pack is the trust gate's
 (a later slice); binding the rows to the one approved plan is the stage driver's; and a platform that
 already loaded a merged registration is not un-executed by restoring the file.
 
@@ -564,8 +566,8 @@ class ApplyOps:
     def preserve(self, source_path, plan_digest):
         """Preserve one plan-enumerated source at apply: re-observe its live bytes, require them to equal
         the plan digest (a drifted source MUST NOT be archived, spec 14.2), and create the byte-identical
-        copy at `.working/archive/adoption/<run-id>/<source-path>`. The source itself stays live and
-        frozen: a non-occupying source's retirement preimage. Returns (bytes, mode)."""
+        copy, at the source's own mode, at `.working/archive/adoption/<run-id>/<source-path>`. The source
+        itself stays live and frozen: a non-occupying source's retirement preimage. Returns (bytes, mode)."""
         expected = _plan_hex(plan_digest)
         fst, data = _read_live(self.root_fd, source_path)
         if fst is None:
@@ -575,7 +577,10 @@ class ApplyOps:
             raise AdoptApplyError("source {!r} is drifted: its live bytes no longer match its plan digest, "
                                   "so it MUST NOT be archived, retired, moved or removed; a fresh plan "
                                   "with its own approval is the remedy (spec 14.2)".format(source_path))
-        self.create(archive_rel(self.run_id, source_path), data)
+        # the copy carries the SOURCE's own mode, not the default create mode: an adopter file
+        # narrowed to owner-only (a registration overlay can carry secrets) must not widen to
+        # world-readable in the tracked archive home (spec 4.2 keeps that home tracked).
+        self.create(archive_rel(self.run_id, source_path), data, mode=stat.S_IMODE(fst.st_mode))
         return data, stat.S_IMODE(fst.st_mode)
 
     def archive_occupying(self, source_path, plan_digest):
@@ -1025,7 +1030,11 @@ class HookContext:
 
 def _compose_enable_hook(op_row, ops):
     """enable-hook, apply stage only, over the pure merge core of _opf_adopt_hook (whose docstring carries
-    the threat model). The registration file must be present, regular, contained and hash to the row's
+    the threat model). The registration path must name a supported v1 registration target (the merge
+    core's closed REGISTRATION_PATHS allowlist: PATH identity selects the platform, decided BEFORE any
+    read, so an unsupported platform or a non-settings file refuses with nothing read and nothing
+    written, however settings-shaped its content). The registration file must then be present, regular,
+    contained and hash to the row's
     old_digest: drift refuses into a fresh plan, never a merge over unknown content (threat 3).
     merge_registration computes the merged bytes and refuses every unrecognized format or shape, conflicting
     entry and control-character vector (threats 2 and 5); the merged bytes must hash to the row's
@@ -1039,6 +1048,12 @@ def _compose_enable_hook(op_row, ops):
     if schema._in_control_area(path) or schema.protected_destination(path, ops.run_id) is not None:
         raise AdoptApplyError("enable-hook {!r} names the store control area or a protected destination, "
                               "never a registration file (fail-closed)".format(path))
+    if not hook.supported_registration_path(path):
+        raise AdoptApplyError("enable-hook {!r} is not a supported v1 registration target (the closed "
+                              "{} allowlist: exactly {}); an unsupported platform or a non-settings "
+                              "file gets no enable-hook write at all, and content shape never admits "
+                              "one (fail-closed)".format(path, hook.REGISTRATION_FAMILY,
+                                                         ", ".join(hook.REGISTRATION_PATHS)))
     if path in ops.staged:
         raise AdoptApplyError("{!r} is merged by two plan rows; one row merges one registration file "
                               "(fail-closed)".format(path))
@@ -2838,6 +2853,10 @@ def _self_test_checks():
     # carries exactly the approved postimage, the adopter's own entries preserved through the model merge.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = hook_fixture(temp)
+        # an owner-only registration (an adopter overlay can carry secrets): the write must keep
+        # the live file's mode AND the archive copy must carry that same mode, never the default
+        # create mode (the archive home stays tracked, spec 4.2, so a widened copy would publish).
+        (root / reg_rel).chmod(0o600)
         first_adoption = store.resolve_store(root).status == store.NOT_ADOPTED
         spawned = AssertionError("enable-hook spawned a process")
         with mock.patch.object(subprocess, "Popen", side_effect=spawned), \
@@ -2854,9 +2873,14 @@ def _self_test_checks():
               reg_new != reg_old and after.get(reg_rel) == reg_new
               and plan_digest(after.get(reg_rel, b"")) == hook_row()["new_digest"])
         check("hook-adopter-entries-preserved",
-              landed.get("permissions") == prior["permissions"]
+              after.get(reg_rel) == reg_new    # non-vacuous: preservation is asserted ON the landed write
+              and landed.get("permissions") == prior["permissions"]
               and landed.get("hooks", {}).get("PostToolUse") == prior["hooks"]["PostToolUse"])
         check("hook-preimage-archived-byte-exact", after.get(archive_rel(rid, reg_rel)) == reg_old)
+        copy_path = root / archive_rel(rid, reg_rel)
+        check("hook-archive-copy-keeps-source-mode",
+              copy_path.is_file() and stat.S_IMODE(copy_path.lstat().st_mode) == 0o600
+              and stat.S_IMODE((root / reg_rel).lstat().st_mode) == 0o600)
         check("hook-bundle-verifies", verify_bundle(root, rid).status == VALID)
         late = refusal(run_adopt_transaction, root, rid, compose_hook([hook_row(reg_new, reg_new)]),
                        phase="completion")
@@ -2876,26 +2900,78 @@ def _self_test_checks():
     stale = hook.merge_registration(reg_old, "opf-other").new_bytes
     drifted = hook._emit(dict(hook.canonical_registration(), model="drifted"))
     foreign = hook._emit(dict(hook.canonical_registration(), unknownKey="x"))
+    empty = b"{}"
+    empty_new = hook.merge_registration(empty, entry).new_bytes
+    # A candidate that is NOT one shell word: the pure merge core accepts any token (its disclosed
+    # trust boundary), so this row's digests are built from the core's own output over it, and
+    # ONLY the plan-row pack-member grammar (_opf_adopt._is_hook_entry, run by validate_op at
+    # dispatch) refuses the row. With the grammar reverted to the generic token rule the row
+    # validates, the merge agrees with its own digests, and the write LANDS, so BOTH checks of
+    # its vector go red: a behavioural flip, not a diagnostic one.
+    multiword = "pkg-tool a.cfg;b"
+    multiword_new = hook.merge_registration(reg_old, multiword).new_bytes
+
+    def multiword_row():
+        return dict(op="enable-hook", registration_path=reg_rel, plugin_entry=multiword,
+                    old_digest=plan_digest(reg_old), new_digest=plan_digest(multiword_new))
+
+    # Guard accounting (QA round 1, codex 2 / claude 4): each vector names which rule refuses it
+    # and whether that rule is SINGLY or DOUBLY guarded, so no mutation claim is stronger than
+    # the source. Singly guarded (removing the one guard admits the write or the drift; both of
+    # the vector's checks go red): stale-new-digest, already-merged-drift, registration-absent,
+    # unrecognized-shape, the three allowlist vectors, and multiword-plugin-entry. Deliberately
+    # DOUBLY guarded (removing the handler's check alone re-attributes the refusal but admits no
+    # write, because a second independent rule still refuses): old-digest-drift (preserve()
+    # re-checks the digest, and the changed postimage also misses new_digest),
+    # protected-registration-path (check_apply_ops re-proves the op list over the same predicate),
+    # and two-rows-one-registration (ApplyOps.create refuses the second archive copy's path).
     hook_flips = (
         # THE new_digest flip: live bytes and old_digest agree, but the plan's new_digest is stale (another
         # merge's postimage), so the merged bytes are not the registration the approval bound
-        ("stale-new-digest", [hook_row(new=stale)], reg_old, "new_digest"),
+        ("stale-new-digest", [hook_row(new=stale)], reg_old, "new_digest", None),
         # THE old_digest flip: the live registration drifted after planning (still a mergeable file)
-        ("old-digest-drift", [hook_row()], drifted, "drifted"),
-        ("registration-absent", [hook_row()], None, "absent"),
-        ("unrecognized-shape", [hook_row(foreign, foreign)], foreign, "registration merge"),
+        ("old-digest-drift", [hook_row()], drifted, "drifted", None),
+        # the one behaviour the handler's own old_digest check adds beyond preserve(): a live file
+        # ALREADY carrying the merged bytes under a row whose old differs is drift, but without the
+        # check the merge no-ops (live == new), composes nothing, and the drifted transaction is
+        # ADMITTED as a silent no-op; removing the check flips BOTH checks of this vector red.
+        ("already-merged-drift", [hook_row()], reg_new, "drifted", None),
+        ("registration-absent", [hook_row()], None, "absent", None),
+        ("unrecognized-shape", [hook_row(foreign, foreign)], foreign, "registration merge", None),
+        # the protected operand EXISTS (planted below), so the refusal is the path rule, never the
+        # absent-file refusal a missing operand would reach first.
         ("protected-registration-path", [hook_row(path=".aiqt/settings.json")], reg_old,
-         "protected destination"),
-        ("two-rows-one-registration", [hook_row(), hook_row()], reg_old, "two plan rows"),
+         "protected destination", {".aiqt/settings.json": reg_old}),
+        # the closed v1 registration-path allowlist (QA round 1 blocker): another platform's
+        # settings file, an unrelated JSON file, and the adopter's personal settings.local.json
+        # each carry an OTHERWISE-VALID row (correct digests over mergeable live content), so only
+        # the path identity refuses; with the allowlist removed each write LANDS (both checks red).
+        ("unsupported-platform-path", [hook_row(path=".gemini/settings.json")], None,
+         "supported v1 registration", {".gemini/settings.json": reg_old}),
+        ("non-settings-json-path",
+         [dict(op="enable-hook", registration_path="config/application.json", plugin_entry=entry,
+               old_digest=plan_digest(empty), new_digest=plan_digest(empty_new))], None,
+         "supported v1 registration", {"config/application.json": empty}),
+        ("local-settings-path", [hook_row(path=".claude/settings.local.json")], None,
+         "supported v1 registration", {".claude/settings.local.json": reg_old}),
+        ("multiword-plugin-entry", [multiword_row()], reg_old, "plugin_entry", None),
+        ("two-rows-one-registration", [hook_row(), hook_row()], reg_old, "two plan rows", None),
     )
-    for label, rows, payload, keyword in hook_flips:
+    for label, rows, payload, keyword, extra in hook_flips:
         with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
             root = hook_fixture(temp, payload)
+            for rel, data in (extra or dict()).items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_bytes(data)
             before = snapshot(root)
             why = refusal(run_adopt_transaction, root, rid, compose_hook(rows))
             check("hook-{}-refused".format(label), why is not None and keyword in why)
+            # snapshot() skips .aiqt/, so a planted operand there is re-read directly.
             check("hook-{}-writes-nothing".format(label),
-                  snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
+                  snapshot(root) == before and lock_free(root)
+                  and not (root / JOURNAL_REL / rid).exists()
+                  and all((root / rel).read_bytes() == data
+                          for rel, data in (extra or dict()).items()))
 
     # the reversal: an injected failure at the final op (the inventory publication, AFTER the registration
     # write landed) rolls the transaction back, restoring the prior registration byte-exact.
@@ -2936,6 +3012,22 @@ def _self_test_checks():
         check("hook-reconcile-restores-prior-registration",
               (rid, "rolled-back") in reconcile_without_store(root) and snapshot(root) == before
               and lock_free(root))
+
+    # the phase guard proven on a WRITING row (QA round 1, claude minor 5): the base transaction of
+    # this run composes nothing, so the completion-phase row WOULD write (live bytes match old, the
+    # merged bytes match new, the archive copy is absent). With the apply-stage guard the refusal
+    # names the stage and the tree keeps the prior bytes; with the guard removed the write lands in
+    # the later phase, so the vector is behavioural, not only a keyword re-attribution.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = hook_fixture(temp)
+        base_txn, base_why = attempt(run_adopt_transaction, root, rid, lambda ops: None)
+        late_writing = refusal(run_adopt_transaction, root, rid, compose_hook([hook_row()]),
+                               phase="completion")
+        check("hook-writing-row-outside-apply-stage-refused",
+              base_txn == rid and base_why is None
+              and late_writing is not None and "apply stage" in late_writing
+              and (root / reg_rel).read_bytes() == reg_old
+              and not (root / archive_rel(rid, reg_rel)).exists())
 
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
