@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "b6c7fe1b0c6540f67d04ac8afbb68d7520776a5381c0e9358f4958a13001ad46"
+tree-sha256 = "8d71624a4986f33e947a090b752742ca99bce0983f00f701fc87b70ad95ae61e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -31,8 +31,8 @@ sha256 = "a2188250b031d6168937b6857d01fe48bdc7f5ed5e93fbc682908b0415a1453f"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 293235
-sha256 = "7099d3b8236c6dab8e43a6688cdf6d4f1ae72fd37c48a8244d73e6f35bd8e235"
+bytes = 293243
+sha256 = "f6f1e6f5bc8dc3f622a9fc74b065a51f903795941feefaa9b5f0810922f38297"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -87,7 +87,7 @@ sha256 = "09772d009717344751feed2b2df2d72d8b2feb97b2a155fcf4646ee9dda57d56"
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
 bytes = 2728
-sha256 = "db7682bbca214ef926f04552311e8432c341b951f69aa06a72a58e67564e21b8"
+sha256 = "cb1dddae6ec6229b5c70f40df008052cd789517e88f5d1ce5a116acc07120f4b"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
@@ -516,8 +516,8 @@ sha256 = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
 
 [[sources]]
 path = ".aiqt/core/rules/security-seci-fail-closed.md"
-bytes = 1139
-sha256 = "31c3ba4d49ba71c5b354cad8560934a0fdf6aa839eb1be56f453748aea92e0d1"
+bytes = 1147
+sha256 = "0a6429c14653cb8aae7a3dec510d475a9ffc86d46aec21845aedb56472e29d9a"
 
 [[sources]]
 path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
@@ -1401,8 +1401,8 @@ sha256 = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
 
 [[sources]]
 path = ".claude/rules/security/SECI-fail-closed.md"
-bytes = 1139
-sha256 = "31c3ba4d49ba71c5b354cad8560934a0fdf6aa839eb1be56f453748aea92e0d1"
+bytes = 1147
+sha256 = "0a6429c14653cb8aae7a3dec510d475a9ffc86d46aec21845aedb56472e29d9a"
 
 [[sources]]
 path = ".claude/rules/security/SECI-federated-identity-flow.md"
@@ -2066,8 +2066,8 @@ sha256 = "9014dd9b93d30a3f15992b7bbef42126b6634dc850b3365086cdb1eecaa6d25b"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/security/SECI-fail-closed.mdc"
-bytes = 982
-sha256 = "2cd3c4b5938b86ee830d19da44d5d2d846713ea923deb6537cf52d345ffecc70"
+bytes = 990
+sha256 = "c9dfd614a20eac86643fa8b1c66aae7b278d7011961b094d5b23f3c09ac0e85b"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/security/SECI-federated-identity-flow.mdc"
@@ -2246,8 +2246,8 @@ sha256 = "3c5c025b2870561769cc0387253f1d0429c36a6e78ed90d4cd7103b5c7a905d0"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 112337
-sha256 = "81d2ed438412abeb86f2b9e7b497ec52fe1fc5bb108f3da1bad501af273e68bd"
+bytes = 112345
+sha256 = "f5f6c7098ca691dacc7539e4c605a97374a69e4b7cdfe6ee33e5b5cdb5f031a6"
 
 [[sources]]
 path = ".preview/README.md"
@@ -2291,8 +2291,8 @@ sha256 = "286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 112326
-sha256 = "90754890f2ce503dda149e75bff5d4cf0c20bf911cdc1934af51488653989a98"
+bytes = 112334
+sha256 = "181f5abf628082c8fb8cb106c74c766692df439fc51643915d0f392d39070857"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2311,8 +2311,8 @@ sha256 = "a209a6da72cf65ede7ccf72b2a0851ebe0bda5e2495372d6f6da466c08beaa8e"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 112333
-sha256 = "a4595c1b62d91c6113bc4007ae9d43be9fac9ba8752f0ae7b1c3216bec227682"
+bytes = 112341
+sha256 = "dea3f83839cc6e63b2c7ac5be501fb818ac81cf38c2cfe1f514fa51f9210032a"
 
 [[sources]]
 path = "LICENSE"
@@ -3022,12 +3022,12 @@ sha256 = "02833e4ed8c6d11f75f9e8511a524927f4d64859e4003c59f325706d000297bc"
 [[sources]]
 path = "site/downloads/aiqt/manifest.json"
 bytes = 820
-sha256 = "c801a8c456148ae2c71c89017ce3774ec5c6b333d2676f22dc39c1e09b9cdb99"
+sha256 = "6d3c8a86f12e39ab583b28d076cd346e1e66065ada8bd0728e89907c81afb1d2"
 
 [[sources]]
 path = "site/downloads/aiqt/provenance.md"
 bytes = 1079
-sha256 = "110c3f9677abffe9f0d1b83908404e45a881a818ec52f5594346771fab6af15c"
+sha256 = "f86d0d5fba81ba25af0024876ec90f6a33c9813d8d3b9b41c9cf857d7b7bd7a2"
 
 [[sources]]
 path = "site/downloads/mappings.csv"
@@ -4211,7 +4211,7 @@ sha256 = "e7da6f0169d1b771456821bc569051e3582eaada65638955aff9723377168451"
 artifact-id = "rules:.claude/rules/security/SECI-fail-closed.md"
 path = ".claude/rules/security/SECI-fail-closed.md"
 kind = "file"
-sha256 = "31c3ba4d49ba71c5b354cad8560934a0fdf6aa839eb1be56f453748aea92e0d1"
+sha256 = "0a6429c14653cb8aae7a3dec510d475a9ffc86d46aec21845aedb56472e29d9a"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/security/SECI-federated-identity-flow.md"
@@ -5009,7 +5009,7 @@ sha256 = "9014dd9b93d30a3f15992b7bbef42126b6634dc850b3365086cdb1eecaa6d25b"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/security/SECI-fail-closed.mdc"
 path = ".cursor/rules/aiqt-guardrails/security/SECI-fail-closed.mdc"
 kind = "file"
-sha256 = "2cd3c4b5938b86ee830d19da44d5d2d846713ea923deb6537cf52d345ffecc70"
+sha256 = "c9dfd614a20eac86643fa8b1c66aae7b278d7011961b094d5b23f3c09ac0e85b"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/security/SECI-federated-identity-flow.mdc"
@@ -5219,13 +5219,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "81d2ed438412abeb86f2b9e7b497ec52fe1fc5bb108f3da1bad501af273e68bd"
+sha256 = "f5f6c7098ca691dacc7539e4c605a97374a69e4b7cdfe6ee33e5b5cdb5f031a6"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "90754890f2ce503dda149e75bff5d4cf0c20bf911cdc1934af51488653989a98"
+sha256 = "181f5abf628082c8fb8cb106c74c766692df439fc51643915d0f392d39070857"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -5238,7 +5238,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "a4595c1b62d91c6113bc4007ae9d43be9fac9ba8752f0ae7b1c3216bec227682"
+sha256 = "dea3f83839cc6e63b2c7ac5be501fb818ac81cf38c2cfe1f514fa51f9210032a"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"
@@ -5268,10 +5268,10 @@ sha256 = "02833e4ed8c6d11f75f9e8511a524927f4d64859e4003c59f325706d000297bc"
 artifact-id = "skill:site/downloads/aiqt/manifest.json"
 path = "site/downloads/aiqt/manifest.json"
 kind = "file"
-sha256 = "c801a8c456148ae2c71c89017ce3774ec5c6b333d2676f22dc39c1e09b9cdb99"
+sha256 = "6d3c8a86f12e39ab583b28d076cd346e1e66065ada8bd0728e89907c81afb1d2"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt/provenance.md"
 path = "site/downloads/aiqt/provenance.md"
 kind = "file"
-sha256 = "110c3f9677abffe9f0d1b83908404e45a881a818ec52f5594346771fab6af15c"
+sha256 = "f86d0d5fba81ba25af0024876ec90f6a33c9813d8d3b9b41c9cf857d7b7bd7a2"

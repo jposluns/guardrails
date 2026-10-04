@@ -1192,10 +1192,10 @@ passed, never as a default-allow.
 Code that such a check loads can exit with any status, fault outside any handler (error formatting, cleanup,
 background work, or shutdown), or replace the check's reporting machinery. Run in a child process, such code
 yields a passing verdict only with a zero exit, a complete structured result written after the child's
-cleanup, and, unless reviewed and pinned with the check, no fault on an error stream it cannot redirect or
-silence. In process, each channel is covered, unreachable, or disclosed under the gate-discipline rule, a
-fault-to-pass channel never merely disclosed; such review and pinning exempt from this only the loaded code
-replacing that machinery.
+cleanup, and no fault on its error stream, one that unreviewed or unpinned code cannot redirect or silence.
+In process, each channel is covered, unreachable, or disclosed under the gate-discipline rule, a
+fault-to-pass channel never merely disclosed; such review and pinning exempt from this only the channel by
+which loaded code replaces that machinery.
 
 ## Validate federated identity and token flows
 
