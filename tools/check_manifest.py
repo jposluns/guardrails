@@ -841,8 +841,16 @@ def _self_test_main_isolated():
         if hasattr(os, "mkfifo"):
             import subprocess
             tree = tmp / "precheck-tree"
-            shutil.copytree(repo_root(), tree, symlinks=True,
-                            ignore=shutil.ignore_patterns(".git", "__pycache__"))
+            try:
+                shutil.copytree(repo_root(), tree, symlinks=True,
+                                ignore=shutil.ignore_patterns(".git", "__pycache__"))
+            except (shutil.Error, OSError) as exc:
+                # claude m1 (QA r5): a special or unreadable entry the live precheck allowed (for
+                # example a socket created in an ignored directory after the walk ran) must be the
+                # NAMED fail-closed exit, never a raw shutil.Error traceback.
+                print("error: cannot copy the live tree for the precheck fixture ({}); "
+                      "fail-closed".format(exc), file=sys.stderr)
+                raise SystemExit(2)
             if gm._git(tree, "init", "-q").returncode != 0:
                 failures.append("D-400-SPECIAL-FILE-PRECHECK: cannot git-init the precheck tree copy")
             tools = (["check_manifest.py"], ["gen_manifest.py", "--check"], ["gen_rules.py", "--check"],
@@ -1110,6 +1118,34 @@ def _self_test_main_isolated():
                 (igext_tree / ".venvx").symlink_to(tmp / "ext-venv-target")
             _entry_expect("an ignored out-of-root directory link", igext_tree, "gen", 0)
             _entry_expect("an ignored out-of-root directory link", igext_tree, "opf", 0)
+            # (s5) QA round 5: the walk DESCENDS into ignored directories, so a FIFO inside one
+            # (the committed __pycache__/ rule is enough to plant one in a live tree) is refused by
+            # name. Fails without the descent (the round-4 walk skipped ignored directories, exit 0).
+            igfifo_tree = _mini_tree("ignored-dir-fifo")
+            if igfifo_tree is not None:
+                (igfifo_tree / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+                (igfifo_tree / "__pycache__").mkdir()
+                os.mkfifo(igfifo_tree / "__pycache__" / "x.fifo")
+            _entry_expect("a FIFO inside an ignored directory", igfifo_tree, "gen", 2, "x.fifo")
+            _entry_expect("a FIFO inside an ignored directory", igfifo_tree, "opf", 2, "x.fifo")
+            # (s6) QA round 5 (claude M2): an ignored out-of-root directory link that SHADOWS
+            # tracked content (git ls-files under the link's path is non-empty) is refused by name;
+            # only a link shadowing nothing (s3 above) stays accepted. Fails without the shadow test.
+            shadow_tree = _mini_tree("ignored-shadow-dirlink")
+            if shadow_tree is not None:
+                (shadow_tree / "docs").mkdir()
+                (shadow_tree / "docs" / "page.md").write_text("x\n", encoding="utf-8")
+                if gm._git(shadow_tree, "add", "-A").returncode != 0:
+                    shadow_tree = None
+            if shadow_tree is not None:
+                shutil.rmtree(shadow_tree / "docs")
+                (tmp / "ext-shadow-target").mkdir(exist_ok=True)
+                (shadow_tree / "docs").symlink_to(tmp / "ext-shadow-target")
+                (shadow_tree / ".gitignore").write_text("docs\n", encoding="utf-8")
+            _entry_expect("an ignored out-of-root directory link shadowing tracked content",
+                          shadow_tree, "gen", 2, "shadows tracked content")
+            _entry_expect("an ignored out-of-root directory link shadowing tracked content",
+                          shadow_tree, "opf", 2, "shadows tracked content")
             # (s4) a tools/ (or opf/) directory REPLACED BY A SYMLINK must not move the root out of
             # the invoked tree: the invoked and resolved derivations disagree, refused by name, so
             # the precheck can never certify a tree the runner's gates do not read.

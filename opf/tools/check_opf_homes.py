@@ -2555,10 +2555,10 @@ def _self_test_vectors():
     check("inert-import", lambda: doctor.IMPORTS_REL == ".working/imports"
           and doctor._is_import_run_id("imp" + suffix) and not doctor._is_import_run_id("adopt" + suffix))
     check("inert-root-exclusions", lambda: store.STORE_ROOT_CONTROL_DIRS == (".git", ".aiqt"))
-    source = Path(store.__file__).read_text(encoding="utf-8")
+    source = _spec_text(Path(store.__file__))
     check("transitional-comment", lambda: "In homes 2, .aiqt is AIQT-only" in source
           and "Until homes 2 is activated, legacy import state still" in source)
-    text = SPEC.read_text(encoding="utf-8")
+    text = _spec_text(SPEC)
     check("spec-contract", lambda: not contract_findings(text))
     # The journal-only record kind is spec-pinned through the kind loop: deleting `record` from the
     # section 4.2 vocabulary sentence turns the gate red with the kind's own finding.
@@ -2730,6 +2730,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--self-test"]:
-        sys.exit(self_test())
+    # QA r5: --self-test runs through main() too, so an OSError out of a self-test read (for example
+    # the non-blocking SPEC reader refusing a FIFO reached through an accepted directory link) is the
+    # NAMED cannot-evaluate exit 2, never a raw traceback or a blocking read.
     sys.exit(main())

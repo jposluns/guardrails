@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5a69992cc5921ddd3360ec7fbab759bd09e2c186a1a98d7a3f090acec6160697"
+tree-sha256 = "849b7dc9685d4bf4d107c6ae1f52cd218a5a60444a419e3aee31282e53475096"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -127,7 +127,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2867
-sha256 = "a87ad6adea769ea2b70d8428eb73927a98abfc8cac5b93ec80e6011cb3815368"
+sha256 = "bfcd17182134f4f4c201f06f72981951f034101252b6d2198153115e02db4b3d"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2556,8 +2556,8 @@ sha256 = "72026d6e7d77dbd23b091a569a7791ab183025f06b9b7ae60362f7b8e16b0df9"
 
 [[sources]]
 path = "opf/tools/_containment.py"
-bytes = 21767
-sha256 = "021c90964aed20a434df1bf305c0ca30e74bebfe85d62a4429eb4f42387b3972"
+bytes = 23496
+sha256 = "986db30e07c905885d6d5da6c3ac8d9cbcfe191e2ae8bcaefe0246c01335d3b8"
 
 [[sources]]
 path = "opf/tools/_journal.py"
@@ -2876,8 +2876,8 @@ sha256 = "c8d74d534524f5ee33bb1443f52f9954a67507d4cfa664414a86a84e17ab2809"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 249238
-sha256 = "915927f894951273094fe40b11f8c671aef2d594e7f2156f43358222e2e5d547"
+bytes = 249417
+sha256 = "02edbf05bf590a6e6714f8beb64a23d7ea2f4960d548fda96813963899331e35"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
@@ -3131,8 +3131,8 @@ sha256 = "5bb55aeaf3708f9df4545de618311bb22ac484568d5a494055f9967c5eb9ae7f"
 
 [[sources]]
 path = "tools/_gen_common.py"
-bytes = 29746
-sha256 = "d11722d71f405c3b37c238a06eb4df4238a91a41f6cd21d266868993b5d71c53"
+bytes = 31475
+sha256 = "5cf266bf95de3ec46a5403be9ef9fc2b0e9827fc9094a588afdbb72db8b551aa"
 
 [[sources]]
 path = "tools/_git_fixture_env.py"
@@ -3196,8 +3196,8 @@ sha256 = "b61ee4627184d0afc7e7e0d4b864c3a7b0d0b505d5546a36b09084f8ec34567a"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 214176
-sha256 = "f6a6c6580baf07930586734029525e08c5146f590c7e09318b1c1af77d9b3849"
+bytes = 223716
+sha256 = "b35a64f3067e51da7956743d4c8803cf1bc1905784929056dec278c1dc409b65"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -3256,8 +3256,8 @@ sha256 = "cce36bdfa04ac37668c2ca2cbce9cc45b083cf6555e654908a422e17aa66477a"
 
 [[sources]]
 path = "tools/check_license_qualification.py"
-bytes = 24268
-sha256 = "fb2ea3448b1d9bc8a0cd5ba51177b64395acff993f63c8e357f4d58c5fb19615"
+bytes = 24587
+sha256 = "c34cd15c6f747e7981029c7b6aa06b39663b15d8c19a950b4e9286b087ab1e55"
 
 [[sources]]
 path = "tools/check_links.py"
@@ -3266,8 +3266,8 @@ sha256 = "5d497dd47f36726ad387fe985359979b5c31093de6248931979366bb0cb9aec3"
 
 [[sources]]
 path = "tools/check_manifest.py"
-bytes = 69542
-sha256 = "8c898890951a265bda1de8de9914aba592da2289cf8b05eab20fc050960ffdf0"
+bytes = 72183
+sha256 = "4b865793936aa9224080aea42263f7e4c23ca563ef0a48ce5f83bbf9fc6dd51a"
 
 [[sources]]
 path = "tools/check_mappings.py"
@@ -3276,8 +3276,8 @@ sha256 = "dc94c504bdfbd189855e920bf7fad332e2a4a86824933be1331e0975d8310aae"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
-bytes = 21536
-sha256 = "fbee536ee229a939691450f46b0d91d07d12b7b24259c90f2b97fd351f0ce7b2"
+bytes = 21802
+sha256 = "9db00f31ee3193d56d2d491cf0cf79f5d96acfcaadc943196bebd10c702ccb0d"
 
 [[sources]]
 path = "tools/check_msg_leaks.py"
@@ -3341,8 +3341,8 @@ sha256 = "5893faf4680c720f09083ecb4aedfdf68e8e54c5bc35a1fed33dd918ddcd64e5"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 144415
-sha256 = "91fa470bab48c2b3601e0be2124420524c996b1cd8e8f3a1bed294b54703efc1"
+bytes = 182699
+sha256 = "477dd8b4288a0d2db360e7109b963dc06c8791428977c453254a3075940e43d6"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -3601,8 +3601,8 @@ sha256 = "13c527d0d7999c696bf34fcf649c804e8856f11c6880c3cfde3bdee630d582fe"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 273290
-sha256 = "6a11d6d749dae039afe3a3b32d662c2e79cc0791195f7db353fbbf9b1e0abc81"
+bytes = 273449
+sha256 = "56de0552528fe059293167d07ea523b32bb9ddc0c20fe5fa392235a9f4d3997b"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"

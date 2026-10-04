@@ -1053,9 +1053,25 @@ def adapt_standalone_runner(text):
     return "\n".join(lines).replace('"$here/', '"opf/tools/'), None
 
 
-def extract_local(text):
-    """Extract normalized members from tools/run_all_checks.sh."""
-    source = LOCAL_SOURCE
+def standalone_runner_diagnostics():
+    """Diagnostics for the LIVE standalone OPF runner under the shared grammar (claude m2, QA
+    round 5): raw-byte read, the shared adaptation, then extract_local with source=
+    STANDALONE_SOURCE. main() fails closed (exit 2) on any of them, so deleting the OPF runner's
+    bootstrap line turns the LIVE gate red, not only the self-test's adapted copy."""
+    runner, read_diagnostic = read_runner_text(
+        ROOT / "opf" / "tools" / "run_all_checks.sh", STANDALONE_SOURCE)
+    if read_diagnostic is not None:
+        return (read_diagnostic,)
+    adapted, adapter_diagnostic = adapt_standalone_runner(runner)
+    if adapter_diagnostic is not None:
+        return (adapter_diagnostic,)
+    return tuple(extract_local(adapted, STANDALONE_SOURCE).diagnostics)
+
+
+def extract_local(text, source=LOCAL_SOURCE):
+    """Extract normalized members from tools/run_all_checks.sh, or (claude m2, QA round 5) from
+    the ADAPTED standalone OPF runner when the caller passes source=STANDALONE_SOURCE, so a
+    diagnostic on that runner names opf/tools/run_all_checks.sh, never the tools runner."""
     diagnostics = []
     members = set()
     origins = {}
@@ -3749,11 +3765,39 @@ def self_test():
                     "26 standalone runner adapter: {!r}".format(
                         adapter_diagnostic))
             else:
-                adapted_diagnostics = extract_local(adapted).diagnostics
+                adapted_diagnostics = extract_local(
+                    adapted, STANDALONE_SOURCE).diagnostics
                 if adapted_diagnostics:
                     failures.append(
                         "26 adapted standalone runner: {!r}".format(
                             adapted_diagnostics))
+                else:
+                    # claude m2 (QA round 5): deleting the OPF runner's bootstrap must be a
+                    # missing-bootstrap diagnostic NAMING opf/tools/run_all_checks.sh, and the
+                    # LIVE gate path (standalone_runner_diagnostics, which main() fails closed
+                    # on) must extract the real runner cleanly. Fails without the source
+                    # parameter and the live check.
+                    opf_bootstrap_line = next(
+                        line for line in PRECHECK_BOOTSTRAP_LINES
+                        if PRECHECK_BOOTSTRAP_LINES[line] == "opf/tools/_containment.py")
+                    deleted_bootstrap = adapted.replace(opf_bootstrap_line + "\n", "", 1)
+                    if deleted_bootstrap == adapted:
+                        failures.append("26c standalone bootstrap fixture drift")
+                    else:
+                        got_deleted = extract_local(
+                            deleted_bootstrap, STANDALONE_SOURCE).diagnostics
+                        if not any(diagnostic.code == "missing-bootstrap"
+                                   and diagnostic.source == STANDALONE_SOURCE
+                                   for diagnostic in got_deleted):
+                            failures.append(
+                                "26c deleting the standalone bootstrap must be a "
+                                "missing-bootstrap diagnostic naming {}, got {!r}".format(
+                                    STANDALONE_SOURCE, got_deleted))
+                    live_standalone = standalone_runner_diagnostics()
+                    if live_standalone:
+                        failures.append(
+                            "26c the live standalone runner must extract cleanly on the live "
+                            "gate path, got {!r}".format(live_standalone))
             # codex qa9 MAJOR-1: the adapter screens the RAW text, so a
             # forbidden character cannot vanish in its splitlines() and
             # newline rejoin before extract_local's own screen. A form feed
@@ -4526,13 +4570,9 @@ def self_test():
             ("_binding_calls", "read_text"): 1,
             ("_caller_env_archive_only", "read_text"): 1,
             ("_calls_any", "read_text"): 1,
-            ("_maintenance_pin_scan", "read_text"): 1,
-            ("_manifest_extra_setup_failures", "read_text"): 1,
-            ("_opf_home_lifecycles", "read_text"): 1,
             ("_registered_selftests", "splitlines"): 1,
             ("_require_wrapper_observed", "splitlines"): 1,
             ("_scrub_scoped_first", "read_text"): 1,
-            ("_system_pin_checks", "read_text"): 1,
             ("_system_pin_probe", "splitlines"): 1,
             ("_write_report", "open-text"): 1,
             ("prepare", "read_text"): 1,
@@ -4731,6 +4771,56 @@ def self_test():
         failures.append("32b an env: mapping on a gate step stays modelled, got {!r} {!r}".format(
             got_problems, got_diagnostics))
 
+    # D-400-SPECIAL-FILE-PRECHECK order (QA round 5, claude M1): GitHub applies workflow- and
+    # job-level env: and defaults: to every step, so a BASH_ENV, PATH or defaults.run.shell value
+    # there (or an env: mapping on the precheck step itself) neuters the canonical precheck step
+    # while its run body still matches. Each inherited execution control must be refused. These
+    # vectors fail without the workflow-key, job-key, env-override and precheck-env rules.
+    count += 1
+    for label, code_name, mutated_fixture in (
+        ("workflow env", "workflow-key",
+         order_fixture.replace("jobs:\n", "env:\n  BASH_ENV: .aiqt/neuter.sh\njobs:\n", 1)),
+        ("workflow defaults", "workflow-key",
+         order_fixture.replace("jobs:\n", "defaults:\n  run:\n    shell: bash\njobs:\n", 1)),
+        ("job env", "job-key",
+         order_fixture.replace(
+             "    runs-on: ubuntu-latest\n",
+             "    runs-on: ubuntu-latest\n    env:\n      BASH_ENV: .aiqt/neuter.sh\n", 1)),
+        ("job defaults shell", "job-key",
+         order_fixture.replace(
+             "    runs-on: ubuntu-latest\n",
+             "    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: bash\n", 1)),
+        ("job if", "job-key",
+         order_fixture.replace(
+             "    runs-on: ubuntu-latest\n",
+             "    runs-on: ubuntu-latest\n    if: false\n", 1)),
+        ("job continue-on-error", "job-key",
+         order_fixture.replace(
+             "    runs-on: ubuntu-latest\n",
+             "    runs-on: ubuntu-latest\n    continue-on-error: true\n", 1)),
+        ("step env PATH entry", "env-override",
+         order_fixture.replace(
+             "      - name: A gate\n        run: python3 -I -B tools/a.py\n",
+             "      - name: A gate\n        env:\n          PATH: /tmp/x\n"
+             "        run: python3 -I -B tools/a.py\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
+            failures.append("32c inherited execution control not refused ({}): {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    enved_precheck = order_fixture.replace(
+        "      - name: Special-file precheck\n        run: |\n",
+        "      - name: Special-file precheck\n        env:\n"
+        "          BASH_ENV: .aiqt/neuter.sh\n        run: |\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(
+        enved_precheck, "fixture.yml")
+    if not (any("env: mapping on the canonical special-file precheck step" in problem
+                for problem in got_problems)
+            and any(diagnostic.code == "env-override" for diagnostic in got_diagnostics)):
+        failures.append("32c an env: mapping on the precheck step must be refused, got "
+                        "{!r} {!r}".format(got_problems, got_diagnostics))
+
     # codex round-4 finding 4: a workflows directory path no path call accepts (an embedded NUL) is a
     # read-error diagnostic, never a raw ValueError. Fails without the (OSError, ValueError) arm.
     count += 1
@@ -4774,7 +4864,18 @@ def workflow_precheck_order_problems(text, source):
     is a step-key diagnostic (cannot-evaluate), the same rule extract_ci applies, so a job cannot
     carry a switched-off precheck step that still matches the canonical body. Full structural
     validation of quality.yml stays extract_ci's job; this pass answers order, across every workflow
-    file."""
+    file. INHERITED EXECUTION CONTROLS (QA round 5, claude M1): GitHub applies workflow- and
+    job-level env: and defaults: (and a job-level if: or continue-on-error:) to every step, so a
+    BASH_ENV, ENV, PATH or PYTHON* value, or a defaults.run.shell override, can neuter the
+    canonical precheck step without touching its run body. Refused here, never a clean order pass:
+    a workflow-level env: or defaults: key (workflow-key); a job-level env:, defaults:, if:,
+    continue-on-error: or container: key (job-key); an env entry in ANY step whose name is an
+    execution-control variable (BASH_ENV, ENV, SHELLOPTS, PATH, PYTHON*, LD_* or BASH_FUNC*) or
+    that is not a KEY: value entry (env-override); and any env: mapping at all on the precheck
+    step itself (a problem). A step-level env: with other names stays modelled (quality.yml
+    carries several). Residual: an execution-control variable this list does not name, and
+    semantics GitHub adds later, stay outside this parse; the canonical step body itself is pinned
+    by PRECHECK_STEP_RUN_LINES."""
     problems, diagnostics = [], []
     jobs = {}
     run_line_numbers = set()
@@ -4805,6 +4906,11 @@ def workflow_precheck_order_problems(text, source):
             in_steps = False
             current_job = None
             step = None
+            if stripped.startswith(("env:", "defaults:")):
+                diagnostics.append(_diagnostic(
+                    source, number, "workflow-key",
+                    "a workflow-level {}: applies to every step and can neuter the precheck "
+                    "step without touching its run body".format(stripped.split(":")[0])))
             index += 1
             continue
         if not in_jobs:
@@ -4826,13 +4932,20 @@ def workflow_precheck_order_problems(text, source):
         if indent == 4:
             in_steps = stripped == "steps:"
             step = None
+            if stripped.startswith(("env:", "defaults:", "if:", "continue-on-error:",
+                                    "container:")):
+                diagnostics.append(_diagnostic(
+                    source, number, "job-key",
+                    "a job-level {}: is an inherited execution control that can disable the job "
+                    "or neuter its precheck step without touching the step's run "
+                    "body".format(stripped.split(":")[0])))
             index += 1
             continue
         if not in_steps:
             index += 1
             continue
         if indent == 6 and stripped.startswith("- "):
-            step = dict(uses=None, run=[], line=number)
+            step = dict(uses=None, run=[], env=[], line=number)
             mapping = None
             jobs[current_job].append(step)
             item = stripped[2:]
@@ -4886,6 +4999,17 @@ def workflow_precheck_order_problems(text, source):
             index += 1
             continue
         if indent >= 10 and mapping is not None:
+            if mapping == "env":
+                step["env"].append(stripped)
+                key = stripped.split(":", 1)[0].strip().strip("'").strip('"')
+                if (key in ("BASH_ENV", "ENV", "SHELLOPTS", "PATH")
+                        or key.startswith(("PYTHON", "LD_", "BASH_FUNC"))
+                        or ":" not in stripped):
+                    diagnostics.append(_diagnostic(
+                        source, number, "env-override",
+                        "step env entry {!r} names an execution-control variable (or is not a "
+                        "KEY: value entry); it can neuter a shell or python step without "
+                        "touching its run body".format(stripped)))
             index += 1
             continue
         diagnostics.append(_diagnostic(
@@ -4925,6 +5049,10 @@ def workflow_precheck_order_problems(text, source):
             problems.append(where + " runs the special-file precheck before checkout, on a tree "
                             "that does not exist yet")
             continue
+        if job_steps[precheck]["env"]:
+            problems.append(where + " carries an env: mapping on the canonical special-file "
+                            "precheck step; a BASH_ENV, ENV or PATH value there can neuter the "
+                            "precheck without touching its run body")
         for s in job_steps[:checkout]:
             for line in s["run"]:
                 if line not in PRE_CHECKOUT_RUN_LINES:
@@ -5001,6 +5129,21 @@ def main(argv=None):
     report = run_paths(LOCAL_PATH, CI_PATH)
     print(render(report))
     code = report.code
+    # claude m2 (QA round 5): the LIVE gate also holds the standalone OPF runner to the shared
+    # grammar (bootstrap REQUIRED ahead of its precheck invocation), so deleting the bootstrap
+    # line of opf/tools/run_all_checks.sh is a live exit 2, not only a self-test finding.
+    standalone = standalone_runner_diagnostics()
+    if standalone:
+        code = 2
+        print("CANNOT EVALUATE: the standalone OPF runner (opf/tools/run_all_checks.sh) did not "
+              "extract cleanly under the shared grammar.")
+        for diagnostic in standalone:
+            location = ("{}:{}".format(diagnostic.source, diagnostic.line)
+                        if diagnostic.line else diagnostic.source)
+            print("  {} [{}] {}".format(location, diagnostic.code, diagnostic.message))
+    else:
+        print("STANDALONE RUNNER: opf/tools/run_all_checks.sh carries the bootstrap and precheck "
+              "and extracts cleanly under the shared grammar.")
     # D-400-SPECIAL-FILE-PRECHECK order: every job in every workflow file, precheck first.
     order_problems, order_diagnostics = precheck_order_report()
     if order_diagnostics:

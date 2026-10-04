@@ -97,7 +97,9 @@ from pathlib import Path
 # is tools-only, so append still finds it. This matches the house pattern (audit_reference.py,
 # check_internal_names.py).
 sys.path.append(str(Path(__file__).resolve().parent))
-from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _walk import walk_files, read_text_nonblocking  # noqa: E402  fail-closed tree walk and the
+# shared O_NONBLOCK fstat-checked reader (QA r5: the walk can meet a git-ignored special file,
+# for example a FIFO at site/__pycache__/a.html; the reader refuses it by name, never blocks)
 from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 # CLASS 1: a whole-project license claim is one of the four claim verbs directly governing "under the
@@ -248,10 +250,12 @@ def _collect(root):
     for f in surfaces:
         rel = f.relative_to(root)
         try:
-            text = f.read_text(encoding="utf-8")
+            text = read_text_nonblocking(f)
         except UnicodeDecodeError:
             findings.append("{}: could not read as UTF-8".format(rel))
             continue
+        except OSError as exc:
+            raise _FailClosed("{}: refused by the non-blocking reader ({})".format(rel, exc))
         claims += len(CLASS1_CLAIM.findall(text))
         for label, snip in scan_text(text):
             findings.append("{}: {} -> {}".format(rel, label, snip))

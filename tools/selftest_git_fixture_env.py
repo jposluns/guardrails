@@ -71,6 +71,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _git_fixture_env  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
 import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
+from _walk import read_text_nonblocking  # noqa: E402  QA r5: tree scans must refuse a special
+# file (for example a FIFO at tools/__pycache__/x.py) by name instead of blocking on it
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
@@ -1059,7 +1061,7 @@ def _system_pin_probe(base, lifecycle):
 def _system_pin_checks(base):
     import types
     # Level 0 parse and compile: the mutant must not follow -O/-OO.
-    tree = _optlevel.parse(Path(_git_fixture_env.__file__).read_text(encoding="utf-8"))
+    tree = _optlevel.parse(read_text_nonblocking(Path(_git_fixture_env.__file__)))
     assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
                    and any(ast.unparse(t) == "os.environ['PATH']" for t in node.targets)]
     if len(assignments) != 1:
@@ -1384,7 +1386,7 @@ def _manifest_extra_setup_failures():
     the actual expressions catches removal of their check_returncode calls.
     This bounded probe does not simulate the rest of the generator's self-test.
     """
-    tree = _optlevel.parse((ROOT / "tools" / "gen_manifest.py").read_text(encoding="utf-8"))
+    tree = _optlevel.parse(read_text_nonblocking(ROOT / "tools" / "gen_manifest.py"))
     owners = [n for n in tree.body if isinstance(n, ast.FunctionDef)
               and n.name == "_self_test_main_isolated"]
     for check_id, fixture, operation in (
@@ -1653,7 +1655,7 @@ def _opf_home_lifecycles(config_results):
     problems = []
     try:
         trees = {Path(relative).stem: ast.parse(
-            (ROOT / relative).read_text(encoding="utf-8")) for relative in sorted(paths)}
+            read_text_nonblocking(ROOT / relative)) for relative in sorted(paths)}
         registrations = _opf_lifecycle_delegates(trees)
     except (OSError, SyntaxError, ValueError) as exc:
         registrations = {}
@@ -3415,7 +3417,7 @@ def _maintenance_pin_scan(root, allow_missing_files=False, planted_entries=()):
             rel = path.relative_to(root).as_posix()
             scanned.add(rel)
             try:
-                tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+                tree = ast.parse(read_text_nonblocking(path), filename=rel)
             except (OSError, SyntaxError, UnicodeDecodeError, ValueError) as exc:
                 findings.append("%s: unreadable or unparseable: %s" % (rel, exc))
                 continue

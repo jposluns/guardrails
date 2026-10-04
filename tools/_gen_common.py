@@ -161,31 +161,34 @@ def precheck_special_files(root):
     whose resolved target subtree is walked ONCE even when that target is git-ignored (a visited set
     keyed by device and inode bounds link cycles), so linked-in contents, which a gate can reach
     through the link's own certified path, are checked rather than trusted; and a GIT-IGNORED symlink
-    to a directory outside the root, or a git-ignored unresolvable symlink, both accepted un-walked (a
-    developer's .venv link; an unresolvable link cannot block, every open of it fails at once).
+    to a directory outside the root THAT SHADOWS NO TRACKED CONTENT (git ls-files under the link's
+    own path answers empty), or a git-ignored unresolvable symlink, both accepted un-walked (a
+    developer's .venv link shadows nothing; an unresolvable link cannot block, every open of it
+    fails at once); a git-ignored out-of-root directory link that DOES shadow tracked content is
+    refused by name, because a gate's fixed-path read of that tracked content would follow it out
+    of the certified tree.
 
     SCOPE: the whole tree under root, except every entry named .git (pruned; git's own metadata is
     outside the tools' read set, but git itself reads it, so a FIFO planted at for example .git/config
-    still hangs the gates that invoke git; removing such a plant needs the operator) and except the
-    REGULAR files and directories git reports IGNORED (_ignored_paths; git never lists a special file
-    as ignored, so a FIFO is classified wherever this walk meets it, and an ignored SYMLINK is still
-    classified by its target as above), so a developer's .venv, editor droppings and build outputs
-    are not refused. The CONTENTS of an ignored directory, and of a git-ignored out-of-root directory
-    link, are therefore OUTSIDE this precheck. Checked against the roster, that is sound because no
-    gate consumes those contents through a BLOCKING read: a gate's certified read set comes from
-    git-tracked paths (a tracked path is never ignored) and fixed tracked files, whose every link
-    step this walk classifies, and each gate that instead ENUMERATES a directory and reads whatever
-    it finds (the repo-wide scanners check_secrets, check_leaks, check_no_dashes, check_links,
-    check_site; the site walkers check_newtab and check_site_versions; the surface scanners
-    check_overclaim, check_internal_names, check_python_floor and check_derived_command_parameters;
-    and the standards-manifest loader _standards.load_manifests behind check_mappings,
-    check_standards_currency and gen_rules) reads it through a NON-BLOCKING, fstat-checked reader
-    (_walk.read_text_nonblocking, read_source_bytes, or that gate's own O_NONBLOCK or
-    stat-before-open reader), which refuses a non-regular file, by name, instead of blocking on it.
-    Residual: a gate that reads a FIXED path with a plain blocking call reads uncertified content
-    only through a git-ignored OUT-OF-ROOT directory link planted over that path (every other link
-    step is classified here); such a plant needs both a tracked-tree replacement and an ignore rule,
-    and the enumerating gates above refuse rather than block. Before git is asked for the
+    still hangs the gates that invoke git; removing such a plant needs the operator) and INCLUDING
+    the contents of every git-ignored directory (QA round 5): the walk DESCENDS into ignored
+    directories too (scandir and lstat only; no regular file is ever opened and no link is followed
+    out of the root), so a special file is refused BY NAME wherever it sits. A socket or FIFO a
+    developer keeps inside an ignored directory (a .venv, a build output) therefore now stops the
+    checks, by name, which is the fail-closed direction; remove the special file to proceed. Git's
+    ignore judgement governs only the SYMLINK leniencies (REFUSED/ACCEPTED above): an ignored
+    unresolvable link is accepted, and an ignored out-of-root directory link is accepted un-walked
+    only when it shadows NO TRACKED content (git ls-files under the link's own path answers empty; a
+    developer's .venv link shadows nothing), because a gate's fixed-path read reaches uncertified
+    content only through a link planted OVER a tracked path.
+    DEFENCE IN DEPTH: this walk is one of two independent layers; every gate-reachable read of
+    repository or configuration-declared content also goes through a NON-BLOCKING, fstat-checked
+    reader (_walk.read_text_nonblocking, read_source_bytes, or that gate's own O_NONBLOCK or
+    stat-before-open reader), which refuses a non-regular file by name instead of blocking on it,
+    and the raw-read lint in tools/check_release_cut.py --self-test holds the gate entry modules
+    and their in-tree imports to those readers, so neither layer alone carries the guarantee.
+    Residual: the contents of an ACCEPTED (non-shadowing) ignored out-of-root directory link stay
+    outside this walk, covered by the reader layer alone. Before git is asked for the
     ignore list, a first pass refuses any in-tree .gitignore that is, or resolves to, a special file,
     or is a symlink git cannot resolve other than a dangling one: git computes the ignore list by
     OPENING those files with a plain blocking read, so they are screened ahead of the one git query
@@ -252,10 +255,27 @@ def precheck_special_files(root):
                                       "it with a plain blocking read to compute the ignore "
                                       "list".format(kind))
         ignored = _ignored_paths(root)
+        tracked_state = []
+
+        def _shadows_tracked(rel):
+            # claude M2 (QA round 5): an ignored out-of-root directory link is allowed only when it
+            # shadows NO tracked content; one planted over a tracked path redirects a gate's
+            # fixed-path read of that content to a tree this walk cannot certify, so it is refused.
+            # ONE cached read-only git query; when git cannot answer, the caller refuses (fail-closed).
+            if not tracked_state:
+                out = _git_lines(root, ["ls-files", "-z"])
+                tracked_state.append(None if out is None else sorted(
+                    os.fsdecode(raw) for raw in out.split(b"\0") if raw))
+            tracked = tracked_state[0]
+            if tracked is None:
+                return None
+            spec = rel.replace(os.sep, "/")
+            return any(entry == spec or entry.startswith(spec + "/") for entry in tracked)
+
         visited = set()
-        stack = [(os.fspath(root), "")]
+        stack = [(os.fspath(root), "", False)]
         while stack:
-            dirpath, relbase = stack.pop()
+            dirpath, relbase, under_ignored = stack.pop()
             try:
                 dir_stat = os.stat(dirpath)
             except FileNotFoundError:
@@ -274,21 +294,22 @@ def precheck_special_files(root):
                 if name == ".git":
                     continue
                 rel = os.path.join(relbase, name) if relbase else name
-                skipped = ignored is not None and rel in ignored
+                skipped = under_ignored or (ignored is not None and rel in ignored)
                 path = item.path
                 try:
                     mode = item.stat(follow_symlinks=False).st_mode
                 except FileNotFoundError:
                     continue
                 if not stat.S_ISLNK(mode):
-                    if skipped:
-                        continue  # an ignored REGULAR file or directory: outside the walk (see SCOPE)
+                    # Ignored or not, a special file is refused and a directory is descended: the
+                    # walk opens nothing, so descending an ignored directory costs lstat calls only,
+                    # and a special file is a blocking-read hazard wherever a reader meets it.
                     for is_kind, kind in _SPECIAL_KINDS:
                         if is_kind(mode):
                             _refuse(path, "{} in the repository tree (a special file, not a regular "
                                           "file)".format(kind))
                     if stat.S_ISDIR(mode):
-                        stack.append((path, rel))
+                        stack.append((path, rel, skipped))
                     continue
                 # A symlink is classified by its TARGET even when the link itself is git-ignored: a
                 # gate's read of a fixed path follows a link regardless of its ignore status.
@@ -313,12 +334,17 @@ def precheck_special_files(root):
                         link_rel = os.path.relpath(real, real_root)
                         if link_rel == ".":
                             link_rel = ""
-                        stack.append((real, link_rel))  # walked even when the TARGET is ignored:
-                        #                        a gate can reach it through the link's own path
+                        stack.append((real, link_rel, skipped))  # walked even when the TARGET
+                        #            is ignored: a gate can reach it through the link's own path
                     elif not skipped:
                         _refuse(path, "a symlink to a directory outside the repository root (to "
                                       "{}); its contents cannot be certified from this "
                                       "root".format(real))
+                    elif _shadows_tracked(rel) is not False:
+                        _refuse(path, "a git-ignored symlink to a directory outside the repository "
+                                      "root (to {}) that shadows tracked content; a gate's read of "
+                                      "that tracked path would follow it to a tree this walk "
+                                      "cannot certify".format(real))
     except (OSError, ValueError) as exc:  # ValueError: a root path no path call accepts (an embedded NUL)
         print("error: cannot walk the repository tree {} ({}); fail-closed".format(root, exc), file=sys.stderr)
         raise SystemExit(2)
