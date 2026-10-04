@@ -1712,8 +1712,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             # An integer literal past CPython's 4300-digit int-string limit (F-TOML-BARE-VALUEERROR-CLASS).
             big_text = "over-long = " + "9" * 4400 + "\n"
             (fp / "qa" / "bigint.toml").write_text(big_text, encoding="utf-8")
-            # A 1200-deep nested array: tomllib raises RecursionError (a RuntimeError, not a ValueError).
-            deep_text = "deep = " + "[" * 1200 + "]" * 1200 + "\n"
+            # A marked, otherwise valid TOML: the self-test's injected tomllib raises RecursionError on it.
+            deep_text = "deep = 1  # injected-overflow\n"
             (fp / "qa" / "deep.toml").write_text(deep_text, encoding="utf-8")
             _write_records(fp, "format-version = 1\n")
             _commit(fp, "candidate with AGENTS.md + demonstration")
@@ -1769,38 +1769,51 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             # must still fail closed as GateError (exit 2); narrowing any one back to (UnicodeDecodeError,
             # TOMLDecodeError) lets the ValueError escape. The digit limit is pinned to the default 4300
             # (test-hermeticity) and restored in finally.
-            # The same four sites must fail closed on the class's RecursionError member (a 1200-deep nested
-            # array); the recursion limit is pinned to the CPython default 1000 for the same reason.
+            # The same four sites must fail closed on the class's RecursionError member (a parser overflow), and the
+            # refusal must come from that site's parse handler (its message, or the overflow it interpolates).
+            # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
+            # otherwise valid input) rather than provoked by a deeply nested body: the depth at which tomllib
+            # overflows is an interpreter limit, so a fixed body overflows under one recursion limit and parses
+            # (or trips an unrelated refusal) under another.
             big_cases = []
             for kind, text, rel in (("over-long integer", big_text, "qa/bigint.toml"),
-                                    ("deep nesting", deep_text, "qa/deep.toml")):
+                                    ("parser overflow", deep_text, "qa/deep.toml")):
                 ev_path = fp / "{}-evidence.toml".format(rel[3:-5])
                 ev_path.write_text(text, encoding="utf-8")
                 ev_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                needle = "injected parser overflow" if text is deep_text else ""
                 big_cases += [
-                    (kind + " evidence artifact",
+                    (kind + " evidence artifact", needle,
                      lambda ev_path=ev_path: _first_pin_evidence_findings(fp, fp_commit, str(ev_path))),
-                    (kind + " demonstration", lambda rel=rel: _first_pin_evidence_findings(
-                        fp, fp_commit, _ev(**{"demonstration": '"{}"'.format(rel)}))),
-                    (kind + " QA attestation",
+                    (kind + " demonstration", needle and "is not offline-evaluable (does not parse)",
+                     lambda rel=rel: _first_pin_evidence_findings(fp, fp_commit, _ev(**{"demonstration": '"{}"'.format(rel)}))),
+                    (kind + " QA attestation", needle,
                      lambda ev_path=ev_path, ev_sha=ev_sha: qa_layers(str(ev_path), ev_sha, fp_commit)),
-                    (kind + " git-shown TOML", lambda rel=rel: _show_toml(fp, fp_commit, rel))]
+                    (kind + " git-shown TOML", needle, lambda rel=rel: _show_toml(fp, fp_commit, rel))]
             prev_digits = sys.get_int_max_str_digits()
-            prev_reclimit = sys.getrecursionlimit()
             sys.set_int_max_str_digits(4300)
-            sys.setrecursionlimit(1000)
+            real_loads, real_load = tomllib.loads, tomllib.load
+
+            def overflowing_loads(text, **kwargs):
+                if "injected-overflow" in text:
+                    raise RecursionError("injected parser overflow")
+                return real_loads(text, **kwargs)
+
+            tomllib.loads = overflowing_loads
+            tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
             try:
-                for big_label, big_call in big_cases:
+                for big_label, big_needle, big_call in big_cases:
                     try:
                         big_call()
                         failures.append("{}: expected GateError (exit 2), got a result".format(big_label))
-                    except GateError:
-                        pass
+                    except GateError as exc:
+                        if big_needle not in str(exc):
+                            failures.append("{}: GateError without the parse handler's finding ({})".format(big_label, exc))
                     except (ValueError, RecursionError) as exc:
                         failures.append("{}: a bare {} escaped the parse (exit 2 expected)".format(
                             big_label, type(exc).__name__))
             finally:
-                sys.setrecursionlimit(prev_reclimit)
+                tomllib.loads, tomllib.load = real_loads, real_load
                 sys.set_int_max_str_digits(prev_digits)
 
             # (round-4 finding 7) _show_bytes distinguishes a genuinely ABSENT path (None) from a git

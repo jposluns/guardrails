@@ -1066,26 +1066,39 @@ def _self_test_main_isolated():
     # tomllib raise a BARE ValueError (not TOMLDecodeError). Both identity-manifest parse sites (the
     # attribution mask and load_identity) must still fail closed as GateError. The digit limit is pinned to
     # the default 4300 (test-hermeticity) and restored in finally; the fixture lives in its own tempdir.
-    # A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must fail closed the same
-    # way at both sites; the recursion limit is pinned to the CPython default 1000 for the same reason.
+    # A parser overflow (tomllib raises RecursionError, not a ValueError) must fail closed the same way at
+    # both sites, with the overflow in the refusal.
+    # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise valid
+    # input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+    # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an unrelated
+    # refusal) under another.
     import tempfile as _tempfile
     _prev_digits = sys.get_int_max_str_digits()
-    _prev_reclimit = sys.getrecursionlimit()
     sys.set_int_max_str_digits(4300)
-    sys.setrecursionlimit(1000)
+    real_loads, real_load = tomllib.loads, tomllib.load
+
+    def overflowing_loads(text, **kwargs):
+        if "injected-overflow" in text:
+            raise RecursionError("injected parser overflow")
+        return real_loads(text, **kwargs)
+
+    tomllib.loads = overflowing_loads
+    tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
     try:
-        for big_label, big_value in (("over-long integer", "9" * 4400), ("deep nesting", "[" * 1200 + "]" * 1200)):
+        for big_label, big_value, big_needle in (("over-long integer", "9" * 4400, "does not parse"),
+                                                 ("parser overflow", "1  # injected-overflow",
+                                                  "does not parse (injected parser overflow)")):
             big_toml = "[plugin]\nover-long = " + big_value + "\n"
             _expect_gate_error(big_label + " attribution source",
-                               lambda: _mask_manifest_identity(big_toml), "does not parse")
+                               lambda: _mask_manifest_identity(big_toml), big_needle)
             with _tempfile.TemporaryDirectory(prefix="aiqt-portability-bigint-") as big_root:
                 big_path = Path(big_root) / IDENTITY_MANIFEST
                 big_path.parent.mkdir(parents=True)
                 big_path.write_text(big_toml, encoding="utf-8")
                 _expect_gate_error(big_label + " identity source",
-                                   lambda: load_identity(Path(big_root)), "does not parse")
+                                   lambda: load_identity(Path(big_root)), big_needle)
     finally:
-        sys.setrecursionlimit(_prev_reclimit)
+        tomllib.loads, tomllib.load = real_loads, real_load
         sys.set_int_max_str_digits(_prev_digits)
 
     # Coverage and working-tree kind checks remain fail-closed or C3 exactly as the tracked-surface roster

@@ -3463,13 +3463,36 @@ def self_test():
         ]) + "\n")
         check("resolution-cycle-cannot-eval", render_write(cyroot) == EXIT_CANNOT_EVALUATE)
 
-        # --- F-07: deeply nested TOML trips tomllib recursion; mapped to cannot-evaluate, not a crash ---
+        # --- F-07: a tomllib parse overflow (RecursionError) is mapped to cannot-evaluate, not a crash. The
+        # overflow is INJECTED on an otherwise valid finding index rather than provoked by a deeply nested body:
+        # the depth at which tomllib overflows is an interpreter limit, so a fixed body overflows under one
+        # recursion limit and, under another, parses and is refused for an unrelated reason (its unknown key),
+        # which would hide a dropped RecursionError mapping. The refusal must carry the injected overflow ---
         rroot = new_root()
         write_toml(rroot, "manifest.toml", manifest)
         empty_indexes(rroot)
-        deep = "schema = 1\ndeep = " + "[" * 2000 + "]" * 2000 + "\n"   # nesting safely above the recursion limit
-        write_toml(rroot, "finding.index.toml", deep)
-        check("deep-toml-recursion-cannot-eval", render_write(rroot) == EXIT_CANNOT_EVALUATE)
+        write_toml(rroot, "finding.index.toml", "schema = 1\n# injected-overflow\n")
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
+        import contextlib
+        import io
+        deep_err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(deep_err):
+                deep_rc = render_write(rroot)
+        except RecursionError:
+            deep_rc = "escaped RecursionError"
+        finally:
+            tomllib.loads, tomllib.load = real_loads, real_load
+        check("deep-toml-recursion-cannot-eval", deep_rc == EXIT_CANNOT_EVALUATE
+              and "cannot evaluate" in deep_err.getvalue() and "injected parser overflow" in deep_err.getvalue())
 
         # --- a non-UTF-8 machine-dir name is rejected fail-closed UNIVERSALLY, even for a header-exempt
         # VERSION-only store. Before render()'s explicit early machine_rel UTF-8 check this store rendered

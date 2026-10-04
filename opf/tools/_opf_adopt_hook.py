@@ -357,7 +357,11 @@ def _parse(raw):
         return json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_pairs,
                           parse_constant=_no_constant, parse_float=_parse_number,
                           parse_int=_parse_number)
-    except (ValueError, RecursionError) as exc:  # ValueError covers JSONDecodeError/UnicodeDecodeError
+    # ValueError covers JSONDecodeError/UnicodeDecodeError. MemoryError is defence in depth: every
+    # parsed input (the old registration and the emitted bytes) is held to MAX_REGISTRATION_BYTES
+    # before it gets here, so the scanner cannot practically exhaust memory; if the host does, the
+    # parse is refused the same way rather than escaping as a traceback.
+    except (ValueError, RecursionError, MemoryError) as exc:
         raise _ParseRefusal("registration bytes are not strict JSON: {}".format(exc)) from None
 
 
@@ -2141,22 +2145,25 @@ def self_test():
     def _merge_or_raised(raw):
         try:
             return merge_registration(raw, entry)
-        except RecursionError:
+        except (RecursionError, MemoryError):
             return None
 
     real_loads = json.loads
+    # The parse handler's MemoryError member gets the same injected vector (practically unreachable
+    # through real input under the byte bound; see _parse).
+    for parse_exc, parse_vector in ((RecursionError, "deep-nesting-parse-cannot-eval"),
+                                    (MemoryError, "parse-memory-exhaustion-cannot-eval")):
+        def _overflowing_loads(*args, _exc=parse_exc, **kwargs):
+            raise _exc("injected parser overflow")
 
-    def _overflowing_loads(*args, **kwargs):
-        raise RecursionError("injected parser overflow")
-
-    json.loads = _overflowing_loads
-    try:
-        r = _merge_or_raised(b"{}")
-    finally:
-        json.loads = real_loads
-    check("deep-nesting-parse-cannot-eval",
-          r is not None and r.status is CANNOT_EVALUATE and r.new_bytes is None
-          and r.findings == ["registration bytes are not strict JSON: injected parser overflow"])
+        json.loads = _overflowing_loads
+        try:
+            r = _merge_or_raised(b"{}")
+        finally:
+            json.loads = real_loads
+        check(parse_vector,
+              r is not None and r.status is CANNOT_EVALUATE and r.new_bytes is None
+              and r.findings == ["registration bytes are not strict JSON: injected parser overflow"])
     real_emit_value = _emit_value
 
     def _overflowing_emit_value(*args, **kwargs):
