@@ -18,6 +18,46 @@
 
 format-version = 1
 python-floor = "3.14"
-guarded-surfaces = []
+guarded-surfaces = [
+    "opf/tools/_journal.py",
+    "opf/tools/_opf_absorb.py",
+    "opf/tools/_opf_adopt.py",
+    "opf/tools/_opf_adopt_apply.py",
+    "opf/tools/_opf_adopt_hook.py",
+    "opf/tools/_opf_adopt_observe.py",
+    "opf/tools/_opf_adopt_plan.py",
+    "opf/tools/_opf_changelog.py",
+    "opf/tools/_opf_check.py",
+    "opf/tools/_opf_emit.py",
+    "opf/tools/_opf_fuzz.py",
+    "opf/tools/_opf_init.py",
+    "opf/tools/_opf_init_contract.py",
+    "opf/tools/_opf_init_operation.py",
+    "opf/tools/_opf_init_substrate.py",
+    "opf/tools/_opf_observe.py",
+    "opf/tools/_opf_oplock.py",
+    "opf/tools/_opf_pack_manifest.py",
+    "opf/tools/_opf_record.py",
+    "opf/tools/_opf_release.py",
+    "opf/tools/_opf_schema.py",
+    "opf/tools/_opf_store.py",
+    "opf/tools/_opf_views.py",
+    "opf/tools/_opf_worklog.py",
+    "opf/tools/_opf_worklog_regressions.py",
+    "opf/tools/check_opf_doctor.py",
+    "opf/tools/check_opf_drift.py",
+    "opf/tools/check_opf_homes.py",
+    "opf/tools/check_opf_init.py",
+    "opf/tools/check_opf_init_contract.py",
+    "opf/tools/check_opf_init_observe.py",
+    "opf/tools/check_opf_init_p0.py",
+    "opf/tools/check_opf_init_qa.py",
+    "opf/tools/check_opf_prompt_pack.py",
+    "opf/tools/check_opf_record.py",
+    "opf/tools/check_opf_upgrade.py",
+    "opf/tools/opf.py",
+    "opf/tools/selftest_commonmark_conformance.py",
+    "opf/tools/selftest_commonmark_headings.py",
+]
 completeness-check = false
 documentation-check = false

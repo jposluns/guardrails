@@ -72,10 +72,18 @@ repo-relative target, so this family gates as self-tests instead (the U1 build-p
 Launched isolated (-I -B) per the Python-launcher-isolation gate; sibling helpers are imported through
 the sys.path insert idiom the repo's tools share.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: opf.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import os
 import stat
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the guarded _opf_* helper bootstrap below
@@ -12549,6 +12557,7 @@ def _upgrade_run(root):
         recovery = (recovery_store_root, recovery_product_root, created_relpaths,
                     product_targets, write_scope["store"])
         released = False
+        propagating = False
         try:
             # Apply: rewrite manifest + counters (canonical bytes), create the missing empty indexes. The
             # 1.1.0 origin rewrites the manifest alone (its delta is the spec_version bump).
@@ -12634,6 +12643,11 @@ def _upgrade_run(root):
             print("opf upgrade: exit 0 means the store is valid at {}; committing is the adopter's own "
                   "step.".format(_UPGRADE_TO))
             return EXIT_OK
+        except BaseException:
+            # Only THIS frame's own escape sets the flag: sys.exc_info() in the finally would also report an
+            # exception a CALLER is handling, and would swallow a release failure on a return path.
+            propagating = True
+            raise
         finally:
             if not released:
                 # R5/FIX1: release the lease on every non-success exit. When a mid-run failure is ALREADY
@@ -12644,8 +12658,7 @@ def _upgrade_run(root):
                 # the lease-replaced note is surfaced ALONGSIDE it, never in place of it (exit 2 preserved,
                 # peer lease left, never seized). A propagating KeyboardInterrupt/SystemExit is likewise not
                 # masked by a release failure.
-                pending = sys.exc_info()[1]
-                if pending is None:
+                if not propagating:
                     # A `return` (or normal fall-through) is passing through with no in-flight exception: a
                     # release failure legitimately becomes the surfaced outcome (exit 2), exactly as before.
                     _opf_write_guard.release_lease(root_fd, machine_rel, lease_payload, "upgrade")
@@ -12658,7 +12671,7 @@ def _upgrade_run(root):
                         print("opf upgrade: additionally, releasing the upgrade lease failed ({}); the peer "
                               "lease is LEFT in place (never seized, spec 5.7) and the original failure above "
                               "still governs (exit 2).".format(rel_exc), file=sys.stderr)
-                        # returning from the except lets `pending` resume propagating (the finally completes
+                        # returning from the except lets the original resume propagating (the finally completes
                         # without raising a new exception), so _cmd_upgrade surfaces the original refusal.
     except BaseException:
         # Cover every escape after acquisition, including writes, render/doctor and lease release.
@@ -12721,7 +12734,7 @@ def _cmd_import(rest):
 
 
 def _parse_unoptimized(source):
-    """ast.parse(source) unoptimized on every supported Python (3.11+): optimize=0 where ast.parse has
+    """ast.parse(source) unoptimized on any Python this can run under: optimize=0 where ast.parse has
     that parameter (3.13+), plain ast.parse before, which is equivalent because before 3.13 ast.parse
     never runs the AST optimizer, so it strips no docstring even under python -O or -OO. A bytes
     `source` is decoded as the interpreter decodes a source file, honouring a PEP 263 coding
