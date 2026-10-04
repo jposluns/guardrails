@@ -1913,7 +1913,10 @@ class _FixtureProcess:
         never raises asynchronous signal exceptions, so no bytecode boundary here can
         lose the fork result between the fork and its store -- by interpreter
         construction, not by statement packing. A launch close() gave up on is
-        collected HERE: the launcher is then the fork's last owner."""
+        collected HERE: the launcher is then the fork's last owner. The park is
+        the one unbounded wait of this class (opf.py's _RUNTIME_WAIT_EXEMPT, QA22):
+        it holds only this daemon thread, and start() waits for the launch through
+        a bounded _launched.wait, so no caller ever waits on the park itself."""
         try:
             self._go.wait()
             with self._launch_lock:
@@ -1944,12 +1947,18 @@ class _FixtureProcess:
         exist), then release the construction resources close() left untouched."""
         import os
         import signal
+        import time
         try:
             if self.pid is not None and not self.collected:
                 _fixture_signal(self.pid, signal.SIGKILL, self.pidfd,
                                 forked=True)
-                os.waitpid(self.pid, 0)
-                self.collected = True
+                # A bounded reap (QA22), never a blocking waitpid: a guardian
+                # the kill did not reach (or that will not die) is left
+                # uncollected after the cleanup grace instead of holding
+                # this thread on it.
+                if self._await_exit(time.monotonic() + _FIXTURE_CLEANUP_GRACE) \
+                        and os.waitpid(self.pid, os.WNOHANG)[0] == self.pid:
+                    self.collected = True
         except OSError:
             pass
         finally:
@@ -1966,6 +1975,21 @@ class _FixtureProcess:
                     except OSError:
                         pass
                     setattr(self, name, None)
+
+    def _await_exit(self, until):
+        """Wait, WITHOUT reaping, until this launch's own guardian has exited or
+        the monotonic `until` has passed (QA22): a WNOHANG poll, never a blocking
+        waitid. True when it has exited; an OSError propagates."""
+        import os
+        import time
+        pause = 0.001
+        while os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+            left = until - time.monotonic()
+            if left <= 0.0:
+                return False
+            time.sleep(min(pause, left))
+            pause = min(pause * 2.0, 0.05)
+        return True
 
     def _start(self):
         import os
@@ -2006,8 +2030,19 @@ class _FixtureProcess:
                     # awaited first WITHOUT reaping and unmasked, so a
                     # cancellation can still interrupt that wait. The reap is a
                     # WNOHANG poll (QA18 claude m2): a 0 result is an unexpected PID.
+                    # The exit wait is bounded by the fixture deadline (QA22): a
+                    # failed guardian that never exits (stopped, wedged) is this
+                    # launch's OWN pre-GO fork, with no subject yet, so it is
+                    # SIGKILLed and must then exit within the cleanup grace; its
+                    # receipt then reports the kill.
                     try:
-                        os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOWAIT)
+                        if not self._await_exit(self.deadline):
+                            _fixture_signal(self.pid, signal.SIGKILL, self.pidfd,
+                                            forked=True)
+                            if not self._await_exit(time.monotonic() + _FIXTURE_CLEANUP_GRACE):
+                                raise ChildStatusUnavailable(
+                                    "guardian failed before READY and did not exit "
+                                    "after SIGKILL")
                     except OSError as exc:
                         raise ChildStatusUnavailable(
                             "cannot collect fixture status: " + str(exc)) from exc
