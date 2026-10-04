@@ -139,6 +139,7 @@ import re
 import stat
 import sys
 import tomllib
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1234,9 +1235,12 @@ class OpContext:
     bytes of each create-file path, which the handler digest-checks against the row before staging them. A
     path two source rows claim is ambiguous and binds nothing, and a row whose path is not a string binds
     nothing either. `claimed` holds every create-file path and move destination the rows have named
-    (case-folded, to the path as named), so two rows can never land on one path, on case variants of one
-    path, or on a file and its own ancestor or descendant (the live tree alone cannot see a path a row
-    composed earlier in this transaction, or one a later stage creates)."""
+    (canonically case-folded, _claim_key, to the path as named), so two rows can never land on one path, on
+    case or Unicode-normalization variants of one path, or on a file and its own ancestor or descendant
+    (the live tree alone cannot see a path a row composed earlier in this transaction, or one a later stage
+    creates). The fold is Unicode canonical caseless matching, not every filesystem's case table (as
+    disclosed for _opf_adopt.protected_destination), and it refuses, fail-closed, two names a
+    case-sensitive filesystem would keep apart (`stra\u00dfe` and `strasse`)."""
 
     def __init__(self, ops, sources=(), content=None):
         self.ops = ops
@@ -1250,17 +1254,23 @@ class OpContext:
 
     def claim(self, path):
         """Claim one created path for this transaction's rows. A path equal to one already claimed, a case
-        variant of it (one name on a case-insensitive filesystem), or its ancestor or descendant (one row
-        needs as a file a name the other needs as a directory) refuses before the base commits work that
-        no retirement stage could finish."""
-        folded = path.casefold()
+        or normalization variant of it (one name on a case-insensitive or normalization-insensitive
+        filesystem), or its ancestor or descendant (one row needs as a file a name the other needs as a
+        directory) refuses before the base commits work that no retirement stage could finish."""
+        folded = _claim_key(path)
         for prior_folded, prior in self.claimed.items():
             if _within(folded, prior_folded) or _within(prior_folded, folded):
                 raise AdoptApplyError("{!r} and {!r} are named by two plan rows (create-file paths or move "
-                                      "destinations) as one path, case variants, or a file and its own "
-                                      "ancestor or descendant; a collision routes to a disposition, never an "
-                                      "overwrite (fail-closed)".format(prior, path))
+                                      "destinations) as one path, case or normalization variants, or a "
+                                      "file and its own ancestor or descendant; a collision routes to a "
+                                      "disposition, never an overwrite (fail-closed)".format(prior, path))
         self.claimed[folded] = path
+
+
+def _claim_key(path):
+    """Unicode canonical caseless form (D145): NFD, casefold, NFD again, so an NFC and an NFD spelling of
+    one name, and its case variants, fold to one key."""
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", path).casefold())
 
 
 def _stage(ops):
@@ -3399,6 +3409,9 @@ def _self_test_checks():
             ("two-moves-descendant-then-file", two_moves(pair_dest, pair_dest + "/child.md", reverse=True),
              "two plan rows"),
             ("two-moves-case-variants", two_moves(pair_dest, pair_dest.lower()), "two plan rows"),
+            # NFC and NFD spellings of one name (one name on a normalization-insensitive filesystem)
+            ("two-moves-normalization-variants", two_moves("adopter/caf\u00e9.md", "adopter/cafe\u0301.md"),
+             "two plan rows"),
             ("move-store-tree-case-variant", dict(rows=[move_row(".Working/stuff.md")],
                                                   sources=moved_to(".Working/stuff.md")),
              "inside the store tree"),
@@ -3557,19 +3570,42 @@ def _self_test_checks():
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = file_fixture(temp)
         apply_stage(root)
-        before = snapshot(root)
+        before = tree_state(root, journal=False)
         rtxn = rid + "." + RETIREMENT_PHASE
         with mock.patch.object(_journal, "capture_preimages", capture_fails):
             unopened = [refusal(run_adopt_transaction, root, rid, compose_rows(fx_disposed, fx_sources),
                                 phase=RETIREMENT_PHASE) for _ in range(2)]
         check("retirement-unopened-attempts-retained-tree-untouched",
-              all(u is not None and "before it opened" in u for u in unopened) and snapshot(root) == before
+              all(u is not None and "before it opened" in u for u in unopened)
+              and tree_state(root, journal=False) == before
               and txn_state(root, rtxn) == txn_state(root, rtxn + ".attempt-2") == "nothing-opened"
               and lock_free(root))
         retry, why = retirement_stage(root)
         check("retirement-retry-after-unopened-attempts-commits",
               retry == rtxn + ".attempt-3" and why is None and txn_state(root, retry) == "complete"
               and "legacy/RULES.md" not in snapshot(root))
+    # a gapped history (`<txn>` and `<txn>.attempt-3`, the record of attempt 2 deleted) retries as attempt 4,
+    # after the highest retained number, never into the deleted slot.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = file_fixture(temp)
+        apply_stage(root)
+        rtxn = rid + "." + RETIREMENT_PHASE
+        with mock.patch.object(_journal, "capture_preimages", capture_fails):
+            for _ in range(3):
+                refusal(run_adopt_transaction, root, rid, compose_rows(fx_disposed, fx_sources),
+                        phase=RETIREMENT_PHASE)
+        gap = _journal_root(root) / (rtxn + ".attempt-2")
+        for dirpath, dirnames, filenames in os.walk(gap, topdown=False):
+            for name in filenames:
+                os.unlink(os.path.join(dirpath, name))
+            for name in dirnames:
+                os.rmdir(os.path.join(dirpath, name))
+        os.rmdir(gap)
+        retry, why = retirement_stage(root)
+        check("retirement-retry-after-gapped-attempts-takes-next-after-highest",
+              retry == rtxn + ".attempt-4" and why is None and txn_state(root, retry) == "complete"
+              and txn_state(root, rtxn) == txn_state(root, rtxn + ".attempt-3") == "nothing-opened"
+              and not gap.exists() and lock_free(root))
 
     # 11g: a HAND-BUILT retirement removal (a compose callback appending a pinned removal, never through
     # ApplyOps.retire) is held to the live preservation check too: the committed archive copy it pairs with
