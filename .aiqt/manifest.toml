@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "801b4239684d06d2454ef42bca416460cac67c466d5eea1a9450d7c08f3465d4"
+tree-sha256 = "4163d2a8d3598290a85b6d769e45347ddb3e96d662da44547600e3278b23dd9a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -127,7 +127,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2867
-sha256 = "ec3210aaa7d8e7fbbae34590b756ea0af8dcb377c9889332b8e3f8cfc79a910e"
+sha256 = "e504eb30d02b2ab10668d71ca391af6dd0b54f8a8b7243bce675e27d86c4e55f"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2556,8 +2556,8 @@ sha256 = "72026d6e7d77dbd23b091a569a7791ab183025f06b9b7ae60362f7b8e16b0df9"
 
 [[sources]]
 path = "opf/tools/_containment.py"
-bytes = 43557
-sha256 = "f51dbe0b3d0af2057771ac195b16028edb70eade35076f1757d3beb163621522"
+bytes = 45052
+sha256 = "312df2a431d58682b5dfb8420aa19416e2716a2adf5aeb3f457715f09046ab76"
 
 [[sources]]
 path = "opf/tools/_journal.py"
@@ -3131,8 +3131,8 @@ sha256 = "5bb55aeaf3708f9df4545de618311bb22ac484568d5a494055f9967c5eb9ae7f"
 
 [[sources]]
 path = "tools/_gen_common.py"
-bytes = 51536
-sha256 = "6e64d1900ede93afd9efedc2a536feff4a96f3bcb3895b0447fa926585ced554"
+bytes = 53031
+sha256 = "9aca434c987c1078018ed41dc11a9799f130ae618b0164d2a65f29f7754d5add"
 
 [[sources]]
 path = "tools/_git_fixture_env.py"
@@ -3266,8 +3266,8 @@ sha256 = "5d497dd47f36726ad387fe985359979b5c31093de6248931979366bb0cb9aec3"
 
 [[sources]]
 path = "tools/check_manifest.py"
-bytes = 102932
-sha256 = "09e7e6a94a97c98e4827c21fdedc6f7dfce04759bfbac4dfe2618a07fc9684db"
+bytes = 105806
+sha256 = "93f98840b4eb803fa015c6ca287a3f38569129cfb348541c3d718299eb90d5ed"
 
 [[sources]]
 path = "tools/check_mappings.py"

@@ -183,7 +183,11 @@ def precheck_special_files(root):
     rule below that path is already the lenient ignored one, its target is walked under its own
     path and classification, and every tracked path through it is resolved by the tracked-path
     layer, so walking it again adds no refusal (a pnpm-style ignored node_modules with many
-    in-root links passes); the bound still refuses more than 64 link-walks at non-ignored logical
+    in-root links passes). QA round 13 (claude MEDIUM 1): that skip applies ONLY when git can list
+    the tracked paths; when it cannot (ls-tree of HEAD fails while the index and ignore queries
+    answer) the tracked-path layer does not run, so such a link is walked under its logical path
+    and counted like any other, and a target the physical walk prunes (the repository's own git
+    dir) is still examined. The bound still refuses more than 64 link-walks at non-ignored logical
     paths, a tracked workspace-link layout of that size included. And a GIT-IGNORED symlink
     to a directory outside the root THAT SHADOWS NO TRACKED CONTENT (git ls-files under the link's
     own path answers empty), or a git-ignored unresolvable symlink, both accepted un-walked (a
@@ -197,7 +201,8 @@ def precheck_special_files(root):
     a special file (QA round 11, codex MAJOR: the object a tracked path resolves to is always
     classified, however many directory links re-spell the route); a tracked path with a missing or
     dangling component stays accepted (every open of it fails at once) when no link step on its
-    route has left the root.
+    route has left the root. That tracked-path layer runs only when git can list the tracked
+    paths; when it cannot, the walk covers those routes instead (QA round 13, above).
 
     SCOPE: the whole tree under root, except the repository's OWN git dir (the one `git rev-parse
     --absolute-git-dir` names; git's own metadata is outside the tools' read set, but git itself
@@ -574,12 +579,18 @@ def precheck_special_files(root):
                                       "file)".format(kind))
                 if stat.S_ISDIR(target_mode):
                     real = os.path.realpath(path)
-                    if skipped and (real == real_root or real.startswith(real_root + os.sep)):
+                    if (skipped and (real == real_root or real.startswith(real_root + os.sep))
+                            and _tracked() is not None):
                         # QA round 12 (claude m3): an in-root directory link at an IGNORED
                         # logical path is not walked under that path, and so not counted: below
                         # it every rule is already the lenient ignored one, its target is walked
                         # under its own path and classification, and every tracked path through
-                        # it is resolved by the tracked-path layer after this walk.
+                        # it is resolved by the tracked-path layer after this walk. QA round 13
+                        # (claude MEDIUM 1): that layer runs only when git can list the tracked
+                        # paths, so the skip applies only then; without the list (ls-tree of
+                        # HEAD fails while the ignore query answers) the link is walked and
+                        # counted below like any other, so a target the physical walk prunes
+                        # (the repository's own git dir) is still examined.
                         continue
                     if real == real_root or real.startswith(real_root + os.sep):
                         # QA round 11 (codex MAJOR): descend through an in-root directory link
@@ -615,8 +626,13 @@ def precheck_special_files(root):
         # QA round 11 (codex MAJOR), the independent layer the walk's leniencies cannot blunt:
         # every TRACKED logical path is resolved component by component and the OBJECT it
         # resolves to is classified, however many directory links re-spell the route. When git
-        # cannot answer there is no tracked list, and the walk above has already run with NO
-        # ignore filter, where every out-of-root directory link is refused outright.
+        # cannot list the tracked paths this layer does not run, and the walk above has already
+        # covered every route a tracked path can take: an ignored in-root directory link is then
+        # walked under its own path (the round-12 skip needs the tracked list; QA round 13,
+        # claude MEDIUM 1), and every out-of-root directory link is refused (outright when there
+        # is no ignore filter, as a possible shadow of tracked content when there is one). The
+        # ignore filter is independent of the tracked list: ls-tree of HEAD can fail while the
+        # index and ignore queries answer.
         for spec in (_tracked() or ()):
             final_mode = _classify_tracked(spec)
             if final_mode is None:

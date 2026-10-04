@@ -1598,6 +1598,46 @@ def _self_test_main_isolated():
                     _entry_expect("70 in-root directory links at an {} path".format(label),
                                   links_tree, which, want_rc,
                                   "bound of 64" if want_rc else None)
+            # (s26) QA round 13 (claude MEDIUM 1): the round-12 skip of an ignored in-root
+            # directory link leans on the tracked-path layer, which does not run when git cannot
+            # list HEAD's tree. Here HEAD's root tree object is missing (ls-tree fails while
+            # rev-parse, ls-files and the ignore query answer), the tracked directory docs/ is
+            # replaced by an ignored link into the repository's own .git, and a FIFO sits at
+            # .git/x.md, which the tracked path docs/x.md reaches. Fails without the round-13
+            # condition on the skip (exit 0: the physical walk prunes .git and the tracked-path
+            # layer is skipped).
+            notree_tree = _mini_tree("ignored-link-into-git-no-head-tree")
+            if notree_tree is not None:
+                (notree_tree / "docs").mkdir()
+                (notree_tree / "docs" / "x.md").write_text("x\n", encoding="utf-8")
+                if (gm._git(notree_tree, "add", "--", "docs/x.md").returncode != 0
+                        or gm._git(notree_tree, "commit", "-q", "-m", "seed").returncode != 0):
+                    notree_tree = None
+            if notree_tree is not None:
+                root_tree = gm._git(notree_tree, "rev-parse", "HEAD^{tree}")
+                tree_hex = root_tree.stdout.decode("ascii", "replace").strip()
+                loose = notree_tree / ".git" / "objects" / tree_hex[:2] / tree_hex[2:]
+                if root_tree.returncode != 0 or not loose.is_file():
+                    notree_tree = None
+                else:
+                    loose.unlink()
+                    shutil.rmtree(notree_tree / "docs")
+                    (notree_tree / "docs").symlink_to(".git")
+                    (notree_tree / ".gitignore").write_text("/docs\n", encoding="utf-8")
+                    os.mkfifo(notree_tree / ".git" / "x.md")
+                    if (gm._git(notree_tree, "ls-tree", "-r", "HEAD").returncode == 0
+                            or gm._git(notree_tree, "rev-parse", "--verify", "--quiet",
+                                       "HEAD").returncode != 0):
+                        notree_tree = None
+            if notree_tree is None:
+                failures.append("(r) cannot build the missing-HEAD-tree fixture (a commit whose "
+                                "root tree is a loose object; ls-tree must then fail while "
+                                "rev-parse --verify succeeds)")
+            else:
+                for which in ("gen", "opf"):
+                    _entry_expect("an ignored in-root link over a tracked directory into .git, "
+                                  "with HEAD's tree missing", notree_tree, which, 2,
+                                  notree_tree / "docs" / "x.md")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1623,7 +1663,7 @@ def _self_test_main_isolated():
           "subprocess, refuses a FIFO, a link to a FIFO, a FIFO behind a planted nested .git or an "
           "in-root directory link, an outside-root directory link, a git-ignored link to a FIFO, a "
           "FIFO behind an in-root link into an ignored directory, and a symlinked tools/ or opf/ "
-          "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), walks a tracked link into an ignored directory strictly in both directions (round 10), resolves every tracked logical path component by component so a FIFO behind two or three chained directory links, in either walk order, and a tracked path through an ignored link loop are refused by the logical path, and screens a nested .git and its HEAD before the ignore query (round 11), follows a nested gitfile without blocking, refusing an out-of-tree target and screening each nested git dir's HEAD and commondir, and passes 70 in-root directory links inside an ignored directory while the same links at a non-ignored path stay bounded (round 12), while a dangling link, a venv-like "
+          "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), walks a tracked link into an ignored directory strictly in both directions (round 10), resolves every tracked logical path component by component so a FIFO behind two or three chained directory links, in either walk order, and a tracked path through an ignored link loop are refused by the logical path, and screens a nested .git and its HEAD before the ignore query (round 11), follows a nested gitfile without blocking, refusing an out-of-tree target and screening each nested git dir's HEAD and commondir, and passes 70 in-root directory links inside an ignored directory while the same links at a non-ignored path stay bounded (round 12), refuses a FIFO in .git reached by a tracked path through an ignored link when HEAD's tree cannot be listed (round 13), while a dangling link, a venv-like "
           "ignored tree and a git-ignored outside-root directory link pass; a multi-newline "
           "rev-parse answer fails closed, one trailing newline stays accepted, and a NUL root is "
           "git-cannot-answer in both copies, with mutants proving the vectors discriminate")
