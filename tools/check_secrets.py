@@ -67,7 +67,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _walk import walk_files, read_text_nonblocking  # noqa: E402  fail-closed tree walk and non-blocking read
 from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".working"}
@@ -353,7 +353,10 @@ def main() -> int:
             if not _is_scan_candidate(path):
                 continue
             try:
-                lines = path.read_text(encoding="utf-8").splitlines()
+                # read_text_nonblocking, not read_text: this walk reads whatever it meets, including
+                # git-ignored paths the precheck does not walk, so a special file must be a loud
+                # refusal (OSError -> exit 2 below), never a blocking read (D-400-SPECIAL-FILE-PRECHECK).
+                lines = read_text_nonblocking(path).splitlines()
             except UnicodeDecodeError:
                 # binary / non-utf8: a text secret-scanner skips it (gitleaks scans binaries)
                 print(f"SKIP (not utf-8 text): {path.relative_to(root)}")

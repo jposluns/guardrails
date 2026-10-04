@@ -264,6 +264,39 @@ PRECHECK_ABORT_LINES = dict((
      "opf/tools/_containment.py --precheck"),
 ))
 
+# D-400-SPECIAL-FILE-PRECHECK bootstrap: the ONE accepted shell test-and-abort line that must run
+# BEFORE the precheck invocation itself, in each runner and in every CI precheck step: python3 would
+# block LOADING the precheck module if the script path were a FIFO, so a POSIX [ -f ] && [ ! -h ] test
+# refuses a non-regular or symlinked script by name first (the residual that remains is the
+# interpreter binary and the runner script itself, both read before this line can run). Keyed by exact
+# spelling (the local runner and the CI workflow share the tools/ spelling; the standalone OPF runner
+# matches AFTER adapt_standalone_runner rebases "$here/ to "opf/tools/); the value is the tools path
+# the shadow scan must see accounted for on that line. The line registers NO roster member: the member
+# is the precheck invocation itself, which the runners and the workflow carry right after it, and the
+# precheck-ORDER pass below holds every workflow job to the full two-line canonical step.
+PRECHECK_BOOTSTRAP_LINES = dict((
+    ('[ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
+     "tools/_gen_common.py"),
+    ('[ -f "opf/tools/_containment.py" ] && [ ! -h "opf/tools/_containment.py" ] || { echo "error: opf/tools/_containment.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
+     "opf/tools/_containment.py"),
+))
+
+# D-400-SPECIAL-FILE-PRECHECK order: the canonical precheck step body every workflow job must run
+# before any other post-checkout run step, exactly and in order: the bootstrap test-and-abort line,
+# then the precheck invocation.
+PRECHECK_STEP_RUN_LINES = (
+    '[ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
+    "python3 -I -B tools/_gen_common.py --precheck",
+)
+
+# The only run line a workflow job may carry BEFORE its checkout step: it configures git ahead of
+# materializing the tree (the byte-canon matrix sets the hostile line-ending conversion before
+# checkout) and cannot read a tree that does not exist yet. Any other pre-checkout run line is a
+# finding, fail-loud.
+PRE_CHECKOUT_RUN_LINES = frozenset({
+    "git config --global core.autocrlf true",
+})
+
 ALLOWLIST = (
     {
         "side": "ci-only",
@@ -1407,6 +1440,17 @@ def extract_local(text):
             if scaffold:
                 _add_member(members, origins, line_number,
                             PRECHECK_ABORT_LINES[stripped])
+        elif stripped in PRECHECK_BOOTSTRAP_LINES:
+            # Only where the real runners put it: top level, before any gate, ahead of the precheck
+            # invocation it guards (D-400-SPECIAL-FILE-PRECHECK bootstrap). The one accepted shell
+            # test-and-abort besides the precheck abort line: python3 would block loading a FIFO at
+            # the precheck script path, so the shell refuses a non-regular or symlinked script by
+            # name first. It registers no member; the shadow scan sees its tools path through
+            # origins. A second spelling, or one after a gate, stays unclassified.
+            scaffold = not if_stack and not members
+            if scaffold:
+                origins.setdefault(line_number, set()).add(
+                    PRECHECK_BOOTSTRAP_LINES[stripped])
         elif stripped == PATH_APPEND_LINE:
             # Only where the real runner puts it: the HOME guard's then branch,
             # which has just proven HOME non-empty. The guard's else branch
@@ -1575,6 +1619,14 @@ def _classify_ci_command(
             "invoking or sourcing tools/run_all_checks.sh makes parity "
             "circular",
         ))
+        return
+
+    if stripped in PRECHECK_BOOTSTRAP_LINES:
+        # D-400-SPECIAL-FILE-PRECHECK bootstrap: the exact shell test-and-abort line each precheck
+        # step runs ahead of the precheck invocation (python3 would block loading a FIFO at the
+        # script path). It registers no member; the shadow scan sees its tools path through origins.
+        origins.setdefault(line_number, set()).add(
+            PRECHECK_BOOTSTRAP_LINES[stripped])
         return
 
     tokenized = _tokenize(stripped)
@@ -2477,6 +2529,10 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
         (root / "tools").mkdir()
         runner = root / "tools" / "run_all_checks.sh"
         runner.write_text(text, encoding="utf-8")
+        # The live runner's precheck BOOTSTRAP line tests this path with [ -f ] && [ ! -h ] before
+        # any stub can run; give the scratch tree a regular file there. Data only: the stub python3
+        # never reads its script argument, and nothing executes this file.
+        (root / "tools" / "_gen_common.py").write_text("", encoding="utf-8")
         log = root / "calls.log"
         log.write_text("", encoding="utf-8")
         env = dict(
@@ -4481,6 +4537,149 @@ def self_test():
                     sorted(got_sites.items()),
                     sorted(allowed.items())))
 
+
+    # D-400-SPECIAL-FILE-PRECHECK bootstrap (runner side): the exact test-and-abort line is accepted
+    # only at top level before any gate, registers no member, and satisfies the shadow scan through
+    # origins; moved after the first gate it is unclassified (cannot-evaluate), so a runner that
+    # reorders the bootstrap behind a gate never reads as clean.
+    count += 1
+    bootstrap_tools = next(line for line in PRECHECK_BOOTSTRAP_LINES
+                           if PRECHECK_BOOTSTRAP_LINES[line] == "tools/_gen_common.py")
+    bootstrap_fixture = "\n".join((
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'cd "$(dirname "$0")/.." || exit 2',
+        "export PYTHONDONTWRITEBYTECODE=1",
+        "failed=0",
+        'failed_names=""',
+        "notrun=0",
+        bootstrap_tools,
+        "python3 -I -B tools/_gen_common.py --precheck || exit 2",
+        "run_gate() {",
+        *EXPECTED_RUN_GATE_BODY,
+        "}",
+        'run_gate "a" python3 -I -B tools/a.py',
+        'if [ "$failed" -ne 0 ]; then',
+        'echo "FAILED GATES: ${failed_names}"',
+        'echo "RESULT: FAIL"',
+        "exit 1",
+        "fi",
+        'if [ "$notrun" -ne 0 ]; then',
+        'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
+        "exit 0",
+        "fi",
+        'echo "RESULT: PASS"',
+    )) + "\n"
+    got = extract_local(bootstrap_fixture)
+    if got.diagnostics or "tools/_gen_common.py --precheck" not in got.members:
+        failures.append(
+            "30 the in-place bootstrap line was not accepted cleanly: {!r}".format(
+                got.diagnostics))
+    moved = bootstrap_fixture.replace(bootstrap_tools + "\n", "", 1).replace(
+        'run_gate "a" python3 -I -B tools/a.py',
+        'run_gate "a" python3 -I -B tools/a.py\n' + bootstrap_tools, 1)
+    got = extract_local(moved)
+    if not any(diagnostic.code == "unclassified-line" for diagnostic in got.diagnostics):
+        failures.append(
+            "30 a bootstrap line after the first gate must be unclassified, got {!r}".format(
+                got.diagnostics))
+
+    # D-400-SPECIAL-FILE-PRECHECK bootstrap (CI side): inside a literal run block the exact line is
+    # benign and shadow-clean; any respelling of it is unclassified-command, so a weakened CI
+    # bootstrap never reads as clean.
+    count += 1
+    ci_bootstrap_fixture = "\n".join((
+        "name: Quality",
+        "jobs:",
+        "  quality:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - name: Special-file precheck",
+        "        run: |",
+        "          " + bootstrap_tools,
+        "          python3 -I -B tools/_gen_common.py --precheck",
+    )) + "\n"
+    got = extract_ci(ci_bootstrap_fixture)
+    if got.diagnostics or "tools/_gen_common.py --precheck" not in got.members:
+        failures.append(
+            "31 the CI bootstrap line was not accepted cleanly: {!r}".format(got.diagnostics))
+    got = extract_ci(ci_bootstrap_fixture.replace("[ ! -h tools/_gen_common.py ]",
+                                                  "[ ! -h tools/x.py ]", 1))
+    if not any(diagnostic.code in ("unclassified-command", "shadow-miss")
+               for diagnostic in got.diagnostics):
+        failures.append(
+            "31 a respelled CI bootstrap line must be unclassified, got {!r}".format(
+                got.diagnostics))
+
+    # D-400-SPECIAL-FILE-PRECHECK order: the LIVE workflow files must order-check clean, and each
+    # mutation class (a missing precheck step, a gate step before the precheck, an unreviewed
+    # pre-checkout run line, a precheck ahead of checkout, a tools path outside captured run lines)
+    # must be caught. This vector fails without the order pass.
+    count += 1
+    live_problems, live_diagnostics = precheck_order_report()
+    if live_problems or live_diagnostics:
+        failures.append("32 live workflow files do not order-check clean: {!r} {!r}".format(
+            live_problems, live_diagnostics))
+    order_fixture = "\n".join((
+        "name: Quality",
+        "jobs:",
+        "  one:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - name: Hostile checkout line-ending setting (before checkout)",
+        "        run: git config --global core.autocrlf true",
+        "      - uses: actions/checkout@v4",
+        "      - uses: actions/setup-python@v5",
+        "      - name: Special-file precheck",
+        "        run: |",
+        "          " + bootstrap_tools,
+        "          python3 -I -B tools/_gen_common.py --precheck",
+        "      - name: A gate",
+        "        run: python3 -I -B tools/a.py",
+    )) + "\n"
+    got_problems, got_diagnostics = workflow_precheck_order_problems(order_fixture, "fixture.yml")
+    if got_problems or got_diagnostics:
+        failures.append("32 the clean order fixture did not pass: {!r} {!r}".format(
+            got_problems, got_diagnostics))
+    order_mutations = (
+        ("missing precheck step",
+         order_fixture.replace("      - name: Special-file precheck\n        run: |\n"
+                               "          " + bootstrap_tools + "\n"
+                               "          python3 -I -B tools/_gen_common.py --precheck\n", ""),
+         "no canonical special-file precheck step"),
+        ("gate before precheck",
+         order_fixture.replace("      - name: Special-file precheck",
+                               "      - name: Early gate\n"
+                               "        run: python3 -I -B tools/b.py\n"
+                               "      - name: Special-file precheck", 1),
+         "before the special-file precheck"),
+        ("unreviewed pre-checkout run",
+         order_fixture.replace("git config --global core.autocrlf true",
+                               "python3 -I -B tools/a.py", 1),
+         "pre-checkout"),
+        ("precheck ahead of checkout",
+         order_fixture.replace("      - uses: actions/checkout@v4\n"
+                               "      - uses: actions/setup-python@v5\n", "", 1).replace(
+                               "      - name: A gate",
+                               "      - uses: actions/checkout@v4\n"
+                               "      - name: A gate", 1),
+         "before checkout"),
+    )
+    for label, mutated_fixture, needle in order_mutations:
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(needle in problem for problem in got_problems):
+            failures.append("32 order mutation not caught ({}): {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    hidden = order_fixture.replace("      - name: A gate\n        run: python3 -I -B tools/a.py\n",
+                                   "      - name: A gate\n        with:\n"
+                                   "          arg: tools/a.py\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(hidden, "fixture.yml")
+    if not any(diagnostic.code == "order-shadow-miss" for diagnostic in got_diagnostics):
+        failures.append("32 a tools path outside captured run lines must be a diagnostic, got "
+                        "{!r}".format(got_diagnostics))
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
@@ -4492,6 +4691,205 @@ def self_test():
         "including fail-without-the-change, passed".format(count)
     )
     return 0
+
+
+
+def workflow_precheck_order_problems(text, source):
+    """(problems, diagnostics) for ONE workflow file (D-400-SPECIAL-FILE-PRECHECK order): every job
+    must carry the canonical special-file precheck step (PRECHECK_STEP_RUN_LINES, exactly those run
+    lines in that order) as its first post-checkout run step. After the checkout step and before the
+    precheck step only infrastructure uses: steps (actions/setup-python) may appear; before checkout,
+    only PRE_CHECKOUT_RUN_LINES may run (the tree does not exist yet, so nothing there can read it)
+    and no action other than checkout itself may appear. The parse is the deliberately narrow step
+    layout quality.yml and currency.yml use (steps at indent 6, step keys at indent 8, literal-block
+    run bodies deeper); a tab, an orphan step, a step without name: or uses:, or a folded/empty run
+    is a diagnostic (cannot-evaluate), and a tools path on a line this parse did not capture as a run
+    line is a diagnostic too (the same shadow principle extract_ci applies), so a gate cannot hide
+    from the ORDER question in unmodelled YAML. Full structural validation of quality.yml stays
+    extract_ci's job; this pass answers order, across every workflow file."""
+    problems, diagnostics = [], []
+    jobs = {}
+    run_line_numbers = set()
+    in_jobs = False
+    in_steps = False
+    current_job = None
+    step = None
+    lines = text.split("\n")
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        number = index + 1
+        if "\t" in raw:
+            diagnostics.append(_diagnostic(
+                source, number, "yaml-tab",
+                "tabs are outside the supported YAML subset"))
+            index += 1
+            continue
+        code = _strip_comment(raw)
+        if not code.strip():
+            index += 1
+            continue
+        stripped = code.strip()
+        indent = len(code) - len(code.lstrip(" "))
+        if indent == 0:
+            in_jobs = stripped == "jobs:"
+            in_steps = False
+            current_job = None
+            step = None
+            index += 1
+            continue
+        if not in_jobs:
+            index += 1
+            continue
+        if indent == 2 and re.fullmatch(r"[A-Za-z0-9_-]+:", stripped):
+            current_job = stripped[:-1]
+            jobs[current_job] = []
+            in_steps = False
+            step = None
+            index += 1
+            continue
+        if current_job is None:
+            diagnostics.append(_diagnostic(
+                source, number, "orphan-job-content",
+                "job content appears without a job mapping"))
+            index += 1
+            continue
+        if indent == 4:
+            in_steps = stripped == "steps:"
+            step = None
+            index += 1
+            continue
+        if not in_steps:
+            index += 1
+            continue
+        if indent == 6 and stripped.startswith("- "):
+            step = dict(uses=None, run=[], line=number)
+            jobs[current_job].append(step)
+            item = stripped[2:]
+            if item.startswith("uses:"):
+                step["uses"] = item[5:].strip()
+            elif not (item.startswith("name:") and item[5:].strip()):
+                diagnostics.append(_diagnostic(
+                    source, number, "step-shape",
+                    "step must begin with a non-empty name: or uses:"))
+            index += 1
+            continue
+        if step is None:
+            diagnostics.append(_diagnostic(
+                source, number, "step-structure",
+                "line is outside the supported step structure: {!r}".format(stripped)))
+            index += 1
+            continue
+        if indent == 8 and stripped.startswith("uses:"):
+            step["uses"] = stripped[5:].strip()
+            index += 1
+            continue
+        if indent == 8 and stripped.startswith("run:"):
+            value = stripped[4:].strip()
+            if value in ("|", "|-", "|+"):
+                index += 1
+                while index < len(lines):
+                    body = _strip_comment(lines[index])
+                    if not body.strip():
+                        index += 1
+                        continue
+                    if len(body) - len(body.lstrip(" ")) <= 8:
+                        break
+                    step["run"].append(body.strip())
+                    run_line_numbers.add(index + 1)
+                    index += 1
+                continue
+            if not value or value in (">", ">-", ">+"):
+                diagnostics.append(_diagnostic(
+                    source, number, "run-shape",
+                    "run: must carry a plain scalar or a literal block"))
+                index += 1
+                continue
+            step["run"].append(value)
+            run_line_numbers.add(number)
+            index += 1
+            continue
+        index += 1
+    for number, raw in enumerate(text.split("\n"), 1):
+        code = _strip_comment(raw)
+        if not code.strip() or number in run_line_numbers:
+            continue
+        if TOOL_RE.search(code):
+            diagnostics.append(_diagnostic(
+                source, number, "order-shadow-miss",
+                "a tools path sits on a line the precheck-order parse did not capture as a run "
+                "line: {!r}".format(code.strip())))
+    if not jobs:
+        diagnostics.append(_diagnostic(
+            source, 0, "jobs-missing", "workflow has no jobs with steps to order"))
+    for job in sorted(jobs):
+        where = "{}: job {}".format(source, job)
+        job_steps = jobs[job]
+        checkout = next((i for i, s in enumerate(job_steps)
+                         if s["uses"] and s["uses"].startswith("actions/checkout@")), None)
+        precheck = next((i for i, s in enumerate(job_steps)
+                         if tuple(s["run"]) == PRECHECK_STEP_RUN_LINES), None)
+        if checkout is None:
+            problems.append(where + " has no actions/checkout step, so what tree its steps read "
+                            "cannot be evaluated")
+            continue
+        if precheck is None:
+            problems.append(where + " has no canonical special-file precheck step (the bootstrap "
+                            "test-and-abort line, then python3 -I -B tools/_gen_common.py "
+                            "--precheck, exactly)")
+            continue
+        if precheck < checkout:
+            problems.append(where + " runs the special-file precheck before checkout, on a tree "
+                            "that does not exist yet")
+            continue
+        for s in job_steps[:checkout]:
+            for line in s["run"]:
+                if line not in PRE_CHECKOUT_RUN_LINES:
+                    problems.append("{} runs {!r} before checkout, outside the reviewed "
+                                    "pre-checkout allowance".format(where, line))
+            if s["uses"]:
+                problems.append("{} runs action {!r} before checkout and before the special-file "
+                                "precheck".format(where, s["uses"]))
+        for s in job_steps[checkout + 1:precheck]:
+            if s["run"]:
+                problems.append("{} runs {!r} before the special-file precheck".format(
+                    where, s["run"][0]))
+            elif s["uses"] and not s["uses"].startswith("actions/setup-python@"):
+                problems.append("{} runs action {!r} between checkout and the special-file "
+                                "precheck".format(where, s["uses"]))
+    return problems, diagnostics
+
+
+def precheck_order_report(workflows_dir=None):
+    """(problems, diagnostics) across EVERY workflow file (.github/workflows/*.yml and *.yaml,
+    sorted), each read through read_runner_text, the one byte-level reader. An unreadable directory
+    or an empty listing is a diagnostic (cannot-evaluate), never a clean pass: this is the check that
+    holds every CI job in every workflow file, not just quality.yml, to the precheck-first order
+    (D-400-SPECIAL-FILE-PRECHECK), so a job added in a NEW workflow file cannot run a gate on an
+    unchecked tree."""
+    import os
+    directory = Path(workflows_dir) if workflows_dir is not None else ROOT / ".github" / "workflows"
+    problems, diagnostics = [], []
+    try:
+        names = sorted(name for name in os.listdir(directory)
+                       if name.endswith(".yml") or name.endswith(".yaml"))
+    except OSError as exc:
+        return [], [_diagnostic(".github/workflows", 0, "read-error",
+                                "cannot list the workflows directory ({})".format(
+                                    type(exc).__name__))]
+    if not names:
+        return [], [_diagnostic(".github/workflows", 0, "empty-extraction",
+                                "no workflow files were found to order-check")]
+    for name in names:
+        source = ".github/workflows/" + name
+        file_text, diagnostic = read_runner_text(directory / name, source)
+        if diagnostic is not None:
+            diagnostics.append(diagnostic)
+            continue
+        file_problems, file_diagnostics = workflow_precheck_order_problems(file_text, source)
+        problems.extend(file_problems)
+        diagnostics.extend(file_diagnostics)
+    return problems, list(_dedupe_diagnostics(diagnostics))
 
 
 def _parse_args(argv):
@@ -4519,7 +4917,25 @@ def main(argv=None):
     precheck_special_files(ROOT)
     report = run_paths(LOCAL_PATH, CI_PATH)
     print(render(report))
-    return report.code
+    code = report.code
+    # D-400-SPECIAL-FILE-PRECHECK order: every job in every workflow file, precheck first.
+    order_problems, order_diagnostics = precheck_order_report()
+    if order_diagnostics:
+        code = 2
+        print("CANNOT EVALUATE: the precheck order across workflow files was not determined.")
+        for diagnostic in order_diagnostics:
+            location = ("{}:{}".format(diagnostic.source, diagnostic.line)
+                        if diagnostic.line else diagnostic.source)
+            print("  {} [{}] {}".format(location, diagnostic.code, diagnostic.message))
+    elif order_problems:
+        code = max(code, 1)
+        print("PRECHECK ORDER FINDINGS:")
+        for problem in order_problems:
+            print("  - " + problem)
+    else:
+        print("PRECHECK ORDER: every workflow job runs the canonical special-file precheck step "
+              "before any other post-checkout run step.")
+    return code
 
 
 if __name__ == "__main__":

@@ -31,11 +31,18 @@ jobs:
 
       # Each gate runs as its own step so a failure names itself in the UI.
       # No step carries continue-on-error: a gate that cannot fail is decorative.
-      # D-400-SPECIAL-FILE-PRECHECK runs FIRST: one walk refuses a special file (a FIFO above all, whose
-      # plain read with no writer blocks forever) or a hostile symlink by name, so every gate and
-      # self-test below acts on a checked tree. A refusal fails this step (exit 2) and stops the job.
+      # D-400-SPECIAL-FILE-PRECHECK runs FIRST, in EVERY job of EVERY workflow (check_ci_parity holds
+      # every job to that order): one walk refuses a special file (a FIFO above all, whose plain read
+      # with no writer blocks forever), a symlink to one, an unresolvable symlink, or a symlink to a
+      # directory outside the root, by name, so every gate and self-test below acts on a checked tree.
+      # The shell test on the first run line is the BOOTSTRAP: python3 would block loading the
+      # precheck script itself if that path were a FIFO, so it is refused by name first (residual:
+      # the interpreter binary, read before the test can run). A refusal fails this step (exit 2)
+      # and stops the job.
       - name: Special-file precheck
-        run: python3 -I -B tools/_gen_common.py --precheck
+        run: |
+          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          python3 -I -B tools/_gen_common.py --precheck
 
       - name: Secrets (project scanner)
         run: python3 -I -B tools/check_secrets.py
@@ -599,6 +606,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+      # D-400-SPECIAL-FILE-PRECHECK: this job checks out its own tree (under the hostile autocrlf
+      # setting), so it carries its own precheck as the first post-checkout run step, same canonical
+      # body as the quality job (check_ci_parity holds every job to this order).
+      - name: Special-file precheck
+        run: |
+          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          python3 -I -B tools/_gen_common.py --precheck
       - name: Byte canon self-test (vectors)
         run: python3 -I -B tools/check_byte_canon.py --self-test
       - name: Byte canon (full gate on this platform)

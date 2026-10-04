@@ -24,9 +24,16 @@ notrun=0
 failed_names=""
 
 # D-400-SPECIAL-FILE-PRECHECK: ONE walk of the repository tree BEFORE any gate runs. A special file (a
-# FIFO above all: a plain read of a FIFO with no writer blocks forever), a dangling symlink, a symlink
-# to a special file or a directory, or a symlink resolving outside the repository root is refused by
-# name and the run STOPS here with exit 2; every gate and self-test below then acts on a checked tree.
+# FIFO above all: a plain read of a FIFO with no writer blocks forever), a symlink to one, an
+# unresolvable (looping) symlink, or a symlink to a directory outside the repository root is refused
+# by name and the run STOPS here with exit 2; a dangling symlink and a symlink to a regular file pass
+# (neither can block a read), and git-ignored paths (a stray .venv, editor or build output) are
+# outside the walk (gates never read them through a blocking call; see the precheck docstring). The
+# shell test on the first line is the BOOTSTRAP: python3 would block LOADING the precheck script
+# itself if that path were a FIFO, so a non-regular or symlinked script is refused by name before
+# python3 touches it. Residual: the interpreter binary and THIS runner script are read before the
+# bootstrap line can run. Every gate and self-test below then acts on a checked tree.
+[ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
 python3 -I -B tools/_gen_common.py --precheck || exit 2
 
 run_gate() {

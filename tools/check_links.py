@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _walk import walk_files, read_text_nonblocking  # noqa: E402  fail-closed tree walk and non-blocking read
 from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 LINK = re.compile(r"(?<!\!)\[[^\]]*\]\(([^)]+)\)")
@@ -24,7 +24,8 @@ def main() -> int:
     try:
         for path in sorted(walk_files(root, SKIP_DIRS, suffixes={".md"})):
             try:
-                text = path.read_text(encoding="utf-8")
+                # non-blocking: this walk reads ignored paths too, which the precheck does not cover.
+                text = read_text_nonblocking(path)
             except UnicodeDecodeError:
                 # a Markdown file that is not utf-8 is a real docs-integrity finding, not a fail-closed
                 # read error; keep it a finding (exit 1). An OSError (unreadable) fails closed below.

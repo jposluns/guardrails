@@ -366,23 +366,52 @@ def self_test_main():
 
 
 def _precheck_copies_problems(gen_text, opf_text):
-    """D-400-SPECIAL-FILE-PRECHECK: precheck_special_files in tools/_gen_common.py and its copy in
-    opf/tools/_containment.py (the standalone OPF pack may not import tools/) must stay identical: the
-    function with its docstring set aside, and the module tables _PRECHECKED_ROOTS and _SPECIAL_KINDS,
-    compared as parsed trees. Beyond equality of those three parts, each MODULE is held to two shape
-    rules that keep the compared definitions the OPERATIVE ones: each of the three names is bound exactly
-    once anywhere in the module (a later `precheck_special_files = lambda root: root` would silently
-    replace the compared function), and no statement in either module stores to or deletes an ATTRIBUTE
-    anywhere (an `os.walk = ...` rebinding at module level would neuter the walk while the compared trees
-    stay equal; neither module legitimately assigns any attribute). Returns the problems, empty when the
-    two copies are in step."""
+    """D-400-SPECIAL-FILE-PRECHECK: the precheck section of tools/_gen_common.py and its copy in
+    opf/tools/_containment.py (the standalone OPF pack may not import tools/) must stay in step. The
+    COMPARED SURFACE is the whole section: the helpers and the function (_git_lines, _git_toplevel,
+    _ignored_paths, _derive_precheck_root, precheck_special_files; docstrings set aside), the module
+    tables (_PRECHECKED_ROOTS, _SPECIAL_KINDS), and the __main__ entry block, each equal between the
+    two modules as parsed trees. Beyond equality, each MODULE is held to shape rules that keep the
+    compared definitions the OPERATIVE ones at import and at --precheck time: each compared name is
+    bound exactly once anywhere in the module (a later `precheck_special_files = lambda root: root`
+    would silently replace the compared function); no statement stores to or deletes an ATTRIBUTE
+    anywhere (an `os.walk = ...` swap); no call anywhere to globals, vars, locals, exec, eval, setattr
+    or delattr (a `globals()["precheck_special_files"] = ...` rebinding); no star import; exactly one
+    `if __name__ == "__main__"` block, which must be the LAST top-level statement; and no OTHER
+    top-level statement that executes at import may reference a compared name (a top-level
+    `_PRECHECKED_ROOTS.add(...)` that pre-fills the cache and turns the walk into a no-op), where a
+    function definition executes only its decorators and argument defaults and a class body executes
+    whole. These rules catch the NAMED mutation classes, not every conceivable one: top-level code
+    that touches neither a compared name nor a banned call (an unconditional sys.exit before the
+    __main__ block) is outside them, and is caught, if at all, by the self-test vectors that run each
+    --precheck entry point as a subprocess against hostile trees. Returns the problems, empty when
+    the two copies are in step."""
     import ast
 
-    guarded = ("precheck_special_files", "_PRECHECKED_ROOTS", "_SPECIAL_KINDS")
+    guarded = ("precheck_special_files", "_PRECHECKED_ROOTS", "_SPECIAL_KINDS", "_git_lines",
+               "_git_toplevel", "_ignored_paths", "_derive_precheck_root")
+    tables = ("_PRECHECKED_ROOTS", "_SPECIAL_KINDS")
+    banned_calls = ("globals", "vars", "locals", "exec", "eval", "setattr", "delattr")
+
+    def is_main_guard(node):
+        return (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name) and node.test.left.id == "__name__"
+                and len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.Eq)
+                and len(node.test.comparators) == 1
+                and isinstance(node.test.comparators[0], ast.Constant)
+                and node.test.comparators[0].value == "__main__")
+
+    def guarded_reference(nodes):
+        for node in nodes:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Name) and sub.id in guarded:
+                    return sub.id
+        return None
 
     def shape_problems(text, label, problems):
+        tree = ast.parse(text)
         bindings = dict.fromkeys(guarded, 0)
-        for sub in ast.walk(ast.parse(text)):
+        for sub in ast.walk(tree):
             if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)) \
                     and sub.id in bindings:
                 bindings[sub.id] += 1
@@ -391,21 +420,54 @@ def _precheck_copies_problems(gen_text, opf_text):
                 bindings[sub.name] += 1
             elif isinstance(sub, (ast.Import, ast.ImportFrom)):
                 for alias in sub.names:
+                    if alias.name == "*":
+                        problems.append("{} uses a star import, which can rebind any compared name "
+                                        "invisibly".format(label))
                     if (alias.asname or alias.name) in bindings:
                         bindings[alias.asname or alias.name] += 1
             elif isinstance(sub, ast.Attribute) and isinstance(sub.ctx, (ast.Store, ast.Del)):
                 problems.append("{} stores to or deletes an attribute ({}.{}), which can rebind a "
                                 "dependency (an os.walk swap) out from under the compared function".format(
                                     label, getattr(sub.value, "id", "<expr>"), sub.attr))
+            elif isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) \
+                    and sub.func.id in banned_calls:
+                problems.append("{} calls {}(), which can rebind or replace a compared definition out "
+                                "of band".format(label, sub.func.id))
         for name, count in bindings.items():
             if count > 1:
                 problems.append("{} binds {} {} times; a later rebinding would silently replace the "
                                 "compared definition".format(label, name, count))
+        mains = [node for node in tree.body if is_main_guard(node)]
+        if len(mains) != 1:
+            problems.append("{} must hold exactly one __main__ entry block, found {}".format(
+                label, len(mains)))
+        elif tree.body[-1] is not mains[0]:
+            problems.append("{}: the __main__ entry block must be the LAST top-level statement; "
+                            "top-level code after it still executes".format(label))
+        for node in tree.body:
+            if mains and node is mains[0]:
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                surface = (list(node.decorator_list) + list(node.args.defaults)
+                           + [default for default in node.args.kw_defaults if default is not None])
+                hit = guarded_reference(surface)
+            elif isinstance(node, ast.ClassDef):
+                hit = guarded_reference([node])
+            elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id in guarded):
+                hit = guarded_reference([node.value])
+            else:
+                hit = guarded_reference([node])
+            if hit:
+                problems.append("{} references {} in top-level code outside the compared definitions "
+                                "and the __main__ block; that code executes at import and can "
+                                "pre-fill or bypass the compared state".format(label, hit))
 
     def parts(text):
         found = {}
         for node in ast.parse(text).body:
-            if isinstance(node, ast.FunctionDef) and node.name == "precheck_special_files":
+            if isinstance(node, ast.FunctionDef) and node.name in guarded:
                 body = node.body
                 if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
                         and isinstance(body[0].value.value, str):
@@ -414,22 +476,23 @@ def _precheck_copies_problems(gen_text, opf_text):
                     + "".join(ast.dump(d) for d in node.decorator_list)
             elif isinstance(node, ast.Assign) and len(node.targets) == 1 \
                     and isinstance(node.targets[0], ast.Name) \
-                    and node.targets[0].id in ("_PRECHECKED_ROOTS", "_SPECIAL_KINDS"):
+                    and node.targets[0].id in tables:
                 found[node.targets[0].id] = ast.dump(node.value)
+            elif is_main_guard(node):
+                found["__main__"] = ast.dump(node)
         return found
 
     problems = []
     shape_problems(gen_text, "_gen_common", problems)
     shape_problems(opf_text, "_containment", problems)
     gen, opf = parts(gen_text), parts(opf_text)
-    for name in ("precheck_special_files", "_PRECHECKED_ROOTS", "_SPECIAL_KINDS"):
+    for name in guarded + ("__main__",):
         if name not in gen or name not in opf:
             problems.append("{} missing from {}".format(
                 name, " and ".join(w for w, p in (("_gen_common", gen), ("_containment", opf)) if name not in p)))
         elif gen[name] != opf[name]:
             problems.append("{} differs".format(name))
     return problems
-
 
 def _self_test_main_isolated():
     import io
@@ -771,15 +834,17 @@ def _self_test_main_isolated():
 
         # (o) D-400-SPECIAL-FILE-PRECHECK item 6: with a FIFO (no writer) at any path of the tree, each of these
         #     tools exits 2 naming that path at the shared repo_root() precheck, bounded by a timeout. The
-        #     tree is a copy of this repository (its .git replaced by an empty directory, so repo_root() of
-        #     the copied tools resolves to the copy). MUTATION: making precheck_special_files a no-op leaves
+        #     tree is a copy of this repository, git-init'd so the copied tools' fixed-location root
+        #     derivation is CONFIRMED by rev-parse on the copy itself (repo_root() never trusts a .git
+        #     marker). MUTATION: making precheck_special_files a no-op leaves
         #     check_versions/check_byte_canon/gen_manifest/conformance hanging or passing on these paths.
         if hasattr(os, "mkfifo"):
             import subprocess
             tree = tmp / "precheck-tree"
             shutil.copytree(repo_root(), tree, symlinks=True,
                             ignore=shutil.ignore_patterns(".git", "__pycache__"))
-            (tree / ".git").mkdir()
+            if gm._git(tree, "init", "-q").returncode != 0:
+                failures.append("D-400-SPECIAL-FILE-PRECHECK: cannot git-init the precheck tree copy")
             tools = (["check_manifest.py"], ["gen_manifest.py", "--check"], ["gen_rules.py", "--check"],
                      ["conformance.py"], ["check_versions.py"], ["check_byte_canon.py"])
             for rel in ("tools/gen_agents.py", ".claude/rules/aiqt/00-project-integrity.md", "CLAUDE.md",
@@ -846,6 +911,140 @@ def _self_test_main_isolated():
         if not _precheck_copies_problems(gen_text, swapped):
             failures.append("D-400-SPECIAL-FILE-PRECHECK: a module-level attribute rebinding (an os.walk "
                             "swap) in the OPF precheck copy was not caught by the copy comparison")
+        rebound_globals = opf_text + "\n\nglobals()[\"precheck_special_files\"] = lambda root: root\n"
+        if not _precheck_copies_problems(gen_text, rebound_globals):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a globals() rebinding appended to the OPF "
+                            "precheck copy was not caught by the copy comparison")
+        prefilled = opf_text + ("\n\n_PRECHECKED_ROOTS.add(os.path.abspath("
+                                "Path(__file__).resolve().parents[2]))\n")
+        if not _precheck_copies_problems(gen_text, prefilled):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a top-level _PRECHECKED_ROOTS.add() that "
+                            "pre-fills the cache was not caught by the copy comparison")
+        diverged_main = opf_text.replace("    precheck_special_files(_root)\n", "    pass\n", 1)
+        if opf_text.count("    precheck_special_files(_root)\n") != 1 \
+                or not _precheck_copies_problems(gen_text, diverged_main):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a neutered __main__ block in the OPF precheck "
+                            "copy was not caught by the copy comparison")
+
+        # (r) D-400-SPECIAL-FILE-PRECHECK rulings 1, 2 and 5: each --precheck ENTRY POINT, run as a
+        #     SUBPROCESS against hostile trees built around the real module files, asserting the exit
+        #     code and the named path. The trees are git-init'd so the fixed-location root derivation
+        #     is confirmed by rev-parse on the tree itself and the ignore filter is live; the planted
+        #     nested .git case proves a marker cannot narrow the root; the venv-like and dangling-link
+        #     cases prove the hazard-scoped rules do not over-refuse. The final two trees run a
+        #     MUTATED module (a neutered __main__ call; refusals turned into returns) and must then
+        #     PASS the FIFO tree, proving these subprocess vectors discriminate on exactly the rules
+        #     they pin. POSIX only (os.mkfifo).
+        if hasattr(os, "mkfifo"):
+            _entry_src = dict(
+                gen=(here / "tools" / "_gen_common.py").read_bytes(),
+                opf=(here / "opf" / "tools" / "_containment.py").read_bytes())
+
+            def _mini_tree(name):
+                base = tmp / ("precheck-entry-" + name)
+                (base / "tools").mkdir(parents=True)
+                (base / "tools" / "_gen_common.py").write_bytes(_entry_src["gen"])
+                (base / "opf" / "tools").mkdir(parents=True)
+                (base / "opf" / "tools" / "_containment.py").write_bytes(_entry_src["opf"])
+                (base / "README.md").write_text("mini\n", encoding="utf-8")
+                if gm._git(base, "init", "-q").returncode != 0:
+                    return None
+                return base
+
+            def _entry_run(base, which):
+                script = base / ("tools/_gen_common.py" if which == "gen"
+                                 else "opf/tools/_containment.py")
+                try:
+                    proc = subprocess.run([sys.executable, "-I", "-B", str(script), "--precheck"],
+                                   capture_output=True, text=True, timeout=30)
+                    return proc.returncode, proc.stdout + proc.stderr
+                except subprocess.TimeoutExpired:
+                    return "hung", ""
+
+            def _entry_expect(label, base, which, want_rc, named=None):
+                if base is None:
+                    failures.append("(r) cannot git-init the {} tree".format(label))
+                    return
+                got_rc, got_out = _entry_run(base, which)
+                if got_rc != want_rc or (named is not None and str(named) not in got_out):
+                    failures.append("(r) {} expected the {} --precheck entry to exit {}{}, got {!r}"
+                                    .format(label, which, want_rc,
+                                            " naming " + str(named) if named is not None else "",
+                                            got_rc))
+
+            fifo_tree = _mini_tree("fifo")
+            if fifo_tree is not None:
+                os.mkfifo(fifo_tree / "evil.fifo")
+            _entry_expect("a FIFO", fifo_tree, "gen", 2, fifo_tree / "evil.fifo" if fifo_tree else None)
+            _entry_expect("a FIFO", fifo_tree, "opf", 2, fifo_tree / "evil.fifo" if fifo_tree else None)
+
+            link_tree = _mini_tree("linkfifo")
+            if link_tree is not None:
+                os.mkfifo(link_tree / "real.fifo")
+                (link_tree / "link-to-fifo").symlink_to(link_tree / "real.fifo")
+            _entry_expect("a symlink to a FIFO", link_tree, "gen", 2,
+                          link_tree / "link-to-fifo" if link_tree else None)
+
+            plant_tree = _mini_tree("plant")
+            if plant_tree is not None:
+                (plant_tree / "tools" / ".git").mkdir()
+                (plant_tree / "opf" / "tools" / ".git").mkdir()
+                os.mkfifo(plant_tree / "evil.fifo")
+            _entry_expect("a planted nested .git beside a FIFO", plant_tree, "gen", 2,
+                          plant_tree / "evil.fifo" if plant_tree else None)
+            _entry_expect("a planted nested .git beside a FIFO", plant_tree, "opf", 2,
+                          plant_tree / "evil.fifo" if plant_tree else None)
+
+            extdir_tree = _mini_tree("extdir")
+            if extdir_tree is not None:
+                (extdir_tree / "outside-dir").symlink_to(tmp)
+            _entry_expect("an outside-root directory symlink", extdir_tree, "gen", 2,
+                          extdir_tree / "outside-dir" if extdir_tree else None)
+
+            clean_tree = _mini_tree("hazardless")
+            if clean_tree is not None:
+                (clean_tree / ".#README.md").symlink_to("missing-lock-target")
+                venv = clean_tree / ".venv"
+                (venv / "lib").mkdir(parents=True)
+                (venv / "bin").mkdir()
+                (venv / ".gitignore").write_text("*\n", encoding="utf-8")
+                (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+                (venv / "lib64").symlink_to("lib")
+                (venv / "bin" / "python3").symlink_to(sys.executable)
+            _entry_expect("a dangling link plus a venv-like ignored tree", clean_tree, "gen", 0)
+            _entry_expect("a dangling link plus a venv-like ignored tree", clean_tree, "opf", 0)
+
+            dirlink_tree = _mini_tree("dirlink")
+            if dirlink_tree is not None:
+                (dirlink_tree / "data").mkdir()
+                os.mkfifo(dirlink_tree / "data" / "deep.fifo")
+                (dirlink_tree / "alias").symlink_to(dirlink_tree / "data")
+            _entry_expect("an in-root directory symlink over a FIFO", dirlink_tree, "gen", 2,
+                          "deep.fifo")
+
+            gen_src = _entry_src["gen"].decode("utf-8")
+            mutant_tree = _mini_tree("neutered-main")
+            if gen_src.count("    precheck_special_files(_root)\n") != 1 or mutant_tree is None:
+                failures.append("(r) cannot build the neutered __main__ mutant")
+            else:
+                (mutant_tree / "tools" / "_gen_common.py").write_text(
+                    gen_src.replace("    precheck_special_files(_root)\n", "    pass\n", 1),
+                    encoding="utf-8")
+                os.mkfifo(mutant_tree / "evil.fifo")
+                _entry_expect("the neutered __main__ mutant (vector sensitivity)",
+                              mutant_tree, "gen", 0)
+            refusal = ('    def _refuse(path, why):\n        print("error: {}: refused, {}; remove it;'
+                       ' fail-closed".format(path, why), file=sys.stderr)\n        raise SystemExit(2)\n')
+            mutant2_tree = _mini_tree("neutered-refuse")
+            if gen_src.count(refusal) != 1 or mutant2_tree is None:
+                failures.append("(r) cannot build the neutered-refusal mutant")
+            else:
+                (mutant2_tree / "tools" / "_gen_common.py").write_text(
+                    gen_src.replace(refusal, refusal.replace("raise SystemExit(2)", "return"), 1),
+                    encoding="utf-8")
+                os.mkfifo(mutant2_tree / "evil.fifo")
+                _entry_expect("the neutered-refusal mutant (vector sensitivity)",
+                              mutant2_tree, "gen", 0)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -865,8 +1064,12 @@ def _self_test_main_isolated():
           "FIFO at a SOURCES member, a TOML record, or load_toml is refused (exit 2) inside an alarm, never a "
           "hang; reconcile refuses a symlinked or directory target (exit 2); and a FIFO at any of six tree "
           "paths makes six gates exit 2 by name at the repo_root() special-file precheck; a stray FIFO makes the "
-          "nine gates that find their root on their own exit 2 by name; and the OPF copy of the precheck "
-          "matches _gen_common's (a changed copy is caught)")
+          "nine gates that find their root on their own exit 2 by name; the OPF copy of the precheck "
+          "matches _gen_common's (a changed copy, a globals() rebinding, a cache pre-fill and a "
+          "diverged __main__ block are each caught); and each --precheck entry point, run as a "
+          "subprocess, refuses a FIFO, a link to a FIFO, a FIFO behind a planted nested .git or an "
+          "in-root directory link, and an outside-root directory link, by name, while a dangling "
+          "link and a venv-like ignored tree pass, with mutants proving the vectors discriminate")
     return 0
 
 

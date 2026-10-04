@@ -2024,6 +2024,14 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/selftest_git_fixture_env.py", "_auto_maintenance_children", ("git-triggering",),
      "the F-367 probe's own traced commit: the green leg passes the pinned fixture env and the"
      " red leg strips exactly the maintenance pins, so pinning this argv would blind both legs"),
+    ("tools/_gen_common.py", "_git_lines", ("git",),
+     "production precheck root/ignore funnel over the real checkout (rev-parse --show-toplevel"
+     " and ls-files --others --ignored --exclude-standard reads), bounded with stdin closed;"
+     " read-only by design, and production launches stay unchanged"),
+    ("opf/tools/_containment.py", "_git_lines", ("git",),
+     "the OPF copy of the production precheck root/ignore funnel (rev-parse --show-toplevel and"
+     " ls-files --others --ignored --exclude-standard reads), bounded with stdin closed;"
+     " read-only by design, and production launches stay unchanged"),
     ("tools/aiqt_corpus.py", "git", ("git",),
      "production read-only helper over the real repository (rev-parse/show/ls-files style"
      " reads); its callers never pass a maintenance-triggering subcommand, and production"

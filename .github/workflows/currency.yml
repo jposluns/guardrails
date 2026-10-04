@@ -31,6 +31,14 @@ jobs:
         with:
           python-version: '3.14'
 
+      # D-400-SPECIAL-FILE-PRECHECK: this scheduled job checks out its own tree, so it carries its
+      # own precheck as the first post-checkout run step, same canonical body as the Quality jobs
+      # (tools/check_ci_parity.py holds every job in every workflow file to this order).
+      - name: Special-file precheck
+        run: |
+          [ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+          python3 -I -B tools/_gen_common.py --precheck
+
       # Real audit against today's date: exit 1 (a manifest past its FAIL threshold) or exit 2 (a
       # malformed manifest / unparseable date) paints this scheduled run red. It ships green today
       # because every manifest was retrieved recently; it begins to speak only as real time passes.
