@@ -1638,6 +1638,59 @@ def _self_test_main_isolated():
                     _entry_expect("an ignored in-root link over a tracked directory into .git, "
                                   "with HEAD's tree missing", notree_tree, which, 2,
                                   notree_tree / "docs" / "x.md")
+            # (s27) QA round 14 (codex MEDIUM 1 and 2), both copies in process: the s26 layout (an
+            # ignored link docs -> .git, a FIFO at .git/x.md) with _git_lines answering the ignore
+            # and own-git-dir queries and each case's tracked-list answers. A HEAD-query failure
+            # (every HEAD query None, or for-each-ref None) is not an unborn HEAD, a branch ref
+            # for-each-ref still lists is a HEAD with a commit, and an unterminated, empty-record,
+            # absolute or '..' record is malformed: each leaves no tracked list, so the link is
+            # walked and the FIFO refused (exit 2). The two controls (a PROVEN unborn HEAD; a
+            # well-formed list) keep the skip, exit 0. The failure and malformed cases fail
+            # without the round-14 rules (exit 0: the skip applies and .git is pruned).
+            _ok_ref = b"refs/heads/main\n"
+            for case_no, (label, index_out, tree_out, sym_out, each_out, want) in enumerate((
+                    ("every HEAD query fails", b"", None, None, None, 2),
+                    ("for-each-ref fails", b"", None, _ok_ref, None, 2),
+                    ("the HEAD branch ref still exists", b"", None, _ok_ref, _ok_ref, 2),
+                    ("a detached HEAD", b"", None, None, b"", 2),
+                    ("an unterminated index answer", b"docs/x.", b"", _ok_ref, b"", 2),
+                    ("an unterminated HEAD answer", b"", b"docs/x.", _ok_ref, b"", 2),
+                    ("an empty index record", b"README.md\0\0", b"", _ok_ref, b"", 2),
+                    ("an absolute HEAD record", b"", b"/etc/x\0", _ok_ref, b"", 2),
+                    ("a '..' index record", b"a/../b\0", b"", _ok_ref, b"", 2),
+                    ("a proven unborn HEAD (control)", b"", None, _ok_ref, b"", 0),
+                    ("a well-formed list (control)", b"README.md\0", b"README.md\0", _ok_ref,
+                     b"", 0))):
+                for _label, _mod in (("_gen_common", _gc), ("_containment", _ct)):
+                    case = tmp / "inproc-s27-{}-{}".format(case_no, _label)
+                    (case / ".git").mkdir(parents=True)
+                    os.mkfifo(case / ".git" / "x.md")
+                    (case / "docs").symlink_to(".git")
+                    answers = {("rev-parse", "--absolute-git-dir"):
+                                   os.fsencode(os.path.realpath(case / ".git")) + b"\n",
+                               ("ls-files", "-z", "--others"): b"docs\0",
+                               ("ls-files", "-z"): index_out,
+                               ("ls-tree", "-r", "-z"): tree_out,
+                               ("symbolic-ref", "-q", "HEAD"): sym_out,
+                               ("for-each-ref", "--format=%(refname)"): each_out}
+
+                    def _fake(root, args, answers=answers):
+                        for size in (3, 2):
+                            if tuple(args[:size]) in answers:
+                                return answers[tuple(args[:size])]
+                        return None
+                    err = io.StringIO()
+                    try:
+                        with patch.object(_mod, "_git_lines", _fake), \
+                                redirect_stdout(io.StringIO()), redirect_stderr(err):
+                            _mod.precheck_special_files(case)
+                        got = 0
+                    except SystemExit as exc:
+                        got = exc.code
+                    named = want == 0 or str(case / "docs" / "x.md") in err.getvalue()
+                    if got != want or not named:
+                        failures.append("(s27) {} ({}): expected exit {}{}, got {!r}".format(
+                            label, _label, want, " naming docs/x.md" if want else "", got))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1663,7 +1716,7 @@ def _self_test_main_isolated():
           "subprocess, refuses a FIFO, a link to a FIFO, a FIFO behind a planted nested .git or an "
           "in-root directory link, an outside-root directory link, a git-ignored link to a FIFO, a "
           "FIFO behind an in-root link into an ignored directory, and a symlinked tools/ or opf/ "
-          "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), walks a tracked link into an ignored directory strictly in both directions (round 10), resolves every tracked logical path component by component so a FIFO behind two or three chained directory links, in either walk order, and a tracked path through an ignored link loop are refused by the logical path, and screens a nested .git and its HEAD before the ignore query (round 11), follows a nested gitfile without blocking, refusing an out-of-tree target and screening each nested git dir's HEAD and commondir, and passes 70 in-root directory links inside an ignored directory while the same links at a non-ignored path stay bounded (round 12), refuses a FIFO in .git reached by a tracked path through an ignored link when HEAD's tree cannot be listed (round 13), while a dangling link, a venv-like "
+          "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), walks a tracked link into an ignored directory strictly in both directions (round 10), resolves every tracked logical path component by component so a FIFO behind two or three chained directory links, in either walk order, and a tracked path through an ignored link loop are refused by the logical path, and screens a nested .git and its HEAD before the ignore query (round 11), follows a nested gitfile without blocking, refusing an out-of-tree target and screening each nested git dir's HEAD and commondir, and passes 70 in-root directory links inside an ignored directory while the same links at a non-ignored path stay bounded (round 12), refuses a FIFO in .git reached by a tracked path through an ignored link when HEAD's tree cannot be listed (round 13) or a HEAD query fails or a tracked-list answer is malformed (round 14), while a dangling link, a venv-like "
           "ignored tree and a git-ignored outside-root directory link pass; a multi-newline "
           "rev-parse answer fails closed, one trailing newline stays accepted, and a NUL root is "
           "git-cannot-answer in both copies, with mutants proving the vectors discriminate")

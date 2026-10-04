@@ -163,9 +163,10 @@ def precheck_special_files(root):
     ignore status; os.stat classifies the target without opening, so the classification itself cannot
     block); a non-ignored symlink that cannot be resolved for any reason OTHER than a missing target
     (a loop above all); and a non-ignored symlink to a directory OUTSIDE the root, whose contents this
-    walk cannot certify. ACCEPTED (except on a TRACKED path, whose route is held to the stricter
-    tracked-path rule below: a tracked path through a link leaving the root is refused even when it
-    dangles or reaches a regular file): a regular file or directory; a DANGLING symlink (every open
+    walk cannot certify. ACCEPTED (except on a TRACKED path while git can list the tracked paths,
+    whose route is then held to the stricter tracked-path rule below: a tracked path through a link
+    leaving the root is refused even when it dangles or reaches a regular file; without the list
+    that stricter rule lapses, the residual named below): a regular file or directory; a DANGLING symlink (every open
     of it fails at once, so no read of it can block); a symlink to a REGULAR file, inside or outside
     the root (a plain read of a regular file does not block); a symlink to a directory INSIDE the root,
     whose contents are walked UNDER THE LINK'S OWN LOGICAL PATH with the link path's ignore
@@ -184,10 +185,11 @@ def precheck_special_files(root):
     path and classification, and every tracked path through it is resolved by the tracked-path
     layer, so walking it again adds no refusal (a pnpm-style ignored node_modules with many
     in-root links passes). QA round 13 (claude MEDIUM 1): that skip applies ONLY when git can list
-    the tracked paths; when it cannot (ls-tree of HEAD fails while the index and ignore queries
-    answer) the tracked-path layer does not run, so such a link is walked under its logical path
-    and counted like any other, and a target the physical walk prunes (the repository's own git
-    dir) is still examined. The bound still refuses more than 64 link-walks at non-ignored logical
+    the tracked paths; when it cannot (the index query ls-files fails, or HEAD's ls-tree fails on a
+    HEAD not proven unborn, while the ignore query answers; QA round 14, below) the tracked-path
+    layer does not run, so such a link is walked under its logical path and counted like any
+    other, and a target the physical walk prunes (the repository's own git dir) is still
+    examined. The bound still refuses more than 64 link-walks at non-ignored logical
     paths, a tracked workspace-link layout of that size included. And a GIT-IGNORED symlink
     to a directory outside the root THAT SHADOWS NO TRACKED CONTENT (git ls-files under the link's
     own path answers empty), or a git-ignored unresolvable symlink, both accepted un-walked (a
@@ -202,7 +204,19 @@ def precheck_special_files(root):
     classified, however many directory links re-spell the route); a tracked path with a missing or
     dangling component stays accepted (every open of it fails at once) when no link step on its
     route has left the root. That tracked-path layer runs only when git can list the tracked
-    paths; when it cannot, the walk covers those routes instead (QA round 13, above).
+    paths. QA round 14 (codex MEDIUM 1 and 2): the list is unavailable when the index query
+    (ls-files) fails, when HEAD's ls-tree fails and HEAD is not PROVEN unborn (a failed or timed-out
+    query never stands for an unborn HEAD; only two queries that succeed prove it: symbolic-ref
+    names one branch ref and for-each-ref on that name answers empty), or when either answer is
+    not framed as git frames it (NUL-terminated records, no unterminated tail, each a decodable
+    relative path with no empty, '.' or '..' component). Without the list the walk still refuses
+    every special file a tracked path reaches (an ignored in-root directory link is then walked
+    under its own path, QA round 13 above, and every symlink to a special file is refused, ignored
+    or not), but the stricter route rule for tracked paths lapses (QA round 14, claude MINOR 1):
+    a tracked path through a link leaving the root to a REGULAR file or a DANGLING target is then
+    accepted, as for any other path. That residual cannot block (a regular file reads without
+    blocking; every open of a dangling link fails at once), and it needs a failed ls-files, a
+    failed ls-tree on a HEAD that names a commit, or a malformed answer from either.
 
     SCOPE: the whole tree under root, except the repository's OWN git dir (the one `git rev-parse
     --absolute-git-dir` names; git's own metadata is outside the tools' read set, but git itself
@@ -423,18 +437,47 @@ def precheck_special_files(root):
             # INDEX or in HEAD; asking the index alone lets a staged removal (git rm --cached)
             # hide a shadowing link, so both are unioned. An unborn HEAD (no commit yet)
             # contributes nothing; any other ls-tree failure is git-cannot-answer (None), on
-            # which every caller fails closed. One cached read-only git query set per walk.
+            # which every caller fails closed. QA round 14 (codex MEDIUM 1): _git_lines answers
+            # None for a timeout or any error as well as for a missing HEAD, so a failed query
+            # never stands for an unborn HEAD. HEAD is unborn only when two queries that SUCCEED
+            # prove it: symbolic-ref names exactly one branch ref (a detached HEAD always names a
+            # commit), and for-each-ref on that name answers empty (a ref whose commit or tree
+            # object is missing is still listed). QA round 14 (codex MEDIUM 2): each answer is a
+            # list only when framed as git frames it (NUL-terminated records, no unterminated
+            # tail, each a decodable relative path with no empty, '.' or '..' component);
+            # anything else is git-cannot-answer too. One cached read-only git query set per walk.
+            def _records(raw):
+                if raw is None or (raw and not raw.endswith(b"\0")):
+                    return None
+                paths = []
+                for record in (raw[:-1].split(b"\0") if raw else ()):
+                    try:
+                        text = os.fsdecode(record)
+                    except ValueError:
+                        return None
+                    if (text.startswith("/")
+                            or any(part in ("", ".", "..") for part in text.split("/"))):
+                        return None
+                    paths.append(text)
+                return paths
+
             if not tracked_state:
-                out = _git_lines(root, ["ls-files", "-z"])
+                out = _records(_git_lines(root, ["ls-files", "-z"]))
                 head = _git_lines(root, ["ls-tree", "-r", "-z", "--name-only", "HEAD"])
-                if head is None and _git_lines(root, ["rev-parse", "--verify", "--quiet",
-                                                      "HEAD"]) is None:
-                    head = b""
+                if head is None:
+                    ref = _git_lines(root, ["symbolic-ref", "-q", "HEAD"])
+                    name = ref[:-1] if ref is not None and ref.endswith(b"\n") else b""
+                    if (name.startswith(b"refs/heads/")
+                            and not any(bad in name for bad in (b"\0", b"\n", b"*", b"?", b"[",
+                                                                b"\\"))
+                            and _git_lines(root, ["for-each-ref", "--format=%(refname)",
+                                                  os.fsdecode(name)]) == b""):
+                        head = b""
+                head = _records(head)
                 if out is None or head is None:
                     tracked_state.append(None)
                 else:
-                    tracked_state.append(sorted(
-                        {os.fsdecode(raw) for raw in out.split(b"\0") + head.split(b"\0") if raw}))
+                    tracked_state.append(sorted(set(out) | set(head)))
             return tracked_state[0]
 
         def _shadows_tracked(rel):
@@ -587,8 +630,9 @@ def precheck_special_files(root):
                         # under its own path and classification, and every tracked path through
                         # it is resolved by the tracked-path layer after this walk. QA round 13
                         # (claude MEDIUM 1): that layer runs only when git can list the tracked
-                        # paths, so the skip applies only then; without the list (ls-tree of
-                        # HEAD fails while the ignore query answers) the link is walked and
+                        # paths, so the skip applies only then; without the list (ls-files
+                        # fails, or ls-tree fails on a HEAD not proven unborn, or an answer is
+                        # malformed, while the ignore query answers) the link is walked and
                         # counted below like any other, so a target the physical walk prunes
                         # (the repository's own git dir) is still examined.
                         continue
@@ -626,13 +670,17 @@ def precheck_special_files(root):
         # QA round 11 (codex MAJOR), the independent layer the walk's leniencies cannot blunt:
         # every TRACKED logical path is resolved component by component and the OBJECT it
         # resolves to is classified, however many directory links re-spell the route. When git
-        # cannot list the tracked paths this layer does not run, and the walk above has already
-        # covered every route a tracked path can take: an ignored in-root directory link is then
-        # walked under its own path (the round-12 skip needs the tracked list; QA round 13,
-        # claude MEDIUM 1), and every out-of-root directory link is refused (outright when there
-        # is no ignore filter, as a possible shadow of tracked content when there is one). The
-        # ignore filter is independent of the tracked list: ls-tree of HEAD can fail while the
-        # index and ignore queries answer.
+        # cannot list the tracked paths (ls-files fails, ls-tree fails on a HEAD not proven
+        # unborn, or either answer is malformed; QA round 14) this layer does not run. The walk
+        # above still refuses every special file a tracked path can reach: an ignored in-root
+        # directory link is then walked under its own path (the round-12 skip needs the tracked
+        # list; QA round 13, claude MEDIUM 1), every symlink to a special file is refused,
+        # ignored or not, a non-ignored out-of-root directory link is refused outright, and an
+        # ignored one is refused as a possible shadow of tracked content. What lapses is the
+        # stricter route rule for tracked paths (QA round 14, claude MINOR 1): a tracked path
+        # through a link leaving the root to a regular file or a dangling target is accepted,
+        # the residual the docstring names (neither can block). The ignore filter is independent
+        # of the tracked list: ls-files or ls-tree can fail while the ignore query answers.
         for spec in (_tracked() or ()):
             final_mode = _classify_tracked(spec)
             if final_mode is None:
