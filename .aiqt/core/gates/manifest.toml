@@ -581,19 +581,25 @@ default = "block"
 class = "c"
 residue = """
 The default entry checks the homes spec contract and rendered gitignore block, and tiles the
-spec sections the 1.3.0 bump touches (the preamble and sections 1, 2, 4.2, 4.4, 4.6, 5.7, 6.1,
-8.1 to 8.6, 8.8, 9, 9.2, 11, 12, 14, 14.1, 14.2, 14.3, 15, 17) with ordered contract pins whose
+spec sections the 1.3.0 bump touches (the preamble and sections 1, 2, 4.2, 4.4 to 4.6, 5.7, 6.1,
+8.1 to 8.6, 8.8, 9, 9.2, 11, 12, 14 to 14.3, 15, 16, 16.1, 17) with ordered contract pins whose
 space-joined concatenation must equal each section's normalized text, so deleting any sentence
 there, prose, list row, table row or fenced block included, turns the gate red; the self-test
 proves that tiling equality and a dropped-pin flip per section, proves each pin unique in its
 section, and deletes each pinned operative occurrence independently (never a replace-all),
 including in 4.2. Under the default entry alone added text stays green, but the self-test's
 per-section tiling equality turns red on any addition inside a tiled section, so the live
-residuals are additions to untiled sections (for example 8.7, 10, 13 and 16), a default-gate
+residuals are additions to untiled sections (for example 8.7, 9.1, 10 and 13), a default-gate
 run without the self-test, and an addition landed together with a matching registry edit,
-which review of registry changes catches. The default entry also runs a section 2 keyword
-lint over every pin of those tiled sections: a pin without MUST, MUST NOT, SHOULD or MAY is red
-unless the registry marks it descriptive (_D, red once a marked pin gains a keyword); the
+which review of registry changes catches. Section 9.1 stays untiled over its lowercase-may
+profile rule, but its implementation-class paragraph is pinned sentence by sentence, each pin
+proven unique and deletion-red by the self-test, so only the rest of 9.1 and additions to it
+stay unprotected. The quickstart's implementation-class sentences and the opfiles.ai disclosure
+page's fresh-only item are pinned the same way over tag-stripped text, outside the keyword lint,
+so the rest of those files and additions to them stay unprotected. The default entry also runs a
+section 2 keyword lint over every pin of those tiled sections and those untiled pins: a pin
+without MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D, red
+once a marked pin gains a keyword); the
 self-test proves synthetic cases, flips every marker and every keyword pin red, and reverts
 named QA5 rewrites red. The lint reads the registry marker, not the meaning, so a requirement
 wrongly marked descriptive stays green, which review of registry changes catches. The
