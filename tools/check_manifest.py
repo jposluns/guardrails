@@ -926,6 +926,35 @@ def _self_test_main_isolated():
             failures.append("D-400-SPECIAL-FILE-PRECHECK: a neutered __main__ block in the OPF precheck "
                             "copy was not caught by the copy comparison")
 
+        # codex round-4 findings 4 and 5, both precheck copies: a rev-parse answer with more than one
+        # trailing newline is MALFORMED (exit 2, not exactly one line), never silently accepted as a
+        # root, while exactly one trailing newline stays accepted; and a root no path call accepts (an
+        # embedded NUL) is git-cannot-answer (None), never a raw ValueError out of _git_lines.
+        import _gen_common as _gc
+        import _containment as _ct
+        for _label, _mod in (("_gen_common", _gc), ("_containment", _ct)):
+            with patch.object(_mod, "_git_lines", lambda root, args: b"/tmp\n\n"):
+                try:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        got = _mod._git_toplevel(".")
+                except SystemExit as exc:
+                    got = exc.code
+                if got != 2:
+                    failures.append("{}: a two-newline rev-parse answer expected exit 2, got {!r}"
+                                    .format(_label, got))
+            with patch.object(_mod, "_git_lines", lambda root, args: b"/tmp\n"):
+                if _mod._git_toplevel(".") != os.path.realpath("/tmp"):
+                    failures.append("{}: a one-trailing-newline rev-parse answer must stay "
+                                    "accepted".format(_label))
+            try:
+                got = _mod._git_toplevel("/tmp/a\x00b")
+                got_ignored = _mod._ignored_paths("/tmp/a\x00b")
+            except ValueError as exc:
+                got = got_ignored = "raised {!r}".format(exc)
+            if got is not None or got_ignored is not None:
+                failures.append("{}: a NUL root must be git-cannot-answer (None), got {!r} and {!r}"
+                                .format(_label, got, got_ignored))
+
         # (r) D-400-SPECIAL-FILE-PRECHECK rulings 1, 2 and 5: each --precheck ENTRY POINT, run as a
         #     SUBPROCESS against hostile trees built around the real module files, asserting the exit
         #     code and the named path. The trees are git-init'd so the fixed-location root derivation
@@ -1045,6 +1074,60 @@ def _self_test_main_isolated():
                 os.mkfifo(mutant2_tree / "evil.fifo")
                 _entry_expect("the neutered-refusal mutant (vector sensitivity)",
                               mutant2_tree, "gen", 0)
+
+            # (s) QA round 4: hazard-scoped ignore handling and root-redirect refusal, each --precheck
+            # entry point as a subprocess against hostile trees.
+            # (s1) an ignored SYMLINK to a FIFO is classified by its target and refused by name (the
+            # ignore exemption must never skip a link a gate would follow).
+            iglink_tree = _mini_tree("ignored-link-fifo")
+            if iglink_tree is not None:
+                (iglink_tree / ".gitignore").write_text("zz-local.toml\n", encoding="utf-8")
+                os.mkfifo(tmp / "outside-target.fifo")
+                (iglink_tree / "zz-local.toml").symlink_to(tmp / "outside-target.fifo")
+            _entry_expect("an ignored symlink to a FIFO", iglink_tree, "gen", 2,
+                          iglink_tree / "zz-local.toml" if iglink_tree else None)
+            _entry_expect("an ignored symlink to a FIFO", iglink_tree, "opf", 2,
+                          iglink_tree / "zz-local.toml" if iglink_tree else None)
+            # (s2) the target subtree of an in-root directory link is walked even when IGNORED (a
+            # gate reads through the link's own certified path).
+            iglinkdir_tree = _mini_tree("ignored-dirlink")
+            if iglinkdir_tree is not None:
+                (iglinkdir_tree / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+                (iglinkdir_tree / "__pycache__" / "spec").mkdir(parents=True)
+                os.mkfifo(iglinkdir_tree / "__pycache__" / "spec" / "SPEC.fifo")
+                (iglinkdir_tree / "specalias").symlink_to(iglinkdir_tree / "__pycache__" / "spec")
+            _entry_expect("an in-root directory link into an ignored directory", iglinkdir_tree,
+                          "gen", 2, "SPEC.fifo")
+            _entry_expect("an in-root directory link into an ignored directory", iglinkdir_tree,
+                          "opf", 2, "SPEC.fifo")
+            # (s3) a GIT-IGNORED out-of-root directory link stays accepted un-walked (the ruling's
+            # developer .venv exemption; its contents are a disclosed residual).
+            igext_tree = _mini_tree("ignored-ext-dirlink")
+            if igext_tree is not None:
+                (tmp / "ext-venv-target").mkdir(exist_ok=True)
+                (tmp / "ext-venv-target" / "ok.txt").write_text("x\n", encoding="utf-8")
+                (igext_tree / ".gitignore").write_text(".venvx\n", encoding="utf-8")
+                (igext_tree / ".venvx").symlink_to(tmp / "ext-venv-target")
+            _entry_expect("an ignored out-of-root directory link", igext_tree, "gen", 0)
+            _entry_expect("an ignored out-of-root directory link", igext_tree, "opf", 0)
+            # (s4) a tools/ (or opf/) directory REPLACED BY A SYMLINK must not move the root out of
+            # the invoked tree: the invoked and resolved derivations disagree, refused by name, so
+            # the precheck can never certify a tree the runner's gates do not read.
+            for which, moved in (("gen", "tools"), ("opf", "opf")):
+                redirect_tree = _mini_tree("redirect-" + which)
+                named_root = None
+                if redirect_tree is not None:
+                    ext_home = tmp / ("ext-home-" + which)
+                    ext_home.mkdir()
+                    shutil.move(str(redirect_tree / moved), str(ext_home / moved))
+                    (redirect_tree / moved).symlink_to(ext_home / moved)
+                    os.mkfifo(redirect_tree / "evil.fifo")
+                    # the resolved module file derives its fixed-location root inside ext_home: the
+                    # parent of the moved tools/ for the gen entry, the standalone opf/ tree for the
+                    # opf entry (no tools/_gen_common.py sentinel beside it there)
+                    named_root = os.path.realpath(ext_home if which == "gen" else ext_home / "opf")
+                _entry_expect("a symlinked {}/ directory".format(moved), redirect_tree, which, 2,
+                              named_root)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1068,8 +1151,12 @@ def _self_test_main_isolated():
           "matches _gen_common's (a changed copy, a globals() rebinding, a cache pre-fill and a "
           "diverged __main__ block are each caught); and each --precheck entry point, run as a "
           "subprocess, refuses a FIFO, a link to a FIFO, a FIFO behind a planted nested .git or an "
-          "in-root directory link, and an outside-root directory link, by name, while a dangling "
-          "link and a venv-like ignored tree pass, with mutants proving the vectors discriminate")
+          "in-root directory link, an outside-root directory link, a git-ignored link to a FIFO, a "
+          "FIFO behind an in-root link into an ignored directory, and a symlinked tools/ or opf/ "
+          "directory that would redirect the root, by name, while a dangling link, a venv-like "
+          "ignored tree and a git-ignored outside-root directory link pass; a multi-newline "
+          "rev-parse answer fails closed, one trailing newline stays accepted, and a NUL root is "
+          "git-cannot-answer in both copies, with mutants proving the vectors discriminate")
     return 0
 
 

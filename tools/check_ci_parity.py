@@ -1098,6 +1098,7 @@ def extract_local(text):
     }
     initialized = set()
     gitleaks_updates = set()
+    precheck_bootstraps = set()
     for line_number, raw in enumerate(text.splitlines(), 1):
         if line_number == 1 and raw == "#!/usr/bin/env bash":
             continue
@@ -1440,6 +1441,19 @@ def extract_local(text):
             if scaffold:
                 _add_member(members, origins, line_number,
                             PRECHECK_ABORT_LINES[stripped])
+                script = PRECHECK_ABORT_LINES[stripped].rsplit(" --precheck", 1)[0]
+                if script not in precheck_bootstraps:
+                    # The bootstrap is REQUIRED, not merely accepted: without it python3 would block
+                    # LOADING a FIFO planted at the precheck script path before any line of the
+                    # precheck could run, and set parity alone cannot see the deletion (the bootstrap
+                    # registers no member).
+                    diagnostics.append(_diagnostic(
+                        source,
+                        line_number,
+                        "missing-bootstrap",
+                        "the precheck invocation runs without its bootstrap test-and-abort line "
+                        "ahead of it; python3 would block loading a FIFO planted at "
+                        "{}".format(script)))
         elif stripped in PRECHECK_BOOTSTRAP_LINES:
             # Only where the real runners put it: top level, before any gate, ahead of the precheck
             # invocation it guards (D-400-SPECIAL-FILE-PRECHECK bootstrap). The one accepted shell
@@ -1451,6 +1465,7 @@ def extract_local(text):
             if scaffold:
                 origins.setdefault(line_number, set()).add(
                     PRECHECK_BOOTSTRAP_LINES[stripped])
+                precheck_bootstraps.add(PRECHECK_BOOTSTRAP_LINES[stripped])
         elif stripped == PATH_APPEND_LINE:
             # Only where the real runner puts it: the HOME guard's then branch,
             # which has just proven HOME non-empty. The guard's else branch
@@ -4584,6 +4599,18 @@ def self_test():
             "30 a bootstrap line after the first gate must be unclassified, got {!r}".format(
                 got.diagnostics))
 
+    # D-400-SPECIAL-FILE-PRECHECK bootstrap (runner side, QA round 4): the bootstrap line is REQUIRED
+    # ahead of the precheck invocation, not merely accepted; DELETING it must be a missing-bootstrap
+    # diagnostic (set parity alone cannot see the deletion, the bootstrap registers no member). This
+    # vector fails without the requirement.
+    count += 1
+    deleted = bootstrap_fixture.replace(bootstrap_tools + "\n", "", 1)
+    got = extract_local(deleted)
+    if not any(diagnostic.code == "missing-bootstrap" for diagnostic in got.diagnostics):
+        failures.append(
+            "30b deleting the bootstrap line must be a missing-bootstrap diagnostic, got {!r}".format(
+                got.diagnostics))
+
     # D-400-SPECIAL-FILE-PRECHECK bootstrap (CI side): inside a literal run block the exact line is
     # benign and shadow-clean; any respelling of it is unclassified-command, so a weakened CI
     # bootstrap never reads as clean.
@@ -4680,6 +4707,41 @@ def self_test():
         failures.append("32 a tools path outside captured run lines must be a diagnostic, got "
                         "{!r}".format(got_diagnostics))
 
+    # D-400-SPECIAL-FILE-PRECHECK order (QA round 4): a step key the parse does not model can disable
+    # or soften the precheck step while its run body still matches the canonical lines (if: and
+    # continue-on-error: above all), so each such key, on the precheck step or any other, must be a
+    # step-key diagnostic (cannot-evaluate), never a clean order pass. An env:/with: mapping stays
+    # modelled (quality.yml carries both). These vectors fail without the step-key rule.
+    count += 1
+    for weakening in ("if: ${{ false }}", "continue-on-error: true", "shell: bash",
+                      "timeout-minutes: 1"):
+        neutered = order_fixture.replace(
+            "      - name: Special-file precheck\n",
+            "      - name: Special-file precheck\n        " + weakening + "\n", 1)
+        got_problems, got_diagnostics = workflow_precheck_order_problems(neutered, "fixture.yml")
+        if not any(diagnostic.code == "step-key" for diagnostic in got_diagnostics):
+            failures.append("32b a {!r} key on the precheck step must be a step-key diagnostic, "
+                            "got {!r} {!r}".format(weakening, got_problems, got_diagnostics))
+    enved = order_fixture.replace(
+        "      - name: A gate\n        run: python3 -I -B tools/a.py\n",
+        "      - name: A gate\n        env:\n          A_VALUE: one\n"
+        "        run: python3 -I -B tools/a.py\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(enved, "fixture.yml")
+    if got_problems or got_diagnostics:
+        failures.append("32b an env: mapping on a gate step stays modelled, got {!r} {!r}".format(
+            got_problems, got_diagnostics))
+
+    # codex round-4 finding 4: a workflows directory path no path call accepts (an embedded NUL) is a
+    # read-error diagnostic, never a raw ValueError. Fails without the (OSError, ValueError) arm.
+    count += 1
+    try:
+        nul_problems, nul_diagnostics = precheck_order_report("fixture\x00dir")
+    except ValueError as exc:
+        nul_problems, nul_diagnostics = ["raised {!r}".format(exc)], []
+    if nul_problems or not any(d.code == "read-error" for d in nul_diagnostics):
+        failures.append("32c a NUL workflows dir must be a read-error diagnostic, got {!r} {!r}".format(
+            nul_problems, nul_diagnostics))
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
@@ -4705,8 +4767,14 @@ def workflow_precheck_order_problems(text, source):
     run bodies deeper); a tab, an orphan step, a step without name: or uses:, or a folded/empty run
     is a diagnostic (cannot-evaluate), and a tools path on a line this parse did not capture as a run
     line is a diagnostic too (the same shadow principle extract_ci applies), so a gate cannot hide
-    from the ORDER question in unmodelled YAML. Full structural validation of quality.yml stays
-    extract_ci's job; this pass answers order, across every workflow file."""
+    from the ORDER question in unmodelled YAML. Inside a step, the only modelled keys are name:,
+    uses:, run: and the env:/with: mappings (their indent-10+ entries consumed); ANY OTHER step key
+    (an if:, continue-on-error:, shell:, or timeout-minutes: above all, each of which can disable,
+    soften, or reinterpret the step without touching its run body) and any line outside those shapes
+    is a step-key diagnostic (cannot-evaluate), the same rule extract_ci applies, so a job cannot
+    carry a switched-off precheck step that still matches the canonical body. Full structural
+    validation of quality.yml stays extract_ci's job; this pass answers order, across every workflow
+    file."""
     problems, diagnostics = [], []
     jobs = {}
     run_line_numbers = set()
@@ -4714,6 +4782,7 @@ def workflow_precheck_order_problems(text, source):
     in_steps = False
     current_job = None
     step = None
+    mapping = None
     lines = text.split("\n")
     index = 0
     while index < len(lines):
@@ -4764,6 +4833,7 @@ def workflow_precheck_order_problems(text, source):
             continue
         if indent == 6 and stripped.startswith("- "):
             step = dict(uses=None, run=[], line=number)
+            mapping = None
             jobs[current_job].append(step)
             item = stripped[2:]
             if item.startswith("uses:"):
@@ -4780,11 +4850,17 @@ def workflow_precheck_order_problems(text, source):
                 "line is outside the supported step structure: {!r}".format(stripped)))
             index += 1
             continue
+        if indent == 8 and stripped in ("env:", "with:"):
+            mapping = stripped[:-1]
+            index += 1
+            continue
         if indent == 8 and stripped.startswith("uses:"):
             step["uses"] = stripped[5:].strip()
+            mapping = None
             index += 1
             continue
         if indent == 8 and stripped.startswith("run:"):
+            mapping = None
             value = stripped[4:].strip()
             if value in ("|", "|-", "|+"):
                 index += 1
@@ -4809,6 +4885,13 @@ def workflow_precheck_order_problems(text, source):
             run_line_numbers.add(number)
             index += 1
             continue
+        if indent >= 10 and mapping is not None:
+            index += 1
+            continue
+        diagnostics.append(_diagnostic(
+            source, number, "step-key",
+            "unsupported step key or shape: {!r}; a key this parse does not model (if:, "
+            "continue-on-error:, shell:, ...) could disable or soften the step".format(stripped)))
         index += 1
     for number, raw in enumerate(text.split("\n"), 1):
         code = _strip_comment(raw)
@@ -4873,7 +4956,7 @@ def precheck_order_report(workflows_dir=None):
     try:
         names = sorted(name for name in os.listdir(directory)
                        if name.endswith(".yml") or name.endswith(".yaml"))
-    except OSError as exc:
+    except (OSError, ValueError) as exc:  # ValueError: a directory path no path call accepts (a NUL)
         return [], [_diagnostic(".github/workflows", 0, "read-error",
                                 "cannot list the workflows directory ({})".format(
                                     type(exc).__name__))]

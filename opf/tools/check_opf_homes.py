@@ -17,8 +17,10 @@ MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_
 the lint reads the registry marker, not the meaning, so a requirement wrongly marked descriptive
 stays green; review of registry changes catches that.
 """
+import io
 import os
 import re
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -28,6 +30,29 @@ import _opf_store as store  # noqa: E402
 import _containment  # noqa: E402  precheck_special_files (D-400-SPECIAL-FILE-PRECHECK)
 
 SPEC = Path(__file__).resolve().parents[1] / "spec" / "OPF-SPEC.md"
+
+
+def _spec_text(path):
+    """SPEC read through ONE O_NONBLOCK descriptor, fstat-checked S_ISREG: defence in depth behind the
+    D-400 special-file precheck, so a special file reached at the spec path (for example through a
+    directory link the walk's git-ignored exemptions leave uncertified) is the named OSError refusal
+    (main() maps it to exit 2), never a blocking read. On a regular file the bytes and strict-UTF-8
+    universal-newline decode equal path.read_text(encoding="utf-8")."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+                 | getattr(os, "O_BINARY", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("{}: refused, not a regular file (a FIFO, device, socket, or directory); a "
+                          "plain read of it could block forever".format(path))
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return io.TextIOWrapper(io.BytesIO(b"".join(chunks)), encoding="utf-8").read()
 
 
 class _Descriptive(str):
@@ -2647,6 +2672,39 @@ def _self_test_vectors():
                     return False
                 return proc.returncode == 2 and str(spec) in proc.stderr
         check("special-file-precheck-fifo-spec", fifo_spec_refused)
+
+        # The reader itself (defence in depth behind the precheck): _spec_text on a FIFO must be the
+        # named OSError refusal within the alarm, never a blocking read. MUTATION: reverting main()'s
+        # read (or this helper) to a plain read_text blocks; the alarm records the hang.
+        import signal
+
+        def fifo_spec_read_refused():
+            if not hasattr(signal, "SIGALRM"):
+                return True
+
+            class _Hang(Exception):
+                pass
+
+            def _on_alarm(_signum, _frame):
+                raise _Hang()
+
+            with tempfile.TemporaryDirectory() as scratch:
+                fifo = Path(scratch) / "spec.md"
+                os.mkfifo(fifo)
+                previous = signal.signal(signal.SIGALRM, _on_alarm)
+                signal.alarm(10)
+                try:
+                    try:
+                        _spec_text(fifo)
+                        return False
+                    except OSError as exc:
+                        return "not a regular file" in str(exc)
+                    except _Hang:
+                        return False
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous)
+        check("special-file-nonblocking-spec-read", fifo_spec_read_refused)
     for failure in failures:
         print("FAIL: " + failure)
     print("OPF-HOMES SELF-TEST: {} ({} checks)".format("FAILED" if failures else "OK", checked))
@@ -2662,7 +2720,7 @@ def main(argv=None):
             print("check_opf_homes: unexpected arguments", file=sys.stderr)
             return 2
         _containment.precheck_special_files(SPEC.parents[1])
-        findings = contract_findings(SPEC.read_text(encoding="utf-8")) + keyword_findings()
+        findings = contract_findings(_spec_text(SPEC)) + keyword_findings()
         for finding in findings:
             print("check_opf_homes: " + finding)
         return 1 if findings else 0
