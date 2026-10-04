@@ -69,9 +69,16 @@ def _git_lines(root, args):
     hostile tree; the ignore-control files git WOULD read with a plain blocking open are screened by
     the caller before the one query that reads them (see precheck_special_files)."""
     import subprocess
+    # QA round 7 (codex M4 = claude M2): every GIT_* variable is scrubbed from the child
+    # environment, as check_portability and scrub_git_environment already do. An inherited
+    # GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE (or any other GIT_ control) can redirect
+    # rev-parse, ls-files and the ignore list to a repository that is NOT the tree this walk
+    # certifies (a nested or decoy repository above all), which would exempt a planted special
+    # file from the walk or blind the tracked-content shadow test.
+    env = dict((key, value) for key, value in os.environ.items() if not key.startswith("GIT_"))
     try:
         proc = subprocess.run(["git", "-C", os.fspath(root), *args], stdin=subprocess.DEVNULL,
-                              capture_output=True, timeout=60)
+                              capture_output=True, timeout=60, env=env)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
@@ -246,12 +253,19 @@ def precheck_special_files(root):
                 own_git_dir = None
 
     def _own_git(path):
+        # QA round 7 (claude m-b): the exemption is applied ONLY at the repository root (the
+        # canonical <root>/.git location; both call sites also require that position). A root
+        # .git FILE (a gitfile with gitdir: tools/qa/.git) must not exempt an IN-TREE nested
+        # directory from the walk: that directory is descended with lstat like any other and a
+        # special file inside it is refused by name (git's own reads of such a layout are
+        # bounded by the _git_lines timeout).
         return own_git_dir is not None and os.path.realpath(path) == own_git_dir
     try:
         real_root = os.path.realpath(root)
         for dirpath, dirnames, filenames in os.walk(root, onerror=_raise, followlinks=False):
             dirnames[:] = [d for d in dirnames
-                           if not (d == ".git" and _own_git(os.path.join(dirpath, d)))]
+                           if not (d == ".git" and os.path.realpath(dirpath) == real_root
+                                   and _own_git(os.path.join(dirpath, d)))]
             for name in dirnames + filenames:
                 if name != ".gitignore":
                     continue
@@ -321,7 +335,7 @@ def precheck_special_files(root):
                 continue
             for item in entries:
                 name = item.name
-                if name == ".git" and _own_git(item.path):
+                if name == ".git" and relbase == "" and _own_git(item.path):
                     continue
                 rel = os.path.join(relbase, name) if relbase else name
                 skipped = under_ignored or (ignored is not None and rel in ignored)
@@ -341,6 +355,18 @@ def precheck_special_files(root):
                     if stat.S_ISDIR(mode):
                         stack.append((path, rel, skipped))
                     continue
+                # QA round 7 (claude B1): the INTERPRETER itself reads __pycache__/<module>.pyc
+                # with a plain blocking open when a gate imports an in-tree module (-B stops only
+                # the WRITES), and that read sits outside every gate reader, so a SYMLINK named
+                # __pycache__ is refused by NAME, ignored or not, wherever it sits and whatever it
+                # resolves to (a real __pycache__ directory stays walked like any directory, and a
+                # special file inside it is already refused by name; the second, independent layer
+                # is the runners' and workflows' -X pycache_prefix redirection).
+                if name == "__pycache__":
+                    _refuse(path, "a symlink named __pycache__ (ignored or not); the Python "
+                                  "interpreter itself opens __pycache__/*.pyc with a plain "
+                                  "blocking read when a gate imports a module, so its target "
+                                  "can never be certified by this walk")
                 # A symlink is classified by its TARGET even when the link itself is git-ignored: a
                 # gate's read of a fixed path follows a link regardless of its ignore status.
                 try:

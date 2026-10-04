@@ -30,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -257,7 +258,7 @@ def build_desired(root, src_dir):
     if not dir_present(rules_dir):
         raise ValueError("cannot validate manifest rules ids: no {} to load".format(rules_dir))
     corpus_ids = {str(fm["corpus-id"]) for _src, fm, _rel in load_corpus(rules_dir)}
-    script_text = script_src.read_text(encoding="utf-8")  # FileNotFoundError -> OSError, fail-closed
+    script_text = _nbio.read_text_nb(script_src, encoding="utf-8")  # FileNotFoundError -> OSError, fail-closed
     if not script_text.strip():
         raise ValueError("{} is empty".format(script_src))
     cross_check(hooks, corpus_ids, script_text, manifest_path.name)
@@ -289,7 +290,7 @@ def run(root, check):
     try:
         for rel, content in sorted(desired.items()):
             target = root / rel
-            current = target.read_text(encoding="utf-8") if _exists(target) else None
+            current = _nbio.read_text_nb(target, encoding="utf-8") if _exists(target) else None
             if current != content:
                 drift.append(rel)
                 if not check:
@@ -438,7 +439,7 @@ def self_test_main():
     def _mutate(root, old, new):
         """Rewrite the built manifest in place to inject one fault, then the run must fail closed."""
         mpath = root / ".aiqt" / "core" / "hooks" / "manifest.toml"
-        text = mpath.read_text(encoding="utf-8")
+        text = _nbio.read_text_nb(mpath, encoding="utf-8")
         if old not in text:
             failures.append("self-test setup: {!r} not found in manifest".format(old))
         mpath.write_text(text.replace(old, new), encoding="utf-8")
@@ -460,7 +461,7 @@ def self_test_main():
         #     sibling file cannot shadow a stdlib import and neuter the hook. A regression in the
         #     generator (dropping the flag or misplacing it) fails the generator's own self-test.
         try:
-            rendered = json.loads((good / HOOKS_JSON_REL).read_text(encoding="utf-8"))
+            rendered = json.loads(_nbio.read_text_nb(good / HOOKS_JSON_REL, encoding="utf-8"))
             entries = [h for event in rendered["hooks"].values() for e in event for h in e["hooks"]]
             if not entries:
                 failures.append("isolation invariant: no rendered hook entries to check")
@@ -473,7 +474,7 @@ def self_test_main():
 
         # 2. Drift in hooks.json, and an orphan under the plugin hooks/, are caught.
         target = good / HOOKS_JSON_REL
-        target.write_text(target.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        target.write_text(_nbio.read_text_nb(target, encoding="utf-8") + "\n", encoding="utf-8")
         if run_quiet(good, check=True) != 1:
             failures.append("drifted hooks.json expected exit 1")
         if run_quiet(good, check=False) != 0 or run_quiet(good, check=True) != 0:
@@ -600,8 +601,8 @@ def self_test_main():
         if run_quiet(stop_block, check=False) != 0 or run_quiet(stop_warn, check=False) != 0:
             failures.append("byte-identity setup: both Stop trees expected a clean generate (exit 0)")
         else:
-            block_json = (stop_block / HOOKS_JSON_REL).read_text(encoding="utf-8")
-            warn_json = (stop_warn / HOOKS_JSON_REL).read_text(encoding="utf-8")
+            block_json = _nbio.read_text_nb(stop_block / HOOKS_JSON_REL, encoding="utf-8")
+            warn_json = _nbio.read_text_nb(stop_warn / HOOKS_JSON_REL, encoding="utf-8")
             if block_json != warn_json:
                 failures.append("Stop hooks.json must be byte-identical for default 'block' vs 'warn' "
                                 "(default is authoring metadata, not rendered output)")

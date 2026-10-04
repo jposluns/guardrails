@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, read_source_text  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -86,7 +87,7 @@ def run(root, check):
     try:
         for rel, content in sorted(desired.items()):
             target = out_dir / rel
-            current = target.read_text(encoding="utf-8") if target.exists() else None
+            current = _nbio.read_text_nb(target, encoding="utf-8") if target.exists() else None
             if current != content:
                 drift.append(rel)
                 if not check:

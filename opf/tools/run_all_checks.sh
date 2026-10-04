@@ -7,9 +7,13 @@
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)" || exit 2
 
-# Each gate launches isolated: `python3 -I -B <opf/tools>/<gate>.py`. `-I` (isolated mode) drops the
-# script's own directory from sys.path so a tool-written sibling cannot shadow a stdlib import; `-B`
-# suppresses bytecode. Paths are resolved from THIS script's own directory, never the CWD, so the runner
+# Each gate launches isolated: `python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache
+# <opf/tools>/<gate>.py`. `-I` (isolated mode) drops the script's own directory from sys.path so a
+# tool-written sibling cannot shadow a stdlib import; `-B` suppresses bytecode WRITES, and the -X
+# option redirects the interpreter's bytecode READS (which -B does not stop, and which otherwise
+# open an in-tree __pycache__/*.pyc with a plain blocking read at import time) to a path under
+# /dev/null where nothing can exist, so Python always compiles from source (QA round 7, claude B1).
+# Paths are resolved from THIS script's own directory, never the CWD, so the runner
 # works from any working directory and from a relocated or standalone opf/ tree.
 export PYTHONDONTWRITEBYTECODE=1
 
@@ -41,31 +45,31 @@ run_gate() {
   echo
 }
 
-run_gate "opf-homes-selftest"          python3 -I -B "$here/check_opf_homes.py" --self-test
-run_gate "opf-homes-contract"          python3 -I -B "$here/check_opf_homes.py"
-run_gate "opf-tooling-selftest"        python3 -I -B "$here/opf.py" --self-test
-run_gate "opf-journal-direct-selftest" python3 -I -B "$here/_journal.py" --self-test
-run_gate "opf-observe-direct-selftest" python3 -I -B "$here/_opf_observe.py" --self-test
-run_gate "opf-drift-selftest"          python3 -I -B "$here/check_opf_drift.py" --self-test
-run_gate "opf-doctor-selftest"         python3 -I -B "$here/check_opf_doctor.py" --self-test
-run_gate "opf-init-selftest"           python3 -I -B "$here/check_opf_init.py" --self-test
-run_gate "opf-init-contract-selftest"  python3 -I -B "$here/_opf_init_contract.py" --self-test
-run_gate "opf-init-contract-check-selftest" python3 -I -B "$here/check_opf_init_contract.py" --self-test
-run_gate "opf-upgrade-selftest"        python3 -I -B "$here/check_opf_upgrade.py" --self-test
-run_gate "opf-adopt-selftest"          python3 -I -B "$here/_opf_adopt.py" --self-test
-run_gate "opf-adopt-apply-selftest"    python3 -I -B "$here/_opf_adopt_apply.py" --self-test
-run_gate "opf-adopt-hook-selftest"     python3 -I -B "$here/_opf_adopt_hook.py" --self-test
-run_gate "opf-pack-manifest-selftest"  python3 -I -B "$here/_opf_pack_manifest.py" --self-test
-run_gate "opf-adopt-observe-selftest"  python3 -I -B "$here/_opf_adopt_observe.py" --self-test
-run_gate "opf-prompt-pack-selftest"    python3 -I -B "$here/check_opf_prompt_pack.py" --self-test
-run_gate "opf-prompt-pack"             python3 -I -B "$here/check_opf_prompt_pack.py"
-run_gate "opf-oplock-selftest"         python3 -I -B "$here/_opf_oplock.py" --self-test
-run_gate "opf-init-substrate-selftest" python3 -I -B "$here/_opf_init_substrate.py" --self-test
-run_gate "opf-init-builders-selftest"  python3 -I -B "$here/_opf_init.py" --self-test
-run_gate "opf-init-operation-selftest" python3 -I -B "$here/_opf_init_operation.py" --self-test
-run_gate "opf-init-p0-selftest"        python3 -I -B "$here/check_opf_init_p0.py" --self-test --red-on-revert
-run_gate "commonmark-headings-selftest" python3 -I -B "$here/selftest_commonmark_headings.py"
-run_gate "commonmark-conformance"      python3 -I -B "$here/selftest_commonmark_conformance.py"
+run_gate "opf-homes-selftest"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/check_opf_homes.py" --self-test
+run_gate "opf-homes-contract"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/check_opf_homes.py"
+run_gate "opf-tooling-selftest"        python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/opf.py" --self-test
+run_gate "opf-journal-direct-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_journal.py" --self-test
+run_gate "opf-observe-direct-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_opf_observe.py" --self-test
+run_gate "opf-drift-selftest"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/check_opf_drift.py" --self-test
+run_gate "opf-doctor-selftest"         python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/check_opf_doctor.py" --self-test
+run_gate "opf-init-selftest"           python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/check_opf_init.py" --self-test
+run_gate "opf-init-contract-selftest"  python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_opf_init_contract.py" --self-test
+run_gate "opf-init-contract-check-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/check_opf_init_contract.py" --self-test
+run_gate "opf-upgrade-selftest"        python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/check_opf_upgrade.py" --self-test
+run_gate "opf-adopt-selftest"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_opf_adopt.py" --self-test
+run_gate "opf-adopt-apply-selftest"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_opf_adopt_apply.py" --self-test
+run_gate "opf-adopt-hook-selftest"     python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_opf_adopt_hook.py" --self-test
+run_gate "opf-pack-manifest-selftest"  python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_opf_pack_manifest.py" --self-test
+run_gate "opf-adopt-observe-selftest"  python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_opf_adopt_observe.py" --self-test
+run_gate "opf-prompt-pack-selftest"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/check_opf_prompt_pack.py" --self-test
+run_gate "opf-prompt-pack"             python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/check_opf_prompt_pack.py"
+run_gate "opf-oplock-selftest"         python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_opf_oplock.py" --self-test
+run_gate "opf-init-substrate-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_opf_init_substrate.py" --self-test
+run_gate "opf-init-builders-selftest"  python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_opf_init.py" --self-test
+run_gate "opf-init-operation-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/_opf_init_operation.py" --self-test
+run_gate "opf-init-p0-selftest"        python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/check_opf_init_p0.py" --self-test --red-on-revert
+run_gate "commonmark-headings-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/selftest_commonmark_headings.py"
+run_gate "commonmark-conformance"      python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache "$here/selftest_commonmark_conformance.py"
 
 if [ "$failed" -ne 0 ]; then
   echo "FAILED GATES: ${failed_names}"

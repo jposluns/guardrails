@@ -79,6 +79,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the guarded _opf_* helper bootstrap below
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 EXIT_OK = 0
 EXIT_FINDING = 1
@@ -589,7 +590,7 @@ def _self_test_entry_gaps(directory, required=()):
             gaps[name] = "it is not a regular file"
             continue
         try:
-            with open(path, "rb") as handle:
+            with _nbio.open_nb(path, "rb") as handle:
                 source = handle.read()
         except OSError as exc:
             gaps[name] = "it cannot be read ({})".format(type(exc).__name__)
@@ -1575,7 +1576,7 @@ def _watchdog_completion_case(mode):
                     patch.object(emit, "_fixture_cleanup_deadline", budget):
                 refuses(emit.ChildStatusUnavailable, launch)
             bounds = [json.loads(line)
-                      for line in log_path.read_text(encoding="ascii").splitlines()]
+                      for line in _nbio.read_text_nb(log_path, encoding="ascii").splitlines()]
             assert len(bounds) == 3 and bounds[0][0] is not None, bounds
             assert bounds[0][1] == bounds[1] == bounds[2], bounds
         # Empty census never licenses completion, even when its budget expires.
@@ -1658,7 +1659,7 @@ def _watchdog_completion_case(mode):
             if first[0]:
                 first[0] = False
                 children = Path("/proc/self/task/{}/children".format(os.getpid()))
-                if not children.read_text(encoding="ascii").split():
+                if not _nbio.read_text_nb(children, encoding="ascii").split():
                     raise emit.ChildStatusUnavailable("child census disagrees with waitid")
             return real_drain(subject, subject_fd, **kwargs)
 
@@ -1805,7 +1806,7 @@ def _watchdog_completion_case(mode):
             def observe(pid, flags):
                 if not observed:
                     try:  # a marker counts only once its pid parses; empty is not ready yet
-                        pids = [int(path.read_text(encoding="ascii")) for path in markers]
+                        pids = [int(_nbio.read_text_nb(path, encoding="ascii")) for path in markers]
                     except (FileNotFoundError, ValueError):
                         pids = []
                     observed.extend(pids)
@@ -1961,14 +1962,14 @@ def _watchdog_completion_case(mode):
                     while not guardian_file.exists():
                         assert time.monotonic() < bound, "guardian never reached its stop point"
                         time.sleep(0.005)
-                    gpid = int(guardian_file.read_text(encoding="ascii"))
+                    gpid = int(_nbio.read_text_nb(guardian_file, encoding="ascii"))
                     await_state(gpid, {"T"}, "guardian did not stop")
                     assert recorded, "the fixture deadline was not observed"
                     while time.monotonic() < recorded[0] + 0.2:
                         time.sleep(0.005)
                     release.write_text("go", encoding="ascii")
                     children = Path("/proc", str(gpid), "task", str(gpid), "children")
-                    subject = int(children.read_text(encoding="ascii").split()[0])
+                    subject = int(_nbio.read_text_nb(children, encoding="ascii").split()[0])
                     await_state(subject, {"Z"}, "subject did not finish after release")
                     os.kill(gpid, signal.SIGCONT)
                     await_state(gpid, {"Z", None}, "guardian did not exit after resume")
@@ -2223,7 +2224,7 @@ def _watchdog_completion_case(mode):
             probe_path.write_text("x", encoding="utf-8")
 
             def outer(declared):
-                fd = os.open(str(probe_path), os.O_RDONLY)
+                fd = os.open(str(probe_path), (os.O_RDONLY) | getattr(os, "O_NONBLOCK", 0))
                 try:
                     def inner():
                         os.fstat(fd)
@@ -2397,7 +2398,7 @@ def _watchdog_completion_case(mode):
                 while not guardian_file.exists():
                     assert time.monotonic() < bound, "the guardian never reached its stop point"
                     time.sleep(0.005)
-                gpid = int(guardian_file.read_text(encoding="ascii"))
+                gpid = int(_nbio.read_text_nb(guardian_file, encoding="ascii"))
                 assert gpid == child.pid, "the hook stopped an unexpected process"
                 await_state(gpid, ("T",), "the guardian did not stop")
                 subject = int(Path("/proc", str(gpid), "task", str(gpid), "children")
@@ -2493,7 +2494,7 @@ def _watchdog_completion_case(mode):
                 while not guardian_file.exists():
                     assert time.monotonic() < bound, "the guardian never stopped"
                     time.sleep(0.005)
-                gpid = int(guardian_file.read_text(encoding="ascii"))
+                gpid = int(_nbio.read_text_nb(guardian_file, encoding="ascii"))
                 assert gpid == child.pid, "the hook stopped an unexpected process"
                 await_state(gpid, ("T",), "the guardian did not stop")
                 subject = int(Path("/proc", str(gpid), "task", str(gpid), "children")
@@ -2599,7 +2600,7 @@ def _watchdog_completion_case(mode):
                 while not waiting.exists():
                     assert time.monotonic() < bound, "the subject never reached its gate"
                     time.sleep(0.005)
-                subject = int(waiting.read_text(encoding="ascii"))
+                subject = int(_nbio.read_text_nb(waiting, encoding="ascii"))
                 # The gated subject publishes its pid BEFORE the guardian sends the
                 # receipt: wait for the receipt to be buffered on the control socket
                 # before any leg kills the guardian, so every leg exercises a
@@ -2897,10 +2898,10 @@ def _watchdog_completion_case(mode):
                 while not (wedged.exists() and grandchild_file.exists()):
                     assert time.monotonic() < bound, "the drain wedge was not reached"
                     time.sleep(0.005)
-                gpid = int(wedged.read_text(encoding="ascii"))
+                gpid = int(_nbio.read_text_nb(wedged, encoding="ascii"))
                 assert gpid == child.pid, "the hook stopped an unexpected process"
                 await_state(gpid, ("T",), "the guardian did not stop")
-                grandchild = int(grandchild_file.read_text(encoding="ascii"))
+                grandchild = int(_nbio.read_text_nb(grandchild_file, encoding="ascii"))
                 assert state(grandchild) not in (None, "Z"), "the descendant died early"
                 failures = []
                 with ExitStack() as stack:
@@ -2975,7 +2976,7 @@ def _watchdog_completion_case(mode):
                 while not descendant_file.exists():
                     assert time.monotonic() < bound, "the subject tree never appeared"
                     time.sleep(0.005)
-                descendant = int(descendant_file.read_text(encoding="ascii"))
+                descendant = int(_nbio.read_text_nb(descendant_file, encoding="ascii"))
                 subject = int(Path("/proc", str(child.pid), "task", str(child.pid),
                                    "children").read_text(encoding="ascii").split()[0])
                 os.kill(child.pid, signal.SIGKILL)
@@ -3526,7 +3527,7 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, \
                         "the guardian never reached its stop point"
                     time.sleep(0.005)
-                gpid = int(wedged.read_text(encoding="ascii"))
+                gpid = int(_nbio.read_text_nb(wedged, encoding="ascii"))
                 assert gpid == child.pid, "the hook stopped an unexpected process"
                 await_state(gpid, ("T",), "the guardian did not stop")
                 subject = int(Path("/proc", str(gpid), "task", str(gpid), "children")
@@ -3611,7 +3612,7 @@ def _watchdog_completion_case(mode):
                 while not descendant_file.exists():
                     assert time.monotonic() < bound, "the subject tree never appeared"
                     time.sleep(0.005)
-                descendant = int(descendant_file.read_text(encoding="ascii"))
+                descendant = int(_nbio.read_text_nb(descendant_file, encoding="ascii"))
                 subject = int(Path("/proc", str(child.pid), "task", str(child.pid),
                                    "children").read_text(encoding="ascii").split()[0])
                 os.kill(child.pid, signal.SIGKILL)
@@ -3955,7 +3956,7 @@ def _watchdog_completion_case(mode):
             while not descendant_file.exists():
                 assert time.monotonic() < bound, "the leg-1 tree never appeared"
                 time.sleep(0.005)
-            descendant = int(descendant_file.read_text(encoding="ascii"))
+            descendant = int(_nbio.read_text_nb(descendant_file, encoding="ascii"))
             fd = os.pidfd_open(leader)
             with patch.object(os, "killpg", rec_killpg), \
                     patch.object(signal, "pidfd_send_signal", rec_pidfd), \
@@ -4025,7 +4026,7 @@ def _watchdog_completion_case(mode):
             while not descendant_file.exists():
                 assert time.monotonic() < bound, "the zombie-leg tree never appeared"
                 time.sleep(0.005)
-            descendant = int(descendant_file.read_text(encoding="ascii"))
+            descendant = int(_nbio.read_text_nb(descendant_file, encoding="ascii"))
             fd = os.pidfd_open(leader)
             await_state(leader, ("Z",), "the leader never became a zombie")
             assert state(descendant) not in (None, "Z"), "the descendant died early"
@@ -4133,10 +4134,10 @@ def _watchdog_completion_case(mode):
                     time.sleep(0.005)
 
             await_file(leader_file, "the model leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
+            leader = int(_nbio.read_text_nb(leader_file, encoding="ascii"))
             fd = os.pidfd_open(leader)
             await_file(grandchild_file, "the model grandchild never appeared")
-            grandchild = int(grandchild_file.read_text(encoding="ascii"))
+            grandchild = int(_nbio.read_text_nb(grandchild_file, encoding="ascii"))
             scratch = Path(directory, "opened.tmp")
             scratch.write_text("y", encoding="ascii")
             scratch.rename(opened)
@@ -4265,9 +4266,9 @@ def _watchdog_completion_case(mode):
                     time.sleep(0.005)
 
             await_file(leader_file, "the leg-7 leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
+            leader = int(_nbio.read_text_nb(leader_file, encoding="ascii"))
             await_file(grandchild_file, "the leg-7 grandchild never appeared")
-            grandchild = int(grandchild_file.read_text(encoding="ascii"))
+            grandchild = int(_nbio.read_text_nb(grandchild_file, encoding="ascii"))
             fd = os.pidfd_open(leader)
             await_file(frozen_file, "the leg-7 guardian never froze")
             await_state(guardian, ("T",), "the leg-7 guardian did not stop")
@@ -4441,9 +4442,9 @@ def _watchdog_completion_case(mode):
                 except BaseException:
                     os._exit(125)
             await_file(leader_file, "the model leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
+            leader = int(_nbio.read_text_nb(leader_file, encoding="ascii"))
             await_file(grandchild_file, "the model grandchild never appeared")
-            grandchild = int(grandchild_file.read_text(encoding="ascii"))
+            grandchild = int(_nbio.read_text_nb(grandchild_file, encoding="ascii"))
             await_file(frozen_file, "the model guardian never froze")
             await_state(guardian, ("T",), "the model guardian did not stop")
             assert state(grandchild) not in (None, "Z"), "the descendant died early"
@@ -4569,7 +4570,7 @@ def _watchdog_completion_case(mode):
                     patch.object(os, "listdir", stale_listdir)):
                 outcome = emit._fixture_escalate_subject(
                     leader, fd, guardian_pid=guardian)
-            forked = int(forked_file.read_text(encoding="ascii"))
+            forked = int(_nbio.read_text_nb(forked_file, encoding="ascii"))
             assert (outcome[0] == "partial" and outcome[1]
                     and forked in outcome[1][0]), (
                 "the fork-raced member was not observed and named",
@@ -4710,7 +4711,7 @@ def _watchdog_completion_case(mode):
             # intermittent "fixture was accepted" flake (fix 16,
             # QA37 claude). Hand the pair out only once the leader
             # holds its own group.
-            leader = int(leader_file.read_text(encoding="ascii"))
+            leader = int(_nbio.read_text_nb(leader_file, encoding="ascii"))
             await_pgid(leader, "the model leader never took its own group")
             return guardian, leader
 
@@ -10870,7 +10871,7 @@ def _watchdog_completion_case(mode):
                 return "the two copies of the leg 19 bound differ"
             return None
 
-        own_text = Path(__file__).read_bytes()
+        own_text = _nbio.read_bytes_nb(Path(__file__))
         assert bound_copy_fault(own_text) is None, (
             bound_copy_fault(own_text), "(fix 30/31)")
         # fix 34 (QA55 codex MINOR): both copies qualify the case
@@ -11446,7 +11447,7 @@ def _init_inventory(root_fd):
                     if depth >= _INIT_MAX_DEPTH:
                         raise RuntimeError("foreign inventory exceeds directory-depth bound")
                     child_fd = os.open(
-                        entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                        entry.name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=fd)
                     try:
                         walk(child_fd, relpath, depth + 1)
                     finally:
@@ -11460,7 +11461,7 @@ def _init_inventory(root_fd):
                 add(working, st)
             else:
                 working_fd = os.open(
-                    working, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                    working, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=root_fd)
                 try:
                     walk(working_fd, working, 0)
                 finally:
@@ -13726,7 +13727,7 @@ def _cli_self_test():
                         snap[os.path.relpath(os.path.join(dirpath, name), rootdir)] = None
                     for name in files:
                         p = os.path.join(dirpath, name)
-                        with open(p, "rb") as fh:
+                        with _nbio.open_nb(p, "rb") as fh:
                             snap[os.path.relpath(p, rootdir)] = fh.read()
                 return snap
 
@@ -13736,7 +13737,7 @@ def _cli_self_test():
             # the interpreter honours it (a utf-8 text read would check other text); the mutants below
             # are built over its utf-8 text.
             try:
-                with open(__file__, "rb") as fh:
+                with _nbio.open_nb(__file__, "rb") as fh:
                     own_source = fh.read()
             except OSError as exc:
                 print("opf cli self-test: harness error: could not read {} for the import structural "
@@ -14152,7 +14153,7 @@ def _cli_self_test():
                 for dirpath, _dirs, files in os.walk(rootdir):
                     for name in files:
                         p = os.path.join(dirpath, name)
-                        with open(p, "rb") as fh:
+                        with _nbio.open_nb(p, "rb") as fh:
                             snap[os.path.relpath(p, rootdir)] = fh.read()
                 return snap
 
@@ -14172,7 +14173,7 @@ def _cli_self_test():
                     # journal's own writer, so the engine's classification reads it as interrupted.
                     debris = os.path.join(abase, "debris")
                     os.makedirs(os.path.join(debris, adopt_j_rel))
-                    debris_fd = os.open(debris, os.O_RDONLY | os.O_DIRECTORY)
+                    debris_fd = os.open(debris, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
                     try:
                         jr_fd = journal.open_journal_root_fd(debris_fd, adopt_j_rel)
                         try:
@@ -14457,7 +14458,7 @@ def _cli_self_test():
                 try:
                     txnswap = fresh_root("txnswap")
                     os.makedirs(os.path.join(txnswap, adopt_j_rel))
-                    ts_fd = os.open(txnswap, os.O_RDONLY | os.O_DIRECTORY)
+                    ts_fd = os.open(txnswap, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
                     try:
                         ts_jr = journal.open_journal_root_fd(ts_fd, adopt_j_rel)
                         try:
@@ -14947,7 +14948,7 @@ def _retained_close_offpath_self_test():
         (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
         (root / _opf_store.WORKING_DIRNAME / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
         store_view = None
-        plan_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        plan_fd = os.open(str(root), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         try:
             for _name, scope, dest_rel, text in _opf_views.plan_views(plan_fd, machine_rel):
                 (root / dest_rel).write_text(text, encoding="utf-8")
@@ -14983,7 +14984,7 @@ def _retained_close_offpath_self_test():
                lambda: _opf_observe._worktree_open_succeeds(root / "CHANGELOG.md"))
         # _opf_write_guard: the gitignore reader and the lease acquire / held-lease message / release cycle.
         expect("offpath-write-guard-gitignore", lambda: _opf_write_guard._homes_read_gitignore(root, "render"))
-        root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        root_fd = os.open(str(root), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         held.append(root_fd)
         lease = root / machine_rel / _opf_check.LEASE_NAME
 
@@ -15004,7 +15005,7 @@ def _retained_close_offpath_self_test():
         (observe / "public").mkdir(parents=True)
         os.chmod(str(observe / "public"), 0o755)
         (observe / "archive.tar.gz").write_bytes(b"archive")
-        observe_fd = os.open(str(observe), os.O_RDONLY | os.O_DIRECTORY)
+        observe_fd = os.open(str(observe), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         held.append(observe_fd)
         deadline = types.SimpleNamespace(left=lambda: 1.0)
         expect("offpath-adopt-observe-open-directory",
@@ -15042,7 +15043,7 @@ def _retained_close_offpath_self_test():
             tar_member("wrap/d/f", tarfile.REGTYPE, b"data"), b"\0" * 1024)), mtime=0)
         unpack_parent = base / "unpack"
         unpack_parent.mkdir(mode=0o700)
-        unpack_fd = os.open(str(unpack_parent), os.O_RDONLY | os.O_DIRECTORY)
+        unpack_fd = os.open(str(unpack_parent), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         held.append(unpack_fd)
 
         def unpack():
@@ -15066,7 +15067,7 @@ def _retained_close_offpath_self_test():
         init = base / "init"
         (init / _opf_store.WORKING_DIRNAME / "a" / "b").mkdir(parents=True)
         (init / "VERSION").write_bytes(b"1.0.0\n")
-        init_fd = os.open(str(init), os.O_RDONLY | os.O_DIRECTORY)
+        init_fd = os.open(str(init), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         held.append(init_fd)
 
         def init_helpers():
@@ -15561,7 +15562,7 @@ def _close_exc_safe_vectors_self_test():
         if body is None:
             # The site's normal path hands the fd to fdopen, so its normal vector drives the helper itself.
             def call():
-                fd = os.open(str(tmp / "lease"), os.O_RDONLY)
+                fd = os.open(str(tmp / "lease"), (os.O_RDONLY) | getattr(os, "O_NONBLOCK", 0))
                 arm()
                 check_opf_prompt_pack._close_fd_exc_safe(fd)
             return call

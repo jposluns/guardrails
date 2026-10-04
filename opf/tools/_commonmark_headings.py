@@ -92,6 +92,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; the shared readers live beside this file
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
+
 # --- policy constants ---------------------------------------------------------------------------------
 
 MAX_CHANGELOG_BYTES = 1048576             # 1 MiB input ceiling, enforced before parsing (named policy value)
@@ -413,7 +416,7 @@ def verify_vendor_manifest(vendor_dir=None, manifest_path=None, root=None):
     root = os.path.abspath(root) if root else os.path.dirname(os.path.dirname(os.path.dirname(vendor_dir)))
     manifest_path = manifest_path or os.path.join(vendor_dir, MANIFEST_NAME)
     try:
-        with open(manifest_path, "r", encoding="utf-8") as handle:
+        with _nbio.open_nb(manifest_path, "r", encoding="utf-8") as handle:
             manifest_lines = handle.read().splitlines()
     except OSError as exc:
         raise HeadingScanError("cannot read the vendored-marko manifest {}: {}".format(manifest_path, exc),
@@ -437,7 +440,7 @@ def verify_vendor_manifest(vendor_dir=None, manifest_path=None, root=None):
     for rel, digest in recorded.items():   # forward: recorded file present and matches
         target = _safe_join(root, rel, contain_base=vendor_dir)
         try:
-            with open(target, "rb") as handle:
+            with _nbio.open_nb(target, "rb") as handle:
                 actual = hashlib.sha256(handle.read()).hexdigest()
         except OSError as exc:
             raise HeadingScanError("manifest file {} is missing or unreadable: {}".format(rel, exc),

@@ -20,6 +20,7 @@ from pathlib import Path
 # on sys.path (the house append idiom keeps stdlib precedence under `python3 -I`).
 sys.path.append(str(Path(__file__).resolve().parent))
 import _containment  # noqa: E402  precheck_special_files (D-400-SPECIAL-FILE-PRECHECK)
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -77,7 +78,7 @@ def _read(rel):
     if not p.is_file():
         _cant("missing input: {}".format(rel))
     try:
-        return p.read_text(encoding="utf-8")
+        return _nbio.read_text_nb(p, encoding="utf-8")
     except Exception as exc:
         _cant("unreadable {}: {}".format(rel, exc))
 

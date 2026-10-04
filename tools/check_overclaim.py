@@ -255,6 +255,7 @@ from urllib.parse import urlsplit, unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 import gen_gensrc  # noqa: E402  build_registry: the in-memory gensrc recomputation (collector 3)
 import gen_manifest  # noqa: E402  load_ownership: the [checkout].binary roster (collector 3 skip set)
@@ -2939,7 +2940,7 @@ def _collector_self_test():
         # so under the OLD path.read_text() it would read whole and scan clean (no finding, no exception).
         # MUTATION: reverting _scan_surface to path.read_text() makes this return normally -> the test fails.
         r = _make_root("oversize-output")
-        with (r / "big.txt").open("wb") as fh:
+        with _nbio.open_nb(r / "big.txt", "wb") as fh:
             fh.truncate(_ASSET_MAX_BYTES + 1)
         try:
             _collect(r, [{"target": "big.txt", "kind": "file"}], set())
@@ -3216,7 +3217,7 @@ def _page_bound_source_self_test():
         SLUG_MARK = "zzslugmarker"
         marked = gen_enforcement_register._build(tmp / "slugmark")
         rp = marked / ".aiqt" / "core" / "rules" / "rule-aa.md"
-        rp.write_text(rp.read_text(encoding="utf-8").replace(
+        rp.write_text(_nbio.read_text_nb(rp, encoding="utf-8").replace(
             "slug: selftest-rule-aa", "slug: " + SLUG_MARK), encoding="utf-8")
         # slug does not feed the ledger, so rebuild it to keep load_ledger's byte-identity check clean.
         (marked / ".aiqt" / "enforceability.json").write_text(
@@ -3350,7 +3351,7 @@ def _page_bound_source_self_test():
         def inject_and_scan(name, rel_path, needle, replacement):
             sub = gen_enforcement_register._build(tmp / name)
             p = sub / rel_path
-            text = p.read_text(encoding="utf-8")
+            text = _nbio.read_text_nb(p, encoding="utf-8")
             if needle not in text:
                 failures.append("INJECT setup: {!r} not found in {}".format(needle, rel_path))
                 return []
@@ -3708,7 +3709,7 @@ def _asset_closure_self_test():
         (r / "site").mkdir(parents=True)
         (r / HTML_REL).write_text(
             '<html><head><script src="/big.js"></script></head><body>ok</body></html>', encoding="utf-8")
-        with (r / "site" / "big.js").open("wb") as fh:
+        with _nbio.open_nb(r / "site" / "big.js", "wb") as fh:
             fh.truncate(_ASSET_MAX_BYTES + 1)
         try:
             _scan_asset_closure(r)

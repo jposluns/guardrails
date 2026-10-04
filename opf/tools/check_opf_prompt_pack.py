@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _opf_adopt import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, _DIGEST_RE, _is_contained_filepath,
 )
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _semver import _parse as _parse_version  # noqa: E402
 import _containment  # noqa: E402  precheck_special_files (D-400-SPECIAL-FILE-PRECHECK)
 
@@ -334,7 +335,7 @@ def _vectors():
 
 
 def _snapshot(root):
-    return dict((str(p.relative_to(root)), p.read_bytes()) for p in sorted(Path(root).rglob("*"))
+    return dict((str(p.relative_to(root)), _nbio.read_bytes_nb(p)) for p in sorted(Path(root).rglob("*"))
                 if p.is_file() and not p.is_symlink())
 
 

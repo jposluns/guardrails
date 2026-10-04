@@ -34,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_store    # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _opf_schema   # noqa: E402
 import _opf_release  # noqa: E402
 from _opf_store import VALID, INVALID, CANNOT_EVALUATE, StoreError  # noqa: E402
@@ -89,7 +90,7 @@ def _scan_sites(predicate):
     `predicate(line)`. The source itself is the authoritative index of the sites (never a hand list)."""
     sites = set()
     for name, path in _MODULE_PATHS.items():
-        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        for i, line in enumerate(_nbio.read_text_nb(path, encoding="utf-8").splitlines(), start=1):
             if predicate(line):
                 sites.add((name, i))
     return sites
@@ -136,7 +137,7 @@ def _skn_call_sites():
     name_to_tok = {tok[:-1]: tok for tok in _KEY_NAME_RENDER_TOKENS}
     sites = {tok: set() for tok in _KEY_NAME_RENDER_TOKENS}
     for fname, path in _MODULE_PATHS.items():
-        hits = _ast_call_sites_in(path.read_text(encoding="utf-8"), fname, set(name_to_tok))
+        hits = _ast_call_sites_in(_nbio.read_text_nb(path, encoding="utf-8"), fname, set(name_to_tok))
         for name, s in hits.items():
             sites[name_to_tok[name]] |= s
     return sites
@@ -170,7 +171,7 @@ def _key_name_render_defs(sources=None):
     disclosed residual noted above). `sources` (a {filename: text} map) overrides the on-disk read so the
     self-test can inject a fixture def (F-R17-B5)."""
     if sources is None:
-        sources = {fname: path.read_text(encoding="utf-8") for fname, path in _MODULE_PATHS.items()}
+        sources = {fname: _nbio.read_text_nb(path, encoding="utf-8") for fname, path in _MODULE_PATHS.items()}
     defs = set()
     for fname, source in sources.items():
         defs |= _ast_key_name_defs_in(source, fname)

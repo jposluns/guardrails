@@ -25,6 +25,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 EXIT_OK = 0
 EXIT_FINDING = 1
@@ -64,7 +65,7 @@ def _snapshot(root):
                 result[relpath] = ("directory", mode)
                 walk(path)
             elif stat.S_ISREG(st.st_mode):
-                result[relpath] = ("file", mode, path.read_bytes())
+                result[relpath] = ("file", mode, _nbio.read_bytes_nb(path))
             elif stat.S_ISLNK(st.st_mode):
                 result[relpath] = ("symlink", os.readlink(path))
             else:
@@ -134,7 +135,7 @@ def _suite_isolated(invoke):
                 if any(not stat.S_ISREG((machine / name).lstat().st_mode) for name in source_names):
                     return False
                 docs = {
-                    name: tomllib.loads((machine / name).read_text(encoding="utf-8"))
+                    name: tomllib.loads(_nbio.read_text_nb(machine / name, encoding="utf-8"))
                     for name in source_names
                 }
                 if not good(_opf_store.validate_manifest(docs[_opf_store.MANIFEST_NAME])):
@@ -164,7 +165,7 @@ def _suite_isolated(invoke):
                 finally:
                     os.close(root_fd)
                 pointer = tomllib.loads(
-                    (root / _opf_store.POINTER_REL).read_text(encoding="utf-8"))
+                    _nbio.read_text_nb(root / _opf_store.POINTER_REL, encoding="utf-8"))
                 return pointer == {"store": {"target": "dir:."}}
             except (FileNotFoundError, ValueError, UnicodeError, _opf_views.ViewsError):
                 return False
@@ -231,7 +232,7 @@ def _suite_isolated(invoke):
             saved_env = dict(os.environ)
             # Even a broken parser that ignores --root defaults into this isolated, non-git directory.
             # Restore the caller's cwd before TemporaryDirectory removes the fixture.
-            saved_cwd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+            saved_cwd = os.open(".", (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
             try:
                 # Use the OPF-local allowlist before mutating os.environ, retaining PATH.
                 # The subprocess init must not inherit an unenumerated GIT_* selector.
@@ -268,7 +269,7 @@ def _suite_isolated(invoke):
                 check("no root VERSION", not (clean / "VERSION").exists())
                 check("heading-only changelog",
                       (clean / "CHANGELOG.md").is_file()
-                      and (clean / "CHANGELOG.md").read_bytes() == b"# Changelog\n")
+                      and _nbio.read_bytes_nb(clean / "CHANGELOG.md") == b"# Changelog\n")
                 created = [
                     json.loads(line) for line in output.splitlines() if line.startswith("{")
                 ]
@@ -314,7 +315,7 @@ def _suite_isolated(invoke):
                     and {(entry["path"], entry["kind"]) for entry in row.get("entries", [])}
                     == expected_inventory for row in reports))
                 check("foreign tree preserved", _snapshot(foreign) == before)
-                check("foreign link target preserved", victim.read_bytes() == b"untouched\n")
+                check("foreign link target preserved", _nbio.read_bytes_nb(victim) == b"untouched\n")
 
                 nongit = base / "non-git"
                 nongit.mkdir()
@@ -353,7 +354,7 @@ def _suite_isolated(invoke):
                 check("existing changelog permits source initialization",
                       rc == EXIT_OK and valid_sources(changelog))
                 check("existing changelog preserved",
-                      (changelog / "CHANGELOG.md").read_bytes() == b"Existing changelog.\n")
+                      _nbio.read_bytes_nb(changelog / "CHANGELOG.md") == b"Existing changelog.\n")
 
                 # Symlinked root, containment-isolated: the symlink target is a REAL directory INSIDE
                 # the same git repo, and --root names the sibling symlink. _init_repo's repo-containment
@@ -944,7 +945,7 @@ def _suite_isolated(invoke):
                 nonutf8 = d2b_stripped_partial("d2b-nonutf8-promisor")
                 git_call(nonutf8, ["config", "remote.origin.promisor", "true"])
                 nu_cfg = nonutf8 / ".git" / "config"
-                nu_raw = nu_cfg.read_bytes()
+                nu_raw = _nbio.read_bytes_nb(nu_cfg)
                 if b'[remote "origin"]' not in nu_raw:
                     raise OSError("R11-1 fixture: expected a [remote \"origin\"] section to rename")
                 nu_cfg.write_bytes(nu_raw.replace(b'[remote "origin"]', b'[remote "up\xffstream"]'))
@@ -982,7 +983,7 @@ def _suite_isolated(invoke):
                 (external_repo / "ext").write_bytes(b"external\n")
                 git_call(external_repo, ["--literal-pathspecs", "add", "--", "ext"])
                 external_index = external_repo / ".git" / "index"
-                external_before = external_index.read_bytes()
+                external_before = _nbio.read_bytes_nb(external_index)
                 saved_index_file = os.environ.get("GIT_INDEX_FILE")
                 os.environ["GIT_INDEX_FILE"] = str(external_index)
                 try:
@@ -994,7 +995,7 @@ def _suite_isolated(invoke):
                     else:
                         os.environ["GIT_INDEX_FILE"] = saved_index_file
                 check("git_input ignores an inherited GIT_INDEX_FILE (external index byte-unchanged)",
-                      external_index.read_bytes() == external_before)
+                      _nbio.read_bytes_nb(external_index) == external_before)
 
                 # OPF-FSMONITOR (F-OPF-INIT-FSMONITOR-EXEC): _run_git must suppress a repository-configured
                 # core.fsmonitor, so an untrusted repo cannot obtain CODE EXECUTION when the adopter runs

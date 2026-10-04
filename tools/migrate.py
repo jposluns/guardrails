@@ -36,6 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 try:
     import tomllib
@@ -91,7 +92,7 @@ def _component_membership(rows):
 def load_crosswalk(root):
     path = root / CROSSWALK_REL
     try:
-        with open(path, "rb") as fh:
+        with _nbio.open_nb(path, "rb") as fh:
             return tomllib.load(fh)
     except FileNotFoundError:
         raise RefuseError("no crosswalk at {} (nothing to plan)".format(CROSSWALK_REL))
@@ -108,7 +109,7 @@ def _read_staged_plan(staged):
     the staged payload (content digest for write/create) so the INTENT records the intended result."""
     plan_path = staged / "plan.json"
     try:
-        raw = plan_path.read_bytes()
+        raw = _nbio.read_bytes_nb(plan_path)
     except OSError as exc:
         raise RefuseError("cannot read staged plan {} ({})".format(plan_path, exc))
     try:
@@ -152,14 +153,14 @@ def _mode_of(raw_op, default):
 def _read_payload(staged, relpath, where):
     _journal._check_rel(relpath)                          # reject traversal in a staged payload path
     try:
-        return (staged / "payload" / relpath).read_bytes()
+        return _nbio.read_bytes_nb(staged / "payload" / relpath)
     except OSError as exc:
         raise RefuseError("{}: missing staged payload for {!r} ({})".format(where, relpath, exc))
 
 
 def _staged_reader(staged):
     def reader(op):
-        return (staged / "payload" / op["path"]).read_bytes()
+        return _nbio.read_bytes_nb(staged / "payload" / op["path"])
     return reader
 
 
@@ -184,7 +185,7 @@ def _require_quiescence(staged):
 def _open_root_fd(root):
     # O_NOFOLLOW binds the adopter root itself against a final-component symlink swap (codex crash-safety
     # hardening): a root whose final component is a symlink is refused rather than followed off-tree.
-    return os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    return os.open(str(root), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
 
 
 def _open_root_or_none(root):
@@ -666,7 +667,7 @@ def _snapshot(root):
         for f in filenames:
             full = dp / f
             out.add((str(full.relative_to(root)), "file", stat_mode(full),
-                     hashlib.sha256(full.read_bytes()).hexdigest()))
+                     hashlib.sha256(_nbio.read_bytes_nb(full)).hexdigest()))
     return frozenset(out)
 
 
@@ -964,7 +965,7 @@ def self_test():
         _run(["cutover", "--root", str(croot), "--staged", str(cstaged), "--unit", _SELFTEST_UNIT])
         ctxn = _latest_txn(croot)
         log = croot / JOURNAL_REL / ctxn / "frames.log"
-        raw = bytearray(log.read_bytes())
+        raw = bytearray(_nbio.read_bytes_nb(log))
         raw[0:1] = b"Z"                                    # break the FIRST (non-tail) frame's magic
         log.write_bytes(bytes(raw))
         if _run(["status", "--root", str(croot)]) != 2:
@@ -1006,7 +1007,7 @@ def self_test():
         #     JournalError (never a silent skip), matching the write/remove non-regular branch (-> exit 2
         #     when a CLI maps it, as do_recover does).
         nd = _build_case_root(tmp / "nondir" / "root", "flat-files")
-        ndfd = os.open(str(nd), os.O_RDONLY | os.O_DIRECTORY)
+        ndfd = os.open(str(nd), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         try:
             (nd / "collide").write_bytes(b"not-a-dir\n")    # a regular file where a directory is expected
             for kind, prestate in (("mkdir", {"kind": "absent"}),
@@ -1032,8 +1033,8 @@ def self_test():
         kjr = tmp / "exclcap" / "journal"; (kjr / "t1" / "preimages").mkdir(parents=True)
         kvictim = tmp / "exclcap" / "victim"; kvictim.write_bytes(b"VICTIM-INTACT")
         os.link(str(kvictim), str(kjr / "t1" / "preimages" / "0"))         # slot 0: a hard link to the victim
-        kjr_fd = os.open(str(kjr), os.O_RDONLY | os.O_DIRECTORY)
-        kroot_fd = os.open(str(kroot), os.O_RDONLY | os.O_DIRECTORY)
+        kjr_fd = os.open(str(kjr), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        kroot_fd = os.open(str(kroot), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         try:
             _journal.capture_preimages(kjr_fd, kjr / "t1", kroot_fd, [{"op": "write", "path": "dataA"}])
             failures.append("capture_preimages must refuse a pre-planted payload slot (O_EXCL), not overwrite it")
@@ -1042,7 +1043,7 @@ def self_test():
         finally:
             os.close(kjr_fd)
             os.close(kroot_fd)
-        if kvictim.read_bytes() != b"VICTIM-INTACT":
+        if _nbio.read_bytes_nb(kvictim) != b"VICTIM-INTACT":
             failures.append("capture_preimages truncated/overwrote a hard-linked victim at the payload slot")
         checked += 1
 
@@ -1059,8 +1060,8 @@ def self_test():
         _lop = {"op": "write", "path": "dataA",
                 "prestate": {"kind": "file", "mode": 0o644, "size": len(_small), "payload": "0",
                              "sha256": hashlib.sha256(_small).hexdigest()}}
-        ljr_fd = os.open(str(ljr), os.O_RDONLY | os.O_DIRECTORY)
-        lroot_fd = os.open(str(lroot), os.O_RDONLY | os.O_DIRECTORY)
+        ljr_fd = os.open(str(ljr), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        lroot_fd = os.open(str(lroot), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         _lmsg = ""
         try:
             _journal._restore_preimage(ljr_fd, ljr / "t1", lroot_fd, _lop)
@@ -1096,8 +1097,8 @@ def self_test():
         _decoy_st = os.lstat(str(mdecoy))          # regular, but a DIFFERENT st_ino/st_dev than the victim
         _orig_lstat_at = _journal._lstat_at
         _journal._lstat_at = lambda pfd, name: _decoy_st
-        mjr_fd = os.open(str(mjr), os.O_RDONLY | os.O_DIRECTORY)
-        mroot_fd = os.open(str(mroot), os.O_RDONLY | os.O_DIRECTORY)
+        mjr_fd = os.open(str(mjr), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        mroot_fd = os.open(str(mroot), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         _m_refused = False
         try:
             _journal._restore_preimage(mjr_fd, mjr / "t1", mroot_fd, _mop)
@@ -1110,7 +1111,7 @@ def self_test():
         if not _m_refused:
             failures.append("_restore_preimage must refuse a regular-file/hardlink swap detected on the "
                             "opened fd (post-open identity check missing)")
-        if mvictim.read_bytes() != b"VICTIM-INTACT":
+        if _nbio.read_bytes_nb(mvictim) != b"VICTIM-INTACT":
             failures.append("_restore_preimage truncated/overwrote a swapped-in victim regular file")
         checked += 1
 
@@ -1124,7 +1125,7 @@ def self_test():
         njr = tmp / "frameslink" / "journal"; (njr / "t1").mkdir(parents=True)
         nvictim = tmp / "frameslink" / "victim"; nvictim.write_bytes(b"VICTIM-INTACT")
         os.link(str(nvictim), str(njr / "t1" / "frames.log"))   # frames.log: a hard link to the victim
-        njr_fd = os.open(str(njr), os.O_RDONLY | os.O_DIRECTORY)
+        njr_fd = os.open(str(njr), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         try:
             _pub_refused = False
             try:
@@ -1154,7 +1155,7 @@ def self_test():
                                 "(expected an st_nlink identity refusal, got {!r})".format(_rd_msg))
         finally:
             os.close(njr_fd)
-        if nvictim.read_bytes() != b"VICTIM-INTACT":
+        if _nbio.read_bytes_nb(nvictim) != b"VICTIM-INTACT":
             failures.append("a hard-linked frames.log was appended-to/truncated through the shared inode "
                             "(victim not intact)")
         checked += 1
@@ -1185,7 +1186,7 @@ def self_test():
                      "prestate": {"kind": "file", "mode": 0o644, "size": len(_pw_bytes), "payload": "0",
                                   "sha256": _pw_sha},
                      "poststate": {"content-sha256": hashlib.sha256(b"NEWDATA").hexdigest()}}
-        aproot_fd = os.open(str(aproot), os.O_RDONLY | os.O_DIRECTORY)
+        aproot_fd = os.open(str(aproot), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         _apply_refused = False
         try:
             _journal.apply_ops(aproot_fd, [_apply_op], lambda _o: b"NEWDATA")
@@ -1196,7 +1197,7 @@ def self_test():
         if not _apply_refused:
             failures.append("apply_ops must refuse a hard-linked product file (st_nlink!=1), not write "
                             "through the shared inode to an out-of-tree victim")
-        if avictim.read_bytes() != _pw_bytes:
+        if _nbio.read_bytes_nb(avictim) != _pw_bytes:
             failures.append("apply_ops truncated/overwrote a hard-linked out-of-tree victim (product file)")
         checked += 1
         # (P-capture) capture_preimages must REFUSE a hard-linked write target (defence in depth).
@@ -1205,8 +1206,8 @@ def self_test():
         os.chmod(str(cvictim), 0o644)
         os.link(str(cvictim), str(cproot / "dataA"))
         cjr = tmp / "prodlink-cap" / "journal"; (cjr / "t1").mkdir(parents=True)
-        cproot_fd = os.open(str(cproot), os.O_RDONLY | os.O_DIRECTORY)
-        cjr_fd = os.open(str(cjr), os.O_RDONLY | os.O_DIRECTORY)
+        cproot_fd = os.open(str(cproot), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        cjr_fd = os.open(str(cjr), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         _cap_refused = False
         try:
             _journal.capture_preimages(cjr_fd, cjr / "t1", cproot_fd, [{"op": "write", "path": "dataA"}])
@@ -1218,7 +1219,7 @@ def self_test():
         if not _cap_refused:
             failures.append("capture_preimages must refuse a hard-linked `write` target (st_nlink!=1) "
                             "before the transaction opens")
-        if cvictim.read_bytes() != _pw_bytes:
+        if _nbio.read_bytes_nb(cvictim) != _pw_bytes:
             failures.append("capture_preimages disturbed a hard-linked out-of-tree victim")
         checked += 1
         # (P-restore) _restore_preimage must REFUSE a hard-linked target and leave the victim intact.
@@ -1232,8 +1233,8 @@ def self_test():
         _restore_op = {"op": "write", "path": "dataA",
                        "prestate": {"kind": "file", "mode": 0o644, "size": len(_rpre), "payload": "0",
                                     "sha256": hashlib.sha256(_rpre).hexdigest()}}
-        rjr_fd = os.open(str(rjr), os.O_RDONLY | os.O_DIRECTORY)
-        rproot_fd = os.open(str(rproot), os.O_RDONLY | os.O_DIRECTORY)
+        rjr_fd = os.open(str(rjr), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        rproot_fd = os.open(str(rproot), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         _restore_refused = False
         try:
             _journal._restore_preimage(rjr_fd, rjr / "t1", rproot_fd, _restore_op)
@@ -1245,7 +1246,7 @@ def self_test():
         if not _restore_refused:
             failures.append("_restore_preimage must refuse a hard-linked product file (st_nlink!=1), not "
                             "rewrite through the shared inode to an out-of-tree victim")
-        if rvictim.read_bytes() != _pw_bytes:
+        if _nbio.read_bytes_nb(rvictim) != _pw_bytes:
             failures.append("_restore_preimage truncated/overwrote a hard-linked out-of-tree victim")
         checked += 1
 
@@ -1258,7 +1259,7 @@ def self_test():
         #     and this flips red.
         xroot = tmp / "exclcreate" / "journal"; (xroot / "t1").mkdir(parents=True)
         (xroot / "t1" / "frames.log").write_bytes(b"PRE-PLANTED")     # a pre-existing entry at that name
-        xjr_fd = os.open(str(xroot), os.O_RDONLY | os.O_DIRECTORY)
+        xjr_fd = os.open(str(xroot), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         _excl_refused = False
         try:
             _journal._create_frames_excl(xjr_fd, xroot / "t1")
@@ -1282,7 +1283,7 @@ def self_test():
         #     second fd leaks, and the raw OSError escapes.
         wroot = tmp / "walkclose" / "root"; (wroot / "a" / "b").mkdir(parents=True)
         (wroot / "a" / "b" / "dataA").write_bytes(b"x")
-        wroot_fd = os.open(str(wroot), os.O_RDONLY | os.O_DIRECTORY)
+        wroot_fd = os.open(str(wroot), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         _w_real_close = os.close
         _w_state = {"n": 0}
 
@@ -1425,7 +1426,7 @@ def self_test():
                   (_journal.F_RIP, {"txn": "A"})])):
             stxn = tmp / "c2" / label.replace(" ", "_")
             stxn.mkdir(parents=True)
-            _sjr = os.open(str(stxn.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            _sjr = os.open(str(stxn.parent), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
             try:
                 for ftype, obj in frames_spec:
                     _journal.publish(_sjr, stxn, ftype, obj)
@@ -1441,7 +1442,7 @@ def self_test():
         # accepted sequence, so is_terminal fails closed there too, classifying identically to recover.
         itxn = tmp / "c2-isterm"
         itxn.mkdir(parents=True)
-        _ijr = os.open(str(itxn.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _ijr = os.open(str(itxn.parent), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
         try:
             _journal.publish(_ijr, itxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
             _journal.publish(_ijr, itxn, _journal.F_RC, {"txn": "A"})
@@ -1460,7 +1461,7 @@ def self_test():
         c3root = _build_case_root(tmp / "c3" / "root", "flat-files")   # has dataA = old-A\n
         c3jr = c3root / JOURNAL_REL
         c3jr.mkdir(parents=True, exist_ok=True)
-        c3fd = os.open(str(c3root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        c3fd = os.open(str(c3root), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
         c3jrfd = _journal.open_journal_root_fd(c3fd, JOURNAL_REL)
         try:
             planned = {"op": "write", "path": "dataA",
@@ -1514,7 +1515,7 @@ def self_test():
         #     re-confirmed the STALE owner and would have unlinked whatever lock was there (the race).
         c1jr = tmp / "c1" / JOURNAL_REL
         c1jr.mkdir(parents=True)
-        c1fd = os.open(str(tmp / "c1"), os.O_RDONLY | os.O_DIRECTORY)
+        c1fd = os.open(str(tmp / "c1"), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         c1jrfd = _journal.open_journal_root_fd(c1fd, JOURNAL_REL)
         try:
             _journal.acquire_lock(c1jr, session_id="live-holder")
@@ -1544,7 +1545,7 @@ def self_test():
         f3jr.mkdir(parents=True)
         (f3jr / "lock.break").write_bytes(b"")               # a regular arbitration file...
         os.link(str(f3jr / "lock.break"), str(f3root / "evil-hardlink"))  # ...with a SECOND hard link
-        f3fd = os.open(str(f3root), os.O_RDONLY | os.O_DIRECTORY)
+        f3fd = os.open(str(f3root), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         f3jrfd = _journal.open_journal_root_fd(f3fd, JOURNAL_REL)
         try:
             try:
@@ -1693,7 +1694,7 @@ def self_test():
         ajr = tmp / "arb-symlink" / JOURNAL_REL
         ajr.mkdir(parents=True)
         os.symlink(str(tmp / "arb-symlink" / "elsewhere"), str(ajr / "lock.break"))
-        awfd = os.open(str(tmp / "arb-symlink"), os.O_RDONLY | os.O_DIRECTORY)
+        awfd = os.open(str(tmp / "arb-symlink"), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         awjrfd = _journal.open_journal_root_fd(awfd, JOURNAL_REL)
         try:
             _journal.reconcile_and_claim_stale(ajr, awjrfd, awfd, session_id="recover")
@@ -1895,7 +1896,7 @@ def self_test():
             (e1 / "D").mkdir()
             mk_real(e1 / "P")
             mk_decoy(e1 / "D")
-            e1fd = os.open(str(e1), os.O_RDONLY | os.O_DIRECTORY)
+            e1fd = os.open(str(e1), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
             orig_open_parent = _journal._open_parent
             e1state = {"swapped": False}
 
@@ -2027,7 +2028,7 @@ def self_test():
         a2root = _build_case_root(tmp / "a2-root", "flat-files")    # dataA = old-A\n
         a2jr = a2root / JOURNAL_REL
         a2jr.mkdir(parents=True, exist_ok=True)
-        a2fd = os.open(str(a2root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        a2fd = os.open(str(a2root), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
         a2jrfd = _journal.open_journal_root_fd(a2fd, JOURNAL_REL)
         try:
             pre_a2 = _snapshot(a2root)
@@ -2069,7 +2070,7 @@ def self_test():
                                                      ensure_ascii=True).encode())
 
         _ab_txn = "a2budtxn"
-        _ab_data = (abroot / "dataA").read_bytes()
+        _ab_data = _nbio.read_bytes_nb(abroot / "dataA")
         _ab_mode = stat.S_IMODE(os.stat(str(abroot / "dataA")).st_mode)
         _ab_prestate = {"kind": "file", "mode": _ab_mode, "size": len(_ab_data),
                         "payload": "0", "sha256": hashlib.sha256(_ab_data).hexdigest()}
@@ -2111,7 +2112,7 @@ def self_test():
         if not (_ab_delta < _ab_rip + _ab_rc and _ab_delta + _ab_complete > _ab_rip + _ab_rc):
             failures.append("A2BUD: prestate delta does not straddle the terminal-frame boundary (test inert)")
         _ab_header = {"unit": "x", "kind": "cutover", "pad": "P" * max(0, _ab_pad)}
-        abfd = os.open(str(abroot), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        abfd = os.open(str(abroot), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
         abjrfd = _journal.open_journal_root_fd(abfd, JOURNAL_REL)
         try:
             pre_ab = _snapshot(abroot)
@@ -2149,7 +2150,7 @@ def self_test():
                                                                   separators=(",", ":")).encode())
                 _ap_fill = _journal._MAX_JOURNAL_READ_BYTES - len(_ap_frame) + _ap_extra
                 (_ap_jr / "aptxn" / "frames.log").write_bytes(b"x" * _ap_fill)
-                _ap_fd = os.open(str(_ap_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                _ap_fd = os.open(str(_ap_root), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
                 _ap_jrfd = _journal.open_journal_root_fd(_ap_fd, JOURNAL_REL)
                 try:
                     try:
@@ -2172,7 +2173,7 @@ def self_test():
         # would follow to the decoy and report zero -> false-clean.
         _jt_root = tmp / "jtoctou" / "root"
         (_jt_root / JOURNAL_REL / "txn1").mkdir(parents=True)
-        _jt_rfd = os.open(str(_jt_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _jt_rfd = os.open(str(_jt_root), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
         _jt_jrfd = _journal.open_journal_root_fd(_jt_rfd, JOURNAL_REL)
         try:
             _jt_jpath = _jt_root / JOURNAL_REL
@@ -2192,7 +2193,7 @@ def self_test():
         # OSError, so the CLI maps it to exit 2 and _all_terminal to False. Inject a scandir failure.
         _ose_root = tmp / "osesc" / "root"
         (_ose_root / JOURNAL_REL).mkdir(parents=True)
-        _ose_rfd = os.open(str(_ose_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _ose_rfd = os.open(str(_ose_root), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
         _ose_jrfd = _journal.open_journal_root_fd(_ose_rfd, JOURNAL_REL)
         _ose_real_scandir = os.scandir
 

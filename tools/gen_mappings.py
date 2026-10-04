@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, read_source_text, replace_block, reconcile  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 import gen_rules  # noqa: E402  (reuse the one frontmatter parser + full corpus validation)
 from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
@@ -461,7 +462,7 @@ def main():
         print("error: site/mappings.html not found (expected generated target)", file=sys.stderr)
         return 2
     try:
-        text = page.read_text(encoding="utf-8")
+        text = _nbio.read_text_nb(page, encoding="utf-8")
         text = replace_block(text, "COVERAGE", render_coverage(reg, rows))
         text = replace_block(text, "RELKINDS", render_relkinds(manifests))
         text = replace_block(text, "IDKINDS", render_idkinds(manifests))

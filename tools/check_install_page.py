@@ -59,6 +59,9 @@ from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I drops the script dir; the shared readers live beside this file
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
+
 PAGE_REL = "site/install.html"
 STYLES_REL = "site/styles.css"
 JS_REL = "site/js/install.js"
@@ -421,9 +424,9 @@ def run(root):
                   "fail-closed".format(rel), file=sys.stderr)
             return 2
     try:
-        page_text = page.read_text(encoding="utf-8")
-        css_text = styles.read_text(encoding="utf-8")
-        js_text = js.read_text(encoding="utf-8")   # read so an unreadable OR empty script fails, not silently clean
+        page_text = _nbio.read_text_nb(page, encoding="utf-8")
+        css_text = _nbio.read_text_nb(styles, encoding="utf-8")
+        js_text = _nbio.read_text_nb(js, encoding="utf-8")   # read so an unreadable OR empty script fails, not silently clean
     except (OSError, UnicodeDecodeError) as exc:
         print("error: cannot read an install-page input ({}); fail-closed".format(exc), file=sys.stderr)
         return 2

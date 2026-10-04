@@ -123,6 +123,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _containment        # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _journal            # noqa: E402
 import _opf_check          # noqa: E402
 import _opf_emit           # noqa: E402
@@ -799,7 +800,7 @@ def observe_inventory(root_fd):
                     raise InitOperationError("the .working inventory exceeds its depth bound",
                                              CANNOT_EVALUATE)
                 try:
-                    cfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    cfd = os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC) | getattr(os, "O_NONBLOCK", 0),
                                   dir_fd=dfd)
                 except OSError as exc:
                     raise InitOperationError("cannot open {} ({})".format(path, exc),
@@ -829,7 +830,7 @@ def observe_inventory(root_fd):
              "mode": stat.S_IMODE(wst.st_mode) & 0o777})
         try:
             wfd = os.open(_opf_store.WORKING_DIRNAME,
-                          os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                          (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC) | getattr(os, "O_NONBLOCK", 0),
                           dir_fd=root_fd)
         except OSError as exc:
             raise InitOperationError("cannot open .working ({})".format(exc), CANNOT_EVALUATE)
@@ -1315,7 +1316,7 @@ def _journal_ensure_txn(jr_fd, txn):
             os.fsync(jr_fd)
         elif stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
             raise InitOperationError("journal {} is not a plain directory".format(txn))
-        tfd = os.open(txn, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        tfd = os.open(txn, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC) | getattr(os, "O_NONBLOCK", 0),
                       dir_fd=jr_fd)
         try:
             try:
@@ -1421,7 +1422,7 @@ def _set_dir_mode(pfd, name, label, st, mode):
 
 def _fsync_dir_at(pfd, name, label):
     try:
-        dfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dfd = os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC) | getattr(os, "O_NONBLOCK", 0),
                       dir_fd=pfd)
         try:
             os.fsync(dfd)
@@ -2582,7 +2583,7 @@ def _tree_snapshot(root):
             elif stat.S_ISDIR(st.st_mode):
                 snap[rel] = ("dir", stat.S_IMODE(st.st_mode), None)
             elif stat.S_ISREG(st.st_mode):
-                with open(p, "rb") as fh:
+                with _nbio.open_nb(p, "rb") as fh:
                     snap[rel] = ("file", stat.S_IMODE(st.st_mode), fh.read())
             else:
                 snap[rel] = ("special", stat.S_IMODE(st.st_mode), None)
@@ -2722,7 +2723,7 @@ def _ops_dir(root):
 
 def _read_plan(root):
     ops = sorted(os.listdir(_ops_dir(root)))
-    with open(os.path.join(_ops_dir(root), ops[0], _opf_init_substrate.PLAN_NAME), "rb") as fh:
+    with _nbio.open_nb(os.path.join(_ops_dir(root), ops[0], _opf_init_substrate.PLAN_NAME), "rb") as fh:
         return ops, fh.read()
 
 
@@ -3086,7 +3087,7 @@ def _b6_tests(base, env, ok, refuses):
 
 def _expected_views(root):
     """{dest relpath: bytes} the renderer planner produces over the store at root (read-only)."""
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    fd = os.open(root, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
     try:
         return {dest: text.encode("utf-8")
                 for _n, _s, dest, text in _opf_views.plan_views(fd, _MACHINE_HOME)}
@@ -3096,7 +3097,7 @@ def _expected_views(root):
 
 def _read_or_none(path):
     try:
-        with open(path, "rb") as fh:
+        with _nbio.open_nb(path, "rb") as fh:
             return fh.read()
     except OSError:
         return None
@@ -3112,7 +3113,7 @@ def _worktree_without_lease(root):
 
 def _snapshot_all(root):
     """The worktree snapshot plus the index bytes (the git index must never change)."""
-    with open(os.path.join(root, ".git", "index"), "rb") as fh:
+    with _nbio.open_nb(os.path.join(root, ".git", "index"), "rb") as fh:
         index = fh.read()
     return _tree_snapshot(root), index
 
@@ -3168,7 +3169,7 @@ def _physical_tests(base, env, ok, signal):
         ok("R1-{:o}-file-modes".format(umask), set(modes.values()) == {SOURCE_MODE}, str(modes))
         ok("R1-{:o}-dir-modes".format(umask), stat.S_IMODE(os.lstat(os.path.join(
             root, _MACHINE_HOME)).st_mode) == DIR_MODE)
-        with open(os.path.join(root, ".git", "index"), "rb") as fh:
+        with _nbio.open_nb(os.path.join(root, ".git", "index"), "rb") as fh:
             ok("R1-{:o}-index-untouched".format(umask), fh.read() == index_before)
         ok("R1-{:o}-no-lease".format(umask), not os.path.exists(os.path.join(root, LEASE_RELPATH)))
         ok("R1-{:o}-phases".format(umask), res["phases"] == list(PHASES), str(res["phases"]))
@@ -3178,12 +3179,12 @@ def _physical_tests(base, env, ok, signal):
            and outcomes[0]["checks_executed"] == list(REQUIRED_CHECKS))
         res_store = _opf_store.resolve_store(root)
         ok("R1-{:o}-resolves".format(umask), res_store.status == _opf_store.RESOLVED)
-        manifest_model = tomllib.loads(open(os.path.join(root, _MACHINE_HOME, "manifest.toml"),
+        manifest_model = tomllib.loads(_nbio.open_nb(os.path.join(root, _MACHINE_HOME, "manifest.toml"),
                                             encoding="utf-8").read())
         contained = _opf_check.classify_containment(manifest_model, _MACHINE_HOME)
         ok("R1-{:o}-init-toml-contained".format(umask), contained.managed_file(PROVENANCE_RELPATH)
            and not contained.managed_file("{}/stray.toml".format(_MACHINE_HOME)))
-        with open(os.path.join(root, CHANGELOG_RELPATH), "rb") as fh:
+        with _nbio.open_nb(os.path.join(root, CHANGELOG_RELPATH), "rb") as fh:
             ok("R1-{:o}-changelog-created".format(umask), fh.read() == _CHANGELOG_PAYLOAD)
 
     # R2 a completed rerun changes NOTHING in the worktree or the index; the lock is released.
@@ -3199,7 +3200,7 @@ def _physical_tests(base, env, ok, signal):
     # validated, never held to its plan's bytes (decision 5): ALREADY-INITIALIZED, the edit untouched.
     root = os.path.join(base, "fresh-77")
     counters_path = os.path.join(root, COUNTERS_RELPATH)
-    edited = open(counters_path, "rb").read().replace(b"BI = 0", b"BI = 1")
+    edited = _nbio.open_nb(counters_path, "rb").read().replace(b"BI = 0", b"BI = 1")
     _write(counters_path, edited)
     record = {"id": "BI-1", "type": "backlog_item", "status": "open", "title": "later",
               "created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z",
@@ -3217,7 +3218,7 @@ def _physical_tests(base, env, ok, signal):
     _git(["add", "-A"], root, env)
     _git(["commit", "-q", "-m", "cl"], root, env)
     rc, res, err = _child(root, env)
-    with open(os.path.join(root, CHANGELOG_RELPATH), "rb") as fh:
+    with _nbio.open_nb(os.path.join(root, CHANGELOG_RELPATH), "rb") as fh:
         ok("R3-changelog-preserved", res and res["status"] == VIEWS_READY
            and fh.read() == b"# Mine\n\nkeep me\n" and CHANGELOG_RELPATH not in res["created"],
            str(res) + err[-400:])
@@ -3354,7 +3355,7 @@ def _physical_tests(base, env, ok, signal):
     ops, _raw = _read_plan(root)
     jr = os.path.join(root, ".git", _opf_init_substrate.SUBSTRATE_DIRNAME,
                       _opf_init_substrate.JOURNALS_DIRNAME)
-    jfd = os.open(jr, os.O_RDONLY | os.O_DIRECTORY)
+    jfd = os.open(jr, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
     try:
         _journal.publish(jfd, _txn_name(ops[0], "sources"), _journal.F_RIP,
                          {"txn": _txn_name(ops[0], "sources")})
@@ -3405,7 +3406,7 @@ def _physical_tests(base, env, ok, signal):
     rc, _res, _err = _child(root, env, kill="source:3", seed=evidence)
     rc, res, err = _child(root, env, kill="noreseed")
     ok("R10-readopted", res and res["status"] == VIEWS_READY, "{} {}".format(res, err[-600:]))
-    with open(os.path.join(root, COUNTERS_RELPATH), "rb") as fh:
+    with _nbio.open_nb(os.path.join(root, COUNTERS_RELPATH), "rb") as fh:
         c = tomllib.loads(fh.read().decode())["counters"]
     ok("R10-wl-next-is-8", high_water(c, "WL") + 1 == 8 and c["BI"] == 3 and c["LF"] == 2)
     _ops, raw = _read_plan(root)
@@ -3524,7 +3525,7 @@ def _physical_tests(base, env, ok, signal):
         return real_read(held, pfd, name, label, size)
     this._read_held = swapping_read
     try:
-        rfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        rfd = os.open(root, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         pfd, name = _journal._open_parent(rfd, entry["path"])
         try:
             _classify_dest(pfd, name, entry, data)
@@ -3545,14 +3546,14 @@ def _physical_tests(base, env, ok, signal):
     plan, _raw = _mk_plan()
     entry = [e for e in plan["sets"]["S"] if e["path"] == CHANGELOG_RELPATH][0]
     data = plan_payloads(plan)[CHANGELOG_RELPATH]
-    rfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    rfd = os.open(root, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
     try:
         _write(os.path.join(root, CHANGELOG_RELPATH), b"theirs\n")
         try:
             _stage_and_publish(rfd, CHANGELOG_RELPATH, entry, data)
             ok("R15-no-replace", False, "an existing destination was replaced")
         except InitOperationError as exc:
-            ok("R15-no-replace", open(os.path.join(root, CHANGELOG_RELPATH), "rb").read()
+            ok("R15-no-replace", _nbio.open_nb(os.path.join(root, CHANGELOG_RELPATH), "rb").read()
                == b"theirs\n" and not os.path.exists(os.path.join(root, entry["staging"])),
                str(exc))
         os.unlink(os.path.join(root, CHANGELOG_RELPATH))
@@ -3595,7 +3596,7 @@ def _physical_tests(base, env, ok, signal):
     ops, _raw = _read_plan(root)
     log = os.path.join(root, ".git", _opf_init_substrate.SUBSTRATE_DIRNAME,
                        _opf_init_substrate.JOURNALS_DIRNAME, _txn_name(ops[0], "dirs"), "frames.log")
-    body = open(log, "rb").read()
+    body = _nbio.open_nb(log, "rb").read()
     second = body.index(b"\n" + _journal.MAGIC + b" " + _journal.F_COMPLETE.encode())
     with open(log, "wb") as fh:
         fh.write(body[:second + 1])
@@ -3629,7 +3630,7 @@ def _physical_tests(base, env, ok, signal):
 
 def _view_state(root, views):
     """The worktree without the lease, the index bytes, and which planned views exist."""
-    with open(os.path.join(root, ".git", "index"), "rb") as fh:
+    with _nbio.open_nb(os.path.join(root, ".git", "index"), "rb") as fh:
         index = fh.read()
     return (_worktree_without_lease(root), index,
             [p for p in views if os.path.lexists(os.path.join(root, p))])

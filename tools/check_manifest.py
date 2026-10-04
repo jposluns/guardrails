@@ -48,6 +48,7 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, read_source_bytes, reconcile, precheck_special_files  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import gen_manifest  # noqa: E402  reuse the validated loader/expansion; recompute, never trust output
 
 _OPF_TOOLS = str(Path(__file__).resolve().parent.parent / "opf" / "tools")
@@ -656,7 +657,7 @@ def _self_test_main_isolated():
         #      absent tracked member. A mutant deleting the leg-5 set-equality loops then makes this
         #      fixture PASS, proving leg 5 is what catches the drop.
         m = _fresh("missrow")
-        text = (m / gm.MANIFEST_REL).read_text(encoding="utf-8")
+        text = _nbio.read_text_nb(m / gm.MANIFEST_REL, encoding="utf-8")
         block = '[[sources]]\npath = "src.txt"\n'
         idx = text.find(block)
         end = text.find("\n\n", idx)
@@ -667,7 +668,7 @@ def _self_test_main_isolated():
         m_text = m_text.replace('tree-sha256 = "{}"'.format(parsed["tree-sha256"]),
                                 'tree-sha256 = "{}"'.format(tree))
         (m / gm.MANIFEST_REL).write_text(m_text, encoding="utf-8")
-        manifest_raw = (m / gm.MANIFEST_REL).read_bytes()
+        manifest_raw = _nbio.read_bytes_nb(m / gm.MANIFEST_REL)
         root_hex = hashlib.sha256(manifest_raw).hexdigest()
         (m / gm.ROOT_REL).write_text("sha256:{}\n".format(root_hex), encoding="utf-8")
         version = gm.read_version(m)
@@ -736,13 +737,13 @@ def _self_test_main_isolated():
         # (g) managed-block digest drift with unchanged surroundings -> exit 1; a surroundings-only change
         #     with an unchanged block still passes.
         mb = _fresh("mblock")
-        raw = (mb / "CLAUDE.md").read_text(encoding="utf-8")
+        raw = _nbio.read_text_nb(mb / "CLAUDE.md", encoding="utf-8")
         drifted = raw.replace("index", "INDEX-CHANGED")  # inside the block
         (mb / "CLAUDE.md").write_text(drifted, encoding="utf-8")
         if check_quiet(mb) != 1:
             failures.append("a managed-block digest drift expected exit 1")
         mb2 = _fresh("mblock2")
-        raw2 = (mb2 / "CLAUDE.md").read_text(encoding="utf-8")
+        raw2 = _nbio.read_text_nb(mb2 / "CLAUDE.md", encoding="utf-8")
         (mb2 / "CLAUDE.md").write_text(raw2.replace("tail", "tail changed outside the block"),
                                        encoding="utf-8")
         if check_quiet(mb2) != 0:
@@ -858,7 +859,7 @@ def _self_test_main_isolated():
                     got = exc.code
             if got != 2:
                 failures.append("reconcile on {} expected exit 2 (refused), got {!r}".format(label, got))
-        if (rdir / "real.toml").read_text(encoding="utf-8") != "same\n":
+        if _nbio.read_text_nb(rdir / "real.toml", encoding="utf-8") != "same\n":
             failures.append("reconcile wrote through a symlinked target")
 
         # (o) D-400-SPECIAL-FILE-PRECHECK item 6: with a FIFO (no writer) at any path of the tree, each of these
@@ -887,7 +888,7 @@ def _self_test_main_isolated():
                      ["conformance.py"], ["check_versions.py"], ["check_byte_canon.py"])
             for rel in ("tools/gen_agents.py", ".claude/rules/aiqt/00-project-integrity.md", "CLAUDE.md",
                         ".aiqt/manifest.toml", ".aiqt/standards/atlas.toml", "VERSION"):
-                saved = (tree / rel).read_bytes()
+                saved = _nbio.read_bytes_nb(tree / rel)
                 (tree / rel).unlink()
                 os.mkfifo(tree / rel)
                 try:
@@ -932,8 +933,8 @@ def _self_test_main_isolated():
         # (q) The OPF copy of the precheck (opf/tools/_containment.py) stays identical to _gen_common's, and a
         #     one-token change to the copy is caught.
         here = Path(__file__).resolve().parents[1]
-        gen_text = (here / "tools" / "_gen_common.py").read_text(encoding="utf-8")
-        opf_text = (here / "opf" / "tools" / "_containment.py").read_text(encoding="utf-8")
+        gen_text = _nbio.read_text_nb(here / "tools" / "_gen_common.py", encoding="utf-8")
+        opf_text = _nbio.read_text_nb(here / "opf" / "tools" / "_containment.py", encoding="utf-8")
         problems = _precheck_copies_problems(gen_text, opf_text)
         if problems:
             failures.append("D-400-SPECIAL-FILE-PRECHECK: the two precheck copies differ: {}".format(
@@ -1004,8 +1005,8 @@ def _self_test_main_isolated():
         #     they pin. POSIX only (os.mkfifo).
         if hasattr(os, "mkfifo"):
             _entry_src = dict(
-                gen=(here / "tools" / "_gen_common.py").read_bytes(),
-                opf=(here / "opf" / "tools" / "_containment.py").read_bytes())
+                gen=_nbio.read_bytes_nb(here / "tools" / "_gen_common.py"),
+                opf=_nbio.read_bytes_nb(here / "opf" / "tools" / "_containment.py"))
 
             def _mini_tree(name):
                 base = tmp / ("precheck-entry-" + name)
@@ -1018,21 +1019,25 @@ def _self_test_main_isolated():
                     return None
                 return base
 
-            def _entry_run(base, which):
+            def _entry_run(base, which, extra_env=None):
                 script = base / ("tools/_gen_common.py" if which == "gen"
                                  else "opf/tools/_containment.py")
+                env = None
+                if extra_env is not None:
+                    env = dict(os.environ)
+                    env.update(extra_env)
                 try:
                     proc = subprocess.run([sys.executable, "-I", "-B", str(script), "--precheck"],
-                                   capture_output=True, text=True, timeout=30)
+                                   capture_output=True, text=True, timeout=30, env=env)
                     return proc.returncode, proc.stdout + proc.stderr
                 except subprocess.TimeoutExpired:
                     return "hung", ""
 
-            def _entry_expect(label, base, which, want_rc, named=None):
+            def _entry_expect(label, base, which, want_rc, named=None, extra_env=None):
                 if base is None:
                     failures.append("(r) cannot git-init the {} tree".format(label))
                     return
-                got_rc, got_out = _entry_run(base, which)
+                got_rc, got_out = _entry_run(base, which, extra_env)
                 if got_rc != want_rc or (named is not None and str(named) not in got_out):
                     failures.append("(r) {} expected the {} --precheck entry to exit {}{}, got {!r}"
                                     .format(label, which, want_rc,
@@ -1257,6 +1262,91 @@ def _self_test_main_isolated():
                             failures.append("(s9) the copy of a tree with an accepted ignored "
                                             "out-of-root link must pass the precheck, got {!r} "
                                             "{!r}".format(got_rc, got_out[-300:]))
+            # (s10) QA round 7 (claude B1): a SYMLINK named __pycache__ is refused BY NAME even
+            # when it is ignored, out-of-root and shadows nothing: the interpreter itself opens
+            # __pycache__/*.pyc with a plain blocking read when a gate imports an in-tree module,
+            # outside every gate reader. Fails without the name refusal (the round-6 walk
+            # accepted this link un-walked, exit 0, and the first gate import then hung).
+            pyclink_tree = _mini_tree("pycache-link")
+            if pyclink_tree is not None:
+                (tmp / "ext-pyc-dir").mkdir(exist_ok=True)
+                os.mkfifo(tmp / "ext-pyc-dir" / "_gen_common.cpython-314.pyc")
+                (pyclink_tree / "tools" / "__pycache__").symlink_to(tmp / "ext-pyc-dir")
+                exclude = pyclink_tree / ".git" / "info" / "exclude"
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                exclude.write_text("tools/__pycache__\n", encoding="utf-8")
+            _entry_expect("an ignored out-of-root __pycache__ symlink", pyclink_tree, "gen", 2,
+                          "__pycache__")
+            _entry_expect("an ignored out-of-root __pycache__ symlink", pyclink_tree, "opf", 2,
+                          "__pycache__")
+            # (s11) QA round 7 (codex M4 = claude M2): an inherited GIT_DIR (with GIT_WORK_TREE)
+            # naming a real nested repository must not designate that directory as the exempt own
+            # git dir: every GIT_* variable is scrubbed from the precheck's git queries. Fails
+            # without the scrub (the redirected identity exits 0 and the nested FIFO goes
+            # unrefused).
+            gitdirred_tree = _mini_tree("gitdir-redirect")
+            if gitdirred_tree is not None:
+                nested = gitdirred_tree / "tools" / "qa2"
+                nested.mkdir(parents=True)
+                if gm._git(nested, "init", "-q").returncode != 0:
+                    gitdirred_tree = None
+                else:
+                    os.mkfifo(nested / ".git" / "x.py")
+            for which in ("gen", "opf"):
+                _entry_expect("an inherited GIT_DIR naming a nested repository", gitdirred_tree,
+                              which, 2, "x.py",
+                              extra_env=(None if gitdirred_tree is None else dict(
+                                  GIT_DIR=str(gitdirred_tree / "tools" / "qa2" / ".git"),
+                                  GIT_WORK_TREE=str(gitdirred_tree))))
+            # (s12) QA round 7 (codex M4 = claude M2): a decoy GIT_DIR (an empty repository whose
+            # exclude file ignores the planted link) must not blind the tracked-content shadow
+            # test; the scrub keeps the walk on the tree's own repository. Fails without the
+            # scrub (the decoy's empty index and unborn HEAD shadow nothing, exit 0).
+            decoyshadow_tree = _mini_tree("decoy-gitdir-shadow")
+            if decoyshadow_tree is not None:
+                (decoyshadow_tree / "docs").mkdir()
+                (decoyshadow_tree / "docs" / "page.md").write_text("x\n", encoding="utf-8")
+                if (gm._git(decoyshadow_tree, "add", "-A").returncode != 0
+                        or gm._git(decoyshadow_tree, "-c", "user.name=t", "-c",
+                                   "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                                   "commit", "-q", "-m", "seed").returncode != 0):
+                    decoyshadow_tree = None
+            decoy_repo = tmp / "decoy-gitdir-repo"
+            if decoyshadow_tree is not None:
+                shutil.rmtree(decoyshadow_tree / "docs")
+                (tmp / "ext-decoy-target").mkdir(exist_ok=True)
+                (decoyshadow_tree / "docs").symlink_to(tmp / "ext-decoy-target")
+                exclude = decoyshadow_tree / ".git" / "info" / "exclude"
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                exclude.write_text("/docs\n", encoding="utf-8")
+                decoy_repo.mkdir(exist_ok=True)
+                if gm._git(decoy_repo, "init", "-q").returncode != 0:
+                    decoyshadow_tree = None
+                else:
+                    dexclude = decoy_repo / ".git" / "info" / "exclude"
+                    dexclude.parent.mkdir(parents=True, exist_ok=True)
+                    dexclude.write_text("/docs\n", encoding="utf-8")
+            for which in ("gen", "opf"):
+                _entry_expect("a decoy GIT_DIR blinding the shadow test", decoyshadow_tree,
+                              which, 2, "shadows tracked content",
+                              extra_env=(None if decoyshadow_tree is None else dict(
+                                  GIT_DIR=str(decoy_repo / ".git"))))
+            # (s13) QA round 7 (claude m-b): a root .git FILE (gitfile) pointing at an IN-TREE
+            # directory must not exempt that directory from the walk: the own-git-dir exemption
+            # applies only at the repository root, so the nested target is descended and a
+            # special file inside it is refused by name. Fails without the root-position rule
+            # (the round-6 walk exempted any path whose realpath matched the gitfile target,
+            # exit 0).
+            gitfile_tree = _mini_tree("gitfile-intree")
+            if gitfile_tree is not None:
+                (gitfile_tree / "tools" / "qa").mkdir(parents=True)
+                shutil.move(str(gitfile_tree / ".git"), str(gitfile_tree / "tools" / "qa" / ".git"))
+                (gitfile_tree / ".git").write_text("gitdir: tools/qa/.git\n", encoding="utf-8")
+                os.mkfifo(gitfile_tree / "tools" / "qa" / ".git" / "x.py")
+            _entry_expect("a root gitfile naming an in-tree git dir", gitfile_tree, "gen", 2,
+                          "x.py")
+            _entry_expect("a root gitfile naming an in-tree git dir", gitfile_tree, "opf", 2,
+                          "x.py")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

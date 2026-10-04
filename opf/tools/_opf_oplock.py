@@ -462,6 +462,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _containment        # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _journal            # noqa: E402
 import _opf_check          # noqa: E402
 import _opf_emit           # noqa: E402
@@ -978,7 +979,7 @@ def _validate_ctl_dir_fd(fd, label):
 def _open_dir_at(parent_fd, name, label):
     """Open a directory component beneath an already-trusted dir fd, no-follow."""
     try:
-        return os.open(name, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+        return os.open(name, (_DIR_OPEN_FLAGS) | getattr(os, "O_NONBLOCK", 0), dir_fd=parent_fd)
     except OSError as exc:
         raise OpLockError("cannot open directory {} no-follow ({})".format(label, exc))
 
@@ -1070,7 +1071,7 @@ def _read_control_record(dir_fd, name, label):
     gate can bind its later delete to the very object and bytes it verified (DEF-1)."""
     with _FdOwner() as owner:
         try:
-            fd = owner.adopt(os.open(name, _FILE_READ_FLAGS, dir_fd=dir_fd))
+            fd = owner.adopt(os.open(name, (_FILE_READ_FLAGS) | getattr(os, "O_NONBLOCK", 0), dir_fd=dir_fd))
         except OSError as exc:
             raise OpLockError("cannot read {} for the recovery liveness gate ({})".format(
                 label, exc))
@@ -1124,7 +1125,7 @@ def _classify_git_entry(store_root_fd, store_root):
     if stat.S_ISREG(st.st_mode):
         with _FdOwner() as owner:
             try:
-                fd = owner.adopt(os.open(".git", _FILE_READ_FLAGS, dir_fd=store_root_fd))
+                fd = owner.adopt(os.open(".git", (_FILE_READ_FLAGS) | getattr(os, "O_NONBLOCK", 0), dir_fd=store_root_fd))
             except OSError as exc:
                 raise OpLockError("cannot open .git at {} no-follow ({})".format(store_root, exc))
             if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -1538,7 +1539,7 @@ def _chmod_bound(parent_fd, name, label, st, mode):
     if hasattr(os, "O_PATH"):
         with _FdOwner() as owner:
             try:
-                fd = owner.adopt(os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+                fd = owner.adopt(os.open(name, (os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC) | getattr(os, "O_NONBLOCK", 0),
                                          dir_fd=parent_fd))
                 ost = os.fstat(fd)
                 if stat.S_IFMT(ost.st_mode) != stat.S_IFMT(st.st_mode) \
@@ -1697,7 +1698,7 @@ def _remove_staging_garbage(dir_fd, name, label, removed=None):
     leftover is also appended to `removed` (a list) when given, so a later refusal can name it."""
     with _FdOwner() as owner:
         try:
-            list_fd = owner.adopt(os.open(".", _DIR_OPEN_FLAGS, dir_fd=dir_fd))
+            list_fd = owner.adopt(os.open(".", (_DIR_OPEN_FLAGS) | getattr(os, "O_NONBLOCK", 0), dir_fd=dir_fd))
             entries = os.listdir(list_fd)
         except OSError as exc:
             raise OpLockError("cannot list the {} directory for staging leftovers ({})".format(
@@ -1956,7 +1957,7 @@ def _recover_stale(dir_fd, name, ident, expected_bytes, label, removed=None):
     the directory fsync, so a removal whose fsync then fails is still reported as performed."""
     with _FdOwner() as owner:
         try:
-            fd = owner.adopt(os.open(name, _FILE_READ_FLAGS, dir_fd=dir_fd))
+            fd = owner.adopt(os.open(name, (_FILE_READ_FLAGS) | getattr(os, "O_NONBLOCK", 0), dir_fd=dir_fd))
         except FileNotFoundError:
             raise OpLockError("stale {} vanished during recovery; refusing (another actor is "
                               "interfering)".format(label))
@@ -2363,7 +2364,7 @@ def _verified_unlink(dir_fd, name, ident, expected_bytes, label, outcome=None, r
     given, BEFORE the directory fsync, so a removal whose fsync then fails is still reported."""
     with _FdOwner() as owner:
         try:
-            fd = owner.adopt(os.open(name, _FILE_READ_FLAGS, dir_fd=dir_fd))
+            fd = owner.adopt(os.open(name, (_FILE_READ_FLAGS) | getattr(os, "O_NONBLOCK", 0), dir_fd=dir_fd))
         except FileNotFoundError:
             raise OpLockError("{} is already absent; this capability did not remove it and "
                               "refuses to certify a release leg it did not perform".format(label))
@@ -4380,10 +4381,10 @@ def _t_c3_c11_mandatory_lease_and_bytes(d, env):
     cap = acquire_operation(root, "op-bytes")
     lease = _st_lease_path(root)
     active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
-    with open(lease, "rb") as fh:
+    with _nbio.open_nb(lease, "rb") as fh:
         on_disk = fh.read()
     assert on_disk == cap._lease_bytes, "lease bytes must equal the recorded payload"
-    with open(active, "rb") as fh:
+    with _nbio.open_nb(active, "rb") as fh:
         assert fh.read() == cap._active_bytes, "active bytes must equal the recorded payload"
     lease_doc = tomllib.loads(on_disk.decode("utf-8"))
     assert set(lease_doc) == set(_opf_check.LEASE_TOP_KEYS), lease_doc
@@ -4696,7 +4697,7 @@ def _t_c6_diffinode(d, env):
     cap = acquire_operation(root, "op")
     lease = _st_lease_path(root)
     active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
-    with open(lease, "rb") as fh:
+    with _nbio.open_nb(lease, "rb") as fh:
         same_bytes = fh.read()
     os.unlink(lease)                                     # swap the inode: same bytes, new inode
     with open(lease, "wb") as fh:
@@ -4719,7 +4720,7 @@ def _t_toml_class_read_control(d, env):
     CPython defaults (test-hermeticity) and restored in finally."""
     dirp = os.path.join(d, "ctl-toml-class")
     os.mkdir(dirp)
-    dfd = os.open(dirp, os.O_RDONLY | os.O_DIRECTORY)
+    dfd = os.open(dirp, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
     prev_rec, prev_dig = sys.getrecursionlimit(), sys.get_int_max_str_digits()
     sys.setrecursionlimit(1000)
     sys.set_int_max_str_digits(4300)
@@ -4748,7 +4749,7 @@ def _t_h4_quote(d, env):
     holder = 'opf:host:pid with a "double quote" inside'
     cap = acquire_operation(root, "op", holder=holder)
     lease = _st_lease_path(root)
-    with open(lease, "rb") as fh:
+    with _nbio.open_nb(lease, "rb") as fh:
         doc = tomllib.loads(fh.read().decode("utf-8"))
     assert set(doc) == set(_opf_check.LEASE_TOP_KEYS), doc
     assert doc["holder"] == holder, "the double-quoted holder must round-trip intact"
@@ -5436,7 +5437,7 @@ def _t_d1_swap_after_liveness_gate(d, env):
         mod._require_holder_confirmed_dead = saved_gate
     assert os.path.exists(active) and os.path.exists(lease), \
         "a live holder B's swapped-in records must be PRESERVED, never deleted into two holders"
-    with open(active, "rb") as fh:
+    with _nbio.open_nb(active, "rb") as fh:
         assert b"holderB-live" in fh.read(), "B's record must be intact (not A's, not deleted)"
     os.unlink(active)                      # manual clear of the fictitious live-B records
     os.unlink(lease)
@@ -5500,7 +5501,7 @@ def _t_d2_missing_holder_fields(d, env):
     # operation differs) -> refused by the pairing check; the pre-fix holder-only match seized it.
     _write_active('holder = "opf:d2-holder"')
     _write_lease('holder = "opf:d2-holder"')
-    with open(lease, "r", encoding="utf-8") as fh:
+    with _nbio.open_nb(lease, "r", encoding="utf-8") as fh:
         text = fh.read()
     with open(lease, "w", encoding="utf-8") as fh:
         fh.write(text.replace('operation = "recovered-op"', 'operation = "another-op"'))
@@ -5510,7 +5511,7 @@ def _t_d2_missing_holder_fields(d, env):
 
     # Sub-case D: complete and paired, but an unsupported schema -> refused.
     _write_lease('holder = "opf:d2-holder"')
-    with open(active, "r", encoding="utf-8") as fh:
+    with _nbio.open_nb(active, "r", encoding="utf-8") as fh:
         text = fh.read()
     with open(active, "w", encoding="utf-8") as fh:
         fh.write(text.replace("schema = {}".format(_ACTIVE_SCHEMA), "schema = 99", 1))
@@ -5759,11 +5760,11 @@ def _t_r2_2_cross_worktree_recovery(d, env):
     main_lease = _st_lease_path(main)
     _st_crash_acquire(main)
     assert os.path.exists(active) and os.path.exists(main_lease)
-    with open(active, "rb") as fh:
+    with _nbio.open_nb(active, "rb") as fh:
         before = fh.read()
     _st_expect_refusal(acquire_operation, wt, "op", recover=True,
                        needle="paired with a different machine store")
-    with open(active, "rb") as fh:
+    with _nbio.open_nb(active, "rb") as fh:
         assert fh.read() == before, "the shared active record must be PRESERVED byte for byte"
     assert os.path.exists(main_lease), "the main checkout's lease must be preserved"
     assert not os.path.exists(_st_lease_path(wt)), "the worktree acquired nothing"
@@ -5774,7 +5775,7 @@ def _t_r2_2_cross_worktree_recovery(d, env):
     dead_pid, dead_start = _st_reaped_child()
     holder = _st_write_active_owned(main, dead_pid, dead_start, os.uname().nodename,
                                     op_id="legacy-op-id")
-    with open(active, "r", encoding="utf-8") as fh:
+    with _nbio.open_nb(active, "r", encoding="utf-8") as fh:
         text = fh.read()
     text = text.replace("schema = {}".format(_ACTIVE_SCHEMA), "schema = 1", 1)
     text = text[:text.index("[machine_store]")]
@@ -6752,7 +6753,7 @@ def _st_assert_named_calls(source):
 
 def _t_named_roster(d, env):
     """Every current roster resolves; bogus names and indirect references fail precisely."""
-    with open(__file__, encoding="utf-8") as source_file:
+    with _nbio.open_nb(__file__, encoding="utf-8") as source_file:
         source = source_file.read()
     _st_assert_named_calls(source)
     bogus = "_st_named_bogus_discriminator"
@@ -7639,7 +7640,7 @@ def _t_f7_3_body(d, env):
     parent_gid = os.lstat(git_dir).st_gid
     fields = tuple(real)
     forged = os.stat_result(fields[:stat.ST_GID] + (parent_gid + 1,) + fields[stat.ST_GID + 1:])
-    git_fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    git_fd = os.open(git_dir, (os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC) | getattr(os, "O_NONBLOCK", 0))
     try:
         assert real.st_gid == parent_gid and _inherits_setgid(git_fd, "control directory", real), \
             "the real directory carries the parent's group and inherits its bit"
@@ -8186,7 +8187,7 @@ def _st_f8_4_body(d):
     """T-f8-4's body, run in a child."""
     probe = os.path.join(d, "probe-dir")
     os.mkdir(probe)
-    dir_fd = os.open(probe, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    dir_fd = os.open(probe, (os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC) | getattr(os, "O_NONBLOCK", 0))
     saved = _FdOwner.transfer
     seen = {}
     top = os.getpid()
@@ -8256,7 +8257,7 @@ def _st_f8_4_body(d):
         assert "forked child" in report and "removed no name" in report \
             and "was not closed and stays open" in report and report.endswith("OPEN=True"), report
         assert "closed only its own descriptor copy" not in report, report
-        with open(os.path.join(probe, "b.toml"), "rb") as fh:
+        with _nbio.open_nb(os.path.join(probe, "b.toml"), "rb") as fh:
             assert fh.read() == b"x = 2\n", "the publisher's record is intact"
         os.close(fd)
         # (C) the cleanup's close interrupted before os.close ran.
@@ -8954,7 +8955,7 @@ def _st_f9_5_body(root):
             "a forked continuation never receives a capability ({}): {}".format(where, report)
         if cap is not None:
             for path, want in ((active, cap._active_bytes), (lease, cap._lease_bytes)):
-                with open(path, "rb") as fh:
+                with _nbio.open_nb(path, "rb") as fh:
                     got = fh.read()
                 assert got == want, "a published record must hold exactly its payload ({}): {} " \
                     "holds {} bytes, not {}".format(where, path, len(got), len(want))
@@ -9350,7 +9351,7 @@ def _t_i2_attach_mints_bound_capability(d, env):
     cap = attach_init_lease(holder, _ST_OP_ID)
     assert isinstance(cap, OpCapability) and cap.op_id == _ST_OP_ID
     assert cap.init_root == root and cap.init_token is holder.token
-    with open(os.path.join(_st_ctl_dir(root), ACTIVE_NAME), "rb") as fh:
+    with _nbio.open_nb(os.path.join(_st_ctl_dir(root), ACTIVE_NAME), "rb") as fh:
         active = tomllib.loads(fh.read().decode("utf-8"))
     assert active["op_id"] == _ST_OP_ID and active["owner"]["session"] == _ST_OP_ID
     assert os.path.isfile(_st_lease_path(root)), "the mandatory lease is attached"
@@ -9473,7 +9474,7 @@ def _t_i5_holder_identity_bound(d, env):
     with open(_st_lease_path(root), "w", encoding="utf-8") as fh:
         fh.write("foreign\n")
     _st_expect_refusal(attach_init_lease, holder, _ST_OP_ID, needle="appeared")
-    with open(_st_lease_path(root), "r", encoding="utf-8") as fh:
+    with _nbio.open_nb(_st_lease_path(root), "r", encoding="utf-8") as fh:
         assert fh.read() == "foreign\n", "a foreign lease is preserved"
     assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME]
     require_live_holder(holder)

@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import body_of, sort_key  # noqa: E402  shared body transform and AIQT ordering
 
@@ -102,7 +103,7 @@ def main():
         for adapter in ADAPTERS:
             out = root.joinpath(*adapter["parts"])
             content = render(pairs, adapter["header"])
-            current = out.read_text(encoding="utf-8") if _exists(out) else None
+            current = _nbio.read_text_nb(out, encoding="utf-8") if _exists(out) else None
             if current != content:
                 if check:
                     print("drift: {}".format("/".join(adapter["parts"])))

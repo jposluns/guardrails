@@ -28,6 +28,7 @@ from _opf_adopt import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, AdoptValidation,
     _is_contained_filepath, _is_token,
 )
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _opf_adopt_plan import (  # noqa: E402
     MAX_FILE_BYTES, MAX_ENTRIES, MAX_PATH_BYTES, MAX_DEPTH,
 )
@@ -414,7 +415,7 @@ def _runner_check(expected, text=None, *, fail_own=0):
         raise ValueError(identity + "/invalid-failure-code")
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
-    source = runner.read_text(encoding="utf-8") if text is None else text
+    source = _nbio.read_text_nb(runner, encoding="utf-8") if text is None else text
     bash = shutil.which("bash")
     if bash is None:
         raise RuntimeError(identity + "/cannot-evaluate/bash")
@@ -423,10 +424,11 @@ def _runner_check(expected, text=None, *, fail_own=0):
     # This parser covers its one-line run_gate registrations, not general
     # shell; malformed registrations or unresolved dollars refuse before launch.
     own_argv = tuple(os.fsencode(arg) for arg in (
-        "-I", "-B", str(here / "_opf_pack_manifest.py"), "--self-test"))
+        "-I", "-B", "-X", "pycache_prefix=/dev/null/aiqt-pycache",
+        str(here / "_opf_pack_manifest.py"), "--self-test"))
     roster = []
     try:
-        for line in runner.read_text(encoding="utf-8").splitlines():
+        for line in _nbio.read_text_nb(runner, encoding="utf-8").splitlines():
             if line.strip() == PRECHECK_LINE:
                 # D-400-SPECIAL-FILE-PRECHECK: the runner's first python3 call is the
                 # tree precheck, outside run_gate; it reaches the same executable
@@ -505,8 +507,9 @@ def _runner_check(expected, text=None, *, fail_own=0):
     # alone, is the basis for omitting isolation.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$manifest_log" || exit 2
-if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
-    && [ "$3" = "$manifest_test" ] && [ "$4" = "--self-test" ]; then
+if [ "$#" -eq 6 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
+    && [ "$3" = "-X" ] && [ "$4" = "pycache_prefix=/dev/null/aiqt-pycache" ] \
+    && [ "$5" = "$manifest_test" ] && [ "$6" = "--self-test" ]; then
   if [ "$manifest_fail_own" -ne 0 ]; then
     "$manifest_python" -I -B "$manifest_test" --self-test --vectors-only || exit "$?"
     exit "$manifest_fail_own"
@@ -590,7 +593,7 @@ exit 0
         # the executable fixture even when the runner assigns PATH itself.
         proc = run_shell(_RUNNER_PATH_PIN + source)
         try:
-            argv_log = log.read_bytes()
+            argv_log = _nbio.read_bytes_nb(log)
         except OSError as exc:
             raise RuntimeError(identity + "/cannot-evaluate/argv-log") from exc
 
@@ -661,7 +664,7 @@ def _runner_routes(identity):
     # (which bypasses shell functions), env, and a child bash process.
     # Each reaches python3 by PATH lookup, so only the fixture can answer.
     runner = Path(__file__).resolve().parent / "run_all_checks.sh"
-    source = runner.read_text(encoding="utf-8")
+    source = _nbio.read_text_nb(runner, encoding="utf-8")
     dispatch = 'if "$@"; then'
     if source.count(dispatch) != 1:
         raise AssertionError(identity + "/red-fixture")
@@ -692,7 +695,7 @@ def _runner_non_readable_fd_checks():
             log = Path(tmp) / "ordinary.log"
             log.write_bytes(b"x" * 37)
             log.chmod(0o600)
-            fd = os.open(log, flags)
+            fd = os.open(log, (flags) | getattr(os, "O_NONBLOCK", 0))
             try:
                 child = (
                     "import fcntl, importlib, os, sys\n"
@@ -734,7 +737,7 @@ def _runner_red_checks(expected):
     from unittest.mock import patch
 
     runner = Path(__file__).resolve().parent / "run_all_checks.sh"
-    source = runner.read_text(encoding="utf-8")
+    source = _nbio.read_text_nb(runner, encoding="utf-8")
     identity = "runner/pack-manifest-registration"
     anchor = '  local name="$1"; shift\n'
     if source.count(anchor) != 1:
@@ -778,7 +781,7 @@ def _runner_red_checks(expected):
     print("PASS " + identity + "/credential-environment")
 
     # Unsupported expansion in any registration word refuses before launch.
-    original_read_text = Path.read_text
+    original_read_text = _nbio.read_text_nb  # the roster read goes through the shared reader now
     for label, old, new in (
         ("roster-braced-here", "$here/", "${here}/"),
         ("roster-variable", "$here/", "$other/"),
@@ -793,7 +796,7 @@ def _runner_red_checks(expected):
                 return roster_source
             return original_read_text(path, *args, **kwargs)
 
-        with patch.object(Path, "read_text", read_roster), \
+        with patch.object(_nbio, "read_text_nb", read_roster), \
                 patch("subprocess.Popen", side_effect=AssertionError(
                     identity + "/roster/unexpected-launch")) as launch:
             red(label, lambda: _runner_check(expected), RuntimeError,
@@ -947,7 +950,7 @@ def _runner_red_checks(expected):
                     raise
             else:
                 raise AssertionError("scrubbed runner accepted")
-            refusal = report.read_text(encoding="utf-8")
+            refusal = _nbio.read_text_nb(report, encoding="utf-8")
         except Exception as exc:
             # Missing/unreadable reports and unexpected runner outcomes are
             # failures of this RED, not harness cannot-evaluate outcomes.
@@ -977,7 +980,7 @@ def _runner_red_checks(expected):
 
         def check_competing_log(calls):
             try:
-                actual = competing_log.read_bytes()
+                actual = _nbio.read_bytes_nb(competing_log)
             except OSError as exc:
                 raise RuntimeError(identity + "/cannot-evaluate/competing-argv-log") from exc
             wanted = b"".join(
@@ -1094,7 +1097,7 @@ def _runner_red_checks(expected):
 
 def _runner_registration_test(expected):
     runner = Path(__file__).resolve().parent / "run_all_checks.sh"
-    source = runner.read_text(encoding="utf-8")
+    source = _nbio.read_text_nb(runner, encoding="utf-8")
     _runner_check(expected, source)
     print("PASS runner/pack-manifest-registration")
     for route, text in _runner_routes("runner/pack-manifest-registration"):

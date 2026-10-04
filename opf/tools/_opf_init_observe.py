@@ -339,8 +339,8 @@ class GitObjects:
                 if not component:
                     continue
                 try:
-                    next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY
-                                      | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    next_fd = os.open(component, (os.O_RDONLY | os.O_DIRECTORY
+                                      | os.O_NOFOLLOW | os.O_CLOEXEC) | getattr(os, "O_NONBLOCK", 0), dir_fd=fd)
                 except FileNotFoundError:
                     return (path, tuple(identities), "absent-ancestor", component)
                 prev, fd = fd, next_fd                    # ownership moves first: a failed close is

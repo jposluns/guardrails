@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_init as builders  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _opf_init_contract as contract  # noqa: E402
 import _opf_init_operation as operation  # noqa: E402
 import _opf_init_p0 as p0  # noqa: E402
@@ -362,7 +363,7 @@ def runner_check(expected, text=None, *, fail_own=0):
         raise ValueError(identity + "/invalid-failure-code")
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
-    source = runner.read_text(encoding="utf-8") if text is None else text
+    source = _nbio.read_text_nb(runner, encoding="utf-8") if text is None else text
     bash = shutil.which("bash")
     if bash is None:
         raise RuntimeError(identity + "/cannot-evaluate/bash")
@@ -371,10 +372,11 @@ def runner_check(expected, text=None, *, fail_own=0):
     # This parser covers its one-line run_gate registrations, not general
     # shell; malformed registrations or unresolved dollars refuse before launch.
     own_argv = tuple(os.fsencode(arg) for arg in (
-        "-I", "-B", str(here / "check_opf_init_p0.py"), "--self-test", "--red-on-revert"))
+        "-I", "-B", "-X", "pycache_prefix=/dev/null/aiqt-pycache",
+        str(here / "check_opf_init_p0.py"), "--self-test", "--red-on-revert"))
     roster = []
     try:
-        for line in runner.read_text(encoding="utf-8").splitlines():
+        for line in _nbio.read_text_nb(runner, encoding="utf-8").splitlines():
             if line.strip() == PRECHECK_LINE:
                 # D-400-SPECIAL-FILE-PRECHECK: the runner's first python3 call is the
                 # tree precheck, outside run_gate; it reaches the same executable
@@ -450,9 +452,10 @@ def runner_check(expected, text=None, *, fail_own=0):
     # alone, is the basis for omitting isolation.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$p0_log" || exit 2
-if [ "$#" -eq 5 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
-    && [ "$3" = "$p0_test" ] && [ "$4" = "--self-test" ] \
-    && [ "$5" = "--red-on-revert" ]; then
+if [ "$#" -eq 7 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
+    && [ "$3" = "-X" ] && [ "$4" = "pycache_prefix=/dev/null/aiqt-pycache" ] \
+    && [ "$5" = "$p0_test" ] && [ "$6" = "--self-test" ] \
+    && [ "$7" = "--red-on-revert" ]; then
   if [ "$p0_fail_own" -ne 0 ]; then
     "$p0_python" -I -B "$p0_test" --self-test --vectors-only || exit "$?"
     exit "$p0_fail_own"
@@ -536,7 +539,7 @@ exit 0
         # the executable fixture even when the runner assigns PATH itself.
         proc = run_shell(RUNNER_PATH_PIN + source)
         try:
-            argv_log = log.read_bytes()
+            argv_log = _nbio.read_bytes_nb(log)
         except OSError as exc:
             raise RuntimeError(identity + "/cannot-evaluate/argv-log") from exc
 
@@ -592,7 +595,7 @@ def runner_routes(identity):
     # (which bypasses shell functions), env, and a child bash process.
     # Each reaches python3 by PATH lookup, so only the fixture can answer.
     runner = Path(__file__).resolve().parent / "run_all_checks.sh"
-    source = runner.read_text(encoding="utf-8")
+    source = _nbio.read_text_nb(runner, encoding="utf-8")
     dispatch = 'if "$@"; then'
     if source.count(dispatch) != 1:
         raise AssertionError(identity + "/red-fixture")
@@ -623,7 +626,7 @@ def _runner_non_readable_fd_checks():
             log = Path(tmp) / "ordinary.log"
             log.write_bytes(b"x" * 37)
             log.chmod(0o600)
-            fd = os.open(log, flags)
+            fd = os.open(log, (flags) | getattr(os, "O_NONBLOCK", 0))
             try:
                 child = (
                     "import fcntl, importlib, os, sys\n"
@@ -665,7 +668,7 @@ def runner_red_checks(expected):
     from unittest.mock import patch
 
     runner = Path(__file__).resolve().parent / "run_all_checks.sh"
-    source = runner.read_text(encoding="utf-8")
+    source = _nbio.read_text_nb(runner, encoding="utf-8")
     identity = "runner/declared-test-executes"
     anchor = '  local name="$1"; shift\n'
     if source.count(anchor) != 1:
@@ -709,7 +712,7 @@ def runner_red_checks(expected):
     print("PASS " + identity + "/credential-environment")
 
     # Unsupported expansion in any registration word refuses before launch.
-    original_read_text = Path.read_text
+    original_read_text = _nbio.read_text_nb  # the roster read goes through the shared reader now
     for label, old, new in (
         ("roster-braced-here", "$here/", "${here}/"),
         ("roster-variable", "$here/", "$other/"),
@@ -724,7 +727,7 @@ def runner_red_checks(expected):
                 return roster_source
             return original_read_text(path, *args, **kwargs)
 
-        with patch.object(Path, "read_text", read_roster), \
+        with patch.object(_nbio, "read_text_nb", read_roster), \
                 patch("subprocess.Popen", side_effect=AssertionError(
                     identity + "/roster/unexpected-launch")) as launch:
             red(label, lambda: runner_check(expected), RuntimeError,
@@ -879,7 +882,7 @@ def runner_red_checks(expected):
                     raise
             else:
                 raise AssertionError("scrubbed runner accepted")
-            refusal = report.read_text(encoding="utf-8")
+            refusal = _nbio.read_text_nb(report, encoding="utf-8")
         except Exception as exc:
             # Missing/unreadable reports and unexpected runner outcomes are
             # failures of this RED, not harness cannot-evaluate outcomes.
@@ -909,7 +912,7 @@ def runner_red_checks(expected):
 
         def check_competing_log(calls):
             try:
-                actual = competing_log.read_bytes()
+                actual = _nbio.read_bytes_nb(competing_log)
             except OSError as exc:
                 raise RuntimeError(identity + "/cannot-evaluate/competing-argv-log") from exc
             wanted = b"".join(
@@ -1035,7 +1038,7 @@ def main():
         ids = run_vectors(p0, f)
         if not args.vectors_only:
             if args.red_on_revert:
-                red_on_revert(Path(p0.__file__).read_text(encoding="utf-8"), f)
+                red_on_revert(_nbio.read_text_nb(Path(p0.__file__), encoding="utf-8"), f)
             runner_check(ids)
             print("PASS runner/declared-test-executes")
             for route, text in runner_routes("runner/declared-test-executes"):
@@ -1043,7 +1046,7 @@ def main():
                 print("PASS runner/declared-test-executes/route-" + route)
             if args.red_on_revert:
                 runner = Path(__file__).resolve().parent / "run_all_checks.sh"
-                text = runner.read_text(encoding="utf-8")
+                text = _nbio.read_text_nb(runner, encoding="utf-8")
                 lines = [line for line in text.splitlines(keepends=True)
                          if line.startswith('run_gate "opf-init-p0-selftest"')]
                 check(len(lines) == 1, "runner/unique-registration")

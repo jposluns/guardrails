@@ -43,6 +43,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 try:
     import tomllib
@@ -195,7 +196,7 @@ def _open_dir_at(dir_fd, name, create):
         except OSError as exc:
             raise AdoptError("cannot create archive component {!r} ({}); fail-closed".format(name, exc))
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        fd = os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=dir_fd)
     except OSError as exc:
         raise AdoptError("cannot open archive component {!r} through a no-follow handle ({}); a symlinked "
                          "component is refused".format(name, exc))
@@ -234,7 +235,7 @@ def _read_payload_fd(entry_fd):
     so an archive immutability comparison can never read redirectable external bytes. Returns the payload
     bytes, or None when the payload is absent; AdoptError on a symlinked or non-regular payload."""
     try:
-        pfd = os.open("payload", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=entry_fd)
+        pfd = os.open("payload", (os.O_RDONLY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=entry_fd)
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -257,7 +258,7 @@ def _verify_published_payload(entry_fd, digest, tmp_stat):
     or substitutes the payload between the write and the publish, fails closed rather than publishing a
     redirected or altered inode. AdoptError on a symlinked, non-regular, substituted, or mismatched payload."""
     try:
-        pfd = os.open("payload", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=entry_fd)
+        pfd = os.open("payload", (os.O_RDONLY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=entry_fd)
     except OSError as exc:
         raise AdoptError("cannot re-open the published payload through a no-follow handle ({}); a symlinked "
                          "payload is refused".format(exc))
@@ -321,7 +322,7 @@ def archive_file(archive_fd, data):
     byte-equality rather than overwriting an already-published payload."""
     digest = hashlib.sha256(data).hexdigest()
     try:
-        entry_fd = os.open(digest, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=archive_fd)
+        entry_fd = os.open(digest, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=archive_fd)
     except FileNotFoundError:
         entry_fd = _open_dir_at(archive_fd, digest, create=True)  # mkdir + no-follow open + parent fsync (G8/G9)
     except OSError as exc:
@@ -391,7 +392,7 @@ def build_candidates(legacy_root, archive_fd, successor_texts):
         # fix #6: capture the 8.2 OWNER from the SAME opened source fd the raw bytes come from, so the
         # recorded owner cannot disagree with the archived payload. No O_NOFOLLOW here: legacy trees may
         # legitimately carry symlinked files that rglob(is_file) and the prior read_bytes both followed.
-        fd = os.open(str(f), os.O_RDONLY)
+        fd = os.open(str(f), (os.O_RDONLY) | getattr(os, "O_NONBLOCK", 0))
         try:
             owner = os.fstat(fd).st_uid
             data = _read_fd_all(fd)                        # archive raw bytes FIRST (before any pointers)
@@ -477,7 +478,7 @@ def run_adopter(legacy_root, out_dir, successor_texts):
     out_dir = Path(out_dir)
     try:
         os.makedirs(str(out_dir), exist_ok=True)          # the chosen output root is the trusted anchor
-        root_fd = os.open(str(out_dir), os.O_RDONLY | os.O_DIRECTORY)
+        root_fd = os.open(str(out_dir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
     except OSError as exc:
         print("error: cannot open output root {} ({}); fail-closed".format(out_dir, exc), file=sys.stderr)
         return 2
@@ -512,7 +513,7 @@ def _load_successor_inventory(path):
     on a read or parse error or a malformed row, so the CLI never ranks against a partial or unreadable
     inventory rather than silently emitting no candidates."""
     try:
-        with open(str(path), "rb") as fh:
+        with _nbio.open_nb(str(path), "rb") as fh:
             doc = tomllib.load(fh)
     except OSError as exc:
         raise AdoptError("cannot read successor inventory {} ({}); fail-closed".format(path, exc))
@@ -600,7 +601,7 @@ def _close_vectors(base):
                 if raise_sent:
                     raise sent
                 return real(fd)
-            entry_fd = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
+            entry_fd = os.open(str(base), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
             try:                                          # the seam is swapped only where its restore runs
                 ns["_read_fd_all"] = spy
                 _read_payload_fd(entry_fd)
@@ -644,9 +645,9 @@ def self_test():
             failures.append("REPO generate expected exit 0")
         if quiet(run_repo, good, True) != 0:
             failures.append("REPO regeneration expected drift-clean exit 0")
-        first = (good / SCHEMA_REL).read_text(encoding="utf-8")
+        first = _nbio.read_text_nb(good / SCHEMA_REL, encoding="utf-8")
         quiet(run_repo, good, False)
-        if (good / SCHEMA_REL).read_text(encoding="utf-8") != first:
+        if _nbio.read_text_nb(good / SCHEMA_REL, encoding="utf-8") != first:
             failures.append("REPO mode is not deterministic")
 
         # (b) mutated schema -> exit 1.
@@ -665,14 +666,14 @@ def self_test():
             failures.append("ADOPTER mode expected exit 0")
         digest = hashlib.sha256(body.encode()).hexdigest()
         payload = out / ".aiqt" / "archive" / digest / "payload"
-        if not payload.is_file() or payload.read_bytes() != body.encode():
+        if not payload.is_file() or _nbio.read_bytes_nb(payload) != body.encode():
             failures.append("ADOPTER mode did not archive the raw legacy bytes under its sha256")
         # (e) 8.6: the pointer in the archived source is NOT consumed. The archived payload is the raw file
         # (the Expected-successor: line survives), and the generated candidate carries NO [[pointer-hint]]
         # row lifted from that source (a pre-fix generator emitted one from the legacy bytes).
-        if b"Expected-successor" not in payload.read_bytes():
+        if b"Expected-successor" not in _nbio.read_bytes_nb(payload):
             failures.append("the archived payload must be the raw file (pointers not stripped from it)")
-        cand_text = (out / ".aiqt" / "migration" / "crosswalk.candidate.toml").read_text(encoding="utf-8")
+        cand_text = _nbio.read_text_nb(out / ".aiqt" / "migration" / "crosswalk.candidate.toml", encoding="utf-8")
         if "[[pointer-hint]]" in cand_text:
             failures.append("8.6: no pointer may be consumed from the archived source into the candidate "
                             "(a [[pointer-hint]] row lifted from the legacy bytes)")
@@ -687,7 +688,7 @@ def self_test():
 
         # (d) immutability: differing re-archive refused; identical idempotent.
         archive_root = out / ".aiqt" / "archive"
-        afd = os.open(str(archive_root), os.O_RDONLY | os.O_DIRECTORY)
+        afd = os.open(str(archive_root), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         try:
             same = archive_file(afd, body.encode())
             if same != digest:
@@ -737,14 +738,14 @@ def self_test():
         fdig = hashlib.sha256(fresh).hexdigest()
         arc7 = tmp / "arc7"
         arc7.mkdir()
-        afd7 = os.open(str(arc7), os.O_RDONLY | os.O_DIRECTORY)
+        afd7 = os.open(str(arc7), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         d1 = archive_file(afd7, fresh)
         d2 = archive_file(afd7, fresh)                     # same-bytes re-archive is idempotent
         os.close(afd7)
         if d1 != fdig or d2 != fdig:
             failures.append("archive_file must be content-addressed and idempotent")
         entry7 = arc7 / fdig
-        if (entry7 / "payload").read_bytes() != fresh:
+        if _nbio.read_bytes_nb(entry7 / "payload") != fresh:
             failures.append("the published payload must be the exact archived bytes")
         leftover = [p.name for p in entry7.iterdir() if p.name != "payload"]
         if leftover:
@@ -759,7 +760,7 @@ def self_test():
         b1dig = hashlib.sha256(b1bytes).hexdigest()
         b1arc = tmp / "b1arc"
         b1arc.mkdir()
-        b1fd = os.open(str(b1arc), os.O_RDONLY | os.O_DIRECTORY)
+        b1fd = os.open(str(b1arc), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         real_link = os.link
 
         def _link_then_swap(src, dst, **kw):
@@ -785,7 +786,7 @@ def self_test():
         (legacy2 / "x.md").write_text("zzz qqq wthismatchesnothing\n", encoding="utf-8")
         arc2 = tmp / "arc2"
         arc2.mkdir()
-        afd2 = os.open(str(arc2), os.O_RDONLY | os.O_DIRECTORY)
+        afd2 = os.open(str(arc2), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         cand = build_candidates(legacy2, afd2, {})            # empty successor set -> nothing to map
         os.close(afd2)
         if not cand["unmatched"]:
@@ -800,7 +801,7 @@ def self_test():
         g8ext = tmp / "g8-external"
         g8ext.write_bytes(g8bytes)                            # external bytes that MATCH, so a follow would pass
         os.symlink(str(g8ext), str(g8arc / g8dig / "payload"))
-        g8fd = os.open(str(g8arc), os.O_RDONLY | os.O_DIRECTORY)
+        g8fd = os.open(str(g8arc), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         try:
             archive_file(g8fd, g8bytes)
             failures.append("G8: a symlinked archived payload must be refused (no-follow), not accepted")
@@ -877,7 +878,7 @@ def self_test():
             (dlegacy / "r.md").write_text(body_v, encoding="utf-8")
             darc = tmp / ("d10b-" + name) / "arc"
             darc.mkdir(parents=True)
-            dafd = os.open(str(darc), os.O_RDONLY | os.O_DIRECTORY)
+            dafd = os.open(str(darc), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
             try:
                 dcand = build_candidates(dlegacy, dafd, d10b_succ)
             finally:
@@ -913,7 +914,7 @@ def self_test():
             failures.append("D10-C: adopter CLI with --successor-inventory expected exit 0 (got {!r})"
                             .format(rc_c))
         c_cand = c_out / ".aiqt" / "migration" / "crosswalk.candidate.toml"
-        c_text = c_cand.read_text(encoding="utf-8") if c_cand.is_file() else ""
+        c_text = _nbio.read_text_nb(c_cand, encoding="utf-8") if c_cand.is_file() else ""
         if "[[mapping]]" not in c_text or 'successor-clause-id = "succ.alpha"' not in c_text:
             failures.append("D10-C: the adopter CLI must emit ranked candidate mapping rows against the "
                             "supplied successor inventory (main() previously passed an empty successor set)")

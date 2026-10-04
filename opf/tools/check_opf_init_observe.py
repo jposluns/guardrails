@@ -14,6 +14,7 @@ import sys
 import types
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 ROOTS = (".opf.toml", ".opf.local.toml", ".working")
 
 
@@ -504,9 +505,9 @@ if __name__ == "__main__":
     parser.add_argument("--red-on-revert", action="store_true")
     args = parser.parse_args()
     here = pathlib.Path(__file__).parent
-    source = here.joinpath("_opf_init_observe.py").read_text(encoding="utf-8")
+    source = _nbio.read_text_nb(here.joinpath("_opf_init_observe.py"), encoding="utf-8")
     run(source, reversals=args.red_on_revert)
-    shared_source = here.joinpath("_opf_observe.py").read_text(encoding="utf-8")
+    shared_source = _nbio.read_text_nb(here.joinpath("_opf_observe.py"), encoding="utf-8")
     functions = {node.name: ast.get_source_segment(shared_source, node) + "\n"
                  for node in ast.parse(shared_source).body if isinstance(node, ast.FunctionDef)}
     shared_tests(_opf_observe, functions["_capture_bounded"], functions["_run_git"],

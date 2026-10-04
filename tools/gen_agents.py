@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, read_source_text  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -75,7 +76,7 @@ def main():
         # render() reads each source via body_of, and out.read_text reads AGENTS.md: keep these, and the
         # write/unlink, inside the fail-closed try so a read or write error is a clean exit 2, not a traceback.
         content = render(pairs)
-        current = out.read_text(encoding="utf-8") if out.exists() else None
+        current = _nbio.read_text_nb(out, encoding="utf-8") if out.exists() else None
         if current != content:
             if check:
                 print("drift: AGENTS.md")

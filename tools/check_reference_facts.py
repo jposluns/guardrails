@@ -33,6 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _standards import load_manifests, ManifestError, KINDS, STATUSES, CATALOGUES  # noqa: E402
 from gen_mappings import RELATION, RELATION_PROSE, STATUS_PILL, STATUS_DESC  # noqa: E402
 from check_standards_currency import POLICY  # noqa: E402
@@ -52,7 +53,7 @@ def _read(path):
     error (exit 2 via OSError), never a silent skip."""
     if not path.is_file():
         raise OSError("required surface missing: {}".format(path))
-    return path.read_text(encoding="utf-8")
+    return _nbio.read_text_nb(path, encoding="utf-8")
 
 
 def expected_families(manifests):

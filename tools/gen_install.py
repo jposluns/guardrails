@@ -29,6 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, replace_block, reconcile  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from gen_skill import parse_source, versioned_zip_basename, SKILL_SRC_PARTS  # noqa: E402
 
 # The generated region and its home. INSTALL_PAGE_PARTS is the relative parts of the hand-authored page the
@@ -76,7 +77,7 @@ def run_gen(root, check):
               file=sys.stderr)
         return 2
     try:
-        new_html = replace_block(page.read_text(encoding="utf-8"), MARKER, inner)
+        new_html = replace_block(_nbio.read_text_nb(page, encoding="utf-8"), MARKER, inner)
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
@@ -159,7 +160,7 @@ def self_test_main():
         if code != 0:
             failures.append("well-formed generate expected exit 0, got {}\n{}".format(code, out))
         expected_href = "/downloads/{}".format(versioned_zip_basename(_FIXTURE_VERSION))
-        if expected_href not in page.read_text(encoding="utf-8"):
+        if expected_href not in _nbio.read_text_nb(page, encoding="utf-8"):
             failures.append("generated page is missing the version-numbered href {!r}".format(expected_href))
         code, out = capture(good, True)
         if code != 0:
@@ -171,7 +172,7 @@ def self_test_main():
         drifted.mkdir()
         dpage = _write_fixture(drifted)
         capture(drifted, False)  # generate a clean tree first
-        dpage.write_text(dpage.read_text(encoding="utf-8").replace(
+        dpage.write_text(_nbio.read_text_nb(dpage, encoding="utf-8").replace(
             "Download the Skill (.zip)", "Download the Skill (hand-edited)"), encoding="utf-8")
         code, out = capture(drifted, True)
         if code != 1:

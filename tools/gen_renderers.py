@@ -35,6 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile, precheck_special_files  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from gen_rules import SLUG_RE  # noqa: E402  the authoritative renderer-id slug syntax
 import gen_gensrc  # noqa: E402  reuse its validated GENSRC_OUTPUTS loader, never a second parser
 
@@ -66,7 +67,7 @@ def _read_renderer_decl(path, where):
     is no single top-level literal assignment to RENDERER_DECL, when the right-hand side is non-literal, or
     when the shape is wrong ({'renderer-id': <non-empty str>, 'semantics-revision': <non-negative int>})."""
     try:
-        source = path.read_text(encoding="utf-8")
+        source = _nbio.read_text_nb(path, encoding="utf-8")
     except OSError as exc:
         raise GateError("{}: cannot read ({})".format(where, exc))
     try:
@@ -101,7 +102,7 @@ def _local_imports(path, tools_dir, where):
     Import/ImportFrom nodes only. Fail-closed (GateError) on a relative import (level > 0) or a wildcard
     `from <pack-local> import *`, both of which a static closure cannot resolve honestly."""
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = ast.parse(_nbio.read_text_nb(path, encoding="utf-8"), filename=str(path))
     except (OSError, SyntaxError) as exc:
         raise GateError("{}: cannot parse for its imports ({})".format(where, exc))
     stems = set()
@@ -153,7 +154,7 @@ def framed_code_digest(closure, root):
     records = []
     for rel in closure:
         try:
-            data = (root / rel).read_bytes()
+            data = _nbio.read_bytes_nb(root / rel)
         except OSError as exc:
             raise GateError("cannot read closure member {} ({})".format(rel, exc))
         records.append("{}\t{}\t{}\n".format(rel, len(data), _sha256(data)))
@@ -318,22 +319,22 @@ def self_test_main():
             failures.append("conformant: generation expected exit 0")
         if run_quiet(good, check=True) != 0:
             failures.append("conformant: regeneration expected drift-clean exit 0")
-        first = (good / RENDERERS_REL).read_text(encoding="utf-8")
+        first = _nbio.read_text_nb(good / RENDERERS_REL, encoding="utf-8")
         run_quiet(good, check=False)
-        if (good / RENDERERS_REL).read_text(encoding="utf-8") != first:
+        if _nbio.read_text_nb(good / RENDERERS_REL, encoding="utf-8") != first:
             failures.append("determinism: two runs are not byte-identical")
 
         # (b) a helper edit inside the closure changes the framed code-digest.
         edited = tmp / "edited"
         _fixture(edited, _ENTRY_GOOD, helper_body="VALUE = 2\n")
         run_quiet(edited, check=False)
-        if (edited / RENDERERS_REL).read_text(encoding="utf-8") == first:
+        if _nbio.read_text_nb(edited / RENDERERS_REL, encoding="utf-8") == first:
             failures.append("closure completeness: a helper edit did not change the code-digest")
 
         # (c) a mutated renderers.toml is caught by --check.
         if run_quiet(good, check=False) == 0:
             target = good / RENDERERS_REL
-            target.write_text(target.read_text(encoding="utf-8") + "\n# tamper\n", encoding="utf-8")
+            target.write_text(_nbio.read_text_nb(target, encoding="utf-8") + "\n# tamper\n", encoding="utf-8")
             if run_quiet(good, check=True) != 1:
                 failures.append("mutated renderers.toml expected exit 1 (drift)")
 

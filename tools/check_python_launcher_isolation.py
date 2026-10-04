@@ -89,6 +89,7 @@ import stat  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 try:
     import gen_hooks  # noqa: E402  the generator whose plugin hooks.json path this gate tracks
 except Exception as exc:  # noqa: BLE001  an import failure is a cannot-evaluate, not a traceback
@@ -515,7 +516,7 @@ def _read_required_text(root, rel, errors):
         errors.append((rel, 0, "", "required input is not a regular file"))
         return None
     try:
-        return path.read_text(encoding="utf-8")
+        return _nbio.read_text_nb(path, encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         errors.append((rel, 0, "", "cannot read required input: {}".format(exc)))
         return None
@@ -557,7 +558,7 @@ def _scan_workflows(root, errors, failures):
         try:
             if not path.is_file():
                 continue  # a directory or special file named *.yml is not a workflow document
-            text = path.read_text(encoding="utf-8")
+            text = _nbio.read_text_nb(path, encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             errors.append((rel, 0, "", "cannot read workflow: {}".format(exc)))
             continue
@@ -1053,9 +1054,9 @@ def self_test_main():
             if not _exists(rb_out):
                 failures.append("real bash: `>&python3` should create a file named python3 "
                                 "(rc={}, stderr={!r})".format(rb_proc.returncode, rb_proc.stderr))
-            elif rb_out.read_text(encoding="utf-8").strip() != "1":
+            elif _nbio.read_text_nb(rb_out, encoding="utf-8").strip() != "1":
                 failures.append("real bash: `python3 -I ... >&python3` should run isolated (file held "
-                                "{!r})".format(rb_out.read_text(encoding="utf-8")))
+                                "{!r})".format(_nbio.read_text_nb(rb_out, encoding="utf-8")))
 
         # 30. A quote/escape-obfuscated launcher NAME in a run_all_checks.sh shell line is resolved by
         #     bash to a real interpreter, so the gate must decide on the DECODED command word, not the

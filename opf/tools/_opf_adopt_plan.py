@@ -65,6 +65,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_adopt as schema  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _opf_store as store  # noqa: E402
 from _opf_emit import EmitError, emit_checked  # noqa: E402
 
@@ -227,7 +228,7 @@ def _inventory(root, sources, targets):
             if working is None or not stat.S_ISDIR(working.st_mode):
                 raise PlanError("store resolution cannot be evaluated: " + resolution.detail)
             wfd = os.open(store.WORKING_DIRNAME,
-                          os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                          (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=root_fd)
             try:
                 count = 0
                 with os.scandir(wfd) as listing:
@@ -237,8 +238,8 @@ def _inventory(root, sources, targets):
                             raise PlanError("store discovery exceeds entry bound")
                         st = os.stat(entry.name, dir_fd=wfd, follow_symlinks=False)
                         if stat.S_ISDIR(st.st_mode):
-                            child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY
-                                            | os.O_NOFOLLOW, dir_fd=wfd)
+                            child = os.open(entry.name, (os.O_RDONLY | os.O_DIRECTORY
+                                            | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=wfd)
                             try:
                                 if store._journal._lstat_at(child, store.MANIFEST_NAME) is not None:
                                     raise PlanError("unresolved store manifest requires repair")
@@ -316,7 +317,7 @@ def _inventory(root, sources, targets):
             if any(_under(path, item["path"]) for item in exclusions):
                 return
             if stat.S_ISDIR(before.st_mode):
-                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                child = os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0),
                                 dir_fd=parent)
                 try:
                     if _stamp(os.fstat(child)) != _stamp(before):
@@ -900,7 +901,7 @@ def self_test():
             return plan(self.root, **args)
 
         def snapshot(self):
-            return {str(p.relative_to(self.root)): p.read_bytes()
+            return {str(p.relative_to(self.root)): _nbio.read_bytes_nb(p)
                     for p in self.root.rglob("*") if p.is_file()}
 
         def test_frozen_digests_and_no_effects(self):
@@ -1109,7 +1110,7 @@ def self_test():
             (self.root / "archive/legacy.md").write_bytes(b"occupied")
             result = self.make_plan(decisions=[decision])
             self.assertEqual(result.status, store.CANNOT_EVALUATE)
-            self.assertEqual((self.root / "archive/legacy.md").read_bytes(), b"occupied")
+            self.assertEqual(_nbio.read_bytes_nb(self.root / "archive/legacy.md"), b"occupied")
             # An explicit destination inside the store tree must lie beneath .working/archive/moved/.
             self.targets = [".working/elsewhere/legacy.md", ".working/archive/moved/legacy.md"]
             for destination, status in ((".working/elsewhere/legacy.md", store.INVALID),
@@ -1158,7 +1159,7 @@ def self_test():
             self.assertIsNone(result.plan)
             self.assertTrue(any("collision" in f and occupied in f for f in result.findings),
                             result.findings)
-            self.assertEqual((self.root / occupied).read_bytes(), b"planted\n")
+            self.assertEqual(_nbio.read_bytes_nb(self.root / occupied), b"planted\n")
 
         def test_default_move_store_base_unobservable(self):
             # A homes-2 store excludes its control area from investigation, so the default
@@ -1328,7 +1329,7 @@ def self_test():
             result = self.make_plan(decisions=[dict(self.decision, disposition="retire")])
             self.assertEqual(result.status, store.CANNOT_EVALUATE)
             self.assertIsNone(result.plan)
-            self.assertEqual((self.root / preserved).read_bytes(), b"planted\n")
+            self.assertEqual(_nbio.read_bytes_nb(self.root / preserved), b"planted\n")
 
         def test_live_source_rewrite_refused(self):
             # A source left live at apply stays byte-identical until its recorded retirement (spec 14.1,

@@ -52,6 +52,7 @@ from pathlib import Path
 # reintroduced index-0 insertion in this file.
 sys.path.append(str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 import check_leaks  # noqa: E402  reuse the leak gate's normalization + structural host/account patterns
 
@@ -105,7 +106,7 @@ def _read_present_text(path):
         return None
     if not stat.S_ISREG(st.st_mode):
         raise OSError("{} is present but not a regular file; fail closed".format(path))
-    return path.read_text(encoding="utf-8")
+    return _nbio.read_text_nb(path, encoding="utf-8")
 
 
 def load_hashes(root):

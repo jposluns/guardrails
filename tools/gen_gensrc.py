@@ -43,6 +43,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 # The registry this tool renders, repo-root-relative. It is listed in its own output (below), so the
 # inventory is complete: the registry names itself alongside every other generated artefact.
@@ -89,7 +90,7 @@ def _read_declaration(path, where):
     parameter (def f[GENSRC_OUTPUTS](), class C[GENSRC_OUTPUTS], type X[GENSRC_OUTPUTS] = ...; py3.12+)
     binds only in the type-parameter scope, is not inspected, cannot affect the module-level
     declaration, and is a SyntaxError on the py3.11 floor: an accepted nested-scope residual."""
-    source = path.read_text(encoding="utf-8")  # OSError -> caller's fail-closed try
+    source = _nbio.read_text_nb(path, encoding="utf-8")  # OSError -> caller's fail-closed try
     try:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError as exc:
@@ -581,7 +582,7 @@ def self_test_main():
 
         # (c) A mutated registry is caught by --check (exit 1).
         if registry.is_file():
-            registry.write_text(registry.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            registry.write_text(_nbio.read_text_nb(registry, encoding="utf-8") + "\n", encoding="utf-8")
             if run_quiet(good, check=True) != 1:
                 failures.append("mutated {} expected exit 1 (drift)".format(REGISTRY_REL))
 

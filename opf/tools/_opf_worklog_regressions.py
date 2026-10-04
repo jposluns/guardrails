@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal          # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _opf_absorb       # noqa: E402
 import _opf_changelog    # noqa: E402
 import _opf_check        # noqa: E402
@@ -111,7 +112,7 @@ class _Fixture:
         self.stack = contextlib.ExitStack()
         # Real descriptors keep close/dup ownership honest; all fixture data stays in memory.
         self.root = Path(__file__).resolve().parent
-        self.fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        self.fd = os.open(self.root, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
         self.stack.callback(os.close, self.fd)
         self.res = SimpleNamespace(status=_opf_store.RESOLVED, store_root=self.root,
                                    pointer_source="default", machine_rel=M)
@@ -529,7 +530,7 @@ def _entry_point_census(check):
         if (path.suffix != ".py" or not path.stem.startswith("_opf_")
                 or path.stem.endswith("_regressions")):
             continue
-        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        for node in ast.parse(_nbio.read_text_nb(path, encoding="utf-8")).body:
             if (isinstance(node, ast.FunctionDef) and node.name != "main"
                     and not node.name.startswith("self_test")):
                 nodes[path.stem + "." + node.name] = node
@@ -919,10 +920,10 @@ def _upgrade_preflight_regressions(check, fence):
                 if stat.S_ISDIR(mode):
                     result[rel] = ("dir",)
                 elif stat.S_ISREG(mode):
-                    result[rel] = ("file", path.read_bytes())
+                    result[rel] = ("file", _nbio.read_bytes_nb(path))
                 else:
                     raise RuntimeError("unexpected fixture path: " + rel)
-        return result, (root / ".git/index").read_bytes()
+        return result, _nbio.read_bytes_nb(root / ".git/index")
 
     with tempfile.TemporaryDirectory(prefix="opf-worklog-upgrade-") as temporary:
         base = Path(temporary).resolve()
@@ -1014,7 +1015,7 @@ def _upgrade_preflight_regressions(check, fence):
                     check(label + "-store-byte-identical", after == before)
                     check(label + "-git-index-byte-identical", index_after == index_before)
                 else:
-                    upgraded = tomllib.loads((machine / "manifest.toml").read_text(encoding="utf-8"))
+                    upgraded = tomllib.loads(_nbio.read_text_nb(machine / "manifest.toml", encoding="utf-8"))
                     check(label + "-legacy-succeeds", proc.returncode == 0
                           and "doctor-VALID" in proc.stdout
                           and upgraded["opf"]["spec_version"] == _opf_store.SUPPORTED_SPEC_VERSION)

@@ -51,6 +51,7 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, read_source_bytes, reconcile, precheck_special_files  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import check_versions  # noqa: E402  the ONE shared ASCII SemVer validator the release gates use
 
 # Static content-bearing inputs shared by manifest.toml/root.txt/announce-snippet.txt (VERSION ->
@@ -885,9 +886,9 @@ def _self_test_main_isolated():
             failures.append("conformant: generation expected exit 0")
         if run_quiet(good, check=True) != 0:
             failures.append("conformant: regeneration expected drift-clean exit 0")
-        manifest_text = (good / MANIFEST_REL).read_text(encoding="utf-8")
+        manifest_text = _nbio.read_text_nb(good / MANIFEST_REL, encoding="utf-8")
         run_quiet(good, check=False)
-        if (good / MANIFEST_REL).read_text(encoding="utf-8") != manifest_text:
+        if _nbio.read_text_nb(good / MANIFEST_REL, encoding="utf-8") != manifest_text:
             failures.append("determinism: two runs are not byte-identical")
 
         # (b) SOURCES carve-outs and the managed-block artifact.
@@ -905,7 +906,7 @@ def _self_test_main_isolated():
             corr = _build_fixture(tmp / ("corrupt-" + rel.replace("/", "_")))
             run_quiet(corr, check=False)
             tp = corr / rel
-            tp.write_text(tp.read_text(encoding="utf-8") + "\n# tamper\n", encoding="utf-8")
+            tp.write_text(_nbio.read_text_nb(tp, encoding="utf-8") + "\n# tamper\n", encoding="utf-8")
             if run_quiet(corr, check=True) != 1:
                 failures.append("corruption of {} expected exit 1 (drift)".format(rel))
 
@@ -914,7 +915,7 @@ def _self_test_main_isolated():
         # derived). A conformant fixture's floor is drift-clean and self-protecting.
         floorf = _build_fixture(tmp / "frozen-floor")
         run_quiet(floorf, check=False)
-        floor_obj = json.loads((floorf / FROZEN_REL).read_text(encoding="utf-8"))
+        floor_obj = json.loads(_nbio.read_text_nb(floorf / FROZEN_REL, encoding="utf-8"))
         want_floor = {".aiqt/archive/", ".aiqt/frozen.json", ".aiqt/manifest.toml",
                       ".aiqt/release/announce-snippet.txt", ".aiqt/release/root.txt"}
         if floor_obj.get("version") != FROZEN_VERSION or set(floor_obj.get("frozen", [])) != want_floor:
@@ -984,7 +985,7 @@ def _self_test_main_isolated():
                               extra_files={"crlf.txt": b"line1\r\nline2\r\n"})
         run_quiet(crlf, check=False)
         want = hashlib.sha256(b"line1\r\nline2\r\n").hexdigest()
-        if want not in (crlf / MANIFEST_REL).read_text(encoding="utf-8"):
+        if want not in _nbio.read_text_nb(crlf / MANIFEST_REL, encoding="utf-8"):
             failures.append("raw-byte hashing: the CRLF file's raw sha256 is not recorded verbatim")
 
         # (h) a broken CLAUDE.md marker pair -> 2.

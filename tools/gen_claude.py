@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, read_source_text, reconcile  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402
 
@@ -145,7 +146,7 @@ def main():
     try:
         corpus = load_corpus(src_dir)
         indexdoc = render_indexdoc(corpus)
-        current = claude_md.read_text(encoding="utf-8")
+        current = _nbio.read_text_nb(claude_md, encoding="utf-8")
         new_claude = replace_block(current, render_pointer())
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc), file=sys.stderr)

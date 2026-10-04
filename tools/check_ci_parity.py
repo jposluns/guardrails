@@ -218,6 +218,9 @@ import sys
 from collections import namedtuple
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I drops the script dir; the shared readers live beside this file
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_PATH = ROOT / "tools" / "run_all_checks.sh"
@@ -502,6 +505,17 @@ def _operator(token):
     return bool(token) and all(char in "|&;<>()`" for char in token)
 
 
+# QA round 7 (claude B1): the ONE reviewed -X option pair every gate launch carries. CPython
+# reads __pycache__/<module>.pyc with a plain blocking open at import time (-B stops only the
+# writes), so a hostile pyc behind an accepted ignored link could park a gate; this option
+# redirects that read to a path under /dev/null, where NOTHING can exist (ENOTDIR on every
+# lookup, no privilege can create it), so the interpreter always compiles from source. The
+# value is byte-pinned: any other -X spelling stays cannot-evaluate. Identity-neutral like
+# -I and -B (PYCACHE_PREFIX_ARGS is removed from the normalized command), and the launcher
+# isolation remains check_python_launcher_isolation.py's question.
+PYCACHE_PREFIX_ARGS = ("-X", "pycache_prefix=/dev/null/aiqt-pycache")
+
+
 def _interpreter_flag(token):
     """Recognize only the disclosed, valueless interpreter flag set."""
     return bool(re.fullmatch(r"-[IBEsPu]+", token))
@@ -557,6 +571,18 @@ def normalize(tokens):
     if command in INTERPRETERS:
         index += 1
         while index < len(tokens) and tokens[index].startswith("-"):
+            if tokens[index] == PYCACHE_PREFIX_ARGS[0]:
+                if tuple(tokens[index:index + 2]) == PYCACHE_PREFIX_ARGS:
+                    index += 2
+                    continue
+                return Result(
+                    False,
+                    None,
+                    "interpreter-option",
+                    "unsupported -X value {!r}; only the reviewed pair {} is "
+                    "modelled".format(tokens[index:index + 2],
+                                      " ".join(PYCACHE_PREFIX_ARGS)),
+                )
             if not _interpreter_flag(tokens[index]):
                 return Result(
                     False,
@@ -2579,7 +2605,7 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
             [bash, "--noprofile", "--norc", str(runner)],
             cwd=tmp, env=env, stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=60)
-        calls = log.read_text(encoding="utf-8").splitlines()
+        calls = _nbio.read_text_nb(log, encoding="utf-8").splitlines()
     return proc.returncode, proc.stdout.splitlines(), calls
 
 
@@ -2592,7 +2618,7 @@ def _naming_scenarios(text):
             registered.append((tokens[1], " ".join(tokens[3:])))
     scenarios = [
         ("passing", "", 0, ()),
-        ("combined failure", "-I -B tools/check_leaks.py", 1,
+        ("combined failure", "-I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_leaks.py", 1,
          (("secrets (gitleaks)", 1), ("leaks", 3))),
         ("gitleaks only", "", 1, (("secrets (gitleaks)", 1),)),
     ]
@@ -4061,8 +4087,8 @@ def self_test():
                 failures.append(
                     "26 non-literal label was not rejected: " + name)
         glob_label = mutate((
-            'run_gate "dashes"    python3 -I -B tools/check_no_dashes.py',
-            "run_gate op[f]/tools/[or]* python3 -I -B tools/check_no_dashes.py"))
+            'run_gate "dashes"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_no_dashes.py',
+            "run_gate op[f]/tools/[or]* python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_no_dashes.py"))
         if glob_label is None:
             failures.append("26 label fixture drift: glob label")
         elif not any(item.code == "run-gate-label"
@@ -4118,7 +4144,7 @@ def self_test():
         # file; each fixture fails without it, on the runner and on the
         # workflow.
         dashes_line = (
-            'run_gate "dashes"    python3 -I -B tools/check_no_dashes.py')
+            'run_gate "dashes"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_no_dashes.py')
         byte_fixtures = (
             ("form feed as a line break (qa8 P1)", "\f",
              mutate(("\n  notrun=1", "\fnotrun=1"))),
@@ -4387,7 +4413,8 @@ def self_test():
             if not (isinstance(problem, tuple) and problem[:1] == ("canary",)):
                 failures.append("26 live runner: " + problem)
         want_executed = ({("", "0"), ("", "1"),
-                          ("-I -B tools/check_leaks.py", "1")}
+                          ("-I -B -X pycache_prefix=/dev/null/aiqt-pycache "
+                           "tools/check_leaks.py", "1")}
                          | {(command, "0") for command in registered_commands})
         if set(executed) != want_executed:
             failures.append(
@@ -4554,7 +4581,6 @@ def self_test():
     allowed_read_sites = {
         "tools/check_ci_parity.py": {
             ("_naming_scenarios", "splitlines"): 1,
-            ("_run_runner_copy", "read_text"): 1,
             ("_run_runner_copy", "splitlines"): 2,
             ("_shadow_check", "splitlines"): 1,
             ("adapt_standalone_runner", "splitlines"): 1,
@@ -4580,7 +4606,7 @@ def self_test():
     }
     for relative, allowed in sorted(allowed_read_sites.items()):
         got_sites = _read_api_sites(
-            ast.parse((ROOT / relative).read_bytes().decode("utf-8")))
+            ast.parse(_nbio.read_bytes_nb(ROOT / relative).decode("utf-8")))
         if got_sites != allowed:
             failures.append(
                 "29 {}: read-API sites drifted from the reviewed "
@@ -4872,6 +4898,77 @@ def self_test():
             failures.append("32d {} must be refused, got {!r} {!r}".format(
                 label, got_problems, got_diagnostics))
 
+    # QA round 7 (codex M2 = claude M1; claude m-a, m-c): the job SET comes only from canonical
+    # plain job ids, so EVERY other line above the job-content indent inside jobs: is a job-id
+    # refusal (a quoted or spaced id, a flow-style mapping, an anchor, an alias or a merge key
+    # could carry a WHOLE JOB the parse cannot see, and a duplicate id re-opens an ordered one);
+    # a modelled job-level key never carries an anchor, alias or flow value; and setup-python
+    # inputs at or before the precheck are an allowlist of the plain python-version: entry.
+    # Each vector fails without the round-7 change.
+    count += 1
+    evil_job = ("    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - name: Evil gate\n        run: python3 -I -B tools/b.py\n")
+    for label, code_name, mutated_fixture in (
+        ("quoted job id", "job-id", order_fixture + "  \"evil\":\n" + evil_job),
+        ("single-quoted job id", "job-id", order_fixture + "  'evil':\n" + evil_job),
+        ("spaced job id", "job-id", order_fixture + "  evil :\n" + evil_job),
+        ("flow-style job", "job-id",
+         order_fixture + "  evil: " + chr(123) + "runs-on: ubuntu-latest, steps: []" + chr(125)
+         + "\n"),
+        ("anchored job value", "job-id", order_fixture + "  evil: &e\n" + evil_job),
+        ("aliased job", "job-id", order_fixture + "  evil2: *e\n"),
+        ("merge key at job level", "job-id", order_fixture + "  <<: *base\n"),
+        ("duplicate job id", "job-id", order_fixture + "  one:\n" + evil_job),
+        ("anchor on a modelled job-level key", "job-key",
+         order_fixture.replace("    runs-on: ubuntu-latest\n",
+                               "    runs-on: &r ubuntu-latest\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
+            failures.append("32e unmodelled job structure not refused ({}): {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    for label, mutated_fixture in (
+        ("pip-install input on setup-python",
+         order_fixture.replace(
+             "      - uses: actions/setup-python@v5\n",
+             "      - uses: actions/setup-python@v5\n        with:\n"
+             "          python-version: '3.14'\n          pip-install: -e .\n", 1)),
+        ("python-version-file input on setup-python",
+         order_fixture.replace(
+             "      - uses: actions/setup-python@v5\n",
+             "      - uses: actions/setup-python@v5\n        with:\n"
+             "          python-version-file: .python-version\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any("setup-python input" in problem for problem in got_problems):
+            failures.append("32e unmodelled setup-python input not refused ({}): {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    versioned = order_fixture.replace(
+        "      - uses: actions/setup-python@v5\n",
+        "      - uses: actions/setup-python@v5\n        with:\n"
+        "          python-version: '3.14'\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(versioned, "fixture.yml")
+    if got_problems or got_diagnostics:
+        failures.append("32e the plain python-version: input must stay modelled, got "
+                        "{!r} {!r}".format(got_problems, got_diagnostics))
+
+    # QA round 7 (claude B1): the ONE reviewed -X pair is identity-neutral like -I and -B, and
+    # any other -X value stays cannot-evaluate. Fails without the PYCACHE_PREFIX_ARGS handling.
+    count += 1
+    with_x = normalize(("python3", "-I", "-B", "-X", "pycache_prefix=/dev/null/aiqt-pycache",
+                        "tools/a.py"))
+    plain_x = normalize(("python3", "-I", "-B", "tools/a.py"))
+    if not (with_x.ok and plain_x.ok and with_x.value == plain_x.value):
+        failures.append("32f the reviewed -X pycache pair must be identity-neutral, got "
+                        "{!r} vs {!r}".format(with_x, plain_x))
+    rogue_x = normalize(("python3", "-I", "-B", "-X", "pycache_prefix=/tmp/evil", "tools/a.py"))
+    if rogue_x.ok or rogue_x.code != "interpreter-option":
+        failures.append("32f an unreviewed -X value must be cannot-evaluate, got "
+                        "{!r}".format(rogue_x))
+
     # codex round-4 finding 4: a workflows directory path no path call accepts (an embedded NUL) is a
     # read-error diagnostic, never a raw ValueError. Fails without the (OSError, ValueError) arm.
     count += 1
@@ -5001,9 +5098,31 @@ def workflow_precheck_order_problems(text, source):
             continue
         if indent == 2 and re.fullmatch(r"[A-Za-z0-9_-]+:", stripped):
             current_job = stripped[:-1]
+            # QA round 7 (codex M2 = claude M1): a duplicate job id re-opens a job this parse
+            # has already ordered; the second mapping would silently shadow the first.
+            if current_job in jobs:
+                diagnostics.append(_diagnostic(
+                    source, number, "job-id",
+                    "duplicate job id {!r}; a repeated YAML key re-opens a job this parse has "
+                    "already ordered".format(current_job)))
             jobs[current_job] = []
             in_steps = False
             step = None
+            index += 1
+            continue
+        if indent < 4:
+            # QA round 7 (codex M2 = claude M1): inside jobs:, EVERY line above the job-content
+            # indent must be a canonical plain job id ([A-Za-z0-9_-]+: with nothing after the
+            # colon). A quoted or spaced id ("evil":, evil :), a flow-style job mapping
+            # (evil: {runs-on: ...}), an anchor (evil: &a), an alias (evil2: *a) or a merge key
+            # could carry a WHOLE JOB this parse cannot see; such a line is refused here, never
+            # skipped and never credited to the previous job.
+            diagnostics.append(_diagnostic(
+                source, number, "job-id",
+                "unrecognized line at job level: {!r}; only the plain canonical job-id "
+                "spelling ([A-Za-z0-9_-]+: with no value) is modelled, and a quoted or spaced "
+                "id, flow-style mapping, anchor, alias or merge key there could carry a whole "
+                "job this parse cannot see".format(stripped)))
             index += 1
             continue
         if current_job is None:
@@ -5027,13 +5146,24 @@ def workflow_precheck_order_problems(text, source):
                     "continue-on-error: or container: above all) can disable the job or neuter "
                     "its precheck step without touching the step's run "
                     "body".format(stripped, ", ".join(JOB_LEVEL_KEYS))))
+            else:
+                # QA round 7 (codex M2 = claude M1): an anchor, alias or flow-style value on a
+                # modelled job-level key can define or reference structure this parse cannot
+                # see (an anchored mapping aliased elsewhere above all); refused, never
+                # consumed silently.
+                value = stripped.split(":", 1)[1].strip()
+                if value[:1] in ("&", "*") or value[:1] in ("[",) or value.startswith(chr(123)):
+                    diagnostics.append(_diagnostic(
+                        source, number, "job-key",
+                        "job-level key {!r} carries a YAML anchor, alias or flow-style value, "
+                        "which can carry structure this parse cannot see".format(stripped)))
             index += 1
             continue
         if not in_steps:
             index += 1
             continue
         if indent == 6 and stripped.startswith("- "):
-            step = dict(uses=None, run=[], env=[], line=number)
+            step = dict(uses=None, run=[], env=[], withs=[], line=number)
             mapping = None
             jobs[current_job].append(step)
             item = stripped[2:]
@@ -5087,6 +5217,8 @@ def workflow_precheck_order_problems(text, source):
             index += 1
             continue
         if indent >= 10 and mapping is not None:
+            if mapping == "with":
+                step["withs"].append((number, stripped))
             if mapping == "env":
                 step["env"].append(stripped)
                 key = stripped.split(":", 1)[0].strip().strip("'").strip('"')
@@ -5138,6 +5270,20 @@ def workflow_precheck_order_problems(text, source):
                             "that does not exist yet")
             continue
         for s in job_steps[:precheck + 1]:
+            # QA round 7 (claude m-a, m-c): setup-python inputs at or before the precheck are an
+            # ALLOWLIST (the plain python-version: entry only). An unmodelled input (pip-install:,
+            # python-version-file:, ...) can install and run committed code or read the checkout
+            # before the precheck step runs.
+            if s["uses"] and s["uses"].startswith("actions/setup-python@"):
+                for with_number, with_line in s["withs"]:
+                    with_key, with_canonical = _yaml_mapping_key(with_line)
+                    if with_key != "python-version" or not with_canonical:
+                        problems.append(where + " passes setup-python input {!r} (line {}) at or "
+                                        "before the special-file precheck; only the plain "
+                                        "python-version: input is modelled there, because an "
+                                        "unmodelled input (pip-install:, python-version-file:, "
+                                        "...) can run committed code or read the checkout before "
+                                        "the precheck runs".format(with_line, with_number))
             if not s["env"]:
                 continue
             if s is job_steps[precheck]:

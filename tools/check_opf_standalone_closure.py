@@ -32,6 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 # The OPF gate subset, relative to the copied opf/tools/ directory. Each entry is (name, [args...]); the
 # self-test legs are deterministic and git-independent (they build their own throwaway fixtures), so they
@@ -236,7 +237,7 @@ def self_test_main():
     try:
         opf_root = _materialize(opf_src, tmp)
         store = opf_root / "tools" / "_opf_store.py"
-        text = store.read_text(encoding="utf-8")
+        text = _nbio.read_text_nb(store, encoding="utf-8")
         flipped = text.replace("from _semver import _parse",
                                "from check_versions import _parse", 1)
         if flipped == text:

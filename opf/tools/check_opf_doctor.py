@@ -89,6 +89,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the self-test's sibling imports below
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 EXIT_OK = 0
 EXIT_FINDING = 1
@@ -432,7 +433,7 @@ def _self_test_isolated():
             if stat.S_ISLNK(st.st_mode):
                 return ("link", st.st_mode, os.readlink(path))
             if stat.S_ISREG(st.st_mode):
-                with open(path, "rb") as fh:
+                with _nbio.open_nb(path, "rb") as fh:
                     return ("file", st.st_mode, hashlib.sha256(fh.read()).hexdigest())
             return ("other", st.st_mode, "")
 
@@ -585,7 +586,7 @@ def _self_test_isolated():
                 calls = []
                 if log.is_file():
                     calls = [line.split(chr(31)) for line in
-                             log.read_text(encoding="utf-8").splitlines()]
+                             _nbio.read_text_nb(log, encoding="utf-8").splitlines()]
                 return rc, calls
 
             # Exact invocation order and arguments: doctor --require-store first, render --check second,
@@ -598,7 +599,7 @@ def _self_test_isolated():
             # sys.flags.dont_write_bytecode per invocation, so dropping either flag reds this vector.
             flags_log = base / "stub-log-{}.flags".format(stub_serial[0])
             expect("ci-recipe-isolated-launch",
-                   flags_log.read_text(encoding="utf-8").splitlines() if flags_log.is_file() else [],
+                   _nbio.read_text_nb(flags_log, encoding="utf-8").splitlines() if flags_log.is_file() else [],
                    ["1 1", "1 1"])
             # Render-failure propagation: doctor 0 + render 1/2 must exit 1/2 (a deleted render line or a
             # trailing status-masking `exit 0` returns 0 here and reds).
@@ -719,7 +720,7 @@ def _self_test_isolated():
             cd_calls = []
             if cd_log.is_file():
                 cd_calls = [line.split(chr(31)) for line in
-                            cd_log.read_text(encoding="utf-8").splitlines()]
+                            _nbio.read_text_nb(cd_log, encoding="utf-8").splitlines()]
             expect("ci-recipe-relative-path-hostile-cdpath",
                    (rc, [c[0] for c in cd_calls]), (EXIT_OK, ["doctor", "render"]))
             # The GitHub Actions template is held to its own stated discipline (a template nothing runs
@@ -760,7 +761,7 @@ def _self_test_isolated():
                                  if ln.strip(" ") and not ln.lstrip(" ").startswith("#"))
 
             expect("workflow-exact-effective-text",
-                   _wf_effective(workflow.read_bytes()), _WORKFLOW_CANONICAL)
+                   _wf_effective(_nbio.read_bytes_nb(workflow)), _WORKFLOW_CANONICAL)
             expect("workflow-comment-and-blank-lines-free",
                    _wf_effective(("# a template comment may change freely\n\n"
                                   + _WORKFLOW_CANONICAL).encode("ascii")),
@@ -888,7 +889,7 @@ def _self_test_isolated():
             _write_machine(viewed, machine)
             _write_product(viewed)
             machine_rel = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
-            fd = os.open(str(viewed), os.O_RDONLY)
+            fd = os.open(str(viewed), (os.O_RDONLY) | getattr(os, "O_NONBLOCK", 0))
             try:
                 for _name, _scope, dest_rel, text in _opf_views.plan_views(fd, machine_rel):
                     (viewed / dest_rel).write_text(text, encoding="utf-8")
@@ -901,7 +902,7 @@ def _self_test_isolated():
             expect("ci-recipe-clean-viewed-store", _run_ci_recipe(viewed), EXIT_OK)
             expect("ci-recipe-clean-run-read-only", _tree_digest(viewed, home) == before, True)
             view_target = viewed / _opf_store.WORKING_DIRNAME / "WORKLOG.md"
-            view_target.write_text(view_target.read_text(encoding="utf-8") + "drifted line\n",
+            view_target.write_text(_nbio.read_text_nb(view_target, encoding="utf-8") + "drifted line\n",
                                    encoding="utf-8")
             _git(viewed, home, "add", "-A")
             _git(viewed, home, "commit", "-m", "commit the drifted view")

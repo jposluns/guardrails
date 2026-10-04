@@ -36,6 +36,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; the shared readers live beside this file
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
+
 TIMEOUT = 30
 SUBCOMMANDS = ("branch", "tag")
 SOURCE_REL = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
@@ -441,7 +444,7 @@ def run(root):
     issues = []
     try:
         source_path = root.resolve(strict=True) / SOURCE_REL
-        hook = parse_hook(source_path.read_text(encoding="utf-8"))
+        hook = parse_hook(_nbio.read_text_nb(source_path, encoding="utf-8"))
         found = shutil.which("git")
         if found is None:
             raise CannotEvaluate("git executable not found")

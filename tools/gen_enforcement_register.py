@@ -61,6 +61,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, read_source_text, reconcile  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402  canonical AIQT-priority rule order (as gen_mappings uses)
@@ -215,7 +216,7 @@ def load_ledger(root):
     fresh = gen_enforceability.build_ledger(root)
     committed_path = root / LEDGER_REL
     try:
-        committed = committed_path.read_text(encoding="utf-8")
+        committed = _nbio.read_text_nb(committed_path, encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise ValueError("cannot read the committed ledger {} ({})".format(LEDGER_REL, exc))
     if committed != fresh:
@@ -647,7 +648,7 @@ def compose_page(root, html_inner):
     Substitution is a single pass over the shell (gen_site's substitution contract), so a substituted
     value is never re-scanned for another token. Reuses the shared shell and gen_site's own escaping and
     substitution rather than duplicating any chrome here."""
-    shell = (root / SHELL_REL).read_text(encoding="utf-8")  # OSError/UnicodeError -> fail-closed in caller
+    shell = _nbio.read_text_nb(root / SHELL_REL, encoding="utf-8")  # OSError/UnicodeError -> fail-closed in caller
     gen_site._validate_shell_placeholders(shell, SHELL_REL)
     gen_site._validate_token_sinks(shell, SHELL_REL)
     substitutions = {"content": _page_content(html_inner)}
@@ -981,7 +982,7 @@ def self_test_main():
                 return "raised SystemExit({!r})".format(exc.code)
 
     def replace_in(path, old, new):
-        text = path.read_text(encoding="utf-8")
+        text = _nbio.read_text_nb(path, encoding="utf-8")
         if old not in text:
             failures.append("self-test setup: {!r} not found in {}".format(old, path.name))
         path.write_text(text.replace(old, new), encoding="utf-8")
@@ -1005,7 +1006,7 @@ def self_test_main():
         if not md.is_file():
             failures.append("conformant tree: expected {} to be written".format(MD_REL))
         else:
-            body = md.read_text(encoding="utf-8")
+            body = _nbio.read_text_nb(md, encoding="utf-8")
             for token in ("Enforced | 3", "Pending | 1", "None | 1", "`gate:gate-alpha`",
                           "`hook:hook-one`", "Enforcement has not been built yet.",
                           "### `gate:gate-alpha`", RESIDUAL_HEADING,
@@ -1025,7 +1026,7 @@ def self_test_main():
             if _md_mechanism_fence(body, "hook:hook-one") != _HOOK_RESIDUE:
                 failures.append("conformant tree: the multi-line hook residue did not round-trip verbatim "
                                 "inside its own Markdown fence")
-        html_page = (good / HTML_REL).read_text(encoding="utf-8")
+        html_page = _nbio.read_text_nb(good / HTML_REL, encoding="utf-8")
         # The multi-line residue is also emitted verbatim (newlines intact, HTML-escaped) in its blockquote.
         if _HOOK_RESIDUE not in html_page:
             failures.append("conformant tree: the multi-line hook residue is not emitted verbatim in the "
@@ -1057,7 +1058,7 @@ def self_test_main():
         for cid, r in roadmap.items():
             if r["status"] == "enforced":
                 enforced_union.update(r["mechanisms"])
-        md_text = md.read_text(encoding="utf-8")
+        md_text = _nbio.read_text_nb(md, encoding="utf-8")
         # Truncate the alpha residue inside its block on the page (drop a distinctive tail token).
         doctored = html_page.replace("an ampersand, so the HTML escaping and the display-fidelity "
                                      "assertion are exercised.", "an ampersand.", 1)
@@ -1120,7 +1121,7 @@ def self_test_main():
 
         # (b) A drifted ENFORCEMENT.md fails --check (exit 1).
         if md.is_file():
-            md.write_text(md.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            md.write_text(_nbio.read_text_nb(md, encoding="utf-8") + "\n", encoding="utf-8")
             if run_quiet(good, check=True) != 1:
                 failures.append("drifted {} expected exit 1".format(MD_REL))
 
@@ -1133,7 +1134,7 @@ def self_test_main():
         if not page_path.is_file():
             failures.append("chrome-edit tree: expected {} to be generated".format(HTML_REL))
         else:
-            page_text = page_path.read_text(encoding="utf-8")
+            page_text = _nbio.read_text_nb(page_path, encoding="utf-8")
             edited = page_text.replace(
                 "<title>Guardrail Enforcement Register</title>",
                 "<title>Hand edited chrome</title>", 1)
@@ -1152,7 +1153,7 @@ def self_test_main():
 
         # (c) Unknown top-level key in the roadmap.
         expect2("roadmap-top-key",
-                lambda t: (t / ROADMAP).write_text("bogus = 1\n" + (t / ROADMAP).read_text("utf-8"),
+                lambda t: (t / ROADMAP).write_text("bogus = 1\n" + _nbio.read_text_nb(t / ROADMAP, "utf-8"),
                                                    encoding="utf-8"))
         # (d) Unknown row key in the roadmap.
         expect2("roadmap-row-key",
@@ -1161,13 +1162,13 @@ def self_test_main():
         # (e) Missing roadmap row (drop ruledd).
         expect2("roadmap-missing-row",
                 lambda t: (t / ROADMAP).write_text(
-                    (t / ROADMAP).read_text("utf-8").replace(
+                    _nbio.read_text_nb(t / ROADMAP, "utf-8").replace(
                         '\n[[rule]]\ncorpus-id = "ruledd"\nstatus = "none"\nmechanisms = []\n', "\n"),
                     encoding="utf-8"))
         # (f) Extra roadmap row (a corpus-id not in the ledger).
         expect2("roadmap-extra-row",
                 lambda t: (t / ROADMAP).write_text(
-                    (t / ROADMAP).read_text("utf-8") +
+                    _nbio.read_text_nb(t / ROADMAP, "utf-8") +
                     '\n[[rule]]\ncorpus-id = "zzghost"\nstatus = "none"\nmechanisms = []\n',
                     encoding="utf-8"))
         # (g) An enforced row whose mechanisms disagree with the ledger linkage.
@@ -1212,7 +1213,7 @@ def self_test_main():
         # (q) A stale committed ledger (mutate it so it no longer matches a fresh build).
         expect2("stale-ledger",
                 lambda t: (t / ".aiqt" / "enforceability.json").write_text(
-                    (t / ".aiqt" / "enforceability.json").read_text("utf-8") + "\n", encoding="utf-8"))
+                    _nbio.read_text_nb(t / ".aiqt" / "enforceability.json", "utf-8") + "\n", encoding="utf-8"))
         # (r) An en dash in a ledger residue fails closed via _residue_display (residues permit newlines
         # but never a dash: the house no-dash convention still holds for the multi-line sink).
         expect2("residue-dash",
@@ -1233,7 +1234,7 @@ def self_test_main():
         # (s) A site shell missing the {{content}} token fails closed (the shell validator refuses it).
         expect2("shell-missing-content",
                 lambda t: (t / "docs" / "_shell.html").write_text(
-                    (t / "docs" / "_shell.html").read_text("utf-8").replace("{{content}}", ""),
+                    _nbio.read_text_nb(t / "docs" / "_shell.html", "utf-8").replace("{{content}}", ""),
                     encoding="utf-8"))
         # (t) An invalid-UTF-8 generated Markdown target fails closed (exit 2), via reconcile's decode.
         expect2("md-invalid-utf8",

@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 
 README_REL = Path(".aiqt") / "standards" / "README.md"
@@ -72,7 +73,7 @@ def build(root):
     ValueError (incl. a UnicodeDecodeError on an invalid-UTF-8 README, a subclass of ValueError) on an
     unreadable or malformed input; the caller maps those to exit 2."""
     manifests = load_manifests(root / ".aiqt" / "standards")
-    text = (root / README_REL).read_text(encoding="utf-8")
+    text = _nbio.read_text_nb(root / README_REL, encoding="utf-8")
     return _replace_roster(text, render_roster(manifests))
 
 
@@ -157,7 +158,7 @@ def self_test_main():
         _write_fixture(good, two, _README)
         if run_quiet(good, check=False) != 0:
             failures.append("conformant tree: generation expected exit 0")
-        readme_text = (good / README_REL).read_text(encoding="utf-8")
+        readme_text = _nbio.read_text_nb(good / README_REL, encoding="utf-8")
         if "Frameworks with a manifest and enabled key (2 in total):" not in readme_text:
             failures.append("conformant tree: expected the '2 in total' count in the generated roster")
         if "- Alpha Framework (edition 1.0)" not in readme_text \
@@ -167,7 +168,7 @@ def self_test_main():
             failures.append("conformant tree: re-check expected drift-clean exit 0")
 
         # (b) a hand-desynced committed block is caught by --check (exit 1).
-        desynced = (good / README_REL).read_text(encoding="utf-8").replace(
+        desynced = _nbio.read_text_nb(good / README_REL, encoding="utf-8").replace(
             "(2 in total)", "(9 in total)")
         (good / README_REL).write_text(desynced, encoding="utf-8")
         if run_quiet(good, check=True) != 1:

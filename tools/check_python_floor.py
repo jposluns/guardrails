@@ -153,6 +153,9 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; the shared readers live beside this file
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_REL = ".aiqt/core/python-floor.toml"
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
@@ -283,7 +286,7 @@ def _read_text(path):
     if not stat.S_ISREG(mode):
         raise CannotEvaluate("{}: not a regular file".format(path))
     try:
-        return Path(path).read_bytes().decode("utf-8")
+        return _nbio.read_bytes_nb(Path(path)).decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise CannotEvaluate("{}: cannot read as UTF-8: {}".format(path, exc))
 

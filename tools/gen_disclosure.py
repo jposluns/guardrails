@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import is_external_url, repo_root, load_toml, replace_block, reconcile  # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 EN, EM = "–", "—"
 PLACEHOLDER = "[[ARCHITECT"
@@ -320,7 +321,7 @@ def main():
         print("error: site/disclosure.html not found (expected generated target)", file=sys.stderr)
         return 2
     try:
-        new_html = replace_block(page.read_text(encoding="utf-8"), "DISCLOSURE", site_inner)
+        new_html = replace_block(_nbio.read_text_nb(page, encoding="utf-8"), "DISCLOSURE", site_inner)
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2

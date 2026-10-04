@@ -364,6 +364,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal as journal          # noqa: E402
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _opf_changelog as opf_changelog  # noqa: E402
 import _opf_check as opf_check      # noqa: E402
 import _opf_emit as emit            # noqa: E402
@@ -456,7 +457,7 @@ def assert_no_auto_maintenance(env, base):
     with patch.dict(env.vars, dict(GIT_TRACE2_EVENT=str(trace))):
         env.git(probe, "commit", "-q", "-m", "probe")
     spawned = []
-    for line in trace.read_text(encoding="utf-8").splitlines():
+    for line in _nbio.read_text_nb(trace, encoding="utf-8").splitlines():
         event = json.loads(line)   # one trace2 event per line; unparseable output is a Harness fault
         if event.get("event") == "child_start":
             argv = event.get("argv") or []
@@ -491,14 +492,14 @@ def snapshot(root):
             path = Path(directory) / name
             st = path.lstat()
             rel = path.relative_to(root).as_posix()
-            kind = ("file", path.read_bytes()) if stat.S_ISREG(st.st_mode) else (
+            kind = ("file", _nbio.read_bytes_nb(path)) if stat.S_ISREG(st.st_mode) else (
                 "dir",) if stat.S_ISDIR(st.st_mode) else ("other", stat.S_IFMT(st.st_mode))
             result[rel] = (stat.S_IMODE(st.st_mode), kind)
     return result
 
 
 def read(root, rel):
-    return (Path(root) / rel).read_bytes()
+    return _nbio.read_bytes_nb(Path(root) / rel)
 
 
 def model(root, rel):
@@ -937,7 +938,7 @@ def t12_recovery_lease(fx):
     env = fx.env
     root = _interrupted(fx, "t12-live-peer")
     # A live peer takes the shared lease through the upgrade verb, as `opf upgrade` does.
-    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    root_fd = os.open(str(root), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
     try:
         peer = guard.acquire_lease(root_fd, MACH, "upgrade")
         try:
@@ -2251,7 +2252,7 @@ def _self_test_homes2_active(root):
     from unittest.mock import patch
     resolution = _opf_store.resolve_store(root)
     path = Path(resolution.store_root) / resolution.machine_rel / _opf_store.MANIFEST_NAME
-    original = path.read_bytes()
+    original = _nbio.read_bytes_nb(path)
     model = tomllib.loads(original.decode("utf-8"))
     model["opf"]["homes"] = 2
     real_validate = _opf_store.validate_manifest
@@ -2697,7 +2698,7 @@ SPEC15_SENTENCE = ("A no-follow existence probe of a former `.aiqt/` location, u
 
 
 def spec15_text():
-    return (TOOLS.parent / "spec" / "OPF-SPEC.md").read_text(encoding="utf-8")
+    return _nbio.read_text_nb(TOOLS.parent / "spec" / "OPF-SPEC.md", encoding="utf-8")
 
 
 def t28_spec15_sentence(fx):
@@ -2770,7 +2771,7 @@ def t29_git_lifecycle(fx):
                               capture_output=True, text=True, timeout=120, env=stripped_launch_env(env))
     assert proc.returncode == 0, ("T29 the stripped launch runs", proc.returncode, proc.stderr[-800:])
     seen = dict()
-    for line in trace.read_text(encoding="utf-8").splitlines():
+    for line in _nbio.read_text_nb(trace, encoding="utf-8").splitlines():
         event = json.loads(line)   # one trace2 event per line; unparseable output is a Harness fault
         if event.get("event") == "def_param":
             seen[event.get("param")] = event.get("value")
@@ -3268,7 +3269,7 @@ def t38_staging_removal_disclosed(fx):
     with _self_test_homes2_active(base):
         root = fx.case("t38-homes2-lone-lease", base)
         cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-        lease_bytes = (Path(root) / LEASE).read_bytes()
+        lease_bytes = _nbio.read_bytes_nb(Path(root) / LEASE)
         record._opf_oplock.release_operation(cap)
         (Path(root) / LEASE).write_bytes(lease_bytes)
         staging = _opf_oplock._staging_name(opf_check.LEASE_NAME)
@@ -3527,7 +3528,7 @@ def t43_publish_names_removals(fx):
             for op in plan.operands:
                 op.new_raw = record._emit_bytes(op.new_model)
             cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
-            lease_bytes = (Path(root) / LEASE).read_bytes()
+            lease_bytes = _nbio.read_bytes_nb(Path(root) / LEASE)
             record._opf_oplock.release_operation(cap)
             (Path(root) / LEASE).write_bytes(lease_bytes)
             staging = _opf_oplock._staging_name(opf_check.LEASE_NAME)

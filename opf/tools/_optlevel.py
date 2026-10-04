@@ -10,6 +10,10 @@ dependency-closed (it imports nothing upward into `tools/`). Offline, stdlib onl
 """
 import ast
 import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; the shared readers live beside this file
+import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 # ast.parse gained its optimize parameter in Python 3.13; the tools declare Python 3.11+.
 _PARSE_TAKES_OPTIMIZE = sys.version_info >= (3, 13)
@@ -29,7 +33,7 @@ def source_docstring(path, name=None):
     """The docstring of the top-level def or class `name` in the Python source at `path` (the module's
     own when `name` is None), parsed from the file at level 0. python -OO strips docstrings and leaves
     __doc__ None, so a check reading __doc__ would follow the interpreter level, not the source."""
-    with open(path, encoding="utf-8") as fh:
+    with _nbio.open_nb(path, encoding="utf-8") as fh:
         node = parse(fh.read(), path)
     if name is not None:
         node = {n.name: n for n in node.body
