@@ -9298,8 +9298,145 @@ _ORCH_SHELL_KEYWORDS = frozenset((
     "do", "done", "in", "function", "time", "coproc"))
 
 
+# A here-document delimiter word ends at the first unquoted shell metacharacter or blank.
+_ORCH_HEREDOC_DELIM_STOP = frozenset(" \t\n;&|<>()")
+# A command-substitution opener: `$(`, a backtick, the `${ cmd; }` / `${| cmd; }` current-shell forms, or a
+# process substitution. Text carrying one can still run a command, so an `&` beside it is never skipped as
+# data (an expanded here-document body, or a `${...}` parameter expansion).
+_ORCH_CMDSUB_RE = re.compile(r"\$\(|`|\$\{[\s|]|[<>]\(")
+# The first character after `${` that makes it a parameter expansion: a name, a positional or special
+# parameter, or the `#` length / `!` indirection prefix. Any other (a blank or `|`) is a command-substitution
+# form in current shells and is scanned as code.
+_ORCH_PARAM_START = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_#?@*!$-")
+
+
+def _orch_heredoc_word(command, i):
+    """Read a here-document delimiter word starting at i. Returns (text, quoted, end): text after quote
+    removal, quoted True when any part was quoted or escaped (the body is then literal, not expanded), end
+    the index after the word. None when the word is empty or uses quoting this reader does not model (an
+    unbalanced quote, a trailing or line-continuation backslash, or ANSI-C `$'...'`), so the caller does
+    NOT treat the operator as a here-document and the text after it is scanned as code."""
+    n = len(command)
+    out, quoted = [], False
+    while i < n:
+        ch = command[i]
+        if ch in _ORCH_HEREDOC_DELIM_STOP:
+            break
+        if ch == "\\":
+            if i + 1 >= n or command[i + 1] == "\n":
+                return None
+            out.append(command[i + 1])
+            quoted, i = True, i + 2
+            continue
+        if ch == "'":
+            j = command.find("'", i + 1)
+            if j == -1:
+                return None
+            out.append(command[i + 1:j])
+            quoted, i = True, j + 1
+            continue
+        if ch == '"':
+            j, buf = i + 1, []
+            while j < n and command[j] != '"':
+                if command[j] == "\\" and j + 1 < n and command[j + 1] in '"\\$`':
+                    buf.append(command[j + 1])
+                    j += 2
+                    continue
+                buf.append(command[j])
+                j += 1
+            if j >= n:
+                return None
+            out.append("".join(buf))
+            quoted, i = True, j + 1
+            continue
+        if ch == "$" and i + 1 < n and command[i + 1] in "'\"":
+            return None
+        out.append(ch)
+        i += 1
+    text = "".join(out)
+    return (text, quoted, i) if text else None
+
+
+def _orch_heredoc_bodies(command, start, pending):
+    """Consume the pending here-document bodies, in order, from index start (the character after the
+    unquoted newline that ends the operator's line). Returns (end, ambiguous): end is the index of the
+    newline closing the last terminator line (or len(command)); ambiguous is True when an EXPANDED body
+    (unquoted delimiter) carries an `&` beside a command substitution, which can still launch work. Returns
+    None when any terminator line is missing: the caller then scans the rest as code (it may over-deny, but
+    a body it cannot delimit is never skipped)."""
+    n = len(command)
+    pos, end, ambiguous = start, start - 1, False
+    for delim, strip_tabs, quoted in pending:
+        body_start = pos
+        while True:
+            eol = command.find("\n", pos)
+            if eol == -1:
+                eol = n
+            line = command[pos:eol]
+            if (line.lstrip("\t") if strip_tabs else line) == delim:
+                body = command[body_start:pos]
+                if not quoted and "&" in body and _ORCH_CMDSUB_RE.search(body):
+                    ambiguous = True
+                pos, end = eol + 1, eol
+                break
+            if eol >= n:
+                return None
+            pos = eol + 1
+    return end, ambiguous
+
+
+def _orch_param_expansion_span(command, i):
+    """(end, data) for the `${` at i. end is the index just after its closing brace (a brace inside a
+    nested `(...)` or a backtick span does not close it), or None when none closes it. data is True only for
+    a plain parameter expansion this scan can skip as data: one whose first character is a parameter start
+    and that holds no newline and no command-substitution opener (`$(`, a backtick, the current-shell form,
+    `<(`, `>(`), whose `&` could still launch work and is therefore scanned as code."""
+    n = len(command)
+    j, depth, paren = i + 2, 1, 0
+    while j < n:
+        ch = command[j]
+        if ch == "\\":
+            j += 2
+            continue
+        if ch in "'`":
+            k = command.find(ch, j + 1)
+            if k == -1:
+                return None, False
+            j = k + 1
+            continue
+        if ch == '"':
+            k = j + 1
+            while k < n and command[k] != '"':
+                k += 2 if command[k] == "\\" else 1
+            if k >= n:
+                return None, False
+            j = k + 1
+            continue
+        if ch == "$" and j + 1 < n and command[j + 1] == "{":
+            depth += 1
+            j += 2
+            continue
+        if ch in "()":
+            paren += 1 if ch == "(" else (-1 if paren else 0)
+        elif ch == "}" and not paren:
+            depth -= 1
+            if depth == 0:
+                body = command[i:j + 1]
+                data = (i + 2 < n and command[i + 2] in _ORCH_PARAM_START and "\n" not in body
+                        and not _ORCH_CMDSUB_RE.search(body))
+                return j + 1, data
+        j += 1
+    return None, False
+
+
 def _orch_foreground_detach(command):
-    """True when a foreground command carries an executable, unquoted, unescaped bare `&` control operator
+    """True when _orch_foreground_detach_kind reports a detach or an ambiguous scan (see there)."""
+    return _orch_foreground_detach_kind(command) is not None
+
+
+def _orch_foreground_detach_kind(command):
+    """'detach' when a foreground command carries an executable, unquoted, unescaped bare `&` control operator
     that detaches a child, launching asynchronous work the foreground tool call does not track. The bare
     detach `&` is distinguished from the shell forms that also carry an ampersand but do NOT detach: the
     `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
@@ -9311,19 +9448,35 @@ def _orch_foreground_detach(command):
     comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
     is still caught rather than smuggled past.
 
-    AMBIGUOUS QUOTING FAILS TOWARD ASK, never toward a silent allow: a scan that ends still inside an
+    DATA IS NOT SYNTAX: a here-document body (after `<<` or `<<-`, quoted or unquoted delimiter) is data,
+    so its apostrophes and ampersands never reach the scan; the body is skipped from the newline ending the
+    operator's line through its terminator line (several here-documents on one line are consumed in
+    order). An `&` inside a plain parameter expansion (`${x:-&}`, `${x//&/and}`) is a literal word
+    character, not an operator, and is skipped too. Neither skip is taken where the text could still run a
+    command: an UNQUOTED-delimiter body is expanded, so one that carries an `&` beside a command
+    substitution is reported 'ambiguous'; a parameter expansion holding a command substitution, and the
+    current-shell command-substitution form (`${ cmd; }`), are scanned as code, though a `<<` in them
+    is word text, not a here-document operator. A `<<` inside an arithmetic `$((`, `((`, or `$[` context
+    is a shift, not a here-document, and is not treated as one. A here-document whose terminator line
+    never appears is not skipped (the rest is scanned as code, erring toward the deny).
+
+    AMBIGUOUS QUOTING FAILS TOWARD THE DENY, never toward a silent allow: a scan that ends still inside an
     unbalanced single or double quote cannot prove that a later `&` is quoted rather than an operator (an
     unbalanced quote, or a construct this scan does not model such as ANSI-C `$'...'` or locale `$"..."`
-    quoting, can leave the scan `inside quotes` and skip a real trailing `&`), so it reports a detach
-    (True -> ASK) rather than allowing. A genuinely balanced, quoted `&` is literal and correctly ignored.
+    quoting, can leave the scan `inside quotes` and skip a real trailing `&`), so it reports 'ambiguous'
+    rather than allowing. A genuinely balanced, quoted `&` is literal and correctly ignored. None means no
+    detach was found.
 
     NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only. Grammar it does not
-    model (a here-document body, a nested shell string, an alias or function that renames a detacher, and
+    model (an arithmetic `&`, a nested shell string, an alias or function that renames a detacher, and
     runtime detachers such as nohup/setsid/disown/coproc) is a disclosed residual; where such a construct
     still leaves an unquoted bare `&`, or leaves the scan inside an unbalanced quote, it errs toward the
-    ASK, but a detacher that carries no bare `&` (setsid worker, a nested `bash -c '... &'`) is NOT caught
+    deny, but a detacher that carries no bare `&` (setsid worker, a nested `bash -c '... &'`) is NOT caught
     here and is a silent-allow residual disclosed in the manifest."""
     in_single = in_double = escaped = False
+    pending = []  # here-documents opened on the current line: (delimiter, strip_tabs, quoted)
+    no_heredoc_until = 0  # end of a parameter expansion scanned as code (its `<<` is word text)
+    arith = 0  # open-bracket depth inside an arithmetic `$((`, `((`, or `$[` context (a `<<` there is a shift)
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
     word_start = True  # the next unquoted char begins a word (start of string, or after unquoted whitespace)
     i, n = 0, len(command)
@@ -9357,6 +9510,17 @@ def _orch_foreground_detach(command):
                 break  # no later line: the comment runs to the end of the string, nothing more to scan
             i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
             continue
+        if ch == "\n" and pending:
+            # The unquoted newline ending a line that opened here-documents: their bodies follow and are
+            # data. Skip through the last terminator line and resume at the newline after it.
+            consumed = _orch_heredoc_bodies(command, i + 1, pending)
+            pending = []
+            if consumed is not None:
+                end, ambiguous = consumed
+                if ambiguous:
+                    return "ambiguous"
+                i = end
+                continue
         if ch.isspace():
             prev_dup, word_start = False, True
             i += 1
@@ -9365,6 +9529,45 @@ def _orch_foreground_detach(command):
             escaped, prev_dup, word_start = True, False, False
             i += 1
             continue
+        if ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i) \
+                and not arith and i >= no_heredoc_until:
+            j = i + 2
+            strip_tabs = command.startswith("-", j)
+            j += 1 if strip_tabs else 0
+            while j < n and command[j] in " \t":
+                j += 1
+            word = _orch_heredoc_word(command, j)
+            if word is not None:
+                text, quoted, end = word
+                pending.append((text, strip_tabs, quoted))
+                prev_dup, word_start = False, False
+                i = end
+                continue
+        if ch == "$" and command.startswith("((", i + 1):
+            arith += 2
+            prev_dup, word_start = False, False
+            i += 3
+            continue
+        if ch == "$" and command.startswith("[", i + 1):
+            arith += 1  # the older `$[...]` arithmetic form: its brackets are counted with the parens
+            prev_dup, word_start = False, False
+            i += 2
+            continue
+        if ch == "(" and word_start and command.startswith("((", i):
+            arith += 2
+            prev_dup, word_start = False, False
+            i += 2
+            continue
+        if arith and ch in "()[]":
+            arith += 1 if ch in "([" else -1
+        if ch == "$" and command.startswith("{", i + 1):
+            end, data = _orch_param_expansion_span(command, i)
+            if data:
+                prev_dup, word_start = False, False
+                i = end
+                continue
+            # Scanned as code, but a `<<` inside it is word text, not a here-document operator.
+            no_heredoc_until = n if end is None else max(no_heredoc_until, end)
         if ch == "'":
             in_single, prev_dup, word_start = True, False, False
             i += 1
@@ -9387,12 +9590,12 @@ def _orch_foreground_detach(command):
                 prev_dup, word_start = False, False
                 i += 1
                 continue
-            return True  # an executable bare `&` control operator: a foreground detach
+            return "detach"  # an executable bare `&` control operator: a foreground detach
         prev_dup, word_start = ch in (">", "<", "|"), False
         i += 1
     # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; fail
-    # toward ASK rather than silently allow a possibly-real detach it could not see.
-    return in_single or in_double
+    # toward the deny rather than silently allow a possibly-real detach it could not see.
+    return "ambiguous" if (in_single or in_double) else None
 
 
 # ROUND-2 FINDING 9: sinks that TRUNCATE their input, so a producer piped into one loses both its full
@@ -9456,6 +9659,21 @@ def _orch_effective_sink_word(argv):
     return argv[idx].lstrip("\\").rsplit("/", 1)[-1] if idx < n else ""
 
 
+def _orch_json_kind(value):
+    """A short JSON type phrase for a malformed-input deny message ('null', 'a string', 'an array')."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, list):
+        return "an array"
+    return "an object" if isinstance(value, dict) else "a " + type(value).__name__
+
+
 def orch_truncation_guard(data):
     """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: it
     performs NO shell parsing, so no lexical or quoting edge can fabricate a capture. A background dispatch
@@ -9473,7 +9691,15 @@ def orch_truncation_guard(data):
     that DETACHES a child with a bare `&` launches asynchronous work the foreground tool call does not track,
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
-    and wait); every other foreground call remains out of scope (the harness returns its output directly)."""
+    and wait); every other foreground call remains out of scope (the harness returns its output directly).
+
+    MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
+    not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
+    malformed, never read as foreground), and a command that is not a string are each DENIED with a
+    reason naming the defect, never silently allowed. REGISTRY SCOPE (a disclosed residual, not a
+    fail-closed case): the registry is this suite's scope declaration, so with NO registry file present the
+    guard is inert and allows every Bash call, while a present-but-unreadable or invalid registry keeps it
+    active."""
     if data.get("tool_name") != "Bash":
         return _allow()
     root = _orch_root(data)
@@ -9481,25 +9707,67 @@ def orch_truncation_guard(data):
         return _allow()
     status, _reg = _orch_registry(root)
     if status == "absent":
-        return _allow()
-    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+        return _allow()  # registry-scoped by design: a disclosed residual (see the docstring)
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
+        return _deny(
+            "AIQT rule trkasy (track-launched-work): this Bash call's tool_input is {}, not a JSON object, "
+            "so this guard cannot read its command or its run_in_background flag. A check that cannot read "
+            "its input fails closed (check-fails-closed-on-unreadable): it is denied rather than allowed "
+            "unread. Re-issue the call with a tool_input object carrying a string command.".format(kind),
+            "AIQT guardrail: denied a Bash call whose tool_input is {}, not an object "
+            "(fail-closed).".format(kind))
     command = tool_input.get("command")
-    rib = tool_input.get("run_in_background") is True
+    rib = tool_input.get("run_in_background", False)
+    if not isinstance(rib, bool):
+        return _deny(
+            "AIQT rule trkasy (track-launched-work): this Bash call's run_in_background is {} ({}), not a "
+            "boolean, so this guard cannot tell a background dispatch from a foreground call; it is denied "
+            "rather than read as foreground (check-fails-closed-on-unreadable). Re-issue with "
+            "run_in_background true or false, or omit it for a foreground call."
+            .format(_orch_json_kind(rib), json.dumps(rib, default=str)[:40]),
+            "AIQT guardrail: denied a Bash call whose run_in_background is not a boolean (fail-closed).")
     if not rib:
         # Foreground scope is narrow: a plain foreground call returns its output directly and is out of
         # scope, but a bare `&` detaches a child into untracked asynchronous work whose result and failure
         # are then lost. A bare-& detach is never the right way to launch tracked work (the tracked
         # background dispatch is), so it DENIES-and-educates: the caller self-corrects to run_in_background
-        # (or waits in the foreground), which is what lets the dispatch ledger record it. An unreadable or
-        # non-detaching foreground command stays out of scope (ALLOW).
-        if isinstance(command, str) and _orch_foreground_detach(command):
+        # (or waits in the foreground), which is what lets the dispatch ledger record it. A command the scan
+        # cannot read with certainty DENIES with its own could-not-read reason (no background advice); an
+        # unreadable (non-string) command fails closed; a non-detaching foreground command is out of scope.
+        if not isinstance(command, str):
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground Bash call's command is {}, not a "
+                "string, so this guard cannot scan it for a bare '&' detach; it is denied rather than "
+                "allowed unread (check-fails-closed-on-unreadable). Re-issue with a string command."
+                .format("missing" if "command" not in tool_input else _orch_json_kind(command)),
+                "AIQT guardrail: denied a foreground Bash call with no readable command string "
+                "(fail-closed).")
+        detach = _orch_foreground_detach_kind(command)
+        if detach == "ambiguous":
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this guard could not read this foreground command "
+                "with certainty for a bare '&' detach: its scan ended inside an unbalanced quote (or a "
+                "quoting form it does not model, such as $'...'), or an expanded here-document body (an "
+                "unquoted delimiter) carries an '&' beside a command substitution. It is denied rather than "
+                "allowed unproven. This is a could-not-read denial, not a detach finding: if the text is "
+                "data, balance its quoting, or pass it through a here-document with a quoted delimiter "
+                "(<<'EOF') or a file, and re-issue; if a command substitution really ends in '&', drop "
+                "that '&'.",
+                "AIQT guardrail: denied a foreground command whose quoting this guard could not read "
+                "(fail-closed); balance the quoting or use a quoted here-document delimiter.")
+        if detach == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
                 "bare '&', launching asynchronous work this tool call does not track, so its result and "
                 "failure would be lost; it is denied. Use the platform's tracked background dispatch "
                 "(run_in_background) and collect its completion, or keep the command in the foreground and "
                 "wait for it. If the detached result and completion are genuinely not needed, drop the '&' "
-                "and run it foreground.",
+                "and run it foreground. If this '&' is not a detach at all (for example a bitwise AND in an "
+                "arithmetic expansion, which this scan does not model), quote it or move the text into a "
+                "file or a quoted here-document instead; the background-dispatch advice applies only to a "
+                "real detach.",
                 "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
                 "trkasy); use the tracked background dispatch or run it in the foreground.")
         return _allow()  # foreground without a bare-& detach operator is out of scope by design

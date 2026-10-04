@@ -827,6 +827,84 @@ def _main_isolated(report_path=None):
         check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "allow")
+        # Data is not syntax: a here-document body (quoted or unquoted delimiter) and a plain parameter
+        # expansion carry apostrophes and ampersands that are data, not a bare-& operator. Before the fix
+        # each of these "-allows" cases DENIED (an unbalanced apostrophe or a body '&' reached the scan).
+        fg = lambda cmd: _verdict(bg(cmd, rib=False))
+        check("trunc/fg-heredoc-quoted-apostrophe-allows", fg("cat > f <<'EOF'\nThe user's file\nEOF"), "allow")
+        check("trunc/fg-heredoc-commit-amp-allows", fg("git commit -F - <<'EOF'\nFix A & B\nEOF"), "allow")
+        check("trunc/fg-heredoc-python-amp-allows", fg("python3 - <<'EOF'\nx = 1 & 2\nEOF"), "allow")
+        check("trunc/fg-heredoc-unquoted-allows", fg("cat > f <<EOF\nThe user's A & B\nEOF"), "allow")
+        check("trunc/fg-heredoc-dash-tab-allows", fg("cat <<-EOF\n\tit's A & B\n\tEOF"), "allow")
+        check("trunc/fg-heredoc-two-bodies-allows", fg("cat <<A <<'B'\nx & y\nA\nit's\nB\necho ok"), "allow")
+        check("trunc/fg-param-default-amp-allows", fg("echo ${x:-&}"), "allow")
+        check("trunc/fg-param-pattern-amp-allows", fg("echo ${x//&/and} && echo y"), "allow")
+        # Discriminating: a GENUINE bare '&' outside a here-document body or parameter expansion is still
+        # denied, and text that can still run a command is never skipped as data.
+        check("trunc/fg-real-sleep-detach-denies", fg("sleep 5 &"), "deny")
+        check("trunc/fg-heredoc-then-detach-denies", fg("cat > f <<'EOF'\nA & B's\nEOF\nsleep 5 &"), "deny")
+        check("trunc/fg-heredoc-operator-line-detach-denies", fg("cat <<'EOF' &\nbody\nEOF"), "deny")
+        check("trunc/fg-heredoc-two-bodies-then-detach-denies",
+              fg("cat <<A <<'B'\nx & y\nA\nit's\nB\nsleep 1 &"), "deny")
+        check("trunc/fg-heredoc-dash-then-detach-denies", fg("cat <<-EOF\n\tA & B\n\tEOF\n\tsleep 1 &"), "deny")
+        check("trunc/fg-heredoc-unterminated-amp-denies", fg("cat <<EOF\nno terminator & here"), "deny")
+        check("trunc/fg-heredoc-expanded-cmdsub-amp-denies",
+              fg("cat <<EOF\n$(sleep 5 >/dev/null &)\nEOF"), "deny")
+        check("trunc/fg-param-then-detach-denies", fg("echo ${x:-&} &"), "deny")
+        check("trunc/fg-param-cmdsub-detach-denies", fg("echo ${x:-$(sleep 5 &)}"), "deny")
+        check("trunc/fg-funsub-detach-denies", fg("echo ${ sleep 5 & }"), "deny")
+        # a '<<' that is word text inside a parameter expansion scanned as code opens no here-document.
+        check("trunc/fg-param-heredoc-text-then-detach-denies",
+              fg("echo ${x:-$(date)<<EOF}\nsleep 5 &\nEOF}"), "deny")
+        # a '<<' in arithmetic is a shift, never a here-document: the lines after it stay code.
+        check("trunc/fg-arith-shift-not-heredoc-denies", fg("echo $((1<<2))\nsleep 5 &\n2"), "deny")
+        check("trunc/fg-arith-bracket-shift-not-heredoc-denies", fg("echo $[1<<2]\nsleep 5 &\n2]"), "deny")
+        # The deny message fits its cause: a could-not-read (ambiguous) deny does not advise
+        # run_in_background (before the fix it carried the detach advice), a real detach still does.
+        _reason = lambda cmd: (bg(cmd, rib=False)[1] or {}).get(
+            "hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        check("trunc/fg-ambiguous-reason-no-background-advice",
+              "run_in_background" in _reason("echo 'oops & more"), False)
+        check("trunc/fg-ambiguous-reason-is-deny", fg("echo 'oops & more"), "deny")
+        check("trunc/fg-detach-reason-background-advice", "run_in_background" in _reason("sleep 5 &"), True)
+        # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
+        # tool_input that is missing, null, or not an object; a run_in_background that is not a real
+        # boolean (the string "true" is never read as foreground); a foreground command that is not a
+        # string. An omitted run_in_background is a foreground call and stays in scope as before.
+        raw = lambda extra: _verdict(aiqt_hooks.orch_truncation_guard(dict(
+            {"hook_event_name": "PreToolUse", "cwd": str(t.root), "session_id": "s1",
+             "tool_name": "Bash"}, **extra)))
+        check("trunc/malformed-tool-input-null-denies", raw({"tool_input": None}), "deny")
+        check("trunc/malformed-tool-input-missing-denies", raw({}), "deny")
+        check("trunc/malformed-tool-input-array-denies", raw({"tool_input": ["sleep 5 &"]}), "deny")
+        check("trunc/malformed-tool-input-string-denies", raw({"tool_input": "sleep 5 &"}), "deny")
+        check("trunc/malformed-rib-string-true-denies",
+              raw({"tool_input": {"command": "python3 build.py", "run_in_background": "true"}}), "deny")
+        check("trunc/malformed-rib-string-false-denies",
+              raw({"tool_input": {"command": "ls", "run_in_background": "false"}}), "deny")
+        check("trunc/malformed-rib-int-denies",
+              raw({"tool_input": {"command": "ls", "run_in_background": 1}}), "deny")
+        check("trunc/malformed-rib-null-denies",
+              raw({"tool_input": {"command": "ls", "run_in_background": None}}), "deny")
+        check("trunc/malformed-fg-command-nonstr-denies", raw({"tool_input": {"command": 42}}), "deny")
+        check("trunc/malformed-fg-command-missing-denies", raw({"tool_input": {}}), "deny")
+        check("trunc/rib-omitted-foreground-allows", raw({"tool_input": {"command": "ls -la"}}), "allow")
+        check("trunc/rib-omitted-foreground-detach-denies", raw({"tool_input": {"command": "sleep 5 &"}}),
+              "deny")
+        # Registry scope, the disclosed residual: with NO registry file the guard is inert (malformed input
+        # included), while a PRESENT but unreadable or invalid registry keeps it active (fail-closed).
+        check("trunc/malformed-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
+            {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
+             "tool_input": None})), "allow")
+        tb = Fixture(tmp, "trunc-badreg")
+        (tb.root / ".aiqt" / "orchestration.local.json").write_text("{not json", encoding="utf-8")
+        check("trunc/bad-registry-detach-denies", _verdict(aiqt_hooks.orch_truncation_guard(
+            tb.payload("PreToolUse", "Bash", {"command": "sleep 5 &"}))), "deny")
+        (tb.root / ".aiqt" / "orchestration.local.json").unlink()
+        (tb.root / ".aiqt" / "orchestration.local.json").mkdir()
+        check("trunc/dir-registry-malformed-denies", _verdict(aiqt_hooks.orch_truncation_guard(
+            {"hook_event_name": "PreToolUse", "cwd": str(tb.root), "tool_name": "Bash",
+             "tool_input": None})), "deny")
 
         # ---------- component 3b: the untracked wait-loop guard (trkasy, deny) ----------
         w = Fixture(tmp, "waitloop")
@@ -1681,9 +1759,11 @@ def _main_isolated(report_path=None):
           "ALLOWS-WITH-NOTE (reducer 'warn') any other shell syntax or reserved word, DENIES-and-educates a "
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
           "producer's full output and exit status) and a "
-          "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment "
-          "and failing an unbalanced/ANSI-C quote toward treating it as a detach (now a deny) rather than a "
-          "silent allow; the ledger records launches and completions; the resume "
+          "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment, "
+          "skipping a here-document body and a plain parameter expansion as data (a real detach beside "
+          "either still denies), and failing an unbalanced/ANSI-C quote toward a could-not-read deny rather "
+          "than a silent allow, and fails closed on a malformed tool_input, run_in_background, or command; "
+          "the ledger records launches and completions; the resume "
           "audit arms and clears the mutation barrier on real record state; the prompt stamp "
           "resets guard counters from genuine human input; an actor-owned, symlinked, or writable "
           "escape sentinel is ignored, recorded, and surfaced once at resume; a declared attestation "
