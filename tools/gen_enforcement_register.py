@@ -1358,9 +1358,11 @@ def self_test_main():
                            (t / ".preview" / "p-bad.py").write_text("def (:\n", encoding="utf-8"),
                            (t / gen_enforceability.PREVIEW_DECL_REL).write_text(
                                '[[preview]]\nid = "p-bad"\nrules = []\n', encoding="utf-8")))
-        # (z) A published preview hook too complex to parse (the parser's MemoryError, or a RecursionError
-        #     on another Python) and one with an unknown coding cookie fail closed with exit 2 the same
-        #     way, never a traceback or exit 1. The setup refreshes the committed ledger whenever the
+        # (z) A published preview hook too complex to parse (the parser's MemoryError, or the compiler's
+        #     RecursionError), one with an unknown coding cookie, one whose cookie names a codec that is not
+        #     a text encoding (rot13, a LookupError), and one with a latin-1 cookie on a lone-CR line 2 fail
+        #     closed with exit 2 the same way, never a traceback or exit 1, while cookie-like text inside a
+        #     lone-CR docstring is no cookie and is accepted. The setup refreshes the committed ledger whenever the
         #     build accepts the file, so exit 2 can come only from the preview check, never from a stale
         #     ledger; the valid control proves the refresh.
         def add_preview(t, body):
@@ -1378,10 +1380,17 @@ def self_test_main():
                 lambda t: add_preview(t, ('"""A doc."""\nx = ' + "-" * 100000 + "1\n").encode("utf-8")))
         expect2("preview-unknown-cookie",
                 lambda t: add_preview(t, b'# coding: not_an_encoding\n"""No named rule."""\n'))
-        ztree = _build(tmp / "preview-valid")
-        add_preview(ztree, b'"""A valid preview hook."""\n')
-        if run_quiet(ztree, check=False) != 0:
-            failures.append("preview-valid: expected exit 0 (the refreshed ledger must be accepted)")
+        expect2("preview-too-deep",
+                lambda t: add_preview(t, ('"""A doc."""\nx = ' + "+".join(["1"] * 200000) + "\n").encode("utf-8")))
+        expect2("preview-rot13-cookie", lambda t: add_preview(t, b'# coding: rot13\n"""A doc."""\n'))
+        expect2("preview-lone-cr-cookie",
+                lambda t: add_preview(t, b'\r# coding: latin-1\r"""Doc caf\xc3\xa9."""\r'))
+        for zname, zbody in (("preview-valid", b'"""A valid preview hook."""\n'),
+                             ("preview-valid-lone-cr", b'# comment\r"""# coding: latin-1"""\r')):
+            ztree = _build(tmp / zname)
+            add_preview(ztree, zbody)
+            if run_quiet(ztree, check=False) != 0:
+                failures.append("{}: expected exit 0 (the refreshed ledger must be accepted)".format(zname))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1404,7 +1413,8 @@ def self_test_main():
           "description, an unsupported lint: reference, a stale committed ledger, an en dash or a raw tab "
           "in a residue, a boolean roadmap version, a site shell missing its content token, and an "
           "invalid-UTF-8 generated Markdown or HTML target, and a published preview hook that does not "
-          "parse, is too complex to parse, or carries an unknown coding cookie all fail closed (exit 2); "
+          "parse, is too complex to parse, or carries an unknown, non-text or lone-CR non-UTF-8 coding cookie "
+          "all fail closed (exit 2), while cookie-like text in a lone-CR docstring is accepted; "
           "neither view calls a linked control enforcement, and the page "
           "lead scopes its linkage claim to the declared inputs")
     return 0

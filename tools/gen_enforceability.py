@@ -231,6 +231,14 @@ def _published_previews(root):
     return {name[:-3] for name in names if name.endswith(".py")}
 
 
+def _refusal(exc):
+    """The reason text for an exception raised while decoding or parsing a preview hook's bytes: a
+    SyntaxError's own message, otherwise the exception's type and message."""
+    if isinstance(exc, SyntaxError):
+        return exc.msg
+    return "{}: {}".format(type(exc).__name__, exc)
+
+
 def _preview_docstring(root, rel):
     """The module docstring of the declared preview hook file root/rel, exactly as Python sees it,
     validated before any of its rules are read. The file itself (the final path component) must be a
@@ -238,19 +246,29 @@ def _preview_docstring(root, rel):
     it are resolved as usual. It must be readable; its bytes must be valid UTF-8 (a UTF-8 byte order mark
     is allowed) with no PEP 263 coding cookie or one naming UTF-8, so the text Python decodes is the text
     checked here; it must parse as Python from those BYTES, so Python's own source decoding applies; and
-    its module docstring must be non-blank. An unreadable file raises OSError; every other failure raises
-    ValueError (a SyntaxError, and the MemoryError or RecursionError of a file too complex to parse, are
-    converted, since none is a ValueError subclass), so run() fails closed with exit 2 either way."""
+    its module docstring must be non-blank. The cookie is looked for where Python looks: on line 1 or 2,
+    with LF, CRLF and a lone CR each ending a line. An unreadable file raises OSError; every other failure
+    raises ValueError naming the file. Every exception that decoding, cookie detection or parsing raises
+    on the file's content is converted, whatever its class (a SyntaxError, the LookupError of a cookie
+    naming a codec that is not a text encoding, the MemoryError or RecursionError of a file too complex to
+    parse, or any other), so run() fails closed with exit 2 either way and never shows a traceback."""
     path = root / rel
     if not stat.S_ISREG(path.lstat().st_mode):  # lstat raises OSError on an absent or unreadable path
         raise ValueError("{} is not a regular file".format(rel))
     raw = path.read_bytes()  # OSError on an unreadable file
-    raw.decode("utf-8")  # UnicodeDecodeError (a ValueError) on bytes that are not UTF-8
     try:
-        encoding = tokenize.detect_encoding(io.BytesIO(raw).readline)[0]
-    except SyntaxError as exc:  # an unknown codec, or a byte order mark beside a non-UTF-8 cookie
-        raise ValueError("{} has an unusable coding cookie ({})".format(rel, exc.msg)) from None
-    if codecs.lookup(encoding).name not in ("utf-8", "utf-8-sig"):
+        raw.decode("utf-8")
+    except Exception as exc:  # noqa: BLE001  any refusal of the bytes is a refusal of the file
+        raise ValueError("{} is not valid UTF-8 ({})".format(rel, _refusal(exc))) from None
+    # detect_encoding's readline ends a line at LF only, so it reads a copy with every line ending made LF;
+    # the original bytes are what is parsed below.
+    lf = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    try:
+        encoding = tokenize.detect_encoding(io.BytesIO(lf).readline)[0]
+        codec = codecs.lookup(encoding).name
+    except Exception as exc:  # noqa: BLE001  e.g. an unknown or non-text codec, or a BOM by another cookie
+        raise ValueError("{} fails source encoding detection ({})".format(rel, _refusal(exc))) from None
+    if codec not in ("utf-8", "utf-8-sig"):
         raise ValueError("{} declares coding {}; a preview hook must be UTF-8 with no other coding "
                          "cookie".format(rel, encoding))
     try:
@@ -261,6 +279,8 @@ def _preview_docstring(root, rel):
     except (MemoryError, RecursionError) as exc:
         raise ValueError("{} is too complex to parse as Python ({}: {})".format(
             rel, type(exc).__name__, exc)) from None
+    except Exception as exc:  # noqa: BLE001  e.g. the ValueError for null bytes on a Python before 3.12
+        raise ValueError("{} does not parse as Python ({})".format(rel, _refusal(exc))) from None
     doc = ast.get_docstring(tree)
     if not doc or not doc.strip():
         raise ValueError("{} has no module docstring (a blank one counts as none)".format(rel))
@@ -538,7 +558,9 @@ def main():
 #       unknown corpus-id, and (v) published preview hooks with the declaration absent each fail closed
 #       (exit 2),
 #   (w) a declared preview file that lists NO rules is still validated: one that is unreadable, not
-#       UTF-8, a directory, a symlink, unparseable, or has no module docstring each fails closed (exit 2),
+#       UTF-8, a directory, a symlink, unparseable, too complex to parse (MemoryError or RecursionError),
+#       coded other than UTF-8 (a lone-CR line 2 cookie included), with a cookie naming an unknown codec or
+#       one that is not a text encoding (rot13, hex), or has no module docstring each fails closed (exit 2),
 #   (x) a linked preview file that does not parse returns exit 2 from run() instead of raising,
 #   (y) a slug with a letter (either case), digit, underscore or hyphen directly beside it is not named,
 #       while the slug in another letter case between punctuation is named, and
@@ -991,6 +1013,15 @@ def self_test_main():
              lambda f: f.write_bytes(b'\xef\xbb\xbf# coding: latin-1\n"""A doc."""\n')),
             ("too complex to parse", lambda f: f.write_text('"""A doc."""\nx = ' + "-" * 100000 + "1\n",
                                                             encoding="utf-8")),
+            ("too deep to compile (RecursionError)", lambda f: f.write_text(
+                '"""A doc."""\nx = ' + "+".join(["1"] * 200000) + "\n", encoding="utf-8")),
+            ("with a rot13 coding cookie (a codec that is not a text encoding: LookupError)",
+             lambda f: f.write_bytes(b'# coding: rot13\n"""A doc."""\n')),
+            ("with a hex coding cookie", lambda f: f.write_bytes(b'# coding: hex\n"""A doc."""\n')),
+            ("with a latin-1 cookie on a lone-CR line 2",
+             lambda f: f.write_bytes(b'\r# coding: latin-1\r"""Doc caf\xc3\xa9."""\r')),
+            ("with a latin-1 cookie on a lone-CR line 2 in an LF-ended file",
+             lambda f: f.write_bytes(b'\r# coding: latin-1\r"""Doc caf\xc3\xa9."""\n')),
         )
         for wi, (wname, wmutate) in enumerate(wcases):
             wtree = _add_previews(_build(tmp / "preview-empty-bad-{}".format(wi)))
@@ -1043,12 +1074,17 @@ def self_test_main():
         # (aa) The bytes Python reads decide: the docstring checked is the one Python sees. A unicode_escape
         #      cookie that makes Python's docstring name rule cc behind rules = [] fails closed; a UTF-8 byte
         #      order mark is Python and is accepted, and the reverse check still reads through it; a cookie
-        #      naming UTF-8 is accepted.
+        #      naming UTF-8 is accepted. A lone CR ends a line for Python, so cookie-like text inside a docstring on
+        #      a CR-delimited line 2, or a cookie on line 3, is no cookie and the file is accepted.
         for ai, (abytes, awant) in enumerate((
                 (b'# coding: unicode_escape\nr"""Motivated by \\x73elftest-rule-cc."""\n', 2),
                 (b'\xef\xbb\xbf"""A self-test preview hook whose docstring names no rule."""\n', 0),
                 (b'\xef\xbb\xbf"""Motivated by selftest-rule-cc."""\n', 2),
-                (b'# -*- coding: utf-8 -*-\n"""A doc."""\n', 0), (b'# coding: utf8\n"""A doc."""\n', 0))):
+                (b'# -*- coding: utf-8 -*-\n"""A doc."""\n', 0), (b'# coding: utf8\n"""A doc."""\n', 0),
+                (b'# comment\r"""# coding: latin-1"""\r', 0),
+                (b'# comment\r"""# coding: not_an_encoding"""\r', 0),
+                (b'# a\r# b\r# coding: latin-1\r"""A doc."""\r', 0),
+                (b'# a\r\n"""A doc."""\r\n', 0))):
             atree = _add_previews(_build(tmp / "preview-bytes-{}".format(ai)))
             (atree / ".preview" / "p-two.py").write_bytes(abytes)
             got = run_caught(atree, check=False)
@@ -1080,8 +1116,8 @@ def self_test_main():
           "at the top level and per rule without changing a status, and an undeclared or unpublished "
           "preview, a declared rule the hook's docstring does not name, a docstring naming a rule its entry "
           "does not list (read from the bytes Python reads, a UTF-8 byte order mark included), a declared "
-          "preview file that is unreadable, not UTF-8, coded other than UTF-8 or with an unknown coding "
-          "cookie, not a regular file, unparseable, too complex to parse, or without a non-blank docstring "
+          "preview file that is unreadable, not UTF-8, coded other than UTF-8 (a cookie on a lone-CR line "
+          "included) or with a cookie naming an unknown or non-text codec, not a regular file, unparseable, too complex to parse, or without a non-blank docstring "
           "(rules listed or not), an unknown declared corpus-id, and an absent declaration beside published "
           "previews all fail closed (exit 2)" + note)
     return 0
