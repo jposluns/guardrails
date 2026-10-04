@@ -3151,7 +3151,9 @@ def _self_test_runtime_escape_probe(tmp):
     started by the probe's spy just before the sleeps.py `--selftest` run's supervisor spawns, carrying
     that live run's ACTUAL token for that run's whole 5 s window), must survive the whole run
     unsignalled and unreported: no kill or report is chosen by an environment match, an exact-token
-    match, a name match or uid ownership. Direct _runtime_snapshot checks
+    match, a name match or uid ownership (a report is matched on a whole `pid <n>` field; each decoy is
+    then killed and reaped within a bound, and one not reaped is a discrepancy, as
+    _self_test_runtime_decoy_unit pins in memory). Direct _runtime_snapshot checks
     then pin the new coverage: the top-level `.git` stays pruned, a nested `.git` is recorded, a
     hardlink swap preserving bytes, mode, size and mtime is a change revealed ONLY by the inode
     identity, and a plant into the nested `.git` with the parent mtimes restored changes nested-`.git`
@@ -3265,6 +3267,80 @@ def _runtime_late_wait(late, bound):
         time.sleep(0.1)
 
 
+def _runtime_decoy_reap(proc, label, bound=5):
+    """Kill and reap `proc`, a decoy the escape case started itself (so, unlike an escaped writer, it may be
+    signalled), waiting at most `bound` seconds; on expiry it is killed again and waited for once more as
+    long. Returns the discrepancy, or None once it was reaped within the first bound."""
+    import subprocess
+    proc.kill()
+    try:
+        proc.wait(timeout=bound)
+        return None
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    try:
+        proc.wait(timeout=bound)
+    except subprocess.TimeoutExpired:
+        return "{} (pid {}) was not reaped within {} s of two kills".format(label, proc.pid, 2 * bound)
+    return "{} (pid {}) was not reaped within {} s of its kill, only after a second".format(label, proc.pid, bound)
+
+
+def _runtime_names_pid(findings, pid):
+    """The first of `findings` naming `pid` as a whole `pid <n>` field (the supervisor's survivor label), or
+    None. A substring test would let decoy pid 12 match a finding that names only pid 123."""
+    import re
+    for miss in findings:
+        if any(int(field) == pid for field in re.findall(r"\bpid (\d+)\b", miss)):
+            return miss
+    return None
+
+
+def _self_test_runtime_decoy_unit():
+    """Pin the two decoy checks of _runtime_escape_cases in memory. A decoy model whose kill() does not
+    complete and whose wait() never returns must be waited for only with a bound, killed again on expiry and
+    reported; one reaped at once is no discrepancy. Decoy pids 12 and 456 must not match findings naming
+    only survivors pid 123, pid 4567 and ppid 12, and a finding naming pid 12 among others must. Returns the
+    list of discrepancies."""
+    import subprocess
+
+    class Decoy:
+        def __init__(self, stalls):
+            self.pid, self.stalls, self.kills, self.waits = 12, stalls, 0, []
+
+        def kill(self):
+            self.kills += 1
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            if timeout is None:
+                raise RuntimeError("an unbounded wait")
+            if self.stalls:
+                raise subprocess.TimeoutExpired("decoy", timeout)
+            return -9
+
+    faults = []
+    stalled, prompt = Decoy(True), Decoy(False)
+    try:
+        stuck, fine = _runtime_decoy_reap(stalled, "decoy", bound=0.01), _runtime_decoy_reap(prompt, "decoy")
+    except RuntimeError as exc:
+        return ["a decoy reap made {} (the waits are {} and {})".format(exc, stalled.waits, prompt.waits)]
+    if not stuck or "pid 12" not in stuck or stalled.kills != 2 or len(stalled.waits) != 2:
+        faults.append("a decoy that is never reaped was not killed twice, waited for twice and reported "
+                      "({!r}, {} kills, waits {})".format(stuck, stalled.kills, stalled.waits))
+    if fine is not None or prompt.kills != 1 or prompt.waits != [5]:
+        faults.append("a decoy reaped at once was not one kill and one bounded wait ({!r}, {} kills, waits {})"
+                      .format(fine, prompt.kills, prompt.waits))
+    survivors = ["detached.py []: left a process running after it exited (pid 123, pid 4567; not signalled)",
+                 "hopper.py []: left a process running after it exited (ppid 12)"]
+    for pid in (12, 456):
+        if _runtime_names_pid(survivors, pid):
+            faults.append("decoy pid {} matched findings naming only pid 123, pid 4567 and ppid 12".format(pid))
+    named = "nondumpable.py []: left a process running after it exited (pid 4567, pid 12; not signalled)"
+    if _runtime_names_pid(survivors + [named], 12) != named:
+        faults.append("a finding naming pid 12 as a whole field was not matched for decoy pid 12")
+    return faults
+
+
 def _runtime_escape_cases(tmp):
     """The cases of _self_test_runtime_escape_probe, which then waits for their escaped writers; returns
     the list of discrepancies."""
@@ -3311,29 +3387,29 @@ def _runtime_escape_cases(tmp):
                                          - {"locked.py"}, spy=spy)
     finally:
         signalled = decoy.poll()
-        decoy.kill()
-        decoy.wait()
         tokened = token_decoy.get("proc")
         token_signalled = tokened.poll() if tokened is not None else None
+        faults = [_runtime_decoy_reap(decoy, "the marker-carrying decoy")]
         if tokened is not None:
-            tokened.kill()
-            tokened.wait()
-    faults = []
+            faults.append(_runtime_decoy_reap(tokened, "the exact-token decoy"))
+    faults = [fault for fault in faults if fault]
     if signalled is not None:
         faults.append("the unrelated same-uid marker-carrying process outside the probe subtree was "
                       "signalled (rc {})".format(signalled))
-    if any("pid {}".format(decoy.pid) in miss for miss in found):
+    named = _runtime_names_pid(found, decoy.pid)
+    if named:
         faults.append("the unrelated same-uid marker-carrying process outside the probe subtree was "
-                      "reported by the probe")
+                      "reported by the probe (pid {} in: {})".format(decoy.pid, named[:200]))
     if tokened is None:
         faults.append("the exact-token decoy never started: the spy saw no sleeps.py `--selftest` run")
     else:
         if token_signalled is not None:
             faults.append("the unrelated same-uid process carrying the actual run token was signalled "
                           "(rc {})".format(token_signalled))
-        if any("pid {}".format(tokened.pid) in miss for miss in found):
+        named = _runtime_names_pid(found, tokened.pid)
+        if named:
             faults.append("the unrelated same-uid process carrying the actual run token was reported "
-                          "by the probe")
+                          "by the probe (pid {} in: {})".format(tokened.pid, named[:200]))
     if locks:
         (directory / "locked").chmod(0o111)
         try:
@@ -3388,6 +3464,7 @@ def _runtime_escape_cases(tmp):
     if not any(miss.startswith("fails.py") and "rc 1" in miss for miss in ignored):
         faults.append("with SIGCHLD ignored by the caller, a failing module was not named (got {})"
                       .format("; ".join(ignored[:3]) or "nothing"))
+    faults += _self_test_runtime_decoy_unit()
     faults += _self_test_runtime_supervisor_unit(tmp)
     faults += _self_test_runtime_report_channel(tmp)
     unit = Path(tmp, "snapunit")
