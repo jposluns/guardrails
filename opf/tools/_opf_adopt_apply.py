@@ -11,8 +11,8 @@ C-EVIDENCE-ENUM is inactive (spec 14.1), which RE-READS the inventories and payl
 the preserve-first composition of spec 14.2; live re-observation of every operand; one journaled
 transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed eleven-op
 ADOPT_OPS vocabulary. Slice 5 makes the three finish ops executable: plant-governance (create-only
-planting of a pack member that passed the b.5 trust gate, verify_pack_member), render-views (delegated to
-the render engine) and record-adoption (the immutable receipt core and its genesis outcome event in the
+planting of a pack member that passed the b.5 trust gate, verify_pack_member), render-views (create-only view
+publication of the render engine's planned bytes, composed into the journaled transaction) and record-adoption (the immutable receipt core and its genesis outcome event in the
 run's own evidence bundle, adoption_record). Every other op returns a refusing not-yet-executable verdict:
 the file ops, init-store composition, approval capture, hook activation, the completion checks,
 retirement, the stage driver, and the MUTATING CLI subcommands (approve, apply, complete, reconcile)
@@ -81,14 +81,16 @@ more such home), so the stage driver's plan stage must refuse over a non-clean a
 journal_clean_or_refuse; the shipped `retire-file` vocabulary row is a single `remove`, while spec 1.3.0
 preserves the retirement preimage at apply and removes only after the green check, a vocabulary split for
 the op slices; interruption is exercised in-process through the journal's kill-point seam, and
-subprocess kill-injection arrives with the file ops. The finish ops add their own: plant-governance and
-record-adoption compose into this shell's transactions, which refuse a resolved store (no lease join), so
-once init-store has run, a real adoption's plant and receipt transactions refuse until the lease join
-lands; render-views runs under the render engine's own witnessed write and rollback, not this journal,
-and takes no lease, the `opf render --write` posture; the receipt core's content (files, approval,
+subprocess kill-injection arrives with the file ops. The finish ops add their own: all three finish ops
+compose into this shell's transactions, which refuse a resolved store (no lease join), so once init-store
+has run, a real adoption's plant, render and receipt transactions refuse until the lease join lands;
+render-views composes create-only view publications through this journal (an occupied view destination
+refuses fail-closed in this slice; the spec 14.2 preserve-then-render write for a plan-enumerated
+occupying source composes with the file-ops slice), delegating only read-only planning and the U6 source
+gate to the render and check engines; the receipt core's content (files, approval,
 transaction ids, checks, probes) is the stage driver's to assemble, held here only to the shipped
 validator and the plan bindings adoption_record names; and the trust gate proves member bytes against the
-agreed anchor, never the publisher's authenticity beyond it.
+agreed release inventory, never the publisher's authenticity beyond it.
 
 Outcome model: single-sourced from `_opf_store` exactly as the sibling `_opf_adopt` does; the inventory
 grading is the doctor's own shared validator (`_opf_check._evidence_rows`), so a malformed inventory or a
@@ -1047,16 +1049,19 @@ def _context_plan(context):
 
 
 def verify_pack_member(plan, pack, source_member):
-    """The b.5 trust gate for ONE pack member (spec 14.1: the release identity's manifest_sha256 checked
-    against an independent anchor). `pack` carries the release manifest's exact bytes (`manifest`), the
-    independently observed `root.txt` bytes (`root`) and member bytes keyed by source path (`members`). The
-    agreed ROOT is the plan's release.manifest_sha256, which must equal its anchor_sha256; the observed
-    root.txt and the sha256 of the exact manifest bytes must both equal it; the manifest must parse VALID
-    through the shipped _opf_pack_manifest grammar and its tree-sha256 must recompute from its own source
-    rows (the consumer obligation that grammar leaves); and the member's bytes must match the size and
-    sha256 its one source row records in that frozen inventory. Returns (bytes, bare-hex sha256); any
-    failure raises AdoptApplyError. Passing proves the bytes are the ones the agreed release lists, never
-    that its publisher is authentic beyond the anchor (the self-asserted-identity residual, spec 14.1)."""
+    """The b.5 trust gate for ONE pack member (spec 14.1: the release identity, bound by digest). `pack`
+    carries the release manifest's exact bytes (`manifest`), the caller-observed `root.txt` bytes (`root`)
+    and member bytes keyed by source path (`members`). The agreed ROOT is the plan's release.manifest_sha256,
+    which must equal the plan's own anchor_sha256 (two fields of the ONE approved plan, frozen at approval;
+    observing the anchor at its independent source is the planner's b.5 capture, never re-done here); the
+    observed root.txt and the sha256 of the exact manifest bytes must both equal that ROOT; the manifest
+    must parse VALID through the shipped _opf_pack_manifest grammar, its tree-sha256 must recompute from
+    its own source rows (the consumer obligation that grammar leaves), and its release-version must BE the
+    approved release's version, so the approved identity can never name one version while the digest-agreed
+    pack carries another; and the member's bytes must match the size and sha256 its one source row records
+    in that frozen inventory. Returns (bytes, bare-hex sha256); any failure raises AdoptApplyError. Passing
+    proves the bytes are the ones the agreed release lists, never that its publisher is authentic beyond
+    the anchor (the self-asserted-identity residual, spec 14.1)."""
     import _opf_pack_manifest as pack_manifest
     release = plan.get("release")
     agreed = release.get("manifest_sha256") if isinstance(release, dict) else None
@@ -1080,6 +1085,10 @@ def verify_pack_member(plan, pack, source_member):
             checked.status, "; ".join(checked.findings)))
     if pack_manifest.compute_tree(document["sources"]) != document["tree-sha256"]:
         raise AdoptApplyError("the pack manifest's tree-sha256 does not recompute from its own source rows")
+    if document["release-version"] != release.get("version"):
+        raise AdoptApplyError("the pack manifest's release-version {!r} is not the approved release version "
+                              "{!r}; the approved release identity is contradictory (fail-closed)".format(
+                                  document["release-version"], release.get("version")))
     rows = [row for row in document["sources"] if row["path"] == source_member]
     if len(rows) != 1:
         raise AdoptApplyError("source_member {!r} is not a source row of the frozen pack "
@@ -1098,7 +1107,9 @@ def _plant_governance(op_row, context=None):
     row's content_digest, composed into the transaction context["ops"] carries. ApplyOps.create re-observes
     the path absent (a pre-existing different file routes to retire-file plus create-file under explicit
     plan rows, never an overwrite). The store tree is the engine's, never a governance adapter's, so a path
-    there refuses, as does every protected destination. Reversal before commit is the journal's rollback,
+    there refuses, as do every protected destination and the product-root VERSION deliverable (spec 14.2
+    names it render-managed; declared views live inside the store tree, refused here, and a planned
+    collision with one is the plan validator's). Reversal before commit is the journal's rollback,
     which removes the planted file. Every refusal is CANNOT-EVALUATE, raised before anything is composed."""
     try:
         ops = _composing_ops(op_row, context)
@@ -1107,6 +1118,10 @@ def _plant_governance(op_row, context=None):
                 or schema.protected_destination(path, ops.run_id) is not None):
             raise AdoptApplyError("{!r} lies in the store tree or is a protected destination, where no "
                                   "governance adapter is planted (fail-closed)".format(path))
+        if path.casefold() == "version":
+            raise AdoptApplyError("{!r} is the product-root VERSION deliverable, a render-managed "
+                                  "destination (spec 14.2), where no governance adapter is planted "
+                                  "(fail-closed)".format(path))
         data, digest = verify_pack_member(_context_plan(context), context.get("pack"), op_row["source_member"])
         if "sha256:" + digest != op_row["content_digest"]:
             raise AdoptApplyError("the verified member {!r} is not the content_digest the row "
@@ -1135,39 +1150,42 @@ def _planned_views(res):
 
 
 def _render_views(op_row, context=None):
-    """render-views (spec 14): DELEGATE to the render engine (`_opf_views.render --write`, the `opf render
-    --write` path), which itself refuses to write over a store whose source integrity is not sound and
-    re-validates and rolls back its own regenerate. `context` carries `product_root` (absolute), `plan` (its
-    `store` identity) and `observations` (the inert git-derived facts the git-aware caller gathers, exactly
-    as `opf render --write` does through _opf_observe.gather; None refuses inside the engine).
+    """render-views (spec 14, 14.2): compose, into the transaction context["ops"] carries, the CREATE of
+    every declared view with the exact approved bytes, so the views land through the same journaled
+    adoption transaction, per-op preimage checks, reversal (the journal's rollback removes them from their
+    captured absent preimages) and adoption-journal lock as every other composing op. `context` carries
+    `product_root` (the transaction's own product root, bound to ops.root_fd by directory identity), `plan`
+    (its frozen `store` identity) and `observations` (the inert git-derived facts the git-aware caller
+    gathers, exactly as `opf render --write` does through _opf_observe.gather).
 
-    Preconditions, all before the engine writes: the adoption journal is clean (reconcile-first); the frozen
-    default store at the product root resolves; the row's members are EXACTLY the declared view
-    destinations the engine's own read-only planner renders, and each member digest is the digest of the
-    bytes it renders, so apply reproduces the approved bytes or refuses, never writes others. VALID only
-    when the engine exits 0 and every member's live bytes, re-read contained, match the row. The engine's
-    write is its own witnessed write, not an adoption-journal transaction, and it takes no single-writer
-    lease, the posture of `opf render --write`; a nonzero engine exit after it regenerated (an authored
-    residual such as an absent CHANGELOG.md) leaves its regenerated views in place, never repaired here.
-    Every refusal is CANNOT-EVALUATE."""
+    Preconditions, all before anything is composed: the plan's frozen DEFAULT store resolves at the product
+    root, which is the transaction's own root; the row's members are EXACTLY the declared view destinations
+    the render engine's own read-only planner renders, and each member digest is the digest of the bytes it
+    renders, so apply reproduces the approved bytes or refuses, never writes others; the U6 source gate
+    (_opf_check.validate_store with the caller's observations, judged by source_integrity_ok) passes, so no
+    view is rendered over a store whose source integrity is not sound; every authored deliverable this op
+    does not own (C-CHANGELOG-GATES always, C-VERSION-FILE unless a VERSION view is planned) already
+    passes, so an authored residual refuses with NOTHING written, never after a write; and every
+    destination is observed ABSENT, contained and no-follow. An occupied view destination refuses
+    fail-closed in this slice (spec 14.2: adopter content is never absorbed, deleted or overwritten; the
+    preserve-then-render write for a plan-enumerated occupying source composes with the file-ops slice).
+    The journal then captures each create's absent prestate under its lock and digest-verifies the written
+    poststate, so a destination raced between compose and apply rolls the whole transaction back. Every
+    refusal is CANNOT-EVALUATE, raised before anything is composed."""
     try:
-        _render_views_run(op_row, context)
+        _render_views_compose(op_row, context)
     except AdoptApplyError as exc:
         return schema._cannot("render-views refused: {}".format(exc))
     return schema._ok()
 
 
-def _render_views_run(op_row, context):
-    import contextlib
-    import io
-    import _opf_views
+def _render_views_compose(op_row, context):
+    import _opf_check
+    ops = _composing_ops(op_row, context)
     plan = _context_plan(context)
     product_root = context.get("product_root")
-    root_fd = _open_product_root(product_root)
-    try:
-        journal_clean_or_refuse(root_fd, _journal_root(product_root))
-    finally:
-        store._close_fd_exc_safe(root_fd)
+    if not isinstance(product_root, (str, os.PathLike)):
+        raise AdoptApplyError("its context carries no product_root (fail-closed)")
     frozen = plan.get("store") if isinstance(plan.get("store"), dict) else {}
     res = store.resolve_store(product_root)
     if not (res.status == store.RESOLVED and res.pointer_source == "default"
@@ -1176,34 +1194,60 @@ def _render_views_run(op_row, context):
             and Path(os.path.abspath(res.store_root)) == Path(os.path.abspath(product_root))):
         raise AdoptApplyError("render-views renders only the plan's frozen default store at the product "
                               "root, and it must resolve (status {}, plan store {!r}); nothing "
-                              "written".format(res.status, frozen))
+                              "composed".format(res.status, frozen))
+    try:
+        fd_st = os.fstat(ops.root_fd)
+        ctx_st = os.stat(os.path.abspath(product_root))
+    except OSError as exc:
+        raise AdoptApplyError("cannot bind the context product root to the transaction root ({}); "
+                              "fail-closed".format(exc))
+    if (fd_st.st_dev, fd_st.st_ino) != (ctx_st.st_dev, ctx_st.st_ino):
+        raise AdoptApplyError("the context product_root is not the transaction's own product root, so the "
+                              "composed views would land in a tree the store checks never saw; nothing "
+                              "composed (fail-closed)")
     planned = _planned_views(res)
     members = {m["path"]: m["digest"] for m in op_row["members"]}
     if set(members) != set(planned):
         raise AdoptApplyError("the row's members are not exactly the declared view destinations {}; "
-                              "nothing written".format(sorted(planned)))
+                              "nothing composed".format(sorted(planned)))
     stale = sorted(p for p in planned if "sha256:" + _sha256(planned[p]) != members[p])
     if stale:
         raise AdoptApplyError("the render engine renders bytes other than the row binds at {}; apply "
                               "reproduces the approved bytes or refuses, never writes others (nothing "
-                              "written)".format(", ".join(stale)))
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        rc = _opf_views.render(["--root", str(product_root), "--write"],
-                               observations=context.get("observations"))
-    if rc != _opf_views.EXIT_OK:
-        said = [line.strip() for line in (out.getvalue() + err.getvalue()).splitlines() if line.strip()]
-        raise AdoptApplyError("the render engine exited {} ({})".format(
-            rc, " | ".join(said) or "no output"))
-    post_fd = _open_product_root(product_root)
+                              "composed)".format(", ".join(stale)))
+    report = _opf_check.validate_store(res, observations=context.get("observations"))
+    if not _opf_check.source_integrity_ok(report):
+        raise AdoptApplyError("the store's SOURCE integrity is not sound (U6 validate_store), so no view is "
+                              "rendered over it; nothing composed")
+    owned = {"C-VIEW-DRIFT"} | ({"C-VERSION-FILE"} if "VERSION" in planned else set())
+    residual = sorted(cid for cid in _opf_check.DELIVERABLE_DRIFT_CHECKS
+                      if cid not in owned and report.checks.get(cid) != "PASS")
+    if residual:
+        raise AdoptApplyError("authored deliverable(s) {} must already pass; render-views renders only its "
+                              "own declared views and repairs nothing authored; nothing composed".format(
+                                  ", ".join(residual)))
+    occupied = sorted(p for p in planned if observe_live(ops.root_fd, p)["kind"] != "absent")
+    if occupied:
+        raise AdoptApplyError("view destination(s) {} are occupied; adopter content is never absorbed or "
+                              "overwritten (spec 14.2), and an occupying source routes to its preserve-first "
+                              "disposition with the file ops; nothing composed".format(", ".join(occupied)))
+    for path in sorted(planned):
+        ops.create(path, planned[path])
+
+
+def event_digest(event):
+    """The event_digest of ONE outcome event (the spec 14.2 append-only events): the sha256 of the event's
+    canonical bytes with the `event_digest` key omitted, so the digest can never cover itself. The ONE
+    definition both the mint and the recomputation check use: adoption_record re-parses the bytes it
+    emitted and requires the recorded digest to recompute through this helper, so a recorded digest that
+    is not the canonical-bytes digest can never publish. Raises AdoptApplyError fail-closed."""
+    if not isinstance(event, dict):
+        raise AdoptApplyError("an outcome event must be a table")
+    body = {key: event[key] for key in event if key != "event_digest"}
     try:
-        for path in sorted(members):
-            live = observe_live(post_fd, path)
-            if live["kind"] != "file" or "sha256:" + live["sha256"] != members[path]:
-                raise AdoptApplyError("view {!r} does not hold the row's bytes after the render; it is "
-                                      "never repaired here".format(path))
-    finally:
-        store._close_fd_exc_safe(post_fd)
+        return "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
+    except EmitError as exc:
+        raise AdoptApplyError("the outcome event cannot be emitted canonically ({}); fail-closed".format(exc))
 
 
 def adoption_record(run_id, plan, receipt, now):
@@ -1212,7 +1256,8 @@ def adoption_record(run_id, plan, receipt, now):
     that the embedded approval attests the receipt's own plan_digest and inventory_digest; it must bind this
     run and the approved plan's product, plan_digest, inventory_digest, store root and release manifest, and
     record an observed, agreeing independent anchor. The genesis `applied` event chains from the sha256 of
-    the canonical core bytes; its event_digest is the sha256 of its own canonical bytes without that key;
+    the canonical core bytes; its event_digest is the named event_digest helper's (the sha256 of its own
+    canonical bytes without that key), required to RECOMPUTE from the emitted bytes before anything returns;
     the one-event chain must validate through the shipped validate_event_chain. `now` is the injected,
     aware-UTC recorded_at instant. Raises AdoptApplyError on any refusal."""
     checked = schema.validate_receipt_core(receipt)
@@ -1242,16 +1287,36 @@ def adoption_record(run_id, plan, receipt, now):
         event = dict(format=schema.EVENT_FORMAT, schema=schema.SCHEMA_VERSION, kind="applied", run_id=run_id,
                      revision=plan.get("revision"), recorded_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                      previous_event_digest="sha256:" + _sha256(core))
-        event["event_digest"] = "sha256:" + _sha256(emit_checked(event).encode("utf-8"))
+        event["event_digest"] = event_digest(event)
         event_bytes = emit_checked(event).encode("utf-8")
     except EmitError as exc:
         raise AdoptApplyError("the adoption record cannot be emitted canonically ({}); "
                               "fail-closed".format(exc))
+    reparsed = tomllib.loads(event_bytes.decode("utf-8"))
+    if reparsed.get("event_digest") != event_digest(reparsed):
+        raise AdoptApplyError("the genesis event_digest does not recompute from the emitted event's own "
+                              "canonical bytes (fail-closed)")
     chain = schema.validate_event_chain([tomllib.loads(event_bytes.decode("utf-8"))], "sha256:" + _sha256(core))
     if chain.status != store.VALID:
         raise AdoptApplyError("the genesis outcome event is refused ({}): {}".format(
             chain.status, "; ".join(chain.findings)))
     return core, event_bytes
+
+
+def minted_record_row(run_id, core):
+    """The stage driver's record-adoption row MINT (spec 14, 14.1): the ONE executable row shape, minted
+    only once the approval exists and the receipt core's canonical bytes are assembled, binding this run's
+    bundle receipt path and the core's digest. The EXPLICIT stage-driver rule, pinned in the self-test: the
+    executable row is never a plan operand -- validate_plan itself refuses a plan whose record-adoption row
+    names this bundle receipt path (the receipt creation is a reserved-control-area effect, spec 14.2) --
+    and the plan binds the receipt through the approval digests the core must embed (validate_receipt_core
+    plus the bindings _record_adoption enforces), while the genesis event is bound by chaining from the
+    core digest this row carries and by its recomputed event_digest."""
+    if not isinstance(core, bytes):
+        raise AdoptApplyError("minted_record_row needs the receipt core's canonical bytes (fail-closed)")
+    return dict(op="record-adoption", receipt_path=receipt_rel(run_id),
+                receipt_core_digest="sha256:" + _sha256(core))
+
 
 
 def _record_adoption(op_row, context=None):
@@ -1260,7 +1325,10 @@ def _record_adoption(op_row, context=None):
     beside it (adoption_record, from context["plan"], context["receipt"] and context["now"]). The row must
     name exactly that receipt path and bind the emitted core's digest: as the planner records, no frozen
     plan can carry that digest (the core binds the approval captured after the plan freezes), so the stage
-    driver mints this row once the approval exists. Both files are create-only, so a run records exactly
+    driver MINTS this row once the approval exists (minted_record_row, the one mint; validate_plan
+    refuses the bundle receipt path as a reserved-control-area creation, so the executable row is never a
+    plan operand, the explicit stage-driver rule the self-test pins). Both files are create-only, so a run
+    records exactly
     one genesis: a second record-adoption of the same run, in this transaction or a later one, refuses on
     the occupied path. Reversal before commit is the journal's rollback, which removes both files. Every
     refusal is CANNOT-EVALUATE, raised before anything is composed."""
@@ -1316,9 +1384,8 @@ OP_HANDLERS = {
 def dispatch(op_row, context=None):
     """Validate, then dispatch ONE plan op row. A malformed row propagates the validator's refusing
     verdict; an op with no registered handler (dispatch-roster drift) is CANNOT-EVALUATE, never a skip.
-    dispatch itself never writes: plant-governance and record-adoption compose into the transaction their
-    context carries, render-views delegates to the render engine given its context, and every other
-    handler refuses with no side effect."""
+    dispatch itself never writes: the three finish ops compose into the transaction their context
+    carries, and every other handler refuses with no side effect."""
     checked = schema.validate_op(op_row)
     if checked.status != store.VALID:
         return checked
@@ -1422,7 +1489,7 @@ def _self_test_checks():
           all(h is _not_yet_executable for n, h in OP_HANDLERS.items() if n not in landed))
     check("handlers-finish-ops-landed", all(OP_HANDLERS[n] is h for n, h in landed.items()))
     for name, needle in (("plant-governance", "no ApplyOps"), ("record-adoption", "no ApplyOps"),
-                         ("render-views", "no approved plan")):
+                         ("render-views", "no ApplyOps")):
         res = dispatch(schema.canonical_op(name))
         check("op-{}-refuses-without-context".format(name),
               res.status == CANNOT and any(needle in f for f in res.findings))
@@ -3091,14 +3158,44 @@ def _finish_ops_self_test(check):
     receipt = schema.canonical_receipt_core()
     receipt["release"] = dict(receipt["release"], manifest_sha256=plan["release"]["manifest_sha256"])
     core, event = adoption_record(rid, plan, receipt, now)
-    record = dict(op="record-adoption", receipt_path=receipt_rel(rid),
-                  receipt_core_digest="sha256:" + _sha256(core))
+    record = minted_record_row(rid, core)
     ctx = dict(plan=plan, pack=pack, receipt=receipt, now=now)
     check("finish-fixture-pack-manifest-valid", pack_manifest.parse_manifest(manifest)[1].status == valid)
     check("finish-fixture-rows-validate", plan["run_id"] == rid and schema.validate_op(plant).status == valid
           and schema.validate_op(record).status == valid)
     check("finish-receipt-in-own-bundle", receipt_rel(rid) == evidence_home_rel(rid) + "/receipt.toml"
           and genesis_event_rel(rid) == evidence_home_rel(rid) + "/event-0001.toml")
+    check("record-row-mint-is-the-executable-row",
+          record == dict(op="record-adoption", receipt_path=receipt_rel(rid),
+                         receipt_core_digest="sha256:" + _sha256(core))
+          and schema.validate_op(record).status == valid)
+    # M3: the genesis event's digest recomputes from its own canonical bytes without the event_digest key,
+    # through the named helper AND an independent inline recomputation, so a minted digest that is not the
+    # canonical-bytes digest is a red here and a refusal inside adoption_record itself.
+    genesis_doc = tomllib.loads(event.decode("utf-8"))
+    genesis_body = dict((k, genesis_doc[k]) for k in genesis_doc if k != "event_digest")
+    check("genesis-event-digest-recomputes",
+          genesis_doc["event_digest"] == "sha256:" + _sha256(emit_checked(genesis_body).encode("utf-8"))
+          and genesis_doc["event_digest"] == event_digest(genesis_doc))
+    # The explicit stage-driver rule behind the mint: the executable record-adoption row is never a plan
+    # operand. validate_plan itself refuses a plan whose record-adoption row names the run's bundle receipt
+    # (the receipt creation is a reserved-control-area effect, spec 14.2), so the minted row can never be
+    # smuggled through an approval; the plan binds the receipt through the approval digests the core must
+    # embed (validate_receipt_core plus _record_adoption's bindings).
+    minted_ops = [dict(record) if r.get("op") == "record-adoption" else r for r in base_plan["ops"]]
+    minted_plan = dict(base_plan, ops=minted_ops,
+                       effects=schema.derive_effects(minted_ops, base_plan["sources"],
+                                                     schema.store_manifest(base_plan["store"])))
+    minted_graded = schema.validate_plan(minted_plan)
+    check("record-minted-row-never-plannable",
+          schema.validate_plan(base_plan).status == valid and minted_graded.status == invalid
+          and any("control area" in f and receipt_rel(rid) in f for f in minted_graded.findings))
+    # and on homes 2 even validate_op refuses the minted row's receipt operand, so the homes-2 activation
+    # slice must route the receipt through the capability-bound journal API (or land its own explicit rule)
+    # before this build's SUPPORTED_HOMES rises -- the fact is pinned so it cannot drift silently.
+    check("record-minted-row-homes2-operand-refused",
+          schema.validate_op(record, homes=1).status == valid
+          and schema.validate_op(record, homes=2).status == invalid)
 
     # The two composing ops over a NOT-ADOPTED root: the verified member is planted create-only, and the
     # receipt core and its genesis event land in the run's own bundle, claimed by the derived inventory.
@@ -3154,6 +3251,15 @@ def _finish_ops_self_test(check):
     refuses_untouched("plant-unknown-source-member-refused",
                       [dict(plant, source_member="governance/OTHER.md")], "not a source row")
     refuses_untouched("plant-store-tree-path-refused", [dict(plant, path=".working/AGENTS.md")], "store tree")
+    # the approved release identity reconciles with the digest-agreed pack manifest: a plan naming
+    # another version over the same agreed bytes is contradictory and refuses, nothing written.
+    version_plan = dict(plan)
+    version_plan["release"] = dict(plan["release"], version="9.9.9")
+    refuses_untouched("plant-release-version-mismatch-refused", [plant],
+                      "not the approved release version", plan=version_plan)
+    # the product-root VERSION deliverable is a render-managed destination (spec 14.2), never a plant target.
+    refuses_untouched("plant-version-deliverable-refused", [dict(plant, path="VERSION")],
+                      "VERSION deliverable")
     with tempfile.TemporaryDirectory(prefix="opf-adopt-finish-") as temp:
         root = Path(temp).resolve()
         (root / "AGENTS.md").write_bytes(b"the adopter's own file\n")
@@ -3173,6 +3279,22 @@ def _finish_ops_self_test(check):
     other_plan = dict(receipt, plan_digest=stray, approval=dict(receipt["approval"], plan_digest=stray))
     check("receipt-other-plan-validates-alone", schema.validate_receipt_core(other_plan).status == valid)
     refuses_untouched("record-unbound-plan-digest-refused", [record], "plan_digest", receipt=other_plan)
+    # each receipt binding beyond plan_digest is pinned by its own refusal: the run identities (both
+    # legs), product, inventory digest, store root and release manifest.
+    other_rid = mint_run_id(now, "fedcba9876543210")
+    refuses_untouched("record-other-run-receipt-refused", [record], "different adoption runs",
+                      receipt=dict(receipt, run_id=other_rid))
+    refuses_untouched("record-other-run-plan-refused", [record], "different adoption runs",
+                      plan=dict(plan, run_id=other_rid))
+    refuses_untouched("record-unbound-product-refused", [record], "plan's product",
+                      receipt=dict(receipt, product="opf"))
+    refuses_untouched("record-unbound-inventory-digest-refused", [record], "inventory_digest",
+                      receipt=dict(receipt, inventory_digest=stray,
+                                   approval=dict(receipt["approval"], inventory_digest=stray)))
+    refuses_untouched("record-unbound-store-root-refused", [record], "store_root",
+                      receipt=dict(receipt, store_root="elsewhere"))
+    refuses_untouched("record-unbound-release-manifest-refused", [record], "release.manifest_sha256",
+                      receipt=dict(receipt, release=dict(receipt["release"], manifest_sha256=stray)))
     refuses_untouched("record-anchor-disagreement-refused", [record], "agreeing independent",
                       receipt=dict(receipt, release=dict(receipt["release"], anchor_agreement=False)))
     refuses_untouched("record-unbound-core-digest-refused",
@@ -3192,10 +3314,20 @@ def _finish_ops_self_test(check):
         res = dispatch(dict(plant if name == "plant-governance" else record), dict(ctx))
         check("{}-without-transaction-refused".format(name), refused(res, "no ApplyOps"))
 
-    # render-views delegates to the render engine over a resolvable store; the expected bytes come from a
-    # twin store the engine renders directly, never from the handler's own planning.
+    # render-views composes into the journaled shell: the approved bytes land through the same adoption
+    # transaction, preimage checks, reversal and journal lock as every other composing op (spec 14, 14.2).
+    # The expected bytes come from a twin store the render engine writes directly, so the composed creates
+    # are pinned byte-for-byte to the engine's own output.
     views = sorted(v["target"] for v in tomllib.loads(_opf_init.build_manifest())["views"].values())
     obs = dict(tracked="tracked", prior=_opf_observe._empty_prior())
+    _this = sys.modules[__name__]
+
+    def lease_stand_in():
+        # The shell refuses a resolved store (no single-writer lease join yet, spec 5.7). This stand-in
+        # admits the fixture's resolved store so the composed render transaction is exercised end to end:
+        # exactly the seam the lease-join slice will occupy. The UNPATCHED refusal is pinned below
+        # (render-views-resolved-store-refused-without-lease).
+        return mock.patch.object(_this, "_store_posture_or_refuse", lambda product_root: None)
 
     def built_store(parent, name, changelog=True):
         root = Path(parent).resolve() / name
@@ -3224,45 +3356,116 @@ def _finish_ops_self_test(check):
         def rctx(root, **changes):
             return dict(dict(product_root=str(root), plan=plan, observations=obs), **changes)
 
+        # the real posture first: WITHOUT the lease join, the shell refuses the resolved store before the
+        # handler composes anything, the same spec 5.7 posture plant-governance and record-adoption take.
+        root = built_store(temp, "posture")
+        before = snapshot(root)
+        txn, why = run(root, [row], **rctx(root))
+        check("render-views-resolved-store-refused-without-lease",
+              txn is None and "lease" in (why or "") and snapshot(root) == before)
+
+        # the committed render: ONE journaled adoption transaction composes the creates; the written views
+        # are byte-identical to the engine twin's; the journal holds the completed transaction under a
+        # freed lock; nothing else changed but the transaction's own (empty) derived inventory.
         root = built_store(temp, "apply")
         before = snapshot(root)
-        res = dispatch(row, rctx(root))
+        with lease_stand_in():
+            txn, why = run(root, [row], **rctx(root))
         after = snapshot(root)
-        check("render-views-writes-exactly-the-approved-bytes", res.status == valid
+        jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+        try:
+            committed = _journal.classify_state(jr_fd, _journal_root(root) / rid)
+        finally:
+            _journal._close_fd_quietly(jr_fd)
+        check("render-views-writes-exactly-the-approved-bytes", txn == rid and why is None
               and all(after.get(v) == rendered.get(v) for v in views)
-              and set(after) - set(before) == set(views))
+              and set(after) - set(before) == set(views) | set([inventory_rel(rid)]))
+        check("render-views-journaled-transaction-complete",
+              committed == "complete" and _journal.read_lock_owner(_journal_root(root)) is None)
 
-        def refuses_unwritten(label, name, needle, rrow=row, changelog=True, **changes):
+        # the reversal (spec 14): an injected failure at the transaction's final op rolls every composed
+        # view back from its journaled (absent) preimage; the tree is the exact prestate.
+        root = built_store(temp, "abort")
+        before = snapshot(root)
+        real_verify = _journal._verify_staged_digest
+
+        def failing_inventory(op, payload):
+            if op["path"] == inventory_rel(rid):
+                raise _journal.JournalError("injected failure at the inventory publication")
+            return real_verify(op, payload)
+
+        with lease_stand_in(), mock.patch.object(_journal, "_verify_staged_digest", failing_inventory):
+            txn, why = run(root, [row], **rctx(root))
+        check("render-views-abort-restores-prestate",
+              txn is None and "rolled back" in (why or "") and snapshot(root) == before)
+
+        # preservation (spec 14.2): an adopter's live file at a declared view destination refuses the
+        # whole transaction with the live bytes untouched -- never absorbed, deleted or overwritten.
+        adopter = b"ADOPTER HAND-MAINTAINED CONTENT\n"
+        root = built_store(temp, "occupied")
+        (root / views[0]).write_bytes(adopter)
+        before = snapshot(root)
+        with lease_stand_in():
+            txn, why = run(root, [row], **rctx(root))
+        check("render-views-occupied-destination-preserved",
+              txn is None and "occupied" in (why or "")
+              and (root / views[0]).read_bytes() == adopter and snapshot(root) == before)
+
+        def refuses_uncomposed(label, name, needle, rrow=row, changelog=True, **changes):
             root = built_store(temp, name, changelog)
             before = snapshot(root)
-            check(label, refused(dispatch(rrow, rctx(root, **changes)), needle) and snapshot(root) == before)
+            with lease_stand_in():
+                txn, why = run(root, [rrow], **dict(rctx(root), **changes))
+            check(label, txn is None and needle in (why or "") and snapshot(root) == before)
 
-        # the engine itself refuses a store whose source integrity is not sound (here an untracked
-        # observation, then none at all), writing nothing.
-        refuses_unwritten("render-views-engine-refuses-invalid-store", "untracked", "render engine exited 2",
-                          observations=dict(obs, tracked="untracked"))
-        refuses_unwritten("render-views-engine-refuses-without-observations", "noobs", "render engine exited 2",
-                          observations=None)
+        # the U6 source gate, now BEFORE anything is composed (an untracked observation, then none at all).
+        refuses_uncomposed("render-views-source-gate-refuses-untracked", "untracked", "SOURCE integrity",
+                           observations=dict(obs, tracked="untracked"))
+        refuses_uncomposed("render-views-source-gate-refuses-without-observations", "noobs",
+                           "SOURCE integrity", observations=None)
         bent = [dict(m, digest="sha256:" + "7" * 64) if m["path"] == views[0] else m for m in row["members"]]
-        refuses_unwritten("render-views-unbound-bytes-refused", "bent", "other than the row binds",
-                          rrow=dict(row, members=bent))
-        refuses_unwritten("render-views-missing-member-refused", "short", "not exactly the declared view",
-                          rrow=dict(row, members=row["members"][1:]))
+        refuses_uncomposed("render-views-unbound-bytes-refused", "bent", "other than the row binds",
+                           rrow=dict(row, members=bent))
+        refuses_uncomposed("render-views-missing-member-refused", "short", "not exactly the declared view",
+                           rrow=dict(row, members=row["members"][1:]))
         other_store = dict(plan, store=dict(plan["store"], machine_rel=".working/data"))
-        refuses_unwritten("render-views-other-store-refused", "other", "frozen default store", plan=other_store)
-        root = built_store(temp, "residual", changelog=False)
-        check("render-views-authored-residual-refused",
-              refused(dispatch(row, rctx(root)), "render engine exited 1"))
-        # the postcondition: an engine exit 0 that left a member without the row's bytes refuses.
-        root = built_store(temp, "silent")
-        with mock.patch.object(_opf_views, "render", return_value=_opf_views.EXIT_OK):
-            check("render-views-postcondition-rereads-members",
-                  refused(dispatch(row, rctx(root)), "does not hold the row's bytes"))
+        refuses_uncomposed("render-views-other-store-refused", "other", "frozen default store",
+                           plan=other_store)
+        # an authored residual (an absent CHANGELOG.md) now refuses with NOTHING written, never after a
+        # write the delegated engine would have left in place.
+        refuses_uncomposed("render-views-authored-residual-refused", "residual", "C-CHANGELOG-GATES",
+                           changelog=False)
+        # a context product root other than the transaction's own root refuses by directory identity, so
+        # composed views can never land in a tree the store checks never saw.
+        refuses_uncomposed("render-views-foreign-product-root-refused", "foreign",
+                           "transaction's own product root", product_root=str(oracle))
+        # the frozen-default-store identity is pinned leg by leg: a non-default pointer source and a store
+        # root other than the product root each refuse even when every other leg matches (crafted
+        # resolutions; the default fixture cannot produce either shape).
+        root = built_store(temp, "identity")
+        genuine = store.resolve_store(root)
+
+        def res_variant(**changes):
+            fields = dict(store_root=genuine.store_root, machine_dir=genuine.machine_dir,
+                          machine_rel=genuine.machine_rel, pointer_source=genuine.pointer_source,
+                          target=genuine.target, product_root=genuine.product_root)
+            fields.update(changes)
+            return store.Resolution(genuine.status, genuine.detail, **fields)
+
+        for label, fake in (("render-views-pointer-source-refused", res_variant(pointer_source="committed")),
+                            ("render-views-foreign-store-root-refused", res_variant(store_root=oracle))):
+            before = snapshot(root)
+            with lease_stand_in(), mock.patch.object(store, "resolve_store", return_value=fake):
+                txn, why = run(root, [row], **rctx(root))
+            check(label, txn is None and "frozen default store" in (why or "") and snapshot(root) == before)
+
         bare = Path(temp).resolve() / "bare"
         bare.mkdir()
-        check("render-views-not-adopted-refused", refused(dispatch(row, rctx(bare)), "must resolve")
+        txn, why = run(bare, [row], **rctx(bare))
+        check("render-views-not-adopted-refused", txn is None and "must resolve" in (why or "")
               and snapshot(bare) == dict())
-        # reconcile-first: a held adoption journal lock refuses before the engine runs (never seized).
+        # reconcile-first: a held adoption journal lock refuses the transaction before the handler runs
+        # (never seized) -- the shell's own gate now guards render-views exactly as the other finish ops.
         root = built_store(temp, "locked")
         before = snapshot(root)
         root_fd = _open_product_root(root)
@@ -3272,11 +3475,13 @@ def _finish_ops_self_test(check):
             store._close_fd_exc_safe(root_fd)
         _journal.acquire_lock(_journal_root(root), "opf-adopt-selftest-peer")
         try:
+            with lease_stand_in():
+                txn, why = run(root, [row], **rctx(root))
             check("render-views-held-journal-lock-refused",
-                  refused(dispatch(row, rctx(root)), "never seized") and snapshot(root) == before)
+                  txn is None and "never seized" in (why or "") and snapshot(root) == before)
         finally:
             _journal.release_lock(_journal_root(root))
-    check("render-views-without-context-refused", refused(dispatch(row), "no approved plan"))
+    check("render-views-without-transaction-refused", refused(dispatch(row), "no ApplyOps"))
 
 
 def main():
