@@ -243,8 +243,9 @@ copied to the retirement name lists at least the plan and the approval, which ar
 destinations. A retirement row whose path a base inventory row also names is a path claimed
 twice and MUST yield cannot-evaluate; a listed destination that does not hold its recorded bytes
 live MUST yield cannot-evaluate, and before a recorded retirement a file at a plan Move
-destination, occupying or not, MUST be a containment finding, since only the retirement-phase
-transaction creates that path.
+destination beneath .working/archive/moved/, occupying or not, MUST be a containment finding,
+since only the retirement-phase transaction creates that path (containment never grades an
+explicit destination outside the store).
 The whole check detects accidents: an interrupted apply, a hand edit that is
 non-canonical or that changes listed bytes, and a misplaced or stale record. It does not detect
 deliberate forgery: a hand edit that re-emits a canonical, self-consistent record, and any

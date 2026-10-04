@@ -39,7 +39,8 @@ base inventory copied to the retirement name lists at least the plan and the app
 destinations, so it never reads as retired. A marker row whose path the base inventory also lists is a
 path claimed twice (spec 4.2), and every listed destination must hold its recorded bytes live. Any other retirement evidence is CANNOT-EVALUATE, never read as retired. Before a recorded
 retirement the Move destination does not exist (the retirement-phase transaction creates it), so a file
-at a plan Move destination is then a finding and the destination is not registered; after it, the
+at a plan Move destination beneath the Move root, default or explicit, is then a finding and the
+destination is not registered (an explicit destination outside the store is never graded); after it, the
 destination is registered and byte-verified through the retirement inventory. A recorded retirement ends
 the bounded state of the retire and move rows only. A migrate source retires through its import, which a
 later activation reads, so it stays bounded until then.
@@ -236,8 +237,8 @@ def adoption_state(root_fd, machine_rel, *, in_repo):
             registered.extend(retired_registered)
         else:
             # Before the recorded retirement the retirement-phase transaction has not run, so nothing
-            # exists at a plan Move destination (spec 14.2); an entry there is a premature, unexplained
-            # record (a finding) and the destination is not registered.
+            # exists at a plan Move destination beneath the Move root (spec 14.2); an entry there is a
+            # premature, unexplained record (a finding) and the destination is not registered.
             for dest in move_destinations(plans[run_id]):
                 try:
                     dst = _journal._lstat_contained(root_fd, dest)
@@ -583,8 +584,9 @@ def _hermetic(run):
     XDG_CONFIG_HOME name a private empty directory (no global git config, hooks path, excludes file or
     attributes file reaches a fixture), GIT_CONFIG_NOSYSTEM drops the system git config wherever a git
     call carries it, every other ambient GIT_* variable is gone, TMPDIR pins the resolved temporary root,
-    the locale is C and the zone UTC, and the umask is 022. The environment and the umask are restored
-    afterwards."""
+    LC_ALL, LANG and TZ give child processes the C locale and the UTC zone, and the umask is 022. Only the
+    environment changes for TZ and the locale: time.tzset() and locale.setlocale() are not called, so this
+    process keeps its own zone and locale. The environment and the umask are restored afterwards."""
     import shutil
     import tempfile
     git = shutil.which("git")
@@ -755,16 +757,18 @@ def _self_test_checks():
                 write(root, apply.archive_rel(rid_, src), sources[src])   # preserved at APPLY (14.1 check 3)
             relist(root, rid_)
 
-        def retire(root, rid_):
+        def retire(root, rid_, creates=None):
             """Record the run's retirement exactly as the retirement-phase transaction does (spec 14.2):
             the REAL compose path (apply.ApplyOps at the retirement phase) creates the plan's recorded
             Move destination from the frozen source bytes and seals the inventory DERIVED from its own
             create ops, so the record lists exactly the plan's Move destinations; the fixture publishes
-            those staged bytes, plus the journal transaction a real apply would also leave (never read)."""
+            those staged bytes, plus the journal transaction a real apply would also leave (never read).
+            `creates` lists (destination, bytes) for a plan other than the default fixture's one move."""
             fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
             try:
                 shell = apply.ApplyOps(fd, rid_, RETIREMENT_PHASE)
-                shell.create(moved, sources[move])
+                for rel_, data in (((moved, sources[move]),) if creates is None else creates):
+                    shell.create(rel_, data)
                 shell.seal()
             finally:
                 os.close(fd)
@@ -1291,6 +1295,65 @@ def _self_test_checks():
             check("explicit-destination-outside-store-reads-retired", rep.findings == []
                   and rep.cannot == [] and rep.migration_incomplete == [] and moved in st_x.registered
                   and ext_dest not in st_x.registered and occx_dest not in st_x.registered)
+
+        # S10f (QA round 7): an EXPLICIT destination beneath the Move root is a Move destination like the
+        # default one (spec 4.2, 14.2). The real planner freezes a plan moving one source to a custom path
+        # under .working/archive/moved/ beside a default move; both destinations are recorded, a file at the
+        # custom one before the retirement is a premature finding, and the real retirement-phase ApplyOps
+        # shell creates both and seals a record that reads as retired, registering the custom destination at
+        # file level only. Counting only the default destination in _move_creates fails the shape, premature and
+        # retired checks here.
+        cust_dest = MOVED_ROOT + "/custom/EXT.md"
+        c_sources = dict(((move, sources[move]), (ext, x_sources[ext])))
+        c_root = base / "plan-custom"
+        for rel, data in c_sources.items():
+            write(c_root, rel, data)
+        c_head = apply._selftest_git_commit(c_root)
+        frozen_c = freeze(c_root, c_head, "1122334455667788", c_sources,
+                          dict(((move, "move"), (ext, "move"))), dict(((ext, cust_dest),))) if c_head else None
+        check("move-root-explicit-destination-frozen-by-the-real-planner", frozen_c is not None)
+        if frozen_c is not None:
+            rid_c = frozen_c[0]
+            pdig[rid_c] = plan_digest_of(frozen_c[1])
+            plan_c = tomllib.loads(frozen_c[1].decode("utf-8"))
+            ops_c = dict((r["source"], r["destination"]) for r in plan_c["ops"] if r["op"] == "move-file")
+            check("move-root-explicit-destination-shape-from-the-real-planner",
+                  ops_c == dict(((move, moved), (ext, cust_dest)))
+                  and reader.move_destinations(plan_c) == sorted((cust_dest, moved)))
+            home_c = apply.evidence_home_rel(rid_c)
+            base_c = [home_c + "/" + apply.PLAN_NAME, home_c + "/" + apply.APPROVAL_NAME]
+
+            def cust_tree():
+                seq[0] += 1
+                root_ = base / ("t" + str(seq[0]))
+                write(root_, mrel + "/manifest.toml", manifest_text.encode("utf-8"))
+                for rel_, data_ in c_sources.items():
+                    write(root_, rel_, data_)
+                write(root_, base_c[0], frozen_c[1])
+                write(root_, base_c[1], frozen_c[2])
+                relist(root_, rid_c, base_c)
+                return root_
+
+            root = cust_tree()
+            rep = contain(root)
+            check("move-root-explicit-destination-run-admits-before-retirement", rep.findings == []
+                  and rep.cannot == [] and bounded(rep) == [move] and named(rep.migration_incomplete, ext))
+            write(root, cust_dest, c_sources[ext])
+            rep = contain(root)
+            check("move-root-explicit-destination-premature-finding",
+                  named(rep.findings, cust_dest, "before the recorded retirement") and rep.cannot == [])
+            root = cust_tree()
+            retire(root, rid_c, [(cust_dest, c_sources[ext]), (moved, c_sources[move])])
+            os.unlink(root / move)
+            os.unlink(root / ext)
+            beside_c = MOVED_ROOT + "/custom/evil.sh"
+            write(root, beside_c, b"evil\n")
+            rep = contain(root)
+            st_c = state_of(root)
+            check("move-root-explicit-destination-reads-retired",
+                  named(rep.findings, beside_c, "unregistered") and len(rep.findings) == 1 and rep.cannot == []
+                  and rep.migration_incomplete == [] and cust_dest in st_c.registered
+                  and moved in st_c.registered and beside_c not in st_c.registered)
 
         # S11: every record case refuses admission; the run homes are then graded and nothing is bounded.
         def record(name, mutate, verdict, *words):

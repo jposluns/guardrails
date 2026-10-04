@@ -580,7 +580,8 @@ def _bundle_root_inventory(run_id, path):
 
 def _evidence_eligible(run_id, path):
     """Whether a created path is retained evidence an inventory row claims (spec 4.2): a member of this
-    run's bundle other than a bundle-root inventory, this run's archive, or a default Move destination."""
+    run's bundle other than a bundle-root inventory, this run's archive, or a Move destination (any path
+    beneath the Move root, default or explicit)."""
     if _within(path, evidence_home_rel(run_id)):
         return not _bundle_root_inventory(run_id, path)
     return _within(path, _archive_root(run_id)) or _within(path, _MOVED_ROOT)

@@ -313,7 +313,8 @@ _ADOPTING_RESIDUALS = (
     "beneath .working/archive/moved/, naming that destination at the moved source's plan digest and "
     "nothing else (the record of a plan without such a move row lists no files), no row naming a path the "
     "base inventory also claims and each listed destination holding its recorded bytes live; before a "
-    "recorded retirement, a file at a plan Move destination is a finding. The machine-local journal is "
+    "recorded retirement, a file at a plan Move destination beneath .working/archive/moved/ is a "
+    "finding. The machine-local journal is "
     "never read, so a clone grades as the original store. The evidence check detects accidents: an "
     "interrupted apply, a hand edit that is non-canonical or that changes listed bytes, and a misplaced "
     "or stale record. It does not detect deliberate forgery: a hand edit that re-emits a canonical, "
@@ -1949,8 +1950,8 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
 
 def _evidence_claim(bundle, kind, run_id, path):
     """Validate one inventory row path against what its bundle may claim: a member of the bundle itself
-    other than a bundle-root inventory, a default Move destination, or, for an adoption bundle, a retire
-    preimage of the same run."""
+    other than a bundle-root inventory, a Move destination (any path beneath .working/archive/moved/,
+    default or explicit), or, for an adoption bundle, a retire preimage of the same run."""
     _opf_store._home_file(path)
     if path.startswith(bundle + "/"):
         member = path[len(bundle) + 1:]
