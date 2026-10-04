@@ -1481,6 +1481,24 @@ def _self_test_checks():
         rep = contain(root)
         check("retirement-record-of-another-phase-refused", unit is None and why is not None
               and "another phase" in why and named(rep.cannot, marker) and bounded(rep) == [])
+        # 2a: a well-formed plan digest other than the proven plan's own at the retirement name (the
+        # record of another plan) refuses, never read as retired: at the unit seam the retire-only plan's
+        # empty record, and through the doctor the plan's own retirement shape re-emitted at that digest,
+        # each of which otherwise reads as retired.
+        foreign_digest = "sha256:" + "0" * 64
+        root = tree()
+        write(root, marker, apply.emit_inventory(rid, [], RETIREMENT_PHASE, foreign_digest))
+        unit, why = unit_retired(root)
+        check("retirement-record-foreign-plan-digest-refused", unit is None and why is not None
+              and "plan digest" in why)
+        root = tree()
+        retire(root, rid)
+        doc_ret = tomllib.loads((root / marker).read_bytes().decode("utf-8"))
+        write(root, marker, apply.emit_inventory(rid, [dict(r) for r in doc_ret["file"]], RETIREMENT_PHASE,
+                                                 foreign_digest))
+        rep = contain(root)
+        check("retirement-record-foreign-plan-digest-cannot", named(rep.cannot, marker, "plan digest")
+              and bounded(rep) == [])
         # 2b: the base inventory's identity binds it to the base phase: the base re-emitted with the
         # retirement-phase identity (the same rows at the same plan digest) refuses admission.
         root = tree()

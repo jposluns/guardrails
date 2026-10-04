@@ -230,6 +230,13 @@ a clone without journals grades exactly as the original store. That evidence che
 internal consistency: the sealed inventories, plan and approval bound to the run id of the
 directory they sit in, and the listed bundle, archive and Move-root bytes at their recorded
 digests (a Move-root row counts only as a move destination the run's own plan records).
+On homes 1 too, the apply side MUST write each adoption inventory's `[adoption]` identity table,
+whose keys are exactly `run_id`, `phase` and `plan_digest` as the bundle layout below defines,
+when it derives the inventory, and the doctor MUST refuse an adoption inventory whose identity is
+missing or malformed, names another run, names a phase other than the one its file name carries,
+or names a plan digest other than the run's proven plan's own (the frozen plan that re-seals its
+own bytes and that its approval binds), so an inventory copied from another run or phase, an
+empty retirement record included, never evaluates as this run's record.
 A retirement is recorded only by a sealed retirement inventory in the shape the
 retirement-phase transaction derives from its own create ops: one row per move row of the plan,
 occupying or not, whose recorded Move destination (its move-file destination) lies beneath
@@ -266,9 +273,10 @@ the tooling activates that generation.
 Each evidence bundle `.working/imported/<kind>/<run-id>/` carries its own inventories at its
 root: `inventory.toml`, plus a new `inventory-<phase>.toml` for each later phase, where `<phase>`
 is a lowercase letter followed by up to 31 lowercase letters or digits. Each holds exactly
-`format = "opf.evidence.inventory/v1"` and a `file` array whose rows have exactly `path` (a
-canonical store-relative file path spelled from `.working/`), `size` (a nonnegative integer), and
-`sha256` (64 lowercase hex digits). A row may name a member of its own bundle other than a
+`format = "opf.evidence.inventory/v1"`, a `file` array and, in an adoption bundle only, the
+`[adoption]` identity table below; the `file` rows have exactly `path` (a canonical
+store-relative file path spelled from `.working/`), `size` (a nonnegative integer), and `sha256`
+(64 lowercase hex digits). A row may name a member of its own bundle other than a
 bundle-root inventory, a Move destination, default or explicit, under `.working/archive/moved/`, or, for an
 adoption bundle, a preserved file of the same run, a retire preimage or an archived occupying
 source, under `.working/archive/adoption/<run-id>/`.
@@ -277,11 +285,13 @@ are exactly `run_id`, `phase` and `plan_digest`: the bundle's own run id, the ph
 inventory records, spelled `base` for `inventory.toml` and as the file name's `<phase>` for a
 later phase, whose name MUST NOT be `base`, and the run's approved plan's own `plan_digest` in
 the `sha256:` form with 64 lowercase hex digits. An inventory of any other kind MUST NOT carry
-that identity table. The apply side MUST write that identity when it derives the inventory, and
-the doctor MUST refuse an adoption inventory whose identity is missing or malformed, names
-another run, names a phase other than the one its file name carries, or names a plan digest
-other than the proven plan's own, so an inventory copied from another run or phase, an empty
-retirement record included, never evaluates as this run's record.
+that identity table. The apply side MUST write that identity when it derives the inventory.
+C-EVIDENCE-ENUM MUST yield cannot-evaluate for an adoption inventory whose identity is missing or
+malformed, names another run, names a phase other than the one its file name carries, or names a
+plan digest other than its bundle's own sealed `plan.toml` digest, and for every inventory of an
+adoption bundle whose `plan.toml` is absent, unreadable or not canonical, names another run, or
+carries a `plan_digest` that does not re-seal its own bytes, so an inventory copied from another
+run or phase never evaluates as this run's record.
 The owning writer or migration MUST derive each inventory from the run's transaction record or
 receipt and MUST publish it exclusively with the retained bytes. An inventory MUST NOT be rewritten,
 so a bundle stays immutable and an evidence commit changes only its bundle folder. An inventory is

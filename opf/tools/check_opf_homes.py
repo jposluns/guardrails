@@ -118,6 +118,7 @@ _CONTRACT = {
         _D("A store whose adoption home .working/imported/adoption/ exists has started an adoption and receives the adoption grading from the same pre-1.3.0 tooling: each admitted run's recorded paths are registered, the non-occupying retire, move and migrate rows of its plan (and only those) are its frozen sources, a frozen source whose live bytes still match its plan digest is graded as bounded adoption state while a drifted or vanished source is a containment failure at required (section 11), and the adopting residuals are disclosed in addition to the legacy residuals."),
         "The doctor MUST decide that a run is admitted, and that its retirement is recorded, from the committed adoption evidence alone, the bundle under .working/imported/adoption/<run-id>/ and the run archive, which travel with every clone, and MUST NOT read the machine-local journal, so a clone without journals grades exactly as the original store.",
         _D("That evidence check verifies internal consistency: the sealed inventories, plan and approval bound to the run id of the directory they sit in, and the listed bundle, archive and Move-root bytes at their recorded digests (a Move-root row counts only as a move destination the run's own plan records)."),
+        "On homes 1 too, the apply side MUST write each adoption inventory's [adoption] identity table, whose keys are exactly run_id, phase and plan_digest as the bundle layout below defines, when it derives the inventory, and the doctor MUST refuse an adoption inventory whose identity is missing or malformed, names another run, names a phase other than the one its file name carries, or names a plan digest other than the run's proven plan's own (the frozen plan that re-seals its own bytes and that its approval binds), so an inventory copied from another run or phase, an empty retirement record included, never evaluates as this run's record.",
         _D("A retirement is recorded only by a sealed retirement inventory in the shape the retirement-phase transaction derives from its own create ops: one row per move row of the plan, occupying or not, whose recorded Move destination (its move-file destination) lies beneath .working/archive/moved/, naming that destination at the moved source's plan digest, and nothing else, so the record of a plan without such a move row lists no files."),
         _D("Those are the bytes the relocation writes: the frozen live source of a non-occupying move, and for an occupying move the committed archive copy the base inventory claims at that same digest."),
         _D("Retire and migrate preimages are preserved at apply and claimed by the base inventory, never re-listed by the retirement record; that shape also binds the record to its phase, because a base inventory copied to the retirement name lists at least the plan and the approval, which are never Move destinations."),
@@ -129,11 +130,12 @@ _CONTRACT = {
         'C-EVIDENCE-ENUM MUST NOT run or read anything until homes 2 is activated; on homes 1 the section 14.1 completion checks MUST carry the evidence digest verification themselves.',
         _D('The boundary below applies only to a store that declares both homes = 2 and spec_version = "2.0.0" once the tooling activates that generation.'),
         _D('Each evidence bundle .working/imported/<kind>/<run-id>/ carries its own inventories at its root: inventory.toml, plus a new inventory-<phase>.toml for each later phase, where <phase> is a lowercase letter followed by up to 31 lowercase letters or digits.'),
-        _D('Each holds exactly format = "opf.evidence.inventory/v1" and a file array whose rows have exactly path (a canonical store-relative file path spelled from .working/), size (a nonnegative integer), and sha256 (64 lowercase hex digits).'),
+        _D('Each holds exactly format = "opf.evidence.inventory/v1", a file array and, in an adoption bundle only, the [adoption] identity table below; the file rows have exactly path (a canonical store-relative file path spelled from .working/), size (a nonnegative integer), and sha256 (64 lowercase hex digits).'),
         _D('A row may name a member of its own bundle other than a bundle-root inventory, a Move destination, default or explicit, under .working/archive/moved/, or, for an adoption bundle, a preserved file of the same run, a retire preimage or an archived occupying source, under .working/archive/adoption/<run-id>/.'),
         "An adoption bundle's inventory MUST also hold exactly one [adoption] identity table whose keys are exactly run_id, phase and plan_digest: the bundle's own run id, the phase this inventory records, spelled base for inventory.toml and as the file name's <phase> for a later phase, whose name MUST NOT be base, and the run's approved plan's own plan_digest in the sha256: form with 64 lowercase hex digits.",
         'An inventory of any other kind MUST NOT carry that identity table.',
-        "The apply side MUST write that identity when it derives the inventory, and the doctor MUST refuse an adoption inventory whose identity is missing or malformed, names another run, names a phase other than the one its file name carries, or names a plan digest other than the proven plan's own, so an inventory copied from another run or phase, an empty retirement record included, never evaluates as this run's record.",
+        'The apply side MUST write that identity when it derives the inventory.',
+        "C-EVIDENCE-ENUM MUST yield cannot-evaluate for an adoption inventory whose identity is missing or malformed, names another run, names a phase other than the one its file name carries, or names a plan digest other than its bundle's own sealed plan.toml digest, and for every inventory of an adoption bundle whose plan.toml is absent, unreadable or not canonical, names another run, or carries a plan_digest that does not re-seal its own bytes, so an inventory copied from another run or phase never evaluates as this run's record.",
         "The owning writer or migration MUST derive each inventory from the run's transaction record or receipt and MUST publish it exclusively with the retained bytes.",
         'An inventory MUST NOT be rewritten, so a bundle stays immutable and an evidence commit changes only its bundle folder.',
         _D('An inventory is not a journal projection and remains available in a clone without journals.'),
@@ -954,10 +956,22 @@ def boundary_self_test():
     def doc(*rows):
         return {"format": "opf.evidence.inventory/v1", "file": list(rows)}
 
-    def adoc(*rows, phase="base"):
-        # An adoption bundle's inventory carries the [adoption] identity table (spec 4.2).
+    import _opf_emit
+
+    def sealed_plan(body):
+        # A plan sealed as the planner seals it: plan_digest is the digest of its canonical emission
+        # without that field (spec 4.2, 14.1).
+        digest = "sha256:" + hashlib.sha256(_opf_emit.emit_checked(body).encode("utf-8")).hexdigest()
+        return _opf_emit.emit_checked(dict(body, plan_digest=digest)).encode("utf-8"), digest
+
+    plan_bytes, plan_digest = sealed_plan(dict(format="opf.adoption.plan/v2", run_id=adopt_run))
+
+    def adoc(*rows, phase="base", digest=None):
+        # An adoption bundle's inventory carries the [adoption] identity table (spec 4.2), naming the
+        # bundle's own sealed plan.toml digest unless a vector passes another.
         out = doc(*rows)
-        out["adoption"] = dict(run_id=adopt_run, phase=phase, plan_digest="sha256:" + "0" * 64)
+        out["adoption"] = dict(run_id=adopt_run, phase=phase,
+                               plan_digest=plan_digest if digest is None else digest)
         return out
 
     def row(path, raw=b"retained"):
@@ -1006,12 +1020,15 @@ def boundary_self_test():
             source = bundle + "/sources/notes.txt"
             moved = ".working/archive/moved/old/notes.txt"
             receipt = adoption + "/receipt.toml"
+            plan = adoption + "/plan.toml"
             preimage = ".working/archive/adoption/" + adopt_run + "/AGENTS.md"
             members = (source, moved, receipt, preimage)
             for path in members:
                 add(path, b"retained")
+            add(plan, plan_bytes)
             for inventory, built in ((bundle + "/inventory.toml", doc(row(source), row(moved))),
-                                     (adoption + "/inventory.toml", adoc(row(receipt), row(preimage)))):
+                                     (adoption + "/inventory.toml",
+                                      adoc(row(receipt), row(preimage), row(plan, plan_bytes)))):
                 add(inventory, b"")
                 inventories[inventory] = built
             check("evidence-members-match", lambda: not evidence().findings and not evidence().cannot)
@@ -1077,11 +1094,44 @@ def boundary_self_test():
             for label, broken in (("foreign-run", foreign),
                                   ("foreign-phase", adoc(row(probe), phase="completion")),
                                   ("base-phase-name", adoc(row(probe), phase="base")),
-                                  ("missing-identity", doc(row(probe)))):
+                                  ("missing-identity", doc(row(probe))),
+                                  ("phase-foreign-plan-digest", adoc(row(probe), phase="evidence",
+                                                                     digest="sha256:" + "0" * 64))):
                 inventories[adoption + "/inventory-evidence.toml"] = broken
                 check("evidence-identity-" + label, lambda: bool(evidence().cannot)
                       and not evidence().findings)
             inventories[adoption + "/inventory-evidence.toml"] = good_phase
+            # The plan digest binds each adoption inventory to its bundle's own sealed plan.toml
+            # (spec 4.2): a well-formed foreign digest on the base inventory, a bundle with no plan, an
+            # edited plan whose digest no longer seals it, and a sealed plan of another run each cannot
+            # evaluate, even when every member's row matches its bytes.
+            first = adoption + "/inventory.toml"
+            good_first = copy.deepcopy(inventories[first])
+            inventories[first] = dict(good_first, adoption=dict(good_first["adoption"],
+                                                                plan_digest="sha256:" + "0" * 64))
+            check("evidence-identity-base-foreign-plan-digest", lambda: any(
+                "plan digest" in s for s in evidence().cannot) and not evidence().findings)
+            del files[plan]
+            inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan))
+            check("evidence-identity-missing-plan", lambda: any(
+                "no plan.toml" in s for s in evidence().cannot) and not evidence().findings)
+            edited = plan_bytes.replace(b"opf.adoption.plan/v2", b"opf.adoption.plan/v9")
+            alien_bytes, alien_digest = sealed_plan(dict(format="opf.adoption.plan/v2",
+                                                         run_id=adopt_run.replace("0123", "4567")))
+            for label, raw, digest in (("plan-not-sealed", edited, plan_digest),
+                                       ("plan-of-another-run", alien_bytes, alien_digest)):
+                add(plan, raw)
+                inventories[first] = adoc(*(r for r in good_first["file"] if r["path"] != plan),
+                                          row(plan, raw), digest=digest)
+                inventories[adoption + "/inventory-evidence.toml"] = adoc(row(probe), phase="evidence",
+                                                                           digest=digest)
+                check("evidence-identity-" + label, lambda: bool(evidence().cannot)
+                      and not evidence().findings)
+            add(plan, plan_bytes)
+            inventories[first] = good_first
+            inventories[adoption + "/inventory-evidence.toml"] = good_phase
+            check("evidence-identity-plan-restored", lambda: not evidence().findings
+                  and not evidence().cannot)
             crossed_kind = doc(row(source), row(moved))
             crossed_kind["adoption"] = dict(good_phase["adoption"])
             inventories[bundle + "/inventory.toml"] = crossed_kind

@@ -61,6 +61,7 @@ import ipaddress
 import os
 import re
 import stat
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1951,7 +1952,9 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
 def _evidence_claim(bundle, kind, run_id, path):
     """Validate one inventory row path against what its bundle may claim: a member of the bundle itself
     other than a bundle-root inventory, a Move destination (any path beneath .working/archive/moved/,
-    default or explicit), or, for an adoption bundle, a retire preimage of the same run."""
+    default or explicit), or, for an adoption bundle, a retire preimage of the same run. (This docstring
+    was corrected in review round 7 as a deliberate, documentation-only exception to the byte-identical
+    protected set; the body is unchanged.)"""
     _opf_store._home_file(path)
     if path.startswith(bundle + "/"):
         member = path[len(bundle) + 1:]
@@ -1970,6 +1973,7 @@ class _LegacyIngestInventory(ValueError):
 
 
 ADOPTION_BASE_PHASE = "base"    # the [adoption] identity phase of inventory.toml (spec 4.2)
+ADOPTION_PLAN_NAME = "plan.toml"   # the adoption bundle's own sealed plan (spec 4.2, 14.1)
 
 
 def _inventory_phase(name):
@@ -2012,6 +2016,37 @@ def _adoption_identity(run_id, doc):
     return phase, digest
 
 
+def _adoption_plan_digest(root_fd, bundle, run_id, rep):
+    """The plan_digest of an adoption bundle's own plan.toml, proven from its bytes (spec 4.2): canonical
+    TOML naming the bundle's run id, whose plan_digest re-seals it (the planner's seal: the digest of the
+    canonical emission of the plan without its plan_digest). Every adoption inventory's [adoption]
+    identity must name this digest. An absent, unreadable, non-canonical, foreign-run or unsealed plan
+    raises ValueError, so no inventory of that bundle evaluates as this run's record."""
+    rel = _rel(bundle, ADOPTION_PLAN_NAME)
+    raw, state = _read_bytes(root_fd, rel, rep)
+    if state == "absent":
+        raise ValueError("the adoption bundle has no {} to prove its inventories' plan digest against "
+                         "(spec 4.2)".format(ADOPTION_PLAN_NAME))
+    if state != "ok":
+        raise ValueError("the adoption bundle's {} is unreadable, so no plan digest is proven (spec "
+                         "4.2)".format(ADOPTION_PLAN_NAME))
+    try:
+        plan = tomllib.loads(raw.decode("utf-8"))
+        canonical = _opf_emit.emit_checked(plan).encode("utf-8")
+        body = dict(plan)
+        claimed = body.pop("plan_digest", None)
+        sealed = "sha256:" + hashlib.sha256(_opf_emit.emit_checked(body).encode("utf-8")).hexdigest()
+    except (TypeError, ValueError, RecursionError, _opf_emit.EmitError) as exc:
+        raise ValueError("the adoption bundle's {} is malformed TOML ({})".format(ADOPTION_PLAN_NAME, exc))
+    if canonical != raw or claimed != sealed:
+        raise ValueError("the adoption bundle's {} is not a canonical plan whose plan_digest seals its own "
+                         "bytes (an edited plan, spec 4.2)".format(ADOPTION_PLAN_NAME))
+    if plan.get("run_id") != run_id:
+        raise ValueError("the adoption bundle's {} names run {!r}, not the bundle run {!r} (a plan of "
+                         "another run, spec 4.2)".format(ADOPTION_PLAN_NAME, plan.get("run_id"), run_id))
+    return sealed
+
+
 def _evidence_rows(bundle, kind, run_id, doc):
     """Shared schema/path validation for doctor and the adoption apply shell; never upgrades old bytes.
     An adoption inventory additionally holds exactly one [adoption] identity table, validated here
@@ -2049,9 +2084,12 @@ def _check_evidence(root_fd, homes, rep):
     inventory, missing listed files, and a recognized legacy ingest inventory are findings.
     An unreadable or malformed input, and a bundle with
     a phase inventory but no inventory.toml, cannot evaluate; a malformed inventory stops the
-    reconciliation, since its claims are unknown. Deleting a whole bundle, inventory and payload
-    together, is outside this local snapshot check; history coverage is separate. Reads use the contained
-    readers and their per-file cap, with a bounded walk.
+    reconciliation, since its claims are unknown. An adoption inventory's [adoption] identity must name
+    the phase its file name carries and the plan digest its bundle's own sealed plan.toml proves; a
+    foreign identity, or a bundle whose plan.toml is absent or does not prove, cannot evaluate.
+    Deleting a whole bundle, inventory and payload together, is outside this local snapshot check;
+    history coverage is separate. Reads use the contained readers and their per-file cap, with a
+    bounded walk.
     """
     if homes < 2:
         return
@@ -2060,6 +2098,7 @@ def _check_evidence(root_fd, homes, rep):
     bundles = []
     budget = [0]
     failed = [False]
+    plans = {}    # adoption bundle -> its proven plan digest, or the ValueError proving it raised
 
     def listing(rel, depth, required):
         # A directory reached through its parent's listing is required: its absence is a race.
@@ -2098,12 +2137,23 @@ def _check_evidence(root_fd, homes, rep):
                     raise ValueError("{!r} is claimed more than once".format(row["path"]))
                 expected[row["path"]] = row
             if kind == "adoption":
-                phase, _plan = _adoption_identity(run_id, doc)
+                phase, plan_digest = _adoption_identity(run_id, doc)
                 named_phase = _inventory_phase(rel.rsplit("/", 1)[-1])
                 if phase != named_phase:
                     raise ValueError("the [adoption] identity names phase {!r}, not the {!r} phase its "
                                      "file name carries (an inventory copied from another phase, "
                                      "spec 4.2)".format(phase, named_phase))
+                if bundle not in plans:
+                    try:
+                        plans[bundle] = _adoption_plan_digest(root_fd, bundle, run_id, rep)
+                    except ValueError as exc:
+                        plans[bundle] = exc
+                if isinstance(plans[bundle], ValueError):
+                    raise plans[bundle]
+                if plan_digest != plans[bundle]:
+                    raise ValueError("the [adoption] identity names plan digest {!r}, not its bundle's own "
+                                     "sealed plan's {!r} (an inventory of another run or plan, spec "
+                                     "4.2)".format(plan_digest, plans[bundle]))
         except _LegacyIngestInventory as exc:
             rep.finding("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))
             failed[0] = True
