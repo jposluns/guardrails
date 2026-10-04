@@ -1997,10 +1997,29 @@ class _FixtureProcess:
         while time.monotonic() < self.deadline:
             if poller.poll(5):
                 if os.read(self.control.fileno(), 1) != b"R":
-                    waited, raw = _fixture_wait(self.pid, 0)
+                    # The reap of the failed guardian and its `collected` mark
+                    # are ONE step with respect to the caller's cancellation
+                    # signals (QA17 claude m1), as in _fixture_drain: a
+                    # SIGINT/SIGTERM landing between them stays pending until
+                    # the restore below, so close() never treats a reaped
+                    # number as an uncollected guardian. The exit itself is
+                    # awaited first WITHOUT reaping and unmasked, so a
+                    # cancellation can still interrupt that wait.
+                    try:
+                        os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOWAIT)
+                    except OSError as exc:
+                        raise ChildStatusUnavailable(
+                            "cannot collect fixture status: " + str(exc)) from exc
+                    prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                    try:
+                        _fixture_mask_cancellation()
+                        waited, raw = _fixture_wait(self.pid, 0)
+                        if waited == self.pid:
+                            self.collected = True
+                    finally:
+                        signal.pthread_sigmask(signal.SIG_SETMASK, prior)
                     if waited != self.pid:
                         raise ChildStatusUnavailable("unexpected startup wait PID")
-                    self.collected = True
                     self._read_report(raw)
                     raise ChildStatusUnavailable("guardian failed before READY")
                 if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:

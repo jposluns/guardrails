@@ -2004,6 +2004,20 @@ _RUNTIME_USAGE = '    print("usage: fixture --self-test", file=sys.stderr)\n    
 _RUNTIME_EXIT_TAIL = ('def cases():\n    print("SUITE RAN")\n\n\ndef main():\n'
                       '    print("usage: fixture --self-test", file=sys.stderr)\n    return 2\n\n\n'
                       'if __name__ == "__main__":\n')
+# The escaping fixtures (detached.py, nondumpable.py, hopper.py) leave their writer running
+# (D-385-CURRENT-CHILD), and it writes its LATE-<kind>-<mark> marker 30 s later into the `late`
+# directory BESIDE the probed one, never into it, so no late write can be blamed on a later run. The
+# module takes an flock on its own LIVE-<mark> file there before it forks; the writer inherits it (on a
+# descriptor of at least 3, since the writer points 0-2 at /dev/null) and holds it until it exits, so
+# _self_test_runtime_escape_probe can wait, for at most _RUNTIME_LATE_BOUND seconds, until every
+# writer has exited before its directory is removed.
+_RUNTIME_LATE_HOLD = (
+    '    late = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "late")\n'
+    "    mark = os.urandom(8).hex()\n"
+    '    hold = fcntl.fcntl(os.open(os.path.join(late, "LIVE-" + mark), os.O_WRONLY | os.O_CREAT | os.O_EXCL),\n'
+    "                       fcntl.F_DUPFD, 3)\n"
+    "    fcntl.flock(hold, fcntl.LOCK_EX)\n")
+_RUNTIME_LATE_BOUND = 40.0
 # The runtime probe's fixtures (name, source, the phrase its discrepancy must hold, or None for a passing
 # module): the reviewers' reproductions the static checks miss, run as files. None but clean_lib.py binds
 # self_test or compares an argument list with a `--self-test` list literal, so the static selection is it alone.
@@ -2063,28 +2077,29 @@ _RUNTIME_FIXTURES = (
      'with open(path, "w") as handle:\n    handle.write(os.urandom(8).hex())\n'
      "os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))\n" 'if __name__ == "__main__":\n' + _RUNTIME_USAGE,
      "restores.py ['--self-test', 'extra']: changed"),
-    ("detached.py", "import os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
-        "def main():\n", "def main():\n    if os.fork() == 0:\n        os.setsid()\n"
+    ("detached.py", "import fcntl\nimport os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n" + _RUNTIME_LATE_HOLD + "    if os.fork() == 0:\n        os.setsid()\n"
         '        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n            os.dup2(null, fd)\n'
-        "        time.sleep(30)\n        here = os.path.dirname(os.path.abspath(__file__))\n"
-        '        open(os.path.join(here, "LATE-{}".format(os.getpid())), "w").close()\n        os._exit(0)\n')
+        "        time.sleep(30)\n"
+        '        open(os.path.join(late, "LATE-detached-" + mark), "w").close()\n        os._exit(0)\n')
      + "    sys.exit(main())\n", "left a process running"),
-    ("nondumpable.py", "import ctypes\nimport os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
-        "def main():\n", "def main():\n    if os.fork() == 0:\n        os.setsid()\n"
+    ("nondumpable.py", "import ctypes\nimport fcntl\nimport os\nimport sys\nimport time\n\n\n"
+     + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n" + _RUNTIME_LATE_HOLD + "    if os.fork() == 0:\n        os.setsid()\n"
         "        ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"
         "        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n"
         "            os.dup2(null, fd)\n"
-        "        time.sleep(30)\n        here = os.path.dirname(os.path.abspath(__file__))\n"
-        "        open(os.path.join(here, \"LATE-nondumpable\"), \"w\").close()\n        os._exit(0)\n")
+        "        time.sleep(30)\n"
+        "        open(os.path.join(late, \"LATE-nondumpable-\" + mark), \"w\").close()\n        os._exit(0)\n")
      + "    sys.exit(main())\n", "left a process running"),
-    ("hopper.py", "import os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
-        "def main():\n", "def main():\n    if os.fork() == 0:\n        os.setsid()\n"
+    ("hopper.py", "import fcntl\nimport os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n" + _RUNTIME_LATE_HOLD + "    if os.fork() == 0:\n        os.setsid()\n"
         "        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n"
         "            os.dup2(null, fd)\n"
         "        end = time.monotonic() + 0.5\n        while time.monotonic() < end:\n"
         "            if os.fork() != 0:\n                os._exit(0)\n"
-        "        time.sleep(30)\n        here = os.path.dirname(os.path.abspath(__file__))\n"
-        "        open(os.path.join(here, \"LATE-hopper\"), \"w\").close()\n        os._exit(0)\n")
+        "        time.sleep(30)\n"
+        "        open(os.path.join(late, \"LATE-hopper-\" + mark), \"w\").close()\n        os._exit(0)\n")
      + "    sys.exit(main())\n", "left a process running"),
     ("inode_swap.py", "import os\nimport sys\n\n"
      "here = os.path.dirname(os.path.abspath(__file__))\ntarget = os.path.join(here, \"pin.txt\")\n"
@@ -3123,8 +3138,8 @@ def _self_test_runtime_escape_probe(tmp):
     suite, top-level vectors with no `__main__` block, `main` rebound through an alias of the module, and
     each early-exit spelling: a helper calling sys.exit, `from sys import exit as leave`, builtins.exit, an
     alias of sys, os.execv), a write into the fresh cwd, a write into the tree, a timeout, a rewrite that
-    restores the file's size and modification time, a detached (setsid) grandchild that writes into the tree
-    after the module exits, a non-dumpable setsid'd grandchild (PR_SET_DUMPABLE 0, its environ
+    restores the file's size and modification time, a detached (setsid) grandchild that outlives the
+    module, a non-dumpable setsid'd grandchild (PR_SET_DUMPABLE 0, its environ
     unreadable), a fork-hopping grandchild (each parent exits at once), a hardlink swap over a tracked
     file and a write into a pre-existing nested `.git` (each restoring the parent mtimes), and an
     undeclared `--self-test --vectors-only` form spelled in the source. Each red
@@ -3146,9 +3161,86 @@ def _self_test_runtime_escape_probe(tmp):
     the module as rc 0 on ECHILD), and _self_test_runtime_supervisor_unit pins the supervisor's census
     and reap behaviour directly. Then the mutant: the same probe restricted
     to the modules the static checks select (_self_test_entry_gap exposes, or _dispatch_targets is non-empty)
-    must name none of them, so the breadth of the probe, not the static selection, is what catches them. The
+    must name none of them, so the breadth of the probe, not the static selection, is what catches them. It
+    runs over its own copy of the fixtures, so no write left behind by the main run can land in its window
+    (its spy writes into the main tree during it, which a run over the main tree names). The escaped
+    writers write only into the sibling `late` directory (_RUNTIME_LATE_HOLD), and the case waits, for at
+    most _RUNTIME_LATE_BOUND seconds, until each has exited (a writer of its own with a 1 s life included)
+    before its directory can be removed: a writer still running then, a writer without its late write,
+    a fixture kind with no late write, or a late write in the probed directory is a discrepancy. The
     modules are files run as children; nothing is passed to exec or eval. Returns a list of the
     discrepancies."""
+    import fcntl
+    import subprocess
+
+    late = Path(tmp, "tree", "opf", "late")
+    os.makedirs(str(late))
+    try:
+        faults = _runtime_escape_cases(tmp)
+    finally:
+        # A writer of the same shape with a known 1 s life pins the wait itself: without the wait, the
+        # checks below find it still holding its LIVE lock and its late write absent.
+        hold = os.open(str(late / "LIVE-own"), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            fcntl.flock(hold, fcntl.LOCK_EX)
+            own = subprocess.Popen([sys.executable, "-I", "-B", "-c",
+                                    "import sys\nimport time\n\ntime.sleep(1)\nopen(sys.argv[1], 'w').close()\n",
+                                    str(late / "LATE-own-own")], pass_fds=(hold,), stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        finally:
+            os.close(hold)
+        held = _runtime_late_wait(late, _RUNTIME_LATE_BOUND)
+        names = os.listdir(str(late))   # before own.wait(), so only the wait can let `own` finish first
+        own.wait()
+    if held:
+        faults.append("{} escaped fixture writer(s) still running {} s after the probe (LIVE-{}), so the fixture "
+                      "directory would be removed under them".format(len(held), _RUNTIME_LATE_BOUND,
+                                                                     ", LIVE-".join(held[:4])))
+    done = {name.split("-")[2]: name.split("-")[1] for name in names
+            if name.startswith("LATE-") and name.count("-") == 2}
+    unwritten = sorted(name[len("LIVE-"):] for name in names
+                       if name.startswith("LIVE-") and name[len("LIVE-"):] not in done)
+    if unwritten:
+        faults.append("escaped fixture writer(s) LIVE-{} had made no late write when the wait ended".format(
+            ", LIVE-".join(unwritten[:4])))
+    missing = sorted({"detached", "nondumpable", "hopper", "own"} - set(done.values()))
+    if missing:
+        faults.append("no late write from {} reached {}, so the wait did not cover that writer".format(
+            ", ".join(missing), late))
+    landed = sorted(name for name in os.listdir(str(Path(tmp, "tree", "opf", "tools"))) if name.startswith("LATE-"))
+    if landed:
+        faults.append("an escaped writer's late write landed in the probed fixture directory ({})".format(
+            ", ".join(landed[:4])))
+    return faults
+
+
+def _runtime_late_wait(late, bound):
+    """Poll, for at most `bound` seconds, until no LIVE-<mark> file in `late` is still locked by an escaped
+    writer (_RUNTIME_LATE_HOLD); the lock is released only when the last holder exits. Returns the marks
+    still held when the bound ran out."""
+    import fcntl
+    import time
+    deadline = time.monotonic() + bound
+    while True:
+        held = []
+        for name in sorted(os.listdir(str(late))):
+            if not name.startswith("LIVE-"):
+                continue
+            probe = os.open(str(Path(late, name)), os.O_RDONLY)
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                held.append(name[len("LIVE-"):])
+            finally:
+                os.close(probe)
+        if not held or time.monotonic() >= deadline:
+            return held
+        time.sleep(0.1)
+
+
+def _runtime_escape_cases(tmp):
+    """The cases of _self_test_runtime_escape_probe, which then waits for their escaped writers; returns
+    the list of discrepancies."""
     import subprocess
 
     import _optlevel
@@ -3237,8 +3329,19 @@ def _self_test_runtime_escape_probe(tmp):
     if selected != {"clean_lib.py"}:
         faults.append("the static selection of the runtime fixtures is {}, not clean_lib.py alone".format(
             sorted(selected)))
-    restricted = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, names=selected,
-                                          timeout=5)
+    # The main run's escaped writers are left running (D-385-CURRENT-CHILD), so the restricted run gets
+    # its own copy of the fixtures: nothing left behind by the main run can land in its window. `stray`
+    # writes into the main tree during that window; a restricted run over `directory` names it.
+    alone = Path(tmp, "restricted", "opf", "tools")
+    os.makedirs(str(alone))
+    for name, source, _want in _RUNTIME_FIXTURES:
+        (alone / name).write_text(source, encoding="utf-8")
+
+    def stray(name, argv, token):
+        (directory / "STRAY-restricted").write_text(token, encoding="utf-8")
+
+    restricted = _self_test_runtime_probe(alone, str(Path(tmp, "boxes")), table=table, names=selected,
+                                          timeout=5, spy=stray)
     faults += ["the probe restricted to the static selection still names {}".format(miss) for miss in restricted]
     # Round-6 codex blocker 1 / claude F2: a caller-inherited ignored SIGCHLD must not blind the probe.
     # Popen does not restore SIGCHLD, so without the supervisor's own SIG_DFL reset the kernel would
@@ -5925,6 +6028,53 @@ def _watchdog_completion_case(mode):
         assert holder == [None], (
             "a cancellation between the reap and the clear left the holder "
             "bound to a reaped number", holder)
+        # QA17 claude m1: _FixtureProcess._start's reap of a guardian that
+        # failed before READY and its `collected` mark are one step too. A
+        # REAL SIGINT raised by the wrapped wait right after it reaps must
+        # stay pending until _start's mask restore, so the KeyboardInterrupt
+        # arrives with `collected` already set; unmasked, it lands between
+        # them and close() would treat the reaped number as an uncollected
+        # guardian. The object is built without its launcher: the guardian
+        # is a real child that exited at once, and its control channel holds
+        # a failure byte in place of READY.
+        import socket
+        failed = os.fork()
+        if failed == 0:
+            os._exit(0)
+        starting = object.__new__(emit._FixtureProcess)
+        starting._go, starting._launched = threading.Event(), threading.Event()
+        starting._launched.set()
+        starting._launch_error = None
+        starting.deadline = time.monotonic() + 5
+        starting.subject = lambda: None
+        starting.pid, starting.collected = failed, False
+        starting.control, starting.peer = socket.socketpair()
+        real_fixture_wait = emit._fixture_wait
+
+        def interrupting_wait(pid, flags):
+            waited, raw = real_fixture_wait(pid, flags)
+            if waited == failed:
+                signal.raise_signal(signal.SIGINT)
+            return waited, raw
+
+        mask_before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        prior_int = signal.signal(signal.SIGINT, signal.default_int_handler)
+        with starting.control, starting.peer:
+            try:
+                starting.peer.send(b"F")
+                with patch.object(emit, "_fixture_wait", interrupting_wait):
+                    starting._start()
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError("the interrupt raised inside the startup reap was lost")
+            finally:
+                signal.signal(signal.SIGINT, prior_int)
+        assert starting.collected is True, (
+            "a cancellation between the startup reap and its mark left a "
+            "reaped guardian uncollected")
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == mask_before, (
+            "the startup reap did not restore the caller's mask")
         # EOF release: the adopted child exits on its own and is reaped.
         os.close(release[1])
         bound = time.monotonic() + 30
