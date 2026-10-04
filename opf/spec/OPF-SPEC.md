@@ -228,11 +228,14 @@ committed adoption evidence alone, the bundle under `.working/imported/adoption/
 the run archive, which travel with every clone, and MUST NOT read the machine-local journal, so
 a clone without journals grades exactly as the original store. That evidence check verifies
 internal consistency: the sealed inventories, plan and approval bound to the run id of the
-directory they sit in, the listed bundle and archive bytes at their recorded digests, and a
-retirement recorded only by a sealed retirement inventory consistent with the base inventory
-and with the plan's retire and move rows. It detects accidents, an interrupted apply or a hand
-edit, not deliberate forgery: a crafted self-consistent bundle is outside the accident-detection
-model, consistent with the rest of OPF. Tooling
+directory they sit in, the listed bundle, archive and Move-root bytes at their recorded digests
+(a Move-root row counts only as a move destination the run's own plan records), and a
+retirement recorded only by a sealed retirement inventory bound to its phase by listing exactly
+the retirement preimages of the plan's retire and move rows, consistent with the base
+inventory. It detects accidents, an interrupted apply, a hand edit that is non-canonical or
+that changes listed bytes, a misplaced or stale record, not deliberate forgery: a hand edit
+that re-emits a canonical, self-consistent record, and any other crafted self-consistent
+bundle, is outside the accident-detection model, consistent with the rest of OPF. Tooling
 that carries the section 9.2 ceiling refuses an above-ceiling declaration as a fail-closed
 INVALID finding; tooling released before that ceiling grades such a store as legacy instead, a
 disclosed residual of section 9.2. Activated 1.3.0
@@ -1616,8 +1619,9 @@ From the recorded approval until its retirement is recorded, a path the approved
 as a frozen retire, move or migrate source (section 14.2) is bounded adoption state: while its
 live bytes still match its plan digest, containment MUST report it as `migration_incomplete`
 detail rather than failing it, at `"none"` during a clean start as much as at `"partial"`. A
-digest mismatch (a drifted source) or an unenumerated path MUST remain a containment-gate
-failure at `required`; the bounded treatment is never a blanket exemption. A formerly occupied
+digest mismatch (a drifted source), a source that is gone before its retirement is recorded (a
+vanished source), or an unenumerated path MUST remain a containment-gate failure at `required`;
+the bounded treatment is never a blanket exemption. A formerly occupied
 destination needs no bounded treatment: its occupying source was archived at apply (section
 14.2), the destination is an ordinary managed path from apply onward, and a check that reads the
 adoption archive, the section 14.1 completion check and import included, MUST fail at `required`,

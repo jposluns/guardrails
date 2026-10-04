@@ -942,7 +942,9 @@ def _committed_base_or_refuse(root_fd, journal_root, run_id, phase):
     journal transaction to classify complete AND the live inventory.toml to hold the exact bytes that
     transaction's INTENT published (bytes check_apply_ops proved derived and valid when the base
     composed). An inventory.toml on disk alone, hand-planted or swapped since the commit, never admits a
-    phase (fail-closed)."""
+    phase (fail-closed). The classification and the INTENT digest come from ONE captured frame set (QA
+    round 3): the journal is read once, so a journal swapped between a classify read and an extract read
+    can never split the decision across two observations."""
     base_rel = inventory_rel(run_id)
     try:
         if _journal._lstat_contained(root_fd, JOURNAL_REL + "/" + run_id) is None:
@@ -951,11 +953,15 @@ def _committed_base_or_refuse(root_fd, journal_root, run_id, phase):
                                   "nothing written (fail-closed)".format(phase))
         jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
         try:
-            if _journal.classify_state(jr_fd, journal_root / run_id) != "complete":
+            # ONE captured frame set: classify_state's own state machine (_validate_terminal_agreement,
+            # then the frame types) is applied to the same frames the INTENT digest is extracted from.
+            frames, _torn, _good = _journal.read_frames(jr_fd, journal_root / run_id)
+            _journal._validate_terminal_agreement(frames)
+            types = [t for t, _ in frames]
+            if _journal.F_INTENT not in types or _journal.F_COMPLETE not in types:
                 raise AdoptApplyError("phase {!r} needs the run's COMMITTED base transaction, and {!r} "
                                       "is not complete; nothing written (fail-closed)".format(
                                           phase, run_id))
-            frames, _torn, _good = _journal.read_frames(jr_fd, journal_root / run_id)
             intent = _journal._first(frames, _journal.F_INTENT)
         finally:
             _journal._close_fd_quietly(jr_fd)
@@ -2643,6 +2649,25 @@ def _self_test_checks():
               and "INTENT" in drifted_base)
         if saved is not None:
             base.write_bytes(saved)
+        # QA round 3: the gate reads the journal ONCE, so a stale classification is never combined with a
+        # later frame read. classify_state is patched to answer complete while every frame read returns
+        # the INTENT-only (open) frames carrying the live inventory's own digest: a two-read gate accepts
+        # that split observation; the one-read gate refuses it as not complete.
+        live_digest = _sha256(base.read_bytes())
+        open_frames = [(_journal.F_INTENT, dict(txn=rid, ops=[dict(
+            op="create", path=inventory_rel(rid), poststate={"content-sha256": live_digest})]))]
+        root_fd2 = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with mock.patch.object(_journal, "classify_state", lambda *a, **k: "complete"), \
+                    mock.patch.object(_journal, "read_frames", lambda *a, **k: (list(open_frames), False, 0)):
+                try:
+                    _committed_base_or_refuse(root_fd2, _journal_root(root), rid, "audit")
+                    split = None
+                except AdoptApplyError as exc:
+                    split = str(exc)
+        finally:
+            os.close(root_fd2)
+        check("phase-gate-single-frame-read", split is not None and "not complete" in split)
 
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)

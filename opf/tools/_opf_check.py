@@ -305,13 +305,16 @@ _ADOPTING_RESIDUALS = (
     "Homes-1 adoption control area (spec 4.2, 17): an admitted adoption run is registered at file level "
     "only, each path its committed inventories list plus its recorded Move destinations, and every other "
     "path under the adoption homes is graded. Admission and retirement are decided from the committed "
-    "evidence bundle and run archive alone, whose listed bundle and archive bytes are verified at their "
-    "recorded digests; rows under the shared Move root are registered by name only until the section 14.1 "
-    "completion checks land. The machine-local journal is never read, so a clone grades as the original "
-    "store; the evidence check detects accidents, an interrupted apply or a hand edit, not deliberate "
-    "forgery. Import and ingest records stay unregistered paths until their own activation, a vanished "
-    "frozen source before its recorded retirement is a failure, and a migrate source stays bounded "
-    "adoption state until the import that retires it is read.",
+    "evidence bundle and run archive alone, whose listed bundle, archive and Move-root bytes are verified "
+    "at their recorded digests; a Move-root row is admitted only as a move destination the run's own plan "
+    "records, and a retirement only by a sealed retirement inventory listing exactly the plan's retire "
+    "and move preimages. The machine-local journal is never read, so a clone grades as the original "
+    "store. The evidence check detects accidents, an interrupted apply, a non-canonical hand edit or one "
+    "that changes listed bytes, a misplaced or stale record, never deliberate forgery: a hand edit that "
+    "re-emits a canonical, self-consistent record is forgery and is not detected. Import and ingest "
+    "records stay unregistered paths until their own activation, a vanished frozen source before its "
+    "recorded retirement is a failure, and a migrate source stays bounded adoption state until the import "
+    "that retires it is read.",
 )
 
 
