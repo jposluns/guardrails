@@ -1474,14 +1474,24 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None, subject_ref=None)
     it). When the PPID census transiently names nothing while kernel
     waitid still answers for a child, the refusal says exactly that -- a
     waitable child remains whose identity the census missed -- never an
-    empty name list presented as the full survivor set (QA15 claude M2).
+    empty name list presented as the full survivor set (QA15 claude M2);
+    while the subject is still bound and unreaped, the refusal names the
+    SUBJECT as that waitable child and any further unnamed child as
+    possible but unproven (QA16 claude m2).
     `subject_ref`, a single-element list owned by the caller, BINDS the
     subject's identity across retries (QA15 codex blocker): the drain
     reads the subject number from it and CLEARS it the moment the subject
     is reaped, so a second drain call with the same holder -- the
     guardian's failure-path retry -- can never signal that number again
-    after the reap freed it for reuse by an adopted process. Absent a
-    holder, a fresh one is bound to this one call. The entry kill carries
+    after the reap freed it for reuse by an adopted process. The reap and
+    the clear run with SIGINT and SIGTERM blocked on the calling thread
+    (_fixture_mask_cancellation, prior mask restored exactly in a finally;
+    QA16 claude m1), so a cancellation landing between them stays
+    kernel-pending and is raised only at the restore, after the holder is
+    cleared; outside that guarantee, as for close()/poll(), are a signal
+    whose interpreter-level flag tripped before the block landed, other
+    signals with raising handlers, and non-signal asynchronous exceptions.
+    Absent a holder, a fresh one is bound to this one call. The entry kill carries
     the drain contract's own-fork declaration (forked=True): `subject` is
     the calling guardian's own direct fork, and once the holder is
     cleared no numeric retry can reach its number. Syscalls still require
@@ -1511,15 +1521,24 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None, subject_ref=None)
             return status
         # Reap every child already dead; an adopted live one is never signalled.
         while True:
+            # The reap and the holder clear are ONE step with respect to the
+            # caller's cancellation signals (QA16 claude m1): a SIGINT/SIGTERM
+            # landing between them stays pending until the restore below, so
+            # the holder is never left bound to an already-reaped number.
+            prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
             try:
-                waited, raw = os.waitpid(-1, os.WNOHANG)
-            except ChildProcessError:
-                return status
-            if waited == 0:
-                break
-            if subject is not None and waited == subject:
-                status = raw
-                subject = subject_ref[0] = None  # the number is now reusable
+                _fixture_mask_cancellation()
+                try:
+                    waited, raw = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    return status
+                if waited == 0:
+                    break
+                if subject is not None and waited == subject:
+                    status = raw
+                    subject = subject_ref[0] = None  # the number is now reusable
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, prior)
         if time.monotonic() >= deadline:
             residual = sorted(pid for pid in _fixture_children()
                               if subject is None or pid != subject)
@@ -1532,15 +1551,24 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None, subject_ref=None)
             # QA15 claude M2: the deadline is reached only after waitid
             # answered for a child, so an empty census names the census's
             # own transient miss, never a completed drain or a full list.
+            # QA16 claude m2: the census excludes the subject, so while the
+            # subject is still bound and unreaped it alone explains the
+            # answer; a further unnamed child is then possible, not proven.
+            if subject is not None:
+                raise ChildStatusUnavailable(
+                    "descendant cleanup deadline: ECHILD not observed and the "
+                    "/proc census named no adopted descendant: the subject {} "
+                    "is still unreaped and is itself the waitable child; a "
+                    "further waitable child the census missed is possible but "
+                    "unproven, and any such child is NOT signalled "
+                    "(D-385-CURRENT-CHILD), left as the disclosed "
+                    "orphan-escape residual".format(subject))
             raise ChildStatusUnavailable(
                 "descendant cleanup deadline: ECHILD not observed and the "
                 "/proc census named no adopted descendant: a waitable child "
-                "remains whose identity the census missed{}; it is NOT "
+                "remains whose identity the census missed; it is NOT "
                 "signalled (D-385-CURRENT-CHILD), left as the disclosed "
-                "orphan-escape residual".format(
-                    "" if subject is None
-                    else " (the subject {} is still unreaped)".format(
-                        subject)))
+                "orphan-escape residual")
         time.sleep(0.005)
 
 
@@ -1683,8 +1711,11 @@ class _FixtureProcess:
     which no mask can stop. The funnels leave the same owner: an
     unrecorded launch is abandoned to the launcher UNDER THE LAUNCH LOCK, a
     recorded one keeps close(), which finishes collecting before re-raising;
-    one landing inside the collection kills the tree and bounded-reaps the
-    guardian before propagating.
+    one landing inside the collection sends the licensed signals -- the
+    receipt-identified subject through its held pidfd and the guardian this
+    layer forked -- and bounded-reaps the guardian before propagating; the
+    subject's own descendants hold no handoff, so they are NOT signalled but
+    named and left (D-385-CURRENT-CHILD).
 
     Locks: only the launcher thread survives into the guardian, whose
     dependencies are preloaded at construction, so guardian-side imports take no
@@ -2617,10 +2648,14 @@ class _FixtureProcess:
     def _interrupt_collect(self):
         """Last-resort owner for a cancellation landing INSIDE the collection
         itself (the receipt read, the bounded reap wait, or the exit proof):
-        read the receipt if it is still pending, kill the whole tree NOW
-        (freeze, receipt kill, guardian SIGKILL), and bounded-reap the
-        guardian, so the re-raised cancellation never strands a live,
-        owner-less guardian or subject. A guardian already collected can still
+        read the receipt if it is still pending, escalate NOW through the
+        licensed signals only (guardian freeze, the receipt-identified
+        subject's SIGKILL through its held pidfd, guardian SIGKILL), and
+        bounded-reap the guardian, so the re-raised cancellation never strands
+        a live, owner-less guardian or subject. The subject's descendants
+        hold no forking-parent handoff: the escalation names them and leaves
+        them, NOT signalled (D-385-CURRENT-CHILD), the disclosed orphan-escape
+        residual. A guardian already collected can still
         owe its subject cleanup (`collected` and `cleaned` are SEPARATE
         states, QA20 codex F1): the subject-only receipt kill runs here too
         (the collected guardian is dead: no census, fix 2y, D2). The

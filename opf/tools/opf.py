@@ -1514,8 +1514,9 @@ def _runtime_snapshot(top):
 # process whose environment happens to carry the marker is never signalled and never reported;
 # containment is the supervisor's own-children subtree alone.
 _RUNTIME_MARKER = "OPF_RUNTIME_PROBE"
-# Seconds the runtime probe waits after a child exits before it looks for and kills the child's
-# descendants.
+# Seconds the runtime probe waits after a child exits before it censuses the child's descendants. The
+# census is report-only: exited children are reaped and a live descendant is reported as a survivor,
+# never signalled. The same pause precedes each tree-snapshot comparison.
 _RUNTIME_SETTLE = 0.05
 # Bounds on the supervisor's report-and-reap rounds over its own children after the module exits: past
 # either, a child that still appears is reported as a survivor the rounds never drained, a finding.
@@ -4293,6 +4294,31 @@ def _watchdog_launcher_case(label, disposition):
     return EXIT_OK if ok else EXIT_FINDING
 
 
+def _live_not_zombie(pid):
+    """Survival predicate for the named-and-left legs (QA16 codex 1): True only while /proc/<pid>/stat
+    reads a state other than zombie. /proc/<pid> also exists for an exited but unreaped child, so mere
+    existence proves a retained process entry, never survival."""
+    try:
+        stat = Path("/proc", str(pid), "stat").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return stat.rsplit(b")", 1)[1].split()[0] != b"Z"
+
+
+def _zombie_survival_control():
+    """Zombie fixture for _live_not_zombie: an exited, unreaped own fork keeps its /proc entry, and the
+    survival predicate must still refuse it. The fork is reaped before returning."""
+    zombie = os.fork()
+    if zombie == 0:
+        os._exit(0)
+    try:
+        os.waitid(os.P_PID, zombie, os.WEXITED | os.WNOWAIT)
+        assert Path("/proc", str(zombie)).exists(), "the zombie fixture left no /proc entry"
+        assert not _live_not_zombie(zombie), "the survival predicate accepted a zombie"
+    finally:
+        os.waitpid(zombie, 0)
+
+
 def _watchdog_completion_case(mode):
     """Run each irreversible audit-hook/disposition experiment in its own fixture process."""
     import json
@@ -4447,6 +4473,29 @@ def _watchdog_completion_case(mode):
         assert "census missed" in message and "NOT" in message, message
         assert "[]" not in message, \
             ("the refusal named an empty list over a waitable child", message)
+        # QA16 claude m2: the census excludes the subject, so a still-bound,
+        # unreaped subject is itself the waitable child; any further unnamed
+        # child is possible but unproven, never asserted as a census miss.
+        assert ("the subject 123 is still unreaped and is itself the "
+                "waitable child" in message
+                and "possible but unproven" in message), message
+        assert "identity the census missed" not in message, message
+        # With the holder already cleared, nothing explains the answer but a
+        # child the census missed, and the refusal says exactly that.
+        with patch.object(os, "waitid", return_value=None), \
+                patch.object(os, "waitpid", return_value=(0, 0)), \
+                patch.object(emit, "_fixture_signal", return_value=True), \
+                patch.object(emit, "_fixture_children", return_value=[]), \
+                patch.object(time, "monotonic", side_effect=[100, 102]), \
+                patch.object(time, "sleep"):
+            try:
+                emit._fixture_drain(123, deadline=101, subject_ref=[None])
+            except emit.ChildStatusUnavailable as exc:
+                message = str(exc)
+            else:
+                raise AssertionError("fixture was accepted: " + mode)
+        assert ("a waitable child remains whose identity the census missed"
+                in message and "123" not in message), message
     elif mode == "deadline-flips":
         real_run = emit.run_bounded
         def late(thunk, **kwargs):
@@ -4742,15 +4791,19 @@ def _watchdog_completion_case(mode):
             # licenses NO signal. The subject python (spid) is NOT asserted
             # either way: it dies under its own forking parent's licensed
             # timeout kill, whose timing depends on the mode's stimulus.
+            # Survival is a live NON-ZOMBIE state, never a mere /proc entry
+            # (QA16 codex 1): the zombie control first proves the predicate
+            # refuses an exited, unreaped process.
+            _zombie_survival_control()
             for pid in (*named, dpid):
-                assert Path("/proc", str(pid)).exists(), (
+                assert _live_not_zombie(pid), (
                     "a named-and-left process did not survive "
                     "(D-385-CURRENT-CHILD)", pid, refusal)
             for pid in named:
                 assert not _kill_proved_child(pid), (
                     "an adopted current child was signalled "
                     "(D-385-CURRENT-CHILD)")
-                assert Path("/proc", str(pid)).exists(), (
+                assert _live_not_zombie(pid), (
                     "the refused hygiene still ended the survivor")
             # File-gate release: every parked member exits on its own; the
             # exited adopted children are then REAPED (collection, never a
@@ -5788,6 +5841,10 @@ def _watchdog_completion_case(mode):
                 break
             assert time.monotonic() < bound, "the orphan was never adopted"
             time.sleep(0.005)
+        # Survival is a live NON-ZOMBIE state, never a mere /proc entry
+        # (QA16 codex 1), checked before and after the refusals.
+        _zombie_survival_control()
+        assert _live_not_zombie(orphan), "the adopted child was not live"
         sends = []
         holder = [subject]
         with patch.object(os, "kill",
@@ -5830,8 +5887,44 @@ def _watchdog_completion_case(mode):
         assert sends == [(subject, signal.SIGKILL)], (
             "a numeric send reached a pid other than the declared own "
             "subject (D-385-CURRENT-CHILD)", sends)
-        assert Path("/proc", str(orphan)).exists(), \
+        assert _live_not_zombie(orphan), \
             "the refused retry still ended the adopted child"
+        # QA16 claude m1: the reap and the holder clear are atomic with
+        # respect to the caller's cancellation signals. A REAL SIGINT raised
+        # by the wrapped waitpid right after it reaps the subject must stay
+        # pending until the drain's mask restore, so the KeyboardInterrupt
+        # arrives with the holder already cleared; unmasked, it lands
+        # between the reap and the clear and leaves the holder bound to a
+        # reaped number.
+        interrupted_own = os.fork()
+        if interrupted_own == 0:
+            os._exit(0)
+        os.waitid(os.P_PID, interrupted_own, os.WEXITED | os.WNOWAIT)
+        real_waitpid = os.waitpid
+
+        def interrupting_waitpid(pid, flags):
+            waited, raw = real_waitpid(interrupted_own, flags)
+            if waited == interrupted_own:
+                signal.raise_signal(signal.SIGINT)
+            return waited, raw
+
+        holder = [interrupted_own]
+        prior_int = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            with patch.object(os, "waitpid", interrupting_waitpid), \
+                    patch.object(os, "kill", lambda pid, signum: None):
+                emit._fixture_drain(interrupted_own, None,
+                                    deadline=time.monotonic() + 1.0,
+                                    subject_ref=holder)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("the interrupt raised inside the reap was lost")
+        finally:
+            signal.signal(signal.SIGINT, prior_int)
+        assert holder == [None], (
+            "a cancellation between the reap and the clear left the holder "
+            "bound to a reaped number", holder)
         # EOF release: the adopted child exits on its own and is reaped.
         os.close(release[1])
         bound = time.monotonic() + 30
@@ -6968,8 +7061,10 @@ def _watchdog_completion_case(mode):
                 return closed
 
             # Leg 1: a SIGINT raised INSIDE the recording step stays pending:
-            # poll() still records the failure, kills the subject tree
-            # pin-first at collection time, and the interrupt lands only after
+            # poll() still records the failure, SIGKILLs the receipt-identified
+            # subject pin-first through its held pidfd at collection time (the
+            # subject's descendants hold no handoff: NOT signalled, named and
+            # left, D-385-CURRENT-CHILD), and the interrupt lands only after
             # the masked step restored the caller's mask.
             child, subject, descendant, release_w = launch_killed()
             captured = []
