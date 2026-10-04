@@ -165,9 +165,11 @@ def precheck_special_files(root):
     walk cannot certify. ACCEPTED: a regular file or directory; a DANGLING symlink (every open of it
     fails at once, so no read of it can block); a symlink to a REGULAR file, inside or outside the
     root (a plain read of a regular file does not block); a symlink to a directory INSIDE the root,
-    whose resolved target subtree is walked ONCE even when that target is git-ignored (a visited set
-    keyed by device and inode bounds link cycles), so linked-in contents, which a gate can reach
-    through the link's own certified path, are checked rather than trusted; and a GIT-IGNORED symlink
+    whose resolved target subtree is walked even when that target is git-ignored, under the TARGET
+    path's OWN ignore status, never the link's (QA round 9, claude MD1), and at most once per ignore
+    classification (a visited set keyed by device, inode and classification bounds link cycles), so
+    linked-in contents, which a gate can reach through the link's own certified path, are checked
+    rather than trusted; and a GIT-IGNORED symlink
     to a directory outside the root THAT SHADOWS NO TRACKED CONTENT (git ls-files under the link's
     own path answers empty), or a git-ignored unresolvable symlink, both accepted un-walked (a
     developer's .venv link shadows nothing; an unresolvable link cannot block, every open of it
@@ -191,14 +193,18 @@ def precheck_special_files(root):
     only when it shadows NO TRACKED content (git ls-files under the link's own path answers empty; a
     developer's .venv link shadows nothing), because a gate's fixed-path read reaches uncertified
     content only through a link planted OVER a tracked path.
-    DEFENCE IN DEPTH: this walk is one of two independent layers; every gate-reachable read of
-    repository or configuration-declared content also goes through a NON-BLOCKING, fstat-checked
-    reader (_walk.read_text_nonblocking, read_source_bytes, or that gate's own O_NONBLOCK or
-    stat-before-open reader), which refuses a non-regular file by name instead of blocking on it,
-    and the raw-read lint in tools/check_release_cut.py --self-test holds the gate entry modules
-    and their in-tree imports to those readers, so neither layer alone carries the guarantee.
-    Residual: the contents of an ACCEPTED (non-shadowing) ignored out-of-root directory link stay
-    outside this walk, covered by the reader layer alone. Before git is asked for the
+    DEFENCE IN DEPTH, PARTIAL IN THIS TREE (QA round 9, codex 2 = claude m1): a second layer of
+    NON-BLOCKING, fstat-checked readers (_walk.read_text_nonblocking, read_source_bytes, or a
+    gate's own O_NONBLOCK or stat-before-open reader) covers only the reads ALREADY CONVERTED to
+    it, not every gate-reachable read: the raw-read lint in tools/check_release_cut.py --self-test
+    still PINS unconverted pre-existing raw-read sites (_RAW_READ_PENDING, a pin that only
+    shrinks; the follow-up change converts them), and an external-link COPY such as the
+    standalone-closure copier (shutil.copytree in tools/check_opf_standalone_closure.py) reads
+    through accepted links outside both this walk and those readers. Residual until that
+    follow-up lands: the contents of an ACCEPTED (non-shadowing) ignored out-of-root directory
+    link stay outside this walk, and a read of them through an unconverted raw-read site or an
+    external-link copy can still block; only a read behind a converted reader refuses a
+    non-regular file by name. Before git is asked for the
     ignore list, a first pass refuses any in-tree .gitignore that is, or resolves to, a special file,
     or is a symlink git cannot resolve other than a dangling one: git computes the ignore list by
     OPENING those files with a plain blocking read, so they are screened ahead of the one git query
@@ -320,6 +326,18 @@ def precheck_special_files(root):
             spec = rel.replace(os.sep, "/")
             return any(entry == spec or entry.startswith(spec + "/") for entry in tracked)
 
+        def _rel_ignored(rel):
+            # QA round 9 (claude MD1): a walked directory's ignore status comes from the PATH
+            # ITSELF (its own rel path and ancestors against git's ignore list), never from the
+            # ignore status of a LINK that led there: the stack is LIFO, so an ignored link to a
+            # tracked directory could otherwise enter that directory's subtree FIRST under the
+            # ignored-only leniencies, and the visited set would then skip the non-ignored walk
+            # of the same subtree, applying the leniencies to content that is not ignored.
+            if ignored is None or not rel:
+                return False
+            parts = rel.split(os.sep)
+            return any(os.sep.join(parts[:i]) in ignored for i in range(1, len(parts) + 1))
+
         visited = set()
         stack = [(os.fspath(root), "", False)]
         while stack:
@@ -328,7 +346,10 @@ def precheck_special_files(root):
                 dir_stat = os.stat(dirpath)
             except FileNotFoundError:
                 continue
-            dir_key = (dir_stat.st_dev, dir_stat.st_ino)
+            # QA round 9 (claude MD1), second independent guard: the visited key carries the
+            # ignore CLASSIFICATION, so even when one real directory is reached under both
+            # classifications, the NON-ignored walk (strictly more refusals) still happens.
+            dir_key = (dir_stat.st_dev, dir_stat.st_ino, under_ignored)
             if dir_key in visited:
                 continue
             visited.add(dir_key)
@@ -394,8 +415,10 @@ def precheck_special_files(root):
                         link_rel = os.path.relpath(real, real_root)
                         if link_rel == ".":
                             link_rel = ""
-                        stack.append((real, link_rel, skipped))  # walked even when the TARGET
-                        #            is ignored: a gate can reach it through the link's own path
+                        # Walked even when the TARGET is ignored (a gate can reach it through
+                        # the link's own certified path), under the TARGET path's OWN ignore
+                        # status, never the link's (QA round 9, claude MD1).
+                        stack.append((real, link_rel, _rel_ignored(link_rel)))
                     elif not skipped:
                         _refuse(path, "a symlink to a directory outside the repository root (to "
                                       "{}); its contents cannot be certified from this "

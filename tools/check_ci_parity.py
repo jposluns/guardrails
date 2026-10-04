@@ -5022,6 +5022,118 @@ def self_test():
             failures.append("32g duplicate or unreadable YAML structure not refused ({}): "
                             "{!r} {!r}".format(label, got_problems, got_diagnostics))
 
+    # QA round 9 (codex 1 = claude MJ1, claude m2): the strict scalar allowlist, the
+    # inline-comment refusal and the post-precheck action refusal. In YAML a trailing doubled
+    # single quote is an ESCAPED QUOTE, not a close, so a step name ending in an escaped quote
+    # pair is an OPEN scalar that swallows the following lines (the round-8 endswith test called
+    # it closed and the guard credited a precheck step the YAML engine did not have). The quoted,
+    # plain-with-quote, comment, merge-key and post-precheck-action vectors fail without the
+    # round-9 change; the block-scalar, anchor, alias, tag and flow vectors prove the standing
+    # allowlist refuses every named form where a step or scalar is expected.
+    count += 1
+    for label, code_name, mutated_fixture in (
+        ("step name ending in an escaped quote pair", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: 'A gate''\n", 1)),
+        ("step name of one escaped quote", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: '''\n", 1)),
+        ("double-quoted step name with a backslash escape", "step-key",
+         order_fixture.replace("      - name: A gate\n",
+                               '      - name: "A ' + chr(92) + '" gate"\n', 1)),
+        ("quoted step name with content after the close", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: 'A' gate\n", 1)),
+        ("quote inside a quoted step name", "step-key",
+         order_fixture.replace("      - name: A gate\n",
+                               "      - name: 'A " + chr(34) + "quoted" + chr(34) + " gate'\n",
+                               1)),
+        ("quote inside a plain step name", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: don't stop\n", 1)),
+        ("backslash inside a plain step name", "step-key",
+         order_fixture.replace("      - name: A gate\n",
+                               "      - name: a" + chr(92) + " gate\n", 1)),
+        ("block scalar step name", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: |\n", 1)),
+        ("anchor as a step name", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: &x gate\n", 1)),
+        ("alias as a step name", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: *x\n", 1)),
+        ("tag as a step name", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: !!str gate\n", 1)),
+        ("inline comment on a step line", "step-comment",
+         order_fixture.replace("      - name: A gate\n", "      - name: A gate # note\n", 1)),
+        ("inline comment on a run body line", "step-comment",
+         order_fixture.replace("          python3 -I -B tools/_gen_common.py --precheck\n",
+                               "          python3 -I -B tools/_gen_common.py --precheck "
+                               "# note\n", 1)),
+        ("merge key in a with mapping", "step-key",
+         order_fixture.replace("      - uses: actions/setup-python@v5\n",
+                               "      - uses: actions/setup-python@v5\n        with:\n"
+                               "          <<: python-version\n", 1)),
+        ("flow mapping where a step is expected", "step-shape",
+         order_fixture.replace("      - name: A gate\n        run: python3 -I -B tools/a.py\n",
+                               "      - " + chr(123) + "name: A gate, run: python3 -I -B "
+                               "tools/a.py" + chr(125) + "\n", 1)),
+        ("multi-line flow where steps are expected", "job-key",
+         order_fixture.replace("    steps:\n", "    steps: [\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
+            failures.append("32h unmodelled scalar, comment or step form not refused ({}): "
+                            "{!r} {!r}".format(label, got_problems, got_diagnostics))
+    replaced_tree = order_fixture + ("      - uses: actions/checkout@v4\n"
+                                     "        with:\n          ref: refs/heads/other\n")
+    got_problems, got_diagnostics = workflow_precheck_order_problems(replaced_tree, "fixture.yml")
+    if not any("after the special-file precheck" in problem for problem in got_problems):
+        failures.append("32h a post-precheck action (a second checkout above all) must be "
+                        "refused, got {!r} {!r}".format(got_problems, got_diagnostics))
+
+    # QA round 9 (codex 1 and claude MJ1, the filed reproduction shapes): a currency-shaped job
+    # whose precheck-looking lines sit INSIDE an open single-quoted step name must be refused,
+    # never a clean order pass; the clean currency shape must still pass. Both reproductions
+    # pass the round-8 guard (0 problems, 0 diagnostics) and fail without the round-9 change.
+    count += 1
+    currency_shape = "\n".join((
+        "name: Standards currency",
+        "jobs:",
+        "  staleness:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: actions/setup-python@v5",
+        "        with:",
+        "          python-version: '3.14'",
+        "      - name: Special-file precheck",
+        "        run: |",
+        "          " + bootstrap_tools,
+        "          python3 -I -B tools/_gen_common.py --precheck",
+        "      - name: Standards staleness",
+        "        run: python3 -I -B tools/check_standards_currency.py",
+    )) + "\n"
+    got_problems, got_diagnostics = workflow_precheck_order_problems(
+        currency_shape, "currency-fixture.yml")
+    if got_problems or got_diagnostics:
+        failures.append("32i the clean currency-shaped fixture must pass, got {!r} {!r}".format(
+            got_problems, got_diagnostics))
+    codex_repro = currency_shape.replace(
+        "      - name: Special-file precheck\n",
+        "      - name: 'Swallow ''\n", 1).replace(
+        "          python3 -I -B tools/_gen_common.py --precheck\n",
+        "          python3 -I -B tools/_gen_common.py --precheck\n"
+        "      - name: end'\n        run: echo placeholder\n", 1)
+    claude_repro = currency_shape.replace(
+        "      - name: Special-file precheck\n",
+        "      - name: 'Prepare''\n      - name: Special-file precheck\n", 1).replace(
+        "      - name: Standards staleness\n",
+        "      - name: done'\n        run: cat README.md\n"
+        "      - name: Standards staleness\n", 1)
+    for label, mutated_fixture in (("escaped-quote swallow A", codex_repro),
+                                   ("escaped-quote swallow B", claude_repro)):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "currency-fixture.yml")
+        if not any(diagnostic.code == "step-key" for diagnostic in got_diagnostics):
+            failures.append("32i round-9 reproduction ({}) not refused: {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+
     # codex round-4 finding 4: a workflows directory path no path call accepts (an embedded NUL) is a
     # read-error diagnostic, never a raw ValueError. Fails without the (OSError, ValueError) arm.
     count += 1
@@ -5071,13 +5183,26 @@ WORKFLOW_LEVEL_KEYS = ("jobs", "name", "on", "permissions")
 JOB_LEVEL_KEYS = ("name", "runs-on", "steps", "strategy")
 
 
+# QA round 9 (codex 1 = claude MJ1): the ONLY modelled quoted scalar is one opening quote, an
+# interior with no quote character of EITHER kind and no backslash, then one closing quote with
+# nothing after it. In YAML a trailing doubled single quote is an ESCAPE, not a close, so an
+# endswith test called the OPEN scalars 'name'' and \'\'\' closed and the round-8 guard credited a
+# precheck step the YAML engine did not have; a backslash does the same inside double quotes.
+_MODELLED_QUOTED_RE = re.compile(r"""^(?:'[^'"\\]*'|"[^'"\\]*")$""")
+
+
 def _unmodelled_value(value):
-    """A reason string when a modelled mapping line's VALUE carries YAML this parse cannot read
-    (QA round 8, codex 7 = claude M1), else None: an anchor or alias, a tag, a flow collection,
-    a block scalar, or a quoted scalar that is not CLOSED on its own line (a multi-line quoted
-    scalar swallows the following lines, so this parse and the YAML engine would read DIFFERENT
-    steps; the round-7 guard credited a precheck step the YAML did not have). An empty value (a
-    bare block-mapping key) is modelled."""
+    """A reason string when a modelled mapping line's VALUE carries YAML this parse cannot read,
+    else None. The parse ACCEPTS only the scalar forms it fully models and REFUSES everything
+    else by name (QA round 8, codex 7 = claude M1; tightened QA round 9, codex 1 = claude MJ1):
+    a plain scalar with no quote character and no backslash anywhere in it, or a single- or
+    double-quoted scalar matching _MODELLED_QUOTED_RE (clean interior, closed, nothing after).
+    Refused by name: an anchor or alias, a tag, a flow collection, a block scalar, any other
+    quote-bearing quoted value (an escaped quote pair keeps the scalar OPEN and swallows the
+    following lines, so this parse and the YAML engine would read DIFFERENT steps), and a plain
+    scalar carrying a quote or backslash (there the comment stripper's quote model and the YAML
+    engine's can disagree about where a comment starts). An empty value (a bare block-mapping
+    key) is modelled."""
     value = value.strip()
     if not value:
         return None
@@ -5090,8 +5215,16 @@ def _unmodelled_value(value):
         return "a flow-style collection"
     if head in ("|", ">"):
         return "a block scalar"
-    if head in ("'", chr(34)) and not (len(value) >= 2 and value.endswith(head)):
-        return "a quoted scalar that is not closed on its own line"
+    if head in ("'", chr(34)):
+        if _MODELLED_QUOTED_RE.fullmatch(value) is None:
+            return ("a quoted scalar outside the modelled form (one opening quote, an interior "
+                    "with no quote character, backslash or escape, one closing quote, nothing "
+                    "after); YAML escape rules make any other quote-bearing form ambiguous to "
+                    "this parse")
+        return None
+    if "'" in value or chr(34) in value or chr(92) in value:
+        return ("a plain scalar carrying a quote character or backslash, which this parse's "
+                "comment and quote handling could read differently from the YAML engine")
     return None
 
 
@@ -5124,7 +5257,16 @@ def workflow_precheck_order_problems(text, source):
     step itself (a problem). A step-level env: with other names stays modelled (quality.yml
     carries several). Residual: an execution-control variable this list does not name, and
     semantics GitHub adds later, stay outside this parse; the canonical step body itself is pinned
-    by PRECHECK_STEP_RUN_LINES."""
+    by PRECHECK_STEP_RUN_LINES. QA round 9 (codex 1 = claude MJ1, claude m2): every scalar this
+    parse reads is held to the strict allowlist in _unmodelled_value (plain with no quote or
+    backslash, or simply-quoted with a clean interior, closed, nothing after); an INLINE comment
+    on a step line or a run body line is refused, never silently stripped and modelled (where a
+    comment starts depends on quote state, and inside a literal block a # is literal text); and
+    an ACTION step after the precheck is refused (a second actions/checkout there replaces the
+    certified tree). Residual (claude m2): a post-precheck run: line that rewrites the tree
+    before a later gate reads it stays outside this ORDER question; extract_ci classifies every
+    run line and an unclassifiable one is cannot-evaluate, but a classified line's writes are
+    not modelled here."""
     problems, diagnostics = [], []
     jobs = {}
     workflow_keys = set()
@@ -5275,6 +5417,17 @@ def workflow_precheck_order_problems(text, source):
         if not in_steps:
             index += 1
             continue
+        # QA round 9 (codex 1 = claude MJ1 class): a step line carrying an INLINE comment is
+        # refused, never silently stripped and modelled: where a comment starts depends on quote
+        # state, and this parse's stripper and the YAML engine can disagree about that state, so
+        # the only safe reading of a commented step line is refusal. A whole-line comment stays
+        # accepted (blank after stripping for this parse, absent for the YAML engine too).
+        if raw.rstrip() != code:
+            diagnostics.append(_diagnostic(
+                source, number, "step-comment",
+                "inline comment on a step line: {!r}; step lines are modelled without inline "
+                "comments, because where a comment starts depends on quote state this parse "
+                "does not model".format(raw.strip())))
         if indent == 6 and stripped.startswith("- "):
             step = dict(uses=None, run=[], env=[], withs=[], keys=set(), line=number)
             mapping = None
@@ -5356,6 +5509,16 @@ def workflow_precheck_order_problems(text, source):
                         continue
                     if len(body) - len(body.lstrip(" ")) <= 8:
                         break
+                    # QA round 9: inside a YAML literal block a # is LITERAL TEXT, so a stripped
+                    # inline comment makes this parse read a run body the YAML engine does not
+                    # have; refused, never silently stripped.
+                    if lines[index].rstrip() != body:
+                        diagnostics.append(_diagnostic(
+                            source, index + 1, "step-comment",
+                            "inline comment on a run body line: {!r}; inside a literal block a "
+                            "# is literal text, so stripping it would make this parse and the "
+                            "YAML engine read different run bodies".format(
+                                lines[index].strip())))
                     step["run"].append(body.strip())
                     run_line_numbers.add(index + 1)
                     index += 1
@@ -5381,6 +5544,12 @@ def workflow_precheck_order_problems(text, source):
             # for the setup-python allowlist below; a duplicate entry key, or a value this parse
             # cannot read (an anchor on a setup-python input above all), is refused at the entry.
             entry_key = stripped.split(":", 1)[0].strip()
+            # QA round 9: a merge key pulls whole entries from an anchor this parse cannot see.
+            if entry_key == "<<":
+                diagnostics.append(_diagnostic(
+                    source, number, "step-key",
+                    "merge key {!r} in a {} mapping; a merge key pulls in entries this parse "
+                    "cannot see".format(stripped, mapping)))
             if entry_key in mapping_keys:
                 diagnostics.append(_diagnostic(
                     source, number, "step-key",
@@ -5489,6 +5658,18 @@ def workflow_precheck_order_problems(text, source):
             elif s["uses"] and not s["uses"].startswith("actions/setup-python@"):
                 problems.append("{} runs action {!r} between checkout and the special-file "
                                 "precheck".format(where, s["uses"]))
+        for s in job_steps[precheck + 1:]:
+            # QA round 9 (claude m2): an ACTION step after the precheck can replace or rewrite
+            # the certified tree (a second actions/checkout with another ref above all), so no
+            # action at all is modelled there; the steps after the precheck are the run: gates,
+            # whose command lines the parity extraction classifies (the residual is named in
+            # this function's docstring).
+            if s["uses"]:
+                problems.append("{} runs action {!r} (step at line {}) after the special-file "
+                                "precheck; an action there can replace or rewrite the certified "
+                                "tree (a second checkout above all), so the precheck would no "
+                                "longer cover what later steps read".format(
+                                    where, s["uses"], s["line"]))
     return problems, diagnostics
 
 
