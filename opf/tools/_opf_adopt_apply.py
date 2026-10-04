@@ -1248,8 +1248,10 @@ def _compose_register_unmanaged(op_row, context):
     registered = [k for k in model.get("unmanaged", {}).get("paths", []) if _overlaps(entry, k)]
     if collision is None and registered:
         collision = "{!r} is already registered [unmanaged] (as {!r})".format(entry, registered[0])
+    # compared under _manifest_spelling like every other overlap guard: a case alias of a consumer an
+    # earlier row repoints names that one file on a case-insensitive filesystem
     if collision is None and any(op.get("op") in ("create", "write", "remove")
-                                 and _within(op.get("path", ""), entry) for op in context.ops.ops):
+                                 and _overlaps(op.get("path", ""), entry) for op in context.ops.ops):
         collision = ("{!r} is written by this transaction, and a kept file stays exactly where it is, "
                      "untouched (spec 14.2 Keep)".format(entry))
     if collision is not None:
@@ -1258,12 +1260,16 @@ def _compose_register_unmanaged(op_row, context):
         kept = _journal._lstat_contained(context.ops.root_fd, entry)
     except (_journal.JournalError, OSError) as exc:
         raise AdoptApplyError("cannot observe the kept file {!r} ({}); fail-closed".format(entry, exc))
+    # An absent entry binds no approved digest and _read_live refuses any non-regular entry, so the two
+    # checks below refuse whatever this guard does (redundant guards, disclosed); it names the cause first.
     if kept is None or not stat.S_ISREG(kept.st_mode):
         raise AdoptApplyError("the kept file {!r} is not a regular file at apply (absent, a directory, a "
                               "symlink or a special entry); Keep registers a file that stays where it is, so "
                               "a fresh plan with its own approval is the remedy (spec 14.1, "
                               "14.2)".format(entry))
     approved = context.kept.get(entry)
+    # with no digest the drift comparison below refuses too (a redundant pair, disclosed); this guard
+    # names the cause
     if not schema._is_digest(approved):
         raise AdoptApplyError("no approved source digest binds the kept file {!r}; Keep registers only the "
                               "bytes the plan approved (fail-closed)".format(entry))
@@ -1317,7 +1323,7 @@ def _compose_repoint_consumer(op_row, context):
     if kept:
         raise AdoptApplyError("repoint-consumer {!r} overlaps the [unmanaged] entry {!r}: ordinary tooling "
                               "never rewrites a kept file (spec 14.2 Keep; fail-closed)".format(path, kept[0]))
-    if path in context.rewrites:
+    if any(_overlaps(path, rewritten) for rewritten in context.rewrites):
         raise AdoptApplyError("{!r} is repointed by two plan rows; one row rewrites one consumer "
                               "(fail-closed)".format(path))
     _canonical_model(path, _current_bytes(context, path, op_row["old_digest"]))
@@ -3323,6 +3329,11 @@ def _self_test_checks():
         ("entry-already-registered", lambda f: chain(f, [keep, keep]), "already registered", None, None, None),
         ("entry-written-by-transaction", lambda f: [repoint_row(f)] + chain(f, [consumer]),
          "written by this transaction", tracked, None, None),
+        # a case alias of the consumer an earlier row repoints (one file on a case-insensitive filesystem)
+        ("entry-written-by-transaction-case", lambda f: [repoint_row(f)] + chain(f, ["CI/consumer.toml"]),
+         "written by this transaction", tracked, None, {"CI/consumer.toml": planted_consumer}),
+        # an absent entry binds no approved digest, so the unbound-digest check refuses it too (a redundant
+        # pair, disclosed at _compose_register_unmanaged)
         ("entry-not-a-file", lambda f: chain(f, ["adopter/NEVER.md"]), "kept file", None, None, None),
         # an invalid prior manifest stays invalid with one more entry, so the postimage validity check
         # refuses it too (a redundant pair, disclosed); the vector below pins the verdict over a crash
@@ -3364,11 +3375,17 @@ def _self_test_checks():
         ("consumer-twice", lambda f: [repoint_row(f), dict(
             repoint_row(f, planned=dict(new_consumer, name="ci2")), old_digest=repoint_row(f)["new_digest"])],
          "two plan rows", dict(tracked), None, None),
+        # the same consumer under a case alias (one file on a case-insensitive filesystem)
+        ("consumer-twice-case", lambda f: [repoint_row(f), repoint_row(f, path="CI/consumer.toml")],
+         "two plan rows", dict(tracked, **{"CI/consumer.toml": new_consumer}), None,
+         {"CI/consumer.toml": planted_consumer}),
         # repoint-consumer over an invalid store manifest (a stray table) that the posture gate admits
         ("consumer-store-manifest-invalid", lambda f: [repoint_row(f)], "not a valid manifest", tracked,
          with_manifest(stray=dict(key=1)), None),
         # the kept file's live bytes against its approved source digest: drifted, or bound by none
         ("entry-kept-drifted", lambda f: chain(f, [keep]), "approved source digest", None, None, None),
+        # unbound: the drift comparison refuses it too (a redundant pair, disclosed), so this vector pins
+        # the named cause, not a commit
         ("entry-kept-unbound", lambda f: chain(f, [keep]), "no approved source digest", None, None, None),
         # an entry overlapping one already registered, in the contains direction and under an alias
         ("entry-within-registered", lambda f: chain(f, [keep]), "already registered", None,
