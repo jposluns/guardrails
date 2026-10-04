@@ -895,6 +895,22 @@ reading, and it blocks activation until the maintainer resolves it.
     outcome kept under a registered `x-<vendor>` table, are performed by no operation of this
     prompt, so they stay the maintainer's reviewed edit (step 14, Ordering, row R4b). If the
     maintainer wants an assistant to make them, add a writer operation for them first.
+31. **A new ID in a maintainer's reviewed repair.** Section 8.2 says "allocation MUST increment its
+    counter under the store's lock as one atomic claim". Some integrity defects that step 14,
+    Ordering, row R22 routes to the maintainer's reviewed edit need a record with a new ID: a
+    ratified `done` item whose receipt was never written needs a `done` receipt, since section 8.5
+    says "Ratified `done` MUST create the one-to-one `done` receipt". No writer operation allocates
+    that receipt: section 8.8 says of `create` that "`done` receipts and worklog entries are not
+    created this way", and `done-with-receipt` moves an item "from `active` or by ratifying
+    `done/proposed`", never one already at unqualified `done`. The specification does not say what
+    the store's lock is; this prompt's writer holds the step 7 lease, which section 5.7 requires
+    before a run mutates the store, and open point 11 keeps the owned lock in the git common
+    directory. Neither names a way for a maintainer's reviewed edit, made with no operation running,
+    to hold it. Ask the maintainer to rule, before step 14, whether such an edit that adds a record
+    and raises its counter, committed through the pre-commit check, meets "under the store's lock",
+    and if not, which sanctioned act allocates the new ID. This point asks for that ruling only; it
+    names no repair procedure. Until the ruling, step 14 reports each repair class that needs a new
+    ID as not run.
 
 ## The store you are building
 
@@ -1276,7 +1292,12 @@ containment.
   confirm with the maintainer.
 - Counter monotonicity is two checks, each run per series and per namespace (section 8.2). The
   bounds check: every ID lies within its counter (section 5.7 says doctor "checks store-wide ID
-  uniqueness and that every ID lies within its counter"). The monotonicity check: section 8.2 says
+  uniqueness and that every ID lies within its counter"), and `counters.toml` holds a row for every
+  clean and imported namespace of every enabled type, the imported rows only where the store is
+  graded at 1.3.0 (open point 21); a missing row is a finding naming its series and namespace, even
+  when that namespace holds no ID. That presence check is this prompt's reading of section 8.2,
+  which says `counters.toml` "MUST hold independent monotonic high-water values per series and
+  namespace", and it needs no prior snapshot. The monotonicity check: section 8.2 says
   `counters.toml` "MUST hold independent monotonic high-water values per series and namespace" and
   "Counters MUST NOT be reset", which no single snapshot can show, since a lowered counter can still
   lie above every ID. So the validator also compares each counter with its value in the prior
@@ -1347,8 +1368,9 @@ Acceptance checks, each as an automated test over a throwaway store the test bui
 
 - A duplicated ID, an ID above its counter, a hand-edited view, a released worklog entry edited
   after its release, a machine-store source absent from the git index, a stray untracked file
-  under `.working/`, an ignored path under `.working/`, a store missing an index, and a store
-  missing an imported leaf each produce a finding or cannot-evaluate, and a valid store built from
+  under `.working/`, an ignored path under `.working/`, a store missing an index, a store missing
+  an imported leaf, and a store whose `counters.toml` lacks the clean `BI` row while the backlog
+  index holds no ID each produce a finding or cannot-evaluate, and a valid store built from
   sections 4 and 9, with its views rendered by step 5, produces valid.
 - A truncated TOML file produces cannot-evaluate (exit 2), never valid.
 - A maintainer-authored clean contribution at unqualified `acknowledged` with neither a `summary`
@@ -2406,17 +2428,17 @@ platform." Wire all four, not only the platform you run on.
   lettered rows, lists each change that the specification allows to a store file after it is
   created, by field and by ledger, with who may make it; part b, rows R22 to R34 and their lettered
   rows, lists the remedies of validator findings, section 8.8 refusals and section 9.2 refusals: row
-  R22 routes every integrity defect to the maintainer's reviewed edit, and the other rows name each
-  remedy: a lifecycle operation, git command or operator act that the specification defines, or
-  that this prompt reads from it and labels as its reading, or, for R31a, none. A lettered
-  row, such as R4a, was added after the first numbering and sits beside the row it extends. Each row
-  names what performs the change. Where a row says "maintainer's reviewed edit", no operation can
-  sensibly perform the change, or none of this prompt's does: the maintainer makes it outside any
-  assistant tool call and commits it through the pre-commit check, the enforcement leaves that path
-  open on purpose, and an assistant reports the change needed and asks the maintainer, never making
-  it. That scoping is this prompt's choice. Every operation the table names is built by an earlier
-  step, except the handoff operation (R6) and rotation (R21, which step 12 lets wait until the store
-  needs it).
+  R22 routes every integrity defect, and the refusal of a store file that is not canonical, to the
+  maintainer's reviewed edit, and the other rows name each remedy: a lifecycle operation, git
+  command or operator act that the specification defines, or that this prompt reads from it and
+  labels as its reading, or, for R31a, none. A lettered row, such as R4a, was added after the first
+  numbering and sits beside the row it extends. Each row names what performs the change. Where a row
+  says "maintainer's reviewed edit", no operation can sensibly perform the change, or none of this
+  prompt's does: the maintainer makes it outside any assistant tool call and commits it through the
+  pre-commit check, the enforcement leaves that path open on purpose, and an assistant reports the
+  change needed and asks the maintainer, never making it. That scoping is this prompt's choice.
+  Every operation the table names is built by an earlier step, except the handoff operation (R6) and
+  rotation (R21, which step 12 lets wait until the store needs it).
 
   | Row | Change | Specification | Who | Performed by |
   | --- | --- | --- | --- | --- |
@@ -2445,7 +2467,7 @@ platform." Wire all four, not only the platform you run on.
   | R19 | `lease.toml` taken and released | 5.7 | the running operation | the step 7 lease, inside every operation that writes the store |
   | R20 | `init.toml`, the empty imported leaves, the pointer `.opf.toml` and `.working/README.md`, each created | 9.2; OPF-INIT-D2B; open point 15 | the operator | `opf init` (step 9), and `opf upgrade` for an upgraded store's imported leaves; no operation writes them after, and every other file init creates is then written by the rows that name it |
   | R21 | Records moved to the archive, with the year's `archive.toml` | 12 | the operator | rotation (step 12); until it exists nothing rotates |
-  | R22 | An integrity defect, uncommitted or reached `HEAD`: every finding that no other row remedies, and any other breach of the specification's store rules, such as a row that is not schema-valid, a store file that does not parse or is not canonical, a duplicated ID, an ID above its counter, a lowered counter, a deleted record or store file, a dangling link, a pending_decision chain without exactly one current effective resolution, more than one `current` handoff, a ratified `done` item without its receipt, an edited release row or frozen entry, a range-coverage defect, or an `archive.toml` that does not enumerate its year's archive | 5.7, 6.1, 7.1, 7.2, 8.2, 8.5, 8.6, 8.8 ("repaired by the operator"), 12, 13 | a maintainer | maintainer's reviewed edit (below) |
+  | R22 | An integrity defect, uncommitted or reached `HEAD`: every finding that no other row remedies, and any other breach of the specification's store rules, such as a row that is not schema-valid, a store file that does not parse, a duplicated ID, an ID above its counter, a counter row missing for an enabled namespace, a lowered counter, a deleted record or store file, a dangling link, a pending_decision chain without exactly one current effective resolution, more than one `current` handoff, a ratified `done` item without its receipt, an edited release row or frozen entry, a range-coverage defect, or an `archive.toml` that does not enumerate its year's archive; and the section 8.8 refusal of a store file that is not canonical (item 2), which the validator does not report | 5.7, 6.1, 7.1, 7.2, 8.2, 8.5, 8.6, 8.8 ("repaired by the operator"), 12, 13 | a maintainer | maintainer's reviewed edit (below) |
   | R23 | A store file conflicted in a merge: the integration base's version taken and the operation redone | 5.7 | the operator | `git merge --abort`, then each of the branch's authoring operations redone through the writer on a branch from the integration base, each committed (step 7) |
   | R24 | View drift | 10.3, 11 | any actor | R14 |
   | R25 | A tracked-store finding (an unstaged or ignored path), or the step 2 `.opf.local.toml` finding | 5.1; open point 20; step 2 | the operator | staging, an ignore-rule change, or `git rm --cached`; none writes a protected path |
@@ -2495,17 +2517,19 @@ platform." Wire all four, not only the platform you run on.
     the defect by an ordinary reviewed edit that satisfies the specification: restoring a removed
     record keeps its original ID and content; any new ID is allocated under the store's lock as
     section 8.2 requires ("allocation MUST increment its counter under the store's lock as one
-    atomic claim"), for example through the writer's own allocation when the writer can run; and the
-    repaired store must validate. The deny rule and the instruction bind an assistant, so this
-    step's enforcement leaves those paths editable for that edit and forces no operation for it
-    (section 14.1); that is this prompt's choice. Open point 22 says how the comparison with `HEAD`
-    treats a prior file that does not parse, a prior row that is not schema-valid, a row in another
-    type's file and an ID that `HEAD` holds twice, so that the defect itself does not stop the
-    commit of its repair. A repair that the pre-commit check still refuses, or that cannot be made
-    as the specification requires, is reported to the maintainer with the finding; this prompt names
-    no route around it. A committed defect reaches `HEAD` only through a commit that the pre-commit
-    check did not grade. CI then fails when the validator can detect the defect in a single
-    revision; the defects it cannot detect there pass CI, as Residuals below says.
+    atomic claim"), and open point 31 asks the maintainer to rule how a reviewed edit meets that
+    rule where no writer operation allocates the new ID, as for the receipt of a ratified `done`
+    item that never had one; and the repaired store must validate. The deny rule and the
+    instruction bind an assistant, so this step's enforcement leaves those paths editable for that
+    edit and forces no operation for it (section 14.1); that is this prompt's choice. Open point 22
+    says how the comparison with `HEAD` treats a prior file that does not parse, a prior row that is
+    not schema-valid, a row in another type's file and an ID that `HEAD` holds twice, so that the
+    defect itself does not stop the commit of its repair. A repair that the pre-commit check still
+    refuses, or that cannot be made as the specification requires, is reported to the maintainer
+    with the finding; this prompt names no route around it. A committed defect reaches `HEAD` only
+    through a commit that the pre-commit check did not grade. CI then fails when the validator can
+    detect the defect in a single revision; the defects it cannot detect there pass CI unless
+    another CI step reports them, as Residuals below says.
   - R23 restores nothing: it abandons the conflicted merge and redoes the branch's operations
     through the writer, as step 7 says, never concluding the merge with the base's files.
   - R34: section 8.8 says a record proposed outside `transition`, "that includes a record `create`
@@ -2545,13 +2569,32 @@ platform." Wire all four, not only the platform you run on.
   checked by the validator and review alone, so a repaired row whose prior status was not legal, and
   a row whose ID `HEAD` held twice, have their status checked by review alone (Ordering, R22).
   Disclose that a commit made with the hooks bypassed can carry a defect that no single revision
-  shows, which the validator then does not report at that commit and CI does not report: a counter
-  lowered to a value that every ID of its namespace still lies within, a counter row removed from a
-  namespace that holds no ID, and the deletion of a record that no link, release span or digest
-  names. Disclose too that no check of this prompt compares release rows with `HEAD`, so an edit to
-  a release row that keeps its spans tiled and its digests recomputing, such as a changed `date`, is
-  reported by no check, committed or not, though section 6.1 says "Release rows MUST be append-only
-  and immutable once written"; adding that comparison is the maintainer's choice. Disclose as well
+  shows, which the validator then does not report at that commit and CI does not report: a status
+  change that sections 8.4 and 8.5 do not allow, such as a resurrection; a counter lowered to a
+  value that every ID of its namespace still lies within; and the deletion of a record that no link,
+  release span or digest names. A counter row missing for an enabled namespace is not among them,
+  since the step 6 bounds check reports it in a single revision. Disclose too what no check of this
+  prompt reports, committed or not:
+  - an edit to a release row that keeps its spans tiled and its digests recomputing, such as a
+    changed `date`, though section 6.1 says "Release rows MUST be append-only and immutable once
+    written", since no check compares release rows with `HEAD`;
+  - the removal of the latest release row together with the summary row and the `CHANGELOG.md`
+    entry that cover that release alone, which can leave the spans tiled and the range coverage
+    whole, and which returns that span's worklog entries to the mutable unreleased tail, where no
+    frozen digest covers them (section 13, "Frozen digests");
+  - an edit to a field of a `done`, `reference`, `autonomous_decision` or `maintainer_decision`
+    record, which section 8.5 makes immutable, that keeps the record schema-valid and its links
+    resolving, since no check compares those records' fields with `HEAD`;
+  - a store file that is not canonical, such as one carrying a comment: the validator grades parsed
+    content, and only the byte-reproduction precondition of the writer and the upgrade refuses such
+    a file (section 5.7; section 8.8, item 2), so the next operation that rewrites it refuses (row
+    R22);
+  - the deletion of `.working/README.md`, which the validator does not require (open point 15).
+
+  Adding any of those comparisons is the maintainer's choice. The deletion of `init.toml`, which
+  section 9.2 says "is never required", is not reported by the validator or the pre-commit check;
+  the step 13 identity check reports it in CI, since it then cannot read the identity (open point
+  19) and exits 2. Disclose as well
   that when a file at `HEAD` does not parse, no-deletion compares it with the nearest earlier commit
   where it parses (open point 22), so a record added only by the commits after that one is not
   protected by that check during the repair; and that a contribution's outcome is recorded by a
@@ -2612,22 +2655,33 @@ Acceptance checks:
   tests the shell-wrapping residual of section 14.1, not the row.
 - The reviewed-edit repair (R22), in a throwaway clone of your project's repository with the hooks
   installed. This check covers only the classes of integrity defect that the validator detects in a
-  single revision: a row that is not schema-valid, a store file that does not parse or is not
-  canonical, a missing index or other store file that the validator reads, a duplicated ID, an ID
-  above its counter, a dangling link, a pending_decision chain without exactly one current effective
-  resolution, more than one `current` handoff, a ratified `done` item without its receipt, an edited
-  frozen entry, a range-coverage defect, and an `archive.toml` that does not enumerate its year's
-  archive. For each, commit the defect with the hooks bypassed, as the per-clone residual allows,
-  and show that the validator reports it at that commit as CI would, naming the defect and its
-  remedy in words. Where your platform's deny hook covers the defective file, show that an
-  assistant's direct edit of it is denied. Then show that a maintainer's reviewed edit that
-  satisfies the specification is allowed by the pre-commit check and that the validator then reports
-  valid. Where the pre-commit check refuses every such edit, or no such edit can be made as the
-  specification requires, report that class as not passed, with the finding and the reason, for the
-  maintainer to rule on; checklist item 17 then does not pass. The defects that no single revision
-  shows, which Residuals above lists, are outside this check: step 6 tests the comparison with
-  `HEAD` that reports a lowered counter or a deleted record before commit, and once such a defect is
-  committed it is disclosed, not tested. Report each class by name.
+  single revision: a row that is not schema-valid, a store file that does not parse, a missing
+  index, imported leaf, `counters.toml` or other store file that step 6 requires (not `init.toml`
+  or `.working/README.md`, which Residuals above covers), a counter row missing for an enabled
+  namespace, a duplicated ID, an ID above its counter, a dangling link, a pending_decision chain
+  without exactly one current effective resolution, more than one `current` handoff, a ratified
+  `done` item without its receipt, an edited frozen entry, a range-coverage defect, and an
+  `archive.toml` that does not enumerate its year's archive. For each, commit the defect with the
+  hooks bypassed, as the per-clone residual allows, and show that the validator reports it at that
+  commit as CI would, naming the defect and its remedy in words. Where your platform's deny hook
+  covers the defective file, show that an assistant's direct edit of it is denied. Then show that a
+  maintainer's reviewed edit that satisfies the specification is allowed by the pre-commit check and
+  that the validator then reports valid. Where the pre-commit check refuses every such edit, or no
+  such edit can be made as the specification requires, report that class as not passed, with the
+  finding and the reason, for the maintainer to rule on; checklist item 17 then does not pass. A
+  class whose repair adds a record with a new ID, such as a ratified `done` item committed with no
+  receipt ever written, follows the maintainer's ruling on open point 31; until the ruling, report
+  it as not run, and checklist item 17 then does not pass. A store file that is not canonical is not
+  one of the validator's classes: commit an index carrying a comment, which the pre-commit check
+  allows, since the validator reports nothing for it, and show that the next writer operation that
+  rewrites that index refuses and leaves it untouched, as step 10 tests, and that once a
+  maintainer's reviewed edit restores its canonical bytes, that edit is allowed by the pre-commit
+  check and the same operation succeeds. The defects that no single revision shows, which Residuals
+  above lists, are outside this check: step 6 tests the comparison with `HEAD` that reports a
+  disallowed status change, a lowered counter or a deleted record before commit, and once such a
+  defect is committed it is disclosed, not tested. Every other defect that Residuals above says no
+  check reports is disclosed, not tested, apart from the store file that is not canonical, which
+  this check tests through the writer's refusal. Report each class by name.
 
 ### Step 15: clean-start completion
 
