@@ -57,7 +57,7 @@ Fix errors and prevent their recurrence. Worked first.
 | FIX-MAIN-UNCOND | In progress (#385) | OPF tool self-tests run only for the exact self-test argument (M, M) | `[public]` `[tooling]` |
 | REQ-OPF-IMPORT-DECISIONS | Not started | OPF adoption splits a mixed decisions register into pending and decided records, preserving history (H, M) | `[public]` `[tooling]` |
 | OPF-IMPL-PROMPT | Not started | A self-contained prompt that lets another AI assistant implement OPF natively from the spec, at opf/spec/OPF-IMPLEMENTATION-PROMPT.md, linked from the preview page (H, M) | `[public]` `[adopter]` |
-| FIX-ORCH-TRUNC-GUARD | Not started | The orchestration truncation guard denies harmless heredoc text, mishandles malformed input, and allows when its registry is missing (M, S) | `[public]` `[tooling]` |
+| FIX-ORCH-TRUNC-GUARD | In progress (#413) | The orchestration truncation guard denies harmless heredoc text, mishandles malformed input, and allows when its registry is missing (M, S) | `[public]` `[tooling]` |
 
 ## Priority 2 - Fill significant gaps
 
