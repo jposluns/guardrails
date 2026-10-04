@@ -10,16 +10,22 @@ phase, never rewritten; the homes-1 bundle verification the completion checks ca
 C-EVIDENCE-ENUM is inactive (spec 14.1), which RE-READS the inventories and payload digests from disk;
 the preserve-first composition of spec 14.2; live re-observation of every operand; one journaled
 transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed eleven-op
-ADOPT_OPS vocabulary in which EVERY op returns a refusing not-yet-executable verdict. No operation
-executes: the file ops, init-store composition, trust verification, approval capture, hook activation,
-rendering, receipt writing, the completion checks, retirement, and the MUTATING CLI subcommands (approve,
-apply, complete, reconcile) remain later slices; the read-only `opf adopt` subcommands plan and status
-shipped with K9a. Live outside the self-test fixtures today: `opf adopt status` opens and lists the
-evidence home in opf.py through the _journal containment primitives, then grades each listed bundle
-through this module's _verify_bundle_at (beneath the HELD home descriptor it is passed) and the journal
-through journal_state, with _open_product_root anchoring both reads to one product-root descriptor;
-every mutating entry -- the transaction shell, reconcile() and the dispatch table -- stays reachable
-only from the self-test until those slices land.
+ADOPT_OPS vocabulary in which EVERY op returns a refusing not-yet-executable verdict. The stage driver
+adds the plan-v2 apply-input gate, the one approval and the apply stage (spec 14.1): `opf adopt approve`
+re-proves a frozen plan from its own bytes, re-derives it over the live tree and prints the approval
+binding its plan_digest and inventory_digest, writing nothing; `opf adopt apply` admits only that approved
+pair, persists both in the run's evidence bundle within the run's one base transaction, and dispatches
+every plan op through the table, so while no op executes, apply refuses before anything is written. No
+operation executes: the file ops, init-store composition, trust verification, hook activation, rendering,
+receipt writing, the completion checks, retirement, and the `complete` and `reconcile` CLI subcommands
+remain later slices; the read-only `opf adopt` subcommands plan and status shipped with K9a. Live outside
+the self-test fixtures today: `opf adopt status` opens and lists the evidence home in opf.py through the
+_journal containment primitives, then grades each listed bundle through this module's _verify_bundle_at
+(beneath the HELD home descriptor it is passed) and the journal through journal_state, with
+_open_product_root anchoring both reads to one product-root descriptor; plan, approve and apply refuse
+over a non-clean adoption journal (require_clean_journal); the transaction shell is reachable from
+`opf adopt apply` only past the unlanded-op gate, which no plan passes in this build, and reconcile()
+stays reachable only from the self-test.
 
 Preserve-first (spec 14.2), enforced over the composed op list BEFORE any transaction opens: a live file
 is removed, OR OVERWRITTEN BY A `write` (which destroys the live bytes exactly as a removal does), ONLY
@@ -62,6 +68,20 @@ interrupted run stays refused. A transaction is named by its run (base) or run.p
 most one base transaction and one per phase; a second attempt refuses before it opens, and changing
 approved work takes a fresh plan with its own run id (spec 14.1).
 
+Stage driver (spec 14, 14.1): a plan is admitted only as its own canonical bytes whose plan_digest
+re-seals and which the schema grades VALID; the approval is the receipt's APPROVAL_REQUIRED shape, its
+plan_digest and inventory_digest equal to the plan's; freshness is re-derivation, the planner re-run over
+the live tree with the worksheet that froze the plan and the plan's own run instant and nonce, which must
+reproduce the plan byte for byte, so any bound-item drift refuses into a fresh plan with its own single
+approval. Apply dispatches every plan op in plan order in the apply stage through one context table
+(`ops`, the transaction's ApplyOps; `plan`; `approval`; `product_root`; `stage`), the seam the op slices
+compose through, and refuses any composed remove or write of a plan source that occupies no managed
+destination: such a source stays frozen in place until the retirement stage after a green completion
+check, and apply takes only its preimage. Disclosed: digests bind the approval to one plan, never the
+actor's authenticity (self-asserted identity and same-user tampering stay spec 14.1 residuals); the
+re-derivation and the transaction are not one snapshot, so each op re-observes its own operands under
+the journal lock; one run takes one base transaction, so an approved plan applies at most once.
+
 Single-writer lease (spec 5.7): this slice carries NO lease join, so a transaction REFUSES, before writing
 anything, when the product root resolves a store (RESOLVED) or when a pointer names a store outside the
 product root, and EVERY other store posture that cannot be evaluated (a malformed or unreadable pointer,
@@ -74,8 +94,8 @@ this slice, none of them a relaxation: bundle MEMBERSHIP (an off-inventory file 
 reconciled here, only listed payloads; containment registration of the archive, Move and evidence homes on
 homes 1 is part of the 1.3.0 activation, not this slice; investigation does not read this journal (the
 planner's ancestry disclosure lists durable OPF history outside .working, and `.aiqt/adopt/journal` is one
-more such home), so the stage driver's plan stage must refuse over a non-clean adoption journal through
-journal_clean_or_refuse; the shipped `retire-file` vocabulary row is a single `remove`, while spec 1.3.0
+more such home), so the stage driver refuses plan, approve and apply over a non-clean adoption journal
+(require_clean_journal); the shipped `retire-file` vocabulary row is a single `remove`, while spec 1.3.0
 preserves the retirement preimage at apply and removes only after the green check, a vocabulary split for
 the op slices; interruption is exercised in-process through the journal's kill-point seam, and
 subprocess kill-injection arrives with the first executable operations.
@@ -90,6 +110,7 @@ modules, so the standalone-closure property holds.
 
 Exit convention (the repo's gates and the sibling OPF units): 0 clean, 1 a finding, 2 cannot-evaluate.
 """
+import copy
 import datetime
 import hashlib
 import os
@@ -111,8 +132,13 @@ SESSION_ID = "opf-adopt"
 OPERATION = "adopt-apply"
 # The adoption journal root, at the PRODUCT root and outside `.working/` (see the module docstring).
 JOURNAL_REL = ".aiqt/adopt/journal"
-# The only plan format apply may take (spec 14.1); its schema lands in a later slice.
-PLAN_V2_FORMAT = "opf.adoption.plan/v2"
+# The only plan format apply may take (spec 14.1), the schema's own marker.
+PLAN_V2_FORMAT = schema.PLAN_FORMAT
+# The run's evidence-bundle members apply persists: the approved plan and its captured approval (spec 14.1).
+PLAN_NAME = "plan.toml"
+APPROVAL_NAME = "approval.toml"
+# The stage every plan op composes in during apply; the retirement stage follows a green completion check.
+APPLY_STAGE = "apply"
 DIR_MODE = 0o755
 FILE_MODE = 0o644
 _NONCE_RE = re.compile(r"^[0-9a-f]{16}\Z")
@@ -1040,19 +1066,225 @@ def dispatch(op_row, context=None):
     return handler(op_row, context)
 
 
-def apply_plan(plan_doc):
-    """The slice-1 apply entry, pure and write-free. Spec 14.1 binds apply to an approved
-    `opf.adoption.plan/v2` plan, so any other format, the shipped v1 schema included, is refused as
-    apply input; v2 validation and the approval binding land in a later slice, so a v2-marked plan is
-    refused too. VALID is unreachable in this build."""
+# --- the stage driver: plan, the one approval, apply (spec 14, 14.1) -----------------------------------
+
+def plan_rel(run_id):
+    """`<bundle>/plan.toml`: the approved frozen plan's exact bytes, which apply persists (spec 14.1)."""
+    return evidence_home_rel(run_id) + "/" + PLAN_NAME
+
+
+def approval_rel(run_id):
+    """`<bundle>/approval.toml`: the captured approval's exact bytes, which apply persists beside its plan."""
+    return evidence_home_rel(run_id) + "/" + APPROVAL_NAME
+
+
+def require_clean_journal(product_root):
+    """The stage driver's reconcile-first gate for plan, approve and apply alike, read-only: investigation
+    does not read the adoption journal, so a stage over an interrupted transaction or a held lock refuses
+    here (journal_clean_or_refuse) and directs the operator to reconcile()."""
+    try:
+        _journal.require_containment()
+    except _journal.JournalError as exc:
+        raise AdoptApplyError("{} (fail-closed)".format(exc))
+    root_fd = _open_product_root(product_root)
+    try:
+        journal_clean_or_refuse(root_fd, _journal_root(product_root))
+    finally:
+        store._close_fd_exc_safe(root_fd)
+
+
+def _canonical_toml(data, label):
+    """Parse `data` as TOML that is byte-identical to its own emit_checked rendering, or refuse: a frozen
+    artefact admits no second spelling (a comment, a reordering or a whitespace change is a hand edit)."""
+    if not isinstance(data, bytes):
+        raise AdoptApplyError("{} must be bytes".format(label))
+    try:
+        doc = tomllib.loads(data.decode("utf-8"))
+        canonical = emit_checked(doc).encode("utf-8")
+    except (ValueError, RecursionError, EmitError) as exc:   # UnicodeDecodeError, TOMLDecodeError included
+        raise AdoptApplyError("{} is unreadable or malformed TOML ({}); fail-closed".format(label, exc))
+    if canonical != data:
+        raise AdoptApplyError("{} is not in its canonical emitted form (a hand edit, comment or reordering); "
+                              "only the exact frozen bytes are admitted (fail-closed)".format(label))
+    return doc
+
+
+def frozen_plan(plan_bytes):
+    """Re-prove one frozen plan from its own bytes (spec 14.1): canonical TOML, the `opf.adoption.plan/v2`
+    format (any other is never apply input), VALID under the schema validator, and a plan_digest that
+    re-seals, the planner's own seal: the digest of the canonical emission of the plan without its
+    plan_digest. Returns the parsed plan; raises AdoptApplyError."""
+    doc = _canonical_toml(plan_bytes, "the adoption plan")
+    if doc.get("format") != PLAN_V2_FORMAT:
+        raise AdoptApplyError("apply takes only an approved {} plan (spec 14.1); {!r} binds none of the "
+                              "v2 roster, so it is never apply input (fail-closed)".format(
+                                  PLAN_V2_FORMAT, doc.get("format")))
+    checked = schema.validate_plan(doc)
+    if checked.status != store.VALID:
+        raise AdoptApplyError("the adoption plan is not a VALID {} plan: {} (fail-closed)".format(
+            PLAN_V2_FORMAT, "; ".join(checked.findings)))
+    body = dict(doc)
+    claimed = body.pop("plan_digest")
+    try:
+        sealed = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
+    except EmitError as exc:
+        raise AdoptApplyError("the adoption plan cannot be re-sealed ({}); fail-closed".format(exc))
+    if sealed != claimed:
+        raise AdoptApplyError("the adoption plan's plan_digest does not seal its own bytes (an edited plan); a "
+                              "fresh plan with its own approval is the remedy (spec 14.1, fail-closed)")
+    return doc
+
+
+def approval_findings(approval, plan_doc):
+    """The findings against one captured approval for one plan, empty when it binds (spec 14.1): the closed
+    APPROVAL_REQUIRED keyset (the receipt's own approval shape), a token actor, an RFC 3339 UTC approved_at,
+    and a plan_digest AND an inventory_digest equal to the plan's own, hence that whole plan."""
+    findings = []
+    if schema._validate_subtable(approval, schema.APPROVAL_REQUIRED, "approval", findings) is None or findings:
+        return findings
+    if not schema._is_token(approval["actor"]):
+        findings.append("approval actor is not a non-empty single-line token")
+    if not schema._is_timestamp(approval["approved_at"]):
+        findings.append("approval approved_at is not an RFC 3339 UTC instant")
+    for key in ("plan_digest", "inventory_digest"):
+        if approval[key] != plan_doc.get(key):
+            findings.append("approval {0} {1!r} does not bind this plan's {0} {2!r}; an approval binds exactly "
+                            "one plan, and a changed plan takes its own single approval (spec 14.1)".format(
+                                key, approval[key], plan_doc.get(key)))
+    return findings
+
+
+def apply_plan(plan_doc, approval=None):
+    """The apply-input gate, pure and write-free (spec 14.1): only an `opf.adoption.plan/v2` plan the schema
+    validator grades VALID, with a captured approval binding its plan_digest and inventory_digest, is apply
+    input. Any other format, the shipped v1 schema included, is refused on the marker before any other field
+    is read; an invalid v2 plan propagates the validator's verdict; a v2 plan with no approval, or whose
+    approval binds another plan, is refused. VALID admits the pair to the stage driver (run_apply) and is
+    never by itself a write."""
     if not isinstance(plan_doc, dict):
         return schema._cannot("adoption plan is not a table")
     if plan_doc.get("format") != PLAN_V2_FORMAT:
         return schema._cannot("apply takes only an approved {} plan (spec 14.1); {!r} binds none of the "
                               "v2 roster, so it is never apply input (fail-closed)".format(
                                   PLAN_V2_FORMAT, plan_doc.get("format")))
-    return schema._cannot("{} validation and the approval binding land in a later adoption slice; apply "
-                          "refuses (fail-closed)".format(PLAN_V2_FORMAT))
+    checked = schema.validate_plan(plan_doc)
+    if checked.status != store.VALID:
+        return checked
+    if approval is None:
+        return schema._cannot("apply takes an APPROVED plan, and no captured approval binds this one (spec "
+                              "14.1); apply refuses (fail-closed)")
+    findings = approval_findings(approval, plan_doc)
+    if findings:
+        return schema.AdoptValidation(store.CANNOT_EVALUATE, findings)
+    return schema._ok()
+
+
+def rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet):
+    """Bound-item freshness (spec 14.1: any bound-item drift refuses into a fresh plan with its own single
+    approval), read-only as the planner is: re-run the planner over the LIVE tree with the worksheet that
+    froze the plan and the plan's own run instant and nonce, and require the byte-identical plan. A changed
+    observation refuses on the planner's own stale-inventory binding; a change to any other bound item (a
+    decision, an op, a binding input) freezes a different plan and refuses. `worksheet` is the parsed
+    planning worksheet: sources, targets, expected_observation_digest, product, decisions, ops, bindings."""
+    import _opf_adopt_plan as planner
+    run_id = plan_doc["run_id"]
+    stamp = run_id[len("adopt-"):len("adopt-") + len("YYYYMMDDTHHMMSSZ")]
+    try:
+        now = datetime.datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=datetime.timezone.utc)
+    except ValueError as exc:
+        raise AdoptApplyError("plan run id {!r} names no calendar instant ({}); fail-closed".format(run_id, exc))
+    try:
+        sheet = copy.deepcopy(worksheet)
+        res = planner.plan(product_root, sources=sheet["sources"], targets=sheet["targets"],
+                           expected_observation_digest=sheet["expected_observation_digest"],
+                           product=sheet["product"], decisions=sheet["decisions"], ops=sheet["ops"],
+                           now=now, run_nonce=run_id[-16:], bindings=sheet["bindings"])
+    except (KeyError, TypeError) as exc:
+        raise AdoptApplyError("the planning worksheet cannot re-derive the plan ({!r}); fail-closed".format(exc))
+    if res.status != store.VALID:
+        reasons = list(res.findings) + ["unresolved source disposition: " + u for u in res.unresolved]
+        raise AdoptApplyError("the live tree no longer freezes this plan ({}); any bound-item drift refuses "
+                              "into a fresh plan with its own single approval (spec 14.1, fail-closed)".format(
+                                  "; ".join(reasons)))
+    if res.plan != plan_bytes:
+        raise AdoptApplyError("re-planning from the worksheet over the live tree freezes a different plan than "
+                              "{}: a bound item drifted, so a fresh plan with its own single approval is the "
+                              "remedy (spec 14.1, fail-closed)".format(plan_doc["plan_digest"]))
+
+
+def capture_approval(product_root, plan_bytes, worksheet, actor, now):
+    """The approve stage, the one approval (spec 14.1), write-free: re-prove the frozen plan from its bytes,
+    refuse over a non-clean adoption journal, re-derive the plan over the live tree (rederive_or_refuse, so
+    a stale observation or any bound-item drift refuses into a fresh plan), then return the canonical
+    approval bytes, in the receipt's APPROVAL_REQUIRED shape, binding the plan's plan_digest and
+    inventory_digest. `now` is the clock instant of the approval. The adopter holds those bytes until apply,
+    which persists them with the plan in the run's evidence bundle; nothing is written here."""
+    plan_doc = frozen_plan(plan_bytes)
+    require_clean_journal(product_root)
+    rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
+    if (type(now) is not datetime.datetime or type(now.tzinfo) is not datetime.timezone
+            or now.utcoffset() != datetime.timedelta(0)):
+        raise AdoptApplyError("now must be a clock-derived aware UTC datetime")
+    approval = dict(actor=actor, approved_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    plan_digest=plan_doc["plan_digest"], inventory_digest=plan_doc["inventory_digest"])
+    findings = approval_findings(approval, plan_doc)
+    if findings:
+        raise AdoptApplyError("the approval cannot be captured: {} (fail-closed)".format("; ".join(findings)))
+    try:
+        return emit_checked(approval).encode("utf-8")
+    except EmitError as exc:
+        raise AdoptApplyError("the approval cannot be emitted canonically ({}); fail-closed".format(exc))
+
+
+def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
+    """The apply stage (spec 14, 14.1, 14.2). Before anything is written, in order: re-prove the frozen
+    plan (frozen_plan) and the captured approval from their own canonical bytes; admit the pair through
+    apply_plan (the approval binds this plan's plan_digest and inventory_digest); refuse over a non-clean
+    adoption journal; re-derive the plan over the live tree (rederive_or_refuse); and refuse while any plan
+    op's slice has not landed (its handler is still _not_yet_executable), so an unlanded op refuses the
+    whole apply fail-closed by construction, never half of it. Then ONE base transaction
+    (run_adopt_transaction) persists the plan and approval bytes in the run's evidence bundle and dispatches
+    EVERY plan op, in plan order, in the apply stage, each with one context table: `ops` (the transaction's
+    ApplyOps), `plan`, `approval`, `product_root` and `stage`; the first refusing verdict refuses the whole
+    transaction. Retirement partition (spec 14.1, 14.2): a plan source that occupies no managed destination
+    stays frozen, byte-identical in place, until the retirement stage after a green completion check, so the
+    apply stage may take only its preimage: a composed remove or write of any non-occupying plan source
+    refuses the transaction. Returns the transaction name."""
+    plan_doc = frozen_plan(plan_bytes)
+    approval = _canonical_toml(approval_bytes, "the adoption approval")
+    gate = apply_plan(plan_doc, approval)
+    if gate.status != store.VALID:
+        raise AdoptApplyError("the approval does not admit this plan: {} (fail-closed)".format(
+            "; ".join(gate.findings)))
+    require_clean_journal(product_root)
+    rederive_or_refuse(product_root, plan_doc, plan_bytes, worksheet)
+    rows = list(plan_doc["ops"])
+    unlanded = sorted(set(row["op"] for row in rows
+                          if OP_HANDLERS.get(row["op"], _not_yet_executable) is _not_yet_executable))
+    if unlanded:
+        raise AdoptApplyError("plan op(s) {} not yet executable in this build; a later adoption slice lands "
+                              "each, and apply refuses before anything is written (fail-closed)".format(
+                                  ", ".join(unlanded)))
+    run_id = plan_doc["run_id"]
+    frozen = set(row["path"] for row in plan_doc["sources"] if not row["occupying"])
+
+    def compose(ops):
+        ops.create(plan_rel(run_id), plan_bytes)
+        ops.create(approval_rel(run_id), approval_bytes)
+        context = dict(ops=ops, plan=plan_doc, approval=approval, product_root=product_root, stage=APPLY_STAGE)
+        for i, row in enumerate(rows):
+            verdict = dispatch(row, context)
+            if verdict.status != store.VALID:
+                raise AdoptApplyError("plan op[{}] ({!r}) refused: {}".format(
+                    i, row["op"], "; ".join(verdict.findings)))
+        touched = sorted(set(op["path"] for op in ops.ops
+                             if op.get("op") in ("remove", "write") and op.get("path") in frozen))
+        if touched:
+            raise AdoptApplyError("the apply stage would remove or rewrite non-occupying plan source(s) {}; "
+                                  "each stays frozen, byte-identical in place, until the retirement stage after "
+                                  "a green completion check (spec 14.1, 14.2), and apply takes only its "
+                                  "preimage (fail-closed)".format(", ".join(touched)))
+    return run_adopt_transaction(product_root, run_id, compose)
 
 
 # --- self-test -----------------------------------------------------------------------------------------
@@ -2693,18 +2925,203 @@ def _self_test_checks():
     # reads any other field, so the v1 input is the bare marker.
     v1 = apply_plan(dict(format="opf.adoption.plan/v1"))
     check("apply-v1-plan-refused", v1.status == CANNOT and any("never apply input" in f for f in v1.findings))
-    # and the schema's own canonical v2 plan is refused fail-closed, attributed to the rule under test: v2
-    # validation and the approval binding land in their later adoption slice.
-    canon = apply_plan(schema.canonical_plan())
-    check("apply-canonical-v2-plan-refused-until-validated",
-          schema.canonical_plan().get("format") == PLAN_V2_FORMAT and canon.status == CANNOT
-          and any("later adoption slice" in f for f in canon.findings))
+    # the schema's own canonical v2 plan is apply input ONLY with a captured approval binding both of its
+    # digests (spec 14.1): no approval, an approval naming another plan_digest or inventory_digest (each
+    # flip red against a gate that ignores the binding), an unknown approval key and a multi-line actor
+    # are each refused; the bare v2 marker propagates the validator's verdict.
+    canon_plan = schema.canonical_plan()
+    check("apply-plan-format-is-the-schema-marker", PLAN_V2_FORMAT == schema.PLAN_FORMAT
+          and canon_plan.get("format") == PLAN_V2_FORMAT)
+    canon = apply_plan(canon_plan)
+    check("apply-canonical-v2-plan-without-approval-refused",
+          canon.status == CANNOT and any("no captured approval" in f for f in canon.findings))
+    bound = dict(actor="adopter", approved_at="2026-09-17T12:00:00Z", plan_digest=canon_plan["plan_digest"],
+                 inventory_digest=canon_plan["inventory_digest"])
+    check("apply-canonical-v2-plan-with-binding-approval-valid", apply_plan(canon_plan, bound).status == VALID)
+    for key in ("plan_digest", "inventory_digest"):
+        other = dict(bound)
+        other[key] = "sha256:" + "f" * 64
+        res = apply_plan(canon_plan, other)
+        check("apply-approval-{}-flip-refused".format(key),
+              res.status == CANNOT and any("does not bind" in f for f in res.findings))
+    res = apply_plan(canon_plan, dict(bound, note="also approves something else"))
+    check("apply-approval-unknown-key-refused",
+          res.status == CANNOT and any("unknown key" in f for f in res.findings))
+    res = apply_plan(canon_plan, dict(bound, actor="adopter\nsecond line"))
+    check("apply-approval-multiline-actor-refused",
+          res.status == CANNOT and any("actor" in f for f in res.findings))
     v2 = apply_plan(dict(format=PLAN_V2_FORMAT))
     check("apply-v2-marked-plan-refused",
-          v2.status == CANNOT and any("later adoption slice" in f for f in v2.findings))
+          v2.status == INVALID and any("missing required key" in f for f in v2.findings))
     nontable = apply_plan([])
     check("apply-non-table-refused",
           nontable.status == CANNOT and any("not a table" in f for f in nontable.findings))
+
+
+    # 11: the stage driver over a fixture the real planner froze (a non-occupying retire source and a kept
+    # file at a NOT-ADOPTED root). Approve is write-free and binds the plan's two digests; a stale tree or a
+    # changed worksheet refuses into a fresh plan; a hand-edited or unsealed plan refuses; an approval for
+    # another plan refuses; a non-clean adoption journal refuses the stage; with every op still refusing,
+    # apply refuses before ANY write. With composing handlers patched in for the landed-op case, apply
+    # persists the plan and approval in the run's bundle, dispatches every row in plan order in the apply
+    # stage, and leaves the frozen retire source in place; the retirement-partition flip removes it.
+    import copy as _copy   # this function binds `copy` as a local name (section 4), shadowing the module
+    import _opf_adopt_plan as planner
+    import _opf_init
+
+    def _digest(data):
+        return "sha256:" + _sha256(data)
+
+    def _bytes(path):
+        """A file's bytes, or None when absent, so a missing file is a recorded check failure."""
+        return path.read_bytes() if path.is_file() else None
+
+    def _snapshot(root):
+        return dict((str(p.relative_to(root)), p.read_bytes() if p.is_file() else None)
+                    for p in sorted(root.rglob("*")))
+
+    def _sheet(root):
+        bindings = schema.canonical_plan_bindings()
+        manifest = _opf_init.build_manifest()
+        views = sorted(v["target"] for v in tomllib.loads(manifest)["views"].values())
+        rows = [dict(op="init-store", store_root=".", members=[dict(
+                    path=".working/toml/manifest.toml", digest=_digest(manifest.encode("utf-8")))]),
+                dict(op="render-views", store_root=".",
+                     members=[dict(path=v, digest=_digest(v.encode("utf-8"))) for v in views]),
+                schema.enforcement_install_op(bindings["enforcement"])]
+        sheet = dict(sources=["keep.md", "legacy.md"], targets=[".opf/hooks/pre-commit"], product="opf",
+                     decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),
+                                dict(path="legacy.md", disposition="retire", actor="fixture")],
+                     ops=rows, bindings=bindings)
+        obs = planner.investigate(root, sources=sheet["sources"], targets=sheet["targets"])
+        sheet["expected_observation_digest"] = (
+            tomllib.loads(obs.observation.decode("utf-8"))["observation_digest"] if obs.observation else "")
+        return sheet
+
+    def _freeze(root, sheet, nonce="0123456789abcdef"):
+        res = planner.plan(root, now=now, run_nonce=nonce, **_copy.deepcopy(sheet))
+        return res.plan if res.status == VALID else None
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        (root / "keep.md").write_bytes(b"kept\n")
+        (root / "legacy.md").write_bytes(b"legacy rules\n")
+        sheet = _sheet(root)
+        plan_bytes = _freeze(root, sheet)
+        check("driver-fixture-plan-frozen", plan_bytes is not None)
+        plan_bytes = plan_bytes or b""
+        plan_doc, _err = attempt(frozen_plan, plan_bytes)
+        check("driver-frozen-plan-reproved", isinstance(plan_doc, dict)
+              and plan_doc == tomllib.loads(plan_bytes.decode("utf-8")))
+        plan_doc = plan_doc or dict(run_id=rid, sources=[], ops=[])
+        frid = plan_doc["run_id"]
+        check("driver-frozen-plan-non-canonical-refused", "canonical emitted form" in
+              (refusal(frozen_plan, plan_bytes + b"# an adopter note\n") or ""))
+        edited = dict(plan_doc, created_at="2026-01-01T00:00:00Z")
+        check("driver-frozen-plan-unsealed-edit-refused", "does not seal" in
+              (refusal(frozen_plan, emit_checked(edited).encode("utf-8")) or ""))
+        v1_bytes = emit_checked(dict(plan_doc, format="opf.adoption.plan/v1")).encode("utf-8")
+        check("driver-frozen-plan-v1-refused", "never apply input" in (refusal(frozen_plan, v1_bytes) or ""))
+
+        # approve: write-free, the receipt's approval shape, binding both plan digests.
+        before = _snapshot(root)
+        approval_bytes, err = attempt(capture_approval, root, plan_bytes, sheet, "adopter", now)
+        check("driver-approve-captures", isinstance(approval_bytes, bytes) and err is None)
+        approval_bytes = approval_bytes or b""
+        approval_doc = tomllib.loads(approval_bytes.decode("utf-8")) if approval_bytes else dict()
+        check("driver-approval-binds-plan", set(approval_doc) == set(schema.APPROVAL_REQUIRED)
+              and approval_doc.get("plan_digest") == plan_doc.get("plan_digest")
+              and approval_doc.get("inventory_digest") == plan_doc.get("inventory_digest")
+              and approval_doc.get("approved_at") == "2026-09-17T12:00:00Z")
+        check("driver-approve-writes-nothing", _snapshot(root) == before)
+        check("driver-approve-multiline-actor-refused", "actor" in
+              (refusal(capture_approval, root, plan_bytes, sheet, "adopter\nsecond", now) or ""))
+        # stale observation: a source's bytes change after the plan froze -> refuse into a fresh plan.
+        (root / "legacy.md").write_bytes(b"edited after planning\n")
+        check("driver-approve-stale-observation-refused", "fresh plan" in
+              (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or ""))
+        (root / "legacy.md").write_bytes(b"legacy rules\n")
+        # a changed worksheet (an attributed decision revised) freezes a different plan -> refused.
+        revised = _copy.deepcopy(sheet)
+        revised["decisions"][1]["actor"] = "another"
+        check("driver-approve-revised-worksheet-refused", "different plan" in
+              (refusal(capture_approval, root, plan_bytes, revised, "adopter", now) or ""))
+        # reconcile-first: an interrupted adoption transaction refuses the stage (the planner never reads
+        # the adoption journal, so without this gate approve would capture over it).
+        (root / JOURNAL_REL / "txn").mkdir(parents=True)
+        jfd = os.open(str(root / JOURNAL_REL), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _journal.publish(jfd, root / JOURNAL_REL / "txn", _journal.F_INTENT, dict(txn="txn", ops=[]))
+        finally:
+            os.close(jfd)
+        check("driver-approve-open-journal-refused", "must be reconciled" in
+              (refusal(capture_approval, root, plan_bytes, sheet, "adopter", now) or ""))
+        check("driver-plan-stage-open-journal-refused", "must be reconciled" in
+              (refusal(require_clean_journal, root) or ""))
+        import shutil
+        shutil.rmtree(root / ".aiqt")
+        check("driver-fixture-restored", _snapshot(root) == before)
+
+        # apply in THIS build: every op still refuses, so apply refuses before any write (no journal, no
+        # bundle), and an approval for ANOTHER plan of the same tree refuses on the binding first.
+        err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-unlanded-ops-refused", "not yet executable" in (err or "")
+              and "retire-file" in (err or ""))
+        check("driver-apply-unlanded-writes-nothing", _snapshot(root) == before)
+        other_plan = _freeze(root, sheet, nonce="fedcba9876543210") or b""
+        check("driver-apply-approval-binding-flip-refused", "does not bind" in
+              (refusal(run_apply, root, other_plan, approval_bytes, sheet) or ""))
+        check("driver-apply-edited-approval-refused", "canonical emitted form" in
+              (refusal(run_apply, root, plan_bytes, approval_bytes + b"# also\n", sheet) or ""))
+        check("driver-apply-refusals-write-nothing", _snapshot(root) == before)
+
+        # landed ops (patched handlers that compose through the context table).
+        seen = []
+
+        def composing(op_row, context):
+            seen.append((op_row["op"], context.get("stage"), context["plan"]["plan_digest"],
+                         context["approval"]["actor"], context.get("product_root")))
+            if op_row["op"] == "retire-file":
+                context["ops"].preserve(op_row["path"], op_row["preimage_digest"])
+            return schema._ok()
+
+        def over_eager(op_row, context):
+            # a retire handler that removes a non-occupying source at apply (archive-then-remove, which
+            # check_apply_ops alone admits as a valid preserve-first pair).
+            if op_row["op"] == "retire-file":
+                context["ops"].archive_occupying(op_row["path"], op_row["preimage_digest"])
+            return schema._ok()
+
+        with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, over_eager)):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-retire-partition-flip-refused", "stays frozen" in (err or "") and "legacy.md" in (err or ""))
+        check("driver-retire-partition-source-untouched",
+              _bytes(root / "legacy.md") == b"legacy rules\n"
+              and not (root / archive_rel(frid, "legacy.md")).exists()
+              and not (root / JOURNAL_REL / frid).exists())
+        (root / "keep.md").write_bytes(b"kept, then edited\n")
+        with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, composing)):
+            err = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-drift-after-approval-refused", "fresh plan" in (err or "") and not seen)
+        (root / "keep.md").write_bytes(b"kept\n")
+        with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, composing)):
+            txn, err = attempt(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-commits-with-landed-ops", txn == frid and err is None)
+        check("driver-apply-dispatches-every-row-in-order",
+              [s[0] for s in seen] == [row["op"] for row in plan_doc["ops"]]
+              and all(s[1:] == (APPLY_STAGE, plan_doc["plan_digest"], "adopter", root) for s in seen))
+        check("driver-apply-frozen-source-in-place-with-preimage",
+              _bytes(root / "legacy.md") == b"legacy rules\n"
+              and _bytes(root / archive_rel(frid, "legacy.md")) == b"legacy rules\n")
+        check("driver-apply-persists-plan-and-approval",
+              _bytes(root / plan_rel(frid)) == plan_bytes and _bytes(root / approval_rel(frid)) == approval_bytes)
+        bundle_rows = tomllib.loads((_bytes(root / inventory_rel(frid)) or b"").decode("utf-8")).get("file", [])
+        check("driver-apply-bundle-verifies", verify_bundle(root, frid).status == VALID
+              and sorted(r["path"] for r in bundle_rows)
+              == sorted([plan_rel(frid), approval_rel(frid), archive_rel(frid, "legacy.md")]))
+        with mock.patch.dict(OP_HANDLERS, dict.fromkeys(OP_HANDLERS, composing)):
+            again = refusal(run_apply, root, plan_bytes, approval_bytes, sheet)
+        check("driver-apply-one-approval-one-apply", again is not None)
 
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
