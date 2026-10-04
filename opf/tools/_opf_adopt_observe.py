@@ -131,9 +131,6 @@ import zlib
 from pathlib import Path
 from urllib.parse import urlsplit
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; the shared readers live beside this file
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
-
 # The standalone CLI needs the installed sibling directory under python -I.
 # No quarantine path is ever added. Preserve sibling imports' ambient path
 # edits so a lazy public gather call does not change its caller's sys.path.
@@ -833,7 +830,7 @@ def _quarantine(root, owners):
 def _put(parent, name, payload, deadline, *, _descriptors):
     fd = None
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
-    _descriptors.push(functools.partial(store._close_fd_on_exit, fd := os.open(name, (flags) | getattr(os, "O_NONBLOCK", 0), 0o600, dir_fd=parent)))
+    _descriptors.push(functools.partial(store._close_fd_on_exit, fd := os.open(name, flags, 0o600, dir_fd=parent)))
     opened = os.fstat(fd)
     _require(stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1,
              CANNOT_EVALUATE, "quarantine", "output is not an exclusive regular file")
@@ -852,7 +849,7 @@ def _read_archive(parent, deadline, *, _descriptors):
     before = os.stat("archive.tar.gz", dir_fd=parent, follow_symlinks=False)
     fd = None
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-    _descriptors.push(functools.partial(store._close_fd_on_exit, fd := os.open("archive.tar.gz", (flags) | getattr(os, "O_NONBLOCK", 0), dir_fd=parent)))
+    _descriptors.push(functools.partial(store._close_fd_on_exit, fd := os.open("archive.tar.gz", flags, dir_fd=parent)))
     opened = os.fstat(fd)
     _require(
         stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1
@@ -1672,7 +1669,7 @@ def _cancellation_self_test():
                     else:
                         if received[1] or not isinstance(received[0].get("record"), bytes):
                             raise AssertionError("cancellation baseline lacked sealed evidence")
-                        if _nbio.read_bytes_nb(Path(received[0]["quarantine"]) / "members/sub/data") != b"data":
+                        if (Path(received[0]["quarantine"]) / "members/sub/data").read_bytes() != b"data":
                             raise AssertionError("cancellation baseline did not populate quarantine")
                     return seen
                 if not fired or type(escaped) is not exception or received is not None:
@@ -2026,7 +2023,7 @@ def _ownership_self_test():
                 preserved = (
                     (current.st_dev, current.st_ino) == (foreign.st_dev, foreign.st_ino)
                     and entries == ["foreign"]
-                    and _nbio.read_bytes_nb(run / "foreign") == b"preserve\n"
+                    and (run / "foreign").read_bytes() == b"preserve\n"
                 )
                 if kind == "identity-mismatch":
                     saved = (root / "saved").stat()
@@ -2067,7 +2064,7 @@ def _ownership_self_test():
                 (run / "foreign").write_bytes(b"preserve\n")
                 owner.remove()
                 return (refusal == "quarantine is not private" and owner.identity is None
-                        and _nbio.read_bytes_nb(run / "foreign") == b"preserve\n")
+                        and (run / "foreign").read_bytes() == b"preserve\n")
             finally:
                 os.close(parent)
 
@@ -2329,7 +2326,7 @@ def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False):
         raise ValueError(identity + "/invalid-failure-code")
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
-    source = _nbio.read_text_nb(runner, encoding="utf-8") if text is None else text
+    source = runner.read_text(encoding="utf-8") if text is None else text
     bash = shutil.which("bash")
     if bash is None:
         raise RuntimeError(identity + "/cannot-evaluate/bash")
@@ -2357,8 +2354,9 @@ def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False):
     # this check too.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$observe_log" || exit 2
-if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
-    && [ "$3" = "$observe_test" ] && [ "$4" = "--self-test" ]; then
+if [ "$#" -eq 6 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
+    && [ "$3" = "-X" ] && [ "$4" = "pycache_prefix=/dev/null/aiqt-pycache" ] \
+    && [ "$5" = "$observe_test" ] && [ "$6" = "--self-test" ]; then
   if [ "$observe_scratch_only" -eq 1 ]; then
     printf '%s\n' "$observe_expected_output"
     exit "$observe_fail_own"
@@ -2456,7 +2454,7 @@ exit 0
         # the scratch legs keep the tight bound.
         proc = run_shell(shim + source, timeout=120 if scratch_only else 600)
         try:
-            argv_log = _nbio.read_bytes_nb(log)
+            argv_log = log.read_bytes()
         except OSError as exc:
             raise RuntimeError(identity + "/cannot-evaluate/argv-log") from exc
 
@@ -2486,7 +2484,8 @@ exit 0
         if any(basename in arg for arg in argv):
             own.append(argv)
     own_argv = tuple(os.fsencode(arg) for arg in (
-        "-I", "-B", env["observe_test"], "--self-test"))
+        "-I", "-B", "-X", "pycache_prefix=/dev/null/aiqt-pycache",
+        env["observe_test"], "--self-test"))
     if own and own != [own_argv]:
         raise AssertionError(identity + "/own-argv")
 
@@ -2538,7 +2537,7 @@ def _runner_non_readable_fd_checks(expected):
             log = Path(tmp) / "ordinary.log"
             log.write_bytes(b"x" * 37)
             log.chmod(0o600)
-            fd = os.open(log, (flags) | getattr(os, "O_NONBLOCK", 0))
+            fd = os.open(log, flags)
             try:
                 child = (
                     "import fcntl, importlib, json, os, sys\n"
@@ -2586,7 +2585,7 @@ def _runner_red_checks(expected):
     from unittest.mock import patch
 
     runner = Path(__file__).resolve().parent / "run_all_checks.sh"
-    source = _nbio.read_text_nb(runner, encoding="utf-8")
+    source = runner.read_text(encoding="utf-8")
     identity = "runner/adopt-observe-registration"
     anchor = '  local name="$1"; shift\n'
     if source.count(anchor) != 1:
@@ -2736,7 +2735,7 @@ def _runner_red_checks(expected):
                     raise
             else:
                 raise AssertionError("scrubbed runner accepted")
-            refusal = _nbio.read_text_nb(report, encoding="utf-8")
+            refusal = report.read_text(encoding="utf-8")
         except Exception as exc:
             # Missing/unreadable reports and unexpected runner outcomes are
             # failures of this RED, not harness cannot-evaluate outcomes.
@@ -2875,7 +2874,7 @@ def _runner_red_checks(expected):
 
 def _runner_registration_test(expected):
     runner = Path(__file__).resolve().parent / "run_all_checks.sh"
-    source = _nbio.read_text_nb(runner, encoding="utf-8")
+    source = runner.read_text(encoding="utf-8")
     _runner_check(expected, source)
     lines = [line for line in source.splitlines(keepends=True)
              if line.startswith('run_gate "opf-adopt-observe-selftest"')]
@@ -3209,7 +3208,7 @@ def self_test(vectors_only=False):
             for name in files:
                 path = Path(directory) / name
                 result[str(path.relative_to(root))] = (
-                    stat.S_IMODE(path.stat().st_mode), _nbio.read_bytes_nb(path),
+                    stat.S_IMODE(path.stat().st_mode), path.read_bytes(),
                 )
         return result
 
@@ -4618,7 +4617,7 @@ def self_test(vectors_only=False):
                     check=True, timeout=15,
                 )
                 os.chmod(key, 0o600)
-                fixture_certificates += _nbio.read_text_nb(cert, encoding="ascii")
+                fixture_certificates += cert.read_text(encoding="ascii")
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.load_cert_chain(str(cert), str(key))
                 contexts.append(context)

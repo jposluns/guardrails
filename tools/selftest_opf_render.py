@@ -31,7 +31,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import opf_render  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from opf_render import run_generator, FileTarget, BlockTarget  # noqa: E402
 
 SOURCE = "source.toml"
@@ -87,7 +86,7 @@ def _selftest(root, failures):
     if (rc, out) != (2, "drift: ROADMAP.md\n" + missing_err):
         failures.append("check/missing-page: expected exit 2 with 'drift: ROADMAP.md' before the "
                         "not-found error, got exit {!r} stdout {!r}".format(rc, out))
-    if _nbio.read_text_nb(root / "ROADMAP.md", encoding="utf-8") != "STALE\n":
+    if (root / "ROADMAP.md").read_text(encoding="utf-8") != "STALE\n":
         failures.append("check/missing-page: --check must not write the stale file")
 
     # (b) MAJOR-1, write mode, missing page: the earlier file IS rewritten (FRESH) before the abort;
@@ -98,7 +97,7 @@ def _selftest(root, failures):
     if (rc, out) != (2, missing_err):
         failures.append("write/missing-page: expected exit 2 and only the not-found error, got exit "
                         "{!r} stdout {!r}".format(rc, out))
-    if _nbio.read_text_nb(root / "ROADMAP.md", encoding="utf-8") != "FRESH\n":
+    if (root / "ROADMAP.md").read_text(encoding="utf-8") != "FRESH\n":
         failures.append("write/missing-page: the earlier file must be written before the later target's "
                         "failure aborts the run (build-all-first would leave it STALE)")
 

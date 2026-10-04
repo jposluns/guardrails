@@ -130,7 +130,6 @@ from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import gen_gensrc  # noqa: E402  reuse its validated, fail-closed registry loader (do not re-parse the JSON)
 
 # Directory names never copied into a sandbox and never recorded in the real-tree manifest: version
@@ -254,7 +253,7 @@ def _read_bytes_safe(path, sandbox_real, where):
     """Read a target's bytes after re-validating it is a contained regular file, opening O_NOFOLLOW so a
     final-component symlink cannot be followed."""
     _validate_contained_regular(path, sandbox_real, where)
-    fd = os.open(path, (os.O_RDONLY | _O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+    fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
     try:
         chunks = []
         while True:
@@ -448,7 +447,7 @@ def _tree_manifest(root):
             if stat.S_ISLNK(st.st_mode):
                 manifest[rel] = ("symlink", mode, os.readlink(full))
             elif stat.S_ISREG(st.st_mode):
-                with _nbio.open_nb(full, "rb") as handle:  # lstat-gated to a regular file, so this cannot block
+                with open(full, "rb") as handle:  # lstat-gated to a regular file, so this cannot block
                     manifest[rel] = ("file", mode, hashlib.sha256(handle.read()).hexdigest())
             else:
                 manifest[rel] = ("special", mode, stat.S_IFMT(st.st_mode))  # do NOT open a FIFO/socket/dev

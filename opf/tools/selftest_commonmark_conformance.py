@@ -28,7 +28,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _commonmark_headings as ch        # noqa: E402  reuse the pinned, containment-checked marko loader
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 # Named fixture path (orchestrator-vendored). The harness reads ONLY this path and fails closed if absent.
 SPEC_FIXTURE = os.path.join(ch._VENDOR_DIR, "commonmark-spec-0.31.2", "spec-0.31.2-examples.json")
@@ -59,7 +58,7 @@ def _load_examples():
     """Load and validate the spec example fixture. Fails closed (HeadingScanError-style RuntimeError) on an
     absent, unreadable, malformed, or empty fixture, or one whose records lack the required keys."""
     try:
-        with _nbio.open_nb(SPEC_FIXTURE, "r", encoding="utf-8") as handle:
+        with open(SPEC_FIXTURE, "r", encoding="utf-8") as handle:
             data = json.load(handle)
     except OSError as exc:
         raise RuntimeError("spec fixture {} is absent or unreadable: {}".format(SPEC_FIXTURE, exc))

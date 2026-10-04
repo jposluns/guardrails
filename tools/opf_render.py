@@ -27,7 +27,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, reconcile, replace_block  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 
 class TargetError(Exception):
@@ -86,7 +85,7 @@ class BlockTarget:
         if not target.exists():
             raise TargetError("error: {} not found (expected generated target)".format(self.path))
         try:
-            new_text = replace_block(_nbio.read_text_nb(target, encoding="utf-8"), self.marker, payload)
+            new_text = replace_block(target.read_text(encoding="utf-8"), self.marker, payload)
         except (ValueError, OSError) as exc:
             # OSError too: an unreadable page is a read error, fail-closed exit 2, not a traceback.
             raise TargetError("error: {}".format(exc))

@@ -40,7 +40,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # probe, moved there for OPF self-containment; this gate reaches DOWN into them (a permitted downward edge).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))
 from _gen_common import repo_root, load_toml  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _containment  # noqa: E402
 import gen_manifest  # noqa: E402  reuse the validated scope loader; never a second parser
 # The pure byte legs and forbidden-codepoint sets are the ONE shared source in _byte_canon; re-imported
@@ -188,7 +187,7 @@ def validate_allowances(root, rows, scope_paths):
         if not set(cps) <= permitted_names:
             raise GateError("{}: codepoints outside the forbidden sets".format(where))
         try:
-            data = _nbio.read_bytes_nb(root / path)
+            data = (root / path).read_bytes()
         except OSError as exc:
             raise GateError("{}: cannot read {} ({})".format(where, path, exc))
         if hashlib.sha256(data).hexdigest() != digest:
@@ -241,7 +240,7 @@ def validate_hardbreak(root, rows, scope_paths):
         if path in out:
             raise GateError("{}: duplicate hardbreak allowance for {}".format(where, path))
         try:
-            data = _nbio.read_bytes_nb(root / path)
+            data = (root / path).read_bytes()
         except OSError as exc:
             raise GateError("{}: cannot read {} ({})".format(where, path, exc))
         if not _has_two_space_break(data):
@@ -321,7 +320,7 @@ def run(root):
         findings = coverage_findings(scope, binary, effective_attributes(root, scope))
         for path in sorted(scope - binary):
             try:
-                data = _nbio.read_bytes_nb(root / path)
+                data = (root / path).read_bytes()
             except OSError as exc:
                 raise GateError("cannot read in-scope file {} ({})".format(path, exc))
             findings += ["{}: {}".format(path, f) for f in

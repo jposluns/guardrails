@@ -23,7 +23,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, read_source_text, reconcile  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from gen_rules import parse_source, load_corpus, CID_RE, SLUG_RE  # noqa: E402
 
 SOURCE_REL = ".aiqt/core/profiles/worker-pack.md"
@@ -98,7 +97,7 @@ def run(root, check):
     target = root / TARGET_REL
     if check:
         try:
-            current = _nbio.read_bytes_nb(target) if target.exists() else None
+            current = target.read_bytes() if target.exists() else None
         except OSError as exc:
             print("error: cannot read {} ({}); fail-closed".format(target, exc), file=sys.stderr)
             return 2
@@ -203,14 +202,14 @@ def self_test_main():
         if run_quiet(good, check=False) != 0:
             failures.append("conformant tree: generation expected exit 0")
         target = good / TARGET_REL
-        if not target.is_file() or _nbio.read_bytes_nb(target) != _EXPECTED_BODY.encode("utf-8"):
+        if not target.is_file() or target.read_bytes() != _EXPECTED_BODY.encode("utf-8"):
             failures.append("conformant tree: published pack does not byte-equal the expected body")
         if run_quiet(good, check=True) != 0:
             failures.append("conformant tree: regeneration expected drift-clean exit 0")
 
         # (b) the PLANTED DRIFT case: a mutated published target must fail --check (exit 1). This case
         #     goes red if the drift comparison is neutered, so the gate guards itself.
-        target.write_text(_nbio.read_text_nb(target, encoding="utf-8") + "tampered\n", encoding="utf-8")
+        target.write_text(target.read_text(encoding="utf-8") + "tampered\n", encoding="utf-8")
         if run_quiet(good, check=True) != 1:
             failures.append("planted drifted target expected exit 1 (drift)")
 
@@ -224,7 +223,7 @@ def self_test_main():
         nokey = tmp / "nokey"
         _build(nokey, "selfw1")
         src = nokey / ".aiqt" / "core" / "profiles" / "worker-pack.md"
-        src.write_text(_nbio.read_text_nb(src, encoding="utf-8").replace(
+        src.write_text(src.read_text(encoding="utf-8").replace(
             "restates: [selfw1]\n", ""), encoding="utf-8")
         if run_quiet(nokey, check=True) != 2:
             failures.append("source missing restates expected exit 2 (fail-closed)")
@@ -236,7 +235,7 @@ def self_test_main():
         if run_quiet(crlf, check=False) != 0:
             failures.append("crlf case: initial generation expected exit 0")
         crlf_target = crlf / TARGET_REL
-        crlf_target.write_bytes(_nbio.read_bytes_nb(crlf_target).replace(b"\n", b"\r\n"))
+        crlf_target.write_bytes(crlf_target.read_bytes().replace(b"\n", b"\r\n"))
         if run_quiet(crlf, check=True) != 1:
             failures.append("CRLF-only published target expected exit 1 (drift)")
 

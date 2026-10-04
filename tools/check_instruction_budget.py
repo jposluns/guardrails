@@ -262,7 +262,6 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_claude  # noqa: E402  the RULES-INDEX markers it writes, never a second copy of them
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import gen_rules  # noqa: E402  its validated frontmatter value parsers, never a second one
 
 RULES_REL = ".claude/rules"
@@ -1373,7 +1372,7 @@ def _mutant(tmp, old, new, *more):
     written under the fixture directory `tmp` and loaded with importlib. A boundary or target that does
     not match exactly once is a harness error (exit 2)."""
     import importlib.util
-    source = _nbio.read_text_nb(Path(__file__), encoding="utf-8")
+    source = Path(__file__).read_text(encoding="utf-8")
     if source.count(MUTATION_BOUNDARY) != 1:
         print("SELF-TEST HARNESS ERROR: the mutation boundary is not unique", file=sys.stderr)
         sys.exit(2)
@@ -1490,7 +1489,7 @@ def _denied(directory):
 
 def _expected_check_ids():
     try:
-        with _nbio.open_nb(CHECKS_MANIFEST, "rb") as handle:
+        with open(CHECKS_MANIFEST, "rb") as handle:
             data = tomllib.load(handle)
     # ValueError and RecursionError too, as in load_budget.
     except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
@@ -2122,7 +2121,7 @@ def self_test(report_path=None):
 
         # The budget source's own comment describes PACK as the gate counts it (it is read for its comment
         # text only; no count is taken from the live corpus).
-        budget_doc = _nbio.read_text_nb(Path(__file__).resolve().parents[1] / BUDGET_REL, encoding="utf-8")
+        budget_doc = (Path(__file__).resolve().parents[1] / BUDGET_REL).read_text(encoding="utf-8")
         budget_doc = " ".join(line.lstrip("# ") for line in budget_doc.split("\n") if line.startswith("#"))
         check("doc/budget-source-pack-description",
               [phrase for phrase in (".claude/CLAUDE.md", "conditional", "header", "relative to the repository",

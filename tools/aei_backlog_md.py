@@ -33,10 +33,6 @@ import hashlib
 import json
 import re
 import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; the shared readers live beside this file
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 ITEM_RE = re.compile(r"^-\s+(?P<id>[A-Za-z][A-Za-z0-9_.-]*)\s+"
                      r"\[(?P<tok>x|X| |\.|o|O|BLOCKED)\]\s+(?P<rest>.+?)\s*$")
@@ -131,7 +127,7 @@ def main():
         return 2
     path = argv[argv.index("--backlog") + 1]
     try:
-        with _nbio.open_nb(path, "rb") as fh:
+        with open(path, "rb") as fh:
             raw = fh.read()
     except OSError as exc:
         print("enumerator error: backlog unreadable: {}".format(exc), file=sys.stderr)

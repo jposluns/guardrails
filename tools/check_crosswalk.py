@@ -40,7 +40,6 @@ except ModuleNotFoundError:  # Python < 3.11
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 from _gen_common import repo_root, precheck_special_files  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _journal  # noqa: E402
 # the SAME 9.1 component computation the engine binds cutovers to, and the SAME validated terminal
 # classification the engine uses (fix #3), so the gate never selects an invalid or non-cutover terminal.
@@ -67,7 +66,7 @@ class GateError(Exception):
 
 def _load_toml(path):
     try:
-        with _nbio.open_nb(path, "rb") as fh:
+        with open(path, "rb") as fh:
             return tomllib.load(fh)
     except FileNotFoundError:
         raise GateError("required input {} is absent".format(path))
@@ -164,12 +163,12 @@ def _open_archive_dir(root):
     redirect the archive read outside the tree. Returns the archive dir fd (caller closes). GateError
     (fail-closed) on a symlinked ancestor, a non-directory, or an I/O error."""
     try:
-        fd = os.open(str(root), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
     except OSError as exc:
         raise GateError("cannot open install root {} ({}); fail-closed".format(root, exc))
     try:
         for comp in ARCHIVE_REL.split("/"):
-            nxt = os.open(comp, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=fd)
+            nxt = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             prev, fd = fd, nxt                              # held first: a raising close cannot strand nxt
             _journal._close_fd_propagating(prev)
     except OSError as exc:
@@ -191,13 +190,13 @@ def _read_archive_payload(root, sha):
     archfd = _open_archive_dir(root)
     try:
         try:
-            shafd = os.open(sha, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=archfd)
+            shafd = os.open(sha, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=archfd)
         except OSError as exc:
             raise GateError("cannot open archive entry {}/{} through a no-follow handle ({}); a symlinked "
                             "archive entry is refused (8.2)".format(root / ARCHIVE_REL, sha, exc))
         try:
             try:
-                pfd = os.open("payload", (os.O_RDONLY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=shafd)
+                pfd = os.open("payload", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=shafd)
             except OSError as exc:
                 raise GateError("cannot open archived payload for {} through a no-follow handle ({}); a "
                                 "symlinked payload is refused (8.2)".format(sha, exc))

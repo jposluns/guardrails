@@ -208,7 +208,7 @@ def assert_open_journal(root_fd, root):
     except (OSError, _journal.JournalError) as exc:
         return Result("open-journal", MALFORMED, "cannot open the journal ({})".format(exc))
     try:
-        jfd = os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=pfd)
+        jfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
     except OSError as exc:
         _journal._close_fd_yielding(pfd)
         return Result("open-journal", MALFORMED, "cannot open the journal ({})".format(exc))
@@ -457,7 +457,7 @@ def _close_vectors(base):
                 if raise_sent:
                     raise sent
                 return True
-            root_fd = os.open(str(base), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+            root_fd = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
             try:                                          # the seam is swapped only where its restore runs
                 ns["is_terminal"] = spy
                 assert_open_journal(root_fd, str(base))

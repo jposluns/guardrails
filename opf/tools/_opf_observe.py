@@ -47,7 +47,6 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: opf/tools/_opf_observe.py requires Python 3.11+ (tomllib).")
 
 import _opf_check   # noqa: E402  the store-integrity engine: its _record_digest + observation-key roster
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _opf_emit    # noqa: E402  the canonical emitter: EmitError, raised by an out-of-subset record body
 import _opf_store   # noqa: E402  the resolver: the fixed store-tree / machine-store directory-name constants
 
@@ -1163,7 +1162,7 @@ def self_test_isolated():
             check("prior-counters", prior.get("counters_high", {}).get("BI") == 1)
             # Digest honesty: gather's digest for the immutable done record must equal the engine's own
             # _record_digest over the SAME committed body (parsed here independently from the working tree).
-            with _nbio.open_nb(str(tracked_repo / machine_rel / ("done" + _INDEX_SUFFIX)), "rb") as fh:
+            with open(str(tracked_repo / machine_rel / ("done" + _INDEX_SUFFIX)), "rb") as fh:
                 done_idx = tomllib.loads(fh.read().decode("utf-8"))
             expected = _opf_check._record_digest(done_idx["record"][0])
             check("prior-digest-matches-engine", prior.get("digests", {}).get("DN-1") == expected)

@@ -20,7 +20,6 @@ import shutil
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _commonmark_headings as ch        # noqa: E402  the adapter under test
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 
 def _entries(text):
@@ -267,7 +266,7 @@ def self_test():
             fh.write(b"# parser\n")
 
         def sha(path):
-            with _nbio.open_nb(path, "rb") as fh:
+            with open(path, "rb") as fh:
                 return hashlib.sha256(fh.read()).hexdigest()
 
         manifest_path = os.path.join(tmp, ch.MANIFEST_NAME)

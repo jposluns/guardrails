@@ -40,9 +40,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; appended BEHIND the stdlib (no sibling shadow), only _nbio resolves here
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
-
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11
@@ -474,7 +471,7 @@ def _classify_presence(path):
     if not stat.S_ISREG(st.st_mode):
         return _UNREADABLE, "not a regular file"
     try:
-        with _nbio.open_nb(path, "rb") as fh:
+        with open(path, "rb") as fh:
             fh.read(1)
     except OSError as exc:
         return _UNREADABLE, "not readable ({})".format(exc)

@@ -101,7 +101,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal              # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _opf_adopt as schema  # noqa: E402
 import _opf_store as store   # noqa: E402
 import _optlevel             # noqa: E402
@@ -355,7 +354,7 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
         if fd is None:
             pfd = dir_at(parts[:-1])
             try:
-                fd = os.open(parts[-1], (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=pfd)
+                fd = os.open(parts[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
             except FileNotFoundError:
                 raise
             except OSError as exc:
@@ -1464,7 +1463,7 @@ def _self_test_checks():
         return root, files
 
     def snapshot(root):
-        return {str(p.relative_to(root)): _nbio.read_bytes_nb(p) for p in sorted(root.rglob("*"))
+        return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*"))
                 if p.is_file() and not p.is_symlink() and not str(p.relative_to(root)).startswith(".aiqt/")}
 
     def plan_digest(payload):
@@ -1543,7 +1542,7 @@ def _self_test_checks():
               ptxn == rid + ".completion" and (root / inventory_rel(rid, "completion")).is_file()
               and verify_bundle(root, rid).status == VALID)
         base = root / inventory_rel(rid)
-        saved = _nbio.read_bytes_nb(base) if base.is_file() else None
+        saved = base.read_bytes() if base.is_file() else None
         if saved is not None:
             base.unlink()
         check("verify-phase-without-base-cannot-eval",
@@ -1553,12 +1552,12 @@ def _self_test_checks():
         # an op against the adoption journal's own tree (a store control root) is refused, so a committed
         # record can never be archived away by a later run.
         frames_rel = JOURNAL_REL + "/" + rid + "/frames.log"
-        frames_bytes = _nbio.read_bytes_nb(root / frames_rel)
+        frames_bytes = (root / frames_rel).read_bytes()
         journal_hit = refusal(run_adopt_transaction, root, other_run, lambda ops: ops.archive_occupying(
             frames_rel, plan_digest(frames_bytes)))
         check("apply-journal-operand-refused",
               journal_hit is not None and "control root" in journal_hit
-              and _nbio.read_bytes_nb(root / frames_rel) == frames_bytes and txn_state(root, rid) == "complete")
+              and (root / frames_rel).read_bytes() == frames_bytes and txn_state(root, rid) == "complete")
         # the phase gate binds the LIVE inventory.toml to the committed base transaction's INTENT digest,
         # so bytes swapped after the commit refuse a later phase.
         swapped = emit_inventory(rid, [inventory_row(home + "/decoy.md", b"decoy\n")])
@@ -1618,7 +1617,7 @@ def _self_test_checks():
         overwrote = refusal(run_adopt_transaction, root, rid, hand_write)
         check("apply-hand-built-write-refused",
               overwrote is not None and "source-poststate" in overwrote
-              and _nbio.read_bytes_nb(root / ".working/TODO.md") == files[".working/TODO.md"]
+              and (root / ".working/TODO.md").read_bytes() == files[".working/TODO.md"]
               and not (root / archive_rel(rid, ".working/TODO.md")).exists())
 
         def hand_rmdir(ops):
@@ -1647,7 +1646,7 @@ def _self_test_checks():
         before = snapshot(root)
         twin = refusal(run_adopt_transaction, root, rid, lambda ops: ops.archive_occupying(
             ".working/toml/manifest.toml",
-            plan_digest(_nbio.read_bytes_nb(root / ".working/toml/manifest.toml"))))
+            plan_digest((root / ".working/toml/manifest.toml").read_bytes())))
         check("posture-multiple-stores-refused",
               store.resolve_store(root).status == CANNOT and twin is not None
               and "cannot be evaluated" in twin and snapshot(root) == before
@@ -1729,9 +1728,9 @@ def _self_test_checks():
         def preserved_now():
             for pth, payload in files.items():
                 live, cp = root / pth, root / archive_rel(rid, pth)
-                if live.exists() and _nbio.read_bytes_nb(live) == payload:
+                if live.exists() and live.read_bytes() == payload:
                     continue
-                if cp.exists() and _nbio.read_bytes_nb(cp) == payload:
+                if cp.exists() and cp.read_bytes() == payload:
                     continue
                 return False
             return True
@@ -1790,7 +1789,7 @@ def _self_test_checks():
               faulted is not None and "rolled back" not in faulted and "reconcile" in faulted)
         check("restore-fault-retains-archive",
               (root / archive_rel(rid, src2)).exists()
-              and _nbio.read_bytes_nb(root / archive_rel(rid, src2)) == files[src2])
+              and (root / archive_rel(rid, src2)).read_bytes() == files[src2])
         check("restore-fault-retains-lock", not lock_free(root))
         _journal.release_lock(_journal_root(root))   # the crashed owner, in this in-process simulation
         check("restore-fault-reconciles-to-prestate",
@@ -1817,7 +1816,7 @@ def _self_test_checks():
             if op.get("op") == "create" and str(op.get("path", "")).startswith(arch):
                 source = op["path"][len(arch):]
                 live = root / source
-                if source in files and not (live.exists() and _nbio.read_bytes_nb(live) == files[source]):
+                if source in files and not (live.exists() and live.read_bytes() == files[source]):
                     misordered.append(op["path"])
             return real_restore(jr_fd, txn_dir, rfd, op, op_index)
 
@@ -1880,7 +1879,7 @@ def _self_test_checks():
             outcomes, _why = attempt(reconcile, root)
             check(tag + "-reconciles-to-exact-prestate",
                   outcomes is not None and (rid, "rolled-back") in outcomes
-                  and _nbio.read_bytes_nb(root / keep) == prior
+                  and (root / keep).read_bytes() == prior
                   and stat.S_IMODE((root / keep).lstat().st_mode) == ro_mode and lock_free(root))
 
     # 6f: the verification READ itself failing (an injected EIO) while a read-only source restores must
@@ -1923,7 +1922,7 @@ def _self_test_checks():
         outcomes, _why = attempt(reconcile, root)
         check("verify-read-fault-reconciles-to-exact-prestate",
               outcomes is not None and (rid, "rolled-back") in outcomes
-              and _nbio.read_bytes_nb(root / keep) == prior
+              and (root / keep).read_bytes() == prior
               and stat.S_IMODE((root / keep).lstat().st_mode) == 0o400 and lock_free(root))
 
     # 6g: the restore PRIMITIVE stays restartable at prestate modes the shell cannot even compose (its
@@ -1975,7 +1974,7 @@ def _self_test_checks():
                     got_mode = stat.S_IMODE(live.lstat().st_mode)
                     live.chmod(0o600)                    # the fixture's own grant, for the byte assert
                     check(tag + "-retry-restores-exact-prestate",
-                          retried is None and got_mode == ro_mode and _nbio.read_bytes_nb(live) == prior)
+                          retried is None and got_mode == ro_mode and live.read_bytes() == prior)
                     live.unlink()                        # the RECREATE path: absent live file
                     armed.append(True)
                     with mock.patch.object(_journal, "_write_all", faulty_write):
@@ -1985,7 +1984,7 @@ def _self_test_checks():
                     live.chmod(0o600)                    # the fixture's own grant, for the byte assert
                     check(tag + "-recreate-fault-then-retry-exact",
                           refaulted is not None and reretried is None and got_mode == ro_mode
-                          and _nbio.read_bytes_nb(live) == prior)
+                          and live.read_bytes() == prior)
                 finally:
                     _journal._close_fd_quietly(jr_fd)
             finally:
@@ -2034,7 +2033,7 @@ def _self_test_checks():
         check("paired-write-destination-fault-fails-closed",
               halted is not None and "recorded digest" in halted)
         check("paired-write-destination-fault-halts-the-sequence",
-              (root / "witness.md").exists() and _nbio.read_bytes_nb(root / "witness.md") == witness)
+              (root / "witness.md").exists() and (root / "witness.md").read_bytes() == witness)
 
     # 6i: the rollback-side checkpoint on the IN-PLACE restore path (a write op's undo, the live file
     # still present): a same-length fault in the restoring write REFUSES to report a rollback (the journal
@@ -2091,7 +2090,7 @@ def _self_test_checks():
             check("restore-in-place-fault-never-reports-rollback", outcome == "open")
             check("restore-in-place-fault-then-recover-exact",
                   _journal.recover(jr_fd, _journal_root(root) / rid, root_fd) == "rolled-back"
-                  and _nbio.read_bytes_nb(root / "doc.md") == old_doc
+                  and (root / "doc.md").read_bytes() == old_doc
                   and stat.S_IMODE((root / "doc.md").lstat().st_mode) == 0o644)
         finally:
             if jr_fd is not None:
@@ -2215,7 +2214,7 @@ def _self_test_checks():
                       faulted is not None and mode_of(live) == 0o400)
                 refinished = try_restore()               # the fault is gone: the restore must finish
                 check("grant-fstat-fault-retry-restores-exact-prestate",
-                      refinished is None and mode_of(live) == 0o400 and _nbio.read_bytes_nb(live) == prior)
+                      refinished is None and mode_of(live) == 0o400 and live.read_bytes() == prior)
 
                 # an identity refusal (a swapped inode) also reverts the grant before failing closed
                 reset()
@@ -2331,7 +2330,7 @@ def _self_test_checks():
                       and mode_of(live) == 0o400)
                 check("grant-interrupt-after-grant-chmod-retry-restores-exact",
                       try_restore() is None and mode_of(live) == 0o400
-                      and _nbio.read_bytes_nb(live) == prior)
+                      and live.read_bytes() == prior)
 
                 # claude round-4: a fault AT the post-checkpoint prestate-mode install is not an
                 # anonymous escape silently retaining the grant: the checkpoint has already
@@ -2352,10 +2351,10 @@ def _self_test_checks():
                     retained = try_restore()
                 check("grant-post-checkpoint-mode-fault-names-the-retained-grant",
                       retained is not None and "deliberately left" in retained
-                      and mode_of(live) == 0o600 and _nbio.read_bytes_nb(live) == prior)
+                      and mode_of(live) == 0o600 and live.read_bytes() == prior)
                 check("grant-post-checkpoint-mode-fault-reconcile-finishes-directly",
                       try_restore() is None and mode_of(live) == 0o400
-                      and _nbio.read_bytes_nb(live) == prior)
+                      and live.read_bytes() == prior)
 
                 # codex round-5 (= claude F1): the OTHER post-checkpoint state. A fault at the
                 # durability fsync AFTER the prestate fchmod took effect leaves the live mode
@@ -2384,10 +2383,10 @@ def _self_test_checks():
                 check("grant-post-mode-fsync-fault-names-no-grant-remains",
                       unsynced is not None and "no grant remains" in unsynced
                       and "deliberately left" not in unsynced
-                      and mode_of(live) == 0o400 and _nbio.read_bytes_nb(live) == prior)
+                      and mode_of(live) == 0o400 and live.read_bytes() == prior)
                 check("grant-post-mode-fsync-fault-retry-restores-exact",
                       try_restore() is None and mode_of(live) == 0o400
-                      and _nbio.read_bytes_nb(live) == prior)
+                      and live.read_bytes() == prior)
 
                 # the RECREATE path's verify-before-mode ordering is pinned: AT the restore checkpoint
                 # the recreated file still holds the temporary owner-rw 0600 (so a faulted checkpoint
@@ -2405,7 +2404,7 @@ def _self_test_checks():
                     recreated = try_restore()
                 check("recreate-verifies-before-prestate-mode-installed",
                       recreated is None and interim == [0o600] and mode_of(live) == 0o400
-                      and _nbio.read_bytes_nb(live) == prior)
+                      and live.read_bytes() == prior)
             finally:
                 _journal._close_fd_quietly(jr_fd)
         finally:
@@ -2452,7 +2451,7 @@ def _self_test_checks():
             if op.get("op") == "create" and str(op.get("path", "")).startswith(arch):
                 source = op["path"][len(arch):]
                 live = root / source
-                if source in files and not (live.exists() and _nbio.read_bytes_nb(live) == files[source]):
+                if source in files and not (live.exists() and live.read_bytes() == files[source]):
                     misordered.append(op["path"])
             return real_restore(jr_fd, txn_dir, rfd, op, op_index)
 
@@ -2612,7 +2611,7 @@ def _self_test_checks():
         root = Path(temp).resolve()
         (root / "home").mkdir()
         root_fd = store._open_dir_nofollow(root)
-        home_fd = os.open("home", (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0), dir_fd=root_fd)
+        home_fd = os.open("home", os.O_RDONLY | os.O_DIRECTORY, dir_fd=root_fd)
         _m1_seen = dict()
         _m1_real_dup = os.dup
 
@@ -2654,7 +2653,7 @@ def _self_test_checks():
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root = Path(temp).resolve()
         (root / "txn-1").mkdir()
-        jr_fd = os.open(str(root), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        jr_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
         _m2_opened = []
         _m2_real_open = os.open
 

@@ -73,7 +73,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal        # noqa: E402  contained (dir-fd, no-follow) readers + JournalError + containment probe
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _containment    # noqa: E402  the single race-free-primitive probe
 from _semver import _parse  # noqa: E402  the shipped bare-SemVer parser (major, minor, patch) or None
 
@@ -573,7 +572,7 @@ def _open_root_fd(root):
     """Open a root directory fd with O_NOFOLLOW, so a symlinked final root component is refused rather
     than followed off-tree (the migrate.py/pin.py idiom). Raises OSError, mapped by the caller. Used for
     the PRODUCT root, the operator's trusted --root anchor."""
-    return os.open(str(root), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+    return os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 
 
 def _open_dir_nofollow(abspath):
@@ -607,9 +606,9 @@ def _open_dir_nofollow(abspath):
     held = []
     try:
         # The filesystem root itself is never a symlink.
-        held.append(os.open(parts[0], (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0)))
+        held.append(os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY))
         for comp in parts[1:]:
-            held.append(os.open(comp, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=held[-1]))
+            held.append(os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[-1]))
             _journal._close_fd_propagating(held.pop(-2))
         return held.pop()
     except BaseException as exc:
@@ -750,7 +749,7 @@ def _open_working_dir_fd(store_root_fd, working_rel):
     wfd = None
     try:
         try:
-            wfd = os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=pfd)
+            wfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
         except FileNotFoundError:
             return None
         except NotADirectoryError as exc:
@@ -2646,7 +2645,7 @@ def self_test():
         # by _read_contained's own `except OSError` and so passed even while blocking).
         _fd_dir = base / "m2-fifo"; _fd_dir.mkdir()
         os.mkfifo(str(_fd_dir / "f"))
-        _rfd = os.open(str(_fd_dir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _rfd = os.open(str(_fd_dir), os.O_RDONLY | os.O_DIRECTORY)
         try:
             check("m2-fifo-no-hang-refused",
                   _refused_no_hang(lambda: _journal._read_contained(_rfd, "f"), keep_fds=(_rfd,)))
@@ -2658,7 +2657,7 @@ def self_test():
         # never a hang. A hostile on-disk tree can pre-plant these paths.
         _rf_dir = base / "n2-read-frames"; _rf_dir.mkdir()
         os.mkfifo(str(_rf_dir / "frames.log"))
-        _rf_jr = os.open(str(base), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+        _rf_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             check("new2-read-frames-fifo-no-hang",
                   _refused_no_hang(lambda: _journal.read_frames(_rf_jr, _rf_dir), keep_fds=(_rf_jr,)))
@@ -2669,7 +2668,7 @@ def self_test():
         check("new2-read-lock-owner-fifo-no-hang", _refused_no_hang(lambda: _journal.read_lock_owner(_rl_dir)))
         _ra_dir = base / "n2-read-at"; _ra_dir.mkdir()
         os.mkfifo(str(_ra_dir / "f"))
-        _rafd = os.open(str(_ra_dir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _rafd = os.open(str(_ra_dir), os.O_RDONLY | os.O_DIRECTORY)
         try:
             check("new2-read-at-fifo-no-hang",
                   _refused_no_hang(lambda: _journal._read_at(_rafd, "f", "f"), keep_fds=(_rafd,)))
@@ -2783,7 +2782,7 @@ def self_test():
 
         _r7_other_path = base / "r7-other-lane"
         _r7_other_path.write_bytes(b"")
-        _r7_other_fd = os.open(str(_r7_other_path), (os.O_RDONLY) | getattr(os, "O_NONBLOCK", 0))
+        _r7_other_fd = os.open(str(_r7_other_path), os.O_RDONLY)
         _r7_other = _r7_ident(_r7_other_fd)
 
         def _r7_fire(fd, real_close, reuse):
@@ -2822,7 +2821,7 @@ def self_test():
         # other-lane file, which the reused-number checks turn red.
         _r5_dir = base / "r5-close-leak"; _r5_dir.mkdir()
         (_r5_dir / "f").write_bytes(b"x = 1\n")
-        _r5_root = os.open(str(_r5_dir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _r5_root = os.open(str(_r5_dir), os.O_RDONLY | os.O_DIRECTORY)
         _r5_real_open_parent = _journal._open_parent
         _r5_real_close = os.close
         for _r5_reuse in (False, True):
@@ -2874,7 +2873,7 @@ def self_test():
         # at its open in the ledger with its identity -- is proven released afterwards; the reuse run puts
         # the other-lane file on the child's number at its close.
         _r6 = build_store(manifest=manifest_text())
-        _r6_root = os.open(str(_r6), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _r6_root = os.open(str(_r6), os.O_RDONLY | os.O_DIRECTORY)
         _r6_real_open_parent = _journal._open_parent
         _r6_real_open = os.open
         _r6_real_close = os.close
@@ -3095,7 +3094,7 @@ def self_test():
         # (close(2) on Linux; P1, #378) must leave neither the parent nor the held `.working` child open
         # when the error propagates fail-closed.
         _r7w = build_store(manifest=manifest_text())
-        _r7w_root = os.open(str(_r7w), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _r7w_root = os.open(str(_r7w), os.O_RDONLY | os.O_DIRECTORY)
         _r7w_real_open_parent = _journal._open_parent
         _r7w_real_open, _r7w_real_close, _r7w_real_fstat = os.open, os.close, os.fstat
         for _r7_reuse in (False, True):
@@ -3334,7 +3333,7 @@ def self_test():
         # is refused fail-closed: it cannot be bound to the held descriptor (the planner refuses such
         # pointers before resolving; path-based callers keep resolve_store).
         _r5a = build_store(manifest=manifest_text())
-        _r5a_fd = os.open(str(_r5a), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _r5a_fd = os.open(str(_r5a), os.O_RDONLY | os.O_DIRECTORY)
         try:
             _r5a_res, _r5a_raw = resolve_store_fd(_r5a_fd, _r5a)
         finally:
@@ -3342,9 +3341,9 @@ def self_test():
         check("r5-fd-default-resolved", _r5a_res.status == RESOLVED
               and _r5a_res.machine_rel == "{}/{}".format(WORKING_DIRNAME, DEFAULT_MACHINE_SUBDIR))
         check("r5-fd-manifest-bytes-exact",
-              _r5a_raw == _nbio.read_bytes_nb(_r5a / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME))
+              _r5a_raw == (_r5a / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME).read_bytes())
         _r5b = build_store(make_working=False)
-        _r5b_fd = os.open(str(_r5b), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _r5b_fd = os.open(str(_r5b), os.O_RDONLY | os.O_DIRECTORY)
         try:
             _r5b_res, _r5b_raw = resolve_store_fd(_r5b_fd, _r5b)
         finally:
@@ -3352,7 +3351,7 @@ def self_test():
         check("r5-fd-empty-not-adopted", _r5b_res.status == NOT_ADOPTED and _r5b_raw is None)
         _r5c = build_store(make_working=False,
                            pointer='[store]\ntarget = "dir:{}"\n'.format(_r5a))
-        _r5c_fd = os.open(str(_r5c), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _r5c_fd = os.open(str(_r5c), os.O_RDONLY | os.O_DIRECTORY)
         try:
             _r5c_res, _r5c_raw = resolve_store_fd(_r5c_fd, _r5c)
         finally:
@@ -3417,7 +3416,7 @@ def self_test():
         (_m1_lock / "lock").write_bytes(b'{"uid": 0, "pid": 1, "pid-start": "", "session": "s", "utc": "u"}')
         _real_jcap = _journal._MAX_JOURNAL_READ_BYTES
         _journal._MAX_JOURNAL_READ_BYTES = 8        # below either well-formed control file; above 0
-        _m1_jr = os.open(str(base), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+        _m1_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             check("minor1-read-frames-oversize-refused",
                   _guard(lambda: (_journal.read_frames(_m1_jr, _m1_frames), "read")[1]) == "RAISED")
@@ -3437,8 +3436,8 @@ def self_test():
         _pa_dir = base / "itemA-product"; _pa_dir.mkdir()
         (_pa_dir / "big").write_bytes(b"x" * 4096)
         (_pa_dir / "small").write_bytes(b"ok")
-        _pa_fd = os.open(str(_pa_dir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
-        _pa_pfd = os.open(str(_pa_dir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _pa_fd = os.open(str(_pa_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _pa_pfd = os.open(str(_pa_dir), os.O_RDONLY | os.O_DIRECTORY)
         _real_pcap = _journal._MAX_PRODUCT_READ_BYTES
         _journal._MAX_PRODUCT_READ_BYTES = 8        # below the 4096-byte file; above the 2-byte file
         try:
@@ -3461,19 +3460,19 @@ def self_test():
         # refusal check and a victim-intact check discriminate.
         _victim = base / "minor2-victim"
         _victim.write_bytes(b"VICTIM-INTACT")
-        _m2_jr = os.open(str(base), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+        _m2_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             _m2_pub = base / "minor2-publish"; _m2_pub.mkdir()
             os.symlink(str(_victim), str(_m2_pub / "frames.log"))
             check("minor2-publish-symlink-refused",
                   _guard(lambda: _journal.publish(_m2_jr, _m2_pub, _journal.F_INTENT,
                                                   {"txn": "t", "ops": []})) == "RAISED")
-            check("minor2-publish-victim-intact", _nbio.read_bytes_nb(_victim) == b"VICTIM-INTACT")
+            check("minor2-publish-victim-intact", _victim.read_bytes() == b"VICTIM-INTACT")
             _m2_tr = base / "minor2-truncate"; _m2_tr.mkdir()
             os.symlink(str(_victim), str(_m2_tr / "frames.log"))
             check("minor2-truncate-symlink-refused",
                   _guard(lambda: _journal._truncate_log(_m2_jr, _m2_tr, 0)) == "RAISED")
-            check("minor2-truncate-victim-intact", _nbio.read_bytes_nb(_victim) == b"VICTIM-INTACT")
+            check("minor2-truncate-victim-intact", _victim.read_bytes() == b"VICTIM-INTACT")
         finally:
             os.close(_m2_jr)
 
@@ -3490,7 +3489,7 @@ def self_test():
         (_f1root / "realj" / "txn" / "frames.log").write_bytes(
             _journal._frame(_journal.F_INTENT, b'{"txn":"t","ops":[]}'))
         os.symlink("realj", str(_f1root / "jdir"))          # jdir -> realj: a symlinked journal-root ancestor
-        _f1_rootfd = os.open(str(_f1root), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+        _f1_rootfd = os.open(str(_f1root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             # positive control: through the REAL journal root, the txn journal reads normally.
             _f1_realjr = _journal.open_journal_root_fd(_f1_rootfd, "realj")
@@ -3515,7 +3514,7 @@ def self_test():
             (_f1root / "realj" / "capt").mkdir()            # the REAL txn dir, beneath the real journal root
             (_f1root / "decoy" / "capt").mkdir(parents=True)  # a decoy the ancestor symlink resolves onto
             os.symlink("decoy", str(_f1root / "caplink"))   # caplink -> decoy: an ANCESTOR symlink on the txn path
-            _f1_capjr = os.open(str(_f1root / "realj"), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+            _f1_capjr = os.open(str(_f1root / "realj"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 _journal.capture_preimages(
                     _f1_capjr, _f1root / "caplink" / "capt", _f1_rootfd, [{"op": "remove", "path": "data.txt"}])
@@ -3585,7 +3584,7 @@ def self_test():
         a1_gvictim = base / "a1-generic-victim"
         a1_gvictim.write_bytes(b"intentional product hardlink")
         os.link(str(a1_gvictim), str(a1_generic / "product-data"))
-        a1_gfd = os.open(str(a1_generic), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+        a1_gfd = os.open(str(a1_generic), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             a1_gdata, a1_gst = _journal._read_contained(a1_gfd, "product-data")
         finally:

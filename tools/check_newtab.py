@@ -39,7 +39,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import read_text_nonblocking, walk_files  # noqa: E402  fail-closed tree walk and reader
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _gen_common import is_external_url, load_toml, precheck_special_files  # noqa: E402
 
 
@@ -395,7 +394,7 @@ def _self_test():
                 copied_tools = r / "tools"
                 copied_tools.mkdir()
                 for name in ("check_newtab.py", "_walk.py", "_gen_common.py"):
-                    (copied_tools / name).write_bytes(_nbio.read_bytes_nb(tools_dir / name))
+                    (copied_tools / name).write_bytes((tools_dir / name).read_bytes())
                 unrelated_cwd = r / "unrelated"
                 unrelated_cwd.mkdir()
                 script = str(copied_tools / "check_newtab.py")

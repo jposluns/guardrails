@@ -112,13 +112,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; the shared readers live beside this file
-try:
-    import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
-except ModuleNotFoundError:  # an EXPORTED single-file copy (self-test vector 18): the copy must
-    _nbio = None             # still reach its own fail-closed repo-root refusal, which runs
-                             # before any _nbio read; every real checkout has the sibling file
-
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11
@@ -153,7 +146,7 @@ def _manifest_suites(manifest_path):
                 .format(manifest_path))
         return None
     try:
-        with _nbio.open_nb(manifest_path, "rb") as handle:
+        with open(manifest_path, "rb") as handle:
             data = tomllib.load(handle)
     except OSError as exc:
         _cannot("expectation manifest {} unreadable: {}".format(manifest_path, exc))
@@ -337,7 +330,7 @@ def _source_check_ids(runner_path):
     a duplicate call-site id. Fail closed: no id is guessed, and source-site uniqueness is required
     (a dead duplicate-id alias would otherwise hide behind its reachable twin in the runtime set)."""
     try:
-        source = _nbio.read_text_nb(Path(runner_path), encoding="utf-8")
+        source = Path(runner_path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         return None, "runner {} unreadable as UTF-8 source: {}".format(runner_path, exc)
     try:
@@ -399,7 +392,7 @@ def _read_report(report_path, suite_id):
                 .format(report_path))
         return None
     try:
-        with _nbio.open_nb(report_path, "r", encoding="utf-8") as handle:
+        with open(report_path, "r", encoding="utf-8") as handle:
             data = json.load(handle, object_pairs_hook=_reject_dup_keys)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         # ValueError covers json.JSONDecodeError and the duplicate-member rejection above.
@@ -810,7 +803,7 @@ def self_test():
         exported = base / "exported"
         exported.mkdir()
         gate_copy = exported / "check_selftest_execution.py"
-        gate_copy.write_text(_nbio.read_text_nb(Path(__file__).resolve(), encoding="utf-8"),
+        gate_copy.write_text(Path(__file__).resolve().read_text(encoding="utf-8"),
                              encoding="utf-8")
         proc = subprocess.run([sys.executable, "-I", "-B", str(gate_copy), "--suite", "demo"],
                               capture_output=True)
@@ -908,7 +901,7 @@ def self_test():
         env_dump = root / "tools" / "git-env.json"
         expect("st/git-env-dump-written", env_dump.exists(), True)
         if env_dump.exists():
-            expect("st/git-env-neutralized", json.loads(_nbio.read_text_nb(env_dump, encoding="utf-8")),
+            expect("st/git-env-neutralized", json.loads(env_dump.read_text(encoding="utf-8")),
                    dict(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
                         GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="2",
                         GIT_CONFIG_KEY_0="core.excludesFile", GIT_CONFIG_VALUE_0=os.devnull,
@@ -917,11 +910,11 @@ def self_test():
         expect("st/py-env-dump-written", py_dump.exists(), True)
         if py_dump.exists():
             expect("st/py-env-neutralized",
-                   json.loads(_nbio.read_text_nb(py_dump, encoding="utf-8")), {})
+                   json.loads(py_dump.read_text(encoding="utf-8")), {})
         home_dump = root / "tools" / "home-env.json"
         expect("st/home-env-dump-written", home_dump.exists(), True)
         if home_dump.exists():
-            home_env = json.loads(_nbio.read_text_nb(home_dump, encoding="utf-8"))
+            home_env = json.loads(home_dump.read_text(encoding="utf-8"))
             expect("st/home-xdg-pinned-together",
                    home_env["HOME"] is not None
                    and home_env["HOME"] == home_env["XDG_CONFIG_HOME"], True)

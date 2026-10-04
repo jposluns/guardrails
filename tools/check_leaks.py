@@ -25,7 +25,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files, read_text_nonblocking  # noqa: E402  fail-closed tree walk and non-blocking read
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
@@ -72,7 +71,7 @@ def load_denylist(root):
     f = root / "tools" / "leak-hashes.txt"
     hashes, maxn, bad, maxn_set = set(), 3, [], False
     try:
-        content = _nbio.read_text_nb(f, encoding="utf-8")
+        content = f.read_text(encoding="utf-8")
     except FileNotFoundError:
         # An ABSENT denylist is intended (no extra terms -> empty set). An UNREADABLE denylist (or an
         # unreadable parent) raises a non-FileNotFound OSError that propagates to main's fail-closed

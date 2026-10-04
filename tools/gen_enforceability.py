@@ -65,7 +65,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_hooks import load_manifest, ID_RE, CID_RE  # noqa: E402  reuse the hooks-manifest loader and shapes
@@ -204,7 +203,7 @@ def roster_scripts(root):
     (ValueError), mirroring gen_gensrc's zero-generators guard."""
     per_file = {}
     for rel in ROSTER_FILES:
-        text = _nbio.read_text_nb(root / rel, encoding="utf-8")  # OSError -> caller's fail-closed try
+        text = (root / rel).read_text(encoding="utf-8")  # OSError -> caller's fail-closed try
         scripts = set()
         for line in text.splitlines():
             # Strip an inline comment before matching (a conservative lexical cut, documented at
@@ -521,7 +520,7 @@ def self_test_main():
                 return "raised SystemExit({!r})".format(exc.code)
 
     def replace_in(path, old, new):
-        text = _nbio.read_text_nb(path, encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
         if old not in text:
             failures.append("self-test setup: {!r} not found in {}".format(old, path.name))
         path.write_text(text.replace(old, new), encoding="utf-8")
@@ -562,7 +561,7 @@ def self_test_main():
         if not ledger.is_file():
             failures.append("conformant tree: expected {} to be written".format(LEDGER_REL))
         else:
-            obj = json.loads(_nbio.read_text_nb(ledger, encoding="utf-8"))
+            obj = json.loads(ledger.read_text(encoding="utf-8"))
             by_id = {e["corpus-id"]: e for e in obj.get("rules", [])}
             expected = {"ruleaa": "gate-linked", "rulebb": "gate-linked", "rulecc": "hook-linked",
                         "ruledd": "prose-only", "apex01": "prose-only"}
@@ -579,7 +578,7 @@ def self_test_main():
 
         # (b) Mutated ledger fails --check (exit 1).
         if ledger.is_file():
-            ledger.write_text(_nbio.read_text_nb(ledger, encoding="utf-8") + "\n", encoding="utf-8")
+            ledger.write_text(ledger.read_text(encoding="utf-8") + "\n", encoding="utf-8")
             if run_quiet(good, check=True) != 1:
                 failures.append("mutated {} expected exit 1 (drift)".format(LEDGER_REL))
 
@@ -619,7 +618,7 @@ def self_test_main():
         gex = _build(tmp / "roster-extra")
         for rel in ROSTER_FILES:
             p = gex / rel
-            p.write_text(_nbio.read_text_nb(p, encoding="utf-8") +
+            p.write_text(p.read_text(encoding="utf-8") +
                          "\n# extra step\nrun: python3 -I -B tools/g_extra.py\n",
                          encoding="utf-8")
         if run_quiet(gex, check=True) != 2:
@@ -630,7 +629,7 @@ def self_test_main():
         hng = _build(tmp / "gate-no-roster")
         (hng / "tools" / "g_orphan.py").write_text("# self-test gate script\n", encoding="utf-8")
         gm = hng / GATES_MANIFEST_REL
-        gm.write_text(_nbio.read_text_nb(gm, encoding="utf-8") +
+        gm.write_text(gm.read_text(encoding="utf-8") +
                       '\n[[gate]]\nid = "gate-orphan"\nscript = "tools/g_orphan.py"\nrules = []\n'
                       'platform = "ci"\ndefault = "block"\nclass = "a"\n'
                       'residue = "A self-test orphan gate."\n', encoding="utf-8")
@@ -640,7 +639,7 @@ def self_test_main():
         # (i) A manifest `script` absent on disk fails closed (exit 2): the stat probe in load.
         ims = _build(tmp / "gate-missing-script")
         gm = ims / GATES_MANIFEST_REL
-        gm.write_text(_nbio.read_text_nb(gm, encoding="utf-8") +
+        gm.write_text(gm.read_text(encoding="utf-8") +
                       '\n[[gate]]\nid = "gate-ghost"\nscript = "tools/g_ghost.py"\nrules = []\n'
                       'platform = "ci"\ndefault = "block"\nclass = "a"\n'
                       'residue = "A self-test ghost gate."\n', encoding="utf-8")
@@ -698,7 +697,7 @@ def self_test_main():
         #     key, each fail closed (exit 2): the load_gates_manifest shape validation.
         otop = _build(tmp / "gates-unknown-top-key")
         gm = otop / GATES_MANIFEST_REL
-        gm.write_text("bogus = 1\n" + _nbio.read_text_nb(gm, encoding="utf-8"), encoding="utf-8")
+        gm.write_text("bogus = 1\n" + gm.read_text(encoding="utf-8"), encoding="utf-8")
         if run_quiet(otop, check=True) != 2:
             failures.append("an unknown top-level key in the gates manifest expected exit 2 (fail-closed)")
         oent = _build(tmp / "gates-unknown-entry-key")
@@ -717,13 +716,13 @@ def self_test_main():
         pinl = _build(tmp / "roster-inline-comment")
         (pinl / "tools" / "g_inline.py").write_text("# self-test gate script\n", encoding="utf-8")
         gm = pinl / GATES_MANIFEST_REL
-        gm.write_text(_nbio.read_text_nb(gm, encoding="utf-8") +
+        gm.write_text(gm.read_text(encoding="utf-8") +
                       '\n[[gate]]\nid = "gate-inline"\nscript = "tools/g_inline.py"\nrules = []\n'
                       'platform = "ci"\ndefault = "block"\nclass = "a"\n'
                       'residue = "A self-test inline-comment gate."\n', encoding="utf-8")
         for rel in ROSTER_FILES:
             p = pinl / rel
-            p.write_text(_nbio.read_text_nb(p, encoding="utf-8") +
+            p.write_text(p.read_text(encoding="utf-8") +
                          "\ntrue  # a commented step: python3 -I -B tools/g_inline.py --check\n",
                          encoding="utf-8")
         if run_quiet(pinl, check=True) != 2:

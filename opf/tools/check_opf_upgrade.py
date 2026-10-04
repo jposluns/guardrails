@@ -123,7 +123,6 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 EXIT_OK = 0
 EXIT_FINDING = 1
@@ -456,7 +455,7 @@ def _snapshot(root):
         st = path.lstat()
         rel = path.relative_to(root).as_posix()
         if stat.S_ISREG(st.st_mode):
-            result[rel] = _nbio.read_bytes_nb(path)
+            result[rel] = path.read_bytes()
         elif stat.S_ISDIR(st.st_mode):
             result[rel] = "dir"
         else:
@@ -713,10 +712,10 @@ def _suite_isolated():
             return _run_opf(["doctor", "--root", str(store)], env_holder["env"])
 
         def man_of(mach):
-            return tomllib.loads(_nbio.read_text_nb(mach / _opf_store.MANIFEST_NAME, encoding="utf-8"))
+            return tomllib.loads((mach / _opf_store.MANIFEST_NAME).read_text(encoding="utf-8"))
 
         def cnt_of(mach):
-            return tomllib.loads(_nbio.read_text_nb(mach / _opf_check.COUNTERS_NAME, encoding="utf-8"))["counters"]
+            return tomllib.loads((mach / _opf_check.COUNTERS_NAME).read_text(encoding="utf-8"))["counters"]
 
         with tempfile.TemporaryDirectory(prefix="opf-upgrade-gate-") as temporary:
             base = Path(temporary).resolve()
@@ -820,8 +819,8 @@ def _suite_isolated():
             mach3 = build_store(s3, manifest=_man_gov(), counters=_cnt_gov(),
                                 extra_files={idx("maintainer_action"): _FIX_INDEX,
                                              idx("maintainer_decision"): _FIX_INDEX})
-            ma_before = _nbio.read_bytes_nb(mach3 / idx("maintainer_action"))
-            md_before = _nbio.read_bytes_nb(mach3 / idx("maintainer_decision"))
+            ma_before = (mach3 / idx("maintainer_action")).read_bytes()
+            md_before = (mach3 / idx("maintainer_decision")).read_bytes()
             rc3, out3 = upgrade(s3)
             check("U3 upgrade exits 0", rc3 == EXIT_OK)
             check("U3 only contribution+preference_pattern indexes created",
@@ -831,8 +830,8 @@ def _suite_isolated():
             check("U3 MA stays module-tier", man3["types"].get("maintainer_action") == {"namespace": "MA"})
             check("U3 MD row preserved", man3["types"].get("maintainer_decision") == {"namespace": "MD"})
             check("U3 MA/MD indexes preserved byte-for-byte",
-                  _nbio.read_bytes_nb(mach3 / idx("maintainer_action")) == ma_before
-                  and _nbio.read_bytes_nb(mach3 / idx("maintainer_decision")) == md_before)
+                  (mach3 / idx("maintainer_action")).read_bytes() == ma_before
+                  and (mach3 / idx("maintainer_decision")).read_bytes() == md_before)
             drc3, dout3 = doctor(s3)
             check("U3 doctor-VALID", drc3 == EXIT_OK and "integrity: VALID" in dout3)
 
@@ -842,11 +841,11 @@ def _suite_isolated():
             mach4 = build_store(s4, manifest=_man_gov(), counters=_cnt_gov(md=1),
                                 extra_files={idx("maintainer_action"): _FIX_INDEX,
                                              idx("maintainer_decision"): _FIX_MD_INDEX})
-            md4_before = _nbio.read_bytes_nb(mach4 / idx("maintainer_decision"))
+            md4_before = (mach4 / idx("maintainer_decision")).read_bytes()
             rc4, out4 = upgrade(s4)
             check("U4 upgrade exits 0", rc4 == EXIT_OK)
             check("U4 populated MD index preserved byte-for-byte",
-                  _nbio.read_bytes_nb(mach4 / idx("maintainer_decision")) == md4_before)
+                  (mach4 / idx("maintainer_decision")).read_bytes() == md4_before)
             check("U4 MD counter high-water preserved", cnt_of(mach4).get("MD") == 1)
             drc4, dout4 = doctor(s4)
             check("U4 doctor-VALID", drc4 == EXIT_OK and "integrity: VALID" in dout4)
@@ -856,7 +855,7 @@ def _suite_isolated():
             s5.mkdir()
             mach5 = build_store(s5, manifest=_man_ds(), counters=_cnt_ds(),
                                 extra_files={idx("preference_pattern"): _FIX_INDEX})
-            pp5_before = _nbio.read_bytes_nb(mach5 / idx("preference_pattern"))
+            pp5_before = (mach5 / idx("preference_pattern")).read_bytes()
             rc5, out5 = upgrade(s5)
             check("U5 upgrade exits 0", rc5 == EXIT_OK)
             check("U5 only contribution+maintainer_decision indexes created",
@@ -864,7 +863,7 @@ def _suite_isolated():
             man5 = man_of(mach5)
             check("U5 decision_support module key removed", "decision_support" not in man5["modules"])
             check("U5 PP row preserved", man5["types"].get("preference_pattern") == {"namespace": "PP"})
-            check("U5 PP index preserved", _nbio.read_bytes_nb(mach5 / idx("preference_pattern")) == pp5_before)
+            check("U5 PP index preserved", (mach5 / idx("preference_pattern")).read_bytes() == pp5_before)
             drc5, dout5 = doctor(s5)
             check("U5 doctor-VALID", drc5 == EXIT_OK and "integrity: VALID" in dout5)
 
@@ -874,11 +873,11 @@ def _suite_isolated():
             s6.mkdir()
             mach6 = build_store(s6, manifest=_man_ds(), counters=_cnt_ds(pp=2),
                                 extra_files={idx("preference_pattern"): _FIX_PP_INDEX})
-            pp6_before = _nbio.read_bytes_nb(mach6 / idx("preference_pattern"))
+            pp6_before = (mach6 / idx("preference_pattern")).read_bytes()
             rc6, out6 = upgrade(s6)
             check("U6 upgrade exits 0 (ratified PP admitted at rest, needs M5)", rc6 == EXIT_OK)
             check("U6 populated PP index preserved byte-for-byte",
-                  _nbio.read_bytes_nb(mach6 / idx("preference_pattern")) == pp6_before)
+                  (mach6 / idx("preference_pattern")).read_bytes() == pp6_before)
             check("U6 PP high-water preserved", cnt_of(mach6).get("PP") == 2)
             drc6, dout6 = doctor(s6)
             check("U6 doctor-VALID (the M5 pipeline regression)",
@@ -891,14 +890,14 @@ def _suite_isolated():
                                 extra_files={idx("maintainer_action"): _FIX_INDEX,
                                              idx("maintainer_decision"): _FIX_MD_INDEX,
                                              idx("preference_pattern"): _FIX_PP_INDEX})
-            md7_before = _nbio.read_bytes_nb(mach7 / idx("maintainer_decision"))
-            pp7_before = _nbio.read_bytes_nb(mach7 / idx("preference_pattern"))
+            md7_before = (mach7 / idx("maintainer_decision")).read_bytes()
+            pp7_before = (mach7 / idx("preference_pattern")).read_bytes()
             rc7, out7 = upgrade(s7)
             check("U7 upgrade exits 0", rc7 == EXIT_OK)
             check("U7 only contribution index created", '"created_indexes": ["contribution"]' in out7)
             check("U7 both populated indexes preserved",
-                  _nbio.read_bytes_nb(mach7 / idx("maintainer_decision")) == md7_before
-                  and _nbio.read_bytes_nb(mach7 / idx("preference_pattern")) == pp7_before)
+                  (mach7 / idx("maintainer_decision")).read_bytes() == md7_before
+                  and (mach7 / idx("preference_pattern")).read_bytes() == pp7_before)
             check("U7 both high-waters preserved",
                   cnt_of(mach7).get("MD") == 1 and cnt_of(mach7).get("PP") == 2)
             drc7, dout7 = doctor(s7)
@@ -948,7 +947,7 @@ def _suite_isolated():
             s11.mkdir()
             da_extra = {idx(t): _FIX_INDEX for t in ("artifact", "gate_run", "release", "waiver")}
             mach11 = build_store(s11, manifest=_man_da(), counters=_cnt_da(), extra_files=da_extra)
-            da_before = {t: _nbio.read_bytes_nb(mach11 / idx(t))
+            da_before = {t: (mach11 / idx(t)).read_bytes()
                          for t in ("artifact", "gate_run", "release", "waiver")}
             rc11, out11 = upgrade(s11)
             check("U11 upgrade exits 0", rc11 == EXIT_OK)
@@ -957,7 +956,7 @@ def _suite_isolated():
                 man11["types"].get(t) == {"namespace": ns} for t, ns in
                 (("artifact", "AR"), ("gate_run", "GR"), ("release", "RL"), ("waiver", "WV"))))
             check("U11 every delivery_assurance index preserved byte-for-byte",
-                  all(_nbio.read_bytes_nb(mach11 / idx(t)) == b for t, b in da_before.items()))
+                  all((mach11 / idx(t)).read_bytes() == b for t, b in da_before.items()))
             check("U11 every delivery_assurance counter preserved",
                   all(cnt_of(mach11).get(ns) == 0 for ns in ("AR", "GR", "RL", "WV")))
             drc11, dout11 = doctor(s11)
@@ -982,7 +981,7 @@ def _suite_isolated():
             s12b.mkdir()
             mach12b = build_store(s12b)
             lease12b = mach12b / _opf_check.LEASE_NAME
-            lease12b.write_bytes(_nbio.read_bytes_nb(mach12 / _opf_check.LEASE_NAME))
+            lease12b.write_bytes((mach12 / _opf_check.LEASE_NAME).read_bytes())
             rel12b = lease12b.relative_to(s12b).as_posix()
             (s12b / ".git/info").mkdir()
             (s12b / ".git/info/exclude").write_text("/" + rel12b + "\n", encoding="utf-8")
@@ -1115,9 +1114,9 @@ def _suite_isolated():
             rc14c, out14c = upgrade(s14b)
             check("U14b moving owner work and correcting its ignore rule permits upgrade", rc14c == EXIT_OK)
             check("U14b saved owner bytes survive",
-                  _nbio.read_bytes_nb(saved14b) == before14b[ignored_rel])
+                  saved14b.read_bytes() == before14b[ignored_rel])
             check("U14b ignored content outside the written scope is untouched",
-                  _nbio.read_bytes_nb(outside / "cache") == before14b["outside-build/cache"])
+                  (outside / "cache").read_bytes() == before14b["outside-build/cache"])
 
             # U14b scope regressions: component-prefix siblings and declared unmanaged ignored content.
             # The .working.bak case also probes the old coarse pathspec directly: the new write plan
@@ -1173,7 +1172,7 @@ def _suite_isolated():
                 check("U14b {} upgrades to doctor-VALID".format(sibling),
                       src == EXIT_OK and "doctor-VALID" in sout)
                 check("U14b {} owner bytes survive".format(sibling),
-                      _nbio.read_bytes_nb(owner) == b"unrelated ignored owner bytes\n")
+                      owner.read_bytes() == b"unrelated ignored owner bytes\n")
 
             su = base / "u14b-unmanaged"
             su.mkdir()
@@ -1192,7 +1191,7 @@ def _suite_isolated():
             urc, uout = upgrade(su)
             check("U14b declared unmanaged ignored content upgrades to doctor-VALID",
                   urc == EXIT_OK and "doctor-VALID" in uout)
-            check("U14b unmanaged bytes survive", _nbio.read_bytes_nb(cache) == b"unmanaged output\n")
+            check("U14b unmanaged bytes survive", cache.read_bytes() == b"unmanaged output\n")
             import shlex
 
             def scoped_staging(text):
@@ -1276,13 +1275,13 @@ def _suite_isolated():
                       observed.completed and observed.rc == 0
                       and b"!! " + prefix + ignored in observed.out.split(b"\x00"))
                 before = _snapshot(repo)
-                before_index = _nbio.read_bytes_nb(repo / ".git/index")
+                before_index = (repo / ".git/index").read_bytes()
                 before_head = git_call(repo, ["rev-parse", "HEAD"])
                 rc, out = upgrade(nested)
                 check("U14c {} refuses before mutation with dirty-store advice".format(case),
                       rc == EXIT_ERROR and target_rel in out and "Commit your changes" in out)
                 check("U14c {} unchanged tree, index and HEAD".format(case),
-                      _snapshot(repo) == before and _nbio.read_bytes_nb(repo / ".git/index") == before_index
+                      _snapshot(repo) == before and (repo / ".git/index").read_bytes() == before_index
                       and git_call(repo, ["rev-parse", "HEAD"]) == before_head)
                 flipped_rc, flipped_out = flipped_upgrade(nested, lossy_prefix)
                 if case == "ancestor":
@@ -1292,7 +1291,7 @@ def _suite_isolated():
                 else:
                     check("U14c {} FLIP loses pre-mutation refusal and changes manifest".format(case),
                           flipped_rc in (EXIT_OK, EXIT_ERROR) and "Commit your changes" not in flipped_out
-                          and _nbio.read_bytes_nb(nested / ".working/toml/manifest.toml")
+                          and (nested / ".working/toml/manifest.toml").read_bytes()
                               != before[os.fsdecode(prefix) + ".working/toml/manifest.toml"])
 
             # The stdin transport must drain output while feeding more than a pipe buffer.
@@ -1401,11 +1400,11 @@ def _suite_isolated():
                 git_call(sf, ["update-index", "--" + flag, "--", rel])
                 (sf / rel).write_bytes(b"owner edit hidden from status\n")
                 before = _snapshot(sf)
-                index_before = _nbio.read_bytes_nb(sf / ".git/index")
+                index_before = (sf / ".git/index").read_bytes()
                 frc, fout = upgrade(sf)
                 check("R4 {} refuses without changing tree or index".format(flag),
                       frc == EXIT_ERROR and "skip-worktree or assume-unchanged" in fout
-                      and _snapshot(sf) == before and _nbio.read_bytes_nb(sf / ".git/index") == index_before)
+                      and _snapshot(sf) == before and (sf / ".git/index").read_bytes() == index_before)
 
             # U15) [types.contribution] pre-declared: an impossible 1.0.0 shape.
             s15 = base / "u15-contribution-predeclared"
@@ -1854,7 +1853,7 @@ def _suite_isolated():
             check("U24 never-seize: acquisition still raises", _ns_raised)
             check("U24 never-seize: the REPLACEMENT holder's lease is NOT removed",
                   (mach24b / _opf_check.LEASE_NAME).is_file()
-                  and _nbio.read_bytes_nb(mach24b / _opf_check.LEASE_NAME) == _peer24)
+                  and (mach24b / _opf_check.LEASE_NAME).read_bytes() == _peer24)
 
             # U25) R5: the lease is released BEFORE success is reported. Monkeypatch _opf_write_guard.release_lease to
             # fail; a valid store must exit 2 with NO success line emitted (without the fix, success prints
@@ -1920,7 +1919,7 @@ def _suite_isolated():
             fd25b = _opf_store._open_dir_nofollow(str(s25b.resolve()))
             _pay25 = opf._opf_write_guard.acquire_lease(fd25b, mrel24, "upgrade")
             check("U25b acquire returns the exact on-disk lease payload (ownership token)",
-                  _pay25 == _nbio.read_bytes_nb(_lp25))
+                  _pay25 == _lp25.read_bytes())
             _peer25 = (b'acquired_at = "2026-03-03T00:00:00Z"\nholder = "peer-runner"\n'
                        b'operation = "upgrade"\nschema = 1\n')
             _lp25.unlink()
@@ -1933,7 +1932,7 @@ def _suite_isolated():
                     and "peer-runner" in str(_e25)
             check("U25b release of a REPLACED lease raises never-seize (no false success)", _seize_raised)
             check("U25b the peer REPLACEMENT survives release (never seized)",
-                  _lp25.is_file() and _nbio.read_bytes_nb(_lp25) == _peer25)
+                  _lp25.is_file() and _lp25.read_bytes() == _peer25)
             # ordinary release of THIS run's own lease still removes it (no over-refusal). Tolerant restore so
             # a REGRESSION (a seizing release that already deleted the peer) fails these checks cleanly rather
             # than crashing the suite on a missing file.
@@ -2068,7 +2067,7 @@ def _suite_isolated():
                   "releasing the upgrade lease failed" in out28
                   and "REPLACED by another holder" in out28 and "peer-runner" in out28)
             check("U28/FIX1 the peer lease is LEFT in place (never seized)",
-                  _lp28.is_file() and _nbio.read_bytes_nb(_lp28) == _peer28)
+                  _lp28.is_file() and _lp28.read_bytes() == _peer28)
 
             # U29) FIX3 absent-vs-replaced release wording: the release refusal DISTINGUISHES a genuine
             # ABSENCE (the lease was deleted, not replaced) from a REPLACEMENT (a present-but-different
@@ -2210,10 +2209,10 @@ def _suite_isolated():
                 sp.mkdir()
                 extra = {idx(t): populated.get(t, _FIX_INDEX) for t in idxtypes}
                 machp = build_store(sp, manifest=man, counters=cnt, extra_files=extra)
-                pre_idx = {t: _nbio.read_bytes_nb(machp / idx(t))
+                pre_idx = {t: (machp / idx(t)).read_bytes()
                            for t in set(_FIX_INDEX_TYPES) | set(idxtypes)}
-                pre_wl = _nbio.read_bytes_nb(machp / _opf_check.WORKLOG_NAME)
-                pre_ver = _nbio.read_bytes_nb(machp / _opf_check.VERSION_NAME)
+                pre_wl = (machp / _opf_check.WORKLOG_NAME).read_bytes()
+                pre_ver = (machp / _opf_check.VERSION_NAME).read_bytes()
                 pre_cnt = tomllib.loads(cnt)["counters"]
                 rcp, outp = upgrade(sp)
                 if rcp != EXIT_OK:
@@ -2223,11 +2222,11 @@ def _suite_isolated():
                 if not (drcp == EXIT_OK and "integrity: VALID" in doutp):
                     p1_ok = False
                     continue
-                if any(_nbio.read_bytes_nb(machp / idx(t)) != b for t, b in pre_idx.items()):
+                if any((machp / idx(t)).read_bytes() != b for t, b in pre_idx.items()):
                     p1_ok = False
-                if _nbio.read_bytes_nb(machp / _opf_check.WORKLOG_NAME) != pre_wl:
+                if (machp / _opf_check.WORKLOG_NAME).read_bytes() != pre_wl:
                     p1_ok = False
-                if _nbio.read_bytes_nb(machp / _opf_check.VERSION_NAME) != pre_ver:
+                if (machp / _opf_check.VERSION_NAME).read_bytes() != pre_ver:
                     p1_ok = False
                 post_cnt = cnt_of(machp)
                 if any(post_cnt.get(k) != v for k, v in pre_cnt.items()):
@@ -2406,7 +2405,7 @@ def _suite_isolated():
             git_call(sG, ["commit", "-m", "eol attrs"])
             (machG / "text.dat").unlink()
             git_call(sG, ["--literal-pathspecs", "checkout", "--", "{}/text.dat".format(_mach_rel_flt)])
-            with _nbio.open_nb(str(machG / "text.dat"), "rb") as _fh:
+            with open(str(machG / "text.dat"), "rb") as _fh:
                 _wt_bytes = _fh.read()
             os.utime(str(machG / "text.dat"), _FUTURE)
             dG = _probe(_git_flt, str(sG), [_opf_store.WORKING_DIRNAME], _lease_flt)
@@ -2505,7 +2504,7 @@ def _suite_isolated():
             git_call(sL, ["commit", "-m", "seed normalizing store"])
             check("U28l fixture is the git-lfs shape (index CLEANED != smudged worktree)",
                   git_call(sL, ["show", ":{}".format(_normtgt)]) == "abc\n"
-                  and _nbio.read_text_nb(sL / _normtgt) == "abc123\n")
+                  and (sL / _normtgt).read_text() == "abc123\n")
             # positive control: with the filter ACTIVE (un-neutralized) the store is genuinely CLEAN (git
             # re-runs clean -> "abc" == index), so the dirty read below is purely the neutralization residual.
             os.utime(str(sL / _normtgt), _FUTURE)

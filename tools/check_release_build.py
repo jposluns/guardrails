@@ -45,7 +45,6 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from check_versions import _parse             # noqa: E402
 import gen_manifest                           # noqa: E402  the single shared release-row schema (QA #6)
 import _release_schema                        # noqa: E402  the ONE shared strict validator set
@@ -353,7 +352,7 @@ def qa_layers(qa_path, qa_sha256, expect_candidate_sha):
     if not isinstance(qa_sha256, str) or not _release_schema.HEX64_RE.fullmatch(qa_sha256):
         raise GateError("qa-sha256 {!r} is not 64 lowercase hex (malformed control input)".format(qa_sha256))
     try:
-        blob = _nbio.read_bytes_nb(Path(qa_path))
+        blob = Path(qa_path).read_bytes()
     except OSError as exc:
         raise GateError("QA attestation unreachable at {} ({})".format(qa_path, exc))
     if hashlib.sha256(blob).hexdigest() != qa_sha256:
@@ -947,7 +946,7 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
         raise GateError("first-pin: the evidence artifact {} is not a regular file (a symlink or special "
                         "entry); fail-closed".format(evidence))
     try:
-        raw = _nbio.read_bytes_nb(ev_path)
+        raw = ev_path.read_bytes()
     except OSError as exc:
         raise GateError("first-pin: evidence artifact {} is unreadable ({}); fail-closed".format(
             evidence, exc))
@@ -2077,7 +2076,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             sym_qa = sym / "qa.toml"
             sym_qa.write_text('candidate-sha = "HEAD"\n', encoding="utf-8")
             if _run_pre_tag_quiet(sym, "HEAD", str(sym_qa),
-                                  hashlib.sha256(_nbio.read_bytes_nb(sym_qa)).hexdigest(), False, None) != 2:
+                                  hashlib.sha256(sym_qa.read_bytes()).hexdigest(), False, None) != 2:
                 failures.append("pre-tag with a symbolic --candidate-sha HEAD must be rejected exit 2 "
                                 "(round-6 finding 5)")
 

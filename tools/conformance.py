@@ -40,7 +40,6 @@ from pathlib import Path
 # tools/ next to the modules it reuses.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEYS
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import gen_agents           # noqa: E402  render, sort_key, body_of
 import gen_adapters         # noqa: E402  ADAPTERS, render (GEMINI.md / copilot-instructions.md)
 import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cursor .mdc tree)
@@ -152,14 +151,14 @@ def _claude_drift(root, corpus):
     desired = {}
     try:
         for src, _fm, rel in corpus:
-            desired[rel] = _nbio.read_text_nb(src, encoding="utf-8")
+            desired[rel] = src.read_text(encoding="utf-8")
     except OSError as exc:
         return (MALFORMED, "cannot read a source rule: {}".format(exc))
     drift = []
     try:
         for rel, content in sorted(desired.items()):
             target = claude_dir / rel
-            current = _nbio.read_text_nb(target, encoding="utf-8") if target.exists() else None
+            current = target.read_text(encoding="utf-8") if target.exists() else None
             if current != content:
                 drift.append(rel)
         for family in ("aiqt", "security"):
@@ -192,7 +191,7 @@ def _agents_drift(root, corpus):
         pairs = [(src, fm) for src, fm, _ in corpus]
         pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
         content = gen_agents.render(pairs)
-        current = _nbio.read_text_nb(out, encoding="utf-8")
+        current = out.read_text(encoding="utf-8")
     except (ValueError, OSError) as exc:
         return (MALFORMED, "cannot render/read AGENTS.md: {}".format(exc))
     if current != content:
@@ -212,7 +211,7 @@ def _adapter_drift(root, corpus, adapter):
     # did not install this surface -> NA) from any other OSError (present but unreadable -> MALFORMED,
     # fail closed), independent of the Python version.
     try:
-        current = _nbio.read_text_nb(out, encoding="utf-8")
+        current = out.read_text(encoding="utf-8")
     except FileNotFoundError:
         return (label, NA, "no {} surface installed".format(parts))
     except (ValueError, OSError) as exc:
@@ -251,7 +250,7 @@ def _cursor_drift(root, corpus):
     try:
         for rel, content in sorted(desired.items()):
             target = cursor_dir / rel
-            current = _nbio.read_text_nb(target, encoding="utf-8") if target.exists() else None
+            current = target.read_text(encoding="utf-8") if target.exists() else None
             if current != content:
                 drift.append(rel)
         for dirpath, _dirs, filenames in os.walk(cursor_dir, onerror=_walk_raise):
@@ -288,16 +287,16 @@ def _skill_drift(root, corpus):
     drift = []
     try:
         for path, content in standalone:
-            current = _nbio.read_text_nb(path, encoding="utf-8") if path.exists() else None
+            current = path.read_text(encoding="utf-8") if path.exists() else None
             if current != content:
                 drift.append(path.relative_to(root).as_posix())
         for path, content in binary:
-            current = _nbio.read_bytes_nb(path) if path.exists() else None
+            current = path.read_bytes() if path.exists() else None
             if current != content:
                 drift.append(path.relative_to(root).as_posix())
         for name, content in sorted(reserved_map.items()):
             target = reserved_dir / name
-            current = _nbio.read_text_nb(target, encoding="utf-8") if target.exists() else None
+            current = target.read_text(encoding="utf-8") if target.exists() else None
             if current != content:
                 drift.append((reserved_dir / name).relative_to(root).as_posix())
         # Orphan scan over the reserved subtree (100% generated); os.walk(onerror=raise), not rglob.
@@ -511,7 +510,7 @@ def check_c5(root, cache):
         for rel, content in sorted(desired.items()):
             target = root / rel
             try:
-                current = _nbio.read_text_nb(target, encoding="utf-8")
+                current = target.read_text(encoding="utf-8")
             except FileNotFoundError:
                 drift.append("missing " + rel)
                 continue
@@ -895,7 +894,7 @@ def _build_conformant(base):
     for s, _fm, rel in corpus:
         target = claude / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_nbio.read_text_nb(s, encoding="utf-8"), encoding="utf-8")
+        target.write_text(s.read_text(encoding="utf-8"), encoding="utf-8")
 
     pairs = [(s, fm) for s, fm, _ in corpus]
     pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
@@ -933,7 +932,7 @@ def _build_mapped_tree(base, rule_text):
     for s, _fm, rel in corpus:
         target = claude / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_nbio.read_text_nb(s, encoding="utf-8"), encoding="utf-8")
+        target.write_text(s.read_text(encoding="utf-8"), encoding="utf-8")
     pairs = [(s, fm) for s, fm, _ in corpus]
     pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
     (base / "AGENTS.md").write_text(gen_agents.render(pairs), encoding="utf-8")
@@ -1060,7 +1059,7 @@ def self_test_main():
         drifted.mkdir()
         _build_conformant(drifted)
         drift_target = drifted / ".claude" / "rules" / "security" / "SECI-input-validation.md"
-        drift_target.write_text(_nbio.read_text_nb(drift_target, encoding="utf-8") + "\nlocal edit\n", encoding="utf-8")
+        drift_target.write_text(drift_target.read_text(encoding="utf-8") + "\nlocal edit\n", encoding="utf-8")
         code, out = run_capture(drifted)
         if code != 1:
             failures.append("drifted tree expected exit 1, got {}\n{}".format(code, out))
@@ -1077,7 +1076,7 @@ def self_test_main():
             adrift.mkdir()
             _build_conformant(adrift)
             f = adrift / rel
-            f.write_text(_nbio.read_text_nb(f, encoding="utf-8") + "\nlocal edit\n", encoding="utf-8")
+            f.write_text(f.read_text(encoding="utf-8") + "\nlocal edit\n", encoding="utf-8")
             code, out = run_capture(adrift)
             if code != 1 or status_of(out, "C2") != FAIL:
                 failures.append("adapter-drift ({}) expected exit 1 + C2 FAIL:\n{}".format(rel, out))
@@ -1098,9 +1097,9 @@ def self_test_main():
         skill_md_target = Path(*gen_skill.RESERVED_PARTS) / "SKILL.md"
         for label, rel, drifter in (
                 ("skill-md", skill_md_target, lambda f: f.write_text(
-                    _nbio.read_text_nb(f, encoding="utf-8") + "\nlocal edit\n", encoding="utf-8")),
+                    f.read_text(encoding="utf-8") + "\nlocal edit\n", encoding="utf-8")),
                 ("skill-zip", Path(*gen_skill.ZIP_PARTS), lambda f: f.write_bytes(
-                    _nbio.read_bytes_nb(f) + b"\n")),
+                    f.read_bytes() + b"\n")),
         ):
             sdrift = tmp / ("skilldrift-" + label)
             sdrift.mkdir()
@@ -1326,7 +1325,7 @@ def self_test_main():
         _build_conformant(hdrift)
         _build_hooks(hdrift)
         hj = hdrift.joinpath(*gen_hooks.PLUGIN_ROOT_PARTS) / "hooks" / "hooks.json"
-        hj.write_text(_nbio.read_text_nb(hj, encoding="utf-8") + "\n", encoding="utf-8")
+        hj.write_text(hj.read_text(encoding="utf-8") + "\n", encoding="utf-8")
         code, out = run_capture(hdrift)
         if code != 1 or status_of(out, "C5") != FAIL:
             failures.append("drifted hooks.json tree expected exit 1 + C5 FAIL:\n{}".format(out))

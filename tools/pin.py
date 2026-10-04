@@ -42,7 +42,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402  the 9.3 engine: contained fd-bound helpers (open/read/lstat/apply/is_terminal)
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _optlevel  # noqa: E402  level-0 source parse for the docstring check, shared with opf/tools
 
 try:
@@ -184,7 +183,7 @@ def verify_chain(rows):
 def _open_root_fd(root):
     """Open the adopter root fd with O_NOFOLLOW, so a symlinked final root component is refused rather
     than followed off-tree (the migrate.py idiom). Raises OSError, mapped to exit 2 by the caller."""
-    return os.open(str(root), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+    return os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 
 
 def _read_contained_toml(root_fd, relpath):
@@ -455,7 +454,7 @@ def _remove_contained(root, relpath):
 
 def _staged_reader(staged):
     def reader(op):
-        return _nbio.read_bytes_nb(staged / "payload" / op["path"])
+        return (staged / "payload" / op["path"]).read_bytes()
     return reader
 
 
@@ -466,12 +465,12 @@ def _staged_reader(staged):
 def _load_staged_ops(staged):
     """Read <staged>/plan.json {"ops":[...]} plus poststate for every write/create from the staged bytes,
     so the shared apply leg (_journal.apply_ops) can verify the installed digest against the plan."""
-    plan = json.loads(_nbio.read_text_nb(staged / "plan.json", encoding="utf-8"))
+    plan = json.loads((staged / "plan.json").read_text(encoding="utf-8"))
     ops = plan["ops"]
     for op in ops:
         kind = op["op"]
         if kind in ("write", "create"):
-            data = _nbio.read_bytes_nb(staged / "payload" / op["path"])
+            data = (staged / "payload" / op["path"]).read_bytes()
             op["poststate"] = {"kind": "file", "mode": op.get("mode", 0o644),
                                "content-sha256": hashlib.sha256(data).hexdigest()}
         elif kind == "mkdir":
@@ -535,7 +534,7 @@ def _read_release(staged):
     malformed or empty release record is a fail-closed PinError (exit 2), never a pin published over empty
     identity."""
     try:
-        data = tomllib.loads(_nbio.read_text_nb(staged / "release.toml", encoding="utf-8"))
+        data = tomllib.loads((staged / "release.toml").read_text(encoding="utf-8"))
     except RecursionError as exc:
         # tomllib raises RecursionError (a RuntimeError, not a ValueError) on a deeply nested array or inline
         # table, which do_pin's ValueError-family handler would not catch (F-TOML-BARE-VALUEERROR-CLASS).
@@ -596,7 +595,7 @@ def _blocking_open_journal(root, root_fd):
     except (OSError, _journal.JournalError):
         return True
     try:
-        jfd = os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=pfd)
+        jfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
     except OSError:
         _journal._close_fd_yielding(pfd)
         return True
@@ -801,7 +800,7 @@ def _rmtree_contained(pfd, name):
     if not stat.S_ISDIR(st.st_mode):
         os.unlink(name, dir_fd=pfd)
         return
-    dfd = os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=pfd)
+    dfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
     try:
         for child in os.listdir(dfd):
             _rmtree_contained(dfd, child)
@@ -1411,7 +1410,7 @@ def self_test():
         s = _write_staged(tmp / "A" / "s", onop, onpay, rel1, [])
         rc, _ = _run_cli(["pin", "--root", str(a), "--staged", str(s)])
         check("T1a: initial pin exits 0", rc == 0)
-        check("T1a: installed file present", _nbio.read_bytes_nb(a / "aiqt-file") == b"release-1.0.0\n")
+        check("T1a: installed file present", (a / "aiqt-file").read_bytes() == b"release-1.0.0\n")
         check("T14: doctor clean after a real pin (recorded digest == installed)", dr(str(a)) == 0)
         (a / "aiqt-file").write_bytes(b"tampered\n")
         check("T1: doctor FAILs a direct byte mutation of an installed file", dr(str(a)) == 1)
@@ -1441,7 +1440,7 @@ def self_test():
         rc, out = _run_cli(["repin", "--root", str(b), "--staged", str(s2)])
         check("T5: re-pin REFUSES (deferred) exit 2", rc == 2 and "deferred" in out.lower())
         check("T5: a forged marker does NOT advance the pin (file unchanged)",
-              _nbio.read_bytes_nb(b / "aiqt-file") == b"release-1.0.0\n")
+              (b / "aiqt-file").read_bytes() == b"release-1.0.0\n")
         with _RootFd(b) as fd:
             check("T5: still exactly one history row (no re-pin appended)", len(read_history(fd)) == 1)
 
@@ -1511,7 +1510,7 @@ def self_test():
         rc, out = _run_cli(["recover", "--root", str(e)])
         check("roll-forward: recover rolls FORWARD (exit 0, 'FORWARD')", rc == 0 and "forward" in out.lower())
         check("roll-forward: pin + file preserved", (e / PIN_REL).is_file()
-              and _nbio.read_bytes_nb(e / "aiqt-file") == b"release-1.0.0\n")
+              and (e / "aiqt-file").read_bytes() == b"release-1.0.0\n")
         check("roll-forward: doctor clean after roll-forward", dr(str(e)) == 0)
 
         # ---- T9: chain type-coercion + strict schema (synthetic histories) ----
@@ -1548,7 +1547,7 @@ def self_test():
         jb2 = tmp / "JB2" / "txn"; jb2.mkdir(parents=True)
         os.symlink(str(tmp / "JB2" / "nowhere"), str(jb2 / "frames.log"))
         b2_caught = False
-        _jb2jr = os.open(str(jb2.parent), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+        _jb2jr = os.open(str(jb2.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             _journal.is_terminal(_jb2jr, str(jb2))
         except _journal.JournalError:
@@ -1580,7 +1579,7 @@ def self_test():
                   str(_write_staged(tmp / "B3" / "s1", onop, onpay, rel1, []))])
         _run_cli(["un-adopt", "--root", str(b3), "--authorizer", "ops", "--reason", "reverse"])
         _hpb3 = b3 / HISTORY_REL                          # corrupt the INTERIOR pin row (breaks the chain at the tail un-adopt row)
-        _hpb3.write_text(_nbio.read_text_nb(_hpb3).replace('version = "1.0.0"', 'version = "9.9.9"', 1))
+        _hpb3.write_text(_hpb3.read_text().replace('version = "1.0.0"', 'version = "9.9.9"', 1))
         rc_b3, _ = _run_cli(["pin", "--root", str(b3), "--staged",
                              str(_write_staged(tmp / "B3" / "s2", onop, onpay, rel1, []))])
         check("B3: onboarding refuses over a chain-invalid (interior-corrupt) history (exit 2)", rc_b3 == 2)

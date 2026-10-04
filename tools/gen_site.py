@@ -101,7 +101,6 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 # The gensrc registry declaration. Only the pilot page is generated today; later PRs add the other
 # docs/*.md -> site/*.html pairs, each as its own row, so the registry lists every generated page
@@ -720,7 +719,7 @@ def _declared_md_sources():
 def _read(path):
     """UTF-8 read; fail-closed exit 2 on any read error (matches reconcile's fail-closed shape)."""
     try:
-        return _nbio.read_text_nb(path, encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         print("error: cannot read {} ({}); fail-closed".format(path, exc), file=sys.stderr)
         raise SystemExit(2)

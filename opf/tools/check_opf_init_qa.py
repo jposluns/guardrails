@@ -14,7 +14,6 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_emit
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _opf_init_operation as op
 
 
@@ -96,7 +95,7 @@ class InitQA(unittest.TestCase):
                 expected = op.plan_payloads(plan).get(entry["path"])
                 if expected is None:
                     expected = op._expected_views(self.root)[entry["path"]]
-                fd = os.open(src, (os.O_RDONLY) | getattr(os, "O_NONBLOCK", 0), dir_fd=kw["src_dir_fd"])
+                fd = os.open(src, os.O_RDONLY, dir_fd=kw["src_dir_fd"])
                 try:
                     self.assertEqual(os.read(fd, len(expected) + 1), expected)
                 finally:
@@ -191,7 +190,7 @@ class InitQA(unittest.TestCase):
                     result = op.init_operation(root)
                     self.assertEqual(result.status, op.REFUSED, result.primary_failure)
                     self.assertNotIn(group + "-intent", result.phases)
-                    self.assertEqual(_nbio.read_bytes_nb(journal), b"")
+                    self.assertEqual(journal.read_bytes(), b"")
                     self.assertEqual(op._snapshot_all(root), before)
                     self.assertEqual(op._read_plan(root), (ops, raw))
                     current = target.stat()
@@ -269,7 +268,7 @@ class InitQA(unittest.TestCase):
         self.readopt(BI=7)
         path = Path(self.root, op.COUNTERS_RELPATH)
         self.assertEqual(
-            tomllib.loads(_nbio.read_text_nb(path, encoding="utf-8"))["counters"]["BI"], 7
+            tomllib.loads(path.read_text(encoding="utf-8"))["counters"]["BI"], 7
         )
 
     def test_completed_b6_seeded_rerun(self):
@@ -281,7 +280,7 @@ class InitQA(unittest.TestCase):
         # An id allocated ABOVE the seed and then removed is still a deletion.
         counters = Path(self.root, op.COUNTERS_RELPATH)
         index = Path(self.root, op._MACHINE_HOME, "backlog_item.index.toml")
-        seeded, empty = _nbio.read_bytes_nb(counters), _nbio.read_bytes_nb(index)
+        seeded, empty = counters.read_bytes(), index.read_bytes()
         vectors = [
             (8, [8], op.ALREADY_INITIALIZED),   # a valid later allocation
             (9, [9], op.REFUSED),               # BI-8 removed from below the max
@@ -304,7 +303,7 @@ class InitQA(unittest.TestCase):
         # a completed first adoption with BI-2 removed from below the max stays REFUSED.
         self.ready()
         counters = Path(self.root, op.COUNTERS_RELPATH)
-        counters.write_bytes(_nbio.read_bytes_nb(counters).replace(b"BI = 0", b"BI = 3"))
+        counters.write_bytes(counters.read_bytes().replace(b"BI = 0", b"BI = 3"))
         Path(self.root, op._MACHINE_HOME, "backlog_item.index.toml").write_bytes(
             _backlog_items([1, 3]))
         self.assert_rerun(op.REFUSED, "C-NO-DELETION")
@@ -337,7 +336,7 @@ class InitQA(unittest.TestCase):
         self.ready()
         counters = Path(self.root, op.COUNTERS_RELPATH)
         worklog = Path(self.root, op._MACHINE_HOME, "worklog.toml")
-        seeded, empty = _nbio.read_bytes_nb(counters), _nbio.read_bytes_nb(worklog)
+        seeded, empty = counters.read_bytes(), worklog.read_bytes()
         self.assertIn(b"WL = 0", seeded)
         vectors = [
             ([9], "FINDING"),        # WL-8 removed from above the floor, below the max
@@ -359,7 +358,7 @@ class InitQA(unittest.TestCase):
     def test_completed_provenance_bound_to_plan(self):
         self.ready()
         path = Path(self.root, op.PROVENANCE_RELPATH)
-        original = _nbio.read_bytes_nb(path)
+        original = path.read_bytes()
         model = tomllib.loads(original.decode("utf-8"))
         mutations = {
             # R1 #3: grammar-valid, but not the digest of the plan's payloads.
@@ -425,7 +424,7 @@ class InitQA(unittest.TestCase):
         for name, data, check in vectors:
             with self.subTest(name=name):
                 path = Path(self.root, op._MACHINE_HOME, name)
-                original = _nbio.read_bytes_nb(path) if path.exists() else None
+                original = path.read_bytes() if path.exists() else None
                 path.write_bytes(data)
                 try:
                     before = op._snapshot_all(self.root)
@@ -443,7 +442,7 @@ class InitQA(unittest.TestCase):
 
         # A valid later edit and changed HEAD preserve bootstrap provenance.
         path = Path(self.root, op.COUNTERS_RELPATH)
-        path.write_bytes(_nbio.read_bytes_nb(path).replace(b"BI = 0", b"BI = 1"))
+        path.write_bytes(path.read_bytes().replace(b"BI = 0", b"BI = 1"))
         record = {
             "id": "BI-1",
             "type": "backlog_item",

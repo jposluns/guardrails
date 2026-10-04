@@ -472,7 +472,15 @@ def _registered_selftests(root=ROOT):
                 if normalized.ok and normalized.value == member:
                     if tokens[:3] != ["python3", "-I", "-B"]:
                         raise ValueError("unsupported self-test launcher: " + code)
-                    candidates.append(tuple(tokens[3:]))
+                    rest = tokens[3:]
+                    # QA round 8 (claude B2): every registered launch now carries the reviewed
+                    # -X pycache_prefix pair (QA round 7, claude B1, tools/run_all_checks.sh);
+                    # normalize() treats the pair as identity-neutral, so the recovered argv
+                    # drops it too, or every command identity would gain a bogus "-X" first
+                    # argument and the exclusion table would go stale.
+                    if rest[:2] == ["-X", "pycache_prefix=/dev/null/aiqt-pycache"]:
+                        rest = rest[2:]
+                    candidates.append(tuple(rest))
             if not candidates:
                 raise ValueError("cannot recover exact self-test arguments: " + member)
             selected.update(candidates)

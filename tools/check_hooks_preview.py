@@ -80,9 +80,6 @@ import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; the shared readers live beside this file
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
-
 PREVIEW_DIR = ".preview"
 README_NAME = "README.md"
 SUMS_NAME = "SHA256SUMS"
@@ -167,7 +164,7 @@ def _read_required(pdir, name, entries):
     if not stat.S_ISREG(mode):
         raise GateError("{}/{} is not a regular file".format(PREVIEW_DIR, name))
     try:
-        return _nbio.read_bytes_nb(pdir / name)
+        return (pdir / name).read_bytes()
     except OSError as exc:
         raise GateError("cannot read {}/{}: {}".format(PREVIEW_DIR, name, exc))
 
@@ -350,7 +347,7 @@ def leg_integrity(pdir, hooks, rows, sums, findings):
             findings.append("{} is listed but {}/{} is absent (b)".format(name, PREVIEW_DIR, name))
             continue
         try:
-            got = hashlib.sha256(_nbio.read_bytes_nb(pdir / name)).hexdigest()
+            got = hashlib.sha256((pdir / name).read_bytes()).hexdigest()
         except OSError as exc:
             raise GateError("cannot read {}/{}: {}".format(PREVIEW_DIR, name, exc))
         for source, recorded in ((README_NAME, table.get(name)), (SUMS_NAME, sums.get(name))):
@@ -576,7 +573,7 @@ def self_test_main():
         case("missing SHA256SUMS", 2, _build(base / "no-sums", {}, sums=False))
         case("missing integrity table", 2, _build(base / "no-table", {}, readme="# Hooks preview\n"))
         r = _build(base / "bad-row", ok)
-        text = _nbio.read_text_nb(r / PREVIEW_DIR / README_NAME, encoding="utf-8")
+        text = (r / PREVIEW_DIR / README_NAME).read_text(encoding="utf-8")
         (r / PREVIEW_DIR / README_NAME).write_text(
             text.replace("| `clock-inject.py` |", "| clock-inject.py |"), encoding="utf-8")
         case("malformed table row", 2, r)
@@ -667,13 +664,13 @@ def self_test_main():
 
         # 19. a README with CRLF line endings (GitHub splits there too) parses as the LF form -> exit 0.
         r = _build(base / "readme-crlf", ok)
-        text = _nbio.read_text_nb(r / PREVIEW_DIR / README_NAME, encoding="utf-8")
+        text = (r / PREVIEW_DIR / README_NAME).read_text(encoding="utf-8")
         (r / PREVIEW_DIR / README_NAME).write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
         case("README with CRLF line endings", 0, r)
 
         # 20. (b) a table line written without a leading `|` (GitHub still renders it as a row) -> exit 2.
         r = _build(base / "pipeless-row", ok)
-        text = _nbio.read_text_nb(r / PREVIEW_DIR / README_NAME, encoding="utf-8")
+        text = (r / PREVIEW_DIR / README_NAME).read_text(encoding="utf-8")
         phantom = "`missing.py` | `{}` | {}".format("a" * 64, _link("missing.py"))
         row_end = text.index("\n", text.index("| `clock-inject.py` |"))
         (r / PREVIEW_DIR / README_NAME).write_text(
@@ -688,7 +685,7 @@ def self_test_main():
             (r / PREVIEW_DIR / SUMS_NAME).write_bytes(sums_text.replace("\n", ch, 1).encode("utf-8"))
             case("SHA256SUMS line separator U+{:04X}".format(ord(ch)), 2, r, needle="is not a line break")
         r = _build(base / "readme-break", ok)
-        text = _nbio.read_text_nb(r / PREVIEW_DIR / README_NAME, encoding="utf-8")
+        text = (r / PREVIEW_DIR / README_NAME).read_text(encoding="utf-8")
         row_end = text.index("\n", text.index("| `clock-inject.py` |"))
         (r / PREVIEW_DIR / README_NAME).write_text(
             text[:row_end] + " | " + phantom + " |" + text[row_end:], encoding="utf-8")

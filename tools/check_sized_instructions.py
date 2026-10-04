@@ -53,7 +53,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_skill  # noqa: E402  reuse its validated section/meta parsers, never a second skill parser
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 # The three hand-authored condensations and their character caps (wc -m semantics).
 SIZED = (
@@ -120,7 +119,7 @@ def skill_version(root):
     source, a source with no meta section, or a meta with no version key."""
     path = root / SKILL_SRC_REL
     try:
-        text = _nbio.read_text_nb(path, encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise GateError("cannot read {} ({})".format(SKILL_SRC_REL, exc))
     try:
@@ -144,7 +143,7 @@ def _read_text(root, rel):
     let a just-over-cap CRLF condensation read as within its cap; decoding the raw bytes preserves every
     CR so the count matches wc -m."""
     try:
-        return _nbio.read_bytes_nb(root / rel).decode("utf-8")
+        return (root / rel).read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise GateError("cannot read {} ({}); fail-closed".format(rel, exc))
 
@@ -152,7 +151,7 @@ def _read_text(root, rel):
 def _source_hash(root):
     """SHA-256 of the generated source's exact bytes. GateError on an unreadable source."""
     try:
-        return hashlib.sha256(_nbio.read_bytes_nb(root / SOURCE_REL)).hexdigest()
+        return hashlib.sha256((root / SOURCE_REL).read_bytes()).hexdigest()
     except OSError as exc:
         raise GateError("cannot read {} ({}); fail-closed".format(SOURCE_REL, exc))
 
@@ -224,7 +223,7 @@ def run(root, update=False, force=False):
         recorded = ""
         if recorded_path.exists():
             try:
-                recorded = _nbio.read_text_nb(recorded_path, encoding="utf-8").strip()
+                recorded = recorded_path.read_text(encoding="utf-8").strip()
             except (OSError, UnicodeDecodeError) as exc:
                 print("error: cannot read {} ({}); fail-closed".format(RECORDED_REL, exc), file=sys.stderr)
                 return 2
@@ -270,7 +269,7 @@ def run(root, update=False, force=False):
               "check_sized_instructions.py --update; fail-closed".format(RECORDED_REL), file=sys.stderr)
         return 2
     try:
-        recorded = _nbio.read_text_nb(recorded_path, encoding="utf-8").strip()
+        recorded = recorded_path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError) as exc:
         print("error: cannot read {} ({}); fail-closed".format(RECORDED_REL, exc), file=sys.stderr)
         return 2

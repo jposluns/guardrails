@@ -39,7 +39,6 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, read_source_text, reconcile  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -200,7 +199,7 @@ def _parse_entries(block, label):
 def parse_source(path):
     """Read and structure skill-source.md. Raises ValueError on any malformed shape and lets an OSError
     (an unreadable or absent required source) propagate: both become a fail-closed exit 2 in the caller."""
-    text = _nbio.read_text_nb(path, encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
     sections = _split_sections(text)
     missing = [s for s in REQUIRED_SECTIONS if s not in sections]
     if missing:
@@ -465,7 +464,7 @@ def plugin_identity(root):
     as exit 2)."""
     path = root.joinpath(*IDENTITY_MANIFEST_PARTS)
     try:
-        data = tomllib.loads(_nbio.read_text_nb(path, encoding="utf-8"))
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
     except RecursionError as exc:
         # tomllib raises RecursionError (a RuntimeError, not a ValueError) on a deeply nested array or inline
         # table; map it into the ValueError family build_outputs surfaces as exit 2
@@ -524,7 +523,7 @@ def build_outputs(root):
     # are byte-identical by construction; gen_skill --check compares each to disk, so a divergence is caught.
     # The canonical LICENSE is packed into the archive (fail-closed: a missing/unreadable LICENSE raises
     # OSError, which the caller surfaces as exit 2) so the download alone carries the Apache License 2.0.
-    license_text = _nbio.read_text_nb(root.joinpath(*LICENSE_PARTS), encoding="utf-8")
+    license_text = root.joinpath(*LICENSE_PARTS).read_text(encoding="utf-8")
     zip_bytes = render_zip(data, license_text)
     binary = [(root.joinpath(*ZIP_PARTS), zip_bytes),
               (root.joinpath(*ZIP_VERSIONED_PARTS), zip_bytes)]
@@ -555,7 +554,7 @@ def run_gen(root, check):
         return 2
     try:
         for path, content in standalone:
-            current = _nbio.read_text_nb(path, encoding="utf-8") if path.exists() else None
+            current = path.read_text(encoding="utf-8") if path.exists() else None
             if current != content:
                 drift.append(path.relative_to(root).as_posix())
                 if not check:
@@ -564,7 +563,7 @@ def run_gen(root, check):
         # Named binary outputs (the download zip) reconcile on bytes, so a stale or hand-swapped archive
         # is caught by the same drift gate as the text surfaces.
         for path, content in binary:
-            current = _nbio.read_bytes_nb(path) if path.exists() else None
+            current = path.read_bytes() if path.exists() else None
             if current != content:
                 drift.append(path.relative_to(root).as_posix())
                 if not check:
@@ -591,7 +590,7 @@ def run_gen(root, check):
                             stale.unlink()
         for name, content in sorted(reserved_map.items()):
             target = reserved_dir / name
-            current = _nbio.read_text_nb(target, encoding="utf-8") if target.exists() else None
+            current = target.read_text(encoding="utf-8") if target.exists() else None
             if current != content:
                 drift.append((reserved_dir / name).relative_to(root).as_posix())
                 if not check:
@@ -832,7 +831,7 @@ def self_test_main():
         # breaks (Version/Author/Website/GitHub) and NONE on the Licence line. Removing any break (so the
         # header would collapse in a sanitizing viewer) fails here even after regeneration.
         good_md = good.joinpath(*RESERVED_PARTS) / "SKILL.md"
-        hdr_lines = [ln for ln in _nbio.read_text_nb(good_md, encoding="utf-8").splitlines()
+        hdr_lines = [ln for ln in good_md.read_text(encoding="utf-8").splitlines()
                      if ln.split(":", 1)[0] in ("Version", "Author", "Website", "GitHub", "Licence")]
 
         def _two(ln):
@@ -857,7 +856,7 @@ def self_test_main():
         _write_fixture(drifted, good_src)
         capture(drifted, False)  # generate a clean tree first
         skill_md = drifted.joinpath(*RESERVED_PARTS) / "SKILL.md"
-        skill_md.write_text(_nbio.read_text_nb(skill_md, encoding="utf-8") + "\nlocal edit\n", encoding="utf-8")
+        skill_md.write_text(skill_md.read_text(encoding="utf-8") + "\nlocal edit\n", encoding="utf-8")
         code, out = capture(drifted, True)
         if code != 1:
             failures.append("drifted SKILL.md expected --check exit 1, got {}\n{}".format(code, out))

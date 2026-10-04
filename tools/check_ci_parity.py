@@ -218,9 +218,6 @@ import sys
 from collections import namedtuple
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I drops the script dir; the shared readers live beside this file
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
-
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_PATH = ROOT / "tools" / "run_all_checks.sh"
@@ -2605,7 +2602,7 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
             [bash, "--noprofile", "--norc", str(runner)],
             cwd=tmp, env=env, stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=60)
-        calls = _nbio.read_text_nb(log, encoding="utf-8").splitlines()
+        calls = log.read_text(encoding="utf-8").splitlines()
     return proc.returncode, proc.stdout.splitlines(), calls
 
 
@@ -4581,6 +4578,7 @@ def self_test():
     allowed_read_sites = {
         "tools/check_ci_parity.py": {
             ("_naming_scenarios", "splitlines"): 1,
+            ("_run_runner_copy", "read_text"): 1,
             ("_run_runner_copy", "splitlines"): 2,
             ("_shadow_check", "splitlines"): 1,
             ("adapt_standalone_runner", "splitlines"): 1,
@@ -4606,7 +4604,7 @@ def self_test():
     }
     for relative, allowed in sorted(allowed_read_sites.items()):
         got_sites = _read_api_sites(
-            ast.parse(_nbio.read_bytes_nb(ROOT / relative).decode("utf-8")))
+            ast.parse((ROOT / relative).read_bytes().decode("utf-8")))
         if got_sites != allowed:
             failures.append(
                 "29 {}: read-API sites drifted from the reviewed "
@@ -4969,6 +4967,61 @@ def self_test():
         failures.append("32f an unreviewed -X value must be cannot-evaluate, got "
                         "{!r}".format(rogue_x))
 
+    # QA round 8 (codex 7 = claude M1): DUPLICATE keys at every modelled level, and a value this
+    # parse cannot read on a modelled line (a multi-line quoted scalar, a tag, a flow mapping on
+    # a repeated jobs: key, an anchor inside a with: entry), are refusals: each form below made
+    # the round-7 guard and the YAML engine read DIFFERENT workflows (the guard credited a
+    # precheck step the YAML did not have). Each vector fails without the round-8 change.
+    count += 1
+    swallowing_job = "\n".join((
+        "name: Quality",
+        "jobs:",
+        "  staleness:",
+        "    name: 'Offline staleness audit",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - name: Special-file precheck",
+        "        run: |",
+        "          " + bootstrap_tools,
+        "          python3 -I -B tools/_gen_common.py --precheck",
+        "      - name: end'",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - name: Unchecked read",
+        "        run: cat README.md",
+    )) + "\n"
+    for label, code_name, mutated_fixture in (
+        ("multi-line quoted job-level scalar swallowing the steps", "job-key", swallowing_job),
+        ("duplicate steps key in a job", "job-key",
+         order_fixture + "    steps:\n      - uses: actions/checkout@v4\n"
+         "      - name: Unchecked read\n        run: cat README.md\n"),
+        ("flow mapping on a repeated top-level jobs key", "workflow-key",
+         order_fixture + "jobs: " + chr(123) + "evil: " + chr(123)
+         + "runs-on: ubuntu-latest, steps: [" + chr(123) + "uses: actions/checkout@v4"
+         + chr(125) + ", " + chr(123) + "run: cat README.md" + chr(125) + "]" + chr(125)
+         + chr(125) + "\n"),
+        ("tagged flow sequence on a repeated steps key", "job-key",
+         order_fixture + "    steps: !!seq [" + chr(123) + "uses: actions/checkout@v4"
+         + chr(125) + "]\n"),
+        ("anchor inside a setup-python with entry", "step-key",
+         order_fixture.replace(
+             "      - uses: actions/setup-python@v5\n",
+             "      - uses: actions/setup-python@v5\n        with:\n"
+             "          python-version: &version '3.14'\n", 1)),
+        ("duplicate run key in one step", "step-key",
+         order_fixture.replace(
+             "      - name: A gate\n        run: python3 -I -B tools/a.py\n",
+             "      - name: A gate\n        run: python3 -I -B tools/a.py\n"
+             "        run: python3 -I -B tools/a.py\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
+            failures.append("32g duplicate or unreadable YAML structure not refused ({}): "
+                            "{!r} {!r}".format(label, got_problems, got_diagnostics))
+
     # codex round-4 finding 4: a workflows directory path no path call accepts (an embedded NUL) is a
     # read-error diagnostic, never a raw ValueError. Fails without the (OSError, ValueError) arm.
     count += 1
@@ -5018,6 +5071,30 @@ WORKFLOW_LEVEL_KEYS = ("jobs", "name", "on", "permissions")
 JOB_LEVEL_KEYS = ("name", "runs-on", "steps", "strategy")
 
 
+def _unmodelled_value(value):
+    """A reason string when a modelled mapping line's VALUE carries YAML this parse cannot read
+    (QA round 8, codex 7 = claude M1), else None: an anchor or alias, a tag, a flow collection,
+    a block scalar, or a quoted scalar that is not CLOSED on its own line (a multi-line quoted
+    scalar swallows the following lines, so this parse and the YAML engine would read DIFFERENT
+    steps; the round-7 guard credited a precheck step the YAML did not have). An empty value (a
+    bare block-mapping key) is modelled."""
+    value = value.strip()
+    if not value:
+        return None
+    head = value[0]
+    if head in ("&", "*"):
+        return "a YAML anchor or alias"
+    if head == "!":
+        return "a YAML tag"
+    if head in (chr(91), chr(123)):
+        return "a flow-style collection"
+    if head in ("|", ">"):
+        return "a block scalar"
+    if head in ("'", chr(34)) and not (len(value) >= 2 and value.endswith(head)):
+        return "a quoted scalar that is not closed on its own line"
+    return None
+
+
 def workflow_precheck_order_problems(text, source):
     """(problems, diagnostics) for ONE workflow file (D-400-SPECIAL-FILE-PRECHECK order): every job
     must carry the canonical special-file precheck step (PRECHECK_STEP_RUN_LINES, exactly those run
@@ -5050,6 +5127,9 @@ def workflow_precheck_order_problems(text, source):
     by PRECHECK_STEP_RUN_LINES."""
     problems, diagnostics = [], []
     jobs = {}
+    workflow_keys = set()
+    job_keys = set()
+    mapping_keys = set()
     run_line_numbers = set()
     in_jobs = False
     in_steps = False
@@ -5091,6 +5171,30 @@ def workflow_precheck_order_problems(text, source):
                     "plain spellings of {} are modelled, and anything else (an env: or defaults: "
                     "above all) can neuter the precheck step without touching its run "
                     "body".format(stripped, ", ".join(WORKFLOW_LEVEL_KEYS))))
+            else:
+                # QA round 8 (codex 7 = claude M1): a DUPLICATE workflow-level key, or a value on
+                # jobs:, can carry whole jobs this parse never sees (a repeated jobs: re-opens the
+                # mapping, and a flow value holds them on the key line), so both are refusals, and
+                # every other modelled key's value must be one this parse can read.
+                if key in workflow_keys:
+                    diagnostics.append(_diagnostic(
+                        source, number, "workflow-key",
+                        "duplicate workflow-level key {!r}; a repeated YAML key re-opens a "
+                        "mapping this parse has already read, so the parse and the YAML engine "
+                        "would read different workflows".format(stripped)))
+                workflow_keys.add(key)
+                if key == "jobs" and stripped != "jobs:":
+                    diagnostics.append(_diagnostic(
+                        source, number, "workflow-key",
+                        "jobs: must be the bare block-mapping key; a value there ({!r}) can "
+                        "carry whole jobs this parse cannot see".format(stripped)))
+                elif key != "jobs":
+                    reason = _unmodelled_value(stripped.split(":", 1)[1])
+                    if reason is not None:
+                        diagnostics.append(_diagnostic(
+                            source, number, "workflow-key",
+                            "workflow-level key {!r} carries {}, which this parse cannot "
+                            "read".format(stripped, reason)))
             index += 1
             continue
         if not in_jobs:
@@ -5106,6 +5210,7 @@ def workflow_precheck_order_problems(text, source):
                     "duplicate job id {!r}; a repeated YAML key re-opens a job this parse has "
                     "already ordered".format(current_job)))
             jobs[current_job] = []
+            job_keys = set()
             in_steps = False
             step = None
             index += 1
@@ -5113,10 +5218,9 @@ def workflow_precheck_order_problems(text, source):
         if indent < 4:
             # QA round 7 (codex M2 = claude M1): inside jobs:, EVERY line above the job-content
             # indent must be a canonical plain job id ([A-Za-z0-9_-]+: with nothing after the
-            # colon). A quoted or spaced id ("evil":, evil :), a flow-style job mapping
-            # (evil: {runs-on: ...}), an anchor (evil: &a), an alias (evil2: *a) or a merge key
-            # could carry a WHOLE JOB this parse cannot see; such a line is refused here, never
-            # skipped and never credited to the previous job.
+            # colon). A quoted or spaced id, a flow-style job mapping, an anchor, an alias or a
+            # merge key could carry a WHOLE JOB this parse cannot see; such a line is refused
+            # here, never skipped and never credited to the previous job.
             diagnostics.append(_diagnostic(
                 source, number, "job-id",
                 "unrecognized line at job level: {!r}; only the plain canonical job-id "
@@ -5147,32 +5251,53 @@ def workflow_precheck_order_problems(text, source):
                     "its precheck step without touching the step's run "
                     "body".format(stripped, ", ".join(JOB_LEVEL_KEYS))))
             else:
-                # QA round 7 (codex M2 = claude M1): an anchor, alias or flow-style value on a
-                # modelled job-level key can define or reference structure this parse cannot
-                # see (an anchored mapping aliased elsewhere above all); refused, never
-                # consumed silently.
-                value = stripped.split(":", 1)[1].strip()
-                if value[:1] in ("&", "*") or value[:1] in ("[",) or value.startswith(chr(123)):
+                # QA round 7 (codex M2 = claude M1) and QA round 8 (codex 7 = claude M1): a
+                # DUPLICATE job-level key re-opens a mapping this parse has already read (the
+                # YAML engine keeps ONE of two steps: blocks while this parse reads both), and
+                # an anchor, alias, tag, flow value, block scalar or unclosed quoted scalar on a
+                # modelled job-level key can define, reference or swallow structure this parse
+                # cannot see; each is refused, never consumed silently.
+                if key in job_keys:
                     diagnostics.append(_diagnostic(
                         source, number, "job-key",
-                        "job-level key {!r} carries a YAML anchor, alias or flow-style value, "
-                        "which can carry structure this parse cannot see".format(stripped)))
+                        "duplicate job-level key {!r}; a repeated YAML key re-opens a mapping "
+                        "this parse has already read, so the parse and the YAML engine would "
+                        "read different steps".format(stripped)))
+                job_keys.add(key)
+                reason = _unmodelled_value(stripped.split(":", 1)[1])
+                if reason is not None:
+                    diagnostics.append(_diagnostic(
+                        source, number, "job-key",
+                        "job-level key {!r} carries {}, which can carry structure this parse "
+                        "cannot see".format(stripped, reason)))
             index += 1
             continue
         if not in_steps:
             index += 1
             continue
         if indent == 6 and stripped.startswith("- "):
-            step = dict(uses=None, run=[], env=[], withs=[], line=number)
+            step = dict(uses=None, run=[], env=[], withs=[], keys=set(), line=number)
             mapping = None
             jobs[current_job].append(step)
             item = stripped[2:]
             if item.startswith("uses:"):
                 step["uses"] = item[5:].strip()
+                step["keys"].add("uses")
             elif not (item.startswith("name:") and item[5:].strip()):
                 diagnostics.append(_diagnostic(
                     source, number, "step-shape",
                     "step must begin with a non-empty name: or uses:"))
+            else:
+                step["keys"].add("name")
+            # QA round 8 (codex 7 = claude M1): an unclosed quoted scalar (or an anchor, alias,
+            # tag or flow value) on the step's first key can swallow or redefine the following
+            # lines, so the parse and the YAML engine would read different steps.
+            reason = _unmodelled_value(item.split(":", 1)[1] if ":" in item else "")
+            if reason is not None:
+                diagnostics.append(_diagnostic(
+                    source, number, "step-key",
+                    "step line {!r} carries {}, which this parse cannot read".format(
+                        stripped, reason)))
             index += 1
             continue
         if step is None:
@@ -5183,14 +5308,43 @@ def workflow_precheck_order_problems(text, source):
             continue
         if indent == 8 and stripped in ("env:", "with:"):
             mapping = stripped[:-1]
+            # QA round 8 (codex 7 = claude M1): a duplicate step key re-opens a mapping this
+            # parse has already read; the parse and the YAML engine would read different steps.
+            if mapping in step["keys"]:
+                diagnostics.append(_diagnostic(
+                    source, number, "step-key",
+                    "duplicate step key {!r} in one step; a repeated YAML key re-opens a "
+                    "mapping this parse has already read".format(stripped)))
+            step["keys"].add(mapping)
+            mapping_keys = set()
             index += 1
             continue
         if indent == 8 and stripped.startswith("uses:"):
+            if "uses" in step["keys"]:
+                diagnostics.append(_diagnostic(
+                    source, number, "step-key",
+                    "duplicate step key {!r} in one step; a repeated YAML key re-opens a "
+                    "mapping this parse has already read".format(stripped)))
+            step["keys"].add("uses")
             step["uses"] = stripped[5:].strip()
+            reason = _unmodelled_value(stripped[5:])
+            if reason is not None:
+                diagnostics.append(_diagnostic(
+                    source, number, "step-key",
+                    "step line {!r} carries {}, which this parse cannot read".format(
+                        stripped, reason)))
             mapping = None
             index += 1
             continue
         if indent == 8 and stripped.startswith("run:"):
+            # QA round 8 (codex 7 = claude M1): a repeated run: makes this parse read BOTH
+            # bodies as one list while the YAML engine keeps only one of them.
+            if "run" in step["keys"]:
+                diagnostics.append(_diagnostic(
+                    source, number, "step-key",
+                    "duplicate step key {!r} in one step; a repeated YAML key re-opens a "
+                    "mapping this parse has already read".format(stripped)))
+            step["keys"].add("run")
             mapping = None
             value = stripped[4:].strip()
             if value in ("|", "|-", "|+"):
@@ -5212,11 +5366,33 @@ def workflow_precheck_order_problems(text, source):
                     "run: must carry a plain scalar or a literal block"))
                 index += 1
                 continue
+            reason = _unmodelled_value(value)
+            if reason is not None:
+                diagnostics.append(_diagnostic(
+                    source, number, "step-key",
+                    "run: value {!r} carries {}, which this parse cannot read".format(
+                        value, reason)))
             step["run"].append(value)
             run_line_numbers.add(number)
             index += 1
             continue
         if indent >= 10 and mapping is not None:
+            # QA round 7 (claude m-a, m-c) and QA round 8 (codex 7): with: entries are collected
+            # for the setup-python allowlist below; a duplicate entry key, or a value this parse
+            # cannot read (an anchor on a setup-python input above all), is refused at the entry.
+            entry_key = stripped.split(":", 1)[0].strip()
+            if entry_key in mapping_keys:
+                diagnostics.append(_diagnostic(
+                    source, number, "step-key",
+                    "duplicate {} entry {!r}; a repeated YAML key re-opens a mapping this "
+                    "parse has already read".format(mapping, stripped)))
+            mapping_keys.add(entry_key)
+            reason = _unmodelled_value(stripped.split(":", 1)[1] if ":" in stripped else "")
+            if reason is not None:
+                diagnostics.append(_diagnostic(
+                    source, number, "step-key",
+                    "{} entry {!r} carries {}, which this parse cannot read".format(
+                        mapping, stripped, reason)))
             if mapping == "with":
                 step["withs"].append((number, stripped))
             if mapping == "env":

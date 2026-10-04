@@ -577,7 +577,7 @@ def _list_contained(root_fd, reldir):
         raise StoreError("cannot open the parent of {} ({})".format(reldir, exc))
     try:
         try:
-            dfd = os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=pfd)
+            dfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
         except FileNotFoundError:
             return None, None
         except NotADirectoryError as exc:
@@ -3954,7 +3954,7 @@ def self_test():
                     tail += "/backlog_item.index.toml"
                 sroot = build(clean_machine(),
                               working={"{}/{}/{}".format(root_kind, RUNID, tail): idx([bi(1, "open")])})
-                sfd = os.open(str(sroot), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+                sfd = os.open(str(sroot), os.O_RDONLY | os.O_DIRECTORY)
                 try:
                     srep = _Report()
                     srep.ran("C-ID-SPACE")
@@ -4711,7 +4711,7 @@ def self_test():
         # only the os.stat leg was wrapped. Exercised by forcing os.listdir to raise over a real dir fd. ---
         _s1_dir = base / "s1-listdir"
         (_s1_dir / "sub").mkdir(parents=True)
-        _s1_fd = os.open(str(_s1_dir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _s1_fd = os.open(str(_s1_dir), os.O_RDONLY | os.O_DIRECTORY)
         _s1_orig_listdir = os.listdir
 
         def _s1_boom_listdir(*_a, **_k):
@@ -4739,7 +4739,7 @@ def self_test():
         _s1c_dir = base / "s1-close"
         (_s1c_dir / "sub" / "child").mkdir(parents=True)
         (_s1c_dir / "sub" / "afile").write_text("x\n", encoding="utf-8")
-        _s1c_fd = os.open(str(_s1c_dir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _s1c_fd = os.open(str(_s1c_dir), os.O_RDONLY | os.O_DIRECTORY)
         _s1c_real_close = os.close
 
         def _s1c_boom_close(fd):
@@ -4821,8 +4821,8 @@ def self_test():
 
         def _q_vector(helper, err):
             """The failed tags of one V1 run of `helper` (empty: green)."""
-            fd = os.open(str(_q_dir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
-            other = os.open(str(_q_dir / "other"), (os.O_RDONLY) | getattr(os, "O_NONBLOCK", 0))
+            fd = os.open(str(_q_dir), os.O_RDONLY | os.O_DIRECTORY)
+            other = os.open(str(_q_dir / "other"), os.O_RDONLY)
             want = _q_real_fstat(other)
             seen = {"closes": 0, "probes": 0, "fired": False}
 

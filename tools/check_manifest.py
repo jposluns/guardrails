@@ -48,7 +48,6 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, read_source_bytes, reconcile, precheck_special_files  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import gen_manifest  # noqa: E402  reuse the validated loader/expansion; recompute, never trust output
 
 _OPF_TOOLS = str(Path(__file__).resolve().parent.parent / "opf" / "tools")
@@ -657,7 +656,7 @@ def _self_test_main_isolated():
         #      absent tracked member. A mutant deleting the leg-5 set-equality loops then makes this
         #      fixture PASS, proving leg 5 is what catches the drop.
         m = _fresh("missrow")
-        text = _nbio.read_text_nb(m / gm.MANIFEST_REL, encoding="utf-8")
+        text = (m / gm.MANIFEST_REL).read_text(encoding="utf-8")
         block = '[[sources]]\npath = "src.txt"\n'
         idx = text.find(block)
         end = text.find("\n\n", idx)
@@ -668,7 +667,7 @@ def _self_test_main_isolated():
         m_text = m_text.replace('tree-sha256 = "{}"'.format(parsed["tree-sha256"]),
                                 'tree-sha256 = "{}"'.format(tree))
         (m / gm.MANIFEST_REL).write_text(m_text, encoding="utf-8")
-        manifest_raw = _nbio.read_bytes_nb(m / gm.MANIFEST_REL)
+        manifest_raw = (m / gm.MANIFEST_REL).read_bytes()
         root_hex = hashlib.sha256(manifest_raw).hexdigest()
         (m / gm.ROOT_REL).write_text("sha256:{}\n".format(root_hex), encoding="utf-8")
         version = gm.read_version(m)
@@ -737,13 +736,13 @@ def _self_test_main_isolated():
         # (g) managed-block digest drift with unchanged surroundings -> exit 1; a surroundings-only change
         #     with an unchanged block still passes.
         mb = _fresh("mblock")
-        raw = _nbio.read_text_nb(mb / "CLAUDE.md", encoding="utf-8")
+        raw = (mb / "CLAUDE.md").read_text(encoding="utf-8")
         drifted = raw.replace("index", "INDEX-CHANGED")  # inside the block
         (mb / "CLAUDE.md").write_text(drifted, encoding="utf-8")
         if check_quiet(mb) != 1:
             failures.append("a managed-block digest drift expected exit 1")
         mb2 = _fresh("mblock2")
-        raw2 = _nbio.read_text_nb(mb2 / "CLAUDE.md", encoding="utf-8")
+        raw2 = (mb2 / "CLAUDE.md").read_text(encoding="utf-8")
         (mb2 / "CLAUDE.md").write_text(raw2.replace("tail", "tail changed outside the block"),
                                        encoding="utf-8")
         if check_quiet(mb2) != 0:
@@ -859,7 +858,7 @@ def _self_test_main_isolated():
                     got = exc.code
             if got != 2:
                 failures.append("reconcile on {} expected exit 2 (refused), got {!r}".format(label, got))
-        if _nbio.read_text_nb(rdir / "real.toml", encoding="utf-8") != "same\n":
+        if (rdir / "real.toml").read_text(encoding="utf-8") != "same\n":
             failures.append("reconcile wrote through a symlinked target")
 
         # (o) D-400-SPECIAL-FILE-PRECHECK item 6: with a FIFO (no writer) at any path of the tree, each of these
@@ -888,7 +887,7 @@ def _self_test_main_isolated():
                      ["conformance.py"], ["check_versions.py"], ["check_byte_canon.py"])
             for rel in ("tools/gen_agents.py", ".claude/rules/aiqt/00-project-integrity.md", "CLAUDE.md",
                         ".aiqt/manifest.toml", ".aiqt/standards/atlas.toml", "VERSION"):
-                saved = _nbio.read_bytes_nb(tree / rel)
+                saved = (tree / rel).read_bytes()
                 (tree / rel).unlink()
                 os.mkfifo(tree / rel)
                 try:
@@ -933,8 +932,8 @@ def _self_test_main_isolated():
         # (q) The OPF copy of the precheck (opf/tools/_containment.py) stays identical to _gen_common's, and a
         #     one-token change to the copy is caught.
         here = Path(__file__).resolve().parents[1]
-        gen_text = _nbio.read_text_nb(here / "tools" / "_gen_common.py", encoding="utf-8")
-        opf_text = _nbio.read_text_nb(here / "opf" / "tools" / "_containment.py", encoding="utf-8")
+        gen_text = (here / "tools" / "_gen_common.py").read_text(encoding="utf-8")
+        opf_text = (here / "opf" / "tools" / "_containment.py").read_text(encoding="utf-8")
         problems = _precheck_copies_problems(gen_text, opf_text)
         if problems:
             failures.append("D-400-SPECIAL-FILE-PRECHECK: the two precheck copies differ: {}".format(
@@ -1005,8 +1004,8 @@ def _self_test_main_isolated():
         #     they pin. POSIX only (os.mkfifo).
         if hasattr(os, "mkfifo"):
             _entry_src = dict(
-                gen=_nbio.read_bytes_nb(here / "tools" / "_gen_common.py"),
-                opf=_nbio.read_bytes_nb(here / "opf" / "tools" / "_containment.py"))
+                gen=(here / "tools" / "_gen_common.py").read_bytes(),
+                opf=(here / "opf" / "tools" / "_containment.py").read_bytes())
 
             def _mini_tree(name):
                 base = tmp / ("precheck-entry-" + name)

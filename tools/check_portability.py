@@ -81,7 +81,6 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_leaks import _tokens, ngram_forms  # noqa: E402  reuse the leak gate's n-gram normalization
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 
@@ -489,7 +488,7 @@ def load_identity(root):
     cannot be read must never scan as an empty deny."""
     path = root / IDENTITY_MANIFEST
     try:
-        with _nbio.open_nb(path, "rb") as handle:
+        with open(path, "rb") as handle:
             data = tomllib.load(handle)
     except OSError as exc:
         raise GateError("cannot read the identity source {} ({})".format(IDENTITY_MANIFEST, exc))
@@ -685,7 +684,7 @@ def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open
                         "binary allow-list) (portability C3)".format(rel, path.suffix))
         return findings
     try:
-        text = _nbio.read_text_nb(path, encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         findings.append("{}: shipped text file is not valid UTF-8 and is not on the binary allow-list "
                         "(portability C3)".format(rel))

@@ -26,7 +26,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 # The source of truth and the render target, repo-root-relative.
 SOURCE_REL = "tools/check_secrets.py"
@@ -126,7 +125,7 @@ def run(root, check):
     target = root / TARGET_REL
     try:
         patterns = _load_check_secrets(root)
-        current = _nbio.read_text_nb(target, encoding="utf-8")
+        current = target.read_text(encoding="utf-8")
         region = render_region(patterns)
         desired = _splice(current, region)
     except (OSError, ValueError, ImportError) as exc:

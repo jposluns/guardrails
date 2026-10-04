@@ -80,7 +80,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal          # noqa: E402  contained (dir-fd, no-follow) readers + JournalError + containment probe
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _opf_store        # noqa: E402  store resolution + discovery + manifest base/profile schema
 import _opf_schema       # noqa: E402  record envelope + baseline type schemas + status parsing + id shape
 import _opf_worklog      # noqa: E402  manifest-selected ledger intake
@@ -2233,7 +2232,7 @@ def self_test():
         from _opf_emit import run_bounded
         _fifo_dir = base / "fifo-src"; _fifo_dir.mkdir()
         os.mkfifo(str(_fifo_dir / "blk.index.toml"))
-        _ffd = os.open(str(_fifo_dir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _ffd = os.open(str(_fifo_dir), os.O_RDONLY | os.O_DIRECTORY)
         # G (self-test-discrimination): the LOCAL pre-open S_ISREG guard in _read_raw_and_parsed, not the
         # hardened downstream _journal._read_contained (which ALSO refuses a non-regular file with an
         # identical "not a regular file" diagnostic), must be what refuses the FIFO. Record whether the
@@ -2262,7 +2261,7 @@ def self_test():
         _slp = base / "symparent"; _slp.mkdir(); (_slp / "real").mkdir()
         (_slp / "real" / "x.index.toml").write_text("schema = 1\n", encoding="utf-8")
         (_slp / "toml").symlink_to("real")
-        _spfd = os.open(str(_slp), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _spfd = os.open(str(_slp), os.O_RDONLY | os.O_DIRECTORY)
         try:
             _read_raw_and_parsed(_spfd, "toml/x.index.toml")
             _sp_ok = False
@@ -2295,7 +2294,7 @@ def self_test():
         # the write gate is not consulted; the failure is at the parent walk, before any write.
         _wslp = base / "wsymparent"; _wslp.mkdir(); (_wslp / "real").mkdir()
         (_wslp / "toml").symlink_to("real")
-        _wspfd = os.open(str(_wslp), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _wspfd = os.open(str(_wslp), os.O_RDONLY | os.O_DIRECTORY)
         try:
             _write_contained(_wspfd, "toml/TODO.md", "x\n", True)
             _wsp_ok = False
@@ -2316,14 +2315,14 @@ def self_test():
         _f4dir = base / "f4-hardlink-swap"; _f4dir.mkdir()
         _f4victim = _f4dir / "victim"; _f4victim.write_text("VICTIM-INTACT", encoding="utf-8")
         os.link(str(_f4victim), str(_f4dir / "TODO.md"))   # destination is a hardlink to the victim inode
-        _f4fd = os.open(str(_f4dir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _f4fd = os.open(str(_f4dir), os.O_RDONLY | os.O_DIRECTORY)
         try:
             _write_contained(_f4fd, "TODO.md", "NEW-VIEW-CONTENT\n", False)   # real write (gate composed)
         finally:
             os.close(_f4fd)
-        check("write-hardlink-swap-victim-intact", _nbio.read_text_nb(_f4victim, encoding="utf-8") == "VICTIM-INTACT")
+        check("write-hardlink-swap-victim-intact", _f4victim.read_text(encoding="utf-8") == "VICTIM-INTACT")
         check("write-hardlink-swap-dest-updated",
-              _nbio.read_text_nb(_f4dir / "TODO.md", encoding="utf-8") == "NEW-VIEW-CONTENT\n")
+              (_f4dir / "TODO.md").read_text(encoding="utf-8") == "NEW-VIEW-CONTENT\n")
         # F(unique-temp): the write temp uses a UNIQUE, exclusively-created name, never a FIXED
         # ".{name}.opf-tmp" it would unconditionally unlink on collision -- which, under concurrency, is
         # ANOTHER live call's temp. Plant a file at the OLD fixed temp name and confirm a write leaves it
@@ -2333,15 +2332,15 @@ def self_test():
         (_utdir / "TODO.md").write_text("OLD\n", encoding="utf-8")
         _utplanted = _utdir / ".TODO.md.opf-tmp"
         _utplanted.write_text("ANOTHER-CALLERS-TEMP", encoding="utf-8")
-        _utfd = os.open(str(_utdir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _utfd = os.open(str(_utdir), os.O_RDONLY | os.O_DIRECTORY)
         try:
             _write_contained(_utfd, "TODO.md", "NEW\n", False)
         finally:
             os.close(_utfd)
         check("write-unique-temp-does-not-clobber-fixed-name",
-              _utplanted.exists() and _nbio.read_text_nb(_utplanted, encoding="utf-8") == "ANOTHER-CALLERS-TEMP")
+              _utplanted.exists() and _utplanted.read_text(encoding="utf-8") == "ANOTHER-CALLERS-TEMP")
         check("write-unique-temp-dest-updated",
-              _nbio.read_text_nb(_utdir / "TODO.md", encoding="utf-8") == "NEW\n")
+              (_utdir / "TODO.md").read_text(encoding="utf-8") == "NEW\n")
         # F(temp-cleanup): a failure DURING the temp-file lifetime (fchmod / write / fsync), BEFORE the atomic
         # rename, must leave NO temp behind and must re-raise the ORIGINAL error unmasked. Inject an ENOSPC
         # mid-write; post-fix the descriptor-relative unlink removes the orphan while the ViewsError-mapped
@@ -2349,7 +2348,7 @@ def self_test():
         # no-temp-leak assertion flips red.
         _tcdir = base / "temp-cleanup"; _tcdir.mkdir()
         (_tcdir / "TODO.md").write_text("OLD\n", encoding="utf-8")
-        _tcfd = os.open(str(_tcdir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _tcfd = os.open(str(_tcdir), os.O_RDONLY | os.O_DIRECTORY)
         _tc_orig_write_all = _journal._write_all
         _journal._write_all = lambda fd, data: (_ for _ in ()).throw(OSError(28, "No space left on device"))
         _tc_err = None
@@ -2371,14 +2370,14 @@ def self_test():
         _mpdir = base / "mode-preserve"; _mpdir.mkdir()
         _mpview = _mpdir / "TODO.md"; _mpview.write_text("OLD\n", encoding="utf-8")
         os.chmod(str(_mpview), 0o600)
-        _mpfd = os.open(str(_mpdir), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        _mpfd = os.open(str(_mpdir), os.O_RDONLY | os.O_DIRECTORY)
         try:
             _write_contained(_mpfd, "TODO.md", "NEW\n", False)
         finally:
             os.close(_mpfd)
         check("write-preserves-existing-restrictive-mode",
               stat.S_IMODE(os.stat(str(_mpview)).st_mode) == 0o600
-              and _nbio.read_text_nb(_mpview, encoding="utf-8") == "NEW\n")
+              and _mpview.read_text(encoding="utf-8") == "NEW\n")
         # The positive mapping DISCRIMINATES the regex/baseline lookup: backlog_item IS a baseline type, so a
         # broken regex or baseline lookup flips it from "backlog_item" to None.
         check("mirror-type-resolves-record-type", _mirror_type("BACKLOG_ITEM-INDEX.md") == "backlog_item")
@@ -3131,14 +3130,14 @@ def self_test():
         # Write mode renders cleanly, then --check is clean (a byte-stable re-render).
         check("populated-write-ok", render_write(root) == EXIT_OK)
         check("populated-check-clean", render(["--root", str(root), "--check"]) == EXIT_OK)
-        _wl_on_disk = tomllib.loads(_nbio.read_text_nb(root / WORKING_DIRNAME / "toml" / "worklog.toml", encoding="utf-8"))
-        _ver_on_disk = tomllib.loads(_nbio.read_text_nb(root / WORKING_DIRNAME / "toml" / "version.toml", encoding="utf-8"))
+        _wl_on_disk = tomllib.loads((root / WORKING_DIRNAME / "toml" / "worklog.toml").read_text(encoding="utf-8"))
+        _ver_on_disk = tomllib.loads((root / WORKING_DIRNAME / "toml" / "version.toml").read_text(encoding="utf-8"))
         check("coverage-digest-reconciles-worklog",
               _opf_release.coverage_digest(_wl_on_disk.get("entry", []))
               == _ver_on_disk["release"][0]["coverage_digest"])
 
         def read_view(name):
-            return _nbio.read_text_nb(root / WORKING_DIRNAME / name, encoding="utf-8")
+            return (root / WORKING_DIRNAME / name).read_text(encoding="utf-8")
 
         todo = read_view("TODO.md")
         check("join-block-hides-active-block", "BI-2" not in todo)
@@ -3222,7 +3221,7 @@ def self_test():
         for gname, gbody in sorted(goldens.items()):
             check("golden-body-" + gname, body_of(read_view(gname)) == gbody)
         check("golden-version-file-bytes",
-              _nbio.read_text_nb(root / "VERSION", encoding="utf-8") == "1.3.0\n")
+              (root / "VERSION").read_text(encoding="utf-8") == "1.3.0\n")
 
         # Retained substring checks (redundant with the goldens, kept as readable anchors).
         backlog = read_view("BACKLOG.md")
@@ -3303,7 +3302,7 @@ def self_test():
         check("findings-group-status", "## open" in findings and "## fixed" in findings)
         handoff = read_view("HANDOFF.md")
         check("handoff-current-first", handoff.index("HO-2") < handoff.index("## Superseded"))
-        version_file = _nbio.read_text_nb(root / "VERSION", encoding="utf-8")
+        version_file = (root / "VERSION").read_text(encoding="utf-8")
         check("version-file-exact-bytes", version_file == "1.3.0\n")
         check("version-file-no-header", not version_file.startswith("<!--"))
         mirror = read_view("BACKLOG_ITEM-INDEX.md")
@@ -3329,15 +3328,15 @@ def self_test():
             'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
         ]) + "\n")
         check("empty-write-ok", render_write(eroot) == EXIT_OK)
-        etodo = _nbio.read_text_nb(eroot / WORKING_DIRNAME / "TODO.md", encoding="utf-8")
+        etodo = (eroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
         check("empty-todo-valid-empty", _EMPTY in etodo and etodo.startswith("<!-- GENERATED"))
-        check("empty-store-version-bytes", _nbio.read_text_nb(eroot / "VERSION", encoding="utf-8") == "0.1.0\n")
+        check("empty-store-version-bytes", (eroot / "VERSION").read_text(encoding="utf-8") == "0.1.0\n")
         # The new 1.1.0 views render over EMPTY indexes too (the NOW scaffold ships empty indexes): the empty
         # CONTRIBUTIONS.md carries the empty marker under a group, and the empty DECISIONS.toml is a valid,
         # reparsing projection with empty arrays and an empty derived join.
-        econtrib = _nbio.read_text_nb(eroot / WORKING_DIRNAME / "CONTRIBUTIONS.md", encoding="utf-8")
+        econtrib = (eroot / WORKING_DIRNAME / "CONTRIBUTIONS.md").read_text(encoding="utf-8")
         check("empty-contributions-valid-empty", _EMPTY in econtrib and econtrib.startswith("<!-- GENERATED"))
-        edtoml = _nbio.read_text_nb(eroot / WORKING_DIRNAME / "DECISIONS.toml", encoding="utf-8")
+        edtoml = (eroot / WORKING_DIRNAME / "DECISIONS.toml").read_text(encoding="utf-8")
         check("empty-projection-is-toml-comment", edtoml.startswith("# GENERATED by opf render"))
         _epe = tomllib.loads(edtoml)
         check("empty-projection-reparses", _epe.get("projection") == "decisions"
@@ -3413,7 +3412,7 @@ def self_test():
         outside.write_text("original\n", encoding="utf-8")
         (symroot / WORKING_DIRNAME / "TODO.md").symlink_to(outside)
         check("symlink-dest-cannot-eval", render_write(symroot) == EXIT_CANNOT_EVALUATE)
-        check("symlink-dest-not-followed", _nbio.read_text_nb(outside, encoding="utf-8") == "original\n")
+        check("symlink-dest-not-followed", outside.read_text(encoding="utf-8") == "original\n")
 
         # --- F-03: an EXTRA declared source beyond a view's required set fails closed --------------------
         xroot = new_root()
@@ -3541,7 +3540,7 @@ def self_test():
                  refs=[("doc", "safe\\n# Forged heading\\n<!-- injected -->")]),
         ]) + "\n")
         check("forged-field-write-ok", render_write(forgeroot) == EXIT_OK)
-        forged_view = _nbio.read_text_nb(forgeroot / WORKING_DIRNAME / "REFERENCES.md", encoding="utf-8")
+        forged_view = (forgeroot / WORKING_DIRNAME / "REFERENCES.md").read_text(encoding="utf-8")
         check("forged-heading-neutralized", "\n# Forged heading" not in body_of(forged_view))
         check("forged-comment-neutralized", "<!-- injected -->" not in forged_view)
 
@@ -3608,7 +3607,7 @@ def self_test():
         check("class-wide-injection-write-ok", render_write(injroot) == EXIT_OK)
 
         def iview(name):
-            return body_of(_nbio.read_text_nb(injroot / WORKING_DIRNAME / name, encoding="utf-8"))
+            return body_of((injroot / WORKING_DIRNAME / name).read_text(encoding="utf-8"))
 
         # Every view whose body carries a free-text sink fed by P must contain ESC and never the raw
         # P: TODO/BACKLOG/PIPELINE (backlog title), DONE (done title), FINDINGS (severity), DECISIONS
@@ -3667,7 +3666,7 @@ def self_test():
         ]) + "\n")
         check("trailing-space-title-renders",
               render_write(_tsroot) == EXIT_OK)
-        _tstodo = _nbio.read_text_nb(_tsroot / WORKING_DIRNAME / "TODO.md", encoding="utf-8")
+        _tstodo = (_tsroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
         # (a) the title text survived, minus its trailing whitespace (no rendered line ends in space/tab);
         # (b) exactly one terminal newline; (c) the emitted bytes pass the authoritative byte-canon scan.
         check("trailing-space-title-text-survived", "trailing space title" in _tstodo)
@@ -3692,7 +3691,7 @@ def self_test():
         ]) + "\n")
         check("trailing-nbsp-title-renders",
               render_write(_tsnbroot) == EXIT_OK)
-        _tsnbtodo = _nbio.read_text_nb(_tsnbroot / WORKING_DIRNAME / "TODO.md", encoding="utf-8")
+        _tsnbtodo = (_tsnbroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
         check("trailing-nbsp-title-text-survived", "trailing nbsp title" in _tsnbtodo)
         check("trailing-nbsp-title-normalized", chr(0x00A0) not in _tsnbtodo)
         check("trailing-nbsp-title-byte-canon-clean",
@@ -3734,7 +3733,7 @@ def self_test():
         check("proposed-store-write-ok", render_write(proproot) == EXIT_OK)
 
         def pview(name):
-            return _nbio.read_text_nb(proproot / WORKING_DIRNAME / name, encoding="utf-8")
+            return (proproot / WORKING_DIRNAME / name).read_text(encoding="utf-8")
 
         ppl = pview("PIPELINE.md")
         check("pipeline-proposed-awaiting-section", "## awaiting ratification" in ppl)
@@ -3923,11 +3922,11 @@ def self_test():
                 encoding="utf-8")
         gdroot, gdobs = _gate_store(mutate=_inject_dup)
         _dup_todo = gdroot / WORKING_DIRNAME / "TODO.md"
-        _dup_before = _nbio.read_text_nb(_dup_todo, encoding="utf-8")
+        _dup_before = _dup_todo.read_text(encoding="utf-8")
         check("gate-invalid-duplicate-id-write-refused",
               render(["--root", str(gdroot), "--write"], observations=gdobs) == EXIT_CANNOT_EVALUATE)
         check("gate-invalid-duplicate-id-wrote-nothing",
-              _nbio.read_text_nb(_dup_todo, encoding="utf-8") == _dup_before)
+              _dup_todo.read_text(encoding="utf-8") == _dup_before)
 
         # --- PR-C: SOURCE-gated REGENERATE. A stale OWNED deliverable (a drifted view, a drifted VERSION, a
         # missing view target) is render's OUTPUT, not a refusal: SOURCE integrity is sound, so --write
@@ -3953,11 +3952,11 @@ def self_test():
                                         ("missing", WORKING_DIRNAME + "/TODO.md", None)):
             _droot, _dobs = _gate_store_drifted(_kind)
             _tp = _droot / _target
-            _before = _nbio.read_text_nb(_tp, encoding="utf-8") if _tp.exists() else None
-            _cl_before = _nbio.read_text_nb(_droot / "CHANGELOG.md", encoding="utf-8")
+            _before = _tp.read_text(encoding="utf-8") if _tp.exists() else None
+            _cl_before = (_droot / "CHANGELOG.md").read_text(encoding="utf-8")
             check("prc-drifted-{}-write-ok".format(_kind),
                   render(["--root", str(_droot), "--write"], observations=_dobs) == EXIT_OK)
-            _after = _nbio.read_text_nb(_tp, encoding="utf-8") if _tp.exists() else None
+            _after = _tp.read_text(encoding="utf-8") if _tp.exists() else None
             check("prc-drifted-{}-regenerated".format(_kind), _after is not None and _after != _before)
             if _expect is not None:
                 check("prc-drifted-{}-exact-bytes".format(_kind), _after == _expect)
@@ -3967,9 +3966,9 @@ def self_test():
             # Whole-target-set witness (completeness): CHANGELOG.md is AUTHORED, byte-stable across the
             # regenerate; VERSION is regenerated to the latest release's exact bytes.
             check("prc-drifted-{}-changelog-untouched".format(_kind),
-                  _nbio.read_text_nb(_droot / "CHANGELOG.md", encoding="utf-8") == _cl_before)
+                  (_droot / "CHANGELOG.md").read_text(encoding="utf-8") == _cl_before)
             check("prc-drifted-{}-version-current".format(_kind),
-                  _nbio.read_text_nb(_droot / "VERSION", encoding="utf-8") == "1.1.0\n")
+                  (_droot / "VERSION").read_text(encoding="utf-8") == "1.1.0\n")
 
         # --- non-hostage: an AUTHORED changelog defect NEVER holds the generated deliverables hostage -------
         # A drifted view PLUS a changelog with a published release heading removed: --write REGENERATES the
@@ -3980,13 +3979,13 @@ def self_test():
         (_nh_root / "CHANGELOG.md").write_text(
             "\n".join(["# Changelog", "", "## unreleased", "", "## 1.1.0", "", "- 1.1.0 notes", ""]) + "\n",
             encoding="utf-8")   # the published 1.0.0 section removed -> a C-CHANGELOG-GATES FINDING
-        _nh_cl_before = _nbio.read_text_nb(_nh_root / "CHANGELOG.md", encoding="utf-8")
+        _nh_cl_before = (_nh_root / "CHANGELOG.md").read_text(encoding="utf-8")
         check("prc-nonhostage-finding-exit-drift",
               render(["--root", str(_nh_root), "--write"], observations=_nh_obs) == EXIT_DRIFT)
         check("prc-nonhostage-view-regenerated",
-              _nbio.read_text_nb(_nh_todo, encoding="utf-8") != "stale sentinel\n")
+              _nh_todo.read_text(encoding="utf-8") != "stale sentinel\n")
         check("prc-nonhostage-changelog-untouched",
-              _nbio.read_text_nb(_nh_root / "CHANGELOG.md", encoding="utf-8") == _nh_cl_before)
+              (_nh_root / "CHANGELOG.md").read_text(encoding="utf-8") == _nh_cl_before)
 
         # A drifted view PLUS a NON-UTF-8 CHANGELOG: --write REGENERATES the view and exits 2 naming the
         # unevaluable input, leaving the changelog bytes untouched (SETTLED: regenerate-and-exit-2, never a
@@ -3994,13 +3993,13 @@ def self_test():
         _nu_root2, _nu_obs = _gate_store_drifted("view")
         _nu_todo = _nu_root2 / WORKING_DIRNAME / "TODO.md"
         (_nu_root2 / "CHANGELOG.md").write_bytes(b"# Changelog\n\xff\xfe not utf-8\n")
-        _nu_cl_before = _nbio.read_bytes_nb(_nu_root2 / "CHANGELOG.md")
+        _nu_cl_before = (_nu_root2 / "CHANGELOG.md").read_bytes()
         check("prc-nonhostage-cannot-eval-exit-2",
               render(["--root", str(_nu_root2), "--write"], observations=_nu_obs) == EXIT_CANNOT_EVALUATE)
         check("prc-nonhostage-cannot-eval-view-regenerated",
-              _nbio.read_text_nb(_nu_todo, encoding="utf-8") != "stale sentinel\n")
+              _nu_todo.read_text(encoding="utf-8") != "stale sentinel\n")
         check("prc-nonhostage-cannot-eval-changelog-untouched",
-              _nbio.read_bytes_nb(_nu_root2 / "CHANGELOG.md") == _nu_cl_before)
+              (_nu_root2 / "CHANGELOG.md").read_bytes() == _nu_cl_before)
 
         # --- fail-safe: the _write_contained backstop refuses ANY mutating write when the gate flag is
         # cleared, source-sound or not (defence-in-depth-default). On a drifted store with the flag False,
@@ -4008,14 +4007,14 @@ def self_test():
         # byte-unchanged; the flag is restored in a finally.
         _fs_root, _fs_obs = _gate_store_drifted("view")
         _fs_todo = _fs_root / WORKING_DIRNAME / "TODO.md"
-        _fs_before = _nbio.read_text_nb(_fs_todo, encoding="utf-8")
+        _fs_before = _fs_todo.read_text(encoding="utf-8")
         _saved_flag = _WRITE_GATE_COMPOSED
         try:
             globals()["_WRITE_GATE_COMPOSED"] = False
             check("prc-uncomposed-gate-write-refused",
                   render(["--root", str(_fs_root), "--write"], observations=_fs_obs) == EXIT_CANNOT_EVALUATE)
             check("prc-uncomposed-gate-wrote-nothing",
-                  _nbio.read_text_nb(_fs_todo, encoding="utf-8") == _fs_before)
+                  _fs_todo.read_text(encoding="utf-8") == _fs_before)
         finally:
             globals()["_WRITE_GATE_COMPOSED"] = _saved_flag
 
@@ -4066,12 +4065,12 @@ def self_test():
         # rollback. TODO.md == "stale sentinel\n" pre-write; Phase B regenerates it; Phase C rolls it back.
         _oa_root, _oa_obs = _gate_store_drifted("view")
         _oa_todo = _oa_root / WORKING_DIRNAME / "TODO.md"
-        _oa_pre = _nbio.read_text_nb(_oa_todo, encoding="utf-8")
+        _oa_pre = _oa_todo.read_text(encoding="utf-8")
         _oa_post = _FakeResult(dict(_all_pass(), **{"C-VIEW-DRIFT": "FINDING"}),
                                by_check={"C-VIEW-DRIFT": ["TODO.md drifted from source"]})
         _oa_rc, _oa_err = _seam_render(_oa_root, _oa_obs, _oa_post)
         check("prc-ownedmiss-owned-exit-2", _oa_rc == EXIT_CANNOT_EVALUATE)
-        check("prc-ownedmiss-owned-preimage-restored", _nbio.read_text_nb(_oa_todo, encoding="utf-8") == _oa_pre)
+        check("prc-ownedmiss-owned-preimage-restored", _oa_todo.read_text(encoding="utf-8") == _oa_pre)
         check("prc-ownedmiss-owned-labelled-owned", "OWNED deliverable" in _oa_err)
         check("prc-ownedmiss-owned-rollback-success", "rolled back to the pre-write bytes" in _oa_err)
 
@@ -4079,12 +4078,12 @@ def self_test():
         # regression and print the source reason, NOT mislabelled "OWNED deliverable" (DEFECT 1b).
         _sa_root, _sa_obs = _gate_store_drifted("view")
         _sa_todo = _sa_root / WORKING_DIRNAME / "TODO.md"
-        _sa_pre = _nbio.read_text_nb(_sa_todo, encoding="utf-8")
+        _sa_pre = _sa_todo.read_text(encoding="utf-8")
         _sa_post = _FakeResult(dict(_all_pass(), **{"C-RECORDS": "FINDING"}),
                                by_check={"C-RECORDS": ["post-write record fault"]})
         _sa_rc, _sa_err = _seam_render(_sa_root, _sa_obs, _sa_post)
         check("prc-ownedmiss-source-exit-2", _sa_rc == EXIT_CANNOT_EVALUATE)
-        check("prc-ownedmiss-source-preimage-restored", _nbio.read_text_nb(_sa_todo, encoding="utf-8") == _sa_pre)
+        check("prc-ownedmiss-source-preimage-restored", _sa_todo.read_text(encoding="utf-8") == _sa_pre)
         check("prc-ownedmiss-source-labelled-source", "SOURCE-INTEGRITY regression" in _sa_err)
         check("prc-ownedmiss-source-reason-printed", "post-write record fault" in _sa_err)
         check("prc-ownedmiss-source-not-mislabelled-owned", "OWNED deliverable" not in _sa_err)
@@ -4149,17 +4148,17 @@ def self_test():
         _ev_todo.write_text("stale sentinel\n", encoding="utf-8")     # drift the OWNED view
         _ev_version = _ev_root / "VERSION"
         _ev_version.write_text("0.0.0\n", encoding="utf-8")           # a STALE, UNDECLARED root VERSION
-        _ev_ver_before = _nbio.read_bytes_nb(_ev_version)
+        _ev_ver_before = _ev_version.read_bytes()
         _ev_buf = io.StringIO()
         with contextlib.redirect_stdout(_ev_buf):
             _ev_rc = render(["--root", str(_ev_root), "--write"], observations=_ev_obs)
         _ev_out = _ev_buf.getvalue()
         check("prc-unowned-version-e2e-exit-drift", _ev_rc == EXIT_DRIFT)
         check("prc-unowned-version-e2e-view-regenerated",
-              _nbio.read_text_nb(_ev_todo, encoding="utf-8") != "stale sentinel\n")
+              _ev_todo.read_text(encoding="utf-8") != "stale sentinel\n")
         check("prc-unowned-version-e2e-root-version-exists", _ev_version.exists())
         check("prc-unowned-version-e2e-root-version-unchanged",
-              _nbio.read_bytes_nb(_ev_version) == _ev_ver_before)
+              _ev_version.read_bytes() == _ev_ver_before)
         check("prc-unowned-version-e2e-no-remove-advice", "remove the file" not in _ev_out)
         check("prc-unowned-version-e2e-qualified-remedy",
               "removing the root VERSION is valid ONLY when the version ledger has no releases" in _ev_out)

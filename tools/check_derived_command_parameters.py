@@ -60,7 +60,6 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _gen_common import precheck_special_files, read_source_bytes  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 CONFIG_REL = ".aiqt/derived-command-parameters.toml"
@@ -258,7 +257,7 @@ def load_config(path):
     or missing binding field, an empty roster, a malformed id, or a duplicate id. An absent file is the
     caller's NOT APPLICABLE case, handled before this loader."""
     try:
-        with _nbio.open_nb(path, "rb") as handle:
+        with open(path, "rb") as handle:
             data = tomllib.load(handle)
     except OSError as exc:
         raise GateError("cannot read the configuration {} ({})".format(CONFIG_REL, exc))

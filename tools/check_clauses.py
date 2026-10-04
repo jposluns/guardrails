@@ -103,7 +103,6 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, read_source_bytes, precheck_special_files  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 from check_versions import _parse as _semver  # noqa: E402  reuse the shipped bare-SemVer parser
 from gen_rules import parse_source, CID_RE  # noqa: E402  reuse the frontmatter parser and corpus-id regex
@@ -1419,7 +1418,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             rules, rows, born = _good_genesis()
             base = _fresh(rules, rows, born)
             reg = base / ".aiqt" / "core" / "id-history.toml"
-            reg.write_text(_nbio.read_text_nb(reg, encoding="utf-8") + "\n[tombstone]\n", encoding="utf-8")
+            reg.write_text(reg.read_text(encoding="utf-8") + "\n[tombstone]\n", encoding="utf-8")
             if _run_quiet(**_paths(base)) != 2:
                 failures.append("tombstone section as a table: expected fail-closed exit 2")
 
@@ -1430,7 +1429,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             rules, rows, born = _good_genesis()
             base = _fresh(rules, rows, born)
             reg = base / ".aiqt" / "core" / "id-history.toml"
-            reg.write_text(_nbio.read_text_nb(reg, encoding="utf-8").replace(
+            reg.write_text(reg.read_text(encoding="utf-8").replace(
                 'born-release = "1.1.0"', 'born-release = "1.1.0\\n"', 1), encoding="utf-8")
             if _run_quiet(**_paths(base, genesis=True)) != 2:
                 failures.append("newline-tainted born-release: expected fail-closed exit 2")

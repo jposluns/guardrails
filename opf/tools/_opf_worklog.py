@@ -386,7 +386,7 @@ def _self_test():
         legacy = machine / LEGACY_NAME
         raw = b'# retained bytes\nschema = 1\n[[entry]]\nid = "WL-1"\ndate = "2026-01-01T00:00:00Z"\nactor = {kind = "maintainer"}\nkind = "fixed"\nsummary = "x"\n'
         legacy.write_bytes(raw)
-        fd = os.open(td, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(td, os.O_RDONLY | os.O_DIRECTORY)
         try:
             old = load_worklog_at(fd, ".working/custom")
             check("legacy-model", old == {"schema": 1, "entry": [entry]})

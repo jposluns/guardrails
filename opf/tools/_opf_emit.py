@@ -1427,7 +1427,7 @@ def _fixture_children():
             try:
                 try:
                     fd = os.open(entry.path + "/stat",
-                                 (os.O_RDONLY | os.O_CLOEXEC) | getattr(os, "O_NONBLOCK", 0))
+                                 os.O_RDONLY | os.O_CLOEXEC)
                     while True:
                         chunk = os.read(fd, 65536)
                         if not chunk:
@@ -3504,7 +3504,7 @@ def _st_guardian_close_reuse():
         recorded with its (st_dev, st_ino), taken while this leg still owns the number."""
         if opened:
             raise OSError(errno.EMFILE, "self-test injected open failure")
-        fd = os.open(path, (flags) | getattr(os, "O_NONBLOCK", 0), mode)
+        fd = os.open(path, flags, mode)
         try:
             st = os.fstat(fd)
         except BaseException:
@@ -3530,7 +3530,7 @@ def _st_guardian_close_reuse():
 
     def own_file(name):
         """A descriptor on a new file in the private directory, with its (st_dev, st_ino) taken at open."""
-        fd = os.open(os.path.join(private, name), (os.O_RDONLY | os.O_CREAT | os.O_EXCL) | getattr(os, "O_NONBLOCK", 0), 0o600)
+        fd = os.open(os.path.join(private, name), os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             st = os.fstat(fd)
         except BaseException:

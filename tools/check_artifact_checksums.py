@@ -89,7 +89,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 ARTIFACT_ROOT = "site/downloads/"
 EVIDENCE_PATH = "site/evidence.html"
@@ -136,7 +135,7 @@ def load_evidence(root):
     """Read site/evidence.html as text. An absent or unreadable page is fail-closed: the evidence check
     (D1 dormant, A5 armed) covers it, so it can never read as nothing to check and pass."""
     try:
-        return _nbio.read_text_nb(root / EVIDENCE_PATH, encoding="utf-8")
+        return (root / EVIDENCE_PATH).read_text(encoding="utf-8")
     except (OSError, ValueError) as exc:
         raise GateError("cannot read {}: {}".format(EVIDENCE_PATH, exc))
 
@@ -193,7 +192,7 @@ def hash_file(root, path):
     """A3. The SHA-256 hex of the artifact at root/path. A missing or unreadable file is fail-closed
     (exit 2): a check that cannot read the artifact it attests reports that, never a clean pass."""
     try:
-        data = _nbio.read_bytes_nb(root / path)
+        data = (root / path).read_bytes()
     except OSError as exc:
         raise GateError("cannot read artifact {} (A3): {}".format(path, exc))
     return hashlib.sha256(data).hexdigest()

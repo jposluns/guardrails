@@ -2985,7 +2985,7 @@ def _self_test_units(check):
     # synthetic contexts stand on an empty directory: no archive tree, nothing rotated.
     import tempfile
     empty = tempfile.mkdtemp(prefix="opf-record-self-test-")
-    empty_fd = os.open(empty, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+    empty_fd = os.open(empty, os.O_RDONLY | os.O_DIRECTORY)
     try:
         _self_test_contexts(check, empty_fd, now)
     finally:

@@ -43,9 +43,6 @@ import zipfile
 from datetime import date
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; the shared readers live beside this file
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
-
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11
@@ -345,7 +342,7 @@ def render(staging_dir, output, *, mapped_ids=None, expected_member=EXPECTED_MEM
     prov_path = staging / PROVENANCE_NAME
     if not prov_path.is_file():
         raise ImportError_("no {} in staging; run acquire first".format(PROVENANCE_NAME))
-    prov = json.loads(_nbio.read_text_nb(prov_path, encoding="utf-8"))
+    prov = json.loads(prov_path.read_text(encoding="utf-8"))
     # The provenance sidecar is claimant-controlled, so every load-bearing field is pinned to the
     # module constants rather than trusted from the record (10-ACCUR-guard-input-soundness).
     if prov.get("member") != expected_member:
@@ -355,7 +352,7 @@ def render(staging_dir, output, *, mapped_ids=None, expected_member=EXPECTED_MEM
         if prov.get(key) != pinned:
             raise ImportError_("provenance {} {!r} != pinned {!r}".format(key, prov.get(key), pinned))
     xml_path = staging / prov["member"]
-    xml_bytes = _nbio.read_bytes_nb(xml_path)
+    xml_bytes = xml_path.read_bytes()
     xml_sha = _sha256(xml_bytes)
     if xml_sha != expected_xml_sha256:
         raise ImportError_("staged {} sha256 {} != pinned {}; re-acquire from the pinned source"
@@ -572,7 +569,7 @@ def self_test():
         render(_stage, _out, mapped_ids=_mapped_all, expected_xml_sha256=_sha256(_xml),
                expected_total=5, expected_active=3, expected_published=3,
                expected_retrieved="2026-04-30", min_elements=1)
-        _out_text = _nbio.read_text_nb(_out, encoding="utf-8")
+        _out_text = _out.read_text(encoding="utf-8")
         _expect(_out.is_file() and 'catalogue = "subset"' in _out_text)
         _expect(_out_text.count("[[id]]") == 3, "happy path should vendor all three mapped fixtures")
         print("  ok (render happy path): fixture rendered as a subset and loader-verified")
@@ -581,7 +578,7 @@ def self_test():
         render(_stage, _out_sub, mapped_ids={"CWE-59"}, expected_xml_sha256=_sha256(_xml),
                expected_total=5, expected_active=3, expected_published=3,
                expected_retrieved="2026-04-30", min_elements=1)
-        _sub_text = _nbio.read_text_nb(_out_sub, encoding="utf-8")
+        _sub_text = _out_sub.read_text(encoding="utf-8")
         _expect(_sub_text.count("[[id]]") == 1 and 'code = "CWE-59"' in _sub_text, "only CWE-59 vendored")
         _expect('code = "CWE-1"' not in _sub_text and 'code = "CWE-363"' not in _sub_text, "unmapped dropped")
         _expect("1 vendored (cross-mapped subset)" in _sub_text, "header states the vendored count")
@@ -600,7 +597,7 @@ def self_test():
         _expect_fail("render fails closed on a count mismatch",
                      lambda: render(_stage, _dest, expected_xml_sha256=_sha256(_xml),
                                     expected_total=5, expected_active=999, min_elements=1))
-        _expect(_nbio.read_text_nb(_dest, encoding="utf-8") == "SENTINEL", "destination preserved on count rejection")
+        _expect(_dest.read_text(encoding="utf-8") == "SENTINEL", "destination preserved on count rejection")
         # loader-stage rejection AFTER the candidate write -> atomic replace must not touch the destination
         _dest2 = _stage / "dest2.toml"; _dest2.write_text("KEEP", encoding="utf-8")
         global _verify_with_loader
@@ -614,7 +611,7 @@ def self_test():
                                         expected_xml_sha256=_sha256(_xml),
                                         expected_total=5, expected_active=3, expected_published=3,
                                         expected_retrieved="2026-04-30", min_elements=1))
-            _expect(_nbio.read_text_nb(_dest2, encoding="utf-8") == "KEEP", "destination preserved on loader rejection")
+            _expect(_dest2.read_text(encoding="utf-8") == "KEEP", "destination preserved on loader rejection")
             _expect(not list(_stage.glob(".cwe-candidate-*.toml")), "candidate cleaned up on failure")
         finally:
             _verify_with_loader = _orig_vwl
@@ -629,7 +626,7 @@ def self_test():
         render(_stage, _outf, mapped_ids=_mapped_all, expected_xml_sha256=_sha256(_xml),
                expected_total=5, expected_active=3, expected_published=3,
                expected_retrieved="2026-04-30", min_elements=1)
-        _r = _nbio.read_text_nb(_outf, encoding="utf-8")
+        _r = _outf.read_text(encoding="utf-8")
         _expect('edition = "4.20"' in _r and "9.99-FORGED" not in _r, "forged edition must not ship")
         _expect(_sha256(_xml) in _r and "deadbeef" not in _r, "forged xml sha must not ship")
         _expect("-42" not in _r and "BOGUS" not in _r and "999" not in _r, "forged counts/reading must not ship")

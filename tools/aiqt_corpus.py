@@ -38,10 +38,6 @@ import re
 import subprocess
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-import sys
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I drops the script dir; the shared readers live beside this file
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 __all__ = [
     # discovery / targeting
@@ -258,7 +254,7 @@ def read_text_safe(path: Path) -> str | None:
     represent a real environmental problem the caller should surface.
     """
     try:
-        return _nbio.read_text_nb(path, encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return None
 

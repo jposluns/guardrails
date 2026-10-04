@@ -116,7 +116,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _git_fixture_env import _MAINTENANCE_PIN_VARS, git_fixture_env, scrub_git_environment  # noqa: E402
 import gen_secret_patterns  # noqa: E402  (same tools dir, for the drift-gate F-129 self-test)
 
@@ -1249,18 +1248,18 @@ def _main_isolated():
         # of status/HEAD, before and after a snapshot: the snapshot must leave every one of them untouched.
         before = (_snap("status", "--porcelain"), _snap("rev-parse", "HEAD"), _snap("write-tree"),
                   _snap("config", "--list"), _snap("stash", "list"))
-        before_idx = _nbio.read_bytes_nb(real_idx)
+        before_idx = real_idx.read_bytes()
         # Also capture the WORKTREE bytes of the dirty file and the full branch-ref listing: the snapshot
         # must leave the actual working-tree content and every branch ref untouched (it writes only objects
         # and one refs/aiqt-recovery/* ref).
-        before_wt = _nbio.read_bytes_nb(rec_inv / "file.txt")
+        before_wt = (rec_inv / "file.txt").read_bytes()
         before_heads = _snap("for-each-ref", "refs/heads")
         expect("(rec-inv) checkout -- on dirty invariant tree asks", "git checkout -- file.txt", "allow",
                cwd=str(rec_inv))
         after = (_snap("status", "--porcelain"), _snap("rev-parse", "HEAD"), _snap("write-tree"),
                  _snap("config", "--list"), _snap("stash", "list"))
-        after_idx = _nbio.read_bytes_nb(real_idx)
-        after_wt = _nbio.read_bytes_nb(rec_inv / "file.txt")
+        after_idx = real_idx.read_bytes()
+        after_wt = (rec_inv / "file.txt").read_bytes()
         after_heads = _snap("for-each-ref", "refs/heads")
         if not _recovery_refs(rec_inv):
             failures.append("(rec-inv-snap) expected a recovery ref on the invariant repo")
@@ -1295,10 +1294,10 @@ def _main_isolated():
             _git(rec_res, "reset", "--hard")
             _git(rec_res, "clean", "-fd")
             _git(rec_res, "checkout", res_refs[0], "--", ":/")
-            if "recovered fix" not in _nbio.read_text_nb(rec_res / "file.txt", encoding="utf-8"):
+            if "recovered fix" not in (rec_res / "file.txt").read_text(encoding="utf-8"):
                 failures.append("(rec-restore-tracked) restore did not recover the tracked modification")
             if not (rec_res / "untr.txt").exists() or \
-                    _nbio.read_text_nb(rec_res / "untr.txt", encoding="utf-8") != "untracked work\n":
+                    (rec_res / "untr.txt").read_text(encoding="utf-8") != "untracked work\n":
                 failures.append("(rec-restore-untracked) restore did not recover the untracked file")
 
         # (rec-faildowngrade) a FORCED snapshot failure downgrades a would-be ALLOW to ASK (never a silent
@@ -1329,7 +1328,7 @@ def _main_isolated():
         if not ledger.exists():
             failures.append("(rec-ledger) expected the recovery ledger to exist after snapshots")
         else:
-            lines = [ln for ln in _nbio.read_text_nb(ledger, encoding="utf-8").splitlines() if ln.strip()]
+            lines = [ln for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()]
             try:
                 rec = json.loads(lines[-1])
             except (ValueError, IndexError):
@@ -1357,7 +1356,7 @@ def _main_isolated():
         _git(rec_idx, "add", "file.txt")  # staged content in the REAL index
         (rec_idx / "untr.txt").write_text("junk\n", encoding="utf-8")
         real_index = rec_idx / ".git" / "index"
-        idx_before = _nbio.read_bytes_nb(real_index)
+        idx_before = real_index.read_bytes()
         ambient = tmp / "ambient-index"  # a bogus preset index OUTSIDE the repo, must stay untouched
         os.environ["GIT_INDEX_FILE"] = str(ambient)
         try:
@@ -1367,7 +1366,7 @@ def _main_isolated():
         if got_idx != "allow":
             failures.append("(rec-idxfile) an ambient GIT_INDEX_FILE target-redirect snapshot-then-allows on a "
                             "dirty cwd (best-effort snapshot taken), got {}".format(got_idx))
-        if _nbio.read_bytes_nb(real_index) != idx_before:
+        if real_index.read_bytes() != idx_before:
             failures.append("(rec-idxfile-index) the REAL .git/index changed under an ambient GIT_INDEX_FILE")
         if ambient.exists():
             failures.append("(rec-idxfile-ambient) the ambient GIT_INDEX_FILE path was written")
@@ -1382,7 +1381,7 @@ def _main_isolated():
         rec_amb = _init_repo(tmp / "rec-ambient")
         (rec_amb / "file.txt").write_text("committed line\nambient env\n", encoding="utf-8")
         amb_index = rec_amb / ".git" / "index"
-        amb_idx_before = _nbio.read_bytes_nb(amb_index)
+        amb_idx_before = amb_index.read_bytes()
         amb_head_before = subprocess.run(["git", "-C", str(rec_amb), "rev-parse", "HEAD"],
                                          capture_output=True, text=True, timeout=30,
                                          env=git_fixture_env()).stdout.strip()
@@ -1401,7 +1400,7 @@ def _main_isolated():
                             "allow, got {}".format(got_amb))
         if not _recovery_refs(rec_amb):
             failures.append("(rec-ambient-snap) expected a recovery ref with ambient GIT_* env present")
-        if _nbio.read_bytes_nb(amb_index) != amb_idx_before:
+        if amb_index.read_bytes() != amb_idx_before:
             failures.append("(rec-ambient-index) the real index changed with ambient GIT_* env present")
         amb_head_after = subprocess.run(["git", "-C", str(rec_amb), "rev-parse", "HEAD"],
                                         capture_output=True, text=True, timeout=30,
@@ -1517,7 +1516,7 @@ def _main_isolated():
         real_head = subprocess.run(["git", "-C", str(rec_decoy), "rev-parse", "HEAD"],
                                    capture_output=True, text=True, timeout=30,
                                    env=git_fixture_env()).stdout.strip()
-        real_idx_bytes = _nbio.read_bytes_nb(rec_decoy / ".git" / "index")
+        real_idx_bytes = (rec_decoy / ".git" / "index").read_bytes()
         decoy_env = {"GIT_DIR": str(decoy / ".git"), "GIT_WORK_TREE": str(decoy)}
         for _k, _v in decoy_env.items():
             os.environ[_k] = _v
@@ -1539,7 +1538,7 @@ def _main_isolated():
                             "recovery snapshot on the real repo")
         if _recovery_refs(decoy):
             failures.append("(rec-decoy-wrongwrite) a recovery ref was written to the DECOY repo")
-        if _nbio.read_bytes_nb(rec_decoy / ".git" / "index") != real_idx_bytes:
+        if (rec_decoy / ".git" / "index").read_bytes() != real_idx_bytes:
             failures.append("(rec-decoy-index) the real index changed under an ambient GIT_DIR/GIT_WORK_TREE")
         real_head_after = subprocess.run(["git", "-C", str(rec_decoy), "rev-parse", "HEAD"],
                                          capture_output=True, text=True, timeout=30,
@@ -1823,8 +1822,8 @@ def _main_isolated():
         cfg_head = subprocess.run(["git", "-C", str(rec_cfg), "rev-parse", "HEAD"],
                                   capture_output=True, text=True, timeout=30,
                                   env=git_fixture_env()).stdout.strip()
-        cfg_idx_bytes = _nbio.read_bytes_nb(rec_cfg / ".git" / "index")
-        cfg_wt_bytes = _nbio.read_bytes_nb(rec_cfg / "file.txt")
+        cfg_idx_bytes = (rec_cfg / ".git" / "index").read_bytes()
+        cfg_wt_bytes = (rec_cfg / "file.txt").read_bytes()
         cfg_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree",
                    "GIT_CONFIG_VALUE_0": str(cfg_decoy), "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1"}
         for _k, _v in cfg_env.items():
@@ -1849,9 +1848,9 @@ def _main_isolated():
         if _recovery_refs(cfg_decoy):
             failures.append("(rec-cfgcount-wrongwrite) a recovery ref was written to the DECOY (an injected "
                             "core.worktree leaked into the snapshot)")
-        if _nbio.read_bytes_nb(rec_cfg / ".git" / "index") != cfg_idx_bytes:
+        if (rec_cfg / ".git" / "index").read_bytes() != cfg_idx_bytes:
             failures.append("(rec-cfgcount-index) the real index changed under an injected GIT_CONFIG_COUNT")
-        if _nbio.read_bytes_nb(rec_cfg / "file.txt") != cfg_wt_bytes:
+        if (rec_cfg / "file.txt").read_bytes() != cfg_wt_bytes:
             failures.append("(rec-cfgcount-worktree) the real worktree changed under an injected "
                             "GIT_CONFIG_COUNT")
         cfg_head_after = subprocess.run(["git", "-C", str(rec_cfg), "rev-parse", "HEAD"],
@@ -3134,7 +3133,7 @@ def _main_isolated():
 
         # Exercise the generated entry point named by hooks.json, including its actual exit/JSON shape.
         _pl239_plugin = repo_root() / "plugin" / "aiqt-guardrails-hooks"
-        _pl239_hooks = json.loads(_nbio.read_text_nb(_pl239_plugin / "hooks" / "hooks.json", encoding="utf-8"))
+        _pl239_hooks = json.loads((_pl239_plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         _pl239_entries = [
             hook for group in _pl239_hooks["hooks"]["PreToolUse"]
             for hook in group["hooks"]
@@ -6772,7 +6771,7 @@ def _main_isolated():
         cs_ge = os.path.join(cs_sd, "guard-events.jsonl")
         cs_rows = []
         if os.path.exists(cs_ge):
-            with _nbio.open_nb(cs_ge, "r", encoding="utf-8") as fh:
+            with open(cs_ge, "r", encoding="utf-8") as fh:
                 cs_rows = [json.loads(ln) for ln in fh if ln.strip()]
         if not any(r.get("kind") == "wrtscp" and r.get("decision") == "allow"
                    and "companion-store" in r.get("detail", "") for r in cs_rows):

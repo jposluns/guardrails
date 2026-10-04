@@ -33,7 +33,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # opf/tools/ carries the ONE shared bare-SemVer parser (_semver), extracted there for OPF self-containment.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))
 from _gen_common import repo_root, load_toml  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from _semver import SEMVER, _parse  # noqa: E402  re-exported so `from check_versions import _parse` callers are unchanged
 
 def main():
@@ -92,7 +91,7 @@ def main():
     latest = parsed[-1][0]
     version_path = root / "VERSION"
     try:
-        on_disk = _nbio.read_bytes_nb(version_path).decode("utf-8")
+        on_disk = version_path.read_bytes().decode("utf-8")
     except FileNotFoundError:
         findings.append("VERSION file is missing; run tools/gen_changelog.py to generate it")
         on_disk = None

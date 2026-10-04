@@ -47,7 +47,6 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the self-test's sibling imports below
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 EXIT_OK = 0
 EXIT_DRIFT = 1
@@ -206,7 +205,7 @@ def _self_test_isolated():
         # Populate the views through the engine's own public planner (never hand-built): open the store
         # root fd, plan every declared view, and write each planned target at its spec destination.
         machine_rel = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
-        fd = os.open(str(root), (os.O_RDONLY) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(str(root), os.O_RDONLY)
         try:
             for _name, _scope, dest_rel, text in _opf_views.plan_views(fd, machine_rel):
                 (Path(root) / dest_rel).write_text(text, encoding="utf-8")
@@ -236,7 +235,7 @@ def _self_test_isolated():
             drifted.mkdir()
             build_clean_store(drifted)
             todo = drifted / _opf_store.WORKING_DIRNAME / "TODO.md"
-            todo.write_text(_nbio.read_text_nb(todo, encoding="utf-8") + "drifted line\n", encoding="utf-8")
+            todo.write_text(todo.read_text(encoding="utf-8") + "drifted line\n", encoding="utf-8")
             expect("drifted-store", _run_render_check(drifted, capture=True), EXIT_DRIFT)
 
             # Broken store: a discovered but unparseable manifest -> 2 (cannot-evaluate).

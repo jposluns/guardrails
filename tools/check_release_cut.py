@@ -63,7 +63,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
 from _semver import _parse  # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 
 CHANGELOG = "changelog.toml"
 DECLARATION = ".aiqt/release-cut.toml"
@@ -353,12 +352,12 @@ def working_blob(root, path):
     who closes fd is never in doubt (P1, #378)."""
     require(hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
             and os.open in os.supports_dir_fd, "safe filesystem traversal unavailable")
-    directory = os.open(root, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         components = path.split("/")
         for component in components[:-1]:
             try:
-                child = os.open(component, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0),
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                                 dir_fd=directory)
             except FileNotFoundError:
                 return None
@@ -554,9 +553,7 @@ def local_report(root, protected=None, before=None):
 # allowlist pins module::enclosing-def::kind -> site count, so REVERTING a converted read, or
 # ADDING a raw read anywhere gate-reachable, adds a key or changes a count and turns this gate
 # red; an entry whose sites vanish is STALE and turns it red too, so the list can only shrink
-# truthfully. QA round 7 (codex B1): the reader CONVERSION IS COMPLETE -- no module-level
-# pending reason remains (RAW_READ_REASONS is empty by design) and every remaining allowlisted
-# site carries a PER-SITE reason in RAW_READ_SITE_REASONS from the closed vocabulary there.
+# truthfully, and every allowlisted module carries a one-line reason in RAW_READ_REASONS.
 # LIMITS: the walk is syntactic (ast); dynamic imports, subprocess children, git's own metadata
 # reads and non-Python programs (bash, gitleaks) are outside it. The D-400 special-file precheck
 # walk (tools/_gen_common.py, opf/tools/_containment.py), which now DESCENDS into git-ignored
@@ -629,17 +626,12 @@ def _raw_read_entry_modules(root):
     for rel in _RAW_READ_REGISTRATIONS:
         for line in _lint_read_text(root / rel).splitlines():
             code = line.split("#", 1)[0]
-            # QA round 7 (codex M3): a MISSING declared module must be a lint failure, so the
-            # message-text carve-out is STRUCTURAL, never existence-based: an `echo` command
-            # only prints its arguments and executes nothing, so (only) a line whose command
-            # word is echo carries message text. Every other non-comment line that names a
-            # module path DECLARES it, present or not: an os.path.lexists prerequisite would
-            # let a deleted registered module silently shrink the enumerated read set.
-            if code.strip().startswith("echo "):
-                continue
             for token in _RAW_READ_ENTRY_RE.findall(code):
                 token = token.replace("$here/", "opf/tools/")
-                declare(token, rel)
+                # a runner or workflow line can NAME a module path in a message; only a path
+                # that is present (a symlink or special file included) is a declaration here
+                if os.path.lexists(root / token):
+                    declare(token, rel)
     try:
         manifest = tomllib.loads(_lint_read_text(root / _RAW_READ_SUITE_MANIFEST))
     except (OSError, ValueError) as exc:  # TOMLDecodeError is a ValueError
@@ -697,37 +689,50 @@ def _raw_read_modules(root):
                 continue
             for name in names:
                 base = name.split(".")[0]
+                resolved = False
                 for candidate in (here + "/" + base + ".py", "tools/" + base + ".py",
                                   "opf/tools/" + base + ".py"):
-                    # QA round 7 (codex M3, claude m-d): a transitively imported in-tree module
-                    # that exists but is unreadable or not a regular file is a lint FAILURE,
-                    # never silently dropped: is_file() on a FIFO answers False, which would
-                    # shrink the enumerated read set exactly like a deleted entry module.
-                    try:
-                        mode = os.lstat(root / candidate).st_mode
-                    except FileNotFoundError:
-                        continue
-                    except (OSError, ValueError) as exc:
-                        failures.append("raw-read-lint: {}: imported by {} but unreadable ({}); "
-                                        "an in-tree import never drops out of the lint "
-                                        "silently".format(candidate, rel, exc))
-                        break
-                    if stat.S_ISLNK(mode):
-                        try:
-                            mode = os.stat(root / candidate).st_mode
-                        except (OSError, ValueError) as exc:
-                            failures.append("raw-read-lint: {}: imported by {} but its symlink "
-                                            "cannot be resolved ({}); an in-tree import never "
-                                            "drops out of the lint silently".format(
-                                                candidate, rel, exc))
-                            break
-                    if stat.S_ISREG(mode):
+                    if (root / candidate).is_file():
                         queue.append(candidate)
-                    else:
-                        failures.append("raw-read-lint: {}: imported by {} but not a regular "
-                                        "file; an in-tree import never drops out of the lint "
-                                        "silently".format(candidate, rel))
+                        resolved = True
+                        break
+                    try:
+                        os.lstat(root / candidate)
+                    except OSError:
+                        continue
+                    # QA round 8 (codex 3): SOMETHING sits at the local candidate path but it is
+                    # not a regular file (is_file follows a link and requires S_ISREG), so the
+                    # module must fail the lint by name, never drop out of the enumerated read
+                    # set silently.
+                    failures.append("raw-read-lint: {}: imported by {} but not a regular file; "
+                                    "an imported module never drops out of the lint "
+                                    "silently".format(candidate, rel))
+                    resolved = True
                     break
+                if resolved or base in sys.stdlib_module_names:
+                    continue
+                if any((root / parent / base).is_dir()
+                       or (root / parent / "_vendor" / base).is_dir()
+                       or (root / parent / "_vendor" / (base + ".py")).is_file()
+                       for parent in (here, "tools", "opf/tools")):
+                    # a local PACKAGE directory, or a VENDORED module the importer reaches by
+                    # putting its _vendor directory on sys.path (opf/tools/_vendor/marko above
+                    # all): resolution only, exactly the round-6 module set; a deleted vendored
+                    # module no longer resolves and fails below
+                    continue
+                if any((root / script.rsplit("/", 1)[0] / (base + ".py")).is_file()
+                       for script in _RAW_READ_HOOK_SCRIPTS):
+                    # a hook-script sibling (aiqt_hooks above all), reached by inserting the
+                    # scripts directory on sys.path: resolution only; the committed copies are
+                    # themselves DECLARED entry modules, so a deleted or special-file copy
+                    # already fails the declare() check by name
+                    continue
+                # QA round 8 (codex 3): the import resolves to NO in-tree file and no stdlib
+                # module; a deleted or renamed local module must fail this lint, never shrink
+                # the enumerated read set silently.
+                failures.append("raw-read-lint: module {!r} (imported by {}) is neither a "
+                                "stdlib module nor an in-tree file; a deleted or renamed local "
+                                "module never drops out of the lint silently".format(base, rel))
     return seen, failures
 
 
@@ -825,6 +830,8 @@ def _raw_read_lint(root):
     return failures, (len(modules), len(got_all), total)
 
 
+_RAW_READ_PENDING = ("unconverted pre-existing raw read(s), pending conversion and tracked by this pin, which\n                     only shrinks. The D-400 precheck walk (which descends ignored directories and nested\n                     .git directories and refuses index- or HEAD-shadowing links) certifies IN-ROOT inputs\n                     as defence in depth, but it can never certify a configuration-declared out-of-root\n                     path, the contents of an accepted ignored out-of-root link, or a post-walk write, so\n                     this pin is NOT a per-site certification; sites with a verified per-site reason are\n                     in RAW_READ_SITE_REASONS instead")
+
 RAW_READ_ALLOWLIST = dict((
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_load_gensrc_registry::open", 1),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_attestation_refs::open", 1),
@@ -888,24 +895,198 @@ RAW_READ_ALLOWLIST = dict((
     (".preview/ungated-record.py::test_21_vendor_byte_identity::open", 1),
     (".preview/ungated-record.py::test_r4_02_strip_keeps_meaning::open", 1),
     (".preview/ungated-record.py::vendor_blocks::open", 1),
+    ("opf/tools/_commonmark_headings.py::verify_vendor_manifest::open", 2),
+    ("opf/tools/_journal.py::_fsync_contained_dir::os.open", 1),
+    ("opf/tools/_journal.py::_fsync_path_dir::os.open", 1),
+    ("opf/tools/_journal.py::_journal_txn_dirs::os.open", 1),
+    ("opf/tools/_journal.py::_open_dir_contained::os.open", 1),
+    ("opf/tools/_journal.py::_open_parent::os.open", 1),
+    ("opf/tools/_journal.py::_open_txn_beneath::os.open", 1),
     ("opf/tools/_journal.py::_pid_start::open", 1),
+    ("opf/tools/_journal.py::call::os.open", 1),
+    ("opf/tools/_journal.py::capture_preimages::os.open", 1),
     ("opf/tools/_journal.py::devnull::os.open", 1),
+    ("opf/tools/_journal.py::ensure_journal_dirs::os.open", 2),
+    ("opf/tools/_journal.py::open_journal_root_from_path::os.open", 1),
+    ("opf/tools/_journal.py::read_contained_missing::os.open", 1),
+    ("opf/tools/_journal.py::read_lock_owner::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::os.open", 2),
+    ("opf/tools/_opf_adopt_apply.py::_self_test_checks::read_bytes", 19),
+    ("opf/tools/_opf_adopt_apply.py::dir_at::os.open", 1),
+    ("opf/tools/_opf_adopt_apply.py::preserved_now::read_bytes", 2),
+    ("opf/tools/_opf_adopt_apply.py::snapshot::read_bytes", 1),
+    ("opf/tools/_opf_adopt_apply.py::watching_restore::read_bytes", 2),
     ("opf/tools/_opf_adopt_hook.py::self_test::attr.open", 2),
     ("opf/tools/_opf_adopt_hook.py::self_test::open", 1),
     ("opf/tools/_opf_adopt_observe.py::__init__::os.open", 1),
+    ("opf/tools/_opf_adopt_observe.py::_put::os.open", 1),
+    ("opf/tools/_opf_adopt_observe.py::_read_archive::os.open", 1),
+    ("opf/tools/_opf_adopt_observe.py::_runner_check::read_bytes", 1),
+    ("opf/tools/_opf_adopt_observe.py::_runner_check::read_text", 1),
+    ("opf/tools/_opf_adopt_observe.py::_runner_non_readable_fd_checks::os.open", 1),
+    ("opf/tools/_opf_adopt_observe.py::_runner_red_checks::read_text", 2),
+    ("opf/tools/_opf_adopt_observe.py::_runner_registration_test::read_text", 1),
+    ("opf/tools/_opf_adopt_observe.py::private_identity::read_bytes", 1),
+    ("opf/tools/_opf_adopt_observe.py::probe::read_bytes", 1),
+    ("opf/tools/_opf_adopt_observe.py::run::read_bytes", 1),
+    ("opf/tools/_opf_adopt_observe.py::self_test::read_text", 1),
+    ("opf/tools/_opf_adopt_observe.py::snapshot::read_bytes", 1),
+    ("opf/tools/_opf_adopt_plan.py::_inventory::os.open", 2),
+    ("opf/tools/_opf_adopt_plan.py::snapshot::read_bytes", 1),
+    ("opf/tools/_opf_adopt_plan.py::test_default_move_collision::read_bytes", 1),
+    ("opf/tools/_opf_adopt_plan.py::test_move_requires_observed_absence::read_bytes", 1),
+    ("opf/tools/_opf_adopt_plan.py::test_preservation_destination_occupied::read_bytes", 1),
+    ("opf/tools/_opf_adopt_plan.py::visit::os.open", 1),
+    ("opf/tools/_opf_check.py::_list_contained::os.open", 1),
+    ("opf/tools/_opf_check.py::_q_vector::os.open", 2),
+    ("opf/tools/_opf_check.py::self_test::os.open", 3),
+    ("opf/tools/_opf_emit.py::_fixture_children::os.open", 1),
     ("opf/tools/_opf_emit.py::_fixture_stat_fields::os.open", 1),
     ("opf/tools/_opf_emit.py::call::os.open", 1),
+    ("opf/tools/_opf_emit.py::own_file::os.open", 1),
+    ("opf/tools/_opf_emit.py::second_open_fails::os.open", 1),
+    ("opf/tools/_opf_fuzz.py::_key_name_render_defs::read_text", 1),
+    ("opf/tools/_opf_fuzz.py::_scan_sites::read_text", 1),
+    ("opf/tools/_opf_fuzz.py::_skn_call_sites::read_text", 1),
+    ("opf/tools/_opf_init_observe.py::graft_snapshot::os.open", 1),
+    ("opf/tools/_opf_init_operation.py::_expected_views::os.open", 1),
+    ("opf/tools/_opf_init_operation.py::_fsync_dir_at::os.open", 1),
+    ("opf/tools/_opf_init_operation.py::_journal_ensure_txn::os.open", 1),
+    ("opf/tools/_opf_init_operation.py::_physical_tests::open", 8),
+    ("opf/tools/_opf_init_operation.py::_physical_tests::os.open", 3),
+    ("opf/tools/_opf_init_operation.py::_read_or_none::open", 1),
+    ("opf/tools/_opf_init_operation.py::_read_plan::open", 1),
+    ("opf/tools/_opf_init_operation.py::_snapshot_all::open", 1),
+    ("opf/tools/_opf_init_operation.py::_tree_snapshot::open", 1),
+    ("opf/tools/_opf_init_operation.py::_view_state::open", 1),
+    ("opf/tools/_opf_init_operation.py::observe_inventory::os.open", 1),
+    ("opf/tools/_opf_init_operation.py::walk::os.open", 1),
+    ("opf/tools/_opf_init_substrate.py::_list_dir_fresh::os.open", 1),
+    ("opf/tools/_opf_init_substrate.py::_read_record_bytes::os.open", 1),
+    ("opf/tools/_opf_init_substrate.py::_t_s15_resume_operation::open", 1),
+    ("opf/tools/_opf_init_substrate.py::_t_s3_plan_validation::open", 2),
+    ("opf/tools/_opf_init_substrate.py::_t_s4_phase_discipline::open", 2),
+    ("opf/tools/_opf_init_substrate.py::_t_s6_crash_resume::open", 3),
+    ("opf/tools/_opf_observe.py::self_test_isolated::open", 1),
+    ("opf/tools/_opf_oplock.py::_chmod_bound::os.open", 1),
+    ("opf/tools/_opf_oplock.py::_classify_git_entry::os.open", 1),
     ("opf/tools/_opf_oplock.py::_close_then_reuse::os.open", 1),
+    ("opf/tools/_opf_oplock.py::_open_dir_at::os.open", 1),
+    ("opf/tools/_opf_oplock.py::_read_control_record::os.open", 1),
+    ("opf/tools/_opf_oplock.py::_recover_stale::os.open", 1),
+    ("opf/tools/_opf_oplock.py::_remove_staging_garbage::os.open", 1),
     ("opf/tools/_opf_oplock.py::_st_f8_2_body::os.open", 1),
+    ("opf/tools/_opf_oplock.py::_st_f8_4_body::open", 1),
+    ("opf/tools/_opf_oplock.py::_st_f8_4_body::os.open", 1),
+    ("opf/tools/_opf_oplock.py::_st_f9_5_body::open", 1),
+    ("opf/tools/_opf_oplock.py::_t_c3_c11_mandatory_lease_and_bytes::open", 2),
+    ("opf/tools/_opf_oplock.py::_t_c6_diffinode::open", 1),
+    ("opf/tools/_opf_oplock.py::_t_d1_swap_after_liveness_gate::open", 1),
+    ("opf/tools/_opf_oplock.py::_t_d2_missing_holder_fields::open", 2),
+    ("opf/tools/_opf_oplock.py::_t_f7_3_body::os.open", 1),
+    ("opf/tools/_opf_oplock.py::_t_h4_quote::open", 1),
+    ("opf/tools/_opf_oplock.py::_t_i2_attach_mints_bound_capability::open", 1),
+    ("opf/tools/_opf_oplock.py::_t_i5_holder_identity_bound::open", 1),
+    ("opf/tools/_opf_oplock.py::_t_named_roster::open", 1),
+    ("opf/tools/_opf_oplock.py::_t_r2_2_cross_worktree_recovery::open", 3),
+    ("opf/tools/_opf_oplock.py::_t_toml_class_read_control::os.open", 1),
+    ("opf/tools/_opf_oplock.py::_verified_unlink::os.open", 1),
+    ("opf/tools/_opf_pack_manifest.py::_runner_check::read_bytes", 1),
+    ("opf/tools/_opf_pack_manifest.py::_runner_check::read_text", 2),
+    ("opf/tools/_opf_pack_manifest.py::_runner_non_readable_fd_checks::os.open", 1),
+    ("opf/tools/_opf_pack_manifest.py::_runner_red_checks::read_text", 2),
+    ("opf/tools/_opf_pack_manifest.py::_runner_registration_test::read_text", 1),
+    ("opf/tools/_opf_pack_manifest.py::_runner_routes::read_text", 1),
+    ("opf/tools/_opf_pack_manifest.py::check_competing_log::read_bytes", 1),
+    ("opf/tools/_opf_record.py::_self_test_units::os.open", 1),
+    ("opf/tools/_opf_store.py::_open_dir_nofollow::os.open", 2),
+    ("opf/tools/_opf_store.py::_open_root_fd::os.open", 1),
+    ("opf/tools/_opf_store.py::_open_working_dir_fd::os.open", 1),
+    ("opf/tools/_opf_store.py::self_test::os.open", 17),
+    ("opf/tools/_opf_store.py::self_test::read_bytes", 3),
+    ("opf/tools/_opf_views.py::iview::read_text", 1),
+    ("opf/tools/_opf_views.py::pview::read_text", 1),
+    ("opf/tools/_opf_views.py::read_view::read_text", 1),
+    ("opf/tools/_opf_views.py::self_test::os.open", 7),
+    ("opf/tools/_opf_views.py::self_test::read_bytes", 4),
+    ("opf/tools/_opf_views.py::self_test::read_text", 35),
+    ("opf/tools/_opf_worklog.py::_self_test::os.open", 1),
+    ("opf/tools/_opf_worklog_regressions.py::__enter__::os.open", 1),
+    ("opf/tools/_opf_worklog_regressions.py::_entry_point_census::read_text", 1),
+    ("opf/tools/_opf_worklog_regressions.py::_upgrade_preflight_regressions::read_text", 1),
+    ("opf/tools/_opf_worklog_regressions.py::snapshot::read_bytes", 2),
+    ("opf/tools/_optlevel.py::source_docstring::open", 1),
+    ("opf/tools/check_opf_doctor.py::_doctor_suite::os.open", 1),
+    ("opf/tools/check_opf_doctor.py::_doctor_suite::read_bytes", 1),
+    ("opf/tools/check_opf_doctor.py::_doctor_suite::read_text", 3),
+    ("opf/tools/check_opf_doctor.py::_lstat_entry::open", 1),
+    ("opf/tools/check_opf_doctor.py::_run_recipe_stubbed::read_text", 1),
+    ("opf/tools/check_opf_drift.py::_drift_suite::read_text", 1),
+    ("opf/tools/check_opf_drift.py::build_clean_store::os.open", 1),
     ("opf/tools/check_opf_homes.py::index_digest::read_bytes", 1),
+    ("opf/tools/check_opf_init.py::_suite_isolated::os.open", 1),
+    ("opf/tools/check_opf_init.py::_suite_isolated::read_bytes", 6),
+    ("opf/tools/check_opf_init.py::valid_sources::read_text", 2),
+    ("opf/tools/check_opf_init.py::walk::read_bytes", 1),
+    ("opf/tools/check_opf_init_contract.py::_read::read_text", 1),
+    ("opf/tools/check_opf_init_observe.py::<module>::read_text", 2),
+    ("opf/tools/check_opf_init_p0.py::_runner_non_readable_fd_checks::os.open", 1),
+    ("opf/tools/check_opf_init_p0.py::check_competing_log::read_bytes", 1),
+    ("opf/tools/check_opf_init_p0.py::main::read_text", 2),
+    ("opf/tools/check_opf_init_p0.py::runner_check::read_bytes", 1),
+    ("opf/tools/check_opf_init_p0.py::runner_check::read_text", 2),
+    ("opf/tools/check_opf_init_p0.py::runner_red_checks::read_text", 2),
+    ("opf/tools/check_opf_init_p0.py::runner_routes::read_text", 1),
+    ("opf/tools/check_opf_init_qa.py::link::os.open", 1),
+    ("opf/tools/check_opf_init_qa.py::test_completed_b6_seeded_rerun::read_bytes", 2),
+    ("opf/tools/check_opf_init_qa.py::test_completed_current_source_health::read_bytes", 2),
+    ("opf/tools/check_opf_init_qa.py::test_completed_deletion_refused::read_bytes", 1),
+    ("opf/tools/check_opf_init_qa.py::test_completed_provenance_bound_to_plan::read_bytes", 1),
+    ("opf/tools/check_opf_init_qa.py::test_library_pinned_b6_seed::read_text", 1),
+    ("opf/tools/check_opf_init_qa.py::test_preintent_directory_and_source_collisions_retry::read_bytes", 1),
+    ("opf/tools/check_opf_init_qa.py::test_worklog_gap_above_floor_is_a_deletion::read_bytes", 2),
+    ("opf/tools/check_opf_prompt_pack.py::_snapshot::read_bytes", 1),
+    ("opf/tools/check_opf_record.py::_self_test_homes2_active::read_bytes", 1),
+    ("opf/tools/check_opf_record.py::assert_no_auto_maintenance::read_text", 1),
+    ("opf/tools/check_opf_record.py::read::read_bytes", 1),
+    ("opf/tools/check_opf_record.py::snapshot::read_bytes", 1),
+    ("opf/tools/check_opf_record.py::spec15_text::read_text", 1),
+    ("opf/tools/check_opf_record.py::t12_recovery_lease::os.open", 1),
+    ("opf/tools/check_opf_record.py::t29_git_lifecycle::read_text", 1),
+    ("opf/tools/check_opf_record.py::t38_staging_removal_disclosed::read_bytes", 1),
+    ("opf/tools/check_opf_record.py::t43_publish_names_removals::read_bytes", 1),
+    ("opf/tools/check_opf_upgrade.py::_snapshot::read_bytes", 1),
+    ("opf/tools/check_opf_upgrade.py::_suite_isolated::open", 1),
+    ("opf/tools/check_opf_upgrade.py::_suite_isolated::read_bytes", 36),
+    ("opf/tools/check_opf_upgrade.py::_suite_isolated::read_text", 1),
+    ("opf/tools/check_opf_upgrade.py::cnt_of::read_text", 1),
+    ("opf/tools/check_opf_upgrade.py::man_of::read_text", 1),
+    ("opf/tools/opf.py::_adopt_leg::os.open", 2),
+    ("opf/tools/opf.py::_import_leg::open", 1),
+    ("opf/tools/opf.py::_init_inventory::os.open", 1),
+    ("opf/tools/opf.py::_retained_close_offpath_self_test::os.open", 5),
+    ("opf/tools/opf.py::_self_test_entry_gaps::open", 1),
     ("opf/tools/opf.py::_watchdog_completion_case::os.open", 1),
+    ("opf/tools/opf.py::_watchdog_completion_case::read_bytes", 1),
+    ("opf/tools/opf.py::_watchdog_completion_case::read_text", 10),
     ("opf/tools/opf.py::_watchdog_safety_case::os.open", 1),
     ("opf/tools/opf.py::await_subject::read_text", 1),
+    ("opf/tools/opf.py::call::os.open", 1),
     ("opf/tools/opf.py::children_of::read_bytes", 1),
-    ("opf/tools/opf.py::exercise::read_text", 1),
-    ("opf/tools/opf.py::launch_killed::read_text", 2),
-    ("opf/tools/opf.py::launch_wedged::read_text", 2),
+    ("opf/tools/opf.py::exercise::read_text", 4),
+    ("opf/tools/opf.py::frozen_pair::read_text", 1),
+    ("opf/tools/opf.py::frozen_tree::read_text", 2),
+    ("opf/tools/opf.py::launch_held::read_text", 1),
+    ("opf/tools/opf.py::launch_killed::read_text", 4),
+    ("opf/tools/opf.py::launch_wedged::read_text", 4),
+    ("opf/tools/opf.py::observe::read_text", 1),
+    ("opf/tools/opf.py::old_census::read_text", 1),
+    ("opf/tools/opf.py::outer::os.open", 1),
     ("opf/tools/opf.py::state::read_bytes", 13),
+    ("opf/tools/opf.py::tree_snapshot::open", 2),
+    ("opf/tools/opf.py::walk::os.open", 1),
+    ("opf/tools/selftest_commonmark_conformance.py::_load_examples::open", 1),
+    ("opf/tools/selftest_commonmark_headings.py::sha::open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_load_gensrc_registry::open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_attestation_refs::open", 1),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_chained_rows::open", 1),
@@ -925,10 +1106,163 @@ RAW_READ_ALLOWLIST = dict((
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::orch_resume_barrier::open", 1),
     ("tools/_close_selftest.py::devnull::os.open", 1),
     ("tools/_gen_common.py::read_source_bytes::os.open", 1),
+    ("tools/_qa_adapter.py::_classify_presence::open", 1),
     ("tools/_qa_adapter.py::load_config::read_bytes", 1),
+    ("tools/aei_backlog_md.py::main::open", 1),
+    ("tools/aiqt_corpus.py::read_text_safe::read_text", 1),
+    ("tools/check_artifact_checksums.py::hash_file::read_bytes", 1),
+    ("tools/check_artifact_checksums.py::load_evidence::read_text", 1),
+    ("tools/check_byte_canon.py::run::read_bytes", 1),
+    ("tools/check_byte_canon.py::validate_allowances::read_bytes", 1),
+    ("tools/check_byte_canon.py::validate_hardbreak::read_bytes", 1),
+    ("tools/check_ci_parity.py::_run_runner_copy::read_text", 1),
+    ("tools/check_ci_parity.py::self_test::read_bytes", 1),
+    ("tools/check_clauses.py::self_test_main::read_text", 2),
+    ("tools/check_crosswalk.py::_load_toml::open", 1),
+    ("tools/check_crosswalk.py::_open_archive_dir::os.open", 2),
+    ("tools/check_crosswalk.py::_read_archive_payload::os.open", 2),
+    ("tools/check_derived_command_parameters.py::load_config::open", 1),
+    ("tools/check_gensrc_failclose.py::_read_bytes_safe::os.open", 1),
+    ("tools/check_gensrc_failclose.py::_tree_manifest::open", 1),
+    ("tools/check_git_option_table.py::run::read_text", 1),
+    ("tools/check_hooks_preview.py::_read_required::read_bytes", 1),
+    ("tools/check_hooks_preview.py::leg_integrity::read_bytes", 1),
+    ("tools/check_hooks_preview.py::self_test_main::read_text", 4),
+    ("tools/check_install_page.py::run::read_text", 3),
+    ("tools/check_instruction_budget.py::_expected_check_ids::open", 1),
+    ("tools/check_instruction_budget.py::_mutant::read_text", 1),
+    ("tools/check_instruction_budget.py::self_test::read_text", 1),
+    ("tools/check_internal_names.py::_read_present_text::read_text", 1),
+    ("tools/check_leaks.py::load_denylist::read_text", 1),
+    ("tools/check_manifest.py::_self_test_main_isolated::read_bytes", 4),
+    ("tools/check_manifest.py::_self_test_main_isolated::read_text", 6),
+    ("tools/check_newtab.py::_self_test::read_bytes", 1),
+    ("tools/check_opf_standalone_closure.py::self_test_main::read_text", 1),
+    ("tools/check_overclaim.py::_asset_closure_self_test::attr.open", 1),
+    ("tools/check_overclaim.py::_collector_self_test::attr.open", 1),
+    ("tools/check_overclaim.py::_page_bound_source_self_test::read_text", 1),
+    ("tools/check_overclaim.py::inject_and_scan::read_text", 1),
+    ("tools/check_portability.py::load_identity::open", 1),
+    ("tools/check_portability.py::scan_file::read_text", 1),
+    ("tools/check_python_floor.py::_read_text::read_bytes", 1),
+    ("tools/check_python_launcher_isolation.py::_read_required_text::read_text", 1),
+    ("tools/check_python_launcher_isolation.py::_scan_workflows::read_text", 1),
+    ("tools/check_python_launcher_isolation.py::self_test_main::read_text", 2),
+    ("tools/check_record_sections.py::_self_test_isolated::read_text", 1),
+    ("tools/check_record_sections.py::load_config::read_bytes", 1),
+    ("tools/check_reference_facts.py::_read::read_text", 1),
+    ("tools/check_release_build.py::_first_pin_evidence_findings::read_bytes", 1),
     ("tools/check_release_build.py::_self_test_main_isolated::attr.open", 2),
+    ("tools/check_release_build.py::_self_test_main_isolated::read_bytes", 1),
+    ("tools/check_release_build.py::qa_layers::read_bytes", 1),
+    ("tools/check_release_cut.py::_close_sweep::read_text", 1),
+    ("tools/check_release_cut.py::_close_sweep_check::read_text", 1),
+    ("tools/check_release_cut.py::_self_test_isolated::read_bytes", 1),
+    ("tools/check_release_cut.py::_self_test_isolated::read_text", 3),
+    ("tools/check_release_cut.py::working_blob::os.open", 2),
+    ("tools/check_release_delta.py::_edit_clause_consistently::read_text", 2),
     ("tools/check_release_delta.py::_extract::attr.open", 1),
+    ("tools/check_release_delta.py::_mut_idhist_topkey::read_text", 1),
+    ("tools/check_release_delta.py::_real_pack_e2e::read_text", 18),
+    ("tools/check_release_delta.py::run::read_bytes", 1),
+    ("tools/check_selftest_execution.py::_manifest_suites::open", 1),
+    ("tools/check_selftest_execution.py::_read_report::open", 1),
+    ("tools/check_selftest_execution.py::_source_check_ids::read_text", 1),
+    ("tools/check_selftest_execution.py::self_test::read_text", 4),
+    ("tools/check_sized_instructions.py::_read_text::read_bytes", 1),
+    ("tools/check_sized_instructions.py::_source_hash::read_bytes", 1),
+    ("tools/check_sized_instructions.py::run::read_text", 2),
+    ("tools/check_sized_instructions.py::skill_version::read_text", 1),
+    ("tools/check_versions.py::main::read_bytes", 1),
+    ("tools/conformance.py::_adapter_drift::read_text", 1),
+    ("tools/conformance.py::_agents_drift::read_text", 1),
+    ("tools/conformance.py::_build_conformant::read_text", 1),
+    ("tools/conformance.py::_build_mapped_tree::read_text", 1),
+    ("tools/conformance.py::_claude_drift::read_text", 2),
+    ("tools/conformance.py::_cursor_drift::read_text", 1),
+    ("tools/conformance.py::_skill_drift::read_bytes", 1),
+    ("tools/conformance.py::_skill_drift::read_text", 2),
+    ("tools/conformance.py::check_c5::read_text", 1),
+    ("tools/conformance.py::self_test_main::read_bytes", 1),
+    ("tools/conformance.py::self_test_main::read_text", 4),
+    ("tools/doctor.py::assert_open_journal::os.open", 1),
+    ("tools/doctor.py::call::os.open", 1),
+    ("tools/gen_adapters.py::main::read_text", 1),
+    ("tools/gen_agents.py::main::read_text", 1),
+    ("tools/gen_claude.py::main::read_text", 1),
+    ("tools/gen_crosswalk.py::_load_successor_inventory::open", 1),
+    ("tools/gen_crosswalk.py::_open_dir_at::os.open", 1),
+    ("tools/gen_crosswalk.py::_read_payload_fd::os.open", 1),
+    ("tools/gen_crosswalk.py::_verify_published_payload::os.open", 1),
+    ("tools/gen_crosswalk.py::archive_file::os.open", 1),
+    ("tools/gen_crosswalk.py::build_candidates::os.open", 1),
+    ("tools/gen_crosswalk.py::call::os.open", 1),
+    ("tools/gen_crosswalk.py::run_adopter::os.open", 1),
+    ("tools/gen_crosswalk.py::self_test::os.open", 6),
+    ("tools/gen_crosswalk.py::self_test::read_bytes", 3),
+    ("tools/gen_crosswalk.py::self_test::read_text", 4),
+    ("tools/gen_cursor.py::run::read_text", 1),
+    ("tools/gen_disclosure.py::main::read_text", 1),
+    ("tools/gen_enforceability.py::replace_in::read_text", 1),
+    ("tools/gen_enforceability.py::roster_scripts::read_text", 1),
+    ("tools/gen_enforceability.py::self_test_main::read_text", 8),
+    ("tools/gen_enforcement_register.py::compose_page::read_text", 1),
+    ("tools/gen_enforcement_register.py::load_ledger::read_text", 1),
+    ("tools/gen_enforcement_register.py::replace_in::read_text", 1),
+    ("tools/gen_enforcement_register.py::self_test_main::read_text", 10),
+    ("tools/gen_gensrc.py::_read_declaration::read_text", 1),
+    ("tools/gen_gensrc.py::self_test_main::read_text", 1),
+    ("tools/gen_hooks.py::_mutate::read_text", 1),
+    ("tools/gen_hooks.py::build_desired::read_text", 1),
+    ("tools/gen_hooks.py::run::read_text", 1),
+    ("tools/gen_hooks.py::self_test_main::read_text", 4),
+    ("tools/gen_install.py::run_gen::read_text", 1),
+    ("tools/gen_install.py::self_test_main::read_text", 2),
+    ("tools/gen_manifest.py::_self_test_main_isolated::read_text", 5),
+    ("tools/gen_mappings.py::main::read_text", 1),
+    ("tools/gen_reference_facts.py::build::read_text", 1),
+    ("tools/gen_reference_facts.py::self_test_main::read_text", 2),
+    ("tools/gen_renderers.py::_local_imports::read_text", 1),
+    ("tools/gen_renderers.py::_read_renderer_decl::read_text", 1),
+    ("tools/gen_renderers.py::framed_code_digest::read_bytes", 1),
+    ("tools/gen_renderers.py::self_test_main::read_text", 4),
+    ("tools/gen_secret_patterns.py::run::read_text", 1),
+    ("tools/gen_site.py::_read::read_text", 1),
+    ("tools/gen_skill.py::build_outputs::read_text", 1),
+    ("tools/gen_skill.py::parse_source::read_text", 1),
+    ("tools/gen_skill.py::plugin_identity::read_text", 1),
+    ("tools/gen_skill.py::run_gen::read_bytes", 1),
+    ("tools/gen_skill.py::run_gen::read_text", 2),
+    ("tools/gen_skill.py::self_test_main::read_text", 2),
+    ("tools/gen_worker_pack.py::run::read_bytes", 1),
+    ("tools/gen_worker_pack.py::self_test_main::read_bytes", 2),
+    ("tools/gen_worker_pack.py::self_test_main::read_text", 2),
     ("tools/import_cwe.py::_extract_member::attr.open", 1),
+    ("tools/import_cwe.py::render::read_bytes", 1),
+    ("tools/import_cwe.py::render::read_text", 1),
+    ("tools/import_cwe.py::self_test::read_text", 5),
+    ("tools/migrate.py::_open_root_fd::os.open", 1),
+    ("tools/migrate.py::_read_payload::read_bytes", 1),
+    ("tools/migrate.py::_read_staged_plan::read_bytes", 1),
+    ("tools/migrate.py::_snapshot::read_bytes", 1),
+    ("tools/migrate.py::load_crosswalk::open", 1),
+    ("tools/migrate.py::reader::read_bytes", 1),
+    ("tools/migrate.py::self_test::os.open", 27),
+    ("tools/migrate.py::self_test::read_bytes", 8),
+    ("tools/opf_render.py::materialize::read_text", 1),
+    ("tools/pin.py::_blocking_open_journal::os.open", 1),
+    ("tools/pin.py::_load_staged_ops::read_bytes", 1),
+    ("tools/pin.py::_load_staged_ops::read_text", 1),
+    ("tools/pin.py::_open_root_fd::os.open", 1),
+    ("tools/pin.py::_read_release::read_text", 1),
+    ("tools/pin.py::_rmtree_contained::os.open", 1),
+    ("tools/pin.py::reader::read_bytes", 1),
+    ("tools/pin.py::self_test::os.open", 1),
+    ("tools/pin.py::self_test::read_bytes", 3),
+    ("tools/pin.py::self_test::read_text", 1),
+    ("tools/selftest_aiqt_hooks.py::_main_isolated::open", 1),
+    ("tools/selftest_aiqt_hooks.py::_main_isolated::read_bytes", 14),
+    ("tools/selftest_aiqt_hooks.py::_main_isolated::read_text", 4),
     ("tools/selftest_ci_status.py::invoke::read_text", 1),
     ("tools/selftest_git_fixture_env.py::_auto_maintenance_children::read_text", 1),
     ("tools/selftest_git_fixture_env.py::_config_injection_lane::attr.open", 1),
@@ -939,16 +1273,108 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/selftest_git_fixture_env.py::main::read_bytes", 2),
     ("tools/selftest_git_fixture_env.py::prepare::read_text", 1),
     ("tools/selftest_git_fixture_env.py::run::read_bytes", 4),
+    ("tools/selftest_opf_render.py::_selftest::read_text", 2),
     ("tools/selftest_orch_hooks.py::_main_isolated::read_text", 19),
     ("tools/selftest_orch_hooks.py::_spoof_detail::read_text", 1),
     ("tools/selftest_orch_hooks.py::turn_state::read_text", 1),
 ))
 
-# QA round 7 (codex B1): the reader conversion is COMPLETE; no module-level pending
-# reason remains. Every allowlisted site carries a PER-SITE reason from the closed
-# vocabulary in RAW_READ_SITE_REASONS below; this table stays only as the mechanism
-# (a key here would cover a whole module) and must stay empty.
 RAW_READ_REASONS = dict((
+    ("opf/tools/_commonmark_headings.py", _RAW_READ_PENDING),
+    ("opf/tools/_journal.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_adopt_apply.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_adopt_hook.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_adopt_observe.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_adopt_plan.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_check.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_emit.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_fuzz.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_init_observe.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_init_operation.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_init_substrate.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_observe.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_oplock.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_pack_manifest.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_record.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_store.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_views.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_worklog.py", _RAW_READ_PENDING),
+    ("opf/tools/_opf_worklog_regressions.py", _RAW_READ_PENDING),
+    ("opf/tools/_optlevel.py", _RAW_READ_PENDING),
+    ("opf/tools/check_opf_doctor.py", _RAW_READ_PENDING),
+    ("opf/tools/check_opf_drift.py", _RAW_READ_PENDING),
+    ("opf/tools/check_opf_homes.py", _RAW_READ_PENDING),
+    ("opf/tools/check_opf_init.py", _RAW_READ_PENDING),
+    ("opf/tools/check_opf_init_contract.py", _RAW_READ_PENDING),
+    ("opf/tools/check_opf_init_observe.py", _RAW_READ_PENDING),
+    ("opf/tools/check_opf_init_p0.py", _RAW_READ_PENDING),
+    ("opf/tools/check_opf_init_qa.py", _RAW_READ_PENDING),
+    ("opf/tools/check_opf_prompt_pack.py", _RAW_READ_PENDING),
+    ("opf/tools/check_opf_record.py", _RAW_READ_PENDING),
+    ("opf/tools/check_opf_upgrade.py", _RAW_READ_PENDING),
+    ("opf/tools/opf.py", _RAW_READ_PENDING),
+    ("opf/tools/selftest_commonmark_conformance.py", _RAW_READ_PENDING),
+    ("opf/tools/selftest_commonmark_headings.py", _RAW_READ_PENDING),
+    ("tools/_close_selftest.py", _RAW_READ_PENDING),
+    ("tools/_gen_common.py", _RAW_READ_PENDING),
+    ("tools/_qa_adapter.py", _RAW_READ_PENDING),
+    ("tools/aei_backlog_md.py", _RAW_READ_PENDING),
+    ("tools/aiqt_corpus.py", _RAW_READ_PENDING),
+    ("tools/check_artifact_checksums.py", _RAW_READ_PENDING),
+    ("tools/check_byte_canon.py", _RAW_READ_PENDING),
+    ("tools/check_ci_parity.py", _RAW_READ_PENDING),
+    ("tools/check_clauses.py", _RAW_READ_PENDING),
+    ("tools/check_crosswalk.py", _RAW_READ_PENDING),
+    ("tools/check_derived_command_parameters.py", _RAW_READ_PENDING),
+    ("tools/check_gensrc_failclose.py", _RAW_READ_PENDING),
+    ("tools/check_git_option_table.py", _RAW_READ_PENDING),
+    ("tools/check_hooks_preview.py", _RAW_READ_PENDING),
+    ("tools/check_install_page.py", _RAW_READ_PENDING),
+    ("tools/check_instruction_budget.py", _RAW_READ_PENDING),
+    ("tools/check_internal_names.py", _RAW_READ_PENDING),
+    ("tools/check_leaks.py", _RAW_READ_PENDING),
+    ("tools/check_manifest.py", _RAW_READ_PENDING),
+    ("tools/check_newtab.py", _RAW_READ_PENDING),
+    ("tools/check_opf_standalone_closure.py", _RAW_READ_PENDING),
+    ("tools/check_overclaim.py", _RAW_READ_PENDING),
+    ("tools/check_portability.py", _RAW_READ_PENDING),
+    ("tools/check_python_floor.py", _RAW_READ_PENDING),
+    ("tools/check_python_launcher_isolation.py", _RAW_READ_PENDING),
+    ("tools/check_record_sections.py", _RAW_READ_PENDING),
+    ("tools/check_reference_facts.py", _RAW_READ_PENDING),
+    ("tools/check_release_build.py", _RAW_READ_PENDING),
+    ("tools/check_release_cut.py", _RAW_READ_PENDING),
+    ("tools/check_release_delta.py", _RAW_READ_PENDING),
+    ("tools/check_selftest_execution.py", _RAW_READ_PENDING),
+    ("tools/check_sized_instructions.py", _RAW_READ_PENDING),
+    ("tools/check_versions.py", _RAW_READ_PENDING),
+    ("tools/conformance.py", _RAW_READ_PENDING),
+    ("tools/doctor.py", _RAW_READ_PENDING),
+    ("tools/gen_adapters.py", _RAW_READ_PENDING),
+    ("tools/gen_agents.py", _RAW_READ_PENDING),
+    ("tools/gen_claude.py", _RAW_READ_PENDING),
+    ("tools/gen_crosswalk.py", _RAW_READ_PENDING),
+    ("tools/gen_cursor.py", _RAW_READ_PENDING),
+    ("tools/gen_disclosure.py", _RAW_READ_PENDING),
+    ("tools/gen_enforceability.py", _RAW_READ_PENDING),
+    ("tools/gen_enforcement_register.py", _RAW_READ_PENDING),
+    ("tools/gen_gensrc.py", _RAW_READ_PENDING),
+    ("tools/gen_hooks.py", _RAW_READ_PENDING),
+    ("tools/gen_install.py", _RAW_READ_PENDING),
+    ("tools/gen_manifest.py", _RAW_READ_PENDING),
+    ("tools/gen_mappings.py", _RAW_READ_PENDING),
+    ("tools/gen_reference_facts.py", _RAW_READ_PENDING),
+    ("tools/gen_renderers.py", _RAW_READ_PENDING),
+    ("tools/gen_secret_patterns.py", _RAW_READ_PENDING),
+    ("tools/gen_site.py", _RAW_READ_PENDING),
+    ("tools/gen_skill.py", _RAW_READ_PENDING),
+    ("tools/gen_worker_pack.py", _RAW_READ_PENDING),
+    ("tools/import_cwe.py", _RAW_READ_PENDING),
+    ("tools/migrate.py", _RAW_READ_PENDING),
+    ("tools/opf_render.py", _RAW_READ_PENDING),
+    ("tools/pin.py", _RAW_READ_PENDING),
+    ("tools/selftest_aiqt_hooks.py", _RAW_READ_PENDING),
+    ("tools/selftest_opf_render.py", _RAW_READ_PENDING),
 ))
 
 
@@ -1083,42 +1509,6 @@ RAW_READ_SITE_REASONS = dict((
      "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
     (".preview/ungated-record.py::vendor_blocks::open",
      "reads the preview module's own committed file (__file__) to verify its vendored block, an in-root path the D-400 walk certifies; the standalone script cannot import the shared readers; conversion to a local non-blocking reader is pending and tracked by this pin"),
-    ("opf/tools/_journal.py::_pid_start::open",
-     "(b) reads /proc/<pid>/stat, a kernel interface; no special file can be planted there"),
-    ("opf/tools/_journal.py::devnull::os.open",
-     "(b) os.devnull, a kernel device node: opening it can never block (the driver answers at once), and these self-test sites deliberately probe the REAL open seam on it, which a checked wrapper would re-interpret"),
-    ("opf/tools/_opf_adopt_hook.py::self_test::attr.open",
-     "(b) os.devnull, a kernel device node: opening it can never block (the driver answers at once), and these self-test sites deliberately probe the REAL open seam on it, which a checked wrapper would re-interpret"),
-    ("opf/tools/_opf_adopt_hook.py::self_test::open",
-     "(b) os.devnull, a kernel device node: opening it can never block (the driver answers at once), and these self-test sites deliberately probe the REAL open seam on it, which a checked wrapper would re-interpret"),
-    ("opf/tools/_opf_adopt_observe.py::__init__::os.open",
-     "(b) os.devnull, a kernel device node: opening it can never block (the driver answers at once), and these self-test sites deliberately probe the REAL open seam on it, which a checked wrapper would re-interpret"),
-    ("opf/tools/_opf_emit.py::_fixture_stat_fields::os.open",
-     "(b) /proc, a kernel interface: the sites read kernel-synthesized process-state files, never a plantable filesystem object, so no FIFO, device or symlink of an attacker can sit at these paths"),
-    ("opf/tools/_opf_emit.py::call::os.open",
-     "(b) os.devnull, a kernel device node: opening it can never block (the driver answers at once), and these self-test sites deliberately probe the REAL open seam on it, which a checked wrapper would re-interpret"),
-    ("opf/tools/_opf_oplock.py::_close_then_reuse::os.open",
-     "(b) os.devnull, a kernel device node: opening it can never block (the driver answers at once), and these self-test sites deliberately probe the REAL open seam on it, which a checked wrapper would re-interpret"),
-    ("opf/tools/_opf_oplock.py::_st_f8_2_body::os.open",
-     "(b) os.devnull, a kernel device node: opening it can never block (the driver answers at once), and these self-test sites deliberately probe the REAL open seam on it, which a checked wrapper would re-interpret"),
-    ("opf/tools/check_opf_homes.py::index_digest::read_bytes",
-     "(a) reads the .git/index of a temporary fixture repository the self-test created"),
-    ("opf/tools/opf.py::_watchdog_completion_case::os.open",
-     "(b) os.devnull, a kernel device node: opening it can never block (the driver answers at once), and these self-test sites deliberately probe the REAL open seam on it, which a checked wrapper would re-interpret"),
-    ("opf/tools/opf.py::_watchdog_safety_case::os.open",
-     "(b) os.devnull, a kernel device node: opening it can never block (the driver answers at once), and these self-test sites deliberately probe the REAL open seam on it, which a checked wrapper would re-interpret"),
-    ("opf/tools/opf.py::await_subject::read_text",
-     "(b) /proc, a kernel interface: the sites read kernel-synthesized process-state files, never a plantable filesystem object, so no FIFO, device or symlink of an attacker can sit at these paths"),
-    ("opf/tools/opf.py::children_of::read_bytes",
-     "(b) /proc, a kernel interface: the sites read kernel-synthesized process-state files, never a plantable filesystem object, so no FIFO, device or symlink of an attacker can sit at these paths"),
-    ("opf/tools/opf.py::exercise::read_text",
-     "(b) /proc, a kernel interface: the sites read kernel-synthesized process-state files, never a plantable filesystem object, so no FIFO, device or symlink of an attacker can sit at these paths"),
-    ("opf/tools/opf.py::launch_killed::read_text",
-     "(b) /proc, a kernel interface: the sites read kernel-synthesized process-state files, never a plantable filesystem object, so no FIFO, device or symlink of an attacker can sit at these paths"),
-    ("opf/tools/opf.py::launch_wedged::read_text",
-     "(b) /proc, a kernel interface: the sites read kernel-synthesized process-state files, never a plantable filesystem object, so no FIFO, device or symlink of an attacker can sit at these paths"),
-    ("opf/tools/opf.py::state::read_bytes",
-     "(b) /proc, a kernel interface: the sites read kernel-synthesized process-state files, never a plantable filesystem object, so no FIFO, device or symlink of an attacker can sit at these paths"),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_load_gensrc_registry::open",
      "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::_orch_attestation_refs::open",
@@ -1153,18 +1543,6 @@ RAW_READ_SITE_REASONS = dict((
      "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
     ("plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py::orch_resume_barrier::open",
      "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
-    ("tools/_close_selftest.py::devnull::os.open",
-     "(b) os.devnull, a kernel device node: opening it can never block (the driver answers at once), and these self-test sites deliberately probe the REAL open seam on it, which a checked wrapper would re-interpret"),
-    ("tools/_gen_common.py::read_source_bytes::os.open",
-     "(c) this IS the shared non-blocking reader: `flags` is built a few lines above with O_NOFOLLOW and O_NONBLOCK (getattr spellings this literal-flag scan cannot see) and the opened descriptor is fstat-checked S_ISREG before any read"),
-    ("tools/_qa_adapter.py::load_config::read_bytes",
-     "(c) _classify_presence requires S_ISREG BEFORE the open (tools/_qa_adapter.py, load_config, the state check ahead of the read), so the read cannot meet a special file"),
-    ("tools/check_release_build.py::_self_test_main_isolated::attr.open",
-     "(c) opens NO path: tarfile.open over an in-memory io.BytesIO fileobj; there is no filesystem object for the open or read to block on"),
-    ("tools/check_release_delta.py::_extract::attr.open",
-     "(c) opens NO path: tarfile.open over an in-memory io.BytesIO fileobj; there is no filesystem object for the open or read to block on"),
-    ("tools/import_cwe.py::_extract_member::attr.open",
-     "(c) opens NO path: a zipfile member over an in-memory io.BytesIO of already-fetched bytes; there is no filesystem object for the open or read to block on"),
     ("tools/selftest_ci_status.py::invoke::read_text",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
     ("tools/selftest_git_fixture_env.py::_auto_maintenance_children::read_text",
@@ -1191,6 +1569,12 @@ RAW_READ_SITE_REASONS = dict((
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
     ("tools/selftest_orch_hooks.py::turn_state::read_text",
      "(a) reads a temporary fixture the same test created under its own tempfile scratch, never the repository tree"),
+    ("opf/tools/_journal.py::_pid_start::open",
+     "(b) reads /proc/<pid>/stat, a kernel interface; no special file can be planted there"),
+    ("opf/tools/check_opf_homes.py::index_digest::read_bytes",
+     "(a) reads the .git/index of a temporary fixture repository the self-test created"),
+    ("tools/_qa_adapter.py::load_config::read_bytes",
+     "(c) _classify_presence requires S_ISREG BEFORE the open (tools/_qa_adapter.py, load_config, the state check ahead of the read), so the read cannot meet a special file"),
 ))
 
 
@@ -2294,7 +2678,7 @@ def _close_sweep(root):
     rows = set()
     for directory in _CLOSE_SWEEP_DIRS:
         for path in sorted((Path(root) / directory).glob("*.py")):
-            rows.update(_close_sweep_source(path.relative_to(root).as_posix(), _nbio.read_text_nb(path, encoding="utf-8")))
+            rows.update(_close_sweep_source(path.relative_to(root).as_posix(), path.read_text(encoding="utf-8")))
     return sorted(rows)
 
 
@@ -2825,7 +3209,7 @@ def _close_sweep_check(root):
     sources = [("<corpus {}>".format(kind), source) for kind, source in _CLOSE_SWEEP_CORPUS]
     for directory in _CLOSE_SWEEP_DIRS:
         for path in sorted((Path(root) / directory).glob("*.py")):
-            sources.append((path.relative_to(root).as_posix(), _nbio.read_text_nb(path, encoding="utf-8")))
+            sources.append((path.relative_to(root).as_posix(), path.read_text(encoding="utf-8")))
     failures = ["close sweep robustness: " + failure for failure in _cs_robustness_failures(sources)]
     if failures:
         return failures                                   # the rows cannot be compared while the sweep raises
@@ -2920,8 +3304,8 @@ def _self_test_isolated(red_on_revert):
             print("FAIL " + failure, file=sys.stderr)
         check("close-vectors", not close_failures)
         print("PASS close-vectors runs=" + str(close_runs))
-        journal = _nbio.read_text_nb(script.parents[1] / "opf" / "tools" / "_journal.py", encoding="utf-8")
-        copy = _nbio.read_text_nb(script.parent / "_close_selftest.py", encoding="utf-8")
+        journal = (script.parents[1] / "opf" / "tools" / "_journal.py").read_text(encoding="utf-8")
+        copy = (script.parent / "_close_selftest.py").read_text(encoding="utf-8")
         check("close-harness-in-step", _close_harness_in_step(journal, copy))
         require(copy.count("raise self.err") == 1, "close harness: drift flip anchor is not unique")
         check("close-harness-drift-red",
@@ -2980,33 +3364,31 @@ def _self_test_isolated(red_on_revert):
                 check("raw-read-lint-declared-fifo-runner-fails",
                       any("selftest_fifo" in failure and "not a regular file" in failure
                           for failure in entry_failures))
-            # QA round 7 (codex M3): a module DECLARED on a non-echo runner line is a failure
-            # when MISSING (no lexists prerequisite), while the same path named only on an echo
-            # line stays message text. Fails without the structural carve-out change.
-            runner_path = lint_root / "tools/run_all_checks.sh"
-            runner_path.write_text(
-                'run_gate "ghost" python3 -I -B tools/ghost_gate.py\n'
-                'echo "see tools/only_in_message.py"\n', encoding="utf-8")
-            manifest_path.write_text("", encoding="utf-8")
-            _entries, entry_failures = _raw_read_entry_modules(lint_root)
-            check("raw-read-lint-declared-missing-module-fails",
-                  any("ghost_gate" in failure and "missing" in failure
-                      for failure in entry_failures))
-            check("raw-read-lint-echo-message-text-exempt",
-                  not any("only_in_message" in failure for failure in entry_failures))
-            # QA round 7 (codex M3, claude m-d): a TRANSITIVELY imported module that exists but
-            # is not a regular file is a failure, never silently dropped. Fails without the
-            # lstat classification (is_file() on a FIFO answered False and dropped it).
-            if hasattr(os, "mkfifo"):
-                runner_path.write_text('run_gate "a" python3 -I -B tools/gate_a.py\n',
-                                       encoding="utf-8")
-                (lint_root / "tools" / "gate_a.py").write_text("import fifomod\n",
-                                                               encoding="utf-8")
-                os.mkfifo(lint_root / "tools" / "fifomod.py")
-                _modules, module_failures = _raw_read_modules(lint_root)
-                check("raw-read-lint-transitive-fifo-import-fails",
-                      any("fifomod" in failure and "not a regular file" in failure
-                          for failure in module_failures))
+                # QA round 8 (codex 3): a TRANSITIVELY imported local module that is deleted or
+                # replaced by a special file fails the lint BY NAME; a stdlib import does not.
+                # Fails without the fail-closed resolution (the round-7 walk dropped a missing
+                # transitive module silently, shrinking the enumerated read set).
+                (lint_root / "tools" / "run_all_checks.sh").write_text(
+                    "python3 -I -B tools/entry_a.py\n", encoding="utf-8")
+                manifest_path.write_text("", encoding="utf-8")
+                (lint_root / "tools" / "entry_a.py").write_text(
+                    "import os\nimport entry_b\n", encoding="utf-8")
+                (lint_root / "tools" / "entry_b.py").write_text("x = 1\n", encoding="utf-8")
+                modules_ok, failures_ok = _raw_read_modules(lint_root)
+                check("raw-read-lint-transitive-module-enumerated",
+                      "tools/entry_b.py" in modules_ok
+                      and not any("entry_b" in failure or "'os'" in failure
+                                  for failure in failures_ok))
+                (lint_root / "tools" / "entry_b.py").unlink()
+                _modules, failures_missing = _raw_read_modules(lint_root)
+                check("raw-read-lint-missing-transitive-module-fails",
+                      any("entry_b" in failure and "never drops out" in failure
+                          for failure in failures_missing))
+                os.mkfifo(lint_root / "tools" / "entry_b.py")
+                _modules, failures_special = _raw_read_modules(lint_root)
+                check("raw-read-lint-special-transitive-module-fails",
+                      any("entry_b" in failure and "not a regular file" in failure
+                          for failure in failures_special))
         lint_failures, lint_stats = _raw_read_lint(script.parents[1])
         for failure in lint_failures[:25]:
             print("FAIL " + failure, file=sys.stderr)
@@ -3015,7 +3397,7 @@ def _self_test_isolated(red_on_revert):
         print("PASS close-sweep shapes={} corpus={} recorded={}".format(
             len(_CLOSE_SWEEP_SHAPES), len(_CLOSE_SWEEP_CORPUS), len(_CLOSE_SWEEP_DISPOSITIONS)))
         if red_on_revert:
-            source = _nbio.read_text_nb(script, encoding="utf-8")
+            source = script.read_text(encoding="utf-8")
             marker = "# SELF-TEST:" + " mutation targets are restricted to the production prefix above."
             require(source.count(marker) == 1, "self-test mutation boundary is not unique")
             production, tests = source.split(marker)
@@ -3067,7 +3449,7 @@ def _self_test_isolated(red_on_revert):
                 ("ci-event", 'require(event in ("pull_request", "push"),',
                  "require(True,", "event-dispatch", 0),
             )
-            parser_bytes = _nbio.read_bytes_nb(script.parents[1] / "opf" / "tools" / "_semver.py")
+            parser_bytes = (script.parents[1] / "opf" / "tools" / "_semver.py").read_bytes()
             for name, old, new, case_id, mutated_code in mutations:
                 require(production.count(old) == 1, name + ": mutation must match exactly once")
                 location = parent / ("mutation-" + name)

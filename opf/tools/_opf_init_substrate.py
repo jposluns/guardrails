@@ -116,7 +116,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _containment        # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 import _journal            # noqa: E402
 import _opf_init_contract  # noqa: E402
 import _opf_oplock         # noqa: E402
@@ -264,7 +263,7 @@ def _list_dir_fresh(parent_fd, name, ident, label):
     listing refuses rather than listing a different directory. Fail-closed throughout: raises
     InitSubstrateError, never a silent empty listing."""
     try:
-        fd = os.open(name, (_opf_oplock._DIR_OPEN_FLAGS) | getattr(os, "O_NONBLOCK", 0), dir_fd=parent_fd)
+        fd = os.open(name, _opf_oplock._DIR_OPEN_FLAGS, dir_fd=parent_fd)
     except OSError as exc:
         raise InitSubstrateError("cannot open {} for a fresh listing ({})".format(label, exc))
     try:
@@ -318,7 +317,7 @@ def _read_record_bytes(dir_fd, name, label, max_bytes):
     OSError (an fstat or read failure AFTER a successful open) is contained as the same refusal,
     so a survey caller can CANNOT-EVALUATE the one record rather than abort whole."""
     try:
-        fd = os.open(name, (_opf_oplock._FILE_READ_FLAGS) | getattr(os, "O_NONBLOCK", 0), dir_fd=dir_fd)
+        fd = os.open(name, _opf_oplock._FILE_READ_FLAGS, dir_fd=dir_fd)
     except OSError as exc:
         raise InitSubstrateError("cannot read {} ({})".format(label, exc))
     try:
@@ -1505,10 +1504,10 @@ def _t_s3_plan_validation(d, env):
         "plan validation must precede any filesystem write"
     sub = begin_operation(cap, good)
     plan = os.path.join(_st_sub_ops(root), cap.op_id, PLAN_NAME)
-    with _nbio.open_nb(plan, "rb") as fh:
+    with open(plan, "rb") as fh:
         assert fh.read() == good, "plan bytes must equal the validated payload"
     _st_expect_refusal(begin_operation, cap, good, needle="already exists")
-    with _nbio.open_nb(plan, "rb") as fh:
+    with open(plan, "rb") as fh:
         assert fh.read() == good, "a refused duplicate begin must preserve the plan"
     close_operation(sub)
     _opf_oplock.release_operation(cap)
@@ -1527,7 +1526,7 @@ def _t_s4_phase_discipline(d, env):
     n2 = record_phase(sub, cap, "plan-recorded")
     assert (n1, n2) == ("0001-observe.json", "0002-plan-recorded.json"), (n1, n2)
     op_dir = os.path.join(_st_sub_ops(root), cap.op_id)
-    with _nbio.open_nb(os.path.join(op_dir, n1), "rb") as fh:
+    with open(os.path.join(op_dir, n1), "rb") as fh:
         raw = fh.read()
     doc = json.loads(raw.decode("utf-8"))
     assert set(doc) == set(PHASE_TOP_KEYS), doc
@@ -1543,7 +1542,7 @@ def _t_s4_phase_discipline(d, env):
     os.unlink(stray)
     record_phase(sub, cap, "stage")
     p1 = os.path.join(op_dir, n1)         # a byte-identical swap is the same record: no refusal
-    with _nbio.open_nb(p1, "rb") as fh:
+    with open(p1, "rb") as fh:
         same = fh.read()
     os.unlink(p1)
     with open(p1, "wb") as fh:
@@ -1691,7 +1690,7 @@ def _t_s6_crash_resume(d, env):
         "the crash must leave the control legs behind"
     plan = os.path.join(_st_sub_ops(root), op_id, PLAN_NAME)
     phase1 = os.path.join(_st_sub_ops(root), op_id, "0001-observe.json")
-    with _nbio.open_nb(plan, "rb") as fh:
+    with open(plan, "rb") as fh:
         plan_before = fh.read()
     survey = classify_operations(root)
     assert survey.status == OPERATIONS and len(survey.operations) == 1
@@ -1704,9 +1703,9 @@ def _t_s6_crash_resume(d, env):
     else:
         raise AssertionError("stale control legs must refuse without recover=True")
     cap = _opf_oplock.acquire_operation(root, "opf-init", recover=True)
-    with _nbio.open_nb(active, "rb") as fh:        # the control legs now belong to the NEW holder
+    with open(active, "rb") as fh:        # the control legs now belong to the NEW holder
         assert fh.read() == cap._active_bytes
-    with _nbio.open_nb(plan, "rb") as fh:
+    with open(plan, "rb") as fh:
         assert fh.read() == plan_before, \
             "recovery must PRESERVE the substrate tree (plan-aware resume evidence)"
     assert os.path.isfile(phase1), "recovery must not touch a phase record"
@@ -2069,7 +2068,7 @@ def _t_s15_resume_operation(d, env):
     sub = resume_operation(holder, _ST_INIT_OP, "sha256:" + "0" * 64)
     assert recorded_phases(sub) == ((1, "plan-recorded"), (2, "dirs-intent"))
     assert record_phase(sub, holder, "dirs-verified") == "0003-dirs-verified.json"
-    with _nbio.open_nb(os.path.join(op_dir, PLAN_NAME), "rb") as fh:
+    with open(os.path.join(op_dir, PLAN_NAME), "rb") as fh:
         assert fh.read() == plan, "resume never rewrites the plan"
     close_operation(sub)
     os.unlink(os.path.join(op_dir, "0002-dirs-intent.json"))

@@ -49,7 +49,6 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml            # noqa: E402
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
 from check_versions import _parse                        # noqa: E402  bare-SemVer (sibling idiom)
 from check_clauses import split_clause_id                # noqa: E402  authoritative clause-id syntax (7.1)
 from gen_rules import SLUG_RE                             # noqa: E402  the authoritative renderer-id slug syntax
@@ -939,7 +938,7 @@ def run(root):
                        path_keyset_leg(prev_manifest, head_manifest),
                        ownership_leg(_ownership_classes_at(root, commit),
                                      _ownership_classes_head(root), rows, head_version),
-                       order_leg(_show(root, commit, ORDER_REL), _nbio.read_bytes_nb(root / ORDER_REL)),
+                       order_leg(_show(root, commit, ORDER_REL), (root / ORDER_REL).read_bytes()),
                        renderer_leg(root, prev_renderers, head_renderers, rows, head_version)):
             events += ev
             findings += fs
@@ -1111,7 +1110,7 @@ def _edit_clause_consistently(repo):
     import tomllib
     from collections import defaultdict
     clp = repo / CLAUSES_REL
-    raw = _nbio.read_text_nb(clp, encoding="utf-8")
+    raw = clp.read_text(encoding="utf-8")
     inv = tomllib.loads(raw).get("clause", [])
     spans = defaultdict(list)
     for c in inv:
@@ -1132,7 +1131,7 @@ def _edit_clause_consistently(repo):
     sp, s, e = target["source-path"], target["start-line"], target["end-line"]
     new_lines = ["EDITEDBYE2ETESTXYZ{}".format(k) for k in range(e - s + 1)]
     srcp = repo / sp
-    src_lines = _nbio.read_text_nb(srcp, encoding="utf-8").split("\n")
+    src_lines = srcp.read_text(encoding="utf-8").split("\n")
     src_lines[s - 1:e] = new_lines
     new_src = "\n".join(src_lines)
     srcp.write_text(new_src, encoding="utf-8")
@@ -1285,7 +1284,7 @@ def _real_pack_e2e(tmp, failures):
     # (this round's #4) a HEAD order.toml with an out-of-vocabulary presentation family in the NON-GENESIS
     # delta path: strict_order on the head object rejects it, exit 2 (pre-fix presentation-order entries
     # were validated only as strings). order.toml is restored so the later cases see the clean tree.
-    _orig_order = _nbio.read_text_nb(repo / ORDER_REL, encoding="utf-8")
+    _orig_order = (repo / ORDER_REL).read_text(encoding="utf-8")
     (repo / ORDER_REL).write_text(_orig_order.replace(
         'families = ["apex", "aiqt", "security"]', 'families = ["bogus"]', 1), encoding="utf-8")
     if _run_quiet_root(repo) != 2:
@@ -1407,10 +1406,10 @@ def _real_pack_e2e(tmp, failures):
     # failing at the version-binding rejection. A gen failure is recorded in `failures` by the helper.
     if not _pin_fixture_version(repo2, failures):
         return True  # the primary cases already ran; the setup failure is recorded in failures
-    orig_gcommon = _nbio.read_text_nb(repo2 / gcommon, encoding="utf-8")
+    orig_gcommon = (repo2 / gcommon).read_text(encoding="utf-8")
     (repo2 / gcommon).write_text(orig_gcommon + "\n# predecessor-only undeclared edit\n", encoding="utf-8")
     attrs = repo2 / ".gitattributes"
-    attrs.write_text(_nbio.read_text_nb(attrs, encoding="utf-8") + "tools/_gen_common.py filter=hide\n",
+    attrs.write_text(attrs.read_text(encoding="utf-8") + "tools/_gen_common.py filter=hide\n",
                      encoding="utf-8")
     ok = True
     for args in (["config", "filter.hide.smudge", "sed '/predecessor-only undeclared edit/d'"],
@@ -1429,7 +1428,7 @@ def _real_pack_e2e(tmp, failures):
         wt = tmp / "smudge-wt"
         if subprocess.run(["git", "-C", str(repo2), "worktree", "add", "--detach", "-q", str(wt), commit1b],
                           capture_output=True, env=env).returncode == 0:
-            if "predecessor-only undeclared edit" in _nbio.read_text_nb(wt / gcommon, encoding="utf-8"):
+            if "predecessor-only undeclared edit" in (wt / gcommon).read_text(encoding="utf-8"):
                 failures.append("smudge fixture: the smudge filter did not hide the edit on checkout; the "
                                 "attack is not set up, so the raw-materialization regression is not proven")
             subprocess.run(["git", "-C", str(repo2), "worktree", "remove", "--force", str(wt)],
@@ -1467,7 +1466,7 @@ def _real_pack_e2e(tmp, failures):
     if not _pin_fixture_version(repo3, failures):
         return True  # the primary cases already ran; the setup failure is recorded in failures
     mpath = repo3 / MANIFEST_REL
-    mblocks = _nbio.read_text_nb(mpath, encoding="utf-8").split("\n[[sources]]")
+    mblocks = mpath.read_text(encoding="utf-8").split("\n[[sources]]")
     kept = [mblocks[0]] + ["\n[[sources]]" + b for b in mblocks[1:] if 'path = "NOTICE"\n' not in b]
     if len(kept) == len(mblocks) - 1 and "[[artifacts]]" in "".join(kept):
         mpath.write_text("".join(kept), encoding="utf-8")
@@ -1559,11 +1558,11 @@ def _real_pack_e2e(tmp, failures):
             failures.append(want_msg)
 
     # capture the real id-history so each fixture can restore a VALID head copy after mutating the predecessor.
-    orig_idh_ref = [_nbio.read_text_nb(repo_root() / IDHISTORY_REL, encoding="utf-8")]
+    orig_idh_ref = [(repo_root() / IDHISTORY_REL).read_text(encoding="utf-8")]
 
     def _mut_idhist_topkey(rp):
         p = rp / IDHISTORY_REL
-        p.write_text("bogus = 1\n" + _nbio.read_text_nb(p, encoding="utf-8"), encoding="utf-8")
+        p.write_text("bogus = 1\n" + p.read_text(encoding="utf-8"), encoding="utf-8")
 
     def _mut_releases_badrow(rp):
         # the finding's repro: a predecessor release ROW with an INTEGER commit_sha. read_genesis (used by
@@ -1693,7 +1692,7 @@ def _real_pack_e2e(tmp, failures):
     gart = _extract_genesis("genesis-bogus-artifact")
     if gart is not None:
         mp = gart / ".aiqt" / "manifest.toml"
-        mp.write_text(_nbio.read_text_nb(mp, encoding="utf-8").replace(
+        mp.write_text(mp.read_text(encoding="utf-8").replace(
             "[[artifacts]]\n", "[[artifacts]]\nbogus = \"x\"\n", 1), encoding="utf-8")
         if _run_quiet_root(gart) != 2:
             failures.append("real genesis full-pack run(): a bogus artifact-row key must fail closed exit 2 "
@@ -1705,7 +1704,7 @@ def _real_pack_e2e(tmp, failures):
     if gsrc is not None:
         mp = gsrc / ".aiqt" / "manifest.toml"
         stripped = re.sub(r'\[\[sources\]\]\npath = [^\n]*\nbytes = [^\n]*\nsha256 = [^\n]*\n\n', '',
-                          _nbio.read_text_nb(mp, encoding="utf-8"))
+                          mp.read_text(encoding="utf-8"))
         mp.write_text(stripped, encoding="utf-8")
         if _run_quiet_root(gsrc) != 2:
             failures.append("real genesis full-pack run(): a manifest missing its [[sources]] section must "
@@ -1715,7 +1714,7 @@ def _real_pack_e2e(tmp, failures):
     gblk = _extract_genesis("genesis-bad-blockid")
     if gblk is not None:
         mp = gblk / ".aiqt" / "manifest.toml"
-        mutated = _nbio.read_text_nb(mp, encoding="utf-8").replace('block-id = "RULES-INDEX"', "block-id = 7", 1)
+        mutated = mp.read_text(encoding="utf-8").replace('block-id = "RULES-INDEX"', "block-id = 7", 1)
         mp.write_text(mutated, encoding="utf-8")
         if _run_quiet_root(gblk) != 2:
             failures.append("real genesis full-pack run(): a non-string managed-block block-id must fail "
@@ -1725,7 +1724,7 @@ def _real_pack_e2e(tmp, failures):
     gcla = _extract_genesis("genesis-clause-topkey")
     if gcla is not None:
         cp = gcla / CLAUSES_REL
-        cp.write_text("bogus = 1\n" + _nbio.read_text_nb(cp, encoding="utf-8"), encoding="utf-8")
+        cp.write_text("bogus = 1\n" + cp.read_text(encoding="utf-8"), encoding="utf-8")
         if _run_quiet_root(gcla) != 2:
             failures.append("real genesis full-pack run(): an unknown clauses.toml top-level key must fail "
                             "closed exit 2 (round-6 finding 3)")
@@ -1778,7 +1777,7 @@ def _real_pack_e2e(tmp, failures):
     gof = _extract_genesis("genesis-order-badfamily")
     if gof is not None:
         op = gof / ORDER_REL
-        op.write_text(_nbio.read_text_nb(op, encoding="utf-8").replace(
+        op.write_text(op.read_text(encoding="utf-8").replace(
             'families = ["apex", "aiqt", "security"]', 'families = ["bogus"]', 1), encoding="utf-8")
         if _run_quiet_root(gof) != 2:
             failures.append("real genesis full-pack run(): an out-of-vocabulary order family must fail "
@@ -1789,7 +1788,7 @@ def _real_pack_e2e(tmp, failures):
     gctl = _extract_genesis("genesis-artifact-ctrlpath")
     if gctl is not None:
         mp = gctl / MANIFEST_REL
-        mp.write_text(_nbio.read_text_nb(mp, encoding="utf-8")
+        mp.write_text(mp.read_text(encoding="utf-8")
                       + '\n[[artifacts]]\nartifact-id = "genx:qa/\\u0001rec.toml"\n'
                       'path = "qa/\\u0001rec.toml"\nkind = "file"\nsha256 = "{}"\n'.format("a" * 64),
                       encoding="utf-8")
@@ -1801,7 +1800,7 @@ def _real_pack_e2e(tmp, failures):
     gaid = _extract_genesis("genesis-artifact-id-newline")
     if gaid is not None:
         mp = gaid / MANIFEST_REL
-        mp.write_text(_nbio.read_text_nb(mp, encoding="utf-8")
+        mp.write_text(mp.read_text(encoding="utf-8")
                       + '\n[[artifacts]]\nartifact-id = "geny:qa/rec.toml\\n"\n'
                       'path = "qa/rec.toml"\nkind = "file"\nsha256 = "{}"\n'.format("b" * 64),
                       encoding="utf-8")
@@ -1813,7 +1812,7 @@ def _real_pack_e2e(tmp, failures):
     godup = _extract_genesis("genesis-order-dupfacet")
     if godup is not None:
         op = godup / ORDER_REL
-        op.write_text(_nbio.read_text_nb(op, encoding="utf-8").replace(
+        op.write_text(op.read_text(encoding="utf-8").replace(
             'members = ["PROGR"]', 'members = ["PROGR", "ACCUR"]', 1), encoding="utf-8")
         if _run_quiet_root(godup) != 2:
             failures.append("real genesis full-pack run(): a facet placed in two precedence tiers must fail "
@@ -1823,7 +1822,7 @@ def _real_pack_e2e(tmp, failures):
     gesc = _extract_genesis("genesis-manifest-escape")
     if gesc is not None:
         mp = gesc / ".aiqt" / "manifest.toml"
-        mp.write_text(_nbio.read_text_nb(mp, encoding="utf-8").replace(
+        mp.write_text(mp.read_text(encoding="utf-8").replace(
             "[[sources]]\npath = ", "[[sources]]\npath = \"../escape\"\nbytes = 1\nsha256 = \"{}\"\n\n"
             "[[sources]]\npath = ".format("a" * 64), 1), encoding="utf-8")
         if _run_quiet_root(gesc) != 2:
@@ -1834,7 +1833,7 @@ def _real_pack_e2e(tmp, failures):
     gkind = _extract_genesis("genesis-manifest-kind")
     if gkind is not None:
         mp = gkind / ".aiqt" / "manifest.toml"
-        mp.write_text(_nbio.read_text_nb(mp, encoding="utf-8").replace('kind = "file"', 'kind = ["file"]', 1),
+        mp.write_text(mp.read_text(encoding="utf-8").replace('kind = "file"', 'kind = ["file"]', 1),
                       encoding="utf-8")
         if _run_quiet_root(gkind) != 2:
             failures.append("real genesis full-pack run(): a list-valued artifact kind must fail closed "
@@ -1844,7 +1843,7 @@ def _real_pack_e2e(tmp, failures):
     grnd = _extract_genesis("genesis-renderer-badtarget")
     if grnd is not None:
         rp = grnd / RENDERERS_REL
-        rp.write_text(_nbio.read_text_nb(rp, encoding="utf-8").replace(
+        rp.write_text(rp.read_text(encoding="utf-8").replace(
             'targets = ["AGENTS.md"]', "targets = [7]", 1), encoding="utf-8")
         if _run_quiet_root(grnd) != 2:
             failures.append("real genesis full-pack run(): a renderers.toml integer target must fail closed "
@@ -1880,7 +1879,7 @@ def _real_pack_e2e(tmp, failures):
     g1 = _extract_genesis("genesis-clause-noncanon-path")
     if g1 is not None:
         cp = g1 / CLAUSES_REL
-        text = _nbio.read_text_nb(cp, encoding="utf-8")
+        text = cp.read_text(encoding="utf-8")
         m = re.search(r'source-path = "([^"]+)"', text)
         parts = m.group(1).split("/") if m else []
         if len(parts) >= 2:

@@ -216,7 +216,7 @@ def _open_parent(root_fd, relpath):
     try:
         for comp in parts[:-1]:
             try:
-                nfd = os.open(comp, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=cur)
+                nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
             except FileNotFoundError:
                 raise
             except OSError as exc:
@@ -387,7 +387,7 @@ def _fsync_path_dir(path):
     symlinked final `lock` for, and the unlink in release_lock) likewise address journal_root by absolute
     path as the lock protocol's design; fully containing that journal_root-level lock protocol beneath a
     threaded journal-root fd is a separate hardening beyond F1's txn-dir-containment scope."""
-    fd = os.open(str(path), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+    fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
     finally:
@@ -399,7 +399,7 @@ def _fsync_contained_dir(pfd, name):
     (set via chmod) is durable before COMPLETE, not merely the parent link. Open it O_DIRECTORY|O_NOFOLLOW
     beneath its bound parent fd (a swapped-in symlink raises rather than redirecting the fsync), fsync the
     dir fd, then close it; the caller fsyncs the parent separately."""
-    dfd = os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=pfd)
+    dfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
     try:
         os.fsync(dfd)
     finally:
@@ -422,11 +422,11 @@ def ensure_journal_dirs(root_fd, journal_rel):
     try:
         for comp in parts:
             try:
-                nfd = os.open(comp, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=cur)
+                nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
             except FileNotFoundError:
                 os.mkdir(comp, 0o777, dir_fd=cur)             # create the single missing component
                 os.fsync(cur)                                 # J1: its entry durable in the PARENT first
-                nfd = os.open(comp, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=cur)
+                nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
             except OSError as exc:
                 raise JournalError("cannot open/create journal component {!r} of {!r} ({})"
                                    .format(comp, journal_rel, exc))
@@ -451,7 +451,7 @@ def _open_dir_contained(root_fd, relpath):
     try:
         for comp in parts:
             try:
-                nfd = os.open(comp, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=cur)
+                nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
             except FileNotFoundError:
                 raise
             except OSError as exc:
@@ -480,7 +480,7 @@ def open_journal_root_from_path(root, journal_rel):
     (O_NOFOLLOW on the operator-supplied root, the same trust anchor migrate._open_root_fd uses) and walk
     down to the journal root contained, returning a jr fd the caller closes. FileNotFoundError when the
     root or a journal-rel component is absent."""
-    root_fd = os.open(str(root), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0))
+    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     jr_fd = None
     try:
         jr_fd = _open_dir_contained(root_fd, journal_rel)
@@ -508,7 +508,7 @@ def _open_txn_beneath(jr_fd, txn_dir):
     name = Path(txn_dir).name
     if not name or "/" in name or name in (".", ".."):
         raise JournalError("invalid journal txn name {!r}".format(name))
-    return os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=jr_fd)
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=jr_fd)
 
 
 # --- frame layer (checksummed framing; a torn final frame is detectably unwritten) --------------------
@@ -821,7 +821,7 @@ def read_lock_owner(journal_root):
     through read_lock_owner_at instead, so the journal path is never re-resolved after that open."""
     journal_root = Path(journal_root)
     try:
-        jr_fd = os.open(str(journal_root), (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        jr_fd = os.open(str(journal_root), os.O_RDONLY | os.O_DIRECTORY)
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -1043,7 +1043,7 @@ def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
                     # cannot close it.
                     entry = Path(journal_root) / name
                     try:
-                        tfd = os.open(name, (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=jr_fd)
+                        tfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=jr_fd)
                     except OSError as exc:
                         raise JournalError("cannot open journal txn dir {!r} contained no-follow ({}); "
                                            "fail-closed".format(name, exc))
@@ -1183,7 +1183,7 @@ def capture_preimages(parent_fd, txn_dir, root_fd, ops):
         except OSError as exc:
             raise JournalError("cannot create contained preimages dir ({})".format(exc))
         try:
-            prefd = os.open("preimages", (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) | getattr(os, "O_NONBLOCK", 0), dir_fd=txnfd)
+            prefd = os.open("preimages", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=txnfd)
         except OSError as exc:
             raise JournalError("cannot open contained preimages dir no-follow ({})".format(exc))
         try:
@@ -2568,7 +2568,7 @@ def _st_site_vectors(base):
                 if raise_sent:
                     raise sent
                 return real(fd, cap=cap)
-            dfd = os.open(base, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+            dfd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
             try:                                          # the seam is swapped only where its restore runs
                 ns["_read_fd"] = spy
                 _read_at(dfd, "f", "f")
@@ -2583,7 +2583,7 @@ def _st_site_vectors(base):
         def spy(root_fd, relpath):
             pfd, name = real(root_fd, relpath)
             return fault.arm(pfd), name
-        dfd = os.open(base, (os.O_RDONLY | os.O_DIRECTORY) | getattr(os, "O_NONBLOCK", 0))
+        dfd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
         try:
             ns["_open_parent"] = spy
             _read_contained(dfd, "missing")

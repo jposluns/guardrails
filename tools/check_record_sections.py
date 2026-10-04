@@ -100,9 +100,6 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; the shared readers live beside this file
-import _nbio  # noqa: E402  shared non-blocking, fstat-checked readers
-
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11
@@ -278,7 +275,7 @@ def load_config(path, allow_absent=False):
     if _config_is_symlink(path):
         raise GateError("config path {} is a symlink; a symlinked config is not followed".format(path))
     try:
-        raw = _nbio.read_bytes_nb(path)
+        raw = path.read_bytes()
     except FileNotFoundError:
         if allow_absent:
             return None
@@ -1255,7 +1252,7 @@ def _self_test_isolated():
                 cxu, ["config", "user.email", "selftest@example.invalid"])
             (cxu / ".aiqt").mkdir()
             (cxu / ".aiqt" / "record-sections.toml").write_text(
-                _nbio.read_text_nb(cxc_config, encoding="utf-8"), encoding="utf-8")
+                cxc_config.read_text(encoding="utf-8"), encoding="utf-8")
             (cxu / "records.md").write_text(with_section, encoding="utf-8")
             _selftest_git(cxu, ["add", "-A"])
             _selftest_git(cxu, ["commit", "-q", "-m", "C carries the section"])
