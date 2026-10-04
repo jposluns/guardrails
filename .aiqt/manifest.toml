@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "b48a33fefa6e38c5ed880a9359a9b5ef143be751025cd323c84d3f18d7927123"
+tree-sha256 = "4fd555f5f8c70049dee2829f4b632e83071323b880ef982e42c63aff598f3880"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2521,8 +2521,8 @@ sha256 = "e4c693cf6e724c8b732d27d30b2c9b240eeb28d09e8edad7c928368784f5bc50"
 
 [[sources]]
 path = "opf/spec/OPF-IMPLEMENTATION-PROMPT.md"
-bytes = 238464
-sha256 = "df7988c3c4b9e1337bca1ebfe0d365b772ce48c24a897925c5cd627f1b0b12ef"
+bytes = 239509
+sha256 = "4c97b6bd7e5845484eaa3cb247467441fc53220606d8df27ca3587e4c9ae26fe"
 
 [[sources]]
 path = "opf/spec/OPF-INIT-D2B-REVIEW.md"
