@@ -2894,16 +2894,16 @@ source-path = ".aiqt/core/rules/security-seci-fail-closed.md"
 start-line = 14
 end-line = 16
 canonical-text = "An exception or error in an authentication, authorization, validation, or cryptographic check leaves the\nsystem in the deny or otherwise safe state. A failed, unavailable, or unreadable check is treated as not\npassed, never as a default-allow."
-source-digest = "bc3e66089444f90c7e2a8a6f3739caf914082058bd92e93f27051868f240a3c8"
+source-digest = "31c3ba4d49ba71c5b354cad8560934a0fdf6aa839eb1be56f453748aea92e0d1"
 
 [[clause]]
 clause-id = "secfcl.2"
 corpus-id = "secfcl"
 source-path = ".aiqt/core/rules/security-seci-fail-closed.md"
 start-line = 18
-end-line = 23
-canonical-text = "Code that such a check loads can exit with any status, fault outside any handler (error formatting,\ncleanup, background work, or shutdown), or replace the check's reporting machinery; review and pinning with\nthe check exempt only the replacement channel from the in-process duty. Run in a child process, such code\nyields a passing verdict only with a complete structured result, a zero exit, and no fault reported on an\nerror stream it cannot redirect or silence. In process, each channel is covered, unreachable, or disclosed\nunder the gate-discipline rule, a fault-to-pass channel never merely disclosed."
-source-digest = "bc3e66089444f90c7e2a8a6f3739caf914082058bd92e93f27051868f240a3c8"
+end-line = 24
+canonical-text = "Code that such a check loads can exit with any status, fault outside any handler (error formatting, cleanup,\nbackground work, or shutdown), or replace the check's reporting machinery. Run in a child process, such code\nyields a passing verdict only with a zero exit, a complete structured result written after the child's\ncleanup, and, unless reviewed and pinned with the check, no fault on an error stream it cannot redirect or\nsilence. In process, each channel is covered, unreachable, or disclosed under the gate-discipline rule, a\nfault-to-pass channel never merely disclosed; such review and pinning exempt from this only the loaded code\nreplacing that machinery."
+source-digest = "31c3ba4d49ba71c5b354cad8560934a0fdf6aa839eb1be56f453748aea92e0d1"
 
 [[clause]]
 clause-id = "secupl.1"
