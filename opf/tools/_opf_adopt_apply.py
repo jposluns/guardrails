@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""OPF adoption apply engine, slice 1: the apply SHELL with ZERO executable operations (OPF-SPEC 1.3.0).
+"""OPF adoption apply engine, slices 1 and 4: the apply SHELL and its two registration ops (OPF-SPEC 1.3.0).
 
-This slice (the clean-start adoption track's first apply unit) supplies the engine SKELETON only, shaped
-by spec 1.3.0 sections 4.2, 5.7 and 14: run identity; the evidence-bundle, archive and Move homes, all
+Slice 1 (the clean-start adoption track's first apply unit) supplies the engine SKELETON, shaped by spec
+1.3.0 sections 4.2, 5.7 and 14: run identity; the evidence-bundle, archive and Move homes, all
 derived from the `_opf_store` homes constructors (never re-spelled here); the `opf.evidence.inventory/v1`
 inventory DERIVED from the run's own transaction op list and published in that SAME transaction as the
 retained bytes it lists (spec 4.2), a base `inventory.toml` then one `inventory-<phase>.toml` per later
@@ -10,16 +10,17 @@ phase, never rewritten; the homes-1 bundle verification the completion checks ca
 C-EVIDENCE-ENUM is inactive (spec 14.1), which RE-READS the inventories and payload digests from disk;
 the preserve-first composition of spec 14.2; live re-observation of every operand; one journaled
 transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed eleven-op
-ADOPT_OPS vocabulary in which EVERY op returns a refusing not-yet-executable verdict. No operation
-executes: the file ops, init-store composition, trust verification, approval capture, hook activation,
-rendering, receipt writing, the completion checks, retirement, and the MUTATING CLI subcommands (approve,
-apply, complete, reconcile) remain later slices; the read-only `opf adopt` subcommands plan and status
-shipped with K9a. Live outside the self-test fixtures today: `opf adopt status` opens and lists the
-evidence home in opf.py through the _journal containment primitives, then grades each listed bundle
-through this module's _verify_bundle_at (beneath the HELD home descriptor it is passed) and the journal
-through journal_state, with _open_product_root anchoring both reads to one product-root descriptor;
-every mutating entry -- the transaction shell, reconcile() and the dispatch table -- stays reachable
-only from the self-test until those slices land.
+ADOPT_OPS vocabulary. Slice 4 makes the two structured-edit ops executable (_REGISTRATION_OPS:
+register-unmanaged, repoint-consumer), in the run's base (apply-stage) transaction only; every other op
+still returns a refusing not-yet-executable verdict: the file ops, init-store composition, trust
+verification, approval capture, hook activation, rendering, receipt writing, the completion checks,
+retirement, and the MUTATING CLI subcommands (approve, apply, complete, reconcile) remain later slices;
+the read-only `opf adopt` subcommands plan and status shipped with K9a. Live outside the self-test
+fixtures today: `opf adopt status` opens and lists the evidence home in opf.py through the _journal
+containment primitives, then grades each listed bundle through this module's _verify_bundle_at (beneath
+the HELD home descriptor it is passed) and the journal through journal_state, with _open_product_root
+anchoring both reads to one product-root descriptor; every mutating entry -- the transaction shell,
+reconcile() and the dispatch table -- stays reachable only from the self-test until those slices land.
 
 Preserve-first (spec 14.2), enforced over the composed op list BEFORE any transaction opens: a live file
 is removed, OR OVERWRITTEN BY A `write` (which destroys the live bytes exactly as a removal does), ONLY
@@ -78,7 +79,29 @@ more such home), so the stage driver's plan stage must refuse over a non-clean a
 journal_clean_or_refuse; the shipped `retire-file` vocabulary row is a single `remove`, while spec 1.3.0
 preserves the retirement preimage at apply and removes only after the green check, a vocabulary split for
 the op slices; interruption is exercised in-process through the journal's kill-point seam, and
-subprocess kill-injection arrives with the first executable operations.
+subprocess kill-injection is not exercised for the registration ops of slice 4.
+
+Registration ops (slice 4): each rewrites ONE existing file whole, never by text substitution, under the
+record writer's byte-reproduction discipline: the bytes it rewrites (live, or the previous link of a
+register-unmanaged chain in this same transaction) must hash to the row's old_digest (drift refuses into a
+fresh plan) and re-emit unchanged byte-exact through emit_checked (a comment or non-canonical
+serialization refuses, untouched); the postimage must hash to the row's new_digest, the bytes the one
+approval bound. register-unmanaged rewrites the frozen store manifest that the plan's store identity names,
+reproducing the planner's own rendering (the kept path appended to [unmanaged].paths), and its reparse must
+equal the prior manifest plus exactly that entry and validate; an entry overlapping the machine store, a
+store control root or a declared view (the planner's reserved-path rule) or already registered refuses.
+repoint-consumer re-emits the caller's planned postimage model of a canonical TOML consumer. The first
+rewrite of a path is preserve-first: its live bytes are archived at this run's adoption archive, then
+overwritten through a `write` pinned to them, so the reversal (the journal restoring the recorded old
+bytes) and the archived copy agree byte-exact; a chain's later links only replace that one write's planned
+bytes. Every refusal is raised while composing, before the transaction opens, with nothing written; the
+journal's own staged-digest pin re-checks the bytes inside the transaction. Disclosed residuals of slice 4:
+the store-posture gate below refuses every resolved store (no lease join yet), and the manifest
+register-unmanaged rewrites exists only once a store resolves, so until the lease join lands it executes
+only in the self-test's fixtures, behind a stand-in for that join, while the unpatched shell refuses it;
+the planned consumer model is the caller's (the stage driver's), bound only through new_digest; a consumer
+in any format but TOML refuses, since TOML's is this slice's one canonical emitter; and binding the rows,
+the store table and the consumer models to the one approved plan is the stage driver's.
 
 Outcome model: single-sourced from `_opf_store` exactly as the sibling `_opf_adopt` does; the inventory
 grading is the doctor's own shared validator (`_opf_check._evidence_rows`), so a malformed inventory or a
@@ -90,6 +113,7 @@ modules, so the standalone-closure property holds.
 
 Exit convention (the repo's gates and the sibling OPF units): 0 clean, 1 a finding, 2 cannot-evaluate.
 """
+import copy
 import datetime
 import hashlib
 import os
@@ -104,7 +128,7 @@ import _journal              # noqa: E402
 import _opf_adopt as schema  # noqa: E402
 import _opf_store as store   # noqa: E402
 import _optlevel             # noqa: E402
-from _opf_emit import EmitError, emit_checked  # noqa: E402
+from _opf_emit import EmitError, _model_equal, emit_checked  # noqa: E402
 
 KIND = "adoption"
 SESSION_ID = "opf-adopt"
@@ -997,12 +1021,230 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         store._close_fd_exc_safe(root_fd)
 
 
-# --- the dispatch table: EVERY op refuses not-yet-executable in this slice -----------------------------
+# --- the registration ops (slice 4): register-unmanaged and repoint-consumer --------------------------
+
+class RegistrationContext:
+    """What the two registration handlers compose against: the transaction's ApplyOps, the plan's frozen
+    store identity (its `store` table; the manifest every register-unmanaged row rewrites is
+    _opf_adopt.store_manifest of it, never a caller-supplied path), and the planned postimage MODEL of each
+    repoint-consumer path, which the handler re-emits and digest-checks against the row before staging it.
+    `rewrites` holds the one write op each rewritten path has in this transaction, so a register-unmanaged
+    chain extends that one write link by link (one op per path) and a second repointing of one consumer
+    refuses."""
+
+    def __init__(self, ops, store_table=None, consumers=None):
+        self.ops = ops
+        self.store = store_table
+        self.consumers = dict(consumers or {})
+        self.rewrites = {}
+
+
+def _canonical_model(rel, data):
+    """PRECONDITION (the record writer's byte-reproduction discipline, _opf_record._require_canonical):
+    parse one rewritten file as TOML and require that re-emitting the UNCHANGED model reproduces its bytes
+    exactly, so a whole-file regeneration loses nothing. A file that is not UTF-8 TOML, or that carries
+    comments or non-canonical serialization, refuses with its bytes untouched. It proves serialization
+    only: a hand edit that leaves canonical bytes is caught by the row's old_digest, not here."""
+    try:
+        model = tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+        raise AdoptApplyError("{!r} does not parse as TOML ({}); this slice re-emits a whole file only "
+                              "through the canonical TOML emitter, never a text substitution "
+                              "(fail-closed)".format(rel, exc))
+    try:
+        canonical = emit_checked(model).encode("utf-8")
+    except EmitError as exc:
+        raise AdoptApplyError("{!r} does not round-trip through the canonical emitter ({}); "
+                              "fail-closed".format(rel, exc))
+    if canonical != data:
+        raise AdoptApplyError("{!r} is not in canonical new-document form (it carries comments or "
+                              "non-canonical serialization); a whole-file re-emit could lose content, so "
+                              "nothing is rewritten (fail-closed)".format(rel))
+    return model
+
+
+def _current_bytes(context, rel, old_digest):
+    """The bytes a row rewrites: this transaction's pending postimage when an earlier row already rewrote
+    `rel` (a registration chain's previous link), else the LIVE bytes, re-observed contained. Either must
+    hash to the row's old_digest; drift refuses into a fresh plan (spec 14.1)."""
+    pending = context.rewrites.get(rel)
+    if pending is not None:
+        data = context.ops.staged.get(rel)
+    else:
+        fst, data = _read_live(context.ops.root_fd, rel)
+        if fst is None:
+            raise AdoptApplyError("{!r} is absent at apply; a fresh plan with its own approval is the remedy "
+                                  "(spec 14.1)".format(rel))
+    if not isinstance(data, bytes) or "sha256:" + _sha256(data) != old_digest:
+        raise AdoptApplyError("{!r} is drifted: its bytes no longer match the row's old_digest, so it is "
+                              "never rewritten; a fresh plan with its own approval is the remedy "
+                              "(spec 14.1)".format(rel))
+    return data
+
+
+def _stage_rewrite(context, rel, old_digest, new_bytes):
+    """Compose one whole-file rewrite preserve-first (spec 14.2): the first rewrite of `rel` archives its
+    live bytes, re-verified against old_digest, at this run's adoption archive and then overwrites it
+    through a `write` pinned to those bytes and mode, which is also its reversal (the journal restores the
+    recorded old bytes); a later link of a chain only replaces that write's planned bytes."""
+    ops = context.ops
+    if ops.sealed:
+        raise AdoptApplyError("the transaction is sealed by its inventory; nothing may follow it")
+    pending = context.rewrites.get(rel)
+    if pending is not None:
+        pending["poststate"]["content-sha256"] = _sha256(new_bytes)
+    else:
+        data, mode = ops.preserve(rel, old_digest)
+        pending = dict(op="write", path=rel, poststate=dict(kind="file"),
+                       **{"source-poststate": dict(kind="file", mode=mode, sha256=_sha256(data))})
+        pending["poststate"]["content-sha256"] = _sha256(new_bytes)
+        ops.ops.append(pending)
+        context.rewrites[rel] = pending
+    ops.staged[rel] = new_bytes
+
+
+def _unmanaged_collision(entry, manifest_rel, model):
+    """Why `entry` may not be registered [unmanaged] in `model`, or None: the planner's reserved-path rule
+    (_opf_adopt_plan, which refuses an exclusion that conceals the machine subtree, a store control root of
+    the manifest's homes generation, or a declared view, in either containment direction), plus an entry
+    the manifest already registers, which would register nothing new."""
+    machine = manifest_rel.rsplit("/", 1)[0]
+    reserved = [machine] + list(store.store_control_roots(store.homes_generation(model)))
+    reserved += [v["target"] for v in model.get("views", {}).values()]
+    hit = [r for r in reserved if _within(entry, r) or _within(r, entry)]
+    if hit:
+        return "{!r} overlaps the reserved store path {!r}".format(entry, hit[0])
+    if entry in model.get("unmanaged", {}).get("paths", []):
+        return "{!r} is already registered [unmanaged]".format(entry)
+    return None
+
+
+def _without_last_entry(model, entry, prior):
+    """The reparsed postimage with its one appended [unmanaged] entry taken back out, shaped as `prior` had
+    it (an [unmanaged] table or paths list the registration introduced is dropped), or None when the last
+    path is not `entry`. The delta is derived from the prior model, never from the planner's rows."""
+    out = copy.deepcopy(model)
+    paths = out.get("unmanaged", {}).get("paths")
+    if not isinstance(paths, list) or not paths or paths[-1] != entry:
+        return None
+    paths.pop()
+    if not paths and "paths" not in prior.get("unmanaged", {}):
+        del out["unmanaged"]["paths"]
+    if not out["unmanaged"] and "unmanaged" not in prior:
+        del out["unmanaged"]
+    return out
+
+
+def _compose_register_unmanaged(op_row, context):
+    """register-unmanaged, apply stage only (spec 14.2 Keep: the file stays exactly where it is,
+    untouched; only the frozen store manifest changes). The manifest is the plan's store identity's, read
+    from this transaction's pending chain link or the live tree and required to equal old_digest; its
+    bytes must be canonical (the byte-reproduction precondition) and VALID; the entry must not collide with
+    a reserved store path; the postimage is the planner's own rendering (_opf_adopt_plan's registration
+    binding: the kept path appended to [unmanaged].paths, emitted through emit_checked), and its reparse
+    must equal the prior model plus exactly that one entry (the allowed-delta postcondition, type-aware),
+    validate as a manifest, and hash to new_digest, else nothing is composed. Reversal is the journaled
+    write's: the recorded manifest preimage restored, which drops the entry."""
+    entry = op_row["entry"]
+    manifest = schema.store_manifest(context.store)
+    if manifest is None:
+        raise AdoptApplyError("register-unmanaged needs the plan's frozen store identity to name the "
+                              "manifest it rewrites, and none was supplied (fail-closed)")
+    current = _current_bytes(context, manifest, op_row["old_digest"])
+    model = _canonical_model(manifest, current)
+    if store.validate_manifest(model).status != store.VALID:
+        raise AdoptApplyError("the store manifest {!r} is not a valid manifest; nothing is registered "
+                              "(fail-closed)".format(manifest))
+    collision = _unmanaged_collision(entry, manifest, model)
+    if collision is not None:
+        raise AdoptApplyError("register-unmanaged refused: {} (fail-closed)".format(collision))
+    planned = copy.deepcopy(model)
+    planned.setdefault("unmanaged", {}).setdefault("paths", []).append(entry)
+    try:
+        new_bytes = emit_checked(planned).encode("utf-8")
+    except EmitError as exc:
+        raise AdoptApplyError("the registered manifest cannot be emitted canonically ({}); "
+                              "fail-closed".format(exc))
+    reparsed = tomllib.loads(new_bytes.decode("utf-8"))
+    back = _without_last_entry(reparsed, entry, model)
+    if back is None or not _model_equal(back, model):
+        raise AdoptApplyError("the registered manifest is not the prior manifest plus exactly the one "
+                              "[unmanaged] entry {!r}; nothing is rewritten (fail-closed)".format(entry))
+    if store.validate_manifest(reparsed).status != store.VALID:
+        raise AdoptApplyError("registering {!r} yields an invalid manifest; nothing is rewritten "
+                              "(fail-closed)".format(entry))
+    if "sha256:" + _sha256(new_bytes) != op_row["new_digest"]:
+        raise AdoptApplyError("the registered manifest does not hash to the row's new_digest, the postimage "
+                              "the approval bound; nothing is rewritten (fail-closed)")
+    _stage_rewrite(context, manifest, op_row["old_digest"], new_bytes)
+
+
+def _compose_repoint_consumer(op_row, context):
+    """repoint-consumer, apply stage only: a whole-file parse-and-re-emit, never a regex substitution over
+    repository text. The live consumer must equal old_digest and be canonical TOML (the byte-reproduction
+    precondition, so the re-emit drops nothing the model does not carry; any other format refuses, since
+    this slice's one canonical emitter is TOML's); the planned postimage model is re-emitted through
+    emit_checked and must hash to new_digest and differ from the old bytes. The frozen store manifest (only
+    its registration chain rewrites it), the store control area and every protected destination are never
+    a consumer. Reversal is the journaled write's: the recorded old bytes restored."""
+    path, ops = op_row["path"], context.ops
+    if (path == schema.store_manifest(context.store) or schema._in_control_area(path)
+            or schema.protected_destination(path, ops.run_id) is not None):
+        raise AdoptApplyError("repoint-consumer {!r} names the store manifest, the store control area or a "
+                              "protected destination, never a consumer (fail-closed)".format(path))
+    if path in context.rewrites:
+        raise AdoptApplyError("{!r} is repointed by two plan rows; one row rewrites one consumer "
+                              "(fail-closed)".format(path))
+    _canonical_model(path, _current_bytes(context, path, op_row["old_digest"]))
+    planned = context.consumers.get(path)
+    if not isinstance(planned, dict):
+        raise AdoptApplyError("no planned postimage model for repoint-consumer {!r} "
+                              "(fail-closed)".format(path))
+    try:
+        new_bytes = emit_checked(planned).encode("utf-8")
+    except EmitError as exc:
+        raise AdoptApplyError("the repointed consumer {!r} cannot be emitted canonically ({}); "
+                              "fail-closed".format(path, exc))
+    if "sha256:" + _sha256(new_bytes) != op_row["new_digest"]:
+        raise AdoptApplyError("the re-emitted consumer {!r} does not hash to the row's new_digest, the "
+                              "postimage the approval bound; nothing is rewritten (fail-closed)".format(path))
+    if op_row["new_digest"] == op_row["old_digest"]:
+        raise AdoptApplyError("repoint-consumer {!r} repoints nothing (its new_digest is its old_digest); "
+                              "nothing is rewritten (fail-closed)".format(path))
+    _stage_rewrite(context, path, op_row["old_digest"], new_bytes)
+
+
+_REGISTRATION_OPS = {"register-unmanaged": _compose_register_unmanaged,
+                     "repoint-consumer": _compose_repoint_consumer}
+
+
+def _execute_registration_op(op_row, context=None):
+    """The one slice-4 handler behind the two registration ops: compose this row's journal ops into the
+    base (apply-stage) transaction its RegistrationContext carries and report VALID; any refusal (drift, a
+    non-canonical or invalid file, a reserved-path collision, a postimage off new_digest, a wrong phase)
+    is CANNOT-EVALUATE naming the reason, raised before the row appends an op. Nothing is written here:
+    the composed ops run only inside run_adopt_transaction, after check_apply_ops re-proves the list."""
+    name = op_row.get("op")
+    if not isinstance(context, RegistrationContext) or not isinstance(context.ops, ApplyOps):
+        return schema._cannot("op {!r} composes only inside an adoption transaction, through its "
+                              "RegistrationContext; nothing composed (fail-closed)".format(name))
+    if context.ops.phase is not None:
+        return schema._cannot("op {!r} runs only in the apply stage (the run's base transaction), not phase "
+                              "{!r}; nothing composed (fail-closed)".format(name, context.ops.phase))
+    try:
+        _REGISTRATION_OPS[name](op_row, context)
+    except AdoptApplyError as exc:
+        return schema._cannot(str(exc))
+    return schema._ok()
+
+
+# --- the dispatch table: every op but the two registration ops refuses not-yet-executable ------------
 
 def _not_yet_executable(op_row, context=None):
-    """The one slice-1 handler behind every dispatch entry: a refusing not-yet-executable verdict. Later
-    slices replace individual OP_HANDLERS entries with real executors; the self-test pins every entry to
-    THIS handler and every canonical row to a refusing status, so a silently-enabled op is a red."""
+    """The refusing handler behind every op no slice has landed yet: a not-yet-executable verdict. Later
+    slices replace individual OP_HANDLERS entries with real executors; the self-test pins every entry
+    outside _REGISTRATION_OPS to THIS handler and every such canonical row to a refusing status, so a
+    silently-enabled op is a red."""
     name = op_row.get("op") if isinstance(op_row, dict) else None
     return schema.AdoptValidation(store.CANNOT_EVALUATE, [
         "op {!r} is not yet executable in this build; a later adoption slice lands it "
@@ -1016,9 +1258,9 @@ OP_HANDLERS = {
     "init-store": _not_yet_executable,
     "create-file": _not_yet_executable,
     "plant-governance": _not_yet_executable,
-    "register-unmanaged": _not_yet_executable,
+    "register-unmanaged": _execute_registration_op,
     "move-file": _not_yet_executable,
-    "repoint-consumer": _not_yet_executable,
+    "repoint-consumer": _execute_registration_op,
     "retire-file": _not_yet_executable,
     "enable-hook": _not_yet_executable,
     "render-views": _not_yet_executable,
@@ -1029,7 +1271,8 @@ OP_HANDLERS = {
 def dispatch(op_row, context=None):
     """Validate, then dispatch ONE plan op row. A malformed row propagates the validator's refusing
     verdict; an op with no registered handler (dispatch-roster drift) is CANNOT-EVALUATE, never a skip.
-    In this slice every handler refuses, so dispatch never has a side effect."""
+    dispatch itself never writes: a registration handler only composes journal ops into the transaction
+    its RegistrationContext carries, and every other handler refuses."""
     checked = schema.validate_op(op_row)
     if checked.status != store.VALID:
         return checked
@@ -1119,6 +1362,7 @@ def _self_test_checks():
         return None
 
     ZERO = "0" * 64
+    _D_ZERO = "sha256:" + ZERO
     now = datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc)
     VALID, INVALID, CANNOT = store.VALID, store.INVALID, store.CANNOT_EVALUATE
 
@@ -1126,11 +1370,18 @@ def _self_test_checks():
     # pinned to the refusing handler, and every canonical row refuses. A silently-enabled op is a red; the
     # slice that legitimately lands an op updates these pins in the same change.
     check("handlers-cover-vocabulary", set(OP_HANDLERS) == set(schema.ADOPT_OPS_BY_NAME))
-    check("handlers-all-refusing", all(h is _not_yet_executable for h in OP_HANDLERS.values()))
-    for name in sorted(schema.ADOPT_OP_NAMES):
+    check("handlers-only-registration-ops-execute",
+          set(_REGISTRATION_OPS) == {"register-unmanaged", "repoint-consumer"}
+          and {n for n, h in OP_HANDLERS.items() if h is not _not_yet_executable} == set(_REGISTRATION_OPS)
+          and all(OP_HANDLERS[n] is _execute_registration_op for n in _REGISTRATION_OPS))
+    for name in sorted(schema.ADOPT_OP_NAMES - set(_REGISTRATION_OPS)):
         res = dispatch(schema.canonical_op(name))
         check("op-{}-refuses-not-yet-executable".format(name),
               res.status == CANNOT and any("not yet executable" in f for f in res.findings))
+    for name in sorted(_REGISTRATION_OPS):
+        res = dispatch(schema.canonical_op(name))
+        check("op-{}-refuses-without-transaction-context".format(name),
+              res.status == CANNOT and any("RegistrationContext" in f for f in res.findings))
     check("dispatch-out-of-vocab-cannot-eval", dispatch(dict(op="delete-everything")).status == CANNOT)
     check("dispatch-malformed-row-invalid", dispatch(dict(op="create-file", path="a/b")).status == INVALID)
 
@@ -2706,12 +2957,240 @@ def _self_test_checks():
     check("apply-non-table-refused",
           nontable.status == CANNOT and any("not a table" in f for f in nontable.findings))
 
+    # 11 (slice 4): the registration ops, over throwaway fixtures through the EXECUTABLE shell. A valid
+    # manifest makes the store resolve, which the posture gate refuses (no lease join yet), so the
+    # unpatched shell refuses a registration first; every later vector runs behind `lease_join`, a stand-in
+    # for the not-yet-landed join that admits the resolved store and nothing else. Each refusal vector
+    # names its rule's keyword and leaves the tree byte-identical (`.aiqt/` aside, the journal's home).
+    import _opf_init
+    import _opf_adopt_plan
+    reg_store = schema.canonical_plan()["store"]
+    man = schema.store_manifest(reg_store)
+    keep, keep2, consumer, notes = "adopter/KEEP.md", "adopter/KEEP2.md", "ci/consumer.toml", "ci/notes.md"
+    old_consumer = dict(paths=dict(rules="legacy/RULES.md"), name="ci")
+    new_consumer = dict(paths=dict(rules=store.moved_dest("legacy/RULES.md")), name="ci")
+
+    def reg_fixture(temp, manifest_text=None):
+        root = Path(temp).resolve()
+        files = {man: (manifest_text or _opf_init.build_manifest()).encode("utf-8"),
+                 keep: b"kept\n", keep2: b"kept too\n", notes: b"Rules: see legacy/RULES.md\n",
+                 consumer: emit_checked(old_consumer).encode("utf-8")}
+        for rel, payload in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(payload)
+        return root, files
+
+    def chain(files, entries):
+        """The planner's OWN registration binding (_opf_adopt_plan._bind_registrations) over the live
+        manifest, so apply is held to reproducing exactly the postimages the plan binds."""
+        rows = [dict(op="register-unmanaged", entry=e) for e in entries]
+        raw = files[man]
+        _opf_adopt_plan._bind_registrations(
+            rows, dict(resolution=dict(status=store.RESOLVED, manifest_digest=plan_digest(raw))),
+            tomllib.loads(raw.decode("utf-8")))
+        return rows
+
+    def repoint_row(files, planned=None, path=None):
+        path = path or consumer
+        body = emit_checked(planned or new_consumer).encode("utf-8")
+        return dict(op="repoint-consumer", path=path, old_digest=plan_digest(files.get(path, b"")),
+                    new_digest=plan_digest(body))
+
+    def compose_reg(rows, consumers=None, store_table=reg_store):
+        def compose(ops):
+            context = RegistrationContext(ops, store_table, consumers)
+            for i, row in enumerate(rows):
+                verdict = dispatch(row, context)
+                if verdict.status != VALID:
+                    raise AdoptApplyError("plan op[{}] ({!r}) refused: {}".format(
+                        i, row.get("op"), "; ".join(verdict.findings)))
+        return compose
+
+    def lease_join():
+        return mock.patch.dict(globals(), dict(_store_posture_or_refuse=lambda product_root: None))
+
+    def reg_refusal(temp, rows, keyword, label, consumers=None, store_table=reg_store, manifest_text=None):
+        root, files = reg_fixture(temp, manifest_text)
+        before = snapshot(root)
+        with lease_join():
+            why = refusal(run_adopt_transaction, root, rid,
+                          compose_reg(rows(files) if callable(rows) else rows, consumers, store_table))
+        check("reg-{}-refused".format(label), why is not None and keyword in why)
+        check("reg-{}-writes-nothing".format(label),
+              snapshot(root) == before and lock_free(root) and not (root / JOURNAL_REL / rid).exists())
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = reg_fixture(temp)
+        before = snapshot(root)
+        leased = refusal(run_adopt_transaction, root, rid, compose_reg(chain(files, [keep])))
+        check("reg-resolved-store-refused-without-lease-join",
+              store.resolve_store(root).status == store.RESOLVED and leased is not None and "lease" in leased
+              and snapshot(root) == before)
+
+    # the round trip: a two-link registration chain and one consumer repointing in ONE transaction. Each
+    # rewritten file is archived byte-exact first and then carries exactly the bound postimage; the kept
+    # files themselves stay untouched; the manifest's reparse is the prior model plus exactly the two
+    # entries, and it still validates.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = reg_fixture(temp)
+        rows = chain(files, [keep, keep2])
+        with lease_join():
+            txn, why = attempt(run_adopt_transaction, root, rid, compose_reg(
+                rows + [repoint_row(files)], dict([(consumer, new_consumer)])))
+        after = snapshot(root)
+        prior = tomllib.loads(files[man].decode("utf-8"))
+        prior["unmanaged"]["paths"] = prior["unmanaged"]["paths"] + [keep, keep2]
+        landed = tomllib.loads(after.get(man, b"").decode("utf-8"))
+        check("reg-chain-and-repoint-committed",
+              txn == rid and why is None and txn_state(root, rid) == "complete" and lock_free(root))
+        check("reg-manifest-is-planner-postimage", plan_digest(after.get(man, b"")) == rows[-1]["new_digest"])
+        check("reg-manifest-prior-plus-exactly-the-entries",
+              _model_equal(landed, prior) and store.validate_manifest(landed).status == VALID)
+        check("reg-kept-files-untouched", after.get(keep) == files[keep] and after.get(keep2) == files[keep2])
+        check("repoint-consumer-is-reemitted-postimage",
+              after.get(consumer) == emit_checked(new_consumer).encode("utf-8"))
+        check("reg-preimages-archived-byte-exact",
+              after.get(archive_rel(rid, man)) == files[man]
+              and after.get(archive_rel(rid, consumer)) == files[consumer])
+        check("reg-bundle-verifies", verify_bundle(root, rid).status == VALID)
+        with lease_join():
+            late = refusal(run_adopt_transaction, root, rid, compose_reg(
+                [dict(op="register-unmanaged", entry="adopter/LATE.md", old_digest=rows[-1]["new_digest"],
+                      new_digest=rows[-1]["new_digest"])]), phase="completion")
+        check("reg-outside-apply-stage-refused", late is not None and "apply stage" in late
+              and plan_digest((root / man).read_bytes()) == rows[-1]["new_digest"])
+
+    commented = "# a hand comment\n" + _opf_init.build_manifest()
+    flips = (
+        # the byte-reproduction precondition: a comment makes the manifest non-canonical
+        ("non-canonical-manifest", lambda f: [dict(op="register-unmanaged", entry=keep,
+                                                   old_digest=plan_digest(f[man]), new_digest=_D_ZERO)],
+         "canonical", None, commented),
+        # the postimage flip: the emitted manifest does not hash to the row's new_digest
+        ("manifest-postimage-off-new-digest",
+         lambda f: [dict(chain(f, [keep])[0], new_digest=_D_ZERO)], "new_digest", None, None),
+        # drift: the live manifest no longer matches the row's old_digest
+        ("manifest-drift", lambda f: [dict(chain(f, [keep])[0], old_digest=_D_ZERO)], "drifted", None, None),
+        # a broken chain: the second link names the manifest the FIRST link rewrote, not its postimage
+        ("chain-link-broken", lambda f: [chain(f, [keep])[0], dict(chain(f, [keep2])[0])], "drifted", None, None),
+        ("entry-in-machine-store", lambda f: chain(f, [".working/toml/x.md"]), "reserved store path", None, None),
+        ("entry-in-control-root", lambda f: chain(f, [".working/imports/x.md"]), "reserved store path", None,
+         None),
+        ("entry-is-view-target", lambda f: chain(f, [".working/TODO.md"]), "reserved store path", None, None),
+        ("entry-contains-store", lambda f: [dict(op="register-unmanaged", entry=".working",
+                                                 old_digest=plan_digest(f[man]), new_digest=_D_ZERO)],
+         "reserved store path", None, None),
+        ("entry-already-registered", lambda f: chain(f, [keep]) + [dict(
+            op="register-unmanaged", entry=keep, old_digest=chain(f, [keep])[0]["new_digest"],
+            new_digest=_D_ZERO)], "already registered", None, None),
+        ("invalid-manifest", lambda f: [dict(op="register-unmanaged", entry=keep,
+                                             old_digest=plan_digest(f[man]), new_digest=_D_ZERO)],
+         "not a valid manifest", None, emit_checked(dict(tomllib.loads(_opf_init.build_manifest()),
+                                                         stray=dict(key=1)))),
+        # repoint-consumer: drift, the postimage flip, a non-canonical or non-TOML consumer, a missing or
+        # unchanged planned model, the manifest or the control area as a consumer, and a consumer twice
+        ("consumer-drift", lambda f: [dict(repoint_row(f), old_digest=plan_digest(f[consumer] + b"x"))],
+         "drifted", dict([(consumer, new_consumer)]), None),
+        ("consumer-postimage-off-new-digest", lambda f: [dict(repoint_row(f), new_digest=_D_ZERO)],
+         "new_digest", dict([(consumer, new_consumer)]), None),
+        ("consumer-not-toml", lambda f: [repoint_row(f, path=notes)], "does not parse as TOML",
+         dict([(notes, new_consumer)]), None),
+        ("consumer-no-planned-model", lambda f: [repoint_row(f)], "no planned postimage", None, None),
+        ("consumer-repoints-nothing", lambda f: [repoint_row(f, planned=old_consumer)], "repoints nothing",
+         dict([(consumer, old_consumer)]), None),
+        ("consumer-is-store-manifest", lambda f: [repoint_row(f, path=man)], "store manifest",
+         dict([(man, new_consumer)]), None),
+        ("consumer-in-control-area", lambda f: [dict(op="repoint-consumer", path=".working/imports/c.toml",
+                                                     old_digest=_D_ZERO, new_digest=_D_ZERO)],
+         "control area", None, None),
+        ("consumer-twice", lambda f: [repoint_row(f), repoint_row(f)], "two plan rows",
+         dict([(consumer, new_consumer)]), None),
+        ("no-store-identity", lambda f: chain(f, [keep]), "frozen store identity", None, None),
+    )
+    for label, rows, keyword, consumers, manifest_text in flips:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            reg_refusal(temp, rows, keyword, label, consumers,
+                        None if label == "no-store-identity" else reg_store, manifest_text)
+
+    # a non-canonical CONSUMER (a comment) refuses on the byte-reproduction precondition too.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = reg_fixture(temp)
+        noisy = b"# hand comment\n" + files[consumer]
+        (root / consumer).write_bytes(noisy)
+        files[consumer] = noisy
+        before = snapshot(root)
+        with lease_join():
+            why = refusal(run_adopt_transaction, root, rid, compose_reg(
+                [repoint_row(files)], dict([(consumer, new_consumer)])))
+        check("reg-non-canonical-consumer-refused",
+              why is not None and "canonical" in why and snapshot(root) == before)
+
+    # the allowed-delta postcondition: an emitter that smuggles a second [unmanaged] path into the planned
+    # manifest is refused even when the row's new_digest names the smuggled bytes, so the digest alone can
+    # never stand in for the one-entry delta.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = reg_fixture(temp)
+        real_emit = emit_checked
+
+        def smuggling_emit(model):
+            paths = model.get("unmanaged", {}).get("paths", [])
+            if keep in paths:
+                model = tomllib.loads(real_emit(model))      # a private copy (`copy` is a local here)
+                model["unmanaged"]["paths"].append("adopter/SMUGGLED.md")
+            return real_emit(model)
+
+        smuggled = tomllib.loads(files[man].decode("utf-8"))
+        smuggled["unmanaged"]["paths"] += [keep, "adopter/SMUGGLED.md"]
+        row = dict(op="register-unmanaged", entry=keep, old_digest=plan_digest(files[man]),
+                   new_digest=plan_digest(real_emit(smuggled).encode("utf-8")))
+        before = snapshot(root)
+        with lease_join(), mock.patch.dict(globals(), dict(emit_checked=smuggling_emit)):
+            why = refusal(run_adopt_transaction, root, rid, compose_reg([row]))
+        check("reg-smuggled-delta-refused", why is not None and "exactly the one" in why
+              and snapshot(root) == before)
+
+    # reversal: a pre-commit abort rolls both rewrites back to their recorded old bytes, and an
+    # interruption after the manifest write landed is rolled back by the explicit reconcile, byte-exact.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = reg_fixture(temp)
+        before = snapshot(root)
+        real_verify = _journal._verify_staged_digest
+
+        def failing_inventory(op, payload):
+            if op["path"] == inventory_rel(rid):
+                raise _journal.JournalError("injected failure at the inventory publication")
+            return real_verify(op, payload)
+
+        with lease_join(), mock.patch.object(_journal, "_verify_staged_digest", failing_inventory):
+            aborted = refusal(run_adopt_transaction, root, rid, compose_reg(
+                chain(files, [keep]) + [repoint_row(files)], dict([(consumer, new_consumer)])))
+        check("reg-abort-restores-recorded-old-bytes",
+              aborted is not None and "rolled back" in aborted and snapshot(root) == before
+              and txn_state(root, rid) == "rolled-back" and lock_free(root))
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = reg_fixture(temp)
+        before = snapshot(root)
+        rows = chain(files, [keep])
+        rewritten = interrupt_when(lambda: plan_digest((root / man).read_bytes()) == rows[0]["new_digest"])
+        with lease_join(), mock.patch.object(_journal, "_kill_point", rewritten):
+            try:
+                run_adopt_transaction(root, rid, compose_reg(rows))
+                cut = False
+            except (_Interrupt, AdoptApplyError) as exc:
+                cut = isinstance(exc, _Interrupt)
+        check("reg-interrupt-leaves-open-transaction", cut and txn_state(root, rid) == "open"
+              and plan_digest((root / man).read_bytes()) == rows[0]["new_digest"])
+        check("reg-reconcile-restores-manifest",
+              (rid, "rolled-back") in reconcile_without_store(root) and snapshot(root) == before
+              and lock_free(root))
+
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
         for f in failures:
             print("  FAILED: {}".format(f))
         return 1
-    print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-shell checks; zero executable ops)".format(checked[0]))
+    print("OPF-ADOPT-APPLY SELF-TEST: PASS ({} apply-engine checks; executable ops: {})".format(
+        checked[0], ", ".join(sorted(_REGISTRATION_OPS))))
     return 0
 
 
