@@ -431,8 +431,8 @@ ADOPT_OPS = (
         ("composes create-only view publications into the journaled apply transaction; the render engine's "
          "read-only planner supplies the bytes and the U6 source gate refuses an unsound store; every "
          "destination is observed absent (an occupied view destination refuses fail-closed; its "
-         "preserve-then-render write joins with the file ops); it writes exactly its members, one per "
-         "declared view destination",)),
+         "preserve-then-render write joins with the file ops, so the declared write effect is not yet "
+         "exercised); it writes exactly its members, one per declared view destination",)),
     AdoptOp(
         "record-adoption", ("receipt_path", "receipt_core_digest"), ("create", "write"),
         "remove or restore the receipt artefacts to their prior state",

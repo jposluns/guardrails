@@ -1110,7 +1110,10 @@ def _plant_governance(op_row, context=None):
     there refuses, as do every protected destination and the product-root VERSION deliverable (spec 14.2
     names it render-managed; declared views live inside the store tree, refused here, and a planned
     collision with one is the plan validator's). Reversal before commit is the journal's rollback,
-    which removes the planted file. Every refusal is CANNOT-EVALUATE, raised before anything is composed."""
+    which removes the planted file. Every refusal is CANNOT-EVALUATE and precedes any filesystem
+    publication; one raised inside ApplyOps.create (a path component that is not a directory) can leave
+    context["ops"] partly composed, so the compose callable MUST raise on any refusing verdict, discarding
+    the whole transaction before it opens (run_adopt_transaction then writes nothing)."""
     try:
         ops = _composing_ops(op_row, context)
         path = op_row["path"]
@@ -1173,7 +1176,10 @@ def _render_views(op_row, context=None):
     poststate: a destination raced in between compose and that capture is refused there as a prestate
     violation before the transaction's INTENT publishes (nothing opened), and the create itself is
     exclusive and no-follow; an arbitrary concurrent writer is outside the journal's model. Every handler
-    refusal is CANNOT-EVALUATE, raised before anything is composed."""
+    refusal is CANNOT-EVALUATE and precedes any filesystem publication; the preconditions above refuse
+    before anything is composed, while one raised inside ApplyOps.create can leave context["ops"] partly
+    composed, so the compose callable MUST raise on any refusing verdict, discarding the whole transaction
+    before it opens (run_adopt_transaction then writes nothing)."""
     try:
         _render_views_compose(op_row, context)
     except AdoptApplyError as exc:
@@ -1294,6 +1300,9 @@ def adoption_record(run_id, plan, receipt, now):
     except EmitError as exc:
         raise AdoptApplyError("the adoption record cannot be emitted canonically ({}); "
                               "fail-closed".format(exc))
+    # Defence in depth: emit_checked already refuses bytes that do not round-trip, so by construction no
+    # vector reaches this refusal; the self-test pins the contract with an independent recompute of the
+    # canonical event body instead.
     reparsed = tomllib.loads(event_bytes.decode("utf-8"))
     if reparsed.get("event_digest") != event_digest(reparsed):
         raise AdoptApplyError("the genesis event_digest does not recompute from the emitted event's own "
@@ -1330,10 +1339,13 @@ def _record_adoption(op_row, context=None):
     driver MINTS this row once the approval exists (minted_record_row, the one mint; validate_plan
     refuses the bundle receipt path as a reserved-control-area creation, so the executable row is never a
     plan operand, the explicit stage-driver rule the self-test pins). Both files are create-only, so a run
-    records exactly
-    one genesis: a second record-adoption of the same run, in this transaction or a later one, refuses on
-    the occupied path. Reversal before commit is the journal's rollback, which removes both files. Every
-    refusal is CANNOT-EVALUATE, raised before anything is composed."""
+    records exactly one genesis: both destinations are observed absent before either create is composed,
+    so a second record-adoption of the same run, in this transaction or a later one, refuses on the
+    occupied path with neither file composed. Reversal before commit is the journal's rollback, which
+    removes both files. Every refusal is CANNOT-EVALUATE and precedes any filesystem publication; one
+    raised inside ApplyOps.create (a path component that is not a directory) can leave context["ops"]
+    partly composed, so the compose callable MUST raise on any refusing verdict, discarding the whole
+    transaction before it opens (run_adopt_transaction then writes nothing)."""
     try:
         ops = _composing_ops(op_row, context)
         if op_row["receipt_path"] != receipt_rel(ops.run_id):
@@ -1343,12 +1355,18 @@ def _record_adoption(op_row, context=None):
                                       context.get("now"))
         if "sha256:" + _sha256(core) != op_row["receipt_core_digest"]:
             raise AdoptApplyError("the row's receipt_core_digest is not the digest of the emitted core")
-        for rel in (receipt_rel(ops.run_id), genesis_event_rel(ops.run_id)):
+        dests = (receipt_rel(ops.run_id), genesis_event_rel(ops.run_id))
+        for rel in dests:
             if rel in ops.staged:
                 raise AdoptApplyError("{!r} is already composed in this transaction: one run records "
                                       "exactly one genesis".format(rel))
-        ops.create(receipt_rel(ops.run_id), core)
-        ops.create(genesis_event_rel(ops.run_id), event)
+        occupied = [rel for rel in dests if observe_live(ops.root_fd, rel)["kind"] != "absent"]
+        if occupied:
+            raise AdoptApplyError("{} already occupied: one run records exactly one genesis, so neither "
+                                  "the receipt nor its genesis event is composed".format(
+                                      ", ".join(repr(rel) for rel in occupied)))
+        ops.create(dests[0], core)
+        ops.create(dests[1], event)
     except AdoptApplyError as exc:
         return schema._cannot("record-adoption refused: {}".format(exc))
     return schema._ok()
@@ -3224,6 +3242,26 @@ def _finish_ops_self_test(check):
         txn, why = run(root, [record], phase="completion", **ctx)
         check("record-adoption-second-genesis-later-phase-refused",
               txn is None and "occupied" in (why or "") and snapshot(root) == before)
+    # both destinations are observed before either is composed: an occupied genesis event beside an absent
+    # receipt refuses with NOTHING composed, not with the receipt create already appended.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-finish-") as temp:
+        root = Path(temp).resolve()
+        planted = root / genesis_event_rel(rid)
+        planted.parent.mkdir(parents=True)
+        planted.write_bytes(b"the adopter's own bytes\n")
+        before, seen = snapshot(root), []
+
+        def probe(ops):
+            verdict = dispatch(dict(record), dict(ctx, ops=ops))
+            seen.append((verdict, list(ops.ops), dict(ops.staged)))
+            raise AdoptApplyError("probe")
+        try:
+            run_adopt_transaction(root, rid, probe)
+        except AdoptApplyError:
+            pass
+        check("record-adoption-occupied-event-composes-nothing",
+              len(seen) == 1 and refused(seen[0][0], "neither the receipt nor its genesis event is composed")
+              and seen[0][1] == [] and seen[0][2] == {} and snapshot(root) == before)
 
     def refuses_untouched(label, rows, needle, **changes):
         with tempfile.TemporaryDirectory(prefix="opf-adopt-finish-") as temp:
