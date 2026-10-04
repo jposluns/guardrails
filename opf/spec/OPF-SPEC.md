@@ -218,9 +218,21 @@ own version ceiling, its legacy grading: the homes-2 names are ordinary store pa
 detected, and dispositioned exactly as before, and the pre-1.3.0 doctor's check roster and
 residuals are unchanged for such a store. A store whose adoption home
 `.working/imported/adoption/` exists has started an adoption and receives the adoption grading
-from the same pre-1.3.0 tooling at once: its admitted adoption records are registered, its
-plan-enumerated frozen sources are graded as bounded adoption state, and the adopting residuals
-are disclosed in addition to the legacy residuals. Tooling
+from the same pre-1.3.0 tooling: each admitted run's recorded paths are registered, the
+non-occupying retire, move and migrate rows of its plan (and only those) are its frozen
+sources, a frozen source whose live bytes still match its plan digest is graded as bounded
+adoption state while a drifted or vanished source is a containment failure at `required`
+(section 11), and the adopting residuals are disclosed in addition to the legacy residuals.
+The doctor MUST decide that a run is admitted, and that its retirement is recorded, from the
+committed adoption evidence alone, the bundle under `.working/imported/adoption/<run-id>/` and
+the run archive, which travel with every clone, and MUST NOT read the machine-local journal, so
+a clone without journals grades exactly as the original store. That evidence check verifies
+internal consistency: the sealed inventories, plan and approval bound to the run id of the
+directory they sit in, the listed bundle and archive bytes at their recorded digests, and a
+retirement recorded only by a sealed retirement inventory consistent with the base inventory
+and with the plan's retire and move rows. It detects accidents, an interrupted apply or a hand
+edit, not deliberate forgery: a crafted self-consistent bundle is outside the accident-detection
+model, consistent with the rest of OPF. Tooling
 that carries the section 9.2 ceiling refuses an above-ceiling declaration as a fail-closed
 INVALID finding; tooling released before that ceiling grades such a store as legacy instead, a
 disclosed residual of section 9.2. Activated 1.3.0

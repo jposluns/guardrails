@@ -303,14 +303,15 @@ _HOMES2_RESIDUALS = (
 # report residuals are unchanged.
 _ADOPTING_RESIDUALS = (
     "Homes-1 adoption control area (spec 4.2, 17): an admitted adoption run is registered at file level "
-    "only, each path its journal-proven inventories list plus its recorded Move destinations, and every "
-    "other path under the adoption homes is graded. The listed paths are registered by name; their bytes "
-    "are not verified by this doctor, and nothing in this build verifies them until the section 14.1 "
-    "completion checks land. Admission classifies the run's own adoption transactions read-only; the "
-    "journal is never consulted to decide partial status, and an interrupted apply reads as not admitted. "
-    "Import and ingest records stay unregistered paths until their own activation, a vanished frozen "
-    "source before its recorded retirement is a failure, and a migrate source stays bounded adoption "
-    "state until the import that retires it is read.",
+    "only, each path its committed inventories list plus its recorded Move destinations, and every other "
+    "path under the adoption homes is graded. Admission and retirement are decided from the committed "
+    "evidence bundle and run archive alone, whose listed bundle and archive bytes are verified at their "
+    "recorded digests; rows under the shared Move root are registered by name only until the section 14.1 "
+    "completion checks land. The machine-local journal is never read, so a clone grades as the original "
+    "store; the evidence check detects accidents, an interrupted apply or a hand edit, not deliberate "
+    "forgery. Import and ingest records stay unregistered paths until their own activation, a vanished "
+    "frozen source before its recorded retirement is a failure, and a migrate source stays bounded "
+    "adoption state until the import that retires it is read.",
 )
 
 
@@ -2347,7 +2348,7 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
     derived by the pure `classify_containment`, the SINGLE authority for adoption content (F10-1).
     enabled_types / layout are derived inside that helper from the manifest (D2), so they are no longer
     passed in. On homes 1 a store that has adopted also registers, at file level, each admitted adoption
-    run's journal-proven record paths and reports its frozen sources as bounded adoption state
+    run's committed-evidence record paths and reports its frozen sources as bounded adoption state
     (`_opf_adopt_state`); `in_repo` (keyword only, unknown by default) is the store topology the adoption
     plan identity is checked against."""
     cls = classify_containment(manifest_data, machine_rel)
@@ -2391,7 +2392,7 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, 
         for msg in adoption.findings:
             rep.finding(msg)
         rep.residuals.extend(_ADOPTING_RESIDUALS)
-        # QA round 1: registration is at FILE level (each journal-proven inventory-listed path and recorded
+        # QA round 1: registration is at FILE level (each committed-inventory-listed path and recorded
         # Move destination), never a whole tree, so a stray under an admitted run's homes is graded.
         registered_files = frozenset(adoption.registered)
         # spec 14.2: an [unmanaged] declaration MUST NOT equal, contain or lie within the control area. A
