@@ -1517,7 +1517,7 @@ _RUNTIME_MARKER = "OPF_RUNTIME_PROBE"
 # Seconds the runtime probe waits after a child exits before it looks for and kills the child's
 # descendants.
 _RUNTIME_SETTLE = 0.05
-# Bounds on the supervisor's kill-and-reap rounds over its own children after the module exits: past
+# Bounds on the supervisor's report-and-reap rounds over its own children after the module exits: past
 # either, a child that still appears is reported as a survivor the rounds never drained, a finding.
 _RUNTIME_REAP_SECONDS = 5.0
 _RUNTIME_REAP_ROUNDS = 250
@@ -1534,15 +1534,17 @@ _RUNTIME_REAP_ROUNDS = 250
 # ptrace_scope says, and it carries the module's stdout and stderr over SOCKETPAIRS, never pipes: a
 # pipe end could be reopened through /proc/<pid>/fd by a concurrent same-uid process and drained, so a
 # failing module's output would vanish into a clean-looking report; reopening a socket end that way
-# gives ENXIO (QA8 claude M1/m4). After the module exits it repeatedly SIGKILLs and reaps the processes it
-# can prove are its own un-reaped children. The census is /proc/self/task/*/children, or where that file
+# gives ENXIO (QA8 claude M1/m4). After the module exits it repeatedly REPORTS, by pid, and reaps (as they
+# exit on their own) the processes its census names (D-385-CURRENT-CHILD: a census pid is an ADOPTED
+# descendant the supervisor never forked, so it is named as an undrained survivor and NEVER signalled --
+# no pidfd is opened on it -- the disclosed orphan-escape residual; the retired rounds SIGKILLed these).
+# The census is /proc/self/task/*/children, or where that file
 # is unavailable the ppid field of /proc/<pid>/stat equal to its own pid; a vanished pid is skipped, and
 # a record that is unreadable for any other reason, or malformed, raises, making the run cannot-evaluate,
-# never clean and never a wider kill. Every signal goes through a pidfd (os.pidfd_open) whose target a
-# waitid(P_PIDFD, ..., WNOHANG|WNOWAIT) has just proved to still be the supervisor's own child; there is
-# no numeric kill anywhere, so pid reuse cannot redirect a signal to an unrelated process (the one
-# non-census kill, the module timeout, goes through Popen.kill on the supervisor's own un-reaped direct
-# child, whose pid the kernel cannot reuse while it stays un-reaped). Reaping is waitpid(WNOHANG) inside
+# never clean and never any kill. There is no numeric kill anywhere, and no census pid is ever a signal
+# target (the ONE kill in the source, the module timeout, goes through Popen.kill on the supervisor's own
+# un-reaped direct child, whose pid the kernel cannot reuse while it stays un-reaped). Reaping is
+# waitpid(WNOHANG) inside
 # the round deadline, never a blocking wait: a traced child, whose exit only its tracer can collect,
 # cannot stall the supervisor past its bound, and anything still present when the deadline ends is
 # reported as an undrained survivor, a finding, before the supervisor exits. It prints one JSON line:
@@ -2171,7 +2173,8 @@ def _runtime_supervisor_signal_audit(source):
 def _self_test_runtime_supervisor_unit(tmp):
     """Unit checks over _RUNTIME_SUPERVISOR, loaded as a module from a file private to this check (the
     probe itself passes the source inline with `-c`, so no supervisor file exists at probe time). Pins:
-    the source holds no numeric kill (every census signal goes through a pidfd) and resets SIGCHLD to
+    the source holds no numeric kill (the census is REPORT-ONLY; no census pid is ever a signal target,
+    and the one kill is Popen.kill on the supervisor's own un-reaped module child) and resets SIGCHLD to
     SIG_DFL first thing; the census skips a vanished pid but raises on an unreadable or malformed
     /proc/<pid>/stat record, so an untrustworthy census can never read as clean; and the reap loop is
     REPORT-ONLY within its bound (D-385-CURRENT-CHILD: a census pid is an adopted descendant the
@@ -2193,8 +2196,8 @@ def _self_test_runtime_supervisor_unit(tmp):
     faults = []
     signals, unbounded_wait = _runtime_supervisor_signal_audit(_RUNTIME_SUPERVISOR)
     if signals:
-        faults.append("the supervisor source can signal a process by pid ({}); every census signal must "
-                      "go through a pidfd it has just proved owns one of its own children".format(
+        faults.append("the supervisor source can signal a process by pid ({}); the census is REPORT-ONLY "
+                      "(D-385-CURRENT-CHILD: no census pid is ever a signal target)".format(
                           ", ".join(signals)))
     if unbounded_wait:
         faults.append("the supervisor waits on the module without a timeout, so a traced or wedged module "
@@ -3634,8 +3637,11 @@ def _pidfd_handoff_recv(conn, note):
     still alive), never who opened or sent it; the SENDER's own checks
     (_pidfd_handoff_send: not a child subreaper, and waitid answering for
     the descriptor) establish that its target was a current waitable child
-    of a non-subreaper -- its own fork, up to the disclosed ptrace-tracee
-    residual there. A holder of the sending endpoint that bypasses
+    of a clear-flag process AT SEND TIME -- current waitability does not
+    prove forking parentage, so that reads as its own fork only up to the
+    THREE residuals disclosed there: a ptrace tracee, an orphan adopted
+    while the sender WAS a subreaper and held past the flag's clearing,
+    and a CLONE_PARENT sibling. A holder of the sending endpoint that bypasses
     _pidfd_handoff_send with a raw socket.send_fds is NOT detected here:
     inside the swept files the SCM_RIGHTS sweep in
     _self_test_runtime_supervisor_unit refuses that spelling, and beyond
@@ -4024,6 +4030,7 @@ def _watchdog_deadline_case(mode):
 
     def census():
         if mode == "transient-census":
+            record(["census", time.monotonic()])
             if empty_since[0] is None:
                 empty_since[0] = time.monotonic()
             if time.monotonic() - empty_since[0] < 1.6:
@@ -4058,14 +4065,21 @@ def _watchdog_deadline_case(mode):
         cleanup_ok = (all(row[1] <= row[2] for row in drains)
                       and finished <= cleanup_limit + 1)
         if mode == "transient-census":
-            # The old combined 1.5 s assertion rejects this passing cleanup.
-            assert elapsed > 1.5 and drains, (elapsed, rows)
+            # D-385-CURRENT-CHILD: the drain neither signals nor WAITS ON
+            # the census -- completion is kernel ECHILD, so the transiently
+            # empty census neither stalls this cleanup (the retired drain
+            # polled it for kill targets; the old elapsed > 1.5 assertion
+            # pinned exactly that wait) nor is consulted at all on this
+            # passing path: it is read only to NAME survivors in a refusal.
+            assert drains, (elapsed, rows)
+        census_unconsulted = (mode != "transient-census"
+                              or not any(row[0] == "census" for row in rows))
         # The helper owns cleanup. A diagnostic never sends another signal.
         reaped = _opf_emit._fixture_child_reaped(child[0])
         os.set_blocking(started_r, False)
         reached = os.read(started_r, 200) == b"started"
         ok = (result == "TIMEOUT" and execution_ok and cleanup_ok
-              and reached and reaped)
+              and reached and reaped and census_unconsulted)
     finally:
         os.close(started_r)
         os.close(started_w)
@@ -4401,12 +4415,12 @@ def _watchdog_completion_case(mode):
                 bound = real_budget(execution_deadline)
                 append(json.dumps([execution_deadline, bound]))
                 return bound
-            def retry(subject, subject_fd=None, *, deadline=None):
-                attempts.append(deadline)
-                append(repr(deadline))
+            def retry(subject, subject_fd=None, **kwargs):
+                attempts.append(kwargs["deadline"])
+                append(repr(kwargs["deadline"]))
                 if len(attempts) == 1:
                     raise OSError(5, "QA15-RETRY")
-                return real_drain(subject, subject_fd, deadline=deadline)
+                return real_drain(subject, subject_fd, **kwargs)
             with patch.object(emit, "_fixture_drain", retry), \
                     patch.object(emit, "_fixture_cleanup_deadline", budget):
                 refuses(emit.ChildStatusUnavailable, launch)
@@ -4414,14 +4428,25 @@ def _watchdog_completion_case(mode):
                       for line in log_path.read_text(encoding="ascii").splitlines()]
             assert len(bounds) == 3 and bounds[0][0] is not None, bounds
             assert bounds[0][1] == bounds[1] == bounds[2], bounds
-        # Empty census never licenses completion, even when its budget expires.
+        # Empty census never licenses completion, even when its budget expires:
+        # waitid still answers for a live child and waitpid reaps nothing, so
+        # the expiry refuses -- and the refusal STATES the census miss rather
+        # than naming an empty adopted-descendant list (QA15 claude M2).
         with patch.object(os, "waitid", return_value=None), \
+                patch.object(os, "waitpid", return_value=(0, 0)), \
                 patch.object(emit, "_fixture_signal", return_value=True), \
                 patch.object(emit, "_fixture_children", return_value=[]), \
                 patch.object(time, "monotonic", side_effect=[100, 102]), \
                 patch.object(time, "sleep"):
-            refuses(emit.ChildStatusUnavailable,
-                    lambda: emit._fixture_drain(123, deadline=101))
+            try:
+                emit._fixture_drain(123, deadline=101)
+            except emit.ChildStatusUnavailable as exc:
+                message = str(exc)
+            else:
+                raise AssertionError("fixture was accepted: " + mode)
+        assert "census missed" in message and "NOT" in message, message
+        assert "[]" not in message, \
+            ("the refusal named an empty list over a waitable child", message)
     elif mode == "deadline-flips":
         real_run = emit.run_bounded
         def late(thunk, **kwargs):
@@ -4602,6 +4627,13 @@ def _watchdog_completion_case(mode):
         import time
         with tempfile.TemporaryDirectory(prefix="opf-tree-") as directory:
             markers = [Path(directory, name) for name in ("subject", "descendant")]
+            # The descendant parks on a FILE GATE this case holds (its own
+            # 60 s bound is the self-limit the drain refusal disclosure
+            # names): unlinking the gate releases it, so the named-and-left
+            # survivor never outlives this case and cleanup needs no signal
+            # to a process this case never forked (D-385-CURRENT-CHILD).
+            gate = Path(directory, "gate")
+            gate.write_text("hold", encoding="ascii")
             # Deliberate fork/session escape is a tree-cleanup stimulus, not a verdict.
             subject = ("import os, time; from pathlib import Path; "
                        "pid = os.fork(); "
@@ -4610,7 +4642,11 @@ def _watchdog_completion_case(mode):
                        "scratch = Path(" + repr(directory) + ", name + '.tmp'); "
                        "scratch.write_text(str(os.getpid()), encoding='ascii'); "
                        "scratch.rename(Path(" + repr(directory) + ", name)); "  # atomic: never a partial PID
-                       "time.sleep(60)")
+                       "bound = time.monotonic() + 60; "
+                       "[time.sleep(0.05) for _ in iter(lambda: "
+                       "os.path.exists(" + repr(str(gate)) + ")"
+                       " and time.monotonic() < bound, False)]; "
+                       "os._exit(0)")
             # Writer half: a tripwire against an accidental edit of the marker
             # lines above, not a proof of atomic publication. It requires the
             # name + '.tmp' scratch path, the prefix scratch.write_text( and the
@@ -4657,14 +4693,81 @@ def _watchdog_completion_case(mode):
             assert not observed, "an empty marker was read as a started subject"
             for path in markers:
                 path.unlink()
+            # D-385-CURRENT-CHILD: the guardian's drain kills and reaps ONLY
+            # the subject -- its own direct fork -- and REFUSES the adopted
+            # session-escaped descendant by name, so the launch surfaces the
+            # drain refusal as ChildStatusUnavailable, never a clean timeout
+            # or cancel verdict, and the descendant SURVIVES, named and left
+            # (the disclosed orphan-escape residual), until this case
+            # releases it through its file gate and reaps its exit.
+            def chain(exc):
+                entries = []
+                while exc is not None and exc not in entries:
+                    entries.append(exc)
+                    exc = exc.__cause__ or exc.__context__
+                return entries
+
             with patch.object(emit, "_fixture_wait", observe):
-                refuses(subprocess.TimeoutExpired if mode == "nested-timeout" else Cancelled,
-                        lambda: emit.run_status_owned(
-                            [*command[:4], subject], fixture_id="tree/" + mode,
-                            process_fixture=True, timeout=2))
+                try:
+                    emit.run_status_owned(
+                        [*command[:4], subject], fixture_id="tree/" + mode,
+                        process_fixture=True, timeout=2)
+                except (emit.ChildStatusUnavailable, Cancelled) as exc:
+                    chained = chain(exc)
+                else:
+                    raise AssertionError("fixture was accepted: " + mode)
             assert len(observed) == 2, "nested subject never started"
-            for pid in observed:
-                assert not Path("/proc", str(pid)).exists(), "descendant survived/unreaped"
+            spid, dpid = observed
+            refusal = " | ".join(str(entry) for entry in chained)
+            assert any(isinstance(entry, emit.ChildStatusUnavailable)
+                       for entry in chained), refusal
+            assert "NOT signalled" in refusal, refusal
+            assert "D-385-CURRENT-CHILD" in refusal, refusal
+            if mode == "nested-cancel":
+                assert any(isinstance(entry, Cancelled) for entry in chained), (
+                    "the cancel stimulus was lost behind the drain refusal",
+                    refusal)
+            # The refusal NAMES the guardian's still-live adopted
+            # descendant(s) -- the process-fixture hop that reparented to it
+            # when its subject died -- by pid.
+            import re
+            named = sorted(set(
+                int(number)
+                for group in re.findall(
+                    r"adopted descendants \[([0-9, ]+)\] NOT", refusal)
+                for number in group.split(",")))
+            assert named, ("the refusal named no adopted descendant", refusal)
+            # Named-and-left: every named survivor and the session-escaped
+            # setsid descendant are ALIVE after the refusal; adoption
+            # licenses NO signal. The subject python (spid) is NOT asserted
+            # either way: it dies under its own forking parent's licensed
+            # timeout kill, whose timing depends on the mode's stimulus.
+            for pid in (*named, dpid):
+                assert Path("/proc", str(pid)).exists(), (
+                    "a named-and-left process did not survive "
+                    "(D-385-CURRENT-CHILD)", pid, refusal)
+            for pid in named:
+                assert not _kill_proved_child(pid), (
+                    "an adopted current child was signalled "
+                    "(D-385-CURRENT-CHILD)")
+                assert Path("/proc", str(pid)).exists(), (
+                    "the refused hygiene still ended the survivor")
+            # File-gate release: every parked member exits on its own; the
+            # exited adopted children are then REAPED (collection, never a
+            # signal).
+            gate.unlink()
+            bound = time.monotonic() + 30
+            targets = sorted(set([*named, spid, dpid]))
+            while any(Path("/proc", str(pid)).exists() for pid in targets):
+                try:
+                    os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+                assert time.monotonic() < bound, (
+                    "the released fixture tree kept running",
+                    [pid for pid in targets
+                     if Path("/proc", str(pid)).exists()])
+                time.sleep(0.05)
     elif mode == "no-signal-echild":
         import time
         # The immediately-exiting subject leaves the exited guardian as the raw
@@ -4672,9 +4775,16 @@ def _watchdog_completion_case(mode):
         child = emit._FixtureProcess(time.monotonic() + 5, subject=lambda: None)
         pid = child.start()
         os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
-        # Positive control: an owned leader permits signalling.
+        # Positive control: an owned leader with the caller's own-fork
+        # declaration permits signalling; WITHOUT the declaration the
+        # numeric boundary refuses even this live owned leader, because
+        # current waitability alone cannot prove fork provenance
+        # (QA15 codex blocker / claude m1).
         with patch.object(os, "kill") as kill:
-            assert emit._fixture_signal(pid, signal.SIGKILL, group=False)
+            assert emit._fixture_signal(pid, signal.SIGKILL, group=False) is False
+            assert not kill.called
+            assert emit._fixture_signal(pid, signal.SIGKILL, group=False,
+                                        forked=True)
             assert kill.called
         os.waitpid(pid, 0)
         child.collected = True  # deliberate external collection of the guardian
@@ -4731,10 +4841,12 @@ def _watchdog_completion_case(mode):
             release = Path(directory, "release")
             guardian_file = Path(directory, "guardian")
             recorded = []
+            fixtures = []
             real_init = emit._FixtureProcess.__init__
 
             def record_init(child, deadline, **kwargs):
                 recorded.append(deadline)
+                fixtures.append(child)
                 return real_init(child, deadline, **kwargs)
 
             real_ack = emit._fixture_ack_subject
@@ -4806,8 +4918,21 @@ def _watchdog_completion_case(mode):
                     children = Path("/proc", str(gpid), "task", str(gpid), "children")
                     subject = int(children.read_text(encoding="ascii").split()[0])
                     await_state(subject, {"Z"}, "subject did not finish after release")
-                    assert _kill_proved_child(gpid, signal.SIGCONT, forked=True), \
-                        "the resume refused: the published guardian pid is not our own child"
+                    # QA15 claude M1: the signal target's pid and descriptor
+                    # come from the _FixtureProcess that LAUNCHED the
+                    # guardian (its own fork), never from the number the
+                    # guardian published through a file -- that file pid is
+                    # observation only (the await_state reads above) and is
+                    # CROSS-CHECKED against the launcher's record here.
+                    owned = fixtures[-1]
+                    assert owned.pid == gpid, (
+                        "the published guardian pid disagrees with the "
+                        "launcher's own fork record", gpid, owned.pid)
+                    assert owned.pidfd is not None, \
+                        "the launcher holds no guardian pidfd"
+                    assert _kill_proved_child(owned.pid, signal.SIGCONT,
+                                              pidfd=owned.pidfd), \
+                        "the resume refused: the launcher's own guardian was not provable"
                     await_state(gpid, {"Z", None}, "guardian did not exit after resume")
                 finally:
                     gate.set()
@@ -5622,14 +5747,111 @@ def _watchdog_completion_case(mode):
         emit._fixture_drain(subject, subject_fd,
                             deadline=time.monotonic() + 10.0)
         os.close(subject_fd)
+    elif mode == "reaped-subject-retry":
+        import time
+        # QA15 codex blocker (the descriptor-less host): once the drain has
+        # REAPED its subject, the subject's number is reusable, so no later
+        # drain retry may send to it -- an adopted process could now answer
+        # to that number and waitid(P_PID) would prove only CURRENT
+        # waitability, not historical identity. The holder (subject_ref)
+        # binds the subject across retries and is cleared at the reap; the
+        # numeric boundary itself refuses a send without the caller's
+        # same-call own-fork declaration (QA15 claude m1). The recorder
+        # model below drives both paths with a REAL adopted child standing
+        # in for the reused number; os.kill is replaced, so nothing is ever
+        # signalled.
+        emit._fixture_subreaper()
+        release = os.pipe()
+        disclose = os.pipe()
+        subject = os.fork()
+        if subject == 0:
+            try:
+                os.close(release[1])
+                os.close(disclose[0])
+                orphan = os.fork()
+                if orphan == 0:
+                    os.close(disclose[1])
+                    os.read(release[0], 1)
+                    os._exit(0)
+                os.write(disclose[1], str(orphan).encode("ascii"))
+                os._exit(0)  # exits at once: the orphan reparents to this case
+            except BaseException:
+                os._exit(125)
+        os.close(disclose[1])
+        orphan = int(os.read(disclose[0], 16))  # DISCLOSURE, never a target
+        os.close(disclose[0])
+        # Wait for the adoption: the orphan's parent must become this case.
+        bound = time.monotonic() + 30
+        while True:
+            fields = Path("/proc", str(orphan), "stat").read_bytes()
+            if int(fields.rsplit(b")", 1)[1].split()[1]) == os.getpid():
+                break
+            assert time.monotonic() < bound, "the orphan was never adopted"
+            time.sleep(0.005)
+        sends = []
+        holder = [subject]
+        with patch.object(os, "kill",
+                          lambda pid, signum: sends.append((pid, signum))):
+            # First drain (pidfd-less model): the entry send is the OWN
+            # subject, declared; the subject is reaped, the holder cleared,
+            # and the live adopted child is refused by name.
+            try:
+                emit._fixture_drain(subject, None,
+                                    deadline=time.monotonic() + 1.0,
+                                    subject_ref=holder)
+            except emit.ChildStatusUnavailable as exc:
+                named = str(exc)
+            else:
+                raise AssertionError("fixture was accepted: " + mode)
+            assert "NOT signalled" in named and str(orphan) in named, named
+            assert holder == [None], (
+                "the reap did not clear the subject binding", holder)
+            # The guardian's failure-path RETRY shares the holder: with the
+            # subject reaped, no numeric send may reach its number again.
+            refuses(emit.ChildStatusUnavailable,
+                    lambda: emit._fixture_drain(subject, None,
+                                                deadline=time.monotonic() + 0.5,
+                                                subject_ref=holder))
+            # The codex round-15 reuse model: the retained number now
+            # identifies the REAL adopted child; a cleared holder refuses
+            # the send and the refusal still NAMES the survivor.
+            try:
+                emit._fixture_drain(orphan, None,
+                                    deadline=time.monotonic() + 0.5,
+                                    subject_ref=[None])
+            except emit.ChildStatusUnavailable as exc:
+                retried = str(exc)
+            else:
+                raise AssertionError("fixture was accepted: " + mode)
+            assert str(orphan) in retried and "NOT signalled" in retried, retried
+            # The boundary itself: a numeric send to an adopted CURRENT
+            # child without the own-fork declaration is refused outright.
+            assert emit._fixture_signal(orphan, signal.SIGKILL) is False
+        assert sends == [(subject, signal.SIGKILL)], (
+            "a numeric send reached a pid other than the declared own "
+            "subject (D-385-CURRENT-CHILD)", sends)
+        assert Path("/proc", str(orphan)).exists(), \
+            "the refused retry still ended the adopted child"
+        # EOF release: the adopted child exits on its own and is reaped.
+        os.close(release[1])
+        bound = time.monotonic() + 30
+        while Path("/proc", str(orphan)).exists():
+            try:
+                os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                pass
+            assert time.monotonic() < bound, "the released orphan kept running"
+            time.sleep(0.005)
+        os.close(release[0])
     elif mode == "escalation-subject":
         import time
-        # QA16 MINOR-2 + QA17 F1: cancelling a wedged guardian is bounded AND kills
-        # and observes the receipt-identified subject tree -- freeze the guardian,
-        # then the subject's group and pidfd, then the guardian -- never a stranded
-        # sleeper the test has to clean up. The same-group descendant must die with
-        # the subject; descendants that LEAVE the group are the documented
-        # wedged-guardian residual, out of contract here.
+        # QA16 MINOR-2 + QA17 F1, as narrowed by D-385-CURRENT-CHILD: cancelling a
+        # wedged guardian is bounded, kills the receipt-identified SUBJECT through
+        # its held pidfd, and the member census is REPORT-ONLY -- no handoff exists
+        # for the subject's own fork, so the same-group descendant is SKIPPED and
+        # NAMED, survives the escalation, and is released by this case's pipe EOF,
+        # exiting on its own (the retired census delivered the kill here). The
+        # parked tree is never a stranded sleeper this test has to clean up.
         def state(target):
             try:
                 stat = Path("/proc", str(target), "stat").read_bytes()
@@ -5882,7 +6104,7 @@ def _watchdog_completion_case(mode):
 
             real_drain = emit._fixture_drain
 
-            def reap_then_wedge(subject, subject_fd=None, *, deadline=None):
+            def reap_then_wedge(subject, subject_fd=None, **kwargs):
                 # Guardian-side: reap the exited subject, then wedge BEFORE any
                 # group kill: the state a drain stalled mid-cleanup leaves behind.
                 if os.getpid() != caller:
@@ -5891,7 +6113,7 @@ def _watchdog_completion_case(mode):
                     scratch.write_text(str(os.getpid()), encoding="ascii")
                     scratch.rename(wedged)  # atomic: never a partial PID
                     os.kill(os.getpid(), signal.SIGSTOP)
-                return real_drain(subject, subject_fd, deadline=deadline)
+                return real_drain(subject, subject_fd, **kwargs)
 
             def state(target):
                 try:
@@ -8610,8 +8832,18 @@ def _watchdog_completion_case(mode):
             leak_release = os.pipe()
             pair_globals = _pidfd_handoff_fork_send.__globals__
             pair_globals["_pidfd_handoff_pair"] = holding_pair
+            forked = []
+            real_fork, fork_owner = os.fork, os.getpid()
+
+            def recording_fork():
+                child = real_fork()
+                if child and os.getpid() == fork_owner:
+                    forked.append(child)
+                return child
+
             try:
-                with patch.object(Path, "exists", frozen_await_fault):
+                with patch.object(Path, "exists", frozen_await_fault), \
+                        patch.object(os, "fork", recording_fork):
                     refuses(RuntimeError,
                             lambda: frozen_pair(Path(directory), leak_release))
             finally:
@@ -8631,12 +8863,18 @@ def _watchdog_completion_case(mode):
             # (D-385-CURRENT-CHILD: the retired adoption proof killed it
             # right here, so the refusals below are the revert flip) -- it
             # is released by the pipe EOF and exits on its own.
+            # QA15 claude M1: the hygiene target is the fork this case
+            # itself just recorded (fork-bound provenance), never a number
+            # read back from a /proc census; the census below is a
+            # CROSS-CHECK and disclosure only.
+            assert len(forked) == 1, (
+                "the leak leg expected exactly one recorded own fork", forked)
+            guardian = forked[0]
             mine = Path("/proc/self/task", str(os.getpid()),
                         "children").read_text(encoding="ascii").split()
-            assert len(mine) == 1, (
-                "the leak leg expected exactly the model guardian as a "
-                "child", mine)
-            guardian = int(mine[0])
+            assert mine == [str(guardian)], (
+                "the census disagrees with the recorded own fork",
+                mine, guardian)
             orphans = Path("/proc", str(guardian), "task", str(guardian),
                            "children").read_text(encoding="ascii").split()
             assert _kill_proved_child(guardian, forked=True), \
@@ -8771,8 +9009,18 @@ def _watchdog_completion_case(mode):
             leak_release = os.pipe()  # a pipe: outside the pidfd/socket census
             pair_globals = _pidfd_handoff_fork_send.__globals__
             pair_globals["_pidfd_handoff_pair"] = recording_pair
+            forked = []
+            real_fork, fork_owner = os.fork, os.getpid()
+
+            def recording_fork():
+                child = real_fork()
+                if child and os.getpid() == fork_owner:
+                    forked.append(child)
+                return child
+
             try:
-                with patch.object(os, "getpgid", pgid_await_fault):
+                with patch.object(os, "getpgid", pgid_await_fault), \
+                        patch.object(os, "fork", recording_fork):
                     refuses(RuntimeError,
                             lambda: frozen_pair(Path(directory), leak_release))
             finally:
@@ -8788,12 +9036,18 @@ def _watchdog_completion_case(mode):
             # Hygiene, exactly as in leg 1k: the guardian is this process's
             # own declared fork; the reparented leader is an ADOPTED current
             # child -- refused (D-385-CURRENT-CHILD) and released by EOF.
+            # QA15 claude M1, exactly as in leg 1k: fork-bound provenance
+            # from this case's own recorded fork; the census is a
+            # CROSS-CHECK and disclosure only.
+            assert len(forked) == 1, (
+                "the post-receive leak leg expected exactly one recorded "
+                "own fork", forked)
+            guardian = forked[0]
             mine = Path("/proc/self/task", str(os.getpid()),
                         "children").read_text(encoding="ascii").split()
-            assert len(mine) == 1, (
-                "the post-receive leak leg expected exactly the model "
-                "guardian as a child", mine)
-            guardian = int(mine[0])
+            assert mine == [str(guardian)], (
+                "the census disagrees with the recorded own fork",
+                mine, guardian)
             orphans = Path("/proc", str(guardian), "task", str(guardian),
                            "children").read_text(encoding="ascii").split()
             assert _kill_proved_child(guardian, forked=True), \
@@ -9413,7 +9667,8 @@ def _watchdog_completion_case(mode):
                     raise InterruptedError("backstop cancellation")
                 return None
 
-            def stub_helper(pid, signum, pidfd=None, *, group=True):
+            def stub_helper(pid, signum, pidfd=None, *, group=True,
+                            forked=False):
                 if helper_kind == "ordinary":
                     raise RuntimeError("helper ordinary")
                 if helper_kind == "cancellation":
@@ -12121,7 +12376,8 @@ def _watchdog_completion_case(mode):
             assert signum == signal.SIGKILL, signum
             raise RuntimeError("subject kill failure")
 
-        def record_helper(pid, signum, pidfd=None, *, group=True):
+        def record_helper(pid, signum, pidfd=None, *, group=True,
+                          forked=False):
             helper_kills.append((pid, signum))
             return True
 
@@ -12254,7 +12510,7 @@ def _watchdog_completion_case(mode):
                 raise RuntimeError("backstop failure")
 
             def borne_helper(pid, signum, pidfd=None, *, group=True,
-                             _born=born):
+                             forked=False, _born=born):
                 raise _born("cleanup-born cancellation")
 
             with patch.object(signal, "pidfd_send_signal",
@@ -12346,7 +12602,8 @@ def _watchdog_completion_case(mode):
                  "handoff (D-385-PIDFD-HANDOFF)"), target_fd, signum)
             return None  # freezes and held-pidfd kills succeed
 
-        def census_helper(pid, signum, pidfd=None, *, group=True):
+        def census_helper(pid, signum, pidfd=None, *, group=True,
+                          forked=False):
             helper_kills.append((pid, signum))
             return True
 
@@ -12389,7 +12646,7 @@ def _watchdog_completion_case(mode):
             assert signum == signal.SIGKILL, signum
             return None  # the held-pidfd subject SIGKILL succeeds
 
-        def ki_helper(pid, signum, pidfd=None, *, group=True):
+        def ki_helper(pid, signum, pidfd=None, *, group=True, forked=False):
             helper_kills.append((pid, signum))
             return True
 
@@ -12924,7 +13181,8 @@ def _watchdog_completion_case(mode):
                 assert signum == signal.SIGKILL, signum
                 raise fault
 
-            def fake_helper(pid, signum, pidfd=None, *, group=True):
+            def fake_helper(pid, signum, pidfd=None, *, group=True,
+                            forked=False):
                 raise cancellation
 
             with patch.object(signal, "pidfd_send_signal",
@@ -12944,7 +13202,8 @@ def _watchdog_completion_case(mode):
                 assert signum == signal.SIGKILL, signum
                 return None  # the direct backstop succeeds
 
-            def fake_helper(pid, signum, pidfd=None, *, group=True):
+            def fake_helper(pid, signum, pidfd=None, *, group=True,
+                            forked=False):
                 raise fault
 
             with patch.object(signal, "pidfd_send_signal",
@@ -15288,7 +15547,7 @@ def _watchdog_regression_self_test():
                         "fd-hygiene-total", "nested-keep", "fd-census",
                         "subject-gc", "guardian-preload", "subject-receipt",
                         "subject-ack", "subject-orphan", "pdeathsig",
-                        "drain-adopted",
+                        "drain-adopted", "reaped-subject-retry",
                         "escalation-subject", "escalate-reaped",
                         "poll-collected", "close-cancel",
                         "escalate-degraded", "poll-masked",

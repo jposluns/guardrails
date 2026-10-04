@@ -605,7 +605,7 @@ def _fixture_wait(pid, flags):
         raise ChildStatusUnavailable("cannot collect fixture status: " + str(exc)) from exc
 
 
-def _fixture_signal(pid, signum, pidfd=None, *, group=True):
+def _fixture_signal(pid, signum, pidfd=None, *, group=True, forked=False):
     """The sole numeric signal boundary. ECHILD never licenses a signal.
 
     Every caller passes ONLY the pid its own os.fork() just returned,
@@ -617,9 +617,18 @@ def _fixture_signal(pid, signum, pidfd=None, *, group=True):
     adopted descendants here as proved current children; that license is
     gone: such a descendant is now reaped if it exits on its own, or
     NAMED, not signalled, in the drain refusal -- the disclosed
-    orphan-escape residual. The numeric os.kill fallback exists only for
-    a pidfd-less host and still targets only the caller's own fork. Never
-    a numeric killpg (QA21 codex F3). `group` is retained for call-site
+    orphan-escape residual. The waitid ownership check proves only
+    CURRENT waitability, which an ADOPTED child also has (QA15 codex
+    blocker: waitid(P_PID) selects the current child matching the
+    number, not its historical identity), so it can never license a
+    numeric send by itself. The numeric os.kill fallback (a pidfd-less
+    host) therefore REQUIRES `forked=True`, the call site's same-call
+    declaration that `pid` is this process's OWN direct, un-reaped fork
+    -- fork-bound at the site, the _kill_proved_child review boundary,
+    now enforced HERE instead of resting on call-site review alone:
+    without it the numeric send is refused (False) and nothing is
+    signalled. Never a numeric killpg (QA21 codex F3). `group` is
+    retained for call-site
     symmetry and licenses nothing; concurrent foreign waiters remain
     outside this trusted test contract.
     """
@@ -638,8 +647,13 @@ def _fixture_signal(pid, signum, pidfd=None, *, group=True):
     try:
         if pidfd is not None:
             signal.pidfd_send_signal(pidfd, signum)
-        else:
+        elif forked:
             os.kill(pid, signum)
+        else:
+            # D-385-CURRENT-CHILD: waitability without the caller's own-fork
+            # declaration licenses NO numeric send (an adopted current child,
+            # or an adopted reuse of a reaped number, would pass owned()).
+            return False
     except ProcessLookupError:
         pass
     return True
@@ -1437,7 +1451,7 @@ def _fixture_cleanup_deadline(execution_deadline=None):
     return floor if execution_deadline is None else max(floor, execution_deadline)
 
 
-def _fixture_drain(subject, subject_fd=None, *, deadline=None):
+def _fixture_drain(subject, subject_fd=None, *, deadline=None, subject_ref=None):
     """Dedicated single-threaded subreaper: every child belongs to this fixture.
 
     Kill ONLY the owned subject -- this guardian's own direct fork, through
@@ -1453,9 +1467,26 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
     cleanup deadline, shared by normal and failure paths; absent one, the
     named minimum grace applies. Expiry yields cannot-evaluate, never
     success: the refusal NAMES every still-live adopted descendant, by pid,
-    as NOT signalled -- the disclosed orphan-escape residual, left running.
-    Syscalls still require kernel progress. Subjects attacking their
-    guardian are outside this trusted harness's contract.
+    as NOT signalled -- the disclosed orphan-escape residual, left running
+    (such a descendant may therefore OUTLIVE the refusing case and its
+    fixture process, bounded only by the fixture's own self-limit -- a
+    bounded sleep or gate deadline -- until its release gate or EOF ends
+    it). When the PPID census transiently names nothing while kernel
+    waitid still answers for a child, the refusal says exactly that -- a
+    waitable child remains whose identity the census missed -- never an
+    empty name list presented as the full survivor set (QA15 claude M2).
+    `subject_ref`, a single-element list owned by the caller, BINDS the
+    subject's identity across retries (QA15 codex blocker): the drain
+    reads the subject number from it and CLEARS it the moment the subject
+    is reaped, so a second drain call with the same holder -- the
+    guardian's failure-path retry -- can never signal that number again
+    after the reap freed it for reuse by an adopted process. Absent a
+    holder, a fresh one is bound to this one call. The entry kill carries
+    the drain contract's own-fork declaration (forked=True): `subject` is
+    the calling guardian's own direct fork, and once the holder is
+    cleared no numeric retry can reach its number. Syscalls still require
+    kernel progress. Subjects attacking their guardian are outside this
+    trusted harness's contract.
     """
     import os
     import signal
@@ -1463,9 +1494,16 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
     status = None
     if deadline is None:
         deadline = _fixture_cleanup_deadline()
-    # Cancel the owned subject immediately, even while a census is empty. The
-    # ownership check makes this safe on a retry after the subject was reaped.
-    _fixture_signal(subject, signal.SIGKILL, subject_fd)
+    if subject_ref is None:
+        subject_ref = [subject]
+    subject = subject_ref[0]
+    # Cancel the owned subject immediately, even while a census is empty --
+    # but ONLY while the holder still binds it: once the subject was reaped
+    # (by this call or an earlier one sharing the holder), its number may
+    # already identify an ADOPTED process, and no retry may signal it
+    # (QA15 codex blocker; D-385-CURRENT-CHILD).
+    if subject is not None:
+        _fixture_signal(subject, signal.SIGKILL, subject_fd, forked=True)
     while True:
         try:
             os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
@@ -1479,16 +1517,30 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
                 return status
             if waited == 0:
                 break
-            if waited == subject:
+            if subject is not None and waited == subject:
                 status = raw
+                subject = subject_ref[0] = None  # the number is now reusable
         if time.monotonic() >= deadline:
             residual = sorted(pid for pid in _fixture_children()
-                              if pid != subject)
+                              if subject is None or pid != subject)
+            if residual:
+                raise ChildStatusUnavailable(
+                    "descendant cleanup deadline: ECHILD not observed; adopted "
+                    "descendants {} NOT signalled (D-385-CURRENT-CHILD: no "
+                    "forking-parent handoff reaches this guardian), left as "
+                    "the disclosed orphan-escape residual".format(residual))
+            # QA15 claude M2: the deadline is reached only after waitid
+            # answered for a child, so an empty census names the census's
+            # own transient miss, never a completed drain or a full list.
             raise ChildStatusUnavailable(
-                "descendant cleanup deadline: ECHILD not observed; adopted "
-                "descendants {} NOT signalled (D-385-CURRENT-CHILD: no "
-                "forking-parent handoff reaches this guardian), left as the "
-                "disclosed orphan-escape residual".format(residual))
+                "descendant cleanup deadline: ECHILD not observed and the "
+                "/proc census named no adopted descendant: a waitable child "
+                "remains whose identity the census missed{}; it is NOT "
+                "signalled (D-385-CURRENT-CHILD), left as the disclosed "
+                "orphan-escape residual".format(
+                    "" if subject is None
+                    else " (the subject {} is still unreaped)".format(
+                        subject)))
         time.sleep(0.005)
 
 
@@ -1863,7 +1915,8 @@ class _FixtureProcess:
         import signal
         try:
             if self.pid is not None and not self.collected:
-                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd,
+                                forked=True)
                 os.waitpid(self.pid, 0)
                 self.collected = True
         except OSError:
@@ -1935,6 +1988,7 @@ class _FixtureProcess:
         import signal
         import time
         subject = subject_fd = cleanup_deadline = None
+        subject_ref = None
         stage = "startup"
         try:
             # The launcher forked this guardian with the cancellation signals
@@ -1984,6 +2038,10 @@ class _FixtureProcess:
                     finally:
                         os._exit(125)
             os.close(ack_r)
+            # One holder for the subject's whole life: the failure-path
+            # retry below shares it, so a subject reaped by the first drain
+            # is never signalled by number again (QA15 codex blocker).
+            subject_ref = [subject]
             stage = "subject-receipt"
             subject_fd = _fixture_pidfd(subject)
             _fixture_send_subject(self.peer, subject, subject_fd)
@@ -2013,7 +2071,8 @@ class _FixtureProcess:
                 time.sleep(0.005)
             stage = "drain"
             cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
-            status = _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
+            status = _fixture_drain(subject, subject_fd, deadline=cleanup_deadline,
+                                    subject_ref=subject_ref)
             subject = None
             if subject_fd is not None:
                 fd, subject_fd = subject_fd, None         # ownership first: a failed close is never
@@ -2055,7 +2114,8 @@ class _FixtureProcess:
                 if subject is not None:
                     if cleanup_deadline is None:
                         cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
-                    _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
+                    _fixture_drain(subject, subject_fd, deadline=cleanup_deadline,
+                                   subject_ref=subject_ref)
                 failure["cleanup"] = "ECHILD" if subject is not None else "no subject"
             except BaseException as cleanup_exc:
                 failure["cleanup"] = detail(cleanup_exc)
@@ -2261,7 +2321,8 @@ class _FixtureProcess:
             # guardian; _cleanup_boundary spans this WHOLE step, direct
             # backstop included (QA26 codex; fix 6).
             try:
-                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd,
+                                forked=True)
             except BaseException as helper_exc:
                 # Even the ownership-checked helper failing (e.g. the
                 # same census fault reaching its own group census) must
@@ -2789,7 +2850,8 @@ class _FixtureProcess:
                 self.peer.close()
                 if self.pid is not None and not self.collected:
                     if not self.armed:
-                        _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+                        _fixture_signal(self.pid, signal.SIGKILL, self.pidfd,
+                                        forked=True)
                     # A cancelled call no longer needs the subject's execution time:
                     # wait within a bounded cleanup budget (twice the grace, so an
                     # honest guardian's own grace-bounded drain fits), then escalate
@@ -3452,7 +3514,7 @@ def _st_guardian_close_reuse():
                              "_fixture_send_subject": lambda peer, subject, fd: None,
                              "_fixture_ack_subject": os.close,
                              "_fixture_cleanup_deadline": lambda deadline=None: deadline,
-                             "_fixture_drain": lambda subject, fd=None, deadline=None: 0}
+                             "_fixture_drain": lambda subject, fd=None, deadline=None, subject_ref=None: 0}
                     calls = {(os, "setpgid"): lambda pid, pgrp: None, (os, "fork"): lambda: 1 << 22,
                              (os, "waitid"): lambda *args: (), (os, "_exit"): _exit,
                              (signal, "pthread_sigmask"): lambda how, mask: set()}   # the caller's mask untouched

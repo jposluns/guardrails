@@ -1838,6 +1838,42 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("opf/tools/_opf_oplock.py", "_st_f8_4_body", "REBIND", "[]seen", "", 1,
      _CS_JOINED.format("report = seen[\"report\"]", "joins report to the closed seen[\"fd\"]", "seen",
                        "report bindings", "report string")),
+    ("opf/tools/opf.py", "_self_test_runtime_supervisor_unit", "AFTER", "kid_fd", "kid_fd", 1,
+     _CS_LEGS.format("pidfd")),
+    ("opf/tools/opf.py", "_self_test_runtime_supervisor_unit", "REBIND", "kid_fd", "", 1,
+     _CS_LEGS.format("pidfd")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "AFTER", "[]disclose", "[]disclose", 2,
+     "false positive: the reaped-subject-retry subject child closes its inherited disclose[0] copy inside a "
+     "try whose every path ends in os._exit; the parent closes its own disclose[1] and disclose[0] copies "
+     "once each, and the two pipe ends share only the one element key of the tuple disclose"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "AFTER", "[]release", "[]release", 1,
+     "false positive: the reaped-subject-retry subject child closes its inherited release[1] copy inside a "
+     "try whose every path ends in os._exit; the parent's later release[1] and release[0] closes each close "
+     "the parent's own copy once, for the EOF release"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "AFTER", "[]victim_release", "[]victim_release", 1,
+     "false positive: the leg-1l victim grandchild closes its inherited victim_release[1] copy inside the "
+     "sender's try, whose every path ends in os._exit; the parent's later victim_release closes each close "
+     "the parent's own copy once, for the EOF release"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "AFTER", "disclose_r", "disclose_r", 1,
+     "false positive: the drain-adopted subject child closes its inherited disclose_r copy inside its try and "
+     "every path of that child ends in os._exit; the parent's later os.close(disclose_r) closes the parent's "
+     "own copy, once, after reading the disclosed pid"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "AFTER", "disclose_w", "disclose_w", 1,
+     "false positive: the drain-adopted orphan grandchild closes its inherited disclose_w copy inside the "
+     "subject's try, whose every path ends in os._exit; the parent's later os.close(disclose_w) closes the "
+     "parent's own copy, once, before reading the disclosed pid"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "AFTER", "release_w", "release_w", 1,
+     "false positive: the drain-adopted subject child closes its inherited release_w copy inside its try and "
+     "every path of that child ends in os._exit; the parent's later os.close(release_w) closes the parent's "
+     "own copy, once, as the EOF release"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "descendant_fd", "", 2,
+     _CS_LEGS.format("received handoff pidfd")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "forked_handoff", "", 2,
+     _CS_LEGS.format("handoff socket")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "release_r", "", 2,
+     _CS_LEGS.format("release pipe end")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "release_w", "", 14,
+     _CS_LEGS.format("release pipe end")),
 ) + tuple(("opf/tools/_opf_init_substrate.py", name, "REBIND", "sub", "", 1,
            "false positive: a self-test step; sub is re-bound to a fresh substrate, the old one never closed again")
           for name in ("_t_s1_sibling_home", "_t_s2_capability_gate", "_t_s13_midread_containment",
