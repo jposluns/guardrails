@@ -2894,7 +2894,7 @@ source-path = ".aiqt/core/rules/security-seci-fail-closed.md"
 start-line = 14
 end-line = 16
 canonical-text = "An exception or error in an authentication, authorization, validation, or cryptographic check leaves the\nsystem in the deny or otherwise safe state. A failed, unavailable, or unreadable check is treated as not\npassed, never as a default-allow."
-source-digest = "8ccb6d94b1cbde7ad35c87f5d3862b7408c5869982feac3d8ff8329278bf036b"
+source-digest = "75241d46bc41a08cb09f22573630085401a308299121ca015e1470c0a4958833"
 
 [[clause]]
 clause-id = "secfcl.2"
@@ -2902,8 +2902,8 @@ corpus-id = "secfcl"
 source-path = ".aiqt/core/rules/security-seci-fail-closed.md"
 start-line = 18
 end-line = 23
-canonical-text = "Code such a check loads into its own process can, beyond raising, exit with any status, fault outside any\nhandler (formatting its errors, cleanup, background work, shutdown), or replace the check's reporting\nmachinery. It runs in a child process whose verdict it cannot produce by exiting early or faulting after it\n(a complete structured result and a clean finish, any later fault failing it), or in process with each\nchannel covered, unreachable, or disclosed under the gate-discipline rule, a fault-to-pass channel never\nmerely disclosed. Review and pinning with the check exempt only the last channel."
-source-digest = "8ccb6d94b1cbde7ad35c87f5d3862b7408c5869982feac3d8ff8329278bf036b"
+canonical-text = "Code that such a check loads in process can exit with any status, fault outside any handler (error\nformatting, cleanup, background work, or shutdown), or replace the check's reporting machinery, the only\nchannel that review and pinning with the check exempt from the in-process duty below. In a child process,\nno early exit or late fault yields a passing verdict (a complete structured result and a clean finish: no\nfault reported on the child's error stream); in process, each channel is covered, unreachable, or disclosed\nunder the gate-discipline rule, a fault-to-pass channel never merely disclosed."
+source-digest = "75241d46bc41a08cb09f22573630085401a308299121ca015e1470c0a4958833"
 
 [[clause]]
 clause-id = "secupl.1"

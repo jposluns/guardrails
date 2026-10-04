@@ -15,15 +15,15 @@
 #                        Raised 112222 -> 128358 when the counting rule changed, not the content: the gate
 #                        began counting the modelled header of each of the 134 loaded files (16136 units;
 #                        rule files 111862 and managed block 360 unchanged; no .claude/CLAUDE.md).
-#                        Raised 128358 -> 128965 for content, with the maintainer's recorded approval of
-#                        2026-10-04: a new second paragraph in security-seci-fail-closed (607 units; rule
-#                        files 111862 -> 112469; headers 16136 and managed block 360 unchanged).
+#                        Raised 128358 -> 128963 for content, with the maintainer's recorded approval of
+#                        2026-10-04: a new second paragraph in security-seci-fail-closed (605 units; rule
+#                        files 111862 -> 112467; headers 16136 and managed block 360 unchanged).
 #   ceiling              the target PACK figure; reported, not enforced. Its value predates header counting,
 #                        which added 16136 units to PACK at the 112222 -> 128358 ratchet raise; it was not
 #                        raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 128965
+ratchet = 128963
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
