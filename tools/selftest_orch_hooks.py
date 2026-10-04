@@ -871,7 +871,6 @@ def _main_isolated(report_path=None):
         check("trunc/fg-arith-after-sep-not-heredoc-denies", fg('true;((y=1<<2))\nsleep 5 &\n2'), "deny")
         check("trunc/fg-arith-subscript-not-heredoc-denies", fg('a[1<<2]=3\nsleep 5 &\n2]=3'), "deny")
         check("trunc/fg-heredoc-opline-cmdsub-open-denies", fg('cat <<EOF $(true\nsleep 5 &\n)\nEOF'), "deny")
-        check("trunc/fg-heredoc-opline-cmdsub-closed-allows", fg('cat <<EOF $(echo hi)\nA & B\nEOF'), "allow")
         check("trunc/fg-heredoc-bslash-nl-no-amp-allows", fg('cat <<EOF\nfoo \\\nbar\nEOF'), "allow")
         check("trunc/scan-herestring-not-heredoc", aiqt_hooks._orch_foreground_detach('cat <<<x\nsleep 5 &\nx'), True)
         # The deny message fits its cause: a could-not-read (ambiguous) deny does not advise
@@ -923,6 +922,73 @@ def _main_isolated(report_path=None):
             {"hook_event_name": "PreToolUse", "cwd": str(tb.root), "tool_name": "Bash",
              "tool_input": None})), "deny")
 
+        import time as _time
+        import shutil as _shutil
+        _mkr2 = lambda raw: raw.replace("%", chr(10))
+        _DET_RAW = []
+        for _cid, _raw in [
+          ("trunc/fg-heredoc-cmdsub-nested-then-detach-denies", "msg=$(cat <<'EOF'%hello%EOF%)%touch MARK &%cat <<EOF%done%EOF"),
+          ("trunc/fg-heredoc-cmdsub-body-then-detach-denies", "body=$(cat <<'EOF'%notes%EOF%)%touch MARK &%wait%cat <<EOF%x%EOF"),
+          ("trunc/fg-heredoc-backtick-nested-then-detach-denies", "v=`cat <<EOF%1%EOF%`%touch MARK &%cat <<EOF%x%EOF"),
+          ("trunc/fg-heredoc-subshell-nested-then-detach-denies", "(cd . && cat <<EOF%hi%EOF%)%touch MARK &%cat <<EOF%ok%EOF"),
+          ("trunc/fg-heredoc-cmdsub-wait-delim-then-detach-denies", "x=$(cat <<'wait'%hi%wait%)%touch MARK &%wait"),
+          ("trunc/fg-heredoc-cmdsub-samedelim-then-detach-denies", "x=$(cat <<E%hello%E%)%touch MARK &%printf B%wait%E"),
+          ("trunc/fg-heredoc-subshell-samedelim-then-detach-denies", "(cat <<E%hello%E%)%touch MARK &%wait%E"),
+          ("trunc/fg-heredoc-case-pattern-paren-then-detach-denies", "cat <<EOF $(case x in x) true%touch MARK &%;; esac)%EOF"),
+          ("trunc/fg-heredoc-subscript-procsub-then-detach-denies", "cat <<EOF a[ <(%touch MARK &%)%EOF"),
+          ("trunc/fg-cr-before-hash-detach-denies", "touch MARK x" + chr(13) + chr(35) + "y &"),
+          ("trunc/fg-vt-before-hash-detach-denies", "touch MARK x" + chr(11) + chr(35) + "y &"),
+          ("trunc/fg-ff-before-hash-detach-denies", "touch MARK x" + chr(12) + chr(35) + "y &"),
+          ("trunc/fg-nbsp-before-hash-detach-denies", "touch MARK x" + chr(160) + chr(35) + "y &"),
+          ("trunc/fg-ansi-c-balanced-detach-denies", "touch MARK $'x\\'y' &"),
+          ("trunc/fg-dq-cmdsub-amp-detach-denies", "echo " + chr(34) + "$(touch MARK &)" + chr(34)),
+        ]:
+            check(_cid, fg(_mkr2(_raw)), "deny")
+            _DET_RAW.append(_raw)
+        _HARM_RAW = []
+        for _cid, _raw in [
+          ("trunc/fg-heredoc-cmdsub-nested-harmless-allows", "x=$(cat <<'EOF'%A & B%EOF%)%echo x"),
+          ("trunc/fg-heredoc-cmdsub-apostrophe-allows", "x=$(cat <<'EOF'%it's fine%EOF%)"),
+          ("trunc/fg-heredoc-subshell-amp-body-allows", "(cat <<'EOF'%Tom & Jerry%EOF%)"),
+          ("trunc/fg-ansi-c-benign-allows", "echo $'\\'t' && ls"),
+        ]:
+            check(_cid, fg(_mkr2(_raw)), "allow")
+            _HARM_RAW.append(_raw)
+        check("trunc/fg-heredoc-opline-cmdsub-closed-overdenies", fg("cat <<EOF $(echo hi)" + chr(10) + "A & B" + chr(10) + "EOF"), "deny")
+        check("trunc/scan-ansi-c-balanced-detach", aiqt_hooks._orch_foreground_detach("true $'x\\'y' & echo ok"), True)
+        check("trunc/scan-dq-cmdsub-amp-detach", aiqt_hooks._orch_foreground_detach("echo " + chr(34) + "$(sleep 5 &)" + chr(34)), True)
+        _bash_r2 = _shutil.which("bash")
+        def _gt_detaches(raw):
+            cmd = _mkr2(raw)
+            d = tempfile.mkdtemp(prefix="gtr2.", dir=str(tmp))
+            try:
+                env = {"PATH": "/usr/bin:/bin", "HOME": d}
+                try:
+                    subprocess.run(["bash", "-c", cmd], cwd=d, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                for _ in range(25):
+                    if os.path.exists(os.path.join(d, "MARK")):
+                        return True
+                    _time.sleep(0.02)
+                return os.path.exists(os.path.join(d, "MARK"))
+            finally:
+                _shutil.rmtree(d, ignore_errors=True)
+        _UNV = "UNVERIFIABLE"
+        if not _bash_r2:
+            _gt_bash_ok, _gt_det_ok, _gt_harm_ok, _gt_flip_ok = _UNV, _UNV, _UNV, _UNV
+        else:
+            _gt_bash_ok = True
+            _det_bash = {r: _gt_detaches(r) for r in _DET_RAW}
+            _harm_bash = {r: _gt_detaches(r) for r in _HARM_RAW}
+            _weak = lambda cmd: None
+            _gt_det_ok = all(_det_bash[r] and fg(_mkr2(r)) == "deny" for r in _DET_RAW)
+            _gt_harm_ok = all((not _harm_bash[r]) and fg(_mkr2(r)) == "allow" for r in _HARM_RAW)
+            _gt_flip_ok = any(_det_bash[r] and _weak(_mkr2(r)) is None for r in _DET_RAW)
+        check("gt/bash-available", _gt_bash_ok, True)
+        check("gt/detach-cases-all-denied", _gt_det_ok, True)
+        check("gt/harmless-cases-no-detach-and-allowed", _gt_harm_ok, True)
+        check("gt/flip-catches-reintroduced-bypass", _gt_flip_ok, True)
         # ---------- component 3b: the untracked wait-loop guard (trkasy, deny) ----------
         w = Fixture(tmp, "waitloop")
         # predicate direct checks (three-valued): the four-conjunct truth table.

@@ -9456,24 +9456,29 @@ def _orch_foreground_detach_kind(command):
     DATA IS NOT SYNTAX: a here-document body (after `<<` or `<<-`, quoted or unquoted delimiter) is data,
     so its apostrophes and ampersands never reach the scan; the body is skipped from the newline ending the
     operator's line through its terminator line (several here-documents on one line are consumed in
-    order). An `&` inside a plain parameter expansion (`${x:-&}`, `${x//&/and}`) is a literal word
-    character, not an operator, and is skipped too. Neither skip is taken where the text could still run a
-    command: an UNQUOTED-delimiter body is expanded, so one that carries an `&` beside a command
-    substitution is reported 'ambiguous'; a parameter expansion holding a command substitution, and the
-    current-shell command-substitution form (`${ cmd; }`), are scanned as code, though a `<<` in them
-    is word text, not a here-document operator. The here-document body skip can only make the scan MORE
-    permissive, so it is taken ONLY where the boundary is provable and otherwise the text is scanned as code
-    (erring toward the deny): it is NOT taken for a here-STRING `<<<` (a one-word redirection), a `<<` inside
-    an arithmetic `$((`, `((`, `$[`, or an index-subscript `name[...]` context (a shift, not an operator), a
-    delimiter word or body line carrying a backslash-newline continuation that bash joins before matching, an
-    open command substitution, backtick, or quote left unbalanced on the operator line, or a here-document
-    whose terminator line never appears. A bare `&` reached after a here-document the scan could not delimit
-    is reported as a could-not-read deny whose reason names the boundary fix, not background dispatch.
+    order). Each pending here-document records the command-substitution/subshell/backtick DEPTH at which its
+    `<<` was read, and its body is consumed at a newline at THAT depth (so a here-document opened inside
+    `$(...)`, `(...)`, or backticks is consumed inside, not leaked past the closing bracket). An `&` inside a
+    plain parameter expansion (`${x:-&}`, `${x//&/and}`) is a literal word character, not an operator, and is
+    skipped too. Neither skip is taken where the text could still run a command: an UNQUOTED-delimiter body is
+    expanded, so one that carries an `&` beside a command substitution is reported 'ambiguous'; a parameter
+    expansion holding a command substitution, the current-shell command-substitution form (`${ cmd; }`), and
+    a `$(...)` command substitution INSIDE double quotes are scanned as code, though a `<<` in them is word
+    text, not a here-document operator. The here-document body skip can only make the scan MORE permissive, so
+    it is taken ONLY where the boundary is provable and otherwise the text is scanned as code (erring toward
+    the deny): it is NOT taken for a here-STRING `<<<` (a one-word redirection), a `<<` inside an arithmetic
+    `$((`, `((`, `$[`, or an index-subscript `name[...]` context (a shift, not an operator), a delimiter word
+    or body line carrying a backslash-newline continuation that bash joins before matching, a here-document
+    CROSSED by a deeper substitution or subshell opened on the operator line (whose `)` could be a
+    case-pattern or subscript `)` rather than a real close), an enclosing substitution or backtick that closes
+    before the body was read, or a here-document whose terminator line never appears. A bare `&` reached after
+    a here-document the scan could not delimit is a could-not-read deny whose reason names the boundary fix,
+    not background dispatch.
 
     AMBIGUOUS QUOTING FAILS TOWARD THE DENY, never toward a silent allow: a scan that ends still inside an
     unbalanced single or double quote cannot prove that a later `&` is quoted rather than an operator (an
-    unbalanced quote, or a construct this scan does not model such as ANSI-C `$'...'` or locale `$"..."`
-    quoting, can leave the scan `inside quotes` and skip a real trailing `&`), so it reports 'ambiguous'
+    unbalanced quote, or an unterminated ANSI-C `$'...'` quote, can leave the scan `inside quotes` and skip a
+    real trailing `&`), so it reports 'ambiguous'
     rather than allowing. A genuinely balanced, quoted `&` is literal and correctly ignored. None means no
     detach was found.
 
@@ -9484,17 +9489,19 @@ def _orch_foreground_detach_kind(command):
     deny, but a detacher that carries no bare `&` (setsid worker, a nested `bash -c '... &'`) is NOT caught
     here and is a silent-allow residual disclosed in the manifest."""
     in_single = in_double = escaped = False
-    pending = []  # here-documents opened on the current line: (delimiter, strip_tabs, quoted)
+    pending = []  # per pending here-document: [delim, strip_tabs, quoted, depth, shadowed]
     no_heredoc_until = 0  # end of a parameter expansion scanned as code (its `<<` is word text)
     arith = 0  # open-bracket depth inside an arithmetic `$((`, `((`, or `$[` context (a `<<` there is a shift)
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
     word_start = True  # the next unquoted char begins a word (start of string, or after unquoted whitespace)
     paren = 0  # unquoted $( command-substitution / ( subshell depth outside arithmetic
     in_backtick = False  # inside an unquoted backtick command substitution
+    dq_cmdsub = []  # paren depths at which a $( command substitution opened INSIDE double quotes
     heredoc_ambiguous = False  # a << whose here-document boundary could not be proven: scan rest as code
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
+        depth = paren + (1 if in_backtick else 0)
         if escaped:
             escaped, prev_dup, word_start = False, False, False
             i += 1
@@ -9510,6 +9517,18 @@ def _orch_foreground_detach_kind(command):
                 escaped = True
             elif ch == '"':
                 in_double = False
+            elif ch == "$" and command.startswith("(", i + 1):
+                # a command substitution INSIDE double quotes: its body is CODE, so a bare & there is a
+                # real detach that quoted-text scanning would hide. Scan it as code and restore the double
+                # quote at the matching ) (a backtick substitution in double quotes stays a residual).
+                in_double = False
+                paren += 1
+                dq_cmdsub.append(paren)
+                for ent in pending:
+                    ent[4] = True
+                prev_dup, word_start = False, False
+                i += 2
+                continue
             prev_dup, word_start = False, False
             i += 1
             continue
@@ -9523,25 +9542,52 @@ def _orch_foreground_detach_kind(command):
                 break  # no later line: the comment runs to the end of the string, nothing more to scan
             i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
             continue
-        if ch == "\n" and pending and not paren and not in_backtick:
-            # The unquoted newline ending a line that opened here-documents: their bodies follow and are
-            # data. Skip through the last terminator line and resume at the newline after it.
-            consumed = _orch_heredoc_bodies(command, i + 1, pending)
-            pending = []
-            if consumed is not None:
-                end, ambiguous = consumed
-                if ambiguous:
-                    return "ambiguous"
-                i = end
-                continue
-            heredoc_ambiguous = True  # a here-document body this scan could not delimit: scan rest as code
-        if ch.isspace():
+        if ch == "\n" and pending and not arith:
+            # bodies for the here-documents opened at THIS nesting depth follow and are data; one opened at
+            # another depth is read at its own depth. A here-document still marked shadowed was crossed by a
+            # deeper substitution or subshell whose ) this scan cannot prove real (a case-pattern or a
+            # subscript ) can falsely close it), so its boundary is unprovable: scan the rest as code rather
+            # than skip a body that may hold a real detach.
+            here = [e for e in pending if e[3] == depth]
+            if here:
+                pending = [e for e in pending if e[3] != depth]
+                if any(e[4] for e in here):
+                    heredoc_ambiguous = True
+                else:
+                    consumed = _orch_heredoc_bodies(
+                        command, i + 1, [(e[0], e[1], e[2]) for e in here])
+                    if consumed is not None:
+                        end, ambiguous = consumed
+                        if ambiguous:
+                            return "ambiguous"
+                        i = end
+                        continue
+                    heredoc_ambiguous = True  # a body this scan could not delimit: scan rest as code
+        if ch in " \t\n":  # bash blanks are only space, tab, and newline (not CR/VT/FF/NBSP)
             prev_dup, word_start = False, True
             i += 1
             continue
         if ch == "\\":
             escaped, prev_dup, word_start = True, False, False
             i += 1
+            continue
+        if ch == "$" and command.startswith("'", i + 1):
+            # ANSI-C quoting $'...': a backslash escapes the next character (an escaped quote or an
+            # escaped backslash), so scan to the first UNescaped quote. Its content is a quoted literal, so a
+            # bare & after it is a real operator, not one hidden by mis-reading the ANSI-C quote as a plain
+            # single quote.
+            j = i + 2
+            while j < n:
+                if command[j] == "\\":
+                    j += 2
+                    continue
+                if command[j] == "'":
+                    break
+                j += 1
+            if j >= n:
+                return "ambiguous"  # an unterminated $'...': the quoting could not be read
+            prev_dup, word_start = False, False
+            i = j + 1
             continue
         if ch == "<" and command.startswith("<<<", i) and not arith:
             # A here-STRING (<<<word) is a one-word redirection, not a here-document: consume the whole
@@ -9558,7 +9604,7 @@ def _orch_foreground_detach_kind(command):
             word = _orch_heredoc_word(command, j)
             if word is not None:
                 text, quoted, end = word
-                pending.append((text, strip_tabs, quoted))
+                pending.append([text, strip_tabs, quoted, depth, False])
                 prev_dup, word_start = False, False
                 i = end
                 continue
@@ -9585,21 +9631,42 @@ def _orch_foreground_detach_kind(command):
             continue
         if ch == "$" and command.startswith("(", i + 1):
             paren += 1  # an unquoted $( command substitution: a newline inside it does not start a body
+            for ent in pending:
+                ent[4] = True  # a deeper context crosses here-documents still pending at this depth
             prev_dup, word_start = False, False
             i += 2
             continue
         if ch == "`":
             in_backtick = not in_backtick  # a newline inside an unquoted backtick does not start a body
+            if in_backtick:
+                for ent in pending:
+                    ent[4] = True
+            else:
+                nd = paren + (1 if in_backtick else 0)
+                if any(e[3] > nd for e in pending):
+                    pending = [e for e in pending if e[3] <= nd]
+                    heredoc_ambiguous = True
             prev_dup, word_start = False, False
             i += 1
             continue
         if not arith and ch == "(":
             paren += 1  # an unquoted subshell (: a newline inside it does not start a body either
+            for ent in pending:
+                ent[4] = True
             prev_dup, word_start = False, False
             i += 1
             continue
         if not arith and ch == ")" and paren:
             paren -= 1
+            nd = paren + (1 if in_backtick else 0)
+            if any(e[3] > nd for e in pending):
+                # the enclosing substitution/subshell closed before this body was read: its boundary can no
+                # longer be proven, so scan the rest as code (could-not-read).
+                pending = [e for e in pending if e[3] <= nd]
+                heredoc_ambiguous = True
+            if dq_cmdsub and dq_cmdsub[-1] == paren + 1:
+                dq_cmdsub.pop()
+                in_double = True  # back inside the double quote the command substitution opened within
             prev_dup, word_start = False, False
             i += 1
             continue
@@ -9794,7 +9861,7 @@ def orch_truncation_guard(data):
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this guard could not read this foreground command "
                 "with certainty for a bare '&' detach: its scan ended inside an unbalanced quote (or a "
-                "quoting form it does not model, such as $'...'), or an expanded here-document body (an "
+                "unterminated ANSI-C $'...' quote), or an expanded here-document body (an "
                 "unquoted delimiter) carries an '&' beside a command substitution. It is denied rather than "
                 "allowed unproven. This is a could-not-read denial, not a detach finding: if the text is "
                 "data, balance its quoting, or pass it through a here-document with a quoted delimiter "
@@ -9805,9 +9872,11 @@ def orch_truncation_guard(data):
         if detach == "detach_data":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this guard could not read this foreground command "
-                "with certainty for a bare '&' detach: a here-document boundary was ambiguous (a here-string "
-                "<<<, a delimiter or body line continued with a backslash-newline, an open substitution or "
-                "quote on the operator line, or a missing terminator line), so a later '&' may be "
+                "with certainty for a bare '&' detach: a here-document boundary was ambiguous (a delimiter "
+                "word this reader cannot model, a delimiter or body line continued with a backslash-newline, "
+                "a here-document crossed by a command substitution or subshell on the operator line, an "
+                "enclosing substitution closed before its body, or a missing terminator line), so a later "
+                "'&' may be "
                 "here-document body data rather than an operator. It is denied rather than allowed unproven. "
                 "This is a could-not-read denial, not a confirmed detach: if the '&' is here-document data, "
                 "give the here-document a plain delimiter alone on its own physical line (quote it as "
