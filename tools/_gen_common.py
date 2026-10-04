@@ -86,11 +86,25 @@ def _git_toplevel(root):
     answer. This never searches upward for a .git marker itself: whether a .git entry is a real
     repository is git's judgement (git skips an invalid planted marker such as an empty tools/.git
     directory), and the answer is used only to CONFIRM a root already derived from a fixed location,
-    never to choose one (D-400-SPECIAL-FILE-PRECHECK root derivation)."""
+    never to choose one (D-400-SPECIAL-FILE-PRECHECK root derivation). An answer that is not one
+    NUL-free absolute path (empty, several lines, an embedded NUL or other undecodable bytes, a
+    relative path) is cannot-evaluate, exit 2, by name: never a raw ValueError out of the path call,
+    and never read as git-absent, which would skip the confirmation."""
     out = _git_lines(root, ["rev-parse", "--show-toplevel"])
     if out is None:
         return None
-    return os.path.realpath(os.fsdecode(out.rstrip(b"\n")))
+    top = out.rstrip(b"\n")
+    try:
+        if not top or b"\0" in top or b"\n" in top:
+            raise ValueError("not exactly one NUL-free line")
+        text = os.fsdecode(top)
+        if not os.path.isabs(text):
+            raise ValueError("not an absolute path")
+        return os.path.realpath(text)
+    except (OSError, ValueError) as exc:
+        print("error: git rev-parse --show-toplevel at {} returned a malformed root {!r} ({}); cannot "
+              "evaluate which tree to walk; fail-closed".format(root, out, exc), file=sys.stderr)
+        raise SystemExit(2)
 
 
 def _ignored_paths(root):
@@ -191,8 +205,8 @@ def precheck_special_files(root):
     def _refuse(path, why):
         print("error: {}: refused, {}; remove it; fail-closed".format(path, why), file=sys.stderr)
         raise SystemExit(2)
-    real_root = os.path.realpath(root)
     try:
+        real_root = os.path.realpath(root)
         for dirpath, dirnames, filenames in os.walk(root, onerror=_raise, followlinks=False):
             dirnames[:] = [d for d in dirnames if d != ".git"]
             for name in dirnames + filenames:
@@ -286,7 +300,7 @@ def precheck_special_files(root):
                                           "root".format(real))
                 elif stat.S_ISDIR(mode):
                     stack.append((path, rel))
-    except OSError as exc:
+    except (OSError, ValueError) as exc:  # ValueError: a root path no path call accepts (an embedded NUL)
         print("error: cannot walk the repository tree {} ({}); fail-closed".format(root, exc), file=sys.stderr)
         raise SystemExit(2)
     _PRECHECKED_ROOTS.add(key)
@@ -324,7 +338,8 @@ def read_source_bytes(path, limit=None):
     require S_ISREG, then read. O_NONBLOCK makes the open of a FIFO with no writer (or a slow device) return
     at once, so the S_ISREG refusal is reached instead of the read blocking forever (F-CORPUS-FIFO-HANG); on a
     regular file it is a no-op. O_NOFOLLOW refuses a symlink final component (ELOOP). A symlink, a
-    non-regular entry, or any open/fstat/read error is SourceReadRefused; plain absence (ENOENT) stays a
+    non-regular entry, any open/fstat/read error, or a path no path call accepts (an embedded NUL, which
+    os.open rejects with ValueError, not OSError) is SourceReadRefused; plain absence (ENOENT) stays a
     FileNotFoundError so callers that report a missing file keep doing so. `limit`, when given, reads at most
     that many bytes. On a regular file the result equals path.read_bytes() (or its first `limit` bytes)."""
     if not hasattr(os, "O_NOFOLLOW"):  # no O_NOFOLLOW (Windows): refuse a symlink by lstat before the open
@@ -332,7 +347,7 @@ def read_source_bytes(path, limit=None):
             is_link = stat.S_ISLNK(os.lstat(path).st_mode)
         except FileNotFoundError:
             raise
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise SourceReadRefused("{}: refused, cannot lstat ({})".format(path, exc)) from exc
         if is_link:
             raise SourceReadRefused("{}: refused, a symlink, not a regular file".format(path))
@@ -342,7 +357,7 @@ def read_source_bytes(path, limit=None):
         fd = os.open(path, flags)
     except FileNotFoundError:
         raise
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise SourceReadRefused("{}: refused, cannot open as a regular non-symlink file ({})".format(
             path, exc)) from exc
     try:

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "3294413dbf10c6e6295ca69e6f05f710ec3663f87e7cc20691fab13c2c6d3d3e"
+tree-sha256 = "3be5f762cd5e622325a7f8cb5c7b28c28576782ee946d3031db49a25159ecaf1"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -127,7 +127,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2867
-sha256 = "7591812d1073432a9cfae19e55c7ce481d26d06225d4086e14d4f44342f68f19"
+sha256 = "667ae682d61d93835cbdaf666043f8c9f27cd703c84654e366341257bb7b5ffe"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2556,8 +2556,8 @@ sha256 = "72026d6e7d77dbd23b091a569a7791ab183025f06b9b7ae60362f7b8e16b0df9"
 
 [[sources]]
 path = "opf/tools/_containment.py"
-bytes = 17679
-sha256 = "a7504b251289ed573149c5e93c7d5c92ebf95ef56b2731b7c4ac2550ba9e9e3d"
+bytes = 18576
+sha256 = "a416dbd4b312580962a5d02b2d702030836287572cdd51d43251d9fa36d1b704"
 
 [[sources]]
 path = "opf/tools/_journal.py"
@@ -3131,8 +3131,8 @@ sha256 = "5bb55aeaf3708f9df4545de618311bb22ac484568d5a494055f9967c5eb9ae7f"
 
 [[sources]]
 path = "tools/_gen_common.py"
-bytes = 25527
-sha256 = "c818c916ba72ce91c54b3f80de37194fe3710b76aea9c92eafc488e08bbbbf47"
+bytes = 26555
+sha256 = "8202e387a6daae9b766c91e591539ba452574c9e8101e566c371b043388941e7"
 
 [[sources]]
 path = "tools/_git_fixture_env.py"
@@ -3156,8 +3156,8 @@ sha256 = "ed6145db0d79aa2f64e5adaf465f4745c6c3b36a03a9ef6f6befc253fbd3f605"
 
 [[sources]]
 path = "tools/_walk.py"
-bytes = 3179
-sha256 = "afef5ba5791b1bd96062df9468a02317294ee74855651b57fcacaa96228fa1b9"
+bytes = 3389
+sha256 = "87c22e892a037cdacce834831fbbad300191f31bc0b6b83ee4d0d2427c4f6c2e"
 
 [[sources]]
 path = "tools/aei_backlog_md.py"
@@ -3191,8 +3191,8 @@ sha256 = "bb193909bd3e5cdfe3d48a27893ae333f4078bd1f5f5eb549f0b71759f31f4b5"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
-bytes = 41228
-sha256 = "7f6b2539235b5eea9dc6a61636336ebbdeb7917d1e23f35a6663107ee519ab7b"
+bytes = 42897
+sha256 = "b61ee4627184d0afc7e7e0d4b864c3a7b0d0b505d5546a36b09084f8ec34567a"
 
 [[sources]]
 path = "tools/check_ci_parity.py"

@@ -41,8 +41,11 @@ def read_text_nonblocking(path, encoding="utf-8"):
     a special file; it fails closed loudly instead. A symlink is followed exactly as read_text follows
     it, bytes and decode behaviour (strict utf-8, universal newlines) are read_text's, and on a regular
     file O_NONBLOCK is a no-op, so the result is byte-identical to path.read_text(encoding=...)."""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
-                 | getattr(os, "O_BINARY", 0))
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+                     | getattr(os, "O_BINARY", 0))
+    except ValueError as exc:  # a path no path call accepts (an embedded NUL): the callers' OSError arm
+        raise OSError("{}: refused, not a usable path ({})".format(path, exc)) from exc
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("{}: refused, not a regular file (a FIFO, device, socket, or directory); a "
