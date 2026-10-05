@@ -254,10 +254,17 @@ def git_tracked(root):
     """The tracked path set from `git ls-files -z --cached --stage`, strictly decoded and validated.
     Fail-closed (GateError) on an unusable repository, a nonzero exit, empty output, a duplicate path,
     a case-fold or NFC/NFD collision, a symlink (120000), a gitlink (160000), or an unknown mode.
-    NEVER a filesystem walk and never a silent empty tree."""
+    NEVER a filesystem walk and never a silent empty tree. Pinned like the release-gate funnels (QA
+    round-7 claude F3): core.fsmonitor=false (a repo-config fsmonitor hook is attacker-chosen code and
+    must never run under a gate read; the genesis and delta branches of check_release_delta consume
+    this enumerator), protocol.allow=never and GIT_NO_LAZY_FETCH=1 (a missing object is a refusal,
+    never a transport), atop the GIT_* environment scrub."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_LAZY_FETCH"] = "1"
     try:
-        proc = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--stage"],
+        proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false",
+                               "-c", "protocol.allow=never",
+                               "ls-files", "-z", "--cached", "--stage"],
                               capture_output=True, timeout=60, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("cannot run git ls-files ({}); fail-closed".format(exc))
@@ -299,10 +306,15 @@ def check_output_modes(root):
     otherwise a mode flip 100644->100755 on a generated output passes both gates unnoticed. Scoped STRICTLY
     to the generated outputs: run_all_checks.sh and other *.sh are legitimately executable and are NEVER
     touched. An output not yet tracked (genesis, before the release commit git-adds it) is not in the index
-    and is skipped, never an error. GateError (exit 2) on a non-100644 tracked output or an unusable git read."""
+    and is skipped, never an error. GateError (exit 2) on a non-100644 tracked output or an unusable git read.
+    Pinned exactly as git_tracked (QA round-7 claude F3, the sibling index read): core.fsmonitor=false,
+    protocol.allow=never and GIT_NO_LAZY_FETCH=1 atop the GIT_* scrub."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_LAZY_FETCH"] = "1"
     try:
-        proc = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--stage", "--",
+        proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false",
+                               "-c", "protocol.allow=never",
+                               "ls-files", "-z", "--cached", "--stage", "--",
                                *GENERATED_OUTPUTS_REL], capture_output=True, timeout=60, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("cannot run git ls-files for output modes ({}); fail-closed".format(exc))
