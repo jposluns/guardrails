@@ -50,53 +50,32 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      (spec 14.1). A move- or keep-disposed source is adopter content and is not frozen.
   R4 declared-view writes. Each machine-store manifest's views targets are declared view destinations;
      a target equal to one is denied (views change only through `opf render`; spec 5.8, 14.1).
-  R5 Bash writes the matcher CAN see. EVERY Bash command is first dequoted WHOLE by a shell-aware
-     loose lexer (quoted spans, backslash escapes, ANSI-C dollar-quoted spans decoded as bash
-     decodes them, a NUL escape ending the span, locale dollar-double-quoted spans read as ordinary
-     double-quoted spans, word-start comments, here-document delimiters and bodies read as bash
-     reads them, and arithmetic spans are read; ONLY the shell's own unquoted operator
-     characters split words, so braces, carriage returns and the other literal pathname characters
-     the shell keeps inside a word stay inside the word here too), so a quoted operand stays one
-     word even when redirection or sequencing rides beside it, and a path spelled with a literal
-     brace or control character still binds and matches. A word carrying an unquoted brace pattern
-     the shell would EXPAND (a comma or `..` between unquoted braces) DENIES as cannot-evaluate:
-     the expansion could spell a protected path this lexer cannot see (a literal `{}` operand or a
-     quoted brace stays a word; `${` is parameter expansion, the disclosed lexical floor).
-     A here-document body is DATA (each line one word) unless the command names a program that
-     runs code (a shell, eval or source, an interpreter such as python, perl or node, or xargs,
-     make, watch or su; `.` in command position): then every here-document body, as its consumer
-     receives it, and every word that could carry further shell syntax (a here-string, a -c or
-     eval argument) is ALSO read as a command, recursively, and a command substitution inside a
-     word (as inside double quotes) is always read as a command too.
-     A command whose quote or here-document structure cannot be read to the end (an unterminated
-     quote, a trailing backslash, an undecodable dollar-quote escape, an unreadable here-document
-     delimiter, a here-document whose delimiter line never appears, an unclosed arithmetic span, a
-     `<<` inside a bare (( arithmetic command, the obsolete $[ ] form, a literal NUL character, an
-     unquoted brace pattern the shell would expand, and a body or word a code-running program
-     would run that cannot itself be read as a command) DENIES as cannot-evaluate: the shell could
-     run such a command differently than this hook read it, and a partially read command is never
-     judged. A
-     command whose raw text or dequoted words reference a protected token is denied unless the WHOLE
-     command is a single plain invocation of the sanctioned writer (allowance A1 below); there is no
-     other allowance. The protected tokens are the `.working` store tree (any substring spelling,
-     and any session cwd that itself sits inside a `.working` tree, where every relative spelling
-     lands in the store), and the frozen (R3) and declared-view (R4) paths, matched with path
-     boundaries (a longer word such as PYTHON_VERSION does not trip a VERSION view; an absolute
-     spelling of the same file does) over the raw command string AND over every dequoted word (so a
-     quote-split spelling such as VER''SION still references the view). The rosters are resolved
-     from the product roots above the session cwd, above every absolute path spelled in the raw
-     text, and above every dequoted word that is absolute (a quoted root with spaces binds through
-     its whole operand, beside redirection and sequencing too); a command that spells more absolute
-     paths or operands than the discovery budget DENIES (cannot-evaluate) rather than truncating
-     the scan. Every dequoted word is ALSO resolved as a path exactly as a file-tool target would
-     be (cwd-joined, tilde expanded, realpathed) and the command is denied when a resolved word
-     lands in the store, on a frozen or view path, or on the enforcement pack's own files (R8);
-     relative words resolve only while the command stays within the word-resolution budget
-     (absolute words always resolve; past the budget the disclosed lexical floor covers relative
-     spellings). Reference, not proven mutation, is the trigger: a lexical hook cannot prove a referencing
-     command read-only (sed -i, tee, cp, mv, truncate, dd, install, ln, rm, shell functions, aliases,
-     and equally cat, grep, ls or git, whose environment assignments and options can make them write),
-     so it fails closed and names the allowed route.
+  R5 Bash writes. EVERY Bash command is first classified PROVABLY PLAIN or not (D-DISCARD-SOUND-RULE,
+     QA round 6). A command is provably plain when the WHOLE command lexes into plain words with
+     simple whole-word quotes only (single quotes, or double quotes carrying no dollar sign,
+     backquote or backslash) and carries NO command or process substitution, NO parameter or
+     arithmetic expansion, NO eval, NO line continuation, NO ANSI-C or locale quoting, NO unquoted
+     here-document, and NO shell or interpreter invocation with inline code (a QUOTED here-document
+     fed to a program that is not a shell or interpreter, such as a commit message, stays plain
+     data). Every round 2..6 bypass was a shell form a sound lexer read differently than bash does;
+     an allowlist of provably plain commands cannot be fooled that way. A PROVABLY PLAIN command
+     takes the EXACT path check: the raw string and every dequoted word are scanned for the
+     protected tokens (the .working store tree by any substring spelling, a session cwd inside a
+     .working tree, and the frozen (R3) and declared-view (R4) paths matched with path boundaries),
+     the rosters bind from the product roots above the session cwd and every absolute operand, and
+     every dequoted word is resolved as a path exactly as a file-tool target would be (store, frozen,
+     view, the pack own files (R8) and the registration (R8)); a command referencing a protected
+     token is denied unless the WHOLE command is a single plain invocation of the sanctioned writer
+     (allowance A1 below), the only allowance. Any OTHER Bash command (one that is not provably plain)
+     is judged COARSELY: it DENIES when the session working directory, or any literal path word it
+     names, lies inside an OPF product root (a directory holding a .working entry) or lands on the
+     pack own tree (R8); from outside every product root it is allowed. This is fail-closed: an
+     obfuscated command can reach a protected path only through the product whose tree holds the
+     session or which a literal word names, and both deny; a protected path reached with neither (a
+     variable, a substitution, an escape, or an interpreter own language spelling an absolute path no
+     literal word carries) is the disclosed lexical-floor residual. Reference, not proven mutation,
+     is the trigger: a lexical hook cannot prove a referencing command read-only, so it fails closed
+     and names the allowed route.
   R6 unreadable inputs fail closed. A missing or non-string target field, a control character in a
      target, a relative target with no readable session cwd, and every unreadable roster input DENY
      (the roster that would prove the operation safe cannot be computed), naming the unreadable input:
@@ -128,8 +107,9 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      naming nothing. A payload string longer than a
      platform path (PATH_MAX) cannot name a reachable file and is judged textually only. The known read-only
      built-ins (Read, Glob, Grep and the other names in READONLY_TOOLS) are allowed outright; tools
-     that only launch further hooked tool calls (Task, Skill) are treated as read-only here because
-     the launched calls are judged on their own.
+     that only launch further hooked tool calls (Task, Agent) are treated as read-only here because
+     the launched calls are judged on their own. Skill and SlashCommand are NOT read-only-listed
+     (their expansion may run shell lines this hook does not see), so each takes R7 (claude n2).
   R8 enforcement self-protection. A file-tool target, a resolved Bash word or a resolved payload
      string that lands inside the enforcement pack's own tree (this hook's opf/enforcement/
      directory or the writer's opf/tools/ directory, both resolved from the hook's own installed
@@ -215,39 +195,35 @@ per-platform residual coverage carry the same list):
     between the check and the tool's own open (a background job re-pointing a symlink, renaming a
     directory or rewriting a roster) is not seen (a check-to-use race; same-user preparation, as
     spec 14.1 accepts).
-  - A program that runs code is recognized by its literal name only (_runs_code): one reached
-    through a variable, alias, function or an unlisted name leaves its here-document body as
-    data, and a code-running program's own language (python string concatenation, an awk print
-    redirection) can spell any path; both fall under the lexical-floor residual above.
+  - A protected path an exotic (not provably plain) command reaches with neither the session cwd
+    nor any literal path word inside the product root: a path spelled only through a shell variable,
+    an alias or function, a command or process substitution, an escape the coarse scan does not
+    decode (ANSI-C or locale quoting), or an interpreter own language, where no literal word of the
+    command resolves into the product, is not seen. R5 is a lexical floor, not a sandbox.
   - Platform hook-startup failures may fall through to the platform's normal permission flow.
   - Shell or interpreter wrapping of the platform itself is outside the hook's reach.
-  - Over-approximation is the accepted cost of the fail-closed posture: R5/R7 deny EVERY
-    protected-token-referencing command and tool call outside A1, read-only forms included, for
-    example `cat .working/toml/counters.toml`, `grep -n x .working/toml/counters.toml`,
-    `git diff .working/toml/counters.toml`, `git add TODO.md` for a declared view TODO.md, `git log
-    LEGACY.md` for a plan-frozen LEGACY.md, and `opf doctor --root .working/..` (only the record and
-    render verbs are the writer; reads go through the platform's Read tool). A command spelling more
-    absolute paths or operands than the discovery budget and an unknown-tool payload over the
-    string-scan budget deny as cannot-evaluate even when reference-free, as does a command whose
-    quote or here-document structure cannot be read to the end (the shell could run it differently
-    than the hook read it), a here-document whose delimiter line never appears, a `<<` inside a
-    bare (( arithmetic command, a dollar-quote escape beyond ASCII or a control-character escape,
-    a command naming a code-running program whose here-document body, here-string or quoted
-    word cannot itself be read as a command (a python body with an escaped apostrophe, a quoted
-    argument such as "it's" beside python3), a command substitution that cannot itself be read,
-    a command carrying an unquoted brace pattern the shell would expand
-    (`mkdir {a,b}`: the expansion could spell a protected path the lexer cannot see), an unknown
-    tool's payload with no tool_input object or no absolute session cwd, and a TodoWrite
-    (write-capable on some platforms, so no longer read-only-listed) whose todo text names a
-    protected path. R8 denies rewriting the pack's own files and the per-product
-    registration through the gated tools (read them with the Read tool; change them outside a
-    hooked session), and the word-resolution pass denies a command that merely names a protected or
-    pack-owned file as a resolvable argument. R6
-    denies every write under a root whose roster carries ANY unreadable or malformed entry (a stray
-    non-directory run entry included), R3 keeps denying a frozen path even after its retirement is
-    recorded and the live file is gone (re-creating it directly stays denied; a fresh plan is the
-    sanctioned route), and a `.working` or boundary-matched protected token inside prose (a commit
-    message, say) still trips R5.
+  - Over-approximation is the accepted cost of the fail-closed posture. A provably plain command
+    that references any protected token outside A1 denies, read-only forms included (cat, grep or
+    git diff of a store path; git add of a declared view TODO.md; git log of a plan-frozen
+    LEGACY.md). A command that is NOT provably plain denies whenever the session working directory,
+    or any literal path word, lies inside a product root, even when it touches nothing protected: so
+    from a cwd inside a product root a parameter expansion (echo $HOME), a command substitution
+    (gh pr create --body "$(...)"), an interpreter or build tool (python3 script.py, make test,
+    bash -c ...), an eval, a line continuation, an ANSI-C or locale quote, and an unquoted
+    here-document all deny; run them from outside the product tree or outside a hooked session, read
+    protected files through the Read tool, and change the store through the opf CLI. R8 denies
+    rewriting the pack own files and the per-product registration through the gated tools, and the
+    word-resolution pass of a plain command denies a command that merely names a protected or
+    pack-owned file as a resolvable argument. R6 denies every write under a root whose roster
+    carries any unreadable or malformed entry, R3 keeps denying a frozen path even after its
+    retirement is recorded, and a protected token inside prose (a commit message) still trips a
+    plain command.
+  - The word-resolution budget of a provably plain command (claude n1): past MAX_RESOLVED_WORDS
+    dequoted words only the ABSOLUTE words are resolved as paths (absolute words always resolve; the
+    raw and word token scan still covers every spelling), so a relative spelling that reaches a
+    declared view or a frozen file only after normalization or symlink resolution, in a plain
+    command past the budget, is not resolved (the store tree still denies by its .working
+    component); a shorter command resolves it. This budget cliff is disclosed here.
   - The IMPORTED record series is NOT yet protected here: the leaves `worklog.imported.toml` and
     `<type>.imported.index.toml` DIRECTLY inside the machine store directory (exactly
     `.working/<machine>/<leaf>`, no other depth, where `<machine>` is a plain directory whose
@@ -319,14 +295,13 @@ IMPORTED_LEAF_RE = re.compile(r"\A(worklog\.imported\.toml|[A-Za-z0-9_-]+\.impor
 # The write-capable file tools and the payload field naming each one's target.
 FILE_TOOL_TARGET = dict(Write="file_path", Edit="file_path", MultiEdit="file_path",
                         NotebookEdit="notebook_path")
-# The known read-only built-ins (R7): allowed outright. Task and Skill only launch further tool calls,
+# The known read-only built-ins (R7): allowed outright. Task and Agent only launch further tool calls,
 # each judged by this hook on its own, so they sit here too. TodoWrite is NOT listed: it is
 # write-capable on some platforms and this hook cannot prove its input names no file, so it takes
 # R7's scan like every other unlisted tool. Every OTHER tool name takes R7's scan.
 READONLY_TOOLS = frozenset(("Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch",
                             "Task", "Agent", "ExitPlanMode", "AskUserQuestion",
-                            "BashOutput", "TaskOutput", "KillShell", "KillBash", "SlashCommand",
-                            "Skill"))
+                            "BashOutput", "TaskOutput", "KillShell", "KillBash"))
 
 # R5/A1 vocabularies. METACHARS is the UNQUOTED-dangerous set for the quote-aware pristine scan:
 # semicolon, ampersand, pipe, the two angle brackets, backquote, dollar sign, the two parentheses, the
@@ -932,66 +907,63 @@ def _is_sanctioned_opf(tokens, cwd):
     return resolved == writer and os.path.isfile(writer)
 
 
-def _ansi_c_span(text, start):
-    """Decode one ANSI-C dollar-quoted span body beginning at `start` (just past the opening
-    quote) EXACTLY as bash does: (characters, index past the closing quote, None), or (None, None,
-    reason) when the span is unterminated or carries an escape this hook does not decode exactly
-    as the shell does (a partially decoded operand could hide a protected spelling, so the caller
-    fails closed). An escape that decodes to NUL (a zero octal, hex or unicode escape) ENDS the
-    decoded string, as in bash (the span is a C string): the rest of the span up to its closing
-    quote is read for its escapes but contributes nothing, and the word continues after the
-    quote. An octal escape is masked to one byte, as bash does; a byte or code point above ASCII
-    (its spelling depends on the shell's locale) and the escapes this hook does not implement
-    (control-character, braced-hex and unknown escapes) fail closed."""
-    out = []
-    ended = False  # True once a NUL has ended the decoded string
-    i, n = start, len(text)
+def _read_plain_delim(command, i):
+    """Read one here-document delimiter word for the provably-plain lexer, starting at i (past
+    the operator and any blanks): (delimiter, quoted, index past the word), or (None, None, None)
+    for a form this hook does not read exactly (a dollar sign, backquote or backslash, an
+    unterminated quote, no word). ANY quoting marks the delimiter quoted, so its body takes no
+    expansion and stays inert data."""
+    n = len(command)
+    out, quoted, start = [], False, i
     while i < n:
-        ch = text[i]
-        if ch == chr(39):
-            return out, i + 1, None
-        if ch != chr(92):
-            if not ended:
-                out.append(ch)
+        c = command[i]
+        if c in (chr(32), chr(9), chr(10)) or c in WORD_SEPARATORS:
+            break
+        if c in (chr(36), chr(96), chr(92)):
+            return None, None, None
+        if c == chr(39):
+            end = command.find(chr(39), i + 1)
+            if end < 0:
+                return None, None, None
+            out.append(command[i + 1:end])
+            quoted = True
+            i = end + 1
+            continue
+        if c == chr(34):
+            i += 1
+            while i < n and command[i] != chr(34):
+                if command[i] in (chr(36), chr(96), chr(92)):
+                    return None, None, None
+                out.append(command[i])
+                i += 1
+            if i >= n:
+                return None, None, None
+            quoted = True
             i += 1
             continue
+        out.append(c)
         i += 1
-        if i >= n:
-            break
-        esc = text[i]
-        if esc in ANSI_SIMPLE:
-            value = ord(ANSI_SIMPLE[esc])
-            i += 1
-        elif esc in ("x", "u", "U"):
-            width = dict(x=2, u=4, U=8)[esc]
-            j = i + 1
-            digits = []
-            while j < n and len(digits) < width and text[j] in "0123456789abcdefABCDEF":
-                digits.append(text[j])
-                j += 1
-            if not digits:
-                return None, None, "a dollar-quoted escape this hook does not decode"
-            value = int("".join(digits), 16)
-            i = j
-        elif esc in "01234567":
-            j = i
-            digits = []
-            while j < n and len(digits) < 3 and text[j] in "01234567":
-                digits.append(text[j])
-                j += 1
-            value = int("".join(digits), 8) & 0xFF  # bash keeps the low byte
-            i = j
-        else:
-            return None, None, "a dollar-quoted escape this hook does not decode"
-        if value > 0x7F:
-            # a raw byte or code point above ASCII is spelled through the shell's locale, which
-            # this hook cannot see, so it cannot be mapped faithfully and fails closed.
-            return None, None, "a dollar-quoted escape this hook does not decode"
-        if value == 0:
-            ended = True
-        elif not ended:
-            out.append(chr(value))
-    return None, None, "an unterminated dollar-quoted span"
+    if i == start:
+        return None, None, None
+    return "".join(out), quoted, i
+
+
+def _skip_plain_heredoc_body(command, i, delim, strip_tabs):
+    """Skip one QUOTED here-document body (inert data fed to a non-code-runner) from line i:
+    the index past the delimiter line, or None when the delimiter line never appears. A quoted body
+    takes no backslash-newline splicing, so each physical line is compared as-is after the leading
+    tab strip of a dash operator."""
+    n = len(command)
+    while i <= n:
+        j = command.find(chr(10), i)
+        if j < 0:
+            line = command[i:]
+            return n if (line.lstrip(chr(9)) if strip_tabs else line) == delim else None
+        line = command[i:j]
+        i = j + 1
+        if (line.lstrip(chr(9)) if strip_tabs else line) == delim:
+            return i
+    return None
 
 
 def _mentions_rel(rel, text):
@@ -1013,103 +985,134 @@ def _mentions_rel(rel, text):
         start = i + 1
 
 
-def _heredoc_delimiter(command, i):
-    """Read one here-document delimiter word starting at `i` (just past `<<` or `<<-` and any
-    blanks) exactly as bash reads it: the word runs to the first unquoted blank, newline or operator
-    character; single quotes, double quotes (a backslash there drops only before a dollar sign,
-    backquote, double quote or backslash) and backslash escapes are removed, and ANY quoting marks
-    the delimiter quoted (its body then takes no line splicing and no expansion). Returns
-    (delimiter, quoted, index past the word, None) or (None, None, None, reason) for a form this
-    hook does not read exactly (a dollar sign or backquote, a newline inside the word, an
-    unterminated quote, no word at all)."""
-    n = len(command)
-    delim, quoted, start = [], False, i
+def _plain_lex(command):
+    """R5 PROVABLY-PLAIN test and dequote. Returns (words, True) when the WHOLE command lexes
+    into plain words with simple whole-word quotes only, else (None, False). A command is NOT
+    provably plain when it carries a dollar sign (parameter, command, arithmetic, ANSI-C or locale
+    expansion), a backquote (command substitution), a backslash (line continuation or an escape), a
+    parenthesis (a subshell or process substitution), an expandable unquoted brace, a NUL, an
+    unterminated or non-simple quote, an UNQUOTED here-document, or a code runner (a shell or
+    interpreter) in command position (which may carry inline code). A QUOTED here-document fed to a
+    program that is not a code runner stays plain: its body is inert data, skipped here, so a
+    commit-message here-document still lexes. words are the command-line words (here-document body
+    lines are data, not words); they feed the exact token scan, root binding and word-resolution
+    pass of _plain_bash_rule. Every other command is judged by _exotic_bash_rule, the coarse
+    product-root check, never this exact pass (D-DISCARD-SOUND-RULE: every round 2..6 bypass was a
+    shell form a sound lexer read differently than bash does; an allowlist of provably plain
+    commands cannot be fooled that way)."""
+    if chr(0) in command:
+        return None, False
+    words, cur, has = [], [], False
+    pending = []
+    braces = []
+    prev = None
+    at_head = True
+    cmd_runner = False
+
+    def flush():
+        nonlocal at_head, cmd_runner
+        if has:
+            word = "".join(cur)
+            words.append(word)
+            if at_head:
+                if _runs_code(word) or word == ".":
+                    cmd_runner = True
+                at_head = bool(_ASSIGNMENT_RE.match(word)) or word in SHELL_PREFIX_WORDS
+
+    i, n = 0, len(command)
     while i < n:
-        dc = command[i]
-        if dc in (" ", chr(9), chr(10)) or dc in WORD_SEPARATORS:
-            break
-        if dc in (chr(36), chr(96)):
-            return None, None, None, "a here-document delimiter this hook cannot read"
-        if dc == chr(39):
+        ch = command[i]
+        if ch in (chr(36), chr(96), chr(92), "(", ")"):
+            return None, False
+        if ch == chr(39):
             end = command.find(chr(39), i + 1)
             if end < 0:
-                return None, None, None, "an unterminated here-document delimiter"
-            delim.append(command[i + 1:end])
-            quoted = True
-            i = end + 1
+                return None, False
+            cur.append(command[i + 1:end])
+            has, prev, i = True, None, end + 1
             continue
-        if dc == chr(34):
-            quoted = True
+        if ch == chr(34):
             i += 1
-            while True:
-                if i >= n:
-                    return None, None, None, "an unterminated here-document delimiter"
-                c = command[i]
-                if c == chr(34):
-                    i += 1
-                    break
-                if c in (chr(36), chr(96)):
-                    return None, None, None, "a here-document delimiter this hook cannot read"
-                if c == chr(92) and i + 1 < n and command[i + 1] in DQ_ESCAPABLE:
-                    delim.append(command[i + 1])
-                    i += 2
-                    continue
-                delim.append(c)
+            while i < n and command[i] != chr(34):
+                if command[i] in (chr(36), chr(96), chr(92)):
+                    return None, False
+                cur.append(command[i])
                 i += 1
+            if i >= n:
+                return None, False
+            has, prev, i = True, None, i + 1
             continue
-        if dc == chr(92):
-            if i + 1 >= n:
-                return None, None, None, "a trailing backslash"
-            delim.append(command[i + 1])
-            quoted = True
+        if ch == chr(10):
+            flush()
+            if cmd_runner:
+                return None, False
+            cur, has, braces, prev = [], False, [], None
+            at_head = True
+            i += 1
+            for delim, strip_tabs in pending:
+                i = _skip_plain_heredoc_body(command, i, delim, strip_tabs)
+                if i is None:
+                    return None, False
+            pending = []
+            continue
+        if command[i:i + 3] == "<<<":
+            flush()
+            if cmd_runner:
+                return None, False
+            cur, has, braces, prev = [], False, [], None
+            at_head = False
+            i += 3
+            continue
+        if command[i:i + 2] == "<<":
+            flush()
+            if cmd_runner:
+                return None, False
+            cur, has, braces, prev = [], False, [], None
             i += 2
-            continue
-        delim.append(dc)
-        i += 1
-    if i == start:
-        return None, None, None, "a here-document with no delimiter"
-    text = "".join(delim)
-    if chr(10) in text:
-        return None, None, None, "a here-document delimiter this hook cannot read"
-    return text, quoted, i, None
-
-
-def _heredoc_body(command, i, delim, strip_tabs, quoted):
-    """Read one here-document body starting at `i` (the start of the line after the operator's
-    command line) exactly as bash reads it: line by line, an UNQUOTED delimiter's body splicing
-    each backslash-newline pair away BEFORE the line is compared (a backslash before any other
-    character keeps both characters), `<<-` stripping leading tabs before the comparison, and the
-    body ending at the first line equal to the delimiter. Returns (lines, the body as the consumer
-    receives it, index past the delimiter line, None), or (None, None, None, reason) when no
-    delimiter line ends the body. The consumer's text applies the here-document expansion of an
-    unquoted body (a backslash before a dollar sign, backquote or backslash is removed; dollar and
-    backquote expansions stay as text, the disclosed lexical floor)."""
-    n = len(command)
-    lines = []
-    while i < n:
-        chars = []
-        while i < n:
-            c = command[i]
-            if c == chr(10):
+            strip_tabs = command[i:i + 1] == "-"
+            if strip_tabs:
                 i += 1
-                break
-            if c == chr(92) and not quoted:
-                if command[i + 1:i + 2] == chr(10):
-                    i += 2  # an unquoted body splices a backslash-newline pair away
-                    continue
-                chars.append(command[i:i + 2])
-                i += 2
-                continue
-            chars.append(c)
+            while i < n and command[i] in (chr(32), chr(9)):
+                i += 1
+            delim, quoted, j = _read_plain_delim(command, i)
+            if delim is None or not quoted:
+                return None, False
+            pending.append((delim, strip_tabs))
+            at_head, i = False, j
+            continue
+        if ch in WORD_SEPARATORS or ch in (chr(32), chr(9)):
+            flush()
+            cur, has, braces, prev = [], False, [], None
+            if ch in ("<", ">"):
+                at_head = False
+            elif ch not in (chr(32), chr(9)):
+                if cmd_runner:
+                    return None, False
+                at_head, cmd_runner = True, False
             i += 1
-        line = "".join(chars)
-        if (line.lstrip(chr(9)) if strip_tabs else line) == delim:
-            text = chr(10).join(lines) + chr(10)
-            if not quoted:
-                text = re.sub(r"\\([$`\\])", r"\1", text)
-            return lines, text, i, None
-        lines.append(line)
-    return None, None, None, "a here-document whose delimiter line never appears"
+            continue
+        if ch == chr(35) and not has:
+            end = command.find(chr(10), i)
+            if end < 0:
+                break
+            i = end
+            continue
+        if ch == chr(123):
+            braces.append([False])
+        elif ch == chr(125):
+            if braces and braces.pop()[0]:
+                return None, False
+        elif ch == ",":
+            if braces:
+                braces[-1][0] = True
+        elif ch == "." and prev == "." and braces:
+            braces[-1][0] = True
+        cur.append(ch)
+        has, prev, i = True, ch, i + 1
+    flush()
+    if cmd_runner or pending:
+        return None, False
+    return words, True
 
 
 def _runs_code(word):
@@ -1119,260 +1122,59 @@ def _runs_code(word):
     return bool(_CODE_RUNNER_RE.match(os.path.basename(word)))
 
 
-def _substitutions(word):
-    """The command-substitution texts inside one word (a `$(` span to its balanced closing
-    parenthesis, or to the word's end when none balances, and a backquoted span), each read again
-    as a command: inside double quotes the shell still runs them."""
-    out = []
-    k = word.find("$(")
-    while k >= 0:
-        if word[k + 2:k + 3] == "(":
-            k = word.find("$(", k + 3)  # an arithmetic $(( span, read in place by _lex
-            continue
-        depth, j = 0, k + 1
-        while j < len(word):
-            if word[j] == "(":
-                depth += 1
-            elif word[j] == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        out.append(word[k:j + 1])
-        k = word.find("$(", j + 1)
-    k = word.find(chr(96))
-    while k >= 0:
-        end = word.find(chr(96), k + 1)
-        out.append(word[k + 1:end] if end >= 0 else word[k + 1:])
-        if end < 0:
-            break
-        k = word.find(chr(96), end + 1)
-    return out
-
-
-def _lex(command):
-    """One pass of R5's shell-aware loose dequote (module docstring): (words, data, bodies,
-    command-position words, None) or (None, None, None, None, reason) when the structure cannot be
-    read to the end. `words` are the dequoted shell words; `data` are the here-document body lines
-    (each one data word); `bodies` are the here-document bodies as their consumer receives them."""
-    words, data, bodies, heads = [], [], [], []
-    cur = []
-    has = False
-    pending = []
-    braces = []    # open unquoted-brace records of the CURRENT word; [True] once expandable
-    prev = None    # the last PLAIN unquoted character appended (None after any quoted span)
-    state = dict(head=True, redirect=False, arith=False)
-
-    def flush():
-        if has:
-            word = "".join(cur)
-            words.append(word)
-            if state["redirect"]:
-                state["redirect"] = False
-            elif state["head"]:
-                heads.append(word)
-                state["head"] = bool(_ASSIGNMENT_RE.match(word)) or word in SHELL_PREFIX_WORDS
-
-    if chr(0) in command:
-        # the shell may end the command at a NUL or drop the NUL, and this hook cannot tell which
-        return None, None, None, None, "a literal NUL character"
+def _literal_words(command):
+    """A tolerant, never-failing split of a command that is NOT provably plain into its literal
+    path-word candidates (R5 coarse pass). Single quotes, double quotes and the dollar-prefixed
+    ANSI-C / locale spans are stripped as whole-word quotes with NO escape decoding (an escaped
+    protected spelling stays undecoded, a disclosed residual); a backslash keeps the next character
+    and drops a line continuation; unquoted blanks and the shell operator characters split words; a
+    dollar sign, backquote, parenthesis or brace is kept as an ordinary character (a substitution
+    text splits into words on its own operators). The words are resolved as paths by
+    _exotic_bash_rule, never dequoted for a token scan or an allowance."""
+    words, cur, has = [], [], False
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
         if ch == chr(39):
             end = command.find(chr(39), i + 1)
             if end < 0:
-                return None, None, None, None, "an unterminated single-quoted span"
+                cur.append(command[i + 1:])
+                has = True
+                break
             cur.append(command[i + 1:end])
-            has = True
-            prev = None
-            i = end + 1
-            continue
-        if ch == chr(36) and command[i + 1:i + 2] == chr(34):
-            i += 1  # locale quoting reads as an ordinary double-quoted span
+            has, i = True, end + 1
             continue
         if ch == chr(34):
             i += 1
-            has = True
-            prev = None
-            while True:
-                if i >= n:
-                    return None, None, None, None, "an unterminated double-quoted span"
-                dq = command[i]
-                if dq == chr(34):
-                    i += 1
-                    break
-                if dq == chr(92):
-                    if i + 1 >= n:
-                        return None, None, None, None, "an unterminated double-quoted span"
-                    nxt = command[i + 1]
-                    if nxt in DQ_ESCAPABLE:
-                        if nxt != chr(10):
-                            cur.append(nxt)
-                    else:
-                        cur.append(dq)
-                        cur.append(nxt)
+            while i < n and command[i] != chr(34):
+                if command[i] == chr(92) and i + 1 < n and command[i + 1] in DQ_ESCAPABLE:
+                    cur.append(command[i + 1])
                     i += 2
                     continue
-                cur.append(dq)
+                cur.append(command[i])
                 i += 1
+            has, i = True, i + 1
+            continue
+        if ch == chr(36) and command[i + 1:i + 2] in (chr(39), chr(34)):
+            i += 1
             continue
         if ch == chr(92):
-            if i + 1 >= n:
-                return None, None, None, None, "a trailing backslash"
-            if command[i + 1] != chr(10):
+            if i + 1 < n and command[i + 1] != chr(10):
                 cur.append(command[i + 1])
                 has = True
-                prev = None
             i += 2
             continue
-        if ch == chr(36) and command[i + 1:i + 2] == chr(39):
-            got, nxt, reason = _ansi_c_span(command, i + 2)
-            if reason is not None:
-                return None, None, None, None, reason
-            cur.append("".join(got))
-            has = True
-            prev = None
-            i = nxt
-            continue
-        if ch == chr(36) and command[i + 1:i + 2] == chr(91):
-            return None, None, None, None, "an obsolete $[ ] arithmetic span"
-        if ch == chr(36) and command[i + 1:i + 3] == "((":
-            end = command.find("))", i + 3)
-            if end < 0:
-                return None, None, None, None, "an unclosed arithmetic span"
-            span = command[i:end + 2]
-            if chr(123) in span and ("," in span or ".." in span):
-                # brace expansion runs BEFORE arithmetic expansion and is purely textual, so an
-                # expandable brace pattern inside the span could split it into unseen words.
-                return None, None, None, None, "a brace expansion this hook does not enumerate"
-            cur.append(span)
-            has = True
-            prev = None
-            i = end + 2
-            continue
-        if ch == "#" and not has:
-            end = command.find(chr(10), i)
-            if end < 0:
-                break
-            i = end
-            continue
-        if ch == chr(10):
-            flush()
-            cur, has, braces, prev = [], False, [], None
-            state.update(head=True, redirect=False)
-            i += 1
-            for delim, strip_tabs, quoted in pending:
-                lines, text, i, reason = _heredoc_body(command, i, delim, strip_tabs, quoted)
-                if reason is not None:
-                    return None, None, None, None, reason
-                data.extend(line for line in lines if line)
-                bodies.append(text)
-            pending = []
-            continue
-        if ch == "<" and command[i:i + 3] == "<<<":
-            flush()
-            cur, has, braces, prev = [], False, [], None
-            i += 3
-            continue
-        if ch == "<" and command[i:i + 2] == "<<":
-            if state["arith"]:
-                # inside an arithmetic command `<<` is a left shift, not a here-document; this
-                # hook does not evaluate arithmetic commands, so it fails closed.
-                return None, None, None, None, "a << inside an arithmetic command"
-            flush()
-            cur, has, braces, prev = [], False, [], None
-            i += 2
-            strip_tabs = command[i:i + 1] == "-"
-            if strip_tabs:
-                i += 1
-            while i < n and command[i] in (" ", chr(9)):
-                i += 1
-            delim, quoted, i, reason = _heredoc_delimiter(command, i)
-            if reason is not None:
-                return None, None, None, None, reason
-            pending.append((delim, strip_tabs, quoted))
-            continue
-        if ch in WORD_SEPARATORS or ch in (" ", chr(9)):
-            flush()
-            cur, has, braces, prev = [], False, [], None
-            if ch in ("<", ">"):
-                state["redirect"] = True
-            elif ch != " " and ch != chr(9):
-                state.update(head=True, redirect=False)
-            if ch == "(" and command[i + 1:i + 2] == "(":
-                state["arith"] = True
-            elif ch == ")" and command[i + 1:i + 2] == ")":
-                state["arith"] = False
+        if ch in WORD_SEPARATORS or ch in (chr(32), chr(9), chr(10)):
+            if has:
+                words.append("".join(cur))
+                cur, has = [], False
             i += 1
             continue
-        if ch == chr(123):
-            if prev != chr(36):  # a dollar sign before the brace is parameter expansion
-                braces.append([False])
-        elif ch == chr(125):
-            if braces and braces.pop()[0]:
-                return None, None, None, None, "a brace expansion this hook does not enumerate"
-        elif ch == ",":
-            if braces:
-                braces[-1][0] = True
-        elif ch == "." and prev == "." and braces:
-            braces[-1][0] = True
         cur.append(ch)
-        has = True
-        prev = ch
-        i += 1
-    flush()
-    if pending:
-        return None, None, None, None, "a here-document whose delimiter line never appears"
-    return words, data, bodies, heads, None
-
-
-def _loose_words(command, depth=0):
-    """R5's shell-aware loose dequote of the WHOLE command: (words, None), or (None, reason) when
-    the quote or here-document structure cannot be read to the end. A quoted span joins the current
-    word (a quoted operand beside redirection or sequencing stays whole); ONLY an unquoted shell
-    operator character, space, tab or newline splits words (braces, carriage returns and the other
-    control characters stay IN the word, exactly as the shell keeps them: a pathname may carry
-    them literally); a word whose unquoted braces the shell would EXPAND (a comma or a double dot
-    between an unquoted brace pair; a dollar sign immediately before the brace is parameter
-    expansion, not brace expansion) is refused as a brace expansion this lexer cannot enumerate;
-    a word-start # comment runs to end of line; an ANSI-C dollar-quoted span is decoded as bash
-    decodes it (a NUL ends it) and a locale dollar-double-quoted span reads as an ordinary
-    double-quoted span; a here-document delimiter and body are read as bash reads them (quote
-    removal on the delimiter, backslash-newline splicing in an unquoted body before the delimiter
-    comparison) and each body line is one DATA word; and an arithmetic $((...)) span stays inside
-    its word (never a false here-document), while a `<<` inside a bare (( arithmetic command and
-    the obsolete $[ ] form are refused. When a word of the command names a program that runs code
-    (_runs_code; `.` counts in command position), every here-document body (as its consumer
-    receives it) and every word that could carry further shell syntax (a here-string or a -c or
-    eval argument among them) is ALSO read as a command, recursively, and a body or word that
-    cannot be read that way is refused: the program could run it differently than this hook read
-    it. A word carrying a command substitution ($( or a backquote, as inside double quotes) is read
-    as a command from that point the same way. Unlike _pristine_tokens this lexer reads EVERY
-    command; its words feed the roster token scan, the root binding and the word-resolution pass,
-    never any allowance."""
-    words, data, bodies, heads, reason = _lex(command)
-    if reason is not None:
-        return None, reason
-    runs_code = any(_runs_code(w) for w in words) or "." in heads
-    nested = []
-    if runs_code:
-        nested.extend(bodies)
-        nested.extend(w for w in words if any(c in _NESTED_SYNTAX for c in w))
-    else:
-        for w in words:
-            nested.extend(_substitutions(w))
-    nested = [text for text in nested if text != command]
-    if nested and depth >= MAX_NESTING:
-        return None, "code nested deeper than %d levels" % (MAX_NESTING,)
-    for text in nested:
-        sub, reason = _loose_words(text, depth + 1)
-        if reason is not None:
-            if reason.startswith(_NESTED_REASON):
-                return None, reason
-            return None, "%s (%s)" % (_NESTED_REASON, reason)
-        words.extend(sub)
-    return words + data, None
+        has, i = True, i + 1
+    if has:
+        words.append("".join(cur))
+    return words
 
 
 def _bound_roots(text, cwd, extras=()):
@@ -1450,7 +1252,9 @@ def _reference_kind(text, cwd, rosters_text=None):
 
 
 def _bash_rule(tool_input, cwd):
-    """R5, R6 and R8 for Bash; returns a deny reason or None (allow)."""
+    """R5, R6 and R8 for Bash. The sanctioned writer (A1) allows first; a PROVABLY PLAIN command
+    takes the exact path check (_plain_bash_rule); every other command takes the coarse product-root
+    check (_exotic_bash_rule)."""
     if not isinstance(tool_input, dict) or not isinstance(tool_input.get("command"), str):
         return "the Bash payload carries no command string; failing closed (R6)"
     command = tool_input["command"]
@@ -1459,12 +1263,90 @@ def _bash_rule(tool_input, cwd):
                 "be resolved; failing closed (R6)")
     tokens = _pristine_tokens(command)
     if tokens and _is_sanctioned_opf(tokens, cwd):
-        return None  # A1 holds even under a roster failure: the sanctioned repair path stays open
-    words, reason = _loose_words(command)
+        return None
+    words, plain = _plain_lex(command)
+    if not plain:
+        return _exotic_bash_rule(command, cwd, tokens)
+    return _plain_bash_rule(command, words, cwd, tokens)
+
+
+def _cwd_product_roots(cwd):
+    """The product roots at or above the session cwd (both as spelled and as realpathed):
+    (roots, None), or (None, reason) when a store tree above the cwd cannot be read (fail closed)."""
+    roots = []
+    spellings = [os.path.normpath(cwd)]
+    try:
+        resolved = os.path.normpath(os.path.realpath(cwd))
+    except (OSError, ValueError):
+        resolved = None
+    if resolved is not None and resolved not in spellings:
+        spellings.append(resolved)
+    for spelling in spellings:
+        got, reason = _roots_above(spelling)
+        if reason is not None:
+            return None, reason
+        for root in got:
+            if root not in roots:
+                roots.append(root)
+    return roots, None
+
+
+def _exotic_bash_rule(command, cwd, tokens):
+    """R5/R8 coarse pass for a Bash command that is NOT provably plain (module docstring): deny
+    when the session working directory, or any literal path word the command names, lies inside an
+    OPF product root (a directory holding a .working entry), or lands on the enforcement pack own
+    tree (R8); otherwise allow. A protected path reached with neither the cwd nor a literal word (a
+    variable, a substitution, an escape or an interpreter own language spelling a path no literal
+    word carries) is the disclosed lexical-floor residual."""
+    roots, reason = _cwd_product_roots(cwd)
     if reason is not None:
-        return ("this Bash command cannot be read to the end (%s): the shell could run it "
-                "differently than this hook read it, and a partially read command is never judged; "
-                "failing closed (R6)" % (reason,))
+        return reason + "; failing closed (R6)"
+    if roots:
+        return ("this Bash command is not provably plain, so a lexical hook cannot prove it "
+                "read-only, and the session working directory lies inside the OPF product root %r "
+                "(its store tree is protected); it is denied fail-closed (R5). %s."
+                % (roots[0], SANCTIONED))
+    exempt = frozenset()
+    if tokens and not _ASSIGNMENT_RE.match(tokens[0]) and os.sep not in tokens[0] \
+            and _PYTHON_RE.match(tokens[0]):
+        rest = tokens[1:]
+        while rest and _PYFLAGS_RE.match(rest[0]):
+            rest = rest[1:]
+        if rest:
+            exempt = frozenset(_candidates(rest[0], cwd) or ())
+    words = _literal_words(command)
+    if len(words) > MAX_RESOLVED_WORDS:
+        return ("this Bash command is not provably plain and names more than %d words, over the "
+                "word-resolution budget, so it cannot be fully examined; failing closed (R6)"
+                % (MAX_RESOLVED_WORDS,))
+    seen = set()
+    for word in words:
+        for cand in _candidates(word, cwd) or ():
+            if cand in seen:
+                continue
+            seen.add(cand)
+            got, reason = _roots_above(cand)
+            if reason is not None:
+                return reason + "; failing closed (R6)"
+            if got:
+                return ("this Bash command is not provably plain, so a lexical hook cannot prove it "
+                        "read-only, and a path it names (%r) lies inside the OPF product root %r "
+                        "(its store tree is protected); it is denied fail-closed (R5). %s."
+                        % (cand, got[0], SANCTIONED))
+            if cand not in exempt:
+                reason = _guard_rule(cand)
+                if reason is not None:
+                    return reason
+    return None
+
+
+def _plain_bash_rule(command, words, cwd, tokens):
+    """R5, R6 and R8 for a PROVABLY PLAIN Bash command: the exact path check. The raw string and
+    every dequoted word are scanned for the protected tokens (boundary-matched), the rosters bind
+    from the product roots above the cwd and every absolute operand, and every dequoted word is
+    resolved as a path exactly as a file-tool target would be (store, frozen, view, the R8 guard and
+    the registration). Only a single plain sanctioned-writer invocation (A1, already allowed) may
+    reference a protected token."""
     scan = command + chr(10) + chr(10).join(words)
     roots, reason = _bound_roots(command, cwd, words)
     if reason is not None:
@@ -1479,18 +1361,6 @@ def _bash_rule(tool_input, cwd):
                 "sanctioned writer (opf record or opf render): a lexical hook cannot prove any "
                 "other referencing command read-only, so it is denied fail-closed (R5). %s; read "
                 "protected files through the platform Read tool." % (kind, SANCTIONED))
-    # The word-resolution pass (R5/R8): every dequoted word is judged as a resolved path the way a
-    # file-tool target is. The R8 launcher exemption keeps the pack's own tools runnable: a plain
-    # pristine python3 invocation exempts its SCRIPT operand from the guard alone (A1 already
-    # governs the writer verbs), never from the store, frozen or view checks.
-    exempt = frozenset()
-    if tokens and not _ASSIGNMENT_RE.match(tokens[0]) and os.sep not in tokens[0] \
-            and _PYTHON_RE.match(tokens[0]):
-        rest = tokens[1:]
-        while rest and _PYFLAGS_RE.match(rest[0]):
-            rest = rest[1:]
-        if rest:
-            exempt = frozenset(_candidates(rest[0], cwd) or ())
     resolve_all = len(words) <= MAX_RESOLVED_WORDS
     seen = set()
     for word in words:
@@ -1511,10 +1381,9 @@ def _bash_rule(tool_input, cwd):
             if cand in views[0]:
                 return ("a word of this Bash command resolves to the declared view %r: views "
                         "change only through opf render (spec 5.8, 14.1)." % (cand,))
-            if cand not in exempt:
-                reason = _guard_rule(cand)
-                if reason is not None:
-                    return reason
+            reason = _guard_rule(cand)
+            if reason is not None:
+                return reason
             reason = _registration_rule(cand, reg_idents)
             if reason is not None:
                 return reason

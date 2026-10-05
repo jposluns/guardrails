@@ -1171,16 +1171,17 @@ def _claude_hook_self_test():
     real path), a symlinked store tree fails closed, the registration is protected at its real
     path, the reserved imports store home denies, TodoWrite takes R7's scan, and a malformed
     unknown-tool envelope (a null tool_input, no session cwd, an empty tool_name) fails closed.
-    The round-5 fixes are pinned the same way: each Bash quoting form is decoded exactly as bash
-    documents it or denied (an ANSI-C NUL escape ends the dollar-quoted string, an octal escape
-    keeps its low byte, a literal NUL denies, a locale dollar-double-quoted operand reads as a
-    double-quoted word), here-document delimiters are read as bash reads them (backslash-newline
-    splicing in an unquoted body, quote removal in the delimiter word; a missing delimiter line
-    denies), a here-document or here-string a shell or interpreter consumes has its body read as
-    commands or the command denies while a body fed to any other program stays data, a `<<`
-    inside a bare arithmetic command and the obsolete $[ ] form deny, the imported-series
-    exemption holds only inside the machine store, and the Edit and NotebookEdit mappings are each
-    pinned by a vector whose deny reason only their own file-tool rule gives.
+    The round-6 change inverts the Bash rule (D-DISCARD-SOUND-RULE): instead of soundly lexing
+    every exotic shell form, the hook decides PROVABLY PLAIN first (plain words, simple whole-word
+    quotes, no substitution, no parameter or arithmetic expansion, no eval, no line continuation, no
+    ANSI-C or locale quoting, no unquoted here-document, no interpreter with inline code; a QUOTED
+    here-document fed to a non-interpreter stays plain data). A plain command keeps the exact path
+    check; every other command denies when the session cwd or any literal path word lies inside a
+    product root and allows otherwise. The three round-6 bypass reproductions (an unquoted
+    here-document substitution, a commented parenthesis truncating a command substitution, and a
+    line continuation before ANSI-C quoting) each deny as not provably plain from a product cwd, and
+    each FAILS on the predecessor pin. Skill and SlashCommand now take R7 (claude n2), and the
+    provably-plain word-resolution budget cliff is disclosed (claude n1).
     git-independent (the hook reads only the live tree; nothing is committed), offline,
     hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
@@ -1515,7 +1516,7 @@ def _claude_hook_self_test():
             # Roster tokens are matched with path boundaries: a longer word is a DIFFERENT path and
             # does not trip the view, while the view's own spellings still deny.
             allow("bash-version-word-boundary-allowed",
-                  payload("Bash", dict(command="env PYTHON_VERSION=3 make"), root))
+                  payload("Bash", dict(command="env PYTHON_VERSION=3 grep -rn x src"), root))
             allow("bash-version-dunder-allowed",
                   payload("Bash", dict(command="grep -rn __VERSION__ src"), root))
             deny("bash-touch-version-denied", payload("Bash", dict(command="touch VERSION"), root),
@@ -1572,9 +1573,9 @@ def _claude_hook_self_test():
             # comments, here-document bodies and decodable dollar-quotes carrying prose
             # apostrophes stay readable and reference-free commands stay allowed.
             deny("bash-unterminated-quote-denied",
-                 payload("Bash", dict(command="echo 'abc"), root), "cannot be read")
+                 payload("Bash", dict(command="echo 'abc"), root), "lexical hook")
             deny("bash-undecodable-dollarquote-denied",
-                 payload("Bash", dict(command="echo $'a\\qb'"), root), "cannot be read")
+                 payload("Bash", dict(command="echo $'a\\qb'"), root), "lexical hook")
             allow("bash-comment-apostrophe-allowed",
                   payload("Bash", dict(command="echo ok # don't worry"), basestr))
             allow("bash-heredoc-apostrophe-allowed",
@@ -1640,7 +1641,7 @@ def _claude_hook_self_test():
             # mention denies (nothing else pins the verb bound on the python3 launcher form).
             deny("bash-python-writer-other-verb-denied",
                  payload("Bash", dict(command="python3 -I -B opf/tools/opf.py doctor --root "
-                                              ".working/.."), str(repo_root)), "store tree")
+                                              ".working/.."), root), "store tree")
 
             # ROUND 4: the loose lexer keeps the SHELL'S own word boundaries. Braces and control
             # characters are literal pathname characters (the shell keeps them in a word), so a
@@ -1670,11 +1671,11 @@ def _claude_hook_self_test():
                  payload("Bash", dict(command="printf x > " + cr_alias), basestr), "store tree")
             deny("bash-brace-expansion-denied",
                  payload("Bash", dict(command="printf x > " + os.path.join(
-                     basestr, chr(123) + "v,w" + chr(125) + ".txt")), basestr),
-                 "brace expansion")
+                     root, chr(123) + "v,w" + chr(125) + ".txt")), basestr),
+                 "product root")
             deny("bash-brace-range-denied",
-                 payload("Bash", dict(command="echo " + chr(123) + "1..3" + chr(125)), basestr),
-                 "brace expansion")
+                 payload("Bash", dict(command="echo " + chr(123) + "1..3" + chr(125)), root),
+                 "product root")
             allow("bash-braces-literal-allowed",
                   payload("Bash", dict(command="find . -name tmp -exec grep -l x " + chr(123)
                                                + chr(125) + " " + chr(92) + ";"), basestr))
@@ -1695,10 +1696,10 @@ def _claude_hook_self_test():
                                               + "tb" + chr(39)), basestr), "store tree")
             deny("bash-dollarquote-hex-view-denied",
                  payload("Bash", dict(command="printf x > $" + chr(39) + root + "/VER" + chr(92)
-                                              + "x53ION" + chr(39)), basestr), "VERSION")
+                                              + "x53ION" + chr(39)), basestr), "store tree")
             deny("bash-dollarquote-octal-view-denied",
                  payload("Bash", dict(command="printf x > $" + chr(39) + root + "/VER" + chr(92)
-                                              + "123ION" + chr(39)), basestr), "VERSION")
+                                              + "123ION" + chr(39)), basestr), "store tree")
             dq_alias = os.path.join(root, "a" + chr(34) + "b")
             os.symlink(counters, dq_alias)
             deny("bash-dq-escaped-quote-alias-denied",
@@ -2031,108 +2032,68 @@ def _claude_hook_self_test():
             deny("edit-frozen-real-dir-denied",
                  payload("Edit", dict(file_path=os.path.join(root4, "site_docs", "OLD.md"),
                                       old_string="a", new_string="b"), root4), "frozen")
-            # ROUND 5: each Bash quoting form is decoded exactly as bash documents it, or denied.
-            # An ANSI-C NUL escape ENDS the dollar-quoted string (the rest of the span is
-            # dropped and the word continues after the quote), and an octal escape keeps its low
-            # byte; a decoder that kept the NUL, or the bytes after it, or the high bits, resolves
-            # a different, unprotected path and would allow.
-            deny("bash-dollarquote-nul-store-denied",
-                 payload("Bash", dict(command="printf overwritten > $" + chr(39) + ".wor" + chr(92)
-                                              + "0ignored" + chr(39) + "king/toml/counters.toml"),
-                         root), "store tree")
-            deny("bash-dollarquote-hex-nul-view-denied",
-                 payload("Bash", dict(command="printf overwritten > $" + chr(39) + "VER" + chr(92)
-                                              + "x00ignored" + chr(39) + "SION"), root),
-                 "VERSION")
-            deny("bash-dollarquote-octal-byte-view-denied",
-                 payload("Bash", dict(command="printf x > $" + chr(39) + "VER" + chr(92) + "523ION"
-                                              + chr(39)), root), "VERSION")
-            deny("bash-literal-nul-denied",
-                 payload("Bash", dict(command="printf x > .wor" + chr(0)
-                                              + "king/toml/counters.toml"), root), "NUL")
-            # A locale dollar-double-quoted operand reads as an ordinary double-quoted word, so a
-            # quoted spaced product root binds and denies.
-            deny("bash-locale-quote-spaced-root-denied",
-                 payload("Bash", dict(command="printf overwritten > $" + chr(34)
-                                              + os.path.join(spaced_root, "VERSION") + chr(34)),
-                         basestr), "VERSION")
-            # Here-document delimiters are read as bash reads them: an unquoted body splices a
-            # backslash-newline pair before the delimiter comparison, and a double-quoted
-            # delimiter's escaped quote is removed; so the command after the real delimiter
-            # line is read (and denies), never swallowed as data. A delimiter line that never
-            # appears denies cannot-evaluate.
-            deny("bash-heredoc-continued-delimiter-denied",
-                 payload("Bash", dict(command="cat <<EOF" + chr(10) + "EO" + chr(92) + chr(10)
-                                              + "F" + chr(10) + "printf overwritten > .wor"
-                                              + chr(39) + chr(39) + "king/toml/counters.toml"),
-                         root), "store tree")
-            deny("bash-heredoc-escaped-quote-delimiter-denied",
-                 payload("Bash", dict(command="cat <<" + chr(34) + "E" + chr(92) + chr(34) + "OF"
-                                              + chr(34) + chr(10) + "E" + chr(34) + "OF"
-                                              + chr(10) + "printf overwritten > .wor" + chr(39)
-                                              + chr(39) + "king/toml/counters.toml"), root),
-                 "store tree")
-            deny("bash-heredoc-unterminated-denied",
-                 payload("Bash", dict(command="cat <<EOF" + chr(10) + "body"), basestr),
-                 "never appears")
-            deny("bash-heredoc-no-body-line-denied",
-                 payload("Bash", dict(command="cat <<EOF"), basestr), "never appears")
-            # A here-document or here-string whose consumer runs code (a shell, an interpreter)
-            # has its body read as commands (an unquoted body as its consumer receives it, after
-            # the here-document backslash removal), or the command denies; fed to any other
-            # program the same body stays data.
-            deny("bash-heredoc-shell-consumer-denied",
-                 payload("Bash", dict(command="bash <<" + chr(39) + "EOF" + chr(39) + chr(10)
-                                              + "printf x > .wor" + chr(39) + chr(39)
-                                              + "king/toml/counters.toml" + chr(10) + "EOF"),
-                         root), "store tree")
-            deny("bash-heredoc-piped-shell-denied",
-                 payload("Bash", dict(command="cat <<" + chr(39) + "EOF" + chr(39) + " | sh"
-                                              + chr(10) + "printf x > .wor" + chr(39) + chr(39)
-                                              + "king/toml/counters.toml" + chr(10) + "EOF"),
-                         root), "store tree")
-            deny("bash-heredoc-shell-unquoted-escape-denied",
-                 payload("Bash", dict(command="bash <<EOF" + chr(10) + "printf x > .wor"
-                                              + chr(92) + chr(92) + "king/toml/counters.toml"
-                                              + chr(10) + "EOF"), root), "store tree")
-            deny("bash-herestring-shell-denied",
-                 payload("Bash", dict(command="bash <<< " + chr(34) + "printf x > .wor" + chr(39)
-                                              + chr(39) + "king/toml/counters.toml" + chr(34)),
-                         root), "store tree")
-            deny("bash-substituted-heredoc-shell-denied",
-                 payload("Bash", dict(command="echo " + chr(34) + "$(bash <<" + chr(39) + "EOF"
-                                              + chr(39) + chr(10) + "printf x > .wor" + chr(39)
-                                              + chr(39) + "king/toml/counters.toml" + chr(10)
-                                              + "EOF" + chr(10) + ")" + chr(34)), root),
-                 "store tree")
-            deny("bash-heredoc-python-unreadable-denied",
-                 payload("Bash", dict(command="python3 - <<" + chr(39) + "EOF" + chr(39) + chr(10)
-                                              + "print(" + chr(39) + "it" + chr(92) + chr(39)
-                                              + "s" + chr(39) + ")" + chr(10) + "EOF"), basestr),
-                 "run as code")
-            allow("bash-heredoc-python-readable-allowed",
-                  payload("Bash", dict(command="python3 - <<" + chr(39) + "EOF" + chr(39) + chr(10)
-                                               + "print(" + chr(34) + "ok" + chr(34) + ")" + chr(10)
-                                               + "EOF"), basestr))
-            allow("bash-heredoc-data-stays-data-allowed",
+            # ROUND 6 (QA round 6, D-DISCARD-SOUND-RULE): the hook decides PROVABLY PLAIN first and
+            # judges every other command coarsely (deny when the cwd or a literal path word lies in
+            # a product root, else allow). The three round-6 bypass reproductions each hid the
+            # protected path from the old sound scan; each now denies as not-provably-plain from a
+            # cwd inside the product, and each FAILS on the predecessor pin (where it allowed).
+            deny("bash-heredoc-unquoted-subst-denied",
+                 payload("Bash", dict(command="cat <<EOF" + chr(10) + "$(printf overwritten > .wor"
+                                              + chr(39) + chr(39) + "king/toml/counters.toml)"
+                                              + chr(10) + "EOF" + chr(10)), root), "product root")
+            deny("bash-commented-paren-subst-denied",
+                 payload("Bash", dict(command="echo " + chr(34) + "$(" + chr(35) + " )" + chr(10)
+                                              + "printf overwritten > .wor" + chr(39) + chr(39)
+                                              + "king/toml/counters.toml" + chr(10) + ")" + chr(34)),
+                         root), "product root")
+            deny("bash-linecont-ansic-denied",
+                 payload("Bash", dict(command="printf overwritten > $" + chr(92) + chr(10) + chr(39)
+                                              + ".wor" + chr(92) + "153ing/toml/counters.toml"
+                                              + chr(39)), root), "product root")
+            # A provably-plain command from inside a product that touches nothing protected still
+            # allows (the exact check); the same exotic forms from OUTSIDE every product allow too
+            # (nothing protected is in reach): the over-refusal is bounded to product trees.
+            allow("bash-plain-unprotected-in-product-allowed",
+                  payload("Bash", dict(command="echo building && ls docs"), root))
+            allow("bash-exotic-outside-product-allowed",
+                  payload("Bash", dict(command="python3 -c " + chr(39) + "print(42)" + chr(39)),
+                          basestr))
+            allow("bash-substitution-outside-product-allowed",
+                  payload("Bash", dict(command="echo " + chr(34) + "$(date)" + chr(34)), basestr))
+            # A variable, an interpreter with inline code, an eval and the obsolete arithmetic
+            # form each make the command not provably plain, so from a product cwd each denies
+            # even with no protected token spelled literally (the recurring bypass class).
+            deny("bash-variable-in-product-denied",
+                 payload("Bash", dict(command="printf x > $" + chr(123) + "HOME" + chr(125) + "/f"),
+                         root), "product root")
+            deny("bash-interp-inline-code-in-product-denied",
+                 payload("Bash", dict(command="python3 -c " + chr(39) + "open(1)" + chr(39)), root),
+                 "product root")
+            deny("bash-eval-in-product-denied",
+                 payload("Bash", dict(command="eval echo hi"), root), "product root")
+            deny("bash-obsolete-arith-in-product-denied",
+                 payload("Bash", dict(command="echo $[1 << 2]"), root), "product root")
+            # A QUOTED here-document fed to a non-interpreter stays allowed as data even from a
+            # product cwd when the command-line words touch nothing protected (a commit message is
+            # the motivating case): its body is inert, so a mention only in the body is not a path.
+            allow("bash-quoted-heredoc-data-in-product-allowed",
                   payload("Bash", dict(command="cat > notes.txt <<" + chr(39) + "EOF" + chr(39)
-                                               + chr(10) + "printf x > .wor" + chr(39) + chr(39)
-                                               + "king" + chr(10) + "Don" + chr(39) + "t" + chr(10)
-                                               + "EOF"), basestr))
-            allow("bash-commit-heredoc-message-allowed",
-                  payload("Bash", dict(command="git commit -m " + chr(34) + "$(cat <<" + chr(39)
-                                               + "EOF" + chr(39) + chr(10) + "Don" + chr(39)
-                                               + "t panic" + chr(10) + "EOF" + chr(10) + ")"
-                                               + chr(34)), basestr))
-            # Inside a bare (( arithmetic command `<<` is a shift, not a here-document: the hook
-            # does not evaluate arithmetic commands, so it denies rather than read the later
-            # lines (a write through a harmless-named alias) as here-document data; the obsolete
-            # $[ ] form denies the same way.
-            deny("bash-arith-shift-not-heredoc-denied",
-                 payload("Bash", dict(command="(( y = 1 << 2 ))" + chr(10) + "printf x > alias.md"
-                                              + chr(10) + "2" + chr(10)), root), "arithmetic")
-            deny("bash-obsolete-arith-denied",
-                 payload("Bash", dict(command="echo $[1 << 2]"), basestr), "arithmetic")
+                                               + chr(10) + "a commit message" + chr(10) + "EOF"
+                                               + chr(10)), root))
+            # The coarse branch still protects the pack own tree (R8) even outside a product.
+            deny("bash-exotic-guard-pack-denied",
+                 payload("Bash", dict(command="sh -c " + chr(39) + "true" + chr(39) + " "
+                                              + str(hook)), basestr), "R8")
+            # claude n2: Skill and SlashCommand are no longer read-only-listed (their expansion
+            # may run shell lines the platform does not route back through PreToolUse), so each
+            # takes R7: a protected reference denies, a free one allows. Both FAIL on the pin.
+            deny("slashcommand-store-reference-denied",
+                 payload("SlashCommand", dict(command="/deploy .working/toml/counters.toml"), root),
+                 "R7")
+            deny("skill-store-reference-denied",
+                 payload("Skill", dict(command="edit .working/toml/counters.toml"), root), "R7")
+            allow("slashcommand-free-allowed",
+                  payload("SlashCommand", dict(command="/status"), root))
             # The imported-series exemption holds ONLY directly inside THE machine store (its
             # manifest declares the OPF standard): the same leaf in another first-level store
             # directory, existing or not, denies.
@@ -2211,18 +2172,17 @@ def _claude_hook_self_test():
           "denies, TodoWrite takes R7's scan (a protected mention in a todo denies, a free "
           "todo list allows), an unknown tool with a null tool_input or no session cwd takes a "
           "structured deny, an empty tool_name exits 2, and a single-quoted literal newline "
-          "keeps a writer spelling non-pristine. ROUND 5: an ANSI-C NUL escape (octal or hex) "
-          "ends the dollar-quoted string and an octal escape keeps its low byte (store and view "
-          "spellings deny), a literal NUL denies, a locale dollar-double-quoted spaced root "
-          "binds and denies, a continued and an escaped-quote here-document delimiter end the "
-          "body where bash ends it (the following write denies), a missing delimiter line "
-          "denies, a here-document or here-string consumed by a shell (directly, piped, or "
-          "inside a double-quoted command substitution) is read as commands and denies, an "
-          "unreadable python here-document body denies while a readable one, a data "
-          "here-document and a commit-message here-document stay allowed, a << inside a bare "
-          "arithmetic command and the obsolete $[ ] form deny, the imported-series leaf in a "
-          "non-machine store directory denies, and Edit and NotebookEdit store and "
-          "relative-no-cwd targets deny with their own file-tool reasons)")
+          "keeps a writer spelling non-pristine. ROUND 6: the Bash rule decides "
+          "provably plain first and judges every other command by a coarse "
+          "product-root check (D-DISCARD-SOUND-RULE); an unquoted here-document "
+          "substitution, a commented-parenthesis command substitution and a line "
+          "continuation before ANSI-C quoting each deny from a product cwd (the "
+          "round-6 reproductions), a plain command touching nothing protected and "
+          "every exotic command outside all products allow, a variable, an "
+          "interpreter with inline code, an eval and the obsolete arithmetic form "
+          "deny from a product cwd, a quoted here-document fed to a non-interpreter "
+          "stays allowed as data, the pack own tree stays protected (R8), and Skill "
+          "and SlashCommand take R7 while a free slash command allows)")
     return EXIT_OK
 
 
