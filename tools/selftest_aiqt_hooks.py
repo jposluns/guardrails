@@ -2073,6 +2073,77 @@ def _main_isolated(monitor):
         expect("(f7-clean-resolvable) git clean on a resolvable dirty tree still allows (snapshot-backed)",
                "git clean -fd", "allow-note", cwd=str(_f7))
 
+        # === F-DISCARD-NONPRISTINE-NOCWD: a discard the guard would allow with NO recovery snapshot it took
+        # === fails closed. A non-pristine discard (a leading assignment, a metacharacter even quoted, or a
+        # compound) or a repository-view-redirected one (FOO=1, -c) whose payload carries no session cwd and
+        # whose target this guard does not resolve DENIES, naming the safe route; it was an allow-note with no
+        # snapshot. With a dirty session cwd, or a resolved -C/cd target, the same command is unchanged: it
+        # snapshots then allows with a note. Each nocwd vector reads allow-note without the fix.
+        _npnc = _init_repo(tmp / "npnocwd")
+        (_npnc / "file.txt").write_text("committed line\nnpnc uncommitted\n", encoding="utf-8")
+        _npnc_t = _init_repo(tmp / "npnocwd-target")
+        (_npnc_t / "file.txt").write_text("committed line\nnpnc target uncommitted\n", encoding="utf-8")
+        _npnc_snaps = []
+        _orig_npnc_rec = aiqt_hooks._record_recovery
+
+        def _npnc_count(repo, verb):
+            _npnc_snaps.append(repo)
+            return _orig_npnc_rec(repo, verb)
+
+        def _npnc_run(command, cwd):
+            """(decision, deny reason text, recovery snapshots taken) for one git_discard payload."""
+            del _npnc_snaps[:]
+            data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+            if cwd is not None:
+                data["cwd"] = cwd
+            code, stdout_obj, _stderr = handler(data)
+            hso = stdout_obj.get("hookSpecificOutput") if isinstance(stdout_obj, dict) else None
+            text = str(hso.get("permissionDecisionReason", "")) if isinstance(hso, dict) else ""
+            return _reduce_result(code, stdout_obj), text, len(_npnc_snaps)
+
+        _npnc_t_s = shlex.quote(str(_npnc_t))
+        _npnc_cases = (
+            # (label, command, nocwd decision, nocwd snapshots, dirty-cwd decision, dirty-cwd snapshots)
+            ("assign", "FOO=1 git reset --hard", "deny", 0, "allow-note", 1),
+            ("quoted-meta", "FOO=';' git reset --hard", "deny", 0, "allow-note", 1),
+            ("compound", "git reset --hard ; true", "deny", 0, "allow-note", 1),
+            ("config-c", "git -c core.abbrev=12 reset --hard", "deny", 0, "allow-note", 1),
+            ("mixed-target", "git -C {} reset --hard ; git reset --hard".format(_npnc_t_s), "deny", 0,
+             "allow-note", 2),
+            ("index-only", "git --work-tree={} reset --mixed ; true".format(_npnc_t_s), "deny", 0,
+             "allow-note", 1),
+            ("stash-clear", "git stash clear ; true", "deny", 0, "allow-note", 1),
+            # a resolved -C target beside a session-cwd stash clear or index-only reset: only the walk's
+            # cwd_unknown flag denies these (the no-target rule does not, since a target resolved)
+            ("mixed-stash", "git -C {} reset --hard ; git stash clear".format(_npnc_t_s), "deny", 0,
+             "allow-note", 2),
+            ("mixed-index-only", "git -C {0} reset --hard ; git --work-tree={0} reset --mixed".format(_npnc_t_s),
+             "deny", 0, "allow-note", 2),
+            ("no-target", "git branch -D npnc-none ; true", "deny", 0, "allow-note", 1),
+            # a resolved target keeps its snapshot with or without a session cwd (unchanged)
+            ("resolved-C", "git -C {} reset --hard ; true".format(_npnc_t_s), "allow-note", 1, "allow-note", 2),
+            ("resolved-cd", "cd {} && git reset --hard".format(_npnc_t_s), "allow-note", 1, "allow-note", 2),
+            ("pristine-C", "git -C {} reset --hard".format(_npnc_t_s), "allow-note", 1, "allow-note", 1),
+        )
+        aiqt_hooks._record_recovery = _npnc_count
+        try:
+            for _lab, _cmd, _w_nc, _n_nc, _w_c, _n_c in _npnc_cases:
+                _got_nc = _npnc_run(_cmd, None)
+                if (_got_nc[0], _got_nc[2]) != (_w_nc, _n_nc):
+                    failures.append("(npnc-{}-nocwd) {!r} with no session cwd: expected {} with {} snapshot(s), "
+                                    "got {} with {}".format(_lab, _cmd, _w_nc, _n_nc, _got_nc[0], _got_nc[2]))
+                elif _w_nc == "deny" and "working directory the hook can see" not in _got_nc[1]:
+                    failures.append("(npnc-{}-route) the no-cwd deny must name the safe route (a working "
+                                    "directory the hook can see, or commit or stash first), got {!r}"
+                                    .format(_lab, _got_nc[1]))
+                _got_c = _npnc_run(_cmd, str(_npnc))
+                if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
+                    failures.append("(npnc-{}-cwd) {!r} with a dirty session cwd must be unchanged: expected {} "
+                                    "with {} snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
+                                                                                _got_c[0], _got_c[2]))
+        finally:
+            aiqt_hooks._record_recovery = _orig_npnc_rec
+
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file allows with a note on dirty tree",
                "git restore --pathspec-from-file=paths.txt", "allow-note", cwd=rp)

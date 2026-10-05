@@ -4353,7 +4353,9 @@ def _discard_recovery_result(kind, detail, snap, optout=None):
     """The SNAPSHOT-THEN-ALLOW outcome for a recoverable-destructive discard (hooks never ask). snap is
     ('ok', info) (a recovery snapshot was saved), ('fail', reason) (a warranted snapshot could NOT be made),
     or None (no snapshot warranted: a ref-level move or a stash/branch asset a working-tree snapshot cannot
-    hold, which is typically reflog-recoverable). On 'ok' or None the discard is ALLOWED with an
+    hold, which is typically reflog-recoverable, or a provably-clean target with nothing to lose). A caller
+    passes None ONLY then: a discard that warrants a snapshot but has no target to take it on (no session cwd
+    and no resolved target, F-DISCARD-NONPRISTINE-NOCWD) DENIES before reaching here. On 'ok' or None the discard is ALLOWED with an
     informational note; on 'fail' the discard would be unrecoverable, so it is DENIED-and-educated (commit or
     stash first). `optout` selects the path-aware opt-out guidance folded into the deny wording only (an
     allow needs none)."""
@@ -4573,9 +4575,12 @@ def _nonpristine_discard_actions(segments, cwd):
                                       #   internal cd moved, or a WRAPPED git (env/sudo/... git) carrying a
                                       #   -C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE= redirect - so its
                                       #   target cannot be snapshotted with certainty
-        'saw_actionable': bool }      # any visible worktree-destructive or stash drop/clear discard
-    A caller with unresolved=True OR hidden=True DENIES (fail closed: it cannot snapshot/preserve the exact
-    target). Where a
+        'saw_actionable': bool        # any visible worktree-destructive or stash drop/clear discard
+        'cwd_unknown':    bool }      # a visible worktree-destructive or stash drop/clear discard acts on
+                                      #   the session cwd, but the payload carries none, so there is
+                                      #   nothing to snapshot or preserve
+    A caller with unresolved=True, hidden=True OR cwd_unknown=True DENIES (fail closed: it cannot
+    snapshot/preserve the exact target). Where a
     destructive segment acts on the plain session cwd (no cd, no redirect) that cwd is added to
     snapshot_bases so it is snapshotted through the same path; where no actionable discard is visible
     (obfuscated verbs, soft/ref-level forms, or an unknown cwd) saw_actionable is False and the caller keeps
@@ -4590,6 +4595,7 @@ def _nonpristine_discard_actions(segments, cwd):
     unresolved = False
     saw_actionable = False
     targets_session = False
+    cwd_unknown = False  # a visible discard acts on the session cwd, which the payload does not carry -> DENY
     hidden = False   # ROUND-6 FINDING 3: a lossy discard the walk cannot resolve as a depth-0 literal-git
     # segment (a subshell-internal cd moved its target, or a WRAPPED git carries a target redirect) -> DENY.
     subshell_cd_seen = False  # a cd/pushd occurred at depth>0 in the current subshell nesting: a git discard
@@ -4635,6 +4641,8 @@ def _nonpristine_discard_actions(segments, cwd):
                                 elif eff is None:
                                     if cd_happened:
                                         unresolved = True
+                                    else:
+                                        cwd_unknown = True  # no session cwd: nothing to snapshot
                                 else:
                                     _add(snapshot_bases, eff)
                             else:
@@ -4648,7 +4656,8 @@ def _nonpristine_discard_actions(segments, cwd):
                             elif eff is None:
                                 if cd_happened:
                                     unresolved = True     # a cd to an unresolvable dir preceded the discard
-                                # else: cwd unknown -> keep the best-effort session path (not unresolved)
+                                else:
+                                    cwd_unknown = True    # no session cwd: nothing to snapshot -> DENY
                             elif cd_happened:
                                 _add(snapshot_bases, eff)  # a cd'd-into concrete dir
                             else:
@@ -4671,7 +4680,8 @@ def _nonpristine_discard_actions(segments, cwd):
                                 elif eff is None:
                                     if cd_happened:
                                         unresolved = True
-                                    # else: cwd unknown -> best-effort session path
+                                    else:
+                                        cwd_unknown = True  # no session cwd: no stash to preserve -> DENY
                                 else:
                                     _add(stash_ops, (eff, stash_op))
                     # a force branch delete/move/copy/reset or stash export is ref-level/reflog-recoverable:
@@ -4719,7 +4729,7 @@ def _nonpristine_discard_actions(segments, cwd):
     if targets_session and session_cwd is not None:
         _add(snapshot_bases, session_cwd)              # a plain session-cwd discard: snapshot the cwd too
     return {"snapshot_bases": snapshot_bases, "stash_ops": stash_ops, "hidden": hidden,
-            "unresolved": unresolved, "saw_actionable": saw_actionable}
+            "unresolved": unresolved, "saw_actionable": saw_actionable, "cwd_unknown": cwd_unknown}
 
 
 def git_discard(data):
@@ -4776,7 +4786,10 @@ def git_discard(data):
     BEST-EFFORT against the SESSION CWD repo (the redirected dir of a non-pristine command is not parsed, so a
     command that changes into a DIFFERENT repo may be snapshotted at the session repo rather than the target;
     a same-repo cd is still captured by the whole-tree add --all). See the recovery block comment above
-    _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
+    _SNAPSHOTTABLE_VERBS. With no session cwd in the payload that catch-all cannot be taken, so a non-pristine
+    command with a visible discard of the session cwd, or with no resolved snapshot or stash target at all,
+    DENIES, as does a destructive repository-view-redirected form with no snapshot target
+    (F-DISCARD-NONPRISTINE-NOCWD). The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
     marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
     content is not recoverable here."""
     if data.get("hook_event_name") != PRETOOL:
@@ -4894,6 +4907,22 @@ def git_discard(data):
                 "AIQT guardrail: denied a subshell/wrapped-and-redirected git discard whose target this guard "
                 "cannot resolve to snapshot (rule prsunc); run it unwrapped from the target repo, or commit or "
                 "stash first.")
+        # F-DISCARD-NONPRISTINE-NOCWD: with no session cwd in the payload the session-cwd catch-all snapshot
+        # below cannot be taken, so a visible discard of the session cwd (cwd_unknown), or a command whose walk
+        # resolved no snapshot or stash target at all (only an obfuscated, ref-level or soft form is visible),
+        # would be allowed with NO recovery point. It fails closed instead: DENY, naming the safe route. A
+        # command whose every visible discard resolved to a concrete target keeps the path below.
+        if actions["cwd_unknown"] or (np_base is None and not actions["snapshot_bases"]
+                                      and not actions["stash_ops"]):
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} is not a pristine single bare 'git <verb>' "
+                "invocation, and the hook payload carries no session working directory, so this guard has "
+                "no worktree to snapshot for a discard that acts on it; denied rather than allowed with no "
+                "recovery point. Run it from a working directory the hook can see, or commit or stash your "
+                "work first. {}"
+                .format(kind, _DISCARD_ALTS),
+                "AIQT guardrail: denied a non-pristine git discard with no session directory to snapshot "
+                "(rule prsunc); run it from a working directory the hook can see, or commit or stash first.")
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo whose
         # stash cannot be preserved), so a `git -C T stash clear` / `git stash clear; :` no longer notes a
         # recovery that omits the cleared stash (round-3 finding 2).
@@ -5097,6 +5126,20 @@ def git_discard(data):
         target_base = repo_dir if isinstance(repo_dir, str) else cwd_base
         target_desc = ("the -C target ({})".format(repo_dir)
                        if isinstance(repo_dir, str) and repo_dir != cwd_base else "the session directory")
+        # F-DISCARD-NONPRISTINE-NOCWD: a destructive form with no snapshot target (no session cwd in the
+        # payload and no resolved -C target, e.g. 'FOO=1 git reset --hard', a -c or --work-tree-only form, or
+        # an ambient GIT_* override, each with no cwd) would be allowed with NO recovery point. It fails
+        # closed instead: DENY, naming the safe route. A form with a target keeps the snapshot path below.
+        if target_base is None and destructive:
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} runs under a non-cosmetic ambient GIT_* "
+                "variable or carries a command-local redirect or leading assignment, and the hook payload "
+                "carries no session working directory and the command names no -C target this guard "
+                "resolves, so there is no worktree it can snapshot first; denied rather than allowed with no "
+                "recovery point. Run it from a working directory the hook can see, or commit or stash your "
+                "work first. {}".format(kind or "a git work-losing verb", _DISCARD_ALTS),
+                "AIQT guardrail: denied a redirected git discard with no session directory to snapshot (rule "
+                "prsunc); run it from a working directory the hook can see, or commit or stash first.")
         ao_snap = None
         if target_base is not None and destructive and _tree_is_clean(target_base) is not True:
             ao_snap = _record_recovery(target_base, sub)
