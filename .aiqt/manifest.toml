@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "433e715d919b2e3c9605eddd27cb5bb4fcc80fba7946e28db364a946dc8ee270"
+tree-sha256 = "cd9fd2542341a9ada0dfd30c1fa1a2a05c026d9eaf3c1f9cf2b25a2c604e38fe"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 250976
-sha256 = "80aab848d3697b883631accb677ba5e099df5947bd56b33cbdef851cfcd39bf3"
+bytes = 251166
+sha256 = "fef84b9d0ba8798ec6cdc69c0e1ee7e0ca51e66bcd47c72a6dce72f843e63a41"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -111,8 +111,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 2840
-sha256 = "058d0fadd9aa7ba18ec917f598ae57d0d2b53442b5430f617ad35334f54b5251"
+bytes = 2839
+sha256 = "c2a6f1f6121d74160fc09621ce85bbbcd21287a3e4a1f558f241cf39ad99d940"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2251,8 +2251,8 @@ sha256 = "100ac19dceab9be4d4278453b880deba79a043839323cdf13d154cba0c8cdea1"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 23148
-sha256 = "808fb8dd662bb888b1d302191a0596b8675dc6491eb68a38be238f0bdcdff7bc"
+bytes = 23188
+sha256 = "3af7ca73ff22a26af14e1860378844b68f87dbffa0ecee556b639065f99a144c"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
@@ -2326,8 +2326,8 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 
 [[sources]]
 path = "README.md"
-bytes = 5984
-sha256 = "b80bb2b5bb6a77ebb8d6c5397ea793601b6f5f4cc5f57accaf46b638145c51f6"
+bytes = 6107
+sha256 = "a3d7459e433056d6884a5fcfc7a282c974a3daa808551c1010f418df2713cb78"
 
 [[sources]]
 path = "RELEASING.md"
@@ -2386,8 +2386,8 @@ sha256 = "2422016ee6acabb49fabd39b64a8dcee0ccd355cd4974bcefaac1f682bf3a2e9"
 
 [[sources]]
 path = "docs/development.md"
-bytes = 10583
-sha256 = "48ce5a41ca2d7798185d08a1f4a08c828bbbe4849e9686ccb226184f69492628"
+bytes = 10646
+sha256 = "ca07859a1d58c1fc409f8580663a06e0f1f150383b3a207f0b5fa7c3c471ca56"
 
 [[sources]]
 path = "docs/evidence.md"
@@ -2456,13 +2456,13 @@ sha256 = "44fabb8f383a49b5344a6d3e1ff0b4e2ef3afe2411e3d2f0c0b00829bafecccb"
 
 [[sources]]
 path = "opf/site/adopt.html"
-bytes = 37484
-sha256 = "215e61838b5585fcf54ab5b154e567d98ba46ceae22cb61cb4a1af327de4d3ef"
+bytes = 37543
+sha256 = "d2c909912e53c97650432b56d6cd865af9ad746e77ffd921e4dadc1c08e1eb3c"
 
 [[sources]]
 path = "opf/site/adopt.md"
-bytes = 4978
-sha256 = "22dbf5b56064848d9f25ef981bbf244bb02187622f3ff106aa5a973f6f2558d6"
+bytes = 5012
+sha256 = "54c6ca7434e5946bc1a0a9fad7371767ac630023127b1843c6d27b7806291736"
 
 [[sources]]
 path = "opf/site/aiqt.html"
@@ -2551,8 +2551,8 @@ sha256 = "4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec"
 
 [[sources]]
 path = "opf/spec/OPF-QUICKSTART.md"
-bytes = 9380
-sha256 = "8c4f5385c4388701ec1d8fdce88c0b13cba104ae75e9d32219b1af0843033e50"
+bytes = 9434
+sha256 = "3af785c6ebe1a2ea68e865e27099ce19b10a0490fbd9d74ff633769a11e90ae1"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
@@ -2991,8 +2991,8 @@ sha256 = "9bf194d541fdc879d05ca10d4bf71a97658822ab75bea64ed8bbbd490248cd72"
 
 [[sources]]
 path = "site/development.html"
-bytes = 14432
-sha256 = "ebf59dac4a385a1e30b0837c18f10ae701366ad438b4e13d6fe8bda83dccabed"
+bytes = 14495
+sha256 = "a82589ee16ad95ab042402cefbaea05661b8bc47f8c61f1aca0756a4b4c867ea"
 
 [[sources]]
 path = "site/disclosure.html"
@@ -3081,8 +3081,8 @@ sha256 = "cbf43cf00b489514e7d60fb20b1dc9550d129ca77aa083dd24c574e20378ca65"
 
 [[sources]]
 path = "site/install.html"
-bytes = 24154
-sha256 = "09f81aa27048c8a3e4f17aa6468d45468a97751b5158985c69d64203eb4274c0"
+bytes = 24273
+sha256 = "7e9e29d3a67b8a6571325fe1db672d1a6bcd56eac16efbd23a0186aeb0d4647b"
 
 [[sources]]
 path = "site/js/install.js"

@@ -60,4 +60,4 @@ guarded-surfaces = [
     "opf/tools/selftest_commonmark_headings.py",
 ]
 completeness-check = false
-documentation-check = false
+documentation-check = true

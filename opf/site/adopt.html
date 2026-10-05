@@ -103,9 +103,10 @@
     <p class="eyebrow">Command reference</p>
     <h2>The opf commands, one by one</h2>
     <p class="lead">OPFiles names a standard command vocabulary; the <code>opf</code> reference CLI is
-      one implementation of it. A base adopter can use their own tooling instead, or adopt by hand. The
-      standard and the reference suite are both a draft, so this reference documents each command by
-      what it does at source today, except where marked Planned.</p>
+      one implementation of it. The reference tooling requires Python 3.14 or newer. A base adopter can
+      use their own tooling instead, or adopt by hand. The standard and the reference suite are both a
+      draft, so this reference documents each command by what it does at source today, except where
+      marked Planned.</p>
     <p><code>doctor</code> distinguishes <b style="color:var(--ink)">0</b> clean,
       <b style="color:var(--ink)">1</b> a finding, and <b style="color:var(--ink)">2</b> cannot-evaluate.
       <code>render --check</code> uses exit 1 for drift; <code>render --write</code> can also exit 1

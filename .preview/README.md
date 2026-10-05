@@ -154,7 +154,7 @@ fails and report it; do not work around a failed check.
      a `REGISTRATION` constant; use this same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
-     on the `PATH` that Claude Code runs hook commands with.
+     on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
