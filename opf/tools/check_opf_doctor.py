@@ -1161,7 +1161,16 @@ def _claude_hook_self_test():
     writer files and the per-product registration are protected (R8) while a plain pristine pack-tool
     launch stays allowed, the envelope byte cap and the crash backstop each exit 2, Edit and
     NotebookEdit are pinned through their own explicit mappings, the python3 launcher is verb-bound,
-    and the boundary-anchored discovery budget no longer counts prose slashes.
+    and the boundary-anchored discovery budget no longer counts prose slashes. The round-4 fixes
+    are pinned the same way: the loose lexer keeps the shell's own word boundaries (braces and
+    control characters are literal pathname characters; an expandable brace pattern is refused,
+    literal brace operands stay words), each dollar-quote and double-quote escape decoder is
+    pinned by a protected operand whose detection depends on its exact decode, root discovery
+    realpaths each spelled location before climbing, the file-tool rosters bind above the session
+    cwd too (a view or frozen file behind a symlink pointing outside the product denies by its
+    real path), a symlinked store tree fails closed, the registration is protected at its real
+    path, the reserved imports store home denies, TodoWrite takes R7's scan, and a malformed
+    unknown-tool envelope (a null tool_input, no session cwd, an empty tool_name) fails closed.
     git-independent (the hook reads only the live tree; nothing is committed), offline,
     hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
@@ -1618,6 +1627,174 @@ def _claude_hook_self_test():
                  payload("Bash", dict(command="python3 -I -B opf/tools/opf.py doctor --root "
                                               ".working/.."), str(repo_root)), "store tree")
 
+            # ROUND 4: the loose lexer keeps the SHELL'S own word boundaries. Braces and control
+            # characters are literal pathname characters (the shell keeps them in a word), so a
+            # braced product root and a carriage-return symlink alias both stay whole, bind and
+            # deny; a brace pattern the shell would EXPAND denies cannot-evaluate (the expansion
+            # could spell a protected path the lexer cannot see), while a literal brace operand
+            # (find's empty-brace operand, a quoted awk program, a parameter expansion) stays a
+            # word and reference-free commands stay allowed.
+            # (named so its brace-truncated raw-text prefix is NOT another fixture root:
+            # the vector must fail through the braced WORD alone)
+            braced_root = os.path.join(basestr, "prodbr" + chr(123) + "x" + chr(125))
+            braced_machine = os.path.join(braced_root, _opf_store.WORKING_DIRNAME, "toml")
+            os.makedirs(braced_machine)
+            with open(os.path.join(braced_machine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]' + chr(10) + 'standard = "opf"' + chr(10) + '[views.version]'
+                         + chr(10) + 'kind = "deterministic"' + chr(10) + 'sources = ["worklog"]'
+                         + chr(10) + 'target = "VERSION"' + chr(10))
+            with open(os.path.join(braced_root, "VERSION"), "w", encoding="utf-8") as fh:
+                fh.write("fixture" + chr(10))
+            deny("bash-braced-root-view-denied",
+                 payload("Bash", dict(command="printf overwritten > "
+                                              + os.path.join(braced_root, "VERSION")), basestr),
+                 "VERSION")
+            cr_alias = os.path.join(root, "a" + chr(13) + "b")
+            os.symlink(counters, cr_alias)
+            deny("bash-cr-alias-resolves-denied",
+                 payload("Bash", dict(command="printf x > " + cr_alias), basestr), "store tree")
+            deny("bash-brace-expansion-denied",
+                 payload("Bash", dict(command="printf x > " + os.path.join(
+                     basestr, chr(123) + "v,w" + chr(125) + ".txt")), basestr),
+                 "brace expansion")
+            deny("bash-brace-range-denied",
+                 payload("Bash", dict(command="echo " + chr(123) + "1..3" + chr(125)), basestr),
+                 "brace expansion")
+            allow("bash-braces-literal-allowed",
+                  payload("Bash", dict(command="find . -name tmp -exec grep -l x " + chr(123)
+                                               + chr(125) + " " + chr(92) + ";"), basestr))
+            allow("bash-awk-program-allowed",
+                  payload("Bash", dict(command="awk " + chr(39) + chr(123) + "print $1, $2"
+                                               + chr(125) + chr(39) + " notes.txt"), basestr))
+            allow("bash-param-brace-allowed",
+                  payload("Bash", dict(command="echo $" + chr(123) + "HOME" + chr(125)),
+                          basestr))
+            # Each escape decoder is pinned by an operand whose PROTECTED detection depends on
+            # its exact decode: a simple escape (tab), a hex and an octal escape and a
+            # double-quoted escaped quote each spell a symlink alias or a view; a decoder that
+            # mis-decodes any of them resolves a DIFFERENT, unprotected path and would allow.
+            tab_alias = os.path.join(root, "a" + chr(9) + "b")
+            os.symlink(counters, tab_alias)
+            deny("bash-dollarquote-tab-alias-denied",
+                 payload("Bash", dict(command="printf x > $" + chr(39) + root + "/a" + chr(92)
+                                              + "tb" + chr(39)), basestr), "store tree")
+            deny("bash-dollarquote-hex-view-denied",
+                 payload("Bash", dict(command="printf x > $" + chr(39) + root + "/VER" + chr(92)
+                                              + "x53ION" + chr(39)), basestr), "VERSION")
+            deny("bash-dollarquote-octal-view-denied",
+                 payload("Bash", dict(command="printf x > $" + chr(39) + root + "/VER" + chr(92)
+                                              + "123ION" + chr(39)), basestr), "VERSION")
+            dq_alias = os.path.join(root, "a" + chr(34) + "b")
+            os.symlink(counters, dq_alias)
+            deny("bash-dq-escaped-quote-alias-denied",
+                 payload("Bash", dict(command="printf x > " + chr(34) + root + "/a" + chr(92)
+                                              + chr(34) + "b" + chr(34)), basestr), "store tree")
+            # Root discovery resolves each spelled location as the KERNEL would (realpath of the
+            # original spelling, links before dot-dot) before climbing: a link/../VERSION
+            # spelling binds the jumped-into product and denies, the unprotected twin allows.
+            root7 = os.path.join(basestr, "product7")
+            machine7 = os.path.join(root7, _opf_store.WORKING_DIRNAME, "toml")
+            os.makedirs(machine7)
+            os.makedirs(os.path.join(root7, "sub"))
+            with open(os.path.join(machine7, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]' + chr(10) + 'standard = "opf"' + chr(10) + '[views.version]'
+                         + chr(10) + 'kind = "deterministic"' + chr(10) + 'sources = ["worklog"]'
+                         + chr(10) + 'target = "VERSION"' + chr(10))
+            with open(os.path.join(root7, "VERSION"), "w", encoding="utf-8") as fh:
+                fh.write("fixture" + chr(10))
+            os.symlink(os.path.join(root7, "sub"), os.path.join(basestr, "jump7"))
+            deny("bash-symlink-dotdot-root-discovery-denied",
+                 payload("Bash", dict(command="printf overwritten > "
+                                              + os.path.join(basestr, "jump7", "..", "VERSION")),
+                         basestr), "VERSION")
+            allow("bash-symlink-dotdot-unprotected-allowed",
+                  payload("Bash", dict(command="printf x > "
+                                               + os.path.join(basestr, "jump7", "..",
+                                                              "notes.txt")), basestr))
+            # A view or frozen file whose symlinked directory points OUTSIDE the product root
+            # denies by its REAL path while the session cwd binds the product (the file tools
+            # bind rosters above the target AND above the cwd, lexical and realpathed).
+            root5 = os.path.join(basestr, "product5")
+            machine5 = os.path.join(root5, _opf_store.WORKING_DIRNAME, "toml")
+            evidence5 = os.path.join(root5, _opf_store.WORKING_DIRNAME, "imported", "adoption",
+                                     RUN_ID)
+            shared5 = os.path.join(basestr, "shared5")
+            shared5old = os.path.join(basestr, "shared5old")
+            for d in (machine5, evidence5, shared5, shared5old):
+                os.makedirs(d)
+            with open(os.path.join(machine5, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]' + chr(10) + 'standard = "opf"' + chr(10) + '[views.version]'
+                         + chr(10) + 'kind = "deterministic"' + chr(10) + 'sources = ["worklog"]'
+                         + chr(10) + 'target = "docs/VERSION"' + chr(10))
+            with open(os.path.join(evidence5, "plan.toml"), "w", encoding="utf-8") as fh:
+                fh.write('format = "opf.adoption.plan/v2"' + chr(10) + '[[sources]]' + chr(10)
+                         + 'path = "old/LEGACY.md"' + chr(10) + 'digest = "sha256:' + "0" * 64
+                         + '"' + chr(10) + 'disposition = "retire"' + chr(10)
+                         + 'occupying = false' + chr(10))
+            with open(os.path.join(shared5, "VERSION"), "w", encoding="utf-8") as fh:
+                fh.write("fixture" + chr(10))
+            with open(os.path.join(shared5old, "LEGACY.md"), "w", encoding="utf-8") as fh:
+                fh.write("fixture" + chr(10))
+            os.symlink(shared5, os.path.join(root5, "docs"))
+            os.symlink(shared5old, os.path.join(root5, "old"))
+            deny("write-view-real-outside-root-denied",
+                 payload("Write", dict(file_path=os.path.join(shared5, "VERSION"), content="x"),
+                         root5), "opf render")
+            deny("edit-frozen-real-outside-root-denied",
+                 payload("Edit", dict(file_path=os.path.join(shared5old, "LEGACY.md"),
+                                      old_string="a", new_string="b"), root5), "frozen")
+            # A symlinked store tree is a layout the writer refuses (O_NOFOLLOW), so the hook
+            # refuses to bind it and fails closed, by the link and by the real tree behind it.
+            root6 = os.path.join(basestr, "product6")
+            qstore6 = os.path.join(basestr, "qstore6")
+            os.makedirs(root6)
+            os.makedirs(os.path.join(qstore6, "toml"))
+            os.symlink(qstore6, os.path.join(root6, _opf_store.WORKING_DIRNAME))
+            deny("symlinked-working-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root6, "notes.md"), content="x"),
+                         root6), "failing closed")
+            deny("symlinked-working-real-store-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(qstore6, "toml", "counters.toml"),
+                                       content="x"), root6), "failing closed")
+            # The registration is protected at its REAL path too (a symlinked settings file is
+            # rewritable through its target), and the reserved `imports` name (spec 4.4) denies
+            # like the other control homes: a leaf under .working/imports/ is store content,
+            # never the machine-store imported-series exemption.
+            os.makedirs(os.path.join(root, ".claude"), exist_ok=True)
+            os.symlink(os.path.join(root, "config.json"),
+                       os.path.join(root, ".claude", "settings.local.json"))
+            deny("write-registration-realpath-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "config.json"), content="x"),
+                         root), "registration")
+            deny("write-imports-reserved-denied",
+                 payload("Write", dict(file_path=os.path.join(
+                     root, ".working", "imports", "worklog.imported.toml"), content="x"), root),
+                 "sanctioned writer")
+            # TodoWrite is no longer read-only-listed: a todo naming a protected path takes R7's
+            # deny (disclosed over-refusal); a free todo list stays allowed.
+            deny("todowrite-store-reference-denied",
+                 payload("TodoWrite", dict(todos=[dict(
+                     content="edit .working/toml/counters.toml", status="pending",
+                     activeForm="editing")]), root), "R7")
+            allow("todowrite-free-allowed",
+                  payload("TodoWrite", dict(todos=[dict(content="write the release notes",
+                                                        status="pending", activeForm="writing")]),
+                          root))
+            # A malformed unknown-tool envelope fails closed: a null tool_input and a missing
+            # session cwd each take a structured deny (absence of references is never permission).
+            deny("mcp-null-toolinput-denied",
+                 payload("mcp__filesystem__write_file", None, root), "failing closed")
+            deny("mcp-no-cwd-denied",
+                 payload("mcp__filesystem__write_file", dict(path="VERSION", content="x"), None),
+                 "failing closed")
+            # A single-quoted literal newline keeps a writer spelling non-pristine too (the
+            # quoted-span control-character bar covers BOTH quote kinds), so the protected
+            # mention denies instead of riding A1.
+            deny("bash-sq-newline-title-denied",
+                 payload("Bash", dict(command="opf record create --title " + chr(39) + "a"
+                                              + chr(10) + ".working" + chr(39)), root),
+                 "store tree")
+
             # Envelope fail-closed: a malformed payload and a mis-wired event each exit 2 (blocking
             # error) with a located stderr message and NO structured decision.
             rc, decision, _reason, err = run_hook(raw=b"this is not json")
@@ -1641,6 +1818,9 @@ def _claude_hook_self_test():
             rc, decision, _reason, _err = run_hook(
                 dict(hook_event_name="PreToolUse", tool_input=dict(), cwd="/"))
             expect("no-tool-name-exit", (rc, decision), (2, None))
+            rc, decision, _reason, _err = run_hook(
+                dict(hook_event_name="PreToolUse", tool_name="", tool_input=None, cwd="/"))
+            expect("empty-tool-name-exit", (rc, decision), (2, None))
             rc, decision, _reason, _err = run_hook(raw=b"[" * 200000)
             expect("deep-nesting-backstop-exit", (rc, decision), (2, None))
             # Malformed tool_input shapes take a structured deny, never a silent allow.
@@ -1886,7 +2066,23 @@ def _claude_hook_self_test():
           "double-quoted literal newline keeps a writer spelling non-pristine (denied on its "
           "protected mention), the python3 launcher form is verb-bound, Edit and NotebookEdit "
           "relative targets without a cwd deny through their own explicit mappings, and prose "
-          "slashes no longer consume the boundary-anchored discovery budget)")
+          "slashes no longer consume the boundary-anchored discovery budget. ROUND 4: the loose "
+          "lexer keeps the shell's own word boundaries (braces and control characters are "
+          "literal pathname characters: a braced product root and a carriage-return symlink "
+          "alias both deny) and refuses a brace pattern the shell would expand while literal "
+          "brace operands (find's empty-brace operand, a quoted awk program, a parameter "
+          "expansion) stay allowed, each dollar-quote and double-quote escape decoder is pinned "
+          "by a protected operand whose detection depends on its exact decode (a tab alias, hex "
+          "and octal view spellings, an escaped-quote alias), root discovery realpaths each "
+          "spelled location before climbing (a link/../VERSION spelling binds the jumped-into "
+          "product), the file-tool rosters bind above the session cwd too (a view or frozen "
+          "file behind a directory symlink pointing OUTSIDE the product denies by its real "
+          "path), a symlinked store tree fails closed by the link and by the real tree behind "
+          "it, the registration denies at its real path, the reserved imports store home "
+          "denies, TodoWrite takes R7's scan (a protected mention in a todo denies, a free "
+          "todo list allows), an unknown tool with a null tool_input or no session cwd takes a "
+          "structured deny, an empty tool_name exits 2, and a single-quoted literal newline "
+          "keeps a writer spelling non-pristine)")
     return EXIT_OK
 
 

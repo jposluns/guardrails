@@ -51,11 +51,18 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      a target equal to one is denied (views change only through `opf render`; spec 5.8, 14.1).
   R5 Bash writes the matcher CAN see. EVERY Bash command is first dequoted WHOLE by a shell-aware
      loose lexer (quoted spans, backslash escapes, ANSI-C dollar-quoted spans, word-start comments,
-     here-document bodies and arithmetic spans are read; unquoted shell operator characters split
-     words), so a quoted operand stays one word even when redirection or sequencing rides beside it.
+     here-document bodies and arithmetic spans are read; ONLY the shell's own unquoted operator
+     characters split words, so braces, carriage returns and the other literal pathname characters
+     the shell keeps inside a word stay inside the word here too), so a quoted operand stays one
+     word even when redirection or sequencing rides beside it, and a path spelled with a literal
+     brace or control character still binds and matches. A word carrying an unquoted brace pattern
+     the shell would EXPAND (a comma or `..` between unquoted braces) DENIES as cannot-evaluate:
+     the expansion could spell a protected path this lexer cannot see (a literal `{}` operand or a
+     quoted brace stays a word; `${` is parameter expansion, the disclosed lexical floor).
      A command whose quote or here-document structure cannot be read to the end (an unterminated
      quote, a trailing backslash, an undecodable dollar-quote escape, an unreadable here-document
-     delimiter, an unclosed arithmetic span) DENIES as cannot-evaluate: the shell could run such a
+     delimiter, an unclosed arithmetic span, an unquoted brace pattern the shell would
+     expand) DENIES as cannot-evaluate: the shell could run such a
      command differently than this hook read it, and a partially read command is never judged. A
      command whose raw text or dequoted words reference a protected token is denied unless the WHOLE
      command is a single plain invocation of the sanctioned writer (allowance A1 below); there is no
@@ -103,7 +110,10 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      expanded, realpathed, control characters included: a path may legally carry them), to the
      store, a frozen path, a declared view or the pack's own files (R8), and is denied
      cannot-evaluate when the payload exceeds the string-scan budget (the hook never judges a partial
-     scan), because the hook cannot prove such a tool read-only. A payload string longer than a
+     scan), because the hook cannot prove such a tool read-only; a payload carrying no tool_input
+     OBJECT at all, and a payload with no absolute session cwd (its relative strings cannot be
+     resolved and no roster can be bound), are likewise denied cannot-evaluate, never read as
+     naming nothing. A payload string longer than a
      platform path (PATH_MAX) cannot name a reachable file and is judged textually only. The known read-only
      built-ins (Read, Glob, Grep and the other names in READONLY_TOOLS) are allowed outright; tools
      that only launch further hooked tool calls (Task, Skill) are treated as read-only here because
@@ -124,8 +134,9 @@ must be PRISTINE under a quote-aware scan of the raw string: outside quotes no m
 (no semicolon, ampersand, pipe, angle bracket, backquote, dollar sign, parenthesis, brace, backslash,
 carriage return or newline), a single-quoted span is wholly literal argument data, a double-quoted span
 may carry no dollar sign, backquote or backslash (those expansions stay live inside double quotes), no
-quoted span may carry a control character (a writer title with a literal newline takes the deny, a
-disclosed over-refusal: spell writer arguments without control characters), and
+quoted span, single-quoted spans included, may carry a control character other than tab (a writer
+title with a literal newline takes the deny, a disclosed over-refusal: spell writer arguments
+without control characters), and
 every quote must be terminated. So no second command, redirection, substitution or expansion can ride
 along, while a sanctioned invocation may still QUOTE prose or a path that names a protected token (an
 `opf record` title, an `opf render --root` operand with spaces or parentheses). A leading VAR=value
@@ -151,6 +162,16 @@ per-platform residual coverage carry the same list):
     relative spelling of a frozen or view path that climbs into an unbound product tree resolves to
     no bound roster and passes both the token scan and the word-resolution pass (the store tree
     itself still denies by its `.working` component).
+  - A protected file reached ONLY by its real path with the session outside its product: each
+    roster entry carries its realpath spelling (a symlinked directory inside OR outside the
+    product root included), so such a write denies whenever a roster is BOUND (a product root at
+    or above the written target or the session cwd, each judged lexically and realpathed); but
+    when the entry's real path lies outside every product root AND the session cwd binds no root,
+    no roster is discovered and the real-path write passes. The writer refuses symlinked view
+    destinations, the planner refuses symlinked sources, and the writer refuses a symlinked
+    `.working` (which this hook likewise refuses to bind as a store, failing closed), so a valid
+    store never carries such a layout; reaching it takes a prior re-layout outside these tools
+    (same-user preparation).
   - A tool outside the named rules whose payload neither names a protected token nor resolves to one:
     R7's path pass judges every payload string as a resolvable target, so a relative or tilde
     spelling that RESOLVES to a protected path is caught, but a spelling the hook cannot resolve
@@ -188,7 +209,11 @@ per-platform residual coverage carry the same list):
     absolute paths or operands than the discovery budget and an unknown-tool payload over the
     string-scan budget deny as cannot-evaluate even when reference-free, as does a command whose
     quote or here-document structure cannot be read to the end (the shell could run it differently
-    than the hook read it). R8 denies rewriting the pack's own files and the per-product
+    than the hook read it), a command carrying an unquoted brace pattern the shell would expand
+    (`mkdir {a,b}`: the expansion could spell a protected path the lexer cannot see), an unknown
+    tool's payload with no tool_input object or no absolute session cwd, and a TodoWrite
+    (write-capable on some platforms, so no longer read-only-listed) whose todo text names a
+    protected path. R8 denies rewriting the pack's own files and the per-product
     registration through the gated tools (read them with the Read tool; change them outside a
     hooked session), and the word-resolution pass denies a command that merely names a protected or
     pack-owned file as a resolvable argument. R6
@@ -256,9 +281,10 @@ MANIFEST_STANDARD = "opf"
 # malformed plan and R6 fails closed on it rather than silently skipping the row.
 VALID_DISPOSITIONS = frozenset(("keep", "move", "migrate", "retire"))
 FROZEN_DISPOSITIONS = ("migrate", "retire")  # the old-file dispositions that freeze in place (spec 14.1)
-# The store-tree control subdirs (spec 4.2): a first component after .working/ outside this set is a
+# The store-tree control subdirs (spec 4.2; spec 4.4 reserves the names imports, imported, archive,
+# staging and journals at the store level): a first component after .working/ outside this set is a
 # machine-store candidate, where the imported-series leaf exemption below may apply.
-CONTROL_SUBDIRS = frozenset(("imported", "archive", "staging", "journals"))
+CONTROL_SUBDIRS = frozenset(("imports", "imported", "archive", "staging", "journals"))
 # The imported-series leaves (spec 8.3) stay EXEMPT until the import writer ships (module docstring).
 IMPORTED_LEAF_RE = re.compile(r"\A(worklog\.imported\.toml|[A-Za-z0-9_-]+\.imported\.index\.toml)\Z")
 
@@ -266,9 +292,11 @@ IMPORTED_LEAF_RE = re.compile(r"\A(worklog\.imported\.toml|[A-Za-z0-9_-]+\.impor
 FILE_TOOL_TARGET = dict(Write="file_path", Edit="file_path", MultiEdit="file_path",
                         NotebookEdit="notebook_path")
 # The known read-only built-ins (R7): allowed outright. Task and Skill only launch further tool calls,
-# each judged by this hook on its own, so they sit here too. Every OTHER tool name takes R7's scan.
+# each judged by this hook on its own, so they sit here too. TodoWrite is NOT listed: it is
+# write-capable on some platforms and this hook cannot prove its input names no file, so it takes
+# R7's scan like every other unlisted tool. Every OTHER tool name takes R7's scan.
 READONLY_TOOLS = frozenset(("Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch",
-                            "Task", "Agent", "TodoWrite", "ExitPlanMode", "AskUserQuestion",
+                            "Task", "Agent", "ExitPlanMode", "AskUserQuestion",
                             "BashOutput", "TaskOutput", "KillShell", "KillBash", "SlashCommand",
                             "Skill"))
 
@@ -280,11 +308,13 @@ READONLY_TOOLS = frozenset(("Read", "Glob", "Grep", "LS", "NotebookRead", "WebFe
 METACHARS = frozenset(chr(c) for c in (59, 38, 124, 60, 62, 96, 36, 40, 41, 123, 125, 92, 13, 10))
 DQ_LIVE = frozenset(chr(c) for c in (36, 96, 92))
 QUOTES = frozenset(chr(c) for c in (39, 34))
-# The loose-lexer word separators (R5): unquoted shell operator characters end a word the way the
-# shell's own lexer does (semicolon, ampersand, pipe, the two angle brackets, the two parentheses,
-# the two braces, backquote, carriage return; space, tab, newline and the remaining control
-# characters are handled in the lexer itself), so a quoted operand beside a redirection stays whole.
-WORD_SEPARATORS = frozenset(chr(c) for c in (59, 38, 124, 60, 62, 40, 41, 123, 125, 96, 13))
+# The loose-lexer word separators (R5): ONLY the shell's own unquoted operator characters end a
+# word (semicolon, ampersand, pipe, the two angle brackets, the two parentheses, backquote; space,
+# tab and newline are handled in the lexer itself), so a quoted operand beside a redirection stays
+# whole. Braces, carriage returns and the other control characters are NOT separators: the shell
+# keeps them inside a word (a pathname may carry them literally), so this lexer keeps them too,
+# and a word whose unquoted braces the shell would EXPAND is refused instead (_loose_words).
+WORD_SEPARATORS = frozenset(chr(c) for c in (59, 38, 124, 60, 62, 40, 41, 96))
 # The backslash-escapable set INSIDE double quotes (dollar, backquote, double quote, backslash,
 # newline); before any other character a double-quoted backslash stays literal, as in the shell.
 DQ_ESCAPABLE = frozenset(chr(c) for c in (36, 96, 34, 92, 10))
@@ -397,20 +427,23 @@ def _store_rule(candidate):
 
 def _roots_above(path):
     """Every product root at or above `path` (a directory holding a `.working` entry, nearest
-    first): (roots, None), or (None, reason) when a `.working` entry EXISTS somewhere above but
-    does not resolve to a directory (a dangling symlink or a non-directory): a store tree that
-    cannot be read is cannot-evaluate, never an absent root (R6)."""
+    first): (roots, None), or (None, reason) when a `.working` entry EXISTS somewhere above but is
+    not a plain directory (a SYMLINK, even to a directory: the writer refuses a symlinked
+    `.working` with O_NOFOLLOW, so this hook refuses to bind one as a store; a dangling link; or a
+    non-directory): a store tree that cannot be read as the writer would read it is
+    cannot-evaluate, never an absent root (R6)."""
     roots = []
     cur = os.path.normpath(path)
     while True:
         if os.path.basename(cur) != WORKING:
             entry = os.path.join(cur, WORKING)
-            if os.path.isdir(entry):
+            if os.path.isdir(entry) and not os.path.islink(entry):
                 roots.append(cur)
             elif os.path.lexists(entry):
-                return None, ("the store entry %s exists but does not resolve to a directory (a "
-                              "dangling symlink or a non-directory store tree cannot be read)"
-                              % (entry,))
+                return None, ("the store entry %s exists but is not a plain directory (a symlinked, "
+                              "dangling or non-directory %s tree is a layout the sanctioned writer "
+                              "refuses, and this hook will not bind a store it cannot read as the "
+                              "writer would)" % (entry, WORKING))
         parent = os.path.dirname(cur)
         if parent == cur:
             return roots, None
@@ -596,7 +629,9 @@ def _view_targets(root):
 def _abs_spellings(root, rel):
     """The lexical AND realpath absolute spellings of one roster entry: a protected path that runs
     through a symlinked directory (docs -> site_docs) is the same file through its REAL directory,
-    so each roster entry contributes both spellings and a write through either one matches."""
+    so each roster entry contributes both spellings and a write through either one matches ONCE A
+    ROSTER IS BOUND (a product root at or above the written target or the session cwd); the
+    real-path-outside-every-root, cwd-outside-every-root case is a disclosed residual."""
     apath = os.path.normpath(os.path.join(root, rel))
     try:
         rpath = os.path.normpath(os.path.realpath(apath))
@@ -628,7 +663,11 @@ def _rosters(roots):
 
 
 def _file_tool_rule(tool_name, tool_input, cwd):
-    """R1-R4, R6 and R8 for the write-capable file tools; returns a deny reason or None (allow)."""
+    """R1-R4, R6 and R8 for the write-capable file tools; returns a deny reason or None (allow).
+    Rosters bind from the product roots above each candidate target AND above the session cwd
+    (each judged lexically and as the kernel resolves it), so a view or frozen file reached by its
+    REAL path behind a symlinked directory, the symlink target outside the product root included,
+    still denies while the session sits inside its product."""
     field = FILE_TOOL_TARGET[tool_name]
     if not isinstance(tool_input, dict):
         return "the %s payload carries no tool_input object; failing closed (R6)" % (tool_name,)
@@ -640,6 +679,22 @@ def _file_tool_rule(tool_name, tool_input, cwd):
     if cands is None:
         return ("the %s target %r is relative and the payload carries no absolute session cwd to "
                 "resolve it against; failing closed (R6)" % (tool_name, target))
+    cwd_roots = []
+    if isinstance(cwd, str) and os.path.isabs(cwd):
+        spellings = [os.path.normpath(cwd)]
+        try:
+            resolved = os.path.normpath(os.path.realpath(cwd))
+        except (OSError, ValueError):
+            resolved = None
+        if resolved is not None and resolved not in spellings:
+            spellings.append(resolved)
+        for spelling in spellings:
+            got, reason = _roots_above(spelling)
+            if reason is not None:
+                return reason + "; failing closed (R6)"
+            for root in got:
+                if root not in cwd_roots:
+                    cwd_roots.append(root)
     for cand in cands:
         reason = _store_rule(cand)
         if reason is not None:
@@ -650,9 +705,13 @@ def _file_tool_rule(tool_name, tool_input, cwd):
         roots, reason = _roots_above(os.path.dirname(cand))
         if reason is not None:
             return reason + "; failing closed (R6)"
+        roots = list(roots)
+        for root in cwd_roots:
+            if root not in roots:
+                roots.append(root)
         if not roots:
             continue
-        reason = _registration_rule(cand, roots)
+        reason = _registration_rule(cand, _registration_idents(roots))
         if reason is not None:
             return reason
         frozen, views, reason = _rosters(roots)
@@ -670,7 +729,8 @@ def _file_tool_rule(tool_name, tool_input, cwd):
 
 def _pristine_tokens(command):
     """The shell-aware tokens of a PRISTINE command (module docstring: no unquoted metacharacter or
-    control character, single-quoted spans wholly literal, double-quoted spans with no live dollar
+    control character, no control character other than tab in ANY quoted span, single-quoted spans
+    otherwise wholly literal, double-quoted spans with no live dollar
     sign, backquote or backslash, every quote terminated); or None when the command is not pristine.
     Leading VAR=value assignments are KEPT: an assignment changes what a program does, so an
     assignment-bearing command is never the sanctioned writer. Quoted spans tokenize as argument
@@ -680,6 +740,8 @@ def _pristine_tokens(command):
         if mode == chr(39):
             if ch == chr(39):
                 mode = ""
+            elif ord(ch) < 0x20 and ch != "\t":
+                return None
             else:
                 cur.append(ch)
             continue
@@ -731,18 +793,36 @@ def _guard_rule(candidate):
     return None
 
 
-def _registration_rule(candidate, roots):
-    """R8 over one absolute candidate path: a deny reason when it is a bound product root's hook
-    registration (.claude/settings.json or .claude/settings.local.json), or None."""
-    base = os.path.basename(candidate)
-    if base not in REGISTRATION_LEAVES:
-        return None
+def _registration_idents(roots):
+    """The protected registration identities over `roots` (R8): for each root and registration
+    leaf, the lexical spelling AND the realpath of the registration entry (a registration that is
+    itself a symlink is rewritable through its target, WHEREVER that target lies, so the real file
+    is a protected identity too), each mapped to its (root, registration path)."""
+    idents = {}
     for root in roots:
-        if candidate == os.path.normpath(os.path.join(root, ".claude", base)):
-            return ("%r is the Claude Code settings registration of the product root %r: the hook "
-                    "registration cannot be rewritten through the tool calls it gates (R8). Edit "
-                    "the registration outside a hooked session." % (candidate, root))
-    return None
+        for base in sorted(REGISTRATION_LEAVES):
+            reg = os.path.normpath(os.path.join(root, ".claude", base))
+            idents.setdefault(reg, (root, reg))
+            try:
+                real = os.path.normpath(os.path.realpath(reg))
+            except (OSError, ValueError):
+                continue
+            idents.setdefault(real, (root, reg))
+    return idents
+
+
+def _registration_rule(candidate, idents):
+    """R8 over one absolute candidate path against `idents` (_registration_idents): a deny reason
+    when it is, by its spelled or its REAL path, a bound product root's hook registration
+    (.claude/settings.json or .claude/settings.local.json), or None."""
+    hit = idents.get(candidate)
+    if hit is None:
+        return None
+    root, reg = hit
+    return ("%r is the Claude Code settings registration %s of the product root %r (matched by its "
+            "spelled or its real path): the hook registration cannot be rewritten through the tool "
+            "calls it gates (R8). Edit the registration outside a hooked session."
+            % (candidate, reg, root))
 
 
 def _sanctioned_writer():
@@ -864,9 +944,14 @@ def _mentions_rel(rel, text):
 def _loose_words(command):
     """R5's shell-aware loose dequote of the WHOLE command: (words, None), or (None, reason) when
     the quote or here-document structure cannot be read to the end. A quoted span joins the current
-    word (a quoted operand beside redirection or sequencing stays whole), an unquoted operator or
-    control character splits words, a word-start # comment runs to end of line, a here-document
-    body contributes each of its lines as one data word, and an arithmetic $((...)) span stays
+    word (a quoted operand beside redirection or sequencing stays whole); ONLY an unquoted shell
+    operator character, space, tab or newline splits words (braces, carriage returns and the other
+    control characters stay IN the word, exactly as the shell keeps them: a pathname may carry
+    them literally); a word whose unquoted braces the shell would EXPAND (a comma or a double dot
+    between an unquoted brace pair; a dollar sign immediately before the brace is parameter
+    expansion, not brace expansion) is refused as a brace expansion this lexer cannot enumerate;
+    a word-start # comment runs to end of line; a here-document
+    body contributes each of its lines as one data word; and an arithmetic $((...)) span stays
     inside its word (never a false here-document). Unlike _pristine_tokens this lexer reads EVERY
     command; its words feed the roster token scan, the root binding and the word-resolution pass,
     never any allowance."""
@@ -874,6 +959,8 @@ def _loose_words(command):
     cur = []
     has = False
     pending = []
+    braces = []    # open unquoted-brace records of the CURRENT word; [True] once expandable
+    prev = None    # the last PLAIN unquoted character appended (None after any quoted span)
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -883,11 +970,13 @@ def _loose_words(command):
                 return None, "an unterminated single-quoted span"
             cur.append(command[i + 1:end])
             has = True
+            prev = None
             i = end + 1
             continue
         if ch == chr(34):
             i += 1
             has = True
+            prev = None
             while True:
                 if i >= n:
                     return None, "an unterminated double-quoted span"
@@ -916,6 +1005,7 @@ def _loose_words(command):
             if command[i + 1] != chr(10):
                 cur.append(command[i + 1])
                 has = True
+                prev = None
             i += 2
             continue
         if ch == chr(36) and command[i + 1:i + 2] == chr(39):
@@ -924,14 +1014,21 @@ def _loose_words(command):
                 return None, reason
             cur.append("".join(got))
             has = True
+            prev = None
             i = nxt
             continue
         if ch == chr(36) and command[i + 1:i + 3] == "((":
             end = command.find("))", i + 3)
             if end < 0:
                 return None, "an unclosed arithmetic span"
-            cur.append(command[i:end + 2])
+            span = command[i:end + 2]
+            if chr(123) in span and ("," in span or ".." in span):
+                # brace expansion runs BEFORE arithmetic expansion and is purely textual, so an
+                # expandable brace pattern inside the span could split it into unseen words.
+                return None, "a brace expansion this hook does not enumerate"
+            cur.append(span)
             has = True
+            prev = None
             i = end + 2
             continue
         if ch == "#" and not has:
@@ -943,7 +1040,7 @@ def _loose_words(command):
         if ch == chr(10):
             if has:
                 words.append("".join(cur))
-            cur, has = [], False
+            cur, has, braces, prev = [], False, [], None
             i += 1
             while pending:
                 delim, strip_tabs = pending.pop(0)
@@ -963,13 +1060,13 @@ def _loose_words(command):
         if ch == "<" and command[i:i + 3] == "<<<":
             if has:
                 words.append("".join(cur))
-            cur, has = [], False
+            cur, has, braces, prev = [], False, [], None
             i += 3
             continue
         if ch == "<" and command[i:i + 2] == "<<":
             if has:
                 words.append("".join(cur))
-            cur, has = [], False
+            cur, has, braces, prev = [], False, [], None
             i += 2
             strip_tabs = command[i:i + 1] == "-"
             if strip_tabs:
@@ -1002,14 +1099,26 @@ def _loose_words(command):
                 return None, "a here-document with no delimiter"
             pending.append(("".join(delim), strip_tabs))
             continue
-        if ch in WORD_SEPARATORS or ch in (" ", chr(9)) or ord(ch) < 32:
+        if ch in WORD_SEPARATORS or ch in (" ", chr(9)):
             if has:
                 words.append("".join(cur))
-            cur, has = [], False
+            cur, has, braces, prev = [], False, [], None
             i += 1
             continue
+        if ch == chr(123):
+            if prev != chr(36):  # a dollar sign before the brace is parameter expansion
+                braces.append([False])
+        elif ch == chr(125):
+            if braces and braces.pop()[0]:
+                return None, "a brace expansion this hook does not enumerate"
+        elif ch == ",":
+            if braces:
+                braces[-1][0] = True
+        elif ch == "." and prev == "." and braces:
+            braces[-1][0] = True
         cur.append(ch)
         has = True
+        prev = ch
         i += 1
     if has:
         words.append("".join(cur))
@@ -1024,13 +1133,13 @@ def _bound_roots(text, cwd, extras=()):
     there is one), above every absolute path spelled in `text`, and above every `extras` entry (a
     dequoted Bash word or payload string, tilde-expanded) that is absolute, so an absolute
     protected spelling is judged even when the session sits outside its product tree and a quoted
-    root with spaces binds through its whole operand."""
-    roots = []
+    root with spaces binds through its whole operand. EVERY bound location is judged both as
+    spelled (lexically normalized) and as the KERNEL would resolve it (realpath of the original
+    spelling, each symlink resolved before any dot-dot collapses), so a link/../file spelling
+    binds the roster of the product the write actually reaches, never only its lexical twin."""
+    seeds = []
     if isinstance(cwd, str) and os.path.isabs(cwd):
-        got, reason = _roots_above(cwd)
-        if reason is not None:
-            return None, reason
-        roots = list(got)
+        seeds.append(cwd)
     matches = ABS_PATH_RE.findall(text)
     if len(matches) > MAX_ABS_PATHS:
         return None, ("the command or payload spells %d absolute paths, over the %d-path roster "
@@ -1047,7 +1156,23 @@ def _bound_roots(text, cwd, extras=()):
                       "discovery budget, and this hook will not judge a truncated scan"
                       % (len(cands), MAX_ABS_PATHS))
     for cand in sorted(cands):
-        got, reason = _roots_above(os.path.normpath(cand))
+        seeds.append(cand)
+    spellings = []
+    for seed in seeds:
+        # realpath the ORIGINAL spelling (the kernel resolves each link BEFORE a dot-dot climbs
+        # out of it); normpath only the lexical twin and the already-resolved result.
+        norm = os.path.normpath(seed)
+        if norm not in spellings:
+            spellings.append(norm)
+        try:
+            resolved = os.path.normpath(os.path.realpath(seed))
+        except (OSError, ValueError):
+            continue
+        if resolved not in spellings:
+            spellings.append(resolved)
+    roots = []
+    for spelling in spellings:
+        got, reason = _roots_above(spelling)
         if reason is not None:
             return None, reason
         for root in got:
@@ -1097,6 +1222,7 @@ def _bash_rule(tool_input, cwd):
     frozen, views, reason = _rosters(roots)
     if reason is not None:
         return reason + "; failing closed (R6)"
+    reg_idents = _registration_idents(roots)
     kind = _reference_kind(scan, cwd, ((frozen[0], frozen[1]), (views[0], views[1])))
     if kind is not None:
         return ("this Bash command references %s and is not a single plain invocation of the "
@@ -1139,7 +1265,7 @@ def _bash_rule(tool_input, cwd):
                 reason = _guard_rule(cand)
                 if reason is not None:
                     return reason
-            reason = _registration_rule(cand, roots)
+            reason = _registration_rule(cand, reg_idents)
             if reason is not None:
                 return reason
     return None
@@ -1172,11 +1298,22 @@ def _other_tool_rule(tool_name, tool_input, cwd):
     as R5) OR resolves, judged exactly as a file-tool target would be (cwd-joined, tilde expanded,
     realpathed, control characters included: a path may legally carry them), to the store, a frozen
     path, a declared view or the pack's own files (R8); and denied cannot-evaluate when the
-    string-scan budget is exceeded (the hook never judges a partial scan). A payload with neither a
+    string-scan budget is exceeded (the hook never judges a partial scan). A payload carrying no
+    tool_input object, and a payload with no absolute session cwd (its relative strings cannot be
+    resolved and no roster can be bound), are denied cannot-evaluate, never read as naming
+    nothing. A payload with neither a
     textual nor a resolvable protected reference is allowed (the disclosed residual). The known
     read-only built-ins are allowed outright."""
     if tool_name in READONLY_TOOLS:
         return None
+    if not isinstance(tool_input, dict):
+        return ("the tool %r is not one this hook knows to be read-only and its payload carries no "
+                "tool_input object, so it cannot be examined at all; failing closed (R6, R7)"
+                % (tool_name,))
+    if not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return ("the tool %r is not one this hook knows to be read-only and its payload carries no "
+                "absolute session cwd, so its relative strings cannot be resolved and the "
+                "protected rosters cannot be bound; failing closed (R6, R7)" % (tool_name,))
     strings, truncated = _payload_strings(tool_input)
     if truncated:
         return ("the tool %r is not one this hook knows to be read-only and its payload exceeds the "
@@ -1201,13 +1338,14 @@ def _other_tool_rule(tool_name, tool_input, cwd):
     frozen, views, reason = _rosters(roots)
     if reason is not None:
         return reason + "; failing closed (R6)"
+    reg_idents = _registration_idents(roots)
     kind = _reference_kind(text, cwd, ((frozen[0], frozen[1]), (views[0], views[1])))
     if kind is None:
         for cand in paths:
             reason = _guard_rule(cand)
             if reason is not None:
                 return reason
-            reason = _registration_rule(cand, roots)
+            reason = _registration_rule(cand, reg_idents)
             if reason is not None:
                 return reason
             if _store_rule(cand) is not None:
@@ -1234,9 +1372,9 @@ def main():
                          "blocked (spec 14.1 denial posture).\n" % (exc,))
         return 2
     tool_name = payload.get("tool_name")
-    if not isinstance(tool_name, str):
-        sys.stderr.write("opf-pretooluse-deny: cannot evaluate: the payload carries no tool_name. "
-                         "Failing closed: the tool call is blocked.\n")
+    if not isinstance(tool_name, str) or not tool_name:
+        sys.stderr.write("opf-pretooluse-deny: cannot evaluate: the payload carries no non-empty "
+                         "tool_name. Failing closed: the tool call is blocked.\n")
         return 2
     cwd = payload.get("cwd")
     tool_input = payload.get("tool_input")
