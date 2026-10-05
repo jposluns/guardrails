@@ -12,10 +12,18 @@ the unread active source. It no longer grades an unread ledger as empty. A later
 intake failure also stops traversal before archive reads. Independently invoked
 archive intake retains its fixed legacy shape and has no manifest contract.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_worklog_regressions.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import contextlib
 import os
 import stat
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch

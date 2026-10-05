@@ -89,10 +89,18 @@ following where sections 6 and 7 leave a gap:
     This unit is that ledger; the release-delta consumer is not built here (build-plan U3 does not assign
     it), and is noted for the finalizer rather than stubbed.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_release.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import json
 import re
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1946,6 +1954,26 @@ def self_test():
     check("d1-worklog-present-schema-ok", validate_worklog({"schema": 1, "entry": []}).status == VALID)
     check("d1-standalone-guard-absent-schema-finding",
           bool(check_frozen_coverage({"release": []}, {})))
+
+    # A duplicate long WL id never crashes the worklog validators under any ambient int-to-str limit: the
+    # clean id parser accepts an id only when its number renders back under that same limit, so the
+    # duplicate-id message is always produced (test-hermeticity; guard-input-soundness). The verdict at
+    # each limit matches the clean-only rule: malformed past the limit, a duplicate within it.
+    _prev_wl_limit = sys.get_int_max_str_digits()
+    try:
+        for _limit in (0, 640, 4300, 271828):
+            sys.set_int_max_str_digits(_limit)
+            _long = dict(entry(1), id="WL-" + "9" * 641)
+            try:
+                _long_v = validate_worklog(dict(schema=1, entry=[_long, dict(_long)]))
+                _long_by = _entries_by_id(dict(entry=[_long, dict(_long)]))
+            except ValueError:
+                _long_v = _long_by = None
+            check("worklog-duplicate-long-id-no-crash-limit-{}".format(_limit),
+                  _long_v is not None and _long_v.status == INVALID and _long_by is not None
+                  and any("duplicate worklog id" in f for f in _long_v.findings) == (_limit != 640))
+    finally:
+        sys.set_int_max_str_digits(_prev_wl_limit)
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))

@@ -549,20 +549,31 @@ def self_test_main():
     scrub_git_environment()
     failures = []
 
-    # F-TOML-BARE-VALUEERROR-CLASS: a 1200-deep nested array makes tomllib raise RecursionError (a
-    # RuntimeError, not a ValueError); the baseline parse must still fail closed as GateError. The recursion
-    # limit is pinned to the CPython default 1000 (test-hermeticity) and restored in finally.
-    prev_reclimit = sys.getrecursionlimit()
-    sys.setrecursionlimit(1000)
+    # F-TOML-BARE-VALUEERROR-CLASS: a parser overflow makes tomllib raise RecursionError (a RuntimeError, not
+    # a ValueError); the baseline parse must still fail closed as GateError carrying the overflow.
+    # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise valid
+    # input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+    # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an unrelated
+    # refusal) under another.
+    real_loads, real_load = tomllib.loads, tomllib.load
+
+    def overflowing_loads(text, **kwargs):
+        if "injected-overflow" in text:
+            raise RecursionError("injected parser overflow")
+        return real_loads(text, **kwargs)
+
+    tomllib.loads = overflowing_loads
+    tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
     try:
-        _parse_base_releases("deep = " + "[" * 1200 + "]" * 1200 + "\n")
-        failures.append("a deeply nested baseline changelog.toml must fail closed (GateError)")
-    except GateError:
-        pass
+        _parse_base_releases("deep = 1  # injected-overflow\n")
+        failures.append("a baseline changelog.toml parser overflow must fail closed (GateError)")
+    except GateError as exc:
+        if "injected parser overflow" not in str(exc):
+            failures.append("a baseline parser overflow was refused without its finding ({})".format(exc))
     except RecursionError:
-        failures.append("a deeply nested baseline changelog.toml let a bare RecursionError escape")
+        failures.append("a baseline changelog.toml parser overflow let a bare RecursionError escape")
     finally:
-        sys.setrecursionlimit(prev_reclimit)
+        tomllib.loads, tomllib.load = real_loads, real_load
 
     # M1 (prefix identity): (base, head, expect_a_finding).
     prefix_cases = [

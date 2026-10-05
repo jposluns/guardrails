@@ -488,6 +488,8 @@ docs/standard.md text eol=lf
 docs/teams.md text eol=lf
 opf/enforcement/ci/github-actions.yml text eol=lf
 opf/enforcement/ci/opf-ci.sh text eol=lf
+opf/enforcement/precommit/install.sh text eol=lf
+opf/enforcement/precommit/pre-commit text eol=lf
 opf/prompt-pack/pack.toml text eol=lf
 opf/site/_redirects text eol=lf
 opf/site/about.html text eol=lf
@@ -507,6 +509,7 @@ opf/site/store-meta.html text eol=lf
 opf/site/styles.css text eol=lf
 opf/site/theme.js text eol=lf
 opf/site/tooling.html text eol=lf
+opf/spec/OPF-IMPLEMENTATION-PROMPT.md text eol=lf
 opf/spec/OPF-INIT-D2B-REVIEW.md text eol=lf
 opf/spec/OPF-INIT-D2B.md text eol=lf
 opf/spec/OPF-QUICKSTART.md text eol=lf
@@ -603,7 +606,7 @@ site/downloads/aiqt-instructions-1_5k.txt text eol=lf
 site/downloads/aiqt-instructions-5k.txt text eol=lf
 site/downloads/aiqt-instructions-8k.txt text eol=lf
 site/downloads/aiqt-instructions.txt text eol=lf
-site/downloads/aiqt-skill-1.0.5.zip binary
+site/downloads/aiqt-skill-1.0.6.zip binary
 site/downloads/aiqt-skill.zip binary
 site/downloads/aiqt/SKILL.md text eol=lf
 site/downloads/aiqt/manifest.json text eol=lf

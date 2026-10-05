@@ -54,8 +54,16 @@ holds.
 
 Exit convention (the repo's gates and the sibling OPF units): 0 clean, 1 a finding, 2 cannot-evaluate.
 """
-import re
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_adopt.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
+import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -427,9 +435,12 @@ ADOPT_OPS = (
          "yes; a structured JSON merge, re-emitted byte-exact, never a blind append",)),
     AdoptOp(
         "render-views", ("store_root", "members"), ("create", "write"),
-        "remove the views this op created (the render engine refuses to write over an invalid store)",
-        ("delegates to the render engine, which itself refuses to write over an invalid store; it writes "
-         "exactly its members, one per declared view destination",)),
+        "remove the views this op created, each from its journaled absent preimage",
+        ("composes create-only view publications into the journaled apply transaction; the render engine's "
+         "read-only planner supplies the bytes and the U6 source gate refuses an unsound store; every "
+         "destination is observed absent (an occupied view destination refuses fail-closed; its "
+         "preserve-then-render write joins with the file ops, so the declared write effect is not yet "
+         "exercised); it writes exactly its members, one per declared view destination",)),
     AdoptOp(
         "record-adoption", ("receipt_path", "receipt_core_digest"), ("create", "write"),
         "remove or restore the receipt artefacts to their prior state",

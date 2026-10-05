@@ -1797,6 +1797,9 @@ _CLOSE_SWEEP_DISPOSITIONS = (
                    "(plan_fd, op_fd, ops_fd) skips plan_fd, and the body never closes op_fd or ops_fd")),
     ("tools/check_crosswalk.py", "_open_archive_dir", "TRY", "prev", "fd", 1,
      _CS_P1.format("prev, fd = fd, nxt runs before the close of prev, so the handler closes nxt, never prev")),
+    ("tools/gen_skill.py", "_open_dir_fd", "TRY", "prev", "fd", 1,
+     _CS_P1.format("prev, fd = fd, nxt runs before os.close(prev), so the handler closes nxt (or nothing, once "
+                   "an absent component left fd None), never prev")),
     ("tools/check_release_cut.py", "working_blob", "TRY", "parent", "directory", 1,
      _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally closes "
                    "child, never parent")),
@@ -1822,6 +1825,10 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      _CS_FRESH.format("self-test legs", "os.open")),
     ("opf/tools/_opf_check.py", "self_test", "AFTER", "sfd", "sfd", 1,
      _CS_FRESH.format("self-test legs", "leg's os.open of a staged-ids fixture root")),
+    ("tools/gen_skill.py", "self_test_main", "REBIND", "race_fd", "", 1,
+     _CS_LEGS.format("_open_root of the race fixture")),
+    ("tools/gen_skill.py", "self_test_main", "AFTER", "race_fd", "race_fd", 1,
+     _CS_FRESH.format("self-test legs", "leg's _open_root of the race fixture")),
     ("opf/tools/_journal.py", "_fake_close", "REBIND", "fd", "", 1,
      "false positive: the harness's fault stub publishes the number it released to its reuser thread "
      "(state[\"fd\"] = fd); the re-binding is that store into state, whose one element key rule 3 joins to fd, "

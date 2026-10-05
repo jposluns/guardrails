@@ -286,11 +286,15 @@ def _write_payload(entry_fd, digest, data):
     tmp_name = "payload.{}.{}.tmp".format(os.getpid(), next(_TMP_SEQ))
     tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=entry_fd)
     try:
-        with os.fdopen(tfd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())                         # temp bytes durable BEFORE the atomic publish
-            tmp_stat = os.fstat(fh.fileno())              # retain the temp inode BEFORE the fd closes
+        # closefd=False: the one close is ours, so a raising fdopen neither leaks it nor closes it twice
+        try:
+            with os.fdopen(tfd, "wb", closefd=False) as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())                     # temp bytes durable BEFORE the atomic publish
+                tmp_stat = os.fstat(fh.fileno())          # retain the temp inode BEFORE the fd closes
+        finally:
+            _close_fd_yielding(tfd)
         try:
             os.link(tmp_name, "payload", src_dir_fd=entry_fd, dst_dir_fd=entry_fd,
                     follow_symlinks=False)                # no-overwrite, no-follow publish
@@ -466,10 +470,14 @@ def _write_candidate(migration_fd, text):
     candidate file cannot redirect the write) and fsync both the file and the directory entry (G9)."""
     fd = os.open("crosswalk.candidate.toml",
                  os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644, dir_fd=migration_fd)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
-        fh.flush()
-        os.fsync(fh.fileno())
+    # closefd=False: the one close is ours, so a raising fdopen neither leaks it nor closes it twice
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+    finally:
+        _close_fd_yielding(fd)
     os.fsync(migration_fd)
 
 
@@ -616,6 +624,115 @@ def _close_vectors(base):
     return _close_selftest._st_close_check(ns, vectors)
 
 
+def _fdopen_vectors(base):
+    """F-CROSSWALK-FDOPEN-RESIDUAL: _write_payload and _write_candidate under a raising os.fdopen. EARLY raises
+    before the descriptor is wrapped; LATE raises after its raw file exists, closing it per the closefd it was
+    given (as io.open does when a later layer fails). Each run must propagate the same MemoryError, leave the
+    descriptor it opened closed (OPEN otherwise) and, for _write_payload, no temp behind (TEMP otherwise); a
+    double close surfaces as a different exception (RAISED). Two flips rebuild each writer and must turn
+    exactly one vector red: PREFIX (the pre-fix `with os.fdopen(fd)`) leaks under EARLY, and EXCEPT (an
+    os.close in an except around the fdopen call, which then owns the descriptor) closes it twice under LATE.
+    Returns (failures, runs)."""
+    import importlib.util
+    import inspect
+    base.mkdir()
+    real_open, real_fdopen = os.open, os.fdopen
+    sent = MemoryError("injected fdopen failure")
+
+    def early(fd, *args, **kwargs):
+        raise sent
+
+    def late(fd, *args, **kwargs):
+        real_fdopen(fd, *args, **kwargs).close()
+        raise sent
+
+    def run(call, fault):
+        opened = []
+
+        def spy(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+        problems = []
+        dfd = real_open(str(base), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.open, os.fdopen = spy, fault               # the seams are swapped only where their restore runs
+            try:
+                call(dfd)
+                problems.append("RAISED: nothing")
+            except BaseException as exc:                  # noqa: BLE001  graded below, never swallowed blind
+                if exc is not sent:
+                    problems.append("RAISED: {!r}".format(exc))
+            finally:
+                os.open, os.fdopen = real_open, real_fdopen
+            for fd in opened:
+                try:
+                    os.fstat(fd)
+                except OSError:
+                    continue
+                problems.append("OPEN")
+                os.close(fd)                              # a failing vector leaks; release it here
+            if any(name.endswith(".tmp") for name in os.listdir(dfd)):
+                problems.append("TEMP")
+        finally:
+            os.close(dfd)
+        return problems
+
+    def payload(fns):
+        return lambda dfd: fns["_write_payload"](dfd, "digest", b"payload bytes\n")
+
+    def candidate(fns):
+        return lambda dfd: fns["_write_candidate"](dfd, "candidate text\n")
+
+    def flipped(name, fd_name, mode):
+        source = inspect.getsource(globals()[name])
+        lines = [line for line in source.splitlines(True) if "closefd=False) as fh:" in line]
+        close = "_close_fd_yielding({})".format(fd_name)
+        if len(lines) != 1 or source.count(close) != 1:
+            return None
+        line = lines[0]
+        indent = line[:len(line) - len(line.lstrip())]
+        opener = line.strip()[len("with "):-len(" as fh:")].replace(", closefd=False", "")
+        if mode == "PREFIX":
+            new = "{}with {} as fh:\n".format(indent, opener)
+        else:
+            new = ("{0}try:\n{0}    fh = {1}\n{0}except BaseException:\n{0}    os.close({2})\n{0}    raise\n"
+                   "{0}with fh:\n").format(indent, opener, fd_name)
+        # The reverted writer is written to a scratch module and loaded over a copy of this module's globals.
+        flip_dir = base.with_name(base.name + "-flips")
+        flip_dir.mkdir(exist_ok=True)
+        flip_path = flip_dir / "{}_{}.py".format(name.lstrip("_"), mode.lower())
+        flip_path.write_text(source.replace(line, new).replace(close, "pass"), encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("_crosswalk_fdopen_flip_" + flip_path.stem, flip_path)
+        reverted = importlib.util.module_from_spec(spec)
+        reverted.__dict__.update((k, v) for k, v in globals().items() if not k.startswith("__"))
+        spec.loader.exec_module(reverted)
+        return reverted.__dict__
+
+    failures = []
+    runs = 0
+    for label, writer, name, fd_name in (("_write_payload", payload, "_write_payload", "tfd"),
+                                         ("_write_candidate", candidate, "_write_candidate", "fd")):
+        for fault_label, fault in (("EARLY", early), ("LATE", late)):
+            problems = run(writer(globals()), fault)
+            runs += 1
+            if problems:
+                failures.append("fdopen vector {} {}: {}".format(label, fault_label, ", ".join(problems)))
+        for mode, red_fault, red_by in (("PREFIX", "EARLY", "OPEN"), ("EXCEPT", "LATE", "RAISED")):
+            fns = flipped(name, fd_name, mode)
+            if fns is None:
+                failures.append("fdopen flip {} {}: target not found once".format(label, mode))
+                continue
+            for fault_label, fault in (("EARLY", early), ("LATE", late)):
+                problems = [p.split(":")[0] for p in run(writer(fns), fault)]
+                runs += 1
+                expected = [red_by] if fault_label == red_fault else []
+                if problems != expected:
+                    failures.append("fdopen flip {} {} under {}: expected {}, got {}".format(
+                        label, mode, fault_label, expected or "green", problems or "green"))
+    return failures, runs
+
+
 def self_test():
     import io
     import shutil
@@ -636,6 +753,7 @@ def self_test():
         return 2
     failures = []
     close_runs = 0
+    fdopen_runs = 0
     try:
         # (a) REPO mode generate + drift-clean + determinism.
         good = tmp / "good"
@@ -708,27 +826,40 @@ def self_test():
         # makes tomllib raise a BARE ValueError (not TOMLDecodeError); the successor-inventory loader must
         # still refuse with AdoptError (exit 2), never let the ValueError escape. The digit limit is pinned to
         # the default 4300 (test-hermeticity) and restored in finally.
-        # A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must be refused the same
-        # way; the recursion limit is pinned to the CPython default 1000 for the same reason.
+        # A parser overflow (tomllib raises RecursionError, not a ValueError) must be refused the same way,
+        # with the overflow in the refusal.
+        # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise
+        # valid input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+        # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an
+        # unrelated refusal) under another.
         prev_digits = sys.get_int_max_str_digits()
-        prev_reclimit = sys.getrecursionlimit()
         sys.set_int_max_str_digits(4300)
-        sys.setrecursionlimit(1000)
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
         try:
-            for big_label, big_value in (("an over-long integer literal", "9" * 4400),
-                                         ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+            for big_label, big_value, big_needle in (("an over-long integer literal", "9" * 4400, ""),
+                                                     ("a parser overflow", "1  # injected-overflow",
+                                                      "injected parser overflow")):
                 big_inv = tmp / "bigint-inventory.toml"
                 big_inv.write_text("over-long = " + big_value + "\n", encoding="utf-8")
                 try:
                     _load_successor_inventory(big_inv)
                     failures.append("{} in the successor inventory must be refused (exit 2)".format(big_label))
-                except AdoptError:
-                    pass
+                except AdoptError as exc:
+                    if big_needle not in str(exc):
+                        failures.append("{} was refused without its finding ({})".format(big_label, exc))
                 except (ValueError, RecursionError) as exc:
                     failures.append("{} let a bare {} escape the successor-inventory loader (exit 2 "
                                     "expected)".format(big_label, type(exc).__name__))
         finally:
-            sys.setrecursionlimit(prev_reclimit)
+            tomllib.loads, tomllib.load = real_loads, real_load
             sys.set_int_max_str_digits(prev_digits)
 
         # (fix #7) unique-per-call temp + no-overwrite publish: a fresh archive leaves NO leftover temp in
@@ -922,6 +1053,10 @@ def self_test():
         # its flip.
         close_failures, close_runs = _close_vectors(tmp / "close")
         failures.extend(close_failures)
+        # F-CROSSWALK-FDOPEN-RESIDUAL: a raising os.fdopen leaves neither writer's descriptor open or closed
+        # twice, each green and red under its flip.
+        fdopen_failures, fdopen_runs = _fdopen_vectors(tmp / "fdopen")
+        failures.extend(fdopen_failures)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -940,7 +1075,8 @@ def self_test():
           "lives only in adopter migration state, never in the archived source, and the Expected-successor:/"
           "Coverage: pointer lines are stripped from the ranking input, so changing only a predecessor's "
           "pointer content does not change which successor a candidate row names. The {} #378 close-vector "
-          "runs pass, each flip leg red by its own assertion.".format(close_runs))
+          "runs pass, each flip leg red by its own assertion, and the {} fdopen-failure runs close each writer's "
+          "descriptor once, each flip red under its own fault.".format(close_runs, fdopen_runs))
     return 0
 
 

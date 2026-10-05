@@ -35,6 +35,10 @@ Four things live here, all from OPF-SPEC.md section 8 (with the release triad's 
      even when a record is superseded or reverted, and rotation/index-rewrite/relocation never touch
      them. This unit provides the schema check, monotonic allocation, a reset/regression check, an
      ids-within-high-water check, and a duplicate-id check the later doctor composes.
+     The IMPORTED SERIES (spec 8.2) is opt-in: `imported:<NS>-<n>` ids and their quoted `"imported:<NS>"`
+     counters are accepted only when a caller passes `imported_namespaces` (validate_counters) or
+     `imported_series=True` (the allocation and checking helpers), each series on its own number line.
+     With neither, every helper keeps its clean-only behaviour, so an imported id or counter is a finding.
 
 Every malformed, unknown, illegal, or unidentifiable input fails closed to an INVALID or CANNOT-EVALUATE
 outcome, never a silent VALID (spec 3 "Fail closed"; the check-fails-closed-on-unreadable rule: a
@@ -73,9 +77,17 @@ unit is that schema release for the record model and DEFINES the following where
     table of `<NS> = <non-negative int>` (mirroring version.toml's `schema = 1` marker); the spec fixes
     the semantics (one monotonic high-water per namespace) but not the file layout.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_schema.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import datetime
 import re
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -100,6 +112,18 @@ RECORD_NAMESPACES = (
     frozenset(BASELINE_TYPES.values())
     | frozenset(ns for ns, _module in MODULE_TYPES.values())
     | frozenset(IMPORTER_TYPES.values())
+)
+
+# The imported series (spec 8.2): an imported id is `imported:<NS>-<n>`, and its counter is the quoted TOML
+# key `"imported:<NS>"`, a number line independent of the clean `<NS>` one.
+IMPORTED_PREFIX = "imported:"
+# The namespaces an imported id or counter may carry: imported history uses the same enabled types in a
+# separate series (spec 8.1 roster notes), so the baseline and module types. The importer-only
+# legacy_fragment (LF) is excluded, because new imports MUST use the imported series and not LF quarantine
+# (spec 8.1); the reserved TX and the unassigned CL are bound to no type and stay excluded (spec 8.1, 8.2).
+IMPORTED_NAMESPACES = (
+    frozenset(BASELINE_TYPES.values())
+    | frozenset(ns for ns, _module in MODULE_TYPES.values())
 )
 
 
@@ -186,6 +210,20 @@ WORKLOG_KEYS = frozenset({"id", "date", "actor", "kind", "summary", "detail", "l
 
 # `<NS>-<n>`: two uppercase letters, a hyphen, a positive integer with no leading zero (spec 8.2).
 _ID_RE = re.compile(r"^([A-Z]{2})-([1-9][0-9]*)\Z")
+# The full id grammar over both series (spec 8.2): `^(?:imported:)?[A-Z]{2}-[1-9][0-9]*$`. _ID_RE above
+# stays the clean-only grammar that every existing caller relies on.
+_SERIES_ID_RE = re.compile(r"^(imported:)?([A-Z]{2})-([1-9][0-9]*)\Z")
+# The id-number ceiling of the SERIES-AWARE path (parse_series_id, and every helper called with
+# `imported_series=True` or `imported_namespaces`): the CPython default int-to-str limit (4300 digits), so
+# the largest id number is _MAX_ID_NUMBER. An id is judged by its digit COUNT before any conversion, a
+# counter by an int comparison with _MAX_ID_NUMBER, and both conversions run in chunks shorter than the
+# smallest limit sys.set_int_max_str_digits allows (640), so parsing, counter validation and allocation
+# share this one ceiling and never depend on that process-wide setting (test-hermeticity;
+# guard-input-soundness). The clean-only default path keeps its original ambient-limit rule
+# (_valid_id_shape, _genuine_high_water), so an existing caller's verdicts do not change.
+_MAX_ID_DIGITS = 4300
+_MAX_ID_NUMBER = 10 ** _MAX_ID_DIGITS - 1
+_ID_DIGIT_CHUNK = 600
 # RFC 3339 UTC with optional fractional seconds. UTC is expressible as `Z` OR the `+00:00` offset (both
 # denote a zero offset); both are accepted, any other numeric offset (e.g. +05:30) is not UTC and is
 # rejected (see the timestamp ambiguity note above).
@@ -384,6 +422,33 @@ def _genuine_high_water(value):
     return True
 
 
+def _series_high_water(value):
+    """A non-negative int usable as a high-water on the series-aware path: not a bool, and at most
+    _MAX_ID_NUMBER, the largest number parse_series_id accepts. Judged by an int comparison, never a
+    str() conversion, so the verdict is the same under every sys.set_int_max_str_digits (spec 8.2)."""
+    return type(value) is int and 0 <= value <= _MAX_ID_NUMBER
+
+
+def _high_water_check(series_aware):
+    """The high-water predicate a helper applies: the fixed-ceiling _series_high_water on the
+    series-aware path, and the original ambient-limit _genuine_high_water on the clean-only default path
+    (so an existing caller's verdicts are unchanged)."""
+    return _series_high_water if series_aware else _genuine_high_water
+
+
+def _id_digits(n):
+    """The decimal digits of a positive id number of at most _MAX_ID_NUMBER, built in chunks shorter than
+    the smallest int-to-str limit (640 digits), so rendering an allocated id never depends on
+    sys.set_int_max_str_digits (test-hermeticity)."""
+    base = 10 ** _ID_DIGIT_CHUNK
+    chunks = []
+    while n >= base:
+        n, rest = divmod(n, base)
+        chunks.append(str(rest).zfill(_ID_DIGIT_CHUNK))
+    chunks.append(str(n))
+    return "".join(reversed(chunks))
+
+
 def parse_status(status, spec):
     """Parse a status string against a type's grammar (spec 8.4). Returns ((state, qualifier), None) on
     success, or (None, message) on a malformed or type-illegal status. `qualifier` is None or "proposed",
@@ -414,6 +479,19 @@ def parse_status(status, spec):
     return (state, qual), None
 
 
+def _id_number(digits):
+    """The int of an id's decimal suffix, or None when it has more than _MAX_ID_DIGITS digits. The length
+    is checked BEFORE any int() call, and each int() call sees fewer than 640 digits, so neither the
+    verdict nor the value depends on sys.set_int_max_str_digits (test-hermeticity)."""
+    if len(digits) > _MAX_ID_DIGITS:
+        return None
+    n = 0
+    for i in range(0, len(digits), _ID_DIGIT_CHUNK):
+        chunk = digits[i:i + _ID_DIGIT_CHUNK]
+        n = n * 10 ** len(chunk) + int(chunk)
+    return n
+
+
 def _valid_id_shape(value):
     """The (namespace, number) of a well-formed `<NS>-<n>` id, or None. An oversized numeric suffix
     (CPython refuses int() on a string of more than 4300 digits, a ValueError) is treated as MALFORMED
@@ -428,6 +506,57 @@ def _valid_id_shape(value):
         return (m.group(1), int(m.group(2)))  # an oversized numeric suffix raises ValueError -> None below
     except ValueError:
         return None
+
+
+def parse_series_id(value):
+    """The (counter_key, namespace, number) of an id in either series (spec 8.2), or None. A clean id
+    `BI-7` yields ("BI", "BI", 7); an imported id `imported:BI-7` yields ("imported:BI", "BI", 7), so the
+    counter key names the independent number line the id belongs to. The grammar is lexical: binding the
+    namespace to the record's enabled type stays the caller's check, as for _valid_id_shape. An oversized
+    numeric suffix (more than _MAX_ID_DIGITS digits, judged by its length before any int() call) is
+    malformed input (None), never an uncontrolled crash, whatever sys.set_int_max_str_digits is."""
+    if not isinstance(value, str):
+        return None
+    m = _SERIES_ID_RE.match(value)
+    if not m:
+        return None
+    n = _id_number(m.group(3))
+    if n is None:
+        return None
+    return ((m.group(1) or "") + m.group(2), m.group(2), n)
+
+
+def _imported_series_error(flag):
+    """None when `imported_series` is a genuine bool, else a fail-closed message. The flag widens what a
+    counters helper accepts, so a truthy non-bool (the string "false", or 1) must never read as True
+    (guard-input-soundness; spec 8.2)."""
+    if isinstance(flag, bool):
+        return None
+    return ("imported_series must be a genuine bool, got {}; a non-bool must not widen the accepted "
+            "series (spec 8.2)".format(_safe_display(flag)))
+
+
+def _is_counter_key(key, imported_series):
+    """True when `key` names a counters number line: a section-8.1 record namespace, or, only when
+    `imported_series` is True, the quoted imported key `imported:<NS>` over IMPORTED_NAMESPACES (spec
+    8.2). `key` is a mapping key, so it is hashable."""
+    if key in RECORD_NAMESPACES:
+        return True
+    return (imported_series is True and isinstance(key, str) and key.startswith(IMPORTED_PREFIX)
+            and key[len(IMPORTED_PREFIX):] in IMPORTED_NAMESPACES)
+
+
+def _id_counter_shape(value, imported_series):
+    """The (counter_key, number) of an id, or None when it is malformed: the clean grammar alone by
+    default, and both series when `imported_series` is True, each id keyed to its own number line (spec
+    8.2). An imported id is accepted only over IMPORTED_NAMESPACES, the same set every other imported
+    helper enforces (_is_counter_key), so a reserved or non-imported namespace is never certified."""
+    if imported_series is True:
+        shape = parse_series_id(value)
+        if shape is None or (shape[0] != shape[1] and shape[1] not in IMPORTED_NAMESPACES):
+            return None
+        return (shape[0], shape[2])
+    return _valid_id_shape(value)
 
 
 def _safe_key_names(keys):
@@ -1214,7 +1343,7 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
 
 # --- counters (spec 8.2) -----------------------------------------------------------------------------
 
-def validate_counters(data, known_namespaces=None, optional_namespaces=None):
+def validate_counters(data, known_namespaces=None, optional_namespaces=None, imported_namespaces=None):
     """Validate a parsed counters.toml (see the counters layout ambiguity note). Returns (high_water,
     findings): high_water is {namespace: int}. Each namespace is two uppercase letters (optionally
     restricted to `known_namespaces`); each value is a non-negative int (a bool is rejected).
@@ -1226,9 +1355,19 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None):
     namespace absent from [counters] is not a finding. The section-8.1 taxonomy-validity check still
     applies to every counter including optional ones (an optional namespace bound to no record type is
     still flagged). It is validated fail-closed exactly like known_namespaces (a malformed control is a
-    finding and treated as empty), and when None/omitted every existing behaviour is unchanged."""
+    finding and treated as empty), and when None/omitted every existing behaviour is unchanged.
+
+    `imported_namespaces` opts into the imported series (spec 8.2). None (the default) keeps every
+    behaviour above, so an `imported:<NS>` key is still a finding. A collection of namespaces accepts the
+    quoted key `"imported:<NS>"` as an independent number line, requires one for each listed namespace
+    (completeness per series, as for known_namespaces), and flags an imported key whose namespace is not in
+    IMPORTED_NAMESPACES or not listed, or whose value is not a genuine high-water. The returned map then
+    holds both series under their own keys. A malformed control is a finding and treated as empty."""
     findings = []
     high_water = {}
+    # The series-aware path (imported_namespaces given) judges every counter, clean or imported, against
+    # the one fixed id ceiling; the default path keeps the original ambient-limit rule.
+    hw_ok = _high_water_check(imported_namespaces is not None)
     if not isinstance(data, dict):
         return high_water, ["counters.toml is not a table"]
     # known_namespaces is a control naming the namespaces that MUST each carry a high-water. None means
@@ -1246,6 +1385,9 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None):
     if optional_namespaces is not None and not _is_str_token_control(optional_namespaces):
         findings.append("optional_namespaces must be a collection of namespace strings (fail-closed)")
         optional_namespaces = frozenset()
+    if imported_namespaces is not None and not _is_str_token_control(imported_namespaces):
+        findings.append("imported_namespaces must be a collection of namespace strings (fail-closed)")
+        imported_namespaces = frozenset()
     extra = set(data) - COUNTERS_TOP_KEYS
     if extra:
         findings.append("counters.toml unknown top-level key(s): {}".format(
@@ -1268,11 +1410,30 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None):
         if known_namespaces:
             findings.append("counters.toml has no [counters] table but known namespace(s) {} each require "
                             "a high-water (spec 8.2)".format(sorted(known_namespaces)))
+        if imported_namespaces:
+            findings.append("counters.toml has no [counters] table but imported namespace(s) {} each "
+                            "require a high-water (spec 8.2)".format(sorted(imported_namespaces)))
         return high_water, findings
     if not isinstance(counters, dict):
         findings.append("[counters] is not a table")
         return high_water, findings
     for ns, val in counters.items():
+        if imported_namespaces is not None and isinstance(ns, str) and ns.startswith(IMPORTED_PREFIX):
+            # An imported counter (spec 8.2): its namespace must be one the imported series may carry and
+            # one the caller listed; it is recorded under its own quoted key, never the clean line's.
+            if ns[len(IMPORTED_PREFIX):] not in IMPORTED_NAMESPACES:
+                findings.append("[counters] key {} is not an imported counter of a type the imported series "
+                                "may carry (spec 8.1/8.2)".format(_safe_display(ns)))
+                continue
+            if ns[len(IMPORTED_PREFIX):] not in imported_namespaces:
+                findings.append("[counters] imported counter {} is not a known imported namespace".format(
+                    _safe_display(ns)))
+            if not hw_ok(val):
+                findings.append("[counters].{} must be a non-negative integer high-water mark of at most "
+                                "{} digits".format(_safe_display(ns), _MAX_ID_DIGITS))
+                continue
+            high_water[ns] = val
+            continue
         if not (isinstance(ns, str) and len(ns) == 2 and ns.isupper() and ns.isalpha()):
             # `ns` is an untrusted inner key: an oversized non-decimal int key would crash a raw {!r}
             # render, so it goes through _safe_display like every other key render (Fable-F2).
@@ -1294,7 +1455,7 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None):
         if known_namespaces is not None and not accepted_ns:
             findings.append("[counters] namespace {!r} is not a known namespace".format(ns))
         # A bool is an int subclass; a high-water is a genuine non-negative int, never True/False.
-        if not _genuine_high_water(val):
+        if not hw_ok(val):
             findings.append("[counters].{} must be a non-negative integer high-water mark".format(ns))
             continue
         high_water[ns] = val
@@ -1305,6 +1466,11 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None):
             if ns not in high_water:
                 findings.append("[counters] is missing a high-water for known namespace {!r} "
                                 "(spec 8.2)".format(ns))
+    if imported_namespaces is not None:
+        for ns in sorted(imported_namespaces):
+            if IMPORTED_PREFIX + ns not in high_water:
+                findings.append("[counters] is missing a high-water for imported namespace {} "
+                                "(spec 8.2)".format(_safe_display(IMPORTED_PREFIX + ns)))
     return high_water, findings
 
 
@@ -1322,26 +1488,27 @@ def high_water(high, ns):
     return high.get(ns, 0)
 
 
-def _validated_counter_map(high, where):
+def _validated_counter_map(high, where, imported_series=False):
     """Fail closed (ValueError) on a counters map that is not a mapping of section-8.1 taxonomy namespaces
     to genuine non-negative ints. next_id and check_monotonic both TRUST the map they are handed, so a
     corrupt map (a non-taxonomy namespace, or a value that is not a genuine int such as a bool, which is
     an int subclass with True == 1) is a fail-closed error rather than a silent zero or a bypassed guard
-    (spec 8.2, guard-input-soundness; M7)."""
+    (spec 8.2, guard-input-soundness; M7). With `imported_series` True an `imported:<NS>` key is a number
+    line too (spec 8.2)."""
     if not isinstance(high, dict):
         raise ValueError("{}: counters map is not a table (spec 8.2)".format(where))
     for ns, val in high.items():
-        if ns not in RECORD_NAMESPACES:
+        if not _is_counter_key(ns, imported_series):
             # `ns` is an untrusted map key: an oversized non-decimal int key would crash a raw {!r} render
             # and lose this module's named refusal, so it renders through _safe_display (Fable-F3).
             raise ValueError("{}: namespace {} is bound to no record type in the section 8.1 taxonomy "
                              "(spec 8.1/8.2)".format(where, _safe_display(ns)))
-        if not _genuine_high_water(val):
+        if not _high_water_check(imported_series is True)(val):
             raise ValueError("{}: high-water for {!r} must be a genuine non-negative int, got {} "
                              "(a bool is not a high-water; spec 8.2)".format(where, ns, _safe_display(val)))
 
 
-def next_id(high, ns, known_complete=False):
+def next_id(high, ns, known_complete=False, imported_series=False):
     """Allocate the next id for a namespace: returns (id_string, new_high_water). The high-water only
     ever increases by one, so an id is never reused (spec 8.2). The caller records new_high_water back to
     counters.toml under the store lock as one atomic claim (spec 8.2, the atomic-claim-from-pool rule).
@@ -1352,8 +1519,25 @@ def next_id(high, ns, known_complete=False):
       - `ns` has NO recorded high-water AND the map is not known to be complete. Allocating from a missing
         counter would read its high-water as 0 and could reuse an id that already exists; that is sound
         only when the map has been proved complete (validate_counters with known_namespaces). The caller
-        asserts that proof with `known_complete=True`; without it, an absent counter is refused."""
-    if not isinstance(ns, str) or ns not in RECORD_NAMESPACES:
+        asserts that proof with `known_complete=True`; without it, an absent counter is refused.
+
+    With `imported_series=True` (a genuine bool), `ns` may also be an imported counter key
+    `imported:<NS>`, which allocates `imported:<NS>-<n>` from that key's own high-water and never reads the
+    clean `<NS>` line (spec 8.2); the map may then hold both series. Without it, an imported key is refused
+    exactly as before. For an absent imported key, `known_complete=True` asserts the imported series'
+    proof instead: validate_counters(..., imported_namespaces=...) listing that namespace, since a
+    clean-only known_namespaces proof says nothing about the imported line. On this series-aware path the
+    map's values and the allocated number share parse_series_id's fixed ceiling (_MAX_ID_NUMBER): an
+    allocation past it is refused, never emitted as an id the parser or check_ids_within_counters would
+    reject, whatever sys.set_int_max_str_digits is."""
+    flag_error = _imported_series_error(imported_series)
+    if flag_error is not None:
+        raise ValueError("cannot allocate an id: {}".format(flag_error))
+    if (imported_series and isinstance(ns, str) and ns.startswith(IMPORTED_PREFIX)
+            and not _is_counter_key(ns, imported_series)):
+        raise ValueError("cannot allocate an id for {}: its namespace is not one the imported series may "
+                         "carry (spec 8.1/8.2)".format(_safe_display(ns)))
+    if not isinstance(ns, str) or not _is_counter_key(ns, imported_series):
         # Guard by type first: a non-string ns (e.g. a list) is unhashable and would crash on the
         # RECORD_NAMESPACES frozenset membership; it is also bound to no record type. Fail closed either
         # way, never a TypeError (guard-input-soundness; spec 8.1/8.2).
@@ -1367,13 +1551,22 @@ def next_id(high, ns, known_complete=False):
         raise ValueError("cannot allocate an id: known_complete must be a genuine bool proof flag, got "
                          "{}; a non-bool must not be read as True (spec 8.2)".format(
                              _safe_display(known_complete)))
-    _validated_counter_map(high, "next_id")
+    _validated_counter_map(high, "next_id", imported_series)
     if ns not in high and not known_complete:
         raise ValueError("cannot allocate an id for namespace {!r}: it has no recorded high-water and the "
                          "counters map is not known complete; validate it with validate_counters(..., "
-                         "known_namespaces=...) and pass known_complete=True, so an absent counter cannot "
-                         "read as high-water 0 and reuse an existing id (spec 8.2)".format(ns))
+                         "{}=...) and pass known_complete=True, so an absent counter cannot "
+                         "read as high-water 0 and reuse an existing id (spec 8.2)".format(
+                             ns, "imported_namespaces" if ns.startswith(IMPORTED_PREFIX)
+                             else "known_namespaces"))
     n = high_water(high, ns) + 1
+    if imported_series:
+        # The series-aware path: one fixed ceiling, shared with parse_series_id and the counter checks, and
+        # a chunked rendering, so neither the verdict nor the id depends on the ambient int limit.
+        if n > _MAX_ID_NUMBER:
+            raise ValueError("cannot allocate an id for namespace {!r}: the next id number exceeds the "
+                             "{}-digit id ceiling ({}; spec 8.2)".format(ns, _MAX_ID_DIGITS, _safe_display(n)))
+        return "{}-{}".format(ns, _id_digits(n)), n
     if not _genuine_high_water(n):
         # The high-water passed _genuine_high_water (within the 4300-digit int-to-str limit), but the id it
         # allocates is high-water + 1, which at exactly the limit overflows one digit past it; refuse with
@@ -1384,23 +1577,27 @@ def next_id(high, ns, known_complete=False):
     return "{}-{}".format(ns, n), n
 
 
-def check_monotonic(old_high, new_high):
+def check_monotonic(old_high, new_high, imported_series=False):
     """Confirm counters only ever advance (spec 8.2: never reset, IDs never reused). Every namespace in
     `old_high` must be present in `new_high` with a value greater than or equal to its old high-water; a
     regression or a dropped namespace (which would let a later allocation reuse an id) is a finding. Both
     maps are validated first: a non-taxonomy namespace or a value that is not a genuine non-negative int
     (a bool is not, though True == 1) is a fail-closed finding, never a silent pass that lets a corrupt
-    counter read as a valid high-water (guard-input-soundness; M7)."""
+    counter read as a valid high-water (guard-input-soundness; M7). With `imported_series` True an
+    `imported:<NS>` key is compared on its own number line, independently of the clean one (spec 8.2)."""
+    flag_error = _imported_series_error(imported_series)
+    if flag_error is not None:
+        return [flag_error]
     findings = []
     for label, m in (("old", old_high), ("new", new_high)):
         if not isinstance(m, dict):
             findings.append("the {} counters map is not a table (spec 8.2)".format(label))
             continue
         for ns, val in m.items():
-            if ns not in RECORD_NAMESPACES:
+            if not _is_counter_key(ns, imported_series):
                 findings.append("{} counters namespace {} is bound to no record type in the section 8.1 "
                                 "taxonomy (spec 8.1/8.2)".format(label, _safe_display(ns)))
-            if not _genuine_high_water(val):
+            if not _high_water_check(imported_series)(val):
                 findings.append("{} counters high-water for {} must be a genuine non-negative int, got "
                                 "{} (a bool is not a high-water; spec 8.2)".format(label, _safe_display(ns), _safe_display(val)))
     if findings:
@@ -1414,10 +1611,15 @@ def check_monotonic(old_high, new_high):
     return findings
 
 
-def check_ids_within_counters(ids, high):
+def check_ids_within_counters(ids, high, imported_series=False):
     """Confirm every allocated id's number is within its namespace's high-water (spec 8.2): an id above
     the high-water means the counter never reserved it, the reuse hazard the atomic claim prevents. `ids`
-    is an iterable of id strings; a malformed id, or an unknown namespace, is itself a finding."""
+    is an iterable of id strings; a malformed id, or an unknown namespace, is itself a finding. With
+    `imported_series` True an `imported:<NS>-<n>` id is checked against its own `imported:<NS>` high-water,
+    never the clean one (spec 8.2: each series is evaluated independently)."""
+    flag_error = _imported_series_error(imported_series)
+    if flag_error is not None:
+        return [flag_error]
     findings = []
     if not isinstance(high, dict):
         # `high` is a control (the counters map). A non-table (e.g. a bare string) would SUBSTRING-match
@@ -1429,9 +1631,11 @@ def check_ids_within_counters(ids, high):
         return ["id-collection must be an iterable of id strings, not {} (spec 8.2)".format(
             type(ids).__name__)]
     for rid in ids:
-        shape = _valid_id_shape(rid)
+        shape = _id_counter_shape(rid, imported_series)
         if shape is None:
-            findings.append("id {} is not a well-formed <NS>-<n> id".format(_safe_display(rid)))
+            findings.append(("id {} is not a well-formed <NS>-<n> or imported:<NS>-<n> id over a namespace "
+                             "its series may carry (spec 8.1/8.2)" if imported_series else
+                             "id {} is not a well-formed <NS>-<n> id").format(_safe_display(rid)))
             continue
         ns, n = shape
         if ns not in high:
@@ -1442,7 +1646,7 @@ def check_ids_within_counters(ids, high):
         # genuine non-negative high-water, so do NOT certify the id against it (the comparison would
         # silently accept True/1.5, or reject against a negative). type(hv) is not int rejects bool, whose
         # type is bool not int (spec 8.2).
-        if not _genuine_high_water(hv):
+        if not _high_water_check(imported_series)(hv):
             findings.append("namespace {!r} high-water {} is not a non-negative integer (spec 8.2)".format(
                 ns, _safe_display(hv)))
             continue
@@ -1452,9 +1656,13 @@ def check_ids_within_counters(ids, high):
     return findings
 
 
-def check_unique_ids(ids):
+def check_unique_ids(ids, imported_series=False):
     """Confirm no id is reused across a set of records (spec 8.2: IDs are never reused). Returns a finding
-    per duplicated id."""
+    per duplicated id. With `imported_series` True an `imported:<NS>-<n>` id is well-formed too; it never
+    collides with the clean `<NS>-<n>`, since the two series are independent (spec 8.2)."""
+    flag_error = _imported_series_error(imported_series)
+    if flag_error is not None:
+        return [flag_error]
     findings = []
     if not _is_item_collection(ids):
         # A non-iterable would crash the `for`; a bare string would splat into characters. Fail closed
@@ -1467,8 +1675,11 @@ def check_unique_ids(ids):
         # membership below: guard by shape first and fail closed with a clean finding, never a TypeError
         # (guard-input-soundness; spec 8.2). Uniqueness cannot be judged for a malformed id, so it is
         # surfaced and not added to `seen`.
-        if _valid_id_shape(rid) is None:
-            findings.append("malformed id {}: an id must be a well-formed '<NS>-<n>' string (spec 8.2)".format(_safe_display(rid)))
+        if _id_counter_shape(rid, imported_series) is None:
+            findings.append(("malformed id {}: an id must be a well-formed '<NS>-<n>' or 'imported:<NS>-<n>' "
+                             "string over a namespace its series may carry (spec 8.1/8.2)" if imported_series
+                             else "malformed id {}: an id must be a well-formed '<NS>-<n>' string (spec 8.2)"
+                             ).format(_safe_display(rid)))
             continue
         if rid in seen:
             findings.append("duplicate id {!r}: IDs are never reused (spec 8.2)".format(rid))
@@ -2431,6 +2642,174 @@ def self_test():
           validate_record(envelope("contribution", 30, "proposed",
                                    links=[{"rel": "derives_from", "id": "FN-1"}],
                                    **contrib_base)).status == VALID)
+
+    # The imported series (spec 8.2): `imported:<NS>-<n>` ids and `"imported:<NS>"` counters, opt-in, each
+    # series on its own number line; with no opt-in every helper keeps its clean-only behaviour.
+    def _alloc_refused(thunk):
+        try:
+            thunk()
+        except ValueError:
+            return True
+        return False
+
+    check("series-id-imported-parses", parse_series_id("imported:BI-7") == ("imported:BI", "BI", 7))
+    check("series-id-clean-parses", parse_series_id("BI-7") == ("BI", "BI", 7))
+    for bad in ("imported:BI-07", "imported:BI-0", "Imported:BI-1", "imported:bi-1", "imported:BIX-1",
+                "imported:imported:BI-1", "importedBI-1", "imported: BI-1", " imported:BI-1",
+                "imported:BI-1" + chr(10), "imported:", None, 7, ["imported:BI-1"]):
+        check("series-id-malformed-{}".format(_safe_display(bad)[:40]), parse_series_id(bad) is None)
+    # test-hermeticity: the oversized-number verdict is judged by digit count, never by the ambient
+    # sys.set_int_max_str_digits, so run each boundary vector under several ambient limits (unlimited, the
+    # 640 floor, the 4300 default, and a high one) and restore the caller's limit afterward.
+    _series_prev_idlimit = sys.get_int_max_str_digits()
+    try:
+        for _limit in (0, 640, 4300, 271828):
+            sys.set_int_max_str_digits(_limit)
+            check("series-id-malformed-oversized-limit-{}".format(_limit),
+                  parse_series_id("imported:BI-" + "9" * (_MAX_ID_DIGITS + 1)) is None
+                  and parse_series_id("BI-" + "9" * 5000) is None)
+            check("series-id-max-digits-parses-limit-{}".format(_limit),
+                  parse_series_id("imported:BI-" + "9" * _MAX_ID_DIGITS) == ("imported:BI", "BI", _MAX_ID_NUMBER))
+            # The clean-only default path keeps its original rule: an id is accepted exactly when int()
+            # of its suffix succeeds under the ambient limit, so every existing caller's verdict is
+            # unchanged, and an accepted id's number always renders back under that limit (a caller that
+            # formats it, such as a duplicate worklog id message, never crashes).
+            for _len in (641, _MAX_ID_DIGITS + 1):
+                _cid = "WL-" + "9" * _len
+                _shape = _valid_id_shape(_cid)
+                check("clean-id-default-rule-{}-limit-{}".format(_len, _limit),
+                      (_shape is not None) == (_limit == 0 or _len <= _limit)
+                      and (_shape is None or str(_shape[1]) == _cid[3:]))
+            # One ceiling for counter validation, allocation and parsing on the series-aware path: a
+            # counter past it is refused, a counter at it is valid but allocates nothing, and every id the
+            # allocator emits parses and passes the counter-bound and uniqueness checks.
+            _ceil_ctr = dict([("BI", _MAX_ID_NUMBER), ("imported:BI", _MAX_ID_NUMBER)])
+            _, _ceil_f = validate_counters(dict(schema=1, counters=dict(_ceil_ctr)), known_namespaces=["BI"],
+                                           imported_namespaces=["BI"])
+            check("series-counter-at-ceiling-ok-limit-{}".format(_limit), not _ceil_f)
+            for _key in ("BI", "imported:BI"):
+                _over = dict(_ceil_ctr)
+                _over[_key] = _MAX_ID_NUMBER + 1
+                _, _ceil_f = validate_counters(dict(schema=1, counters=_over), known_namespaces=["BI"],
+                                               imported_namespaces=["BI"])
+                check("series-counter-past-ceiling-flagged-{}-limit-{}".format(_key, _limit),
+                      any("[counters].{} must be".format(_key if _key == "BI" else _safe_display(_key)) in f
+                          for f in _ceil_f))
+                check("series-next-id-at-ceiling-refused-{}-limit-{}".format(_key, _limit),
+                      _alloc_refused(lambda: next_id(_ceil_ctr, _key, imported_series=True)))
+                check("series-next-id-past-ceiling-refused-{}-limit-{}".format(_key, _limit),
+                      _alloc_refused(lambda: next_id(_over, _key, imported_series=True)))
+                check("series-monotonic-past-ceiling-flagged-{}-limit-{}".format(_key, _limit),
+                      bool(check_monotonic(_ceil_ctr, _over, imported_series=True)))
+                check("series-ids-within-past-ceiling-high-flagged-{}-limit-{}".format(_key, _limit),
+                      bool(check_ids_within_counters(["BI-1", "imported:BI-1"], _over, imported_series=True)))
+                for _hw in (_MAX_ID_NUMBER - 1, 10 ** 700, 7):
+                    try:
+                        _rid, _n = next_id({_key: _hw}, _key, imported_series=True)
+                    except ValueError:
+                        _rid = _n = None
+                    check("series-next-id-parses-{}-{}-limit-{}".format(_key, _hw.bit_length(), _limit),
+                          _n == _hw + 1 and parse_series_id(_rid) == (_key, "BI", _n)
+                          and not check_ids_within_counters([_rid], {_key: _n}, imported_series=True)
+                          and not check_unique_ids([_rid], imported_series=True))
+    finally:
+        sys.set_int_max_str_digits(_series_prev_idlimit)
+    check("series-id-clean-grammar-unchanged", _valid_id_shape("imported:BI-7") is None)
+    check("imported-namespaces-exclude-lf-tx-cl",
+          not ({"LF", "TX", "CL"} & IMPORTED_NAMESPACES) and {"BI", "WL", "SL"} <= IMPORTED_NAMESPACES)
+
+    imp_ctr = {"schema": 1, "counters": {"BI": 3, "imported:BI": 5}}
+    imp_hw, imp_f = validate_counters(imp_ctr, known_namespaces={"BI"}, imported_namespaces={"BI"})
+    check("imported-counters-ok", not imp_f and imp_hw == {"BI": 3, "imported:BI": 5})
+    _, imp_f = validate_counters(imp_ctr, known_namespaces={"BI"})
+    check("imported-counters-default-still-flagged", any("'imported:BI'" in f for f in imp_f))
+    _, imp_f = validate_counters({"schema": 1, "counters": {"BI": 3}}, known_namespaces={"BI"},
+                                 imported_namespaces={"BI"})
+    check("imported-counters-missing-flagged",
+          any("missing a high-water for imported namespace 'imported:BI'" in f for f in imp_f))
+    _, imp_f = validate_counters({"schema": 1}, imported_namespaces={"BI"})
+    check("imported-counters-absent-table-flagged", any("imported namespace(s)" in f for f in imp_f))
+    for key in ("imported:LF", "imported:TX", "imported:CL", "imported:ZZ", "imported:", "imported:bi"):
+        _, imp_f = validate_counters({"schema": 1, "counters": {"BI": 3, "imported:BI": 1, key: 1}},
+                                     known_namespaces={"BI"}, imported_namespaces={"BI"})
+        check("imported-counters-bad-key-flagged-{}".format(key),
+              any(_safe_display(key) in f for f in imp_f))
+    _, imp_f = validate_counters({"schema": 1, "counters": {"BI": 3, "imported:BI": 1, "imported:FN": 1}},
+                                 known_namespaces={"BI"}, imported_namespaces={"BI"})
+    check("imported-counters-unlisted-flagged", any("'imported:FN'" in f for f in imp_f))
+    for badval in (True, -1, 1.5, "1"):
+        _, imp_f = validate_counters({"schema": 1, "counters": {"BI": 3, "imported:BI": badval}},
+                                     known_namespaces={"BI"}, imported_namespaces={"BI"})
+        check("imported-counters-bad-value-flagged-{}".format(_safe_display(badval)),
+              any("[counters].'imported:BI' must be" in f for f in imp_f))
+    _, imp_f = validate_counters(imp_ctr, known_namespaces={"BI"}, imported_namespaces="BI")
+    check("imported-counters-malformed-control-flagged",
+          any("imported_namespaces must be" in f for f in imp_f))
+
+    def _alloc_error(thunk):
+        try:
+            thunk()
+        except ValueError as e:
+            return e
+        return None
+
+    both = {"BI": 3, "imported:BI": 5}
+    check("imported-next-id-own-line", next_id(both, "imported:BI", imported_series=True) == ("imported:BI-6", 6))
+    check("imported-next-id-from-complete-empty",
+          next_id({"BI": 3}, "imported:BI", known_complete=True, imported_series=True) == ("imported:BI-1", 1))
+    check("imported-next-id-clean-line-unchanged", next_id(both, "BI", imported_series=True) == ("BI-4", 4))
+    check("imported-next-id-default-refused", _alloc_refused(lambda: next_id(both, "imported:BI")))
+    check("imported-next-id-default-mixed-map-refused", _alloc_refused(lambda: next_id(both, "BI")))
+    check("imported-next-id-absent-not-complete-refused",
+          _alloc_refused(lambda: next_id({"BI": 3}, "imported:BI", imported_series=True)))
+    check("imported-next-id-lf-refused", _alloc_refused(
+        lambda: next_id({}, "imported:LF", known_complete=True, imported_series=True)))
+    check("imported-next-id-nonbool-flag-refused", _alloc_refused(
+        lambda: next_id(both, "imported:BI", imported_series="false")))
+
+    check("imported-monotonic-ok", not check_monotonic(both, {"BI": 3, "imported:BI": 6}, imported_series=True))
+    check("imported-monotonic-regression-flagged", any("regressed" in f for f in check_monotonic(
+        both, {"BI": 3, "imported:BI": 4}, imported_series=True)))
+    check("imported-monotonic-vanished-flagged", any("vanished" in f for f in check_monotonic(
+        both, {"BI": 3}, imported_series=True)))
+    check("imported-monotonic-default-flagged", bool(check_monotonic(both, both)))
+    check("imported-monotonic-nonbool-flag-flagged", bool(check_monotonic({"BI": 1}, {"BI": 1}, imported_series=1)))
+
+    check("imported-ids-within-ok",
+          not check_ids_within_counters(["BI-3", "imported:BI-5"], both, imported_series=True))
+    check("imported-id-exceeds-own-line", any("exceeds" in f for f in check_ids_within_counters(
+        ["imported:BI-4"], {"BI": 9, "imported:BI": 3}, imported_series=True)))
+    check("clean-id-exceeds-own-line", any("exceeds" in f for f in check_ids_within_counters(
+        ["BI-4"], {"BI": 3, "imported:BI": 9}, imported_series=True)))
+    check("imported-ids-default-malformed", bool(check_ids_within_counters(["imported:BI-1"], both)))
+    check("imported-ids-nonbool-flag-flagged",
+          bool(check_ids_within_counters(["BI-1"], both, imported_series="yes")))
+
+    check("imported-unique-distinct-series", not check_unique_ids(["BI-1", "imported:BI-1"], imported_series=True))
+    check("imported-unique-duplicate-flagged", any("duplicate" in f for f in check_unique_ids(
+        ["imported:BI-1", "imported:BI-1"], imported_series=True)))
+    check("imported-unique-default-malformed", bool(check_unique_ids(["imported:BI-1"])))
+    check("imported-unique-nonbool-flag-flagged", bool(check_unique_ids(["BI-1"], imported_series=0)))
+    # Every helper that accepts imported ids enforces the one IMPORTED_NAMESPACES set (spec 8.1/8.2): the
+    # importer-only LF, the reserved TX, the unassigned CL and an unknown ZZ are refused even when the
+    # caller's map tracks them.
+    for _ns in ("LF", "TX", "CL", "ZZ"):
+        _ikey = "imported:" + _ns
+        _iid = _ikey + "-1"
+        check("imported-ids-within-namespace-refused-{}".format(_ns),
+              any("not a well-formed" in f for f in check_ids_within_counters(
+                  [_iid], {_ikey: 5}, imported_series=True)))
+        check("imported-unique-namespace-refused-{}".format(_ns),
+              any("malformed id" in f for f in check_unique_ids([_iid], imported_series=True)))
+        check("imported-monotonic-namespace-refused-{}".format(_ns),
+              bool(check_monotonic({_ikey: 1}, {_ikey: 1}, imported_series=True)))
+        check("imported-counters-namespace-refused-{}".format(_ns), bool(validate_counters(
+            dict(schema=1, counters={_ikey: 1}), imported_namespaces=[_ns])[1]))
+        check("imported-next-id-namespace-refused-{}".format(_ns), _alloc_refused(
+            lambda: next_id({_ikey: 1}, _ikey, imported_series=True)))
+    check("imported-next-id-proof-names-imported-control",
+          "imported_namespaces" in str(_alloc_error(
+              lambda: next_id(dict(BI=3), "imported:BI", imported_series=True))))
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))

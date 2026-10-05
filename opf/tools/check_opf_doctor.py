@@ -82,10 +82,76 @@ real. The clean store is built through the OPF helpers' own canonical emitters a
 hand-built), the same construction _opf_check's own self-test proves VALID. Offline, stdlib only, fail-closed,
 launched isolated (-I -B). The tempdir is removed in a finally (test-hermeticity). When git is not on PATH the
 self-test SKIPs clean (a committed HEAD is required for the tracked/prior observations).
+
+The pre-commit floor (opf/enforcement/precommit: the staged-snapshot hook and its per-clone installer, which
+writes a pre-commit stub into the clone's untracked hooks directory and never sets core.hooksPath) rides
+fixtures of the same kind, each holding a copy of the pack at its pack path. The installer writes the stub,
+a rerun is a no-op, and other hooks are kept; it refuses (2, nothing changed) any core.hooksPath, the
+tracked pack directory included, an existing pre-commit hook, an unreadable pack hook or hooks directory
+(unprivileged user only) and a hooks path that is not a directory; an inherited GIT_DIR naming another
+repository cannot redirect it, and a missing dirname run from another repository's pack directory installs
+nowhere (2). Inherited GIT_TRACE and GIT_TRACE2 destinations naming another repository's tracked file leave
+it unchanged, for the installer and for the hook. A stub that does not read back (no cmp) is removed, with
+the hooks directory the run created. The destination is confined to the clone's common git directory: a
+hooks directory that is a symbolic link (to another repository's hooks directory, or to a tracked directory
+of the working tree) and a git directory inside any worktree's top level other than as its own .git
+directory are refused with nothing written there: inside the working tree the installer runs from, inside
+the main working tree when it runs from a linked worktree, inside a linked worktree when it runs from the
+main one, and equal to the top level (`gitdir: .`); a git directory outside every working tree
+(--separate-git-dir) installs. Also refused: a core.worktree a linked worktree reads naming a directory that
+holds the git directory, a git directory inside the main worktree's core.worktree from a linked worktree
+(one outside it installs), a registry entry naming a top level of /, a linked worktree at the hooks
+directory, a hand-written .git file naming the git directory, a linked worktree moved by hand, an empty
+core.worktree (a stand-in git answers one), and a termination signal mid-install, which rolls back. A
+refusal after rollback names what is at the hooks directory, the stub path and the private directory by
+file type: a signal just after the ln or the final rmdir leaves nothing and says so; one just after the
+hooks directory's or the private directory's mkdir leaves that empty directory and names it; one that
+arrives before the hooks directory's mkdir leaves no hooks directory and names none; a stub the rollback
+cannot read is named, not taken as gone; a hooks directory that cannot be searched leaves the paths in it
+named as not known. A mkdir that fails because a directory arrived first leaves that directory and its
+contents, and a private directory an earlier run left is refused and kept. The main worktree's core.worktree is checked with no .git entry at that top
+level. A core.hooksPath only another linked worktree reads (its config.worktree, or
+an includeIf onbranch: for its branch) is refused, and so is a worktree registry that cannot be read
+(unprivileged user only). The existing stub is compared byte for byte: one more trailing newline, or a
+symbolic link to the exact text, is refused. A write that fails partway (a zero file-size limit) leaves no
+stub and no temporary file, and a trace2 target the kept global configuration names writes nothing. A link
+to another repository's hooks directory, or a directory, that arrives at the stub path just before ln is
+refused and kept, with nothing this run wrote left in either repository. A refusal names a backslash in a
+path as it is. A post-checkout and a post-merge a branch commits in the pack directory
+do not run on checkout or merge. From a linked worktree under a path with spaces the stub lands in the
+common hooks directory and the worktree's commits are checked; the stub refuses a commit whose working tree
+lacks the pack hook. Through real `git commit` runs over an installed fixture: a clean staged
+change commits; a staged tamper of an immutable record body is refused by doctor's resurrection finding over
+the snapshot (the hook output must carry that finding, so a refusal for another reason does not satisfy the
+vector), with HEAD unmoved, while the same commit in a clone without the hook succeeds; the staged snapshot,
+not the working tree, is what is checked (a staged tamper with restored working-tree bytes is refused, an
+unstaged tamper does not block a clean staged change); `git commit PATH` and `git commit -a` are checked
+against the temporary index git names in GIT_INDEX_FILE; an unborn branch commits a clean store; and a
+dedicated sync target equal to the clone's remote stays VALID in the snapshot. Under a recording stub tool,
+run by hand: exact order and arguments (doctor --require-store, then render --check, over one snapshot root
+under TMPDIR), each launched -I -B; the clone left unchanged over the read-only snapshot described above; a doctor
+finding stopping before render, a render error forwarded, an out-of-vocabulary status normalized to 2 and a
+surplus operand a usage 2 with no step run; and every snapshot directory removed on exit. Fail closed, each a
+named 2: the installer refuses a hooks directory it cannot read (run only for an unprivileged user, as root
+reads any directory) or that is not a directory, and a git below the 2.32 floor; it writes the stub and no
+configuration when core.hooksPath is supplied only by the environment; the hook stops before any step under a
+git below the floor or when the GIT_ variable names cannot be read from the environment (no sed), and exits 2
+when the snapshot removal fails (no rm), and a missing dirname stops the hook before any step. The disclosed
+CI residual is held as behaviour and text: a staged tamper the hook refuses, committed with --no-verify,
+passes the CI recipe, and the shipped files say so; git cherry-pick records the same tamper with the stub
+installed and no hook run, and the shipped files name the operations git commits without the hook.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_opf_doctor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the self-test's sibling imports below
@@ -1053,6 +1119,953 @@ def _self_test_isolated():
             shutil.rmtree(str(base), ignore_errors=True)
         return failures
 
+    def _precommit_suite():
+        """The pre-commit floor (enforcement pack, spec 1.3.0 (draft) 14.1: staged-snapshot pre-commit checks
+        with the per-clone installation residual disclosed). Each fixture is a committed clean store holding
+        a copy of opf/enforcement/precommit at its pack path, with OPF_TOOL pointing at this opf.py and
+        TMPDIR at a controlled directory. Returns the list of assertion failures; raises OSError if a fixture
+        cannot be built (a harness error, exit 2 via _classify)."""
+        failures = []
+
+        def expect(label, got, want):
+            if got != want:
+                failures.append("pre-commit: {}: got {}, expected {}".format(label, got, want))
+
+        pack = Path(__file__).resolve().parent.parent / "enforcement" / "precommit"
+        if not (pack / "pre-commit").is_file() or not (pack / "install.sh").is_file():
+            raise OSError("the pre-commit pack {} is incomplete".format(pack))
+        rel = "opf/enforcement/precommit"
+        base = Path(tempfile.mkdtemp(prefix="opf-precommit-selftest-")).resolve()
+        home = base / "home"
+        home.mkdir()
+        snaps = base / "tmp"
+        snaps.mkdir()
+        stub = base / "stub_opf.py"
+        stub.write_text(
+            "import os, sys\n"
+            "with open(os.environ['OPF_STUB_LOG'], 'a', encoding='utf-8') as log:\n"
+            "    log.write(chr(31).join(sys.argv[1:]) + chr(10))\n"
+            "with open(os.environ['OPF_STUB_LOG'] + '.flags', 'a', encoding='utf-8') as log:\n"
+            "    log.write('{} {}'.format(sys.flags.isolated, sys.flags.dont_write_bytecode) + chr(10))\n"
+            "verb = sys.argv[1].upper() if len(sys.argv) > 1 else 'NONE'\n"
+            "sys.exit(int(os.environ.get('OPF_STUB_RC_' + verb, '0')))\n",
+            encoding="utf-8")
+
+        def _env(extra=None):
+            # The fixture git env (every ambient GIT_ variable dropped, global and system config
+            # neutralized, HOME the fixture home) plus the pack's overrides.
+            env = _git_env(home)
+            env.update(OPF_PYTHON=sys.executable, OPF_TOOL=str(Path(__file__).resolve().parent / "opf.py"),
+                       TMPDIR=str(snaps))
+            if extra:
+                env.update(extra)
+            return env
+
+        def _run(args, cwd, extra=None):
+            # Run a pack script under sh and return its exit status. A missing sh is a harness error.
+            sh = shutil.which("sh")
+            if sh is None:
+                raise OSError("sh not found on PATH; the pre-commit pack cannot be run")
+            argv = [os.path.abspath(sh)] + list(args)
+            try:
+                proc = subprocess.run(argv, cwd=str(cwd), env=_env(extra),
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise OSError("could not run {} in {} ({})".format(args, cwd, exc))
+            return proc.returncode
+
+        def _fixture(name, machine=None, remote=None, commit=True):
+            root = base / name
+            root.mkdir()
+            _write_machine(root, machine if machine is not None else clean_machine())
+            _write_product(root)
+            shutil.copytree(str(pack), str(root / rel))
+            _git(root, home, "init")
+            if remote is not None:
+                _git(root, home, "remote", "add", "origin", remote)
+            if commit:
+                _git(root, home, "add", "-A")
+                _git(root, home, "commit", "-m", "seed store")
+            return root
+
+        def _install(root, extra=None):
+            return _run([str(root / rel / "install.sh")], base, extra)
+
+        def _git_out(root, *args):
+            proc = subprocess.run([git, "--no-replace-objects", "-C", str(root), "-c", "gc.auto=0",
+                                   "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"] + list(args),
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, env=_git_env(home), timeout=_GIT_TIMEOUT_S)
+            return proc.stdout.decode("utf-8", "replace").strip() if proc.returncode == 0 else None
+
+        def _hookspath(root):
+            return _git_out(root, "config", "--get", "core.hooksPath")
+
+        def _stub(root):
+            # The text of the installed pre-commit stub in the clone's untracked hooks directory, or None.
+            path = root / ".git" / "hooks" / "pre-commit"
+            if not path.is_file() or not os.access(str(path), os.X_OK):
+                return None
+            return path.read_text(encoding="utf-8")
+
+        def _stub_ok(root):
+            # True when the stub is installed and names the pack hook at its pack path.
+            text = _stub(root)
+            return text is not None and ("hook='./" + rel + "/pre-commit'") in text
+
+        def _head(root):
+            return _git_out(root, "rev-parse", "-q", "--verify", "HEAD")
+
+        def _commit(root, *args):
+            # A real `git commit`, so git itself runs the installed hook with its own GIT_INDEX_FILE.
+            # Returns (exit status, combined output).
+            try:
+                proc = subprocess.run([git, "--no-replace-objects", "-C", str(root),
+                                       "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
+                                       "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
+                                       "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                                       "commit", "-q", "-m", "change"] + list(args),
+                                      cwd=str(root), env=_env(), stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, timeout=300)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise OSError("could not run git commit in {} ({})".format(root, exc))
+            return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+        def _refused(root, *args):
+            # (refused, HEAD unchanged, refused BY doctor's resurrection finding over the snapshot) for one
+            # commit attempt; a refusal for any other reason (a cannot-evaluate, say) is not this vector.
+            before = _head(root)
+            rc, text = _commit(root, *args)
+            return rc != EXIT_OK, _head(root) == before, "FINDING: C-HISTORY-RESURRECTION" in text
+
+        def _committed(root, *args):
+            # (exit status, HEAD moved) for one commit attempt.
+            before = _head(root)
+            rc, _text = _commit(root, *args)
+            return rc, _head(root) != before
+
+        def _tamper(root):
+            _write_machine(root, {"done.index.toml": idx([dn(1, "BI-1", title="tampered")])})
+
+        def _untamper(root):
+            _write_machine(root, {"done.index.toml": idx([dn(1, "BI-1")])})
+
+        done_rel = "{}/{}/done.index.toml".format(_opf_store.WORKING_DIRNAME,
+                                                     _opf_store.DEFAULT_MACHINE_SUBDIR)
+        # A git that reports 2.31.0 (below the 2.32 floor) and otherwise runs the real git.
+        old_bin = base / "old-git-bin"
+        old_bin.mkdir()
+        (old_bin / "git").write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = --version ]; then echo 'git version 2.31.0'; exit 0; fi\n"
+            "exec \"$OPF_REAL_GIT\" \"$@\"\n", encoding="utf-8")
+        os.chmod(str(old_bin / "git"), 0o755)
+        old_git_env = dict(PATH=str(old_bin) + os.pathsep + _env().get("PATH", os.defpath), OPF_REAL_GIT=git)
+
+        hook_tools = ("git", "dirname", "mktemp", "env", "sed", "mkdir", "rm")
+        # ls is not run by the installer; it is here so an installer that still lists the hooks directory
+        # with it is judged on the command a vector removes, not on a missing ls.
+        install_tools = ("git", "dirname", "env", "sed", "cat", "cmp", "chmod", "ln", "rm", "rmdir", "mkdir", "ls")
+
+        def _path_without(missing, needed=hook_tools, tag="hook"):
+            # A PATH holding only the external commands the script runs (`needed`), less `missing`.
+            tools = base / ("bin-" + tag + "-without-" + missing)
+            tools.mkdir()
+            for tool in needed:
+                if tool == missing:
+                    continue
+                found = shutil.which(tool)
+                if found is None:
+                    raise OSError(tool + " not found on PATH; the hook's tool set cannot be built")
+                os.symlink(os.path.abspath(found), str(tools / tool))
+            return dict(PATH=str(tools))
+
+        try:
+            # --- The installer. It writes the pre-commit stub into the clone's untracked hooks directory and
+            # sets no core.hooksPath (0); a rerun is a no-op (0). ---
+            inst = _fixture("install")
+            expect("install-writes-stub", (_install(inst), _stub_ok(inst), _hookspath(inst)), (EXIT_OK, True, None))
+            first = _stub(inst)
+            expect("install-rerun-no-op", (_install(inst), _stub(inst) == first), (EXIT_OK, True))
+            # A core.hooksPath set to any value (git would run no hook from the hooks directory) is refused
+            # (2) and left as it was, including the tracked pack directory a former install set.
+            other = _fixture("install-other")
+            _git(other, home, "config", "core.hooksPath", "elsewhere")
+            expect("install-refuses-other-hookspath", (_install(other), _hookspath(other), _stub(other)),
+                   (EXIT_ERROR, "elsewhere", None))
+            former = _fixture("install-former")
+            _git(former, home, "config", "core.hooksPath", rel)
+            expect("install-refuses-pack-hookspath", (_install(former), _hookspath(former), _stub(former)),
+                   (EXIT_ERROR, rel, None))
+            # A pre-commit hook already in the hooks directory, which the stub would replace, is refused and
+            # left as it was; any other hook there is kept and the stub installs beside it.
+            planted = _fixture("install-planted")
+            (planted / ".git" / "hooks").mkdir(exist_ok=True)
+            (planted / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            expect("install-refuses-existing-hook",
+                   (_install(planted), (planted / ".git" / "hooks" / "pre-commit").read_text(encoding="utf-8")),
+                   (EXIT_ERROR, "#!/bin/sh\nexit 0\n"))
+            kept = _fixture("install-kept")
+            (kept / ".git" / "hooks").mkdir(exist_ok=True)
+            (kept / ".git" / "hooks" / "post-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            expect("install-keeps-other-hooks",
+                   (_install(kept), _stub_ok(kept),
+                    (kept / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")),
+                   (EXIT_OK, True, "#!/bin/sh\nexit 0\n"))
+            # An inherited GIT_DIR naming another repository cannot redirect the install: it lands in the
+            # clone that holds the installer, and the other repository is untouched.
+            target = _fixture("install-target")
+            decoy = _fixture("install-decoy")
+            expect("install-ignores-ambient-git-dir",
+                   (_install(target, dict(GIT_DIR=str(decoy / ".git"))), _stub_ok(target), _stub(decoy)),
+                   (EXIT_OK, True, None))
+            # A surplus operand is a usage error.
+            expect("install-usage", _run([str(inst / rel / "install.sh"), "x"], base), EXIT_ERROR)
+            # Root reads any file and directory, so the two unreadable vectors run only for an unprivileged
+            # user. A pack hook the stub could not read is refused with no stub written; a hooks directory
+            # that cannot be read is refused and the hook in it left as it was.
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                unread_pack = _fixture("install-unreadable-pack-hook")
+                os.chmod(str(unread_pack / rel / "pre-commit"), 0o311)
+                try:
+                    expect("install-refuses-unreadable-pack-hook", (_install(unread_pack), _stub(unread_pack)),
+                           (EXIT_ERROR, None))
+                finally:
+                    os.chmod(str(unread_pack / rel / "pre-commit"), 0o755)
+                unread = _fixture("install-unreadable-hooks")
+                unread_hooks = unread / ".git" / "hooks"
+                unread_hooks.mkdir(exist_ok=True)
+                (unread_hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+                os.chmod(str(unread_hooks), 0o111)
+                try:
+                    rc = _install(unread)
+                finally:
+                    os.chmod(str(unread_hooks), 0o755)
+                expect("install-refuses-unreadable-hooks-dir",
+                       (rc, (unread_hooks / "pre-commit").read_text(encoding="utf-8")),
+                       (EXIT_ERROR, "#!/bin/sh\nexit 1\n"))
+            # A hooks path that is not a directory is refused and left as it was.
+            notdir = _fixture("install-hooks-not-dir")
+            shutil.rmtree(str(notdir / ".git" / "hooks"), ignore_errors=True)
+            (notdir / ".git" / "hooks").write_text("", encoding="utf-8")
+            expect("install-refuses-hooks-not-dir", (_install(notdir), (notdir / ".git" / "hooks").is_file()),
+                   (EXIT_ERROR, True))
+            # A core.hooksPath supplied only by the environment (a `git -c` or alias caller) is dropped, not
+            # read as configuration: the stub installs and no configuration is written.
+            envcfg = _fixture("install-env-config")
+            env_only = dict(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath", GIT_CONFIG_VALUE_0=rel)
+            expect("install-ignores-env-config", (_install(envcfg, env_only), _stub_ok(envcfg), _hookspath(envcfg)),
+                   (EXIT_OK, True, None))
+            # A git older than the 2.32 floor is refused (2) with no stub written.
+            oldgit = _fixture("install-old-git")
+            expect("install-refuses-old-git", (_install(oldgit, old_git_env), _stub(oldgit)), (EXIT_ERROR, None))
+            # A missing dirname fails closed (2): run from inside another repository's pack directory, the
+            # installer neither installs there nor in its own clone.
+            nodir = _fixture("install-no-dirname")
+            nodir_cwd = _fixture("install-no-dirname-cwd")
+            rc = _run([str(nodir / rel / "install.sh")], nodir_cwd / rel,
+                      _path_without("dirname", install_tools, "install"))
+            expect("install-dirname-missing-refused",
+                   (rc, _stub(nodir), _stub(nodir_cwd), _hookspath(nodir_cwd)), (EXIT_ERROR, None, None, None))
+            # Inherited git trace destinations are dropped before the first git call: a trace file that is
+            # another repository's tracked file is left byte for byte as it was, on a first install and on
+            # the already-installed rerun.
+            traced = _fixture("install-trace-target")
+            (traced / "TRACED.md").write_text("traced\n", encoding="utf-8")
+            _git(traced, home, "add", "TRACED.md")
+            _git(traced, home, "commit", "-q", "--no-verify", "-m", "traced")
+            trace_file = str(traced / "TRACED.md")
+            trace_env = dict(GIT_TRACE=trace_file, GIT_TRACE_SETUP=trace_file, GIT_TRACE_PERFORMANCE=trace_file,
+                             GIT_TRACE2=trace_file, GIT_TRACE2_EVENT=trace_file, GIT_TRACE2_PERF=trace_file)
+            tracing = _fixture("install-traced")
+            expect("install-git-trace-scrubbed",
+                   (_install(tracing, trace_env), _install(tracing, trace_env), _stub_ok(tracing),
+                    (traced / "TRACED.md").read_text(encoding="utf-8")),
+                   (EXIT_OK, EXIT_OK, True, "traced\n"))
+            # A stub that does not read back (no cmp) is rolled back: the stub is removed, and so is the
+            # hooks directory when this run created it.
+            readback = _fixture("install-readback")
+            expect("install-readback-failure-rolls-back",
+                   (_install(readback, _path_without("cmp", install_tools, "install")),
+                    (readback / ".git" / "hooks" / "pre-commit").exists(), _hookspath(readback)),
+                   (EXIT_ERROR, False, None))
+            readback_dir = _fixture("install-readback-dir")
+            shutil.rmtree(str(readback_dir / ".git" / "hooks"))
+            expect("install-readback-failure-removes-created-dir",
+                   (_install(readback_dir, _path_without("cmp", install_tools, "install-dir")),
+                    (readback_dir / ".git" / "hooks").exists()),
+                   (EXIT_ERROR, False))
+            # The destination is confined to the clone's own common git directory. A hooks directory that is
+            # a symbolic link is refused (2) with nothing written through it: one naming another repository's
+            # hooks directory, and one naming a tracked directory of the clone's own working tree.
+            via = _fixture("install-hooks-link-other")
+            via_target = _fixture("install-hooks-link-target")
+            (via_target / ".git" / "hooks").mkdir(exist_ok=True)
+            shutil.rmtree(str(via / ".git" / "hooks"), ignore_errors=True)
+            os.symlink(str(via_target / ".git" / "hooks"), str(via / ".git" / "hooks"))
+            expect("install-refuses-hooks-link-to-other-repo",
+                   (_install(via), (via_target / ".git" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            tracked = _fixture("install-hooks-link-tracked")
+            (tracked / "hookdir").mkdir()
+            (tracked / "hookdir" / "README.md").write_text("tracked\n", encoding="utf-8")
+            _git(tracked, home, "add", "hookdir")
+            _git(tracked, home, "commit", "-q", "--no-verify", "-m", "tracked hook directory")
+            shutil.rmtree(str(tracked / ".git" / "hooks"), ignore_errors=True)
+            os.symlink(str(tracked / "hookdir"), str(tracked / ".git" / "hooks"))
+            expect("install-refuses-hooks-link-to-tracked-dir",
+                   (_install(tracked), (tracked / "hookdir" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A git directory inside the working tree under no .git component (git tracks its files) is
+            # refused with no stub written there.
+            inner = _fixture("install-inner-gitdir")
+            os.rename(str(inner / ".git"), str(inner / "gd"))
+            (inner / ".git").write_text("gitdir: " + str(inner / "gd") + "\n", encoding="utf-8")
+            expect("install-refuses-gitdir-in-worktree",
+                   (_install(inner), (inner / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A core.hooksPath that only another linked worktree reads is refused (2), with no stub written:
+            # its own config.worktree under extensions.worktreeConfig, and an includeIf onbranch: for the
+            # branch it has checked out.
+            scoped = _fixture("install-wt-scoped")
+            _git(scoped, home, "config", "extensions.worktreeConfig", "true")
+            _git(scoped, home, "worktree", "add", "-q", "-b", "side", str(base / "install wt scoped"))
+            _git(base / "install wt scoped", home, "config", "--worktree", "core.hooksPath", str(base / "elsewhere"))
+            expect("install-refuses-other-worktree-hookspath", (_install(scoped), _stub(scoped)), (EXIT_ERROR, None))
+            onbranch = _fixture("install-wt-onbranch")
+            (base / "onbranch.inc").write_text("[core]\n\thooksPath = elsewhere\n", encoding="utf-8")
+            _git(onbranch, home, "config", "includeIf.onbranch:side.path", str(base / "onbranch.inc"))
+            _git(onbranch, home, "worktree", "add", "-q", "-b", "side", str(base / "install wt onbranch"))
+            expect("install-refuses-onbranch-worktree-hookspath", (_install(onbranch), _stub(onbranch)),
+                   (EXIT_ERROR, None))
+            # The existing hook is compared byte for byte: a stub with one more trailing newline, and a
+            # symbolic link to a file holding the exact stub text, are not taken as installed (2, kept).
+            trailing = _fixture("install-trailing-newline")
+            expect("install-trailing-first", _install(trailing), EXIT_OK)
+            trailing_hook = trailing / ".git" / "hooks" / "pre-commit"
+            trailing_hook.write_text(_stub(trailing) + "\n", encoding="utf-8")
+            trailing_text = trailing_hook.read_text(encoding="utf-8")
+            expect("install-refuses-stub-with-extra-newline",
+                   (_install(trailing), trailing_hook.read_text(encoding="utf-8")), (EXIT_ERROR, trailing_text))
+            linkstub = _fixture("install-stub-link")
+            expect("install-stub-link-first", _install(linkstub), EXIT_OK)
+            linkstub_hook = linkstub / ".git" / "hooks" / "pre-commit"
+            (linkstub / "STUB.sh").write_text(_stub(linkstub), encoding="utf-8")
+            os.chmod(str(linkstub / "STUB.sh"), 0o755)
+            os.remove(str(linkstub_hook))
+            os.symlink(str(linkstub / "STUB.sh"), str(linkstub_hook))
+            expect("install-refuses-stub-symlink", (_install(linkstub), os.path.islink(str(linkstub_hook))),
+                   (EXIT_ERROR, True))
+            # A stub write that fails partway leaves nothing behind (a zero file-size limit makes the write
+            # fail): no pre-commit, no temporary file.
+            partial = _fixture("install-partial-write")
+            rc = _run(["-c", 'ulimit -f 0 && sh "$0"', str(partial / rel / "install.sh")], base)
+            expect("install-partial-write-leaves-nothing",
+                   (rc, sorted(n for n in os.listdir(str(partial / ".git" / "hooks"))
+                               if n == "pre-commit" or n.startswith(".opf-"))), (EXIT_ERROR, []))
+            # A trace2 target the kept global configuration names is overridden: another repository's
+            # tracked file is left byte for byte as it was.
+            trace_cfg = base / "trace2.gitconfig"
+            trace_cfg.write_text("[trace2]\n\teventTarget = " + trace_file + "\n\tnormalTarget = " + trace_file
+                                 + "\n\tperfTarget = " + trace_file + "\n", encoding="utf-8")
+            cfg_traced = _fixture("install-config-traced")
+            expect("install-config-trace2-overridden",
+                   (_install(cfg_traced, dict(GIT_CONFIG_GLOBAL=str(trace_cfg))), _stub_ok(cfg_traced),
+                    (traced / "TRACED.md").read_text(encoding="utf-8")),
+                   (EXIT_OK, True, "traced\n"))
+            # The trackable-destination check covers every worktree of the clone, not only the one the
+            # installer runs from. A git directory inside the main working tree, installed from a linked
+            # worktree, is refused (2) with no stub written there.
+            inner_main = _fixture("install-inner-gitdir-main")
+            inner_lw = base / "install inner gitdir linked"
+            os.rename(str(inner_main / ".git"), str(inner_main / "gd"))
+            (inner_main / ".git").write_text("gitdir: gd\n", encoding="utf-8")
+            _git(inner_main, home, "worktree", "add", "-q", "-b", "lw", str(inner_lw))
+            expect("install-refuses-gitdir-in-main-from-linked-worktree",
+                   (_install(inner_lw), (inner_main / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A git directory inside a linked worktree's top level, installed from the main worktree whose
+            # own top level does not hold it, is refused (2) with no stub written there.
+            outer_main = _fixture("install-gitdir-in-linked")
+            outer_lw = base / "install gitdir in linked wt"
+            _git(outer_main, home, "worktree", "add", "-q", "-b", "lw", str(outer_lw))
+            os.rename(str(outer_main / ".git"), str(outer_lw / "gd"))
+            (outer_main / ".git").write_text("gitdir: " + str(outer_lw / "gd") + "\n", encoding="utf-8")
+            outer_entries = os.listdir(str(outer_lw / "gd" / "worktrees"))
+            if len(outer_entries) != 1:
+                raise OSError("the linked worktree entry of {} could not be found".format(outer_main))
+            (outer_lw / ".git").write_text("gitdir: " + str(outer_lw / "gd" / "worktrees" / outer_entries[0]) + "\n",
+                                           encoding="utf-8")
+            expect("install-refuses-gitdir-in-linked-worktree",
+                   (_install(outer_main), (outer_lw / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A git directory AT the top level (its .git file reads `gitdir: .`, so the common git directory
+            # equals the top level) is refused (2) with no stub written there.
+            flat = _fixture("install-gitdir-at-top")
+            for name in os.listdir(str(flat / ".git")):
+                os.rename(str(flat / ".git" / name), str(flat / name))
+            os.rmdir(str(flat / ".git"))
+            (flat / ".git").write_text("gitdir: .\n", encoding="utf-8")
+            expect("install-refuses-gitdir-equals-top",
+                   (_install(flat), (flat / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A git directory outside every working tree (--separate-git-dir) still installs from the main
+            # worktree (0), and the stub lands in that git directory's hooks.
+            sep_wt = _fixture("install-separate", commit=False)
+            sep_git = base / "install-separate.git"
+            os.rename(str(sep_wt / ".git"), str(sep_git))
+            (sep_wt / ".git").write_text("gitdir: " + str(sep_git) + "\n", encoding="utf-8")
+            _git(sep_wt, home, "add", "-A")
+            _git(sep_wt, home, "commit", "-q", "--no-verify", "-m", "seed store")
+            expect("install-separate-gitdir-from-main",
+                   (_install(sep_wt), (sep_git / "hooks" / "pre-commit").is_file()), (EXIT_OK, True))
+            # A worktree registry that cannot be read (it would list as empty) is refused (2), with no stub
+            # written, while a linked worktree it holds sets core.hooksPath. Root reads it, so this is an
+            # unprivileged-user vector.
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                unreg = _fixture("install-unreadable-registry")
+                _git(unreg, home, "config", "extensions.worktreeConfig", "true")
+                _git(unreg, home, "worktree", "add", "-q", "-b", "side", str(base / "install unreadable registry wt"))
+                _git(base / "install unreadable registry wt", home, "config", "--worktree", "core.hooksPath",
+                     str(base / "elsewhere"))
+                os.chmod(str(unreg / ".git" / "worktrees"), 0o311)
+                try:
+                    rc = _install(unreg)
+                finally:
+                    os.chmod(str(unreg / ".git" / "worktrees"), 0o755)
+                expect("install-refuses-unreadable-worktree-registry", (rc, _stub(unreg)), (EXIT_ERROR, None))
+            # Something that arrives at the stub path between the last check and ln (a stand-in ln makes it
+            # arrive, then runs the real ln): a link to another repository's hooks directory, and a
+            # directory. Each is refused (2) and kept; nothing this run wrote is left in either repository.
+            real_ln = shutil.which("ln")
+            real_mkdir = shutil.which("mkdir")
+            if real_ln is None or real_mkdir is None:
+                raise OSError("ln or mkdir not found on PATH; the placement race vectors cannot be built")
+            race_target = _fixture("install-race-target")
+            (race_target / ".git" / "hooks").mkdir(exist_ok=True)
+            for kind in ("link", "dir"):
+                racer = _fixture("install-race-" + kind)
+                (racer / ".git" / "hooks").mkdir(exist_ok=True)
+                race_env = _path_without("ln", install_tools, "install-race-" + kind)
+                shim = Path(race_env["PATH"]) / "ln"
+                arrive = ('"$OPF_QA_REAL_LN" -s -- "$OPF_QA_TARGET" "$last" || exit 1\n' if kind == "link"
+                          else '"$OPF_QA_REAL_MKDIR" -- "$last" || exit 1\n')
+                shim.write_text("#!/bin/sh\nfor last in \"$@\"; do :; done\n" + arrive
+                                + 'exec "$OPF_QA_REAL_LN" "$@"\n', encoding="utf-8")
+                os.chmod(str(shim), 0o755)
+                race_env.update(OPF_QA_REAL_LN=os.path.abspath(real_ln), OPF_QA_REAL_MKDIR=os.path.abspath(real_mkdir),
+                                OPF_QA_TARGET=str(race_target / ".git" / "hooks"))
+                race_stub = racer / ".git" / "hooks" / "pre-commit"
+                rc = _install(racer, race_env)
+                kept = os.path.islink(str(race_stub)) if kind == "link" else (
+                    race_stub.is_dir() and not os.path.islink(str(race_stub)) and os.listdir(str(race_stub)) == [])
+                expect("install-placement-race-" + kind + "-leaves-nothing",
+                       (rc, kept, sorted(n for n in os.listdir(str(racer / ".git" / "hooks")) if n.startswith(".opf-")),
+                        [n for n in os.listdir(str(race_target / ".git" / "hooks"))
+                         if n.startswith(".opf-") or n == "pre-commit"]),
+                       (EXIT_ERROR, True, [], []))
+            # A path that names a backslash is printed as it is (printf, not echo, whose operand some shells
+            # read for escapes): the refusal names a core.hooksPath of a\tb with its backslash.
+            slashed = _fixture("install-backslash")
+            _git(slashed, home, "config", "core.hooksPath", "a\\tb")
+            slashed_err = base / "install-backslash.err"
+            rc = _run(["-c", 'sh "$0" 2> "$1"', str(slashed / rel / "install.sh"), str(slashed_err)], base)
+            expect("install-message-keeps-backslash",
+                   (rc, "core.hooksPath is set to a\\tb " in slashed_err.read_text(encoding="utf-8", errors="replace")),
+                   (EXIT_ERROR, True))
+            # A core.worktree a linked worktree reads (its config.worktree under extensions.worktreeConfig)
+            # that names a directory holding the common git directory is checked like any top level:
+            # installed from the main worktree, it is refused (2) with no stub written there.
+            cw_root = base / "install core worktree"
+            cw_root.mkdir()
+            cw_main = _fixture("install core worktree/main")
+            cw_lw = cw_root / "linked"
+            _git(cw_main, home, "worktree", "add", "-q", "-b", "lw", str(cw_lw))
+            os.rename(str(cw_main / ".git"), str(cw_root / "gd"))
+            (cw_main / ".git").write_text("gitdir: " + str(cw_root / "gd") + "\n", encoding="utf-8")
+            cw_entries = os.listdir(str(cw_root / "gd" / "worktrees"))
+            if len(cw_entries) != 1:
+                raise OSError("the linked worktree entry of " + str(cw_main) + " could not be found")
+            (cw_lw / ".git").write_text("gitdir: " + str(cw_root / "gd" / "worktrees" / cw_entries[0]) + "\n",
+                                        encoding="utf-8")
+            _git(cw_main, home, "config", "extensions.worktreeConfig", "true")
+            _git(cw_lw, home, "config", "--worktree", "core.worktree", str(cw_root))
+            expect("install-refuses-gitdir-in-linked-core-worktree",
+                   (_install(cw_main), (cw_root / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # Run from a linked worktree, the main worktree's top level is the one a core.worktree on the
+            # common git directory sets: a git directory outside it installs (0), one inside it is refused
+            # (2), with no stub written there.
+            scw_wt = _fixture("install-separate-core-worktree", commit=False)
+            scw_git = base / "install-separate-core-worktree.git"
+            os.rename(str(scw_wt / ".git"), str(scw_git))
+            (scw_wt / ".git").write_text("gitdir: " + str(scw_git) + "\n", encoding="utf-8")
+            _git(scw_wt, home, "add", "-A")
+            _git(scw_wt, home, "commit", "-q", "--no-verify", "-m", "seed store")
+            _git(scw_wt, home, "config", "core.worktree", str(scw_wt))
+            scw_lw = base / "install separate core worktree linked"
+            _git(scw_wt, home, "worktree", "add", "-q", "-b", "lw", str(scw_lw))
+            expect("install-separate-core-worktree-from-linked",
+                   (_install(scw_lw), (scw_git / "hooks" / "pre-commit").is_file()), (EXIT_OK, True))
+            icw = _fixture("install-inner-core-worktree")
+            os.rename(str(icw / ".git"), str(icw / "gd"))
+            (icw / ".git").write_text("gitdir: gd\n", encoding="utf-8")
+            _git(icw, home, "config", "core.worktree", str(icw))
+            icw_lw = base / "install inner core worktree linked"
+            _git(icw, home, "worktree", "add", "-q", "-b", "lw", str(icw_lw))
+            expect("install-refuses-gitdir-in-main-core-worktree-from-linked",
+                   (_install(icw_lw), (icw / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # The same with the main worktree's .git file removed, so that only the core.worktree on the
+            # common git directory names the top level holding it (no .git entry there for the walk to see):
+            # run from a linked worktree, it is refused (2) with no stub written there.
+            icwo = _fixture("install-inner-core-worktree-only")
+            os.rename(str(icwo / ".git"), str(icwo / "gd"))
+            (icwo / ".git").write_text("gitdir: gd\n", encoding="utf-8")
+            _git(icwo, home, "config", "core.worktree", str(icwo))
+            icwo_lw = base / "install inner core worktree only linked"
+            _git(icwo, home, "worktree", "add", "-q", "-b", "lw", str(icwo_lw))
+            os.unlink(str(icwo / ".git"))
+            expect("install-refuses-gitdir-in-main-core-worktree-only-from-linked",
+                   (_install(icwo_lw), (icwo / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # An empty core.worktree is refused (2), not taken as unset, with no stub written. Git 2.53 will
+            # not run with one, so a stand-in git answers an empty core.worktree for each linked worktree
+            # entry (read under extensions.worktreeConfig) and runs the real git otherwise.
+            ecw = _fixture("install-empty-core-worktree")
+            _git(ecw, home, "worktree", "add", "-q", "-b", "lw", str(base / "install empty core worktree wt"))
+            _git(ecw, home, "config", "extensions.worktreeConfig", "true")
+            ecw_bin = base / "bin-empty-core-worktree"
+            ecw_bin.mkdir()
+            (ecw_bin / "git").write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "    --git-dir=*/worktrees/*)\n"
+                "        if [ \"$2\" = config ] && [ \"$3\" = --get ] && [ \"$4\" = core.worktree ]; then echo; exit 0; fi ;;\n"
+                "esac\n"
+                "exec \"$OPF_REAL_GIT\" \"$@\"\n", encoding="utf-8")
+            os.chmod(str(ecw_bin / "git"), 0o755)
+            ecw_env = dict(PATH=str(ecw_bin) + os.pathsep + _env().get("PATH", os.defpath), OPF_REAL_GIT=git)
+            expect("install-refuses-empty-core-worktree", (_install(ecw, ecw_env), _stub(ecw)), (EXIT_ERROR, None))
+            # A linked worktree whose registry entry names a top level of / (its gitdir file reads /.git)
+            # holds every path, so the install is refused (2) with no stub written.
+            rooted = _fixture("install-root-top")
+            _git(rooted, home, "worktree", "add", "-q", "-b", "lw", str(base / "install root top wt"))
+            rooted_entries = os.listdir(str(rooted / ".git" / "worktrees"))
+            if len(rooted_entries) != 1:
+                raise OSError("the linked worktree entry of " + str(rooted) + " could not be found")
+            (rooted / ".git" / "worktrees" / rooted_entries[0] / "gitdir").write_text("/.git\n", encoding="utf-8")
+            expect("install-refuses-root-top-level", (_install(rooted), _stub(rooted)), (EXIT_ERROR, None))
+            # A linked worktree AT the hooks directory (its top level equals the hooks directory) is refused
+            # (2), and that worktree gains no pre-commit file.
+            hookwt = _fixture("install-hooks-worktree")
+            shutil.rmtree(str(hookwt / ".git" / "hooks"))
+            _git(hookwt, home, "worktree", "add", "-q", "-b", "h", str(hookwt / ".git" / "hooks"))
+            expect("install-refuses-hooks-dir-as-worktree",
+                   (_install(hookwt), (hookwt / ".git" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A working tree the registry does not name (a .git file written by hand naming a git directory
+            # inside another working tree), and a linked worktree moved by hand so that its registry entry
+            # names a path it has left, are found by their .git entries: each is refused (2), no stub.
+            unreg_a = _fixture("install-unregistered-a")
+            os.rename(str(unreg_a / ".git"), str(unreg_a / "gd"))
+            (unreg_a / ".git").write_text("gitdir: gd\n", encoding="utf-8")
+            unreg_b = base / "install-unregistered-b"
+            unreg_b.mkdir()
+            (unreg_b / ".git").write_text("gitdir: " + str(unreg_a / "gd") + "\n", encoding="utf-8")
+            _git(unreg_b, home, "checkout", "-q", "--", ".")
+            expect("install-refuses-gitdir-in-unregistered-worktree",
+                   (_run([str(unreg_b / rel / "install.sh")], base), (unreg_a / "gd" / "hooks" / "pre-commit").exists()),
+                   (EXIT_ERROR, False))
+            moved_main = _fixture("install-moved-linked")
+            moved_lw = base / "install moved linked wt"
+            moved_to = base / "install moved linked wt2"
+            _git(moved_main, home, "worktree", "add", "-q", "-b", "lw", str(moved_lw))
+            os.rename(str(moved_main / ".git"), str(moved_lw / "gd"))
+            moved_entries = os.listdir(str(moved_lw / "gd" / "worktrees"))
+            if len(moved_entries) != 1:
+                raise OSError("the linked worktree entry of " + str(moved_main) + " could not be found")
+            os.rename(str(moved_lw), str(moved_to))
+            (moved_main / ".git").write_text("gitdir: " + str(moved_to / "gd") + "\n", encoding="utf-8")
+            (moved_to / ".git").write_text("gitdir: " + str(moved_to / "gd" / "worktrees" / moved_entries[0]) + "\n",
+                                           encoding="utf-8")
+            expect("install-refuses-gitdir-in-moved-worktree",
+                   (_install(moved_main), (moved_to / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A termination signal during the install (a stand-in chmod runs the real one, then sends TERM
+            # to the installer) runs the rollback: 2, no stub and no private directory left.
+            real_chmod = shutil.which("chmod")
+            if real_chmod is None:
+                raise OSError("chmod not found on PATH; the signal vector cannot be built")
+            signalled = _fixture("install-signalled")
+            sig_env = _path_without("chmod", install_tools, "install-signal")
+            sig_shim = Path(sig_env["PATH"]) / "chmod"
+            sig_shim.write_text('#!/bin/sh\n"$OPF_QA_REAL_CHMOD" "$@" || exit 1\nkill -TERM "$PPID"\n',
+                                encoding="utf-8")
+            os.chmod(str(sig_shim), 0o755)
+            sig_env.update(OPF_QA_REAL_CHMOD=os.path.abspath(real_chmod))
+            rc = _install(signalled, sig_env)
+            expect("install-signal-rolls-back",
+                   (rc, sorted(n for n in os.listdir(str(signalled / ".git" / "hooks"))
+                               if n == "pre-commit" or n.startswith(".opf-"))), (EXIT_ERROR, []))
+            # A refusal after rollback names what is at the hooks directory and, while that is a directory, at
+            # the stub path and the private directory, by file type. The installer runs from a shell that
+            # records its process id and then execs it (so the private directory's name is known); the last
+            # line of its error output is the refusal.
+            real_rmdir = shutil.which("rmdir")
+            real_cmp = shutil.which("cmp")
+            if real_rmdir is None or real_cmp is None:
+                raise OSError("rmdir or cmp not found on PATH; the signal vectors cannot be built")
+            sh_path = shutil.which("sh")
+            if sh_path is None:
+                raise OSError("sh not found on PATH; the signal vectors cannot be built")
+
+            def _install_seen(root, env, label):
+                err = base / (label + ".err")
+                pid = base / (label + ".pid")
+                rc = _run(["-c", 'printf "%s\\n" "$$" > "$3" && exec "$2" "$0" 2> "$1"', str(root / rel / "install.sh"),
+                           str(err), os.path.abspath(sh_path), str(pid)], base, env)
+                lines = err.read_text(encoding="utf-8", errors="replace").strip().split("\n")
+                return rc, lines, ".opf-pre-commit-install." + pid.read_text(encoding="utf-8").strip()
+
+            def _seen(reason, root, priv, hooks_kind, stub_kind="nothing", priv_kind="nothing"):
+                hooks_dir = root / ".git" / "hooks"
+                text = "opf-pre-commit install: refused: " + reason + "; after the removal, what is there: "
+                text += str(hooks_dir) + ": " + hooks_kind
+                if hooks_kind == "a directory":
+                    text += "; " + str(hooks_dir / "pre-commit") + ": " + stub_kind
+                    text += "; " + str(hooks_dir / priv) + ": " + priv_kind
+                return text
+
+            def _opf_names(root):
+                hooks_dir = root / ".git" / "hooks"
+                if not hooks_dir.is_dir():
+                    return None
+                return sorted((n, sorted(os.listdir(str(hooks_dir / n))) if (hooks_dir / n).is_dir() else "file")
+                              for n in os.listdir(str(hooks_dir)) if n == "pre-commit" or n.startswith(".opf-"))
+
+            def _shimmed(tag, tools):
+                env = _path_without(next(iter(tools)), install_tools, tag)
+                for tool, (real, body) in tools.items():
+                    shim = Path(env["PATH"]) / tool
+                    if shim.exists() or shim.is_symlink():
+                        os.remove(str(shim))
+                    shim.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+                    os.chmod(str(shim), 0o755)
+                    env["OPF_QA_REAL_" + tool.upper()] = os.path.abspath(real)
+                return env
+
+            # A signal that lands just after a write (the stand-in runs the real command, then sends TERM; the
+            # installer runs the trap as soon as that command returns). After the ln or the final rmdir it
+            # leaves no stub and no private directory and names nothing at either. After a mkdir, the trap
+            # runs before the directory is recorded as this run's, so that one empty directory is left and
+            # named (the disclosed instant).
+            for label, tool, real, when in (("hooks-mkdir", "mkdir", real_mkdir, '[ "$1" = -- ]'),
+                                            ("private-mkdir", "mkdir", real_mkdir, '[ "$1" = -m ]'),
+                                            ("ln", "ln", real_ln, ":"),
+                                            ("rmdir", "rmdir", real_rmdir, ":")):
+                after = _fixture("install-signal-after-" + label)
+                after_hooks = after / ".git" / "hooks"
+                if label == "hooks-mkdir":
+                    if after_hooks.exists():
+                        shutil.rmtree(str(after_hooks))
+                else:
+                    after_hooks.mkdir(exist_ok=True)
+                after_env = _shimmed("install-signal-after-" + label, {tool: (real, (
+                    '"$OPF_QA_REAL_' + tool.upper() + '" "$@" || exit $?\n' + when
+                    + ' && kill -TERM "$PPID"\nexit 0\n'))})
+                rc, lines, priv = _install_seen(after, after_env, "install-signal-after-" + label)
+                outcome = ("names-the-directory" if label.endswith("mkdir") else "leaves-nothing")
+                expect("install-signal-after-" + label + "-" + outcome,
+                       (rc, _opf_names(after), lines[-1]),
+                       (EXIT_ERROR, [(priv, [])] if label == "private-mkdir" else [],
+                        _seen("stopped by a signal", after, priv, "a directory",
+                              priv_kind="a directory" if label == "private-mkdir" else "nothing")))
+            # A mkdir that fails because a directory arrived after the check (the stand-in makes it, then runs
+            # the real mkdir) leaves that directory and its contents alone and names it: the hooks directory,
+            # and a private directory holding a file at the temporary stub's name.
+            for label, when, arrive in (
+                    ("hooks", '[ "$1" = -- ]', '"$OPF_QA_REAL_MKDIR" -- "$2"'),
+                    ("private", '[ "$1" = -m ]',
+                     '"$OPF_QA_REAL_MKDIR" -- "$4" && printf x > "$4/.opf-pre-commit-stub.${4##*.}"')):
+                arrived = _fixture("install-mkdir-arrival-" + label)
+                arrived_hooks = arrived / ".git" / "hooks"
+                if label == "hooks":
+                    if arrived_hooks.exists():
+                        shutil.rmtree(str(arrived_hooks))
+                else:
+                    arrived_hooks.mkdir(exist_ok=True)
+                arrived_env = _shimmed("install-mkdir-arrival-" + label, {"mkdir": (real_mkdir, (
+                    when + " && { " + arrive + ' || exit 1; }\nexec "$OPF_QA_REAL_MKDIR" "$@"\n'))})
+                rc, lines, priv = _install_seen(arrived, arrived_env, "install-mkdir-arrival-" + label)
+                expect("install-failed-" + label + "-mkdir-keeps-arrived-dir",
+                       (rc, _opf_names(arrived), lines[-1]),
+                       (EXIT_ERROR, [(priv, [".opf-pre-commit-stub." + priv.rsplit(".", 1)[1]])] if label == "private"
+                        else [],
+                        _seen("could not create the " + ("hooks directory " + str(arrived_hooks) if label == "hooks"
+                                                         else "private directory " + str(arrived_hooks / priv)),
+                              arrived, priv, "a directory",
+                              priv_kind="a directory" if label == "private" else "nothing")))
+            # A signal after the final rmdir, with the stub unreadable to the rollback's comparison once the
+            # temporary file is gone (a stand-in cmp fails then): the stub is kept and named as a regular
+            # file, not taken as gone.
+            unread = _fixture("install-signal-unreadable-stub")
+            (unread / ".git" / "hooks").mkdir(exist_ok=True)
+            unread_env = _shimmed("install-signal-unreadable-stub", {
+                "rmdir": (real_rmdir, '"$OPF_QA_REAL_RMDIR" "$@" || exit $?\nkill -TERM "$PPID"\n'),
+                "cmp": (real_cmp, 'case "$4" in\n*/pre-commit)\n'
+                        '    for t in "${4%/*}"/.opf-pre-commit-install.*/.opf-pre-commit-stub.*; do\n'
+                        '        [ -e "$t" ] && exec "$OPF_QA_REAL_CMP" "$@"\n    done\n    exit 2 ;;\nesac\n'
+                        'exec "$OPF_QA_REAL_CMP" "$@"\n')})
+            rc, lines, priv = _install_seen(unread, unread_env, "install-signal-unreadable-stub")
+            expect("install-signal-unreadable-stub-named",
+                   (rc, _opf_names(unread), lines[-1]),
+                   (EXIT_ERROR, [("pre-commit", "file")],
+                    _seen("stopped by a signal", unread, priv, "a directory", stub_kind="a regular file")))
+            # A signal that arrives before the hooks directory's mkdir makes it (the stand-in sends TERM and
+            # fails without making it): no hooks directory, and the refusal, alone on the error output, names
+            # nothing there.
+            before = _fixture("install-signal-before-hooks-mkdir")
+            if (before / ".git" / "hooks").exists():
+                shutil.rmtree(str(before / ".git" / "hooks"))
+            before_env = _shimmed("install-signal-before-hooks-mkdir", {"mkdir": (real_mkdir, (
+                '[ "$1" = -- ] && { kill -TERM "$PPID"; exit 1; }\nexec "$OPF_QA_REAL_MKDIR" "$@"\n'))})
+            rc, lines, priv = _install_seen(before, before_env, "install-signal-before-hooks-mkdir")
+            expect("install-signal-before-hooks-mkdir-names-nothing",
+                   (rc, (before / ".git" / "hooks").exists(), lines),
+                   (EXIT_ERROR, False, [_seen("stopped by a signal", before, priv, "nothing")]))
+            # A private directory an earlier run left at this run's name (the shell that execs the installer
+            # makes it, holding a file) is refused and kept with its contents; no stub is written.
+            stale = _fixture("install-stale-private-dir")
+            stale_hooks = stale / ".git" / "hooks"
+            stale_hooks.mkdir(exist_ok=True)
+            stale_err = base / "install-stale-private-dir.err"
+            rc = _run(["-c", 'd="$3/.opf-pre-commit-install.$$" && "$4" -- "$d" && printf x > "$d/keep" && '
+                       'exec "$2" "$0" 2> "$1"', str(stale / rel / "install.sh"), str(stale_err),
+                       os.path.abspath(sh_path), str(stale_hooks), os.path.abspath(real_mkdir)], base)
+            stale_names = _opf_names(stale)
+            expect("install-refuses-stale-private-dir",
+                   (rc, [(n, k) for n, k in stale_names] if stale_names else stale_names,
+                    "is already there (an earlier run left it; remove it)"
+                    in stale_err.read_text(encoding="utf-8", errors="replace")),
+                   (EXIT_ERROR, [(n, ["keep"]) for n, k in (stale_names or [])
+                                 if n.startswith(".opf-pre-commit-install.")] or ["missing"], True))
+            # A hooks directory that cannot be searched when the rollback runs (the stand-in chmod makes it
+            # so, then sends TERM) leaves the stub path and the private directory named as not known, not
+            # as nothing (unprivileged user only: root searches any directory).
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                blind = _fixture("install-signal-unsearchable-hooks")
+                blind_hooks = blind / ".git" / "hooks"
+                blind_hooks.mkdir(exist_ok=True)
+                blind_env = _shimmed("install-signal-unsearchable-hooks", {"chmod": (real_chmod, (
+                    '"$OPF_QA_REAL_CHMOD" "$@" || exit 1\n"$OPF_QA_REAL_CHMOD" 600 "${2%/*/*}" || exit 1\n'
+                    'kill -TERM "$PPID"\n'))})
+                try:
+                    rc, lines, priv = _install_seen(blind, blind_env, "install-signal-unsearchable-hooks")
+                finally:
+                    os.chmod(str(blind_hooks), 0o755)
+                unknown = "not known (the directory " + str(blind_hooks) + " cannot be searched)"
+                expect("install-signal-unsearchable-hooks-not-known",
+                       (rc, lines[-1]),
+                       (EXIT_ERROR, _seen("stopped by a signal", blind, priv, "a directory", stub_kind=unknown,
+                                          priv_kind=unknown)))
+            # A branch cannot add a hook: a post-checkout and a post-merge committed in the pack directory on
+            # another branch do not run on checkout or merge, since no tracked directory is a hooks path.
+            branchy = _fixture("branch-hooks")
+            expect("branch-hooks-install", _install(branchy), EXIT_OK)
+            marker = base / "branch-hook-ran"
+            _git(branchy, home, "checkout", "-q", "-b", "evil")
+            for name in ("post-checkout", "post-merge"):
+                (branchy / rel / name).write_text(
+                    "#!/bin/sh\necho " + name + " >> '" + str(marker) + "'\n", encoding="utf-8")
+                os.chmod(str(branchy / rel / name), 0o755)
+                _git(branchy, home, "add", rel + "/" + name)
+            _git(branchy, home, "commit", "-q", "--no-verify", "-m", "branch hooks")
+            _git(branchy, home, "checkout", "-q", "main")
+            _git(branchy, home, "checkout", "-q", "evil")
+            _git(branchy, home, "checkout", "-q", "main")
+            _git(branchy, home, "merge", "-q", "--ff-only", "evil")
+            expect("branch-added-hooks-not-run", marker.exists(), False)
+            # A linked worktree under a path with spaces: the stub lands in the common hooks directory, no
+            # configuration is written, and commits in the worktree are checked.
+            linked = _fixture("linked repo")
+            linked_wt = base / "linked wt"
+            _git(linked, home, "worktree", "add", "-q", "-b", "side", str(linked_wt))
+            expect("linked-install", (_install(linked_wt), _stub_ok(linked), _hookspath(linked_wt),
+                                      (linked / ".git" / "config.worktree").exists()),
+                   (EXIT_OK, True, None, False))
+            (linked_wt / "README.md").write_text("readme\n", encoding="utf-8")
+            _git(linked_wt, home, "add", "README.md")
+            expect("linked-commit-clean-passes", _committed(linked_wt), (EXIT_OK, True))
+            _tamper(linked_wt)
+            _git(linked_wt, home, "add", done_rel)
+            expect("linked-commit-tamper-refused", _refused(linked_wt), (True, True, True))
+            # --- End to end through git commit, over the installed fixture. A clean staged change commits.
+            (inst / "README.md").write_text("readme\n", encoding="utf-8")
+            _git(inst, home, "add", "README.md")
+            expect("commit-clean-passes", _committed(inst), (EXIT_OK, True))
+            # A staged tamper of an immutable record body is refused and HEAD does not move. The same
+            # commit in a clone WITHOUT the hook succeeds, so it is the hook that refuses it.
+            _tamper(inst)
+            _git(inst, home, "add", done_rel)
+            expect("commit-staged-tamper-refused", _refused(inst), (True, True, True))
+            bare = _fixture("no-hook")
+            _tamper(bare)
+            _git(bare, home, "add", done_rel)
+            expect("commit-staged-tamper-without-hook-passes", _committed(bare), (EXIT_OK, True))
+            # The STAGED snapshot is checked, not the working tree: a staged tamper whose working-tree bytes
+            # were restored is still refused ...
+            _untamper(inst)
+            expect("commit-staged-tamper-clean-worktree-refused", _refused(inst), (True, True, True))
+            # ... and an unstaged working-tree tamper does not block a clean staged change.
+            _git(inst, home, "reset", "-q", "--", done_rel)
+            _tamper(inst)
+            (inst / "NOTES.md").write_text("notes\n", encoding="utf-8")
+            _git(inst, home, "add", "NOTES.md")
+            expect("commit-unstaged-tamper-ignored", _committed(inst), (EXIT_OK, True))
+            # `git commit PATH` and `git commit -a` commit a temporary index that git names in
+            # GIT_INDEX_FILE; the hook checks that index, so both are refused over the working-tree tamper.
+            expect("commit-path-temp-index-refused", _refused(inst, "--", done_rel), (True, True, True))
+            expect("commit-all-temp-index-refused", _refused(inst, "-a"), (True, True, True))
+            # An unborn branch (no commit yet) has an honestly empty history: a clean store commits.
+            unborn = _fixture("unborn", commit=False)
+            expect("unborn-install", _install(unborn), EXIT_OK)
+            _git(unborn, home, "add", "-A")
+            expect("commit-unborn-clean-passes", _committed(unborn), (EXIT_OK, True))
+            # The snapshot carries the remote: a store whose manifest names a dedicated sync target equal to
+            # the clone's remote is VALID, and the same snapshot without that remote is INVALID.
+            url = "https://example.invalid/org/store.git"
+            synced = clean_machine()
+            synced["manifest.toml"] = dict(synced["manifest.toml"], store={"sync_target": url})
+            remote = _fixture("remote", machine=synced, remote=url)
+            expect("remote-doctor-valid", _run_doctor(remote, capture=True), EXIT_OK)
+            expect("remote-install", _install(remote), EXIT_OK)
+            (remote / "README.md").write_text("readme\n", encoding="utf-8")
+            _git(remote, home, "add", "README.md")
+            expect("commit-remote-sync-target-passes", _committed(remote), (EXIT_OK, True))
+            # The stub fails closed when the working tree being committed has no pack hook (a branch that
+            # predates the pack, say): the commit is refused rather than passing silently.
+            nopack = _fixture("stub-no-pack")
+            expect("stub-no-pack-install", _install(nopack), EXIT_OK)
+            os.remove(str(nopack / rel / "pre-commit"))
+            (nopack / "README.md").write_text("readme\n", encoding="utf-8")
+            _git(nopack, home, "add", "README.md")
+            rc, moved = _committed(nopack)
+            expect("stub-missing-pack-hook-refused", (rc != EXIT_OK, moved), (True, False))
+            # The disclosed CI residual, held as behaviour and as text: a history violation the hook refuses,
+            # committed past it with --no-verify, passes the CI recipe (doctor's prior there is that same
+            # commit), and the shipped files say so rather than calling CI the floor for it.
+            bypass = _fixture("bypass")
+            expect("bypass-install", _install(bypass), EXIT_OK)
+            _tamper(bypass)
+            _git(bypass, home, "add", done_rel)
+            expect("bypass-hook-refuses", _refused(bypass), (True, True, True))
+            expect("bypass-no-verify-commits", _committed(bypass, "--no-verify"), (EXIT_OK, True))
+            expect("bypass-ci-recipe-misses-history", _run_ci_recipe(bypass), EXIT_OK)
+            # The disclosed operations residual, held as behaviour: with the stub installed, git cherry-pick
+            # records the same history violation without running any pre-commit hook.
+            picked = _fixture("cherry-pick")
+            expect("cherry-pick-install", _install(picked), EXIT_OK)
+            _git(picked, home, "checkout", "-q", "-b", "side")
+            _tamper(picked)
+            _git(picked, home, "add", done_rel)
+            _git(picked, home, "commit", "-q", "--no-verify", "-m", "tamper")
+            _git(picked, home, "checkout", "-q", "main")
+            before = _head(picked)
+            try:
+                proc = subprocess.run([git, "--no-replace-objects", "-C", str(picked),
+                                       "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
+                                       "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
+                                       "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                                       "cherry-pick", "side"],
+                                      env=_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                      timeout=300)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise OSError("could not run git cherry-pick in {} ({})".format(picked, exc))
+            expect("cherry-pick-skips-hook", (proc.returncode, _head(picked) != before), (EXIT_OK, True))
+            hook_text = " ".join((pack / "pre-commit").read_text(encoding="utf-8").replace("#", " ").split())
+            inst_text = " ".join((pack / "install.sh").read_text(encoding="utf-8").replace("#", " ").split())
+            expect("residuals-disclosed", (
+                "CI does not catch a history violation committed past this hook" in hook_text,
+                "C-HISTORY-RESURRECTION, C-HISTORY-APPEND-ONLY, C-HISTORY-COUNTERS" in hook_text,
+                "The hook runs checked-out code" in hook_text,
+                "Operations git commits without running any pre-commit hook: cherry-pick, revert, rebase"
+                in hook_text,
+                "no pre-commit hook for cherry-pick, revert, rebase, am or a merge that commits without stopping"
+                in inst_text,
+                "so a missing hook is never silent" in hook_text,
+                "It never sets core.hooksPath" in inst_text,
+                "Requires git 2.32 or later" in hook_text,
+                "CI (../ci/opf-ci.sh) does not close these for the history checks" in inst_text,
+                "runs this hook before each commit" in hook_text,
+                "A missing hook is silent" in hook_text,
+                "CI stays the shared floor" in hook_text,
+                "is the floor that every change meets" in inst_text,
+                "CI is the shared floor" in inst_text,
+                "or an includeIf onbranch: for a branch checked out later) is not seen" in inst_text),
+                (True, True, True, True, True, True, True, True, True, False, False, False, False, False, True))
+
+            # --- The hook's contract, run by hand under a recording stub tool. ---
+            serial = [0]
+
+            def _stubbed(root, rc_doctor=0, rc_render=0, args=(), extra=None):
+                serial[0] += 1
+                log = base / "stub-log-{}".format(serial[0])
+                env = dict(OPF_TOOL=str(stub), OPF_STUB_LOG=str(log),
+                           OPF_STUB_RC_DOCTOR=str(rc_doctor), OPF_STUB_RC_RENDER=str(rc_render))
+                env.update(extra or dict())
+                rc = _run([rel + "/pre-commit"] + list(args), root, env)
+                calls = []
+                if log.is_file():
+                    calls = [line.split(chr(31)) for line in log.read_text(encoding="utf-8").splitlines()]
+                flags_log = Path(str(log) + ".flags")
+                flags = flags_log.read_text(encoding="utf-8").splitlines() if flags_log.is_file() else []
+                return rc, calls, flags
+
+            # Exact order and arguments (doctor --require-store, then render --check, both over ONE snapshot
+            # root under TMPDIR), each launched isolated (-I -B), leaving the clone unchanged.
+            stubbed = _fixture("stubbed")
+            snap_before = _tree_digest(stubbed, home)
+            rc, calls, flags = _stubbed(stubbed)
+            roots = [c[-1] for c in calls]
+            snap_root = Path(roots[0]) if roots else None
+            expect("hook-order-and-args", (rc, [c[:-1] for c in calls]),
+                   (EXIT_OK, [["doctor", "--require-store", "--root"], ["render", "--check", "--root"]]))
+            expect("hook-snapshot-root", (len(set(roots)), snap_root is not None and snap_root.name == "tree"
+                                          and snap_root.parent.parent == snaps), (1, True))
+            expect("hook-isolated-launch", flags, ["1 1", "1 1"])
+            expect("hook-read-only", _tree_digest(stubbed, home) == snap_before, True)
+            # Per-step propagation: a doctor finding stops before render; a render error is the exit; an
+            # out-of-vocabulary status is normalized to 2; a surplus operand is a usage 2 with no step run.
+            rc, calls, _f = _stubbed(stubbed, rc_doctor=1)
+            expect("hook-doctor-finding-stops", (rc, [c[0] for c in calls]), (EXIT_FINDING, ["doctor"]))
+            rc, calls, _f = _stubbed(stubbed, rc_render=2)
+            expect("hook-render-error-propagates", (rc, [c[0] for c in calls]),
+                   (EXIT_ERROR, ["doctor", "render"]))
+            rc, calls, _f = _stubbed(stubbed, rc_doctor=3)
+            expect("hook-abnormal-status-normalized", (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor"]))
+            rc, calls, _f = _stubbed(stubbed, args=("x",))
+            expect("hook-usage", (rc, calls), (EXIT_ERROR, []))
+            # Every snapshot is removed on exit.
+            expect("hook-snapshots-removed", sorted(os.listdir(str(snaps))), [])
+            # Fail closed, each before any step: a git older than the 2.32 floor, and an environment whose
+            # GIT_ variable names cannot be read (no sed), so the snapshot is never built still bound to
+            # the hook environment.
+            rc, calls, _f = _stubbed(stubbed, extra=old_git_env)
+            expect("hook-old-git-refused", (rc, calls), (EXIT_ERROR, []))
+            rc, calls, _f = _stubbed(stubbed, extra=_path_without("sed"))
+            expect("hook-env-enumeration-failure-refused", (rc, calls), (EXIT_ERROR, []))
+            # A missing dirname fails closed (2) before any step, rather than resolving to the launching
+            # directory.
+            rc, calls, _f = _stubbed(stubbed, extra=_path_without("dirname"))
+            expect("hook-dirname-missing-refused", (rc, calls), (EXIT_ERROR, []))
+            # Inherited git trace destinations are dropped before the first git call: another repository's
+            # tracked file they name is left as it was, and both steps run.
+            rc, calls, _f = _stubbed(stubbed, extra=trace_env)
+            expect("hook-git-trace-scrubbed",
+                   (rc, [c[0] for c in calls], (traced / "TRACED.md").read_text(encoding="utf-8")),
+                   (EXIT_OK, ["doctor", "render"], "traced\n"))
+            # A snapshot removal that fails (no rm) exits 2 after passing steps; the directory it names is
+            # then removed here.
+            rc, calls, _f = _stubbed(stubbed, extra=_path_without("rm"))
+            left = sorted(os.listdir(str(snaps)))
+            expect("hook-cleanup-failure-refused", (rc, [c[0] for c in calls], len(left)),
+                   (EXIT_ERROR, ["doctor", "render"], 1))
+            for name in left:
+                shutil.rmtree(str(snaps / name), ignore_errors=True)
+        finally:
+            shutil.rmtree(str(base), ignore_errors=True)
+        return failures
+
     # Guard the gate's OWN status contract both ways, so the documented assertion(1)-vs-harness(2) distinction
     # is a check that reds if it regresses (change-carries-check), not merely prose.
     def _raise_harness_error():
@@ -1071,7 +2084,7 @@ def _self_test_isolated():
             print("check_opf_doctor self-test: FAIL: status-contract: {}".format(c), file=sys.stderr)
         return EXIT_FINDING
 
-    rc = _classify(_doctor_suite)
+    rc = max(_classify(_doctor_suite), _classify(_precommit_suite))
     if rc == EXIT_OK:
         print("check_opf_doctor self-test: PASS (opf doctor returns 0 on a clean committed store / 1 after an "
               "immutable-body mutation vs the committed prior / 2 on a broken store / 0 NOT APPLICABLE, end to "
@@ -1104,7 +2117,25 @@ def _self_test_isolated():
               "child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
               "relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "
-              "status contract 1=assertion 2=harness)")
+              "status contract 1=assertion 2=harness; pre-commit floor: installer writes a stub in the "
+              "untracked hooks directory, sets no core.hooksPath, keeps other hooks, and refuses any "
+              "hooksPath (another linked worktree's included), an existing pre-commit hook (compared byte "
+              "for byte, never through a symlink), a symlinked hooks destination, a git directory in any "
+              "worktree's top level (from a linked worktree, from the main one, and equal to the top level) "
+              "while a separate git directory installs, a core.worktree top level (linked and main, from a linked worktree, the main one with no .git entry), an empty core.worktree, a top level of /, a worktree at the hooks directory, an unregistered or moved working tree, a signal rolled back with what is left named by file type (after chmod, ln and the last rmdir nothing; after either mkdir that empty directory; before the hooks mkdir no directory; an unreadable stub named; an unsearchable hooks directory named not known), a directory arriving at either mkdir kept, a stale private directory refused and kept, an unreadable worktree registry, an "
+              "unreadable pack hook and an ambient GIT_DIR redirect; no dirname, inherited GIT_TRACE*, a "
+              "configured trace2 target, read-back rollback, a partial write left nowhere, a link or "
+              "directory arriving at the stub path refused and kept with nothing left, a backslash kept in "
+              "a refusal, "
+              "branch-added hooks not run, "
+              "linked worktree with spaces, stub refuses a missing pack hook, cherry-pick residual held; "
+              "git commit over the staged snapshot refuses a staged tamper by "
+              "doctor's finding, ignores an unstaged one, checks GIT_INDEX_FILE for commit PATH and -a, "
+              "passes an unborn branch and a remote sync target; stubbed hook order, -I -B, read-only, "
+              "propagation, normalization, usage and snapshot cleanup; fail closed on an unreadable hooks "
+              "directory, an environment-only hooksPath, git below 2.32, an unreadable environment, a "
+              "missing dirname and a failed cleanup; the --no-verify history bypass CI misses is disclosed "
+              "and held)")
     return rc
 
 

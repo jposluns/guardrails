@@ -27,8 +27,16 @@ Run standalone (`python3 -I -B opf/tools/_opf_fuzz.py --self-test`) or as the `o
 Returns 0 clean, 1 on a failed assertion, 2 on a harness/fail-closed error. Judged on returned
 status/finding VALUES and on raised exception TYPES, never by grepping output (the isolate-verifiers rule).
 """
-import ast
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_fuzz.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
+import ast
 import tomllib
 from pathlib import Path
 
@@ -366,20 +374,22 @@ def run():
           "actor_kind": "maintainer", "pre_proposal_state": "active", "reason": "rejected", "specs": None},
          ["type_name", "from_status", "to_status", "actor_kind", "pre_proposal_state", "reason", "specs"]),
         ("validate_counters", _opf_schema.validate_counters, "findings",
-         {"data": {"counters": {"BI": 5}}, "known_namespaces": None},
-         ["data", "known_namespaces"]),
+         {"data": {"counters": {"BI": 5}}, "known_namespaces": None, "imported_namespaces": None},
+         ["data", "known_namespaces", "imported_namespaces"]),
         ("parse_status", _opf_schema.parse_status, "op",
          {"status": "open", "spec": _opf_schema.BASELINE_SPECS["backlog_item"]}, ["status", "spec"]),
         ("high_water", _opf_schema.high_water, "op",
          {"high": {"BI": 5}, "ns": "BI"}, ["high", "ns"]),
         ("next_id", _opf_schema.next_id, "op",
-         {"high": {"BI": 5}, "ns": "BI", "known_complete": True}, ["high", "ns", "known_complete"]),
+         {"high": {"BI": 5}, "ns": "BI", "known_complete": True, "imported_series": False},
+         ["high", "ns", "known_complete", "imported_series"]),
         ("check_monotonic", _opf_schema.check_monotonic, "findings",
-         {"old_high": {"BI": 1}, "new_high": {"BI": 2}}, ["old_high", "new_high"]),
+         {"old_high": {"BI": 1}, "new_high": {"BI": 2}, "imported_series": False},
+         ["old_high", "new_high", "imported_series"]),
         ("check_ids_within_counters", _opf_schema.check_ids_within_counters, "findings",
-         {"ids": ["BI-1"], "high": {"BI": 5}}, ["ids", "high"]),
+         {"ids": ["BI-1"], "high": {"BI": 5}, "imported_series": False}, ["ids", "high", "imported_series"]),
         ("check_unique_ids", _opf_schema.check_unique_ids, "findings",
-         {"ids": ["BI-1", "BI-2"]}, ["ids"]),
+         {"ids": ["BI-1", "BI-2"], "imported_series": False}, ["ids", "imported_series"]),
         # _opf_release
         ("validate_version", _opf_release.validate_version, "status",
          {"data": dict(vok)}, ["data"]),

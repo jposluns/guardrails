@@ -288,7 +288,7 @@
         ".aiqt/core/hooks/manifest.toml",
         "LICENSE"
       ],
-      "target": "site/downloads/aiqt-skill-1.0.5.zip"
+      "target": "site/downloads/aiqt-skill-1.0.6.zip"
     },
     {
       "kind": "file",

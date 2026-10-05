@@ -1089,26 +1089,39 @@ def _self_test_isolated():
         #      still refuse with a ConfigError. Narrowing the parse handler back to (TOMLDecodeError,
         #      UnicodeDecodeError) lets the ValueError escape. The digit limit is pinned to the default 4300
         #      (test-hermeticity) and restored in finally.
-        #      A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must be refused the
-        #      same way; the recursion limit is pinned to the CPython default 1000 for the same reason.
+        #      A parser overflow (tomllib raises RecursionError, not a ValueError) must be refused the same
+        #      way, with the overflow in the refusal.
+        #      The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
+        #      otherwise valid input) rather than provoked by a deeply nested body: the depth at which tomllib
+        #      overflows is an interpreter limit, so a fixed body overflows under one recursion limit and parses
+        #      (or trips an unrelated refusal) under another.
         _prev_digits = sys.get_int_max_str_digits()
-        _prev_reclimit = sys.getrecursionlimit()
         sys.set_int_max_str_digits(4300)
-        sys.setrecursionlimit(1000)
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
         try:
-            for big_label, big_value in (("an over-long integer literal", "9" * 4400),
-                                         ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+            for big_label, big_value, big_needle in (("an over-long integer literal", "9" * 4400, ""),
+                                                     ("a parser overflow", "1  # injected-overflow",
+                                                      "injected parser overflow")):
                 big_cfg = tmp / "bad-literal.toml"
                 big_cfg.write_text("schema-version = " + big_value + "\n", encoding="utf-8")
                 try:
                     load_config(big_cfg)
                     failures.append("load_config accepted {}".format(big_label))
-                except ConfigError:
-                    pass
+                except ConfigError as exc:
+                    if big_needle not in str(exc):
+                        failures.append("load_config refused {} without its finding ({})".format(big_label, exc))
                 except (ValueError, RecursionError) as exc:
                     failures.append("load_config let a bare {} escape on {}".format(type(exc).__name__, big_label))
         finally:
-            sys.setrecursionlimit(_prev_reclimit)
+            tomllib.loads, tomllib.load = real_loads, real_load
             sys.set_int_max_str_digits(_prev_digits)
 
         # 22. DISCRIMINATING (--config operand parsing): an empty operand, the =-joined empty form, a
