@@ -14,11 +14,19 @@
       follow-through. A registry can name this as (part of) its enumerator. An attestation register
       is evidence, never backlog: project the mistakes register, not the attestations file.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: orch_register.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import argparse
 import datetime
 import hashlib
 import json
-import sys
 from pathlib import Path
 
 ZERO = "0" * 64
