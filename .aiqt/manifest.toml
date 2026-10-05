@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ce98c24a54ce3fe966a12e26348ce06a6ad7e04918a16d41c64a1d956f8168ef"
+tree-sha256 = "d20c601995afe8fccc957776ae85a5ff1c783fa65c7dd0c5ca93db69e7e9f9f5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2241,8 +2241,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41298
-sha256 = "3c5c025b2870561769cc0387253f1d0429c36a6e78ed90d4cd7103b5c7a905d0"
+bytes = 41348
+sha256 = "9a2460e8b8dcc3a17fabe9fbabbb785a92839037aded1e2f3cd92177d9b82461"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2251,8 +2251,8 @@ sha256 = "ef59915087e4ccbe6dc19b142deac9ac34eedc5686c6efb28c95f15141cd8992"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 22803
-sha256 = "f933fbe6065846eab5eaa44eb33af037a876adfe5109e2dcb8da26e5d3d5b13c"
+bytes = 23148
+sha256 = "808fb8dd662bb888b1d302191a0596b8675dc6491eb68a38be238f0bdcdff7bc"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
@@ -2523,6 +2523,11 @@ sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 path = "opf/site/tooling.html"
 bytes = 13013
 sha256 = "e4c693cf6e724c8b732d27d30b2c9b240eeb28d09e8edad7c928368784f5bc50"
+
+[[sources]]
+path = "opf/spec/OPF-IMPLEMENTATION-PROMPT.md"
+bytes = 260593
+sha256 = "988018fc166776b9698f8424989561deadb311f2027a37ae082623e6db29509b"
 
 [[sources]]
 path = "opf/spec/OPF-INIT-D2B-REVIEW.md"
