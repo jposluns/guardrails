@@ -175,11 +175,15 @@ enabled-type roster except `legacy_fragment`; `worklog` uses `worklog.imported.t
 imported index. Their manifest, emitter, upgrade and containment registrations MUST agree. A 1.3.0
 `opf init` and the section 9.2 upgrade MUST create the imported leaves for every enabled type
 except `legacy_fragment`, create-only and empty; enabling a further type or module other than
-`legacy_fragment` later MUST create its imported leaf and its imported counter row in the same act
-as its clean index, the row at zero only where no imported ancestry exists (section 8.2).
+`legacy_fragment` later MUST create its imported leaf in the same act as its clean index.
 `legacy_fragment` has no imported leaf and no imported counter row, since the imported series
 refuses the `LF` namespace (section 8.2). A 1.3.0 `opf init` MUST write at zero the imported
-counter row of each type that has an imported leaf (section 8.2). They are machine
+counter row of each type that has an imported leaf (section 8.2). In a store that declares
+`spec_version` 1.3.0 or later, enabling a further type or module other than `legacy_fragment`
+MUST also add its imported counter row in the same act as its clean index, at zero only where no
+imported ancestry exists, as in the section 9.2 upgrade. Both counter-row duties follow from the
+section 8.2 rule that requires the imported counter rows once the store declares `spec_version`
+1.3.0 or later. They are machine
 records, distinct from the original-source evidence under `.working/imported/`. The first
 imported-series release MUST keep these files inline in either store layout and MUST NOT provide
 views over imported data; assistants read the TOML. Historical releases remain in `version.toml`
@@ -905,7 +909,8 @@ above that its type's schema carries. The only exempt fields are `proposed_from`
 each where the type's own schema does not require it; an imported record never carries
 `proposed_from`, since its status never takes `/proposed`. An imported worklog row's `summary` is
 therefore never exempt, since the worklog schema requires it (section 6.2). `unrecorded` MUST hold
-one row per absent field, no duplicate fields and no row claiming a supplied field absent. Supplied
+exactly one row for each omitted field that is not exempt, and no row that repeats a field or
+claims a supplied field absent. Supplied
 fields MUST retain their declared value types and vocabularies; unknown keys still fail.
 `field` MUST name a field in that type's schema. The closed reasons are `not_recorded_in_source`,
 `unparsed`, `ambiguous`, `conflicting`, and `not_applicable`. The first means "never recorded
@@ -921,7 +926,9 @@ Optional `import.history` retains verbatim source-precision values that cannot b
 normalized, such as a date-only string; a UTC midnight MUST NOT be fabricated. Optional
 `import.unparsed` holds verbatim source text that cannot be mapped. The assistant MUST retain such
 text rather than drop it. When present, `import.span` MUST be an array of two integers,
-`import.history` an array of tables, and `import.unparsed` an array of strings. The writer performs
+`import.history` an array of tables, and `import.unparsed` an array of strings. Each
+`import.history` table MUST hold exactly two keys, `field` (a field named in the type's schema)
+and `value` (its verbatim source value as a string). The writer performs
 no byte-tiling or leftover accounting: byte-level coverage and semantic fidelity are not
 machine-proven. Preserved originals remain the restoration authority.
 

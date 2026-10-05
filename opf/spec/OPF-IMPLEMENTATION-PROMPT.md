@@ -389,7 +389,7 @@ conformance claim (checklist item 19) until the maintainer rules.
     the upgrade from 1.0.0, composed or staged, could not reach the validator VALID that section 9.2
     requires without staging its files, which section 9.2 forbids. Ask the maintainer to rule on
     this reading and on the open point 21 message together. A `HEAD` manifest that the second
-    exception needs and that cannot be read is cannot-evaluate. Section 5.1 fails "an untracked or
+    exception needs and that cannot be read is cannot-evaluate. Section 5.1 fails "An untracked or
     ignored `.working/` tree" without separating managed files from others, so this reading counts
     every file under `.working/`; the narrower alternative, counting only machine-store sources and
     declared views, is the maintainer's to choose instead. Rotation (step 12) gets no exception: the
@@ -695,7 +695,7 @@ conformance claim (checklist item 19) until the maintainer rules.
       reference of a legacy clean record: its field, its form, or how the validator confirms that it
       records the omission.
     - The base field names of a 1.0.0 manifest. The section 9 example marks `layout` as "(was
-      `layout_profile`)", and OPF-QUICKSTART.md lists that rename beside the retirement of
+      layout_profile)", and OPF-QUICKSTART.md lists that rename beside the retirement of
       `devprocess`, but the section 9.2 delta from 1.0.0 carries "every other base field over
       unchanged" and renames no field. The pinned sources do not settle whether a 1.0.0
       `[devprocess]` table carries `layout_profile` or `layout`, so the 1.0.0 fixtures cannot be
