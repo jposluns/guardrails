@@ -22436,17 +22436,27 @@ def _unit_copy_capped(stream, path, label, kind, ident):
     the same path laundered a tainted error stream into a pass; `replaced` now includes a planted
     REGULAR file, not only a symlink or FIFO).
     Where the platform lacks O_NOFOLLOW or O_NONBLOCK the read-back
-    fails closed by name instead of opening unguarded (QA30 gemini; _unit_guard_flags), and the
-    read is bounded by the cap. Returns (anomaly, tainted): `anomaly` is None, or the NAMED reason
+    fails closed by name instead of opening unguarded (QA30 gemini; _unit_guard_flags). The
+    DELIVERED copy is bounded by the cap; the SCAN is not: it covers the COMPLETE stream, in
+    bounded memory, through a rolling window that carries the marker's length minus one across
+    chunks, so a marker anywhere in the capture -- the cap boundary straddled included -- is
+    seen (merge train 2 QA, codex MAJOR: a shutdown traceback wholly past the 4 MiB cap escaped
+    the old prefix-only scan into a pass; the fail-closed rule, secfcl, forbids a fault-to-pass
+    channel that is merely disclosed, so the scan now reads to the end). The scan's work is
+    bounded by the capture's fstat size at open: a capture holding more bytes than that (still
+    growing under some live writer) is a NAMED anomaly, cannot-evaluate, never a pass over an
+    unscanned tail. Returns (anomaly, tainted): `anomaly` is None, or the NAMED reason
     this capture cannot stand -- replaced by a symlink, a non-regular file or a different file at
-    its path, or NOT READABLE back
+    its path, grown past its fstat size mid-scan, or NOT READABLE back
     (QA29 codex MAJOR 5: a unit that unlinked or broke its capture used to pass with the open
     error swallowed; a passing verdict requires a readable, complete capture, so the runner fails
-    the unit closed with the anomaly). `tainted` says the capped read carries the uncaught-exception
+    the unit closed with the anomaly). `tainted` says the COMPLETE stream carries the
+    uncaught-exception
     marker `Traceback (most recent call last):` -- the runner refuses a PASSING exit over a tainted
-    error stream (a marker past the cap escapes the scan; the bounded-read residual, disclosed --
-    as is a unit that rewrites or truncates the stream through its OWN still-open descriptor
-    before exiting: while it lives the capture is the unit's own output, indistinguishable from
+    error stream (a unit that rewrites or truncates the stream through its OWN still-open
+    descriptor
+    before exiting stays disclosed: while it lives the capture is the unit's own output,
+    indistinguishable from
     output never written, so the identity check defends the READ-BACK, not the unit's own pen).
     The path lookup behind the re-open is not bounded, and O_NOFOLLOW guards only its last
     component: a filesystem a unit's escapee mounted over the box, or a symlink the unit left at
@@ -22483,8 +22493,37 @@ def _unit_copy_capped(stream, path, label, kind, ident):
                         "unlinked or renamed away and another file planted at its path, so the "
                         "stream cannot be read back complete (QA30 codex MAJOR)".format(
                             kind, info.st_dev, info.st_ino, ident.st_dev, ident.st_ino), False)
+            marker = b"Traceback (most recent call last):"
             data = handle.read(_UNIT_OUTPUT_CAP)
-            if handle.read(1):
+            tainted = marker in data
+            # The delivered copy stops at the cap; the SCAN goes on to the END of the stream in
+            # bounded memory (merge train 2 QA, codex MAJOR: a traceback wholly past the cap
+            # escaped the old prefix-only scan into a pass). `carry` rolls the last
+            # len(marker) - 1 bytes across chunks so a marker straddling any boundary is seen,
+            # and the scan's work is bounded by the fstat size taken above: a capture that still
+            # grows past it mid-scan cannot be scanned complete and is a named anomaly.
+            carry = data[max(len(data) - len(marker) + 1, 0):]
+            scanned = len(data)
+            scan_bound = max(info.st_size, scanned) + len(marker)
+            truncated = False
+            while True:
+                chunk = handle.read(1 << 20)
+                if not chunk:
+                    break
+                truncated = True
+                scanned += len(chunk)
+                if scanned > scan_bound:
+                    return ("its {} capture held more bytes than its fstat size when opened for "
+                            "reading back ({} read against {}): a capture still growing under "
+                            "some live writer cannot be scanned complete, and a passing verdict "
+                            "requires a complete scan of the stream (merge train 2 QA, codex "
+                            "MAJOR)".format(kind, scanned, info.st_size), False)
+                if tainted:
+                    break   # the verdict is settled and the truncation known; nothing more to learn
+                window = carry + chunk
+                tainted = marker in window
+                carry = window[max(len(window) - len(marker) + 1, 0):]
+            if truncated:
                 extra = max(info.st_size - _UNIT_OUTPUT_CAP, 1)
                 data += ("\n[opf self-test: {} {} exceeded the {}-byte copy cap; about {} more bytes "
                          "were truncated]\n".format(label, kind, _UNIT_OUTPUT_CAP, extra)
@@ -22492,7 +22531,6 @@ def _unit_copy_capped(stream, path, label, kind, ident):
         except OSError as exc:
             return ("its {} capture could not be read back (errno {}); a passing verdict requires "
                     "a readable, complete capture".format(kind, exc.errno), False)
-    tainted = b"Traceback (most recent call last):" in data
     if data:
         _unit_deliver(stream, data, 10.0)
     return (None, tainted)
@@ -22867,7 +22905,9 @@ def _run_unit_subprocess(label, bound, argv=None):
     (residual (j)) -- and a unit
     exiting 0 whose captured error stream carries an uncaught-exception traceback is refused -- a
     passing verdict requires a readable, complete capture and an empty or clean error stream
-    (clean: free of the `Traceback (most recent call last):` marker within the capped read; units
+    (clean: free of the `Traceback (most recent call last):` marker anywhere in the COMPLETE
+    capture -- the scan reads past the delivery cap to the end of the stream, merge train 2 QA,
+    codex MAJOR; units
     legitimately print fixture diagnostics to stderr on a pass). An ordinary write failure of the
     copy itself cannot change the unit's verdict.
     Disclosed residuals, each named with why it sits outside this runner's contract
@@ -22970,7 +23010,8 @@ def _run_unit_subprocess(label, bound, argv=None):
     (D-385-ACCIDENTAL-UNIT).
     Further disclosed: a descendant that LEAVES the unit's process group (its own setpgid or
     setsid, or a start_new_session launch) is not killed and never signalled (the escaped-writer
-    design); copied output past _UNIT_OUTPUT_CAP is truncated with a note; _UNIT_FSIZE_LIMIT
+    design); copied output past _UNIT_OUTPUT_CAP is truncated with a note (the error-stream
+    taint scan still reads the complete capture); _UNIT_FSIZE_LIMIT
     bounds each file, not the aggregate; and where os.waitid is unavailable the wait falls back to
     REAP-FIRST (the WNOWAIT observation needs waitid) and, the leader reaped, no group kill
     follows (a reaped pid licences nothing), so a descendant that stayed in the group survives
@@ -23305,7 +23346,11 @@ def _unit_bound_self_test():
     place (the swapped box's renamed files untouched, never walked through the symlink), and a
     box removed while its unit runs is the named record failure that also names the capture and
     the box; and the QA34 leg: a deadline passing while the walk lists a directory stops it there,
-    before it removes anything. Returns 0 clean, 1 on a failure."""
+    before it removes anything. The merge-train leg: (29) an exit 0 over a traceback written
+    ENTIRELY past the copy cap, and one straddling the cap boundary, each fail closed by name
+    (merge train 2 QA, codex MAJOR: the old prefix-only scan let a shutdown traceback past the
+    cap pass; the scan covers the complete stream, run under a 64 KiB test cap restored in a
+    finally). Returns 0 clean, 1 on a failure."""
     import contextlib
     import inspect
     import io
@@ -24264,6 +24309,36 @@ def _unit_bound_self_test():
                       "the listing, before it removes anything (QA34 codex MINOR)".format(
                           stopped, len(kept)))
 
+    # (29) merge train 2 QA, codex MAJOR: a shutdown traceback ENTIRELY past the copy cap cannot
+    # pass -- the scan covers the complete stream, never only the delivered prefix -- and neither
+    # can a marker straddling the cap boundary (the rolling window carries the marker's length
+    # across chunks). Run under a 64 KiB test cap, restored in a finally. Each unit writes its
+    # matching record and exits 0, so only the complete error-stream scan stands between it and
+    # a pass: both vectors passed before this scan read past the cap.
+    cap = _UNIT_OUTPUT_CAP
+    try:
+        globals()["_UNIT_OUTPUT_CAP"] = 65536
+        for case, writes in (
+                ("wholly past the cap",
+                 "os.write(2, b'x' * 65536)\n"
+                 "os.write(2, b'Traceback (most recent call last):\\nRuntimeError: past\\n')\n"),
+                ("straddling the cap boundary",
+                 "os.write(2, b'x' * (65536 - 16))\n"
+                 "os.write(2, b'Traceback (most recent call last):\\nRuntimeError: edge\\n')\n"),
+        ):
+            code, _took, _out_text, err_text = run_vector("synthetic-past-cap", 10.0, (
+                "import os\n" + writes +
+                "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+                "    handle.write('synthetic-past-cap 0 ' + str(os.getpid()) + '\\n')\n"
+                "os._exit(0)\n"))
+            if code != EXIT_MALFORMED or "error stream" not in err_text:
+                faults.append("an exit 0 over a traceback {} still passed (code {}, stderr tail "
+                              "{!r}): the scan must cover the complete error stream, never only "
+                              "the delivered prefix (merge train 2 QA, codex MAJOR)".format(
+                                  case, code, err_text[-240:]))
+    finally:
+        globals()["_UNIT_OUTPUT_CAP"] = cap
+
     if faults:
         print("opf unit-bound self-test: FAIL ({})".format("; ".join(faults)[:2000]), file=sys.stderr)
         return EXIT_FINDING
@@ -24292,7 +24367,9 @@ def _unit_bound_self_test():
           "the named cannot-evaluate with its remnant left in place, and a box removed while its "
           "unit ran is the named record failure naming the capture and the box; and the QA34 "
           "leg holds: a swapped box's renamed files are left untouched, and a deadline passing "
-          "mid-listing stops the walk before it removes anything)")
+          "mid-listing stops the walk before it removes anything; and the merge-train leg holds: "
+          "the error-stream scan covers the complete capture, so a traceback wholly past the "
+          "copy cap, or straddling it, fails closed)")
     return EXIT_OK
 
 
