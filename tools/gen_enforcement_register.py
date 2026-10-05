@@ -25,8 +25,9 @@ as such.
 HONEST BOUNDARY. An "enforced" status records LINKAGE, not complete coverage: at least one shipped gate or
 hook cites the rule, and each mechanism carries its residual (what it does not catch) from the ledger. A
 linked mechanism may cover only part of a rule's violation surface. "partial" records the same linkage
-and states outright that the linked mechanisms are known to cover only part of the rule (each mechanism's
-residual names the uncovered clauses). A rule whose every linked mechanism is class c (partial by the
+and states outright that the linked mechanisms are known to cover only part of the rule; each mechanism's
+residual names what that mechanism does not catch, which need not list every uncovered clause of every
+rule it is linked to. A rule whose every linked mechanism is class c (partial by the
 class legend) must be "partial"; "enforced" there is refused as an overclaim (exit 2). "none" and
 "pending" both mean enforcement is not built yet; "pending" adds the intended-build description.
 

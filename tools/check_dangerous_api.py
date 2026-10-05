@@ -17,14 +17,16 @@ never importing or running the file, and reports:
                ForkingPickler.loads, pandas.read_pickle, joblib.load, torch.load, the yaml
                unsafe and full loader functions, constructors and Loader classes), a
                yaml.load or yaml.load_all whose Loader is not proven a safe or base loader,
-               and an allow_pickle= keyword that is not literal False;
+               an allow_pickle= keyword that is not literal False, and a numpy.load whose third
+               positional argument (allow_pickle) is not literal False or a * spread hides;
   tls          verify= or verify_ssl= that is False, 0 or not a literal, ssl= that is False or
                0, a .verify attribute set to anything but a non-false literal, any reference to
                _create_unverified_context, _create_stdlib_context, _create_default_https_context,
                CERT_NONE, CERT_OPTIONAL or CLIENT_AUTH, an ssl.SSLContext whose protocol is not
                proven ssl.PROTOCOL_TLS_CLIENT (or referenced uncalled), and a check_hostname or
                verify_mode set to anything but True or a proven ssl.CERT_REQUIRED (assignment,
-               a literal setattr, or a keyword, cert_reqs= included);
+               any other store such as a for, with or comprehension target, a literal setattr,
+               or a keyword, cert_reqs= included);
   shell        a subprocess run/call/check_call/check_output/Popen whose shell is on, or cannot
                be seen (a ** spread that is not a literal dict, a * spread, or a ninth
                positional argument that is not literal False), over a non-literal command;
@@ -32,7 +34,7 @@ never importing or running the file, and reports:
                getstatusoutput, asyncio.create_subprocess_shell (asyncio.subprocess included)
                and any loop.subprocess_shell over a non-literal command or one a * or **
                spread hides; and any of these referenced without a call (an alias);
-  code         any reference to eval or exec (builtins and __builtins__ included),
+  code         any reference to eval or exec (builtins included),
                types.FunctionType, and the runpy, timeit, cProfile, profile, pdb and code
                runners, and any call of a method named exec_module or load_module (an importlib
                loader running a module's code, whatever object it is called on).
@@ -56,7 +58,8 @@ with a literal attribute name, the argument of hasattr, or the name read with a 
 as above. So a sink module bound to another name in any form (assignment, unpacking, walrus,
 conditional or boolean expression, default parameter, match capture, for or with target),
 passed as an argument, returned, yielded, held in a container, or passed to getattr with a
-non-literal name, is a finding. A judged callable referenced without a call (r = subprocess.run),
+non-literal name, is a finding, unless a string literal directly follows it (out of scope,
+below). A judged callable referenced without a call (r = subprocess.run),
 a star import from a sink module and a literal importlib.import_module or __import__ of one are
 findings.
 
@@ -79,9 +82,20 @@ directory, valid or broken), a missing root, and a non-regular *.py entry are ca
 (exit 2), never a clean pass. Every directory under a scanned root is walked, __pycache__
 included; only the vendored opf/tools/_vendor tree is excluded.
 
+Out of scope: this lint guards against ACCIDENTAL use of a dangerous API in the repository's
+own code written the ordinary way, so code deliberately built to hide a sink is not claimed:
+a string-assembled or string-literal module name (importlib or __import__ with a computed
+name, sys.modules[...]; a literal import of a sink module is a finding, but the module it
+returns is not followed), getattr with a computed name or a sink module followed by an
+adjacent string literal (f(os, "x") and (pickle, "x")[0] read the module as an attribute base,
+not an escape, and getattr(shutil, "os") is not read as the os module), __builtins__ aliasing
+(m = __builtins__, __builtins__.exec, __builtins__[...]), a rewritten module attribute
+(ssl.PROTOCOL_TLS_CLIENT = 2 still proves the protocol) and dunder access (__getattribute__,
+__setattr__, object.__setattr__, __dict__).
+
 Residuals (not seen): dynamic dispatch (getattr with a non-literal name on an object that is
-not a sink module, setattr with a non-literal name, importlib with a non-literal name,
-globals(), vars(), __dict__, sys.modules or __builtins__[...] lookups); an attribute chain
+not a sink module, setattr with a non-literal name, globals() or vars() lookups); a numpy.load
+reached through an alias and given allow_pickle positionally; an attribute chain
 whose base is not an import binding (a parameter, self, a call result or a subscript, so
 self.os.system and sys.modules["os"].system are not resolved), and a sink module re-exported
 under a name other than its own (a module that binds pickle as _p, reached as mod._p.loads);
@@ -138,6 +152,7 @@ DESERIALIZE_SINKS = frozenset(
        "jsonpickle.unpickler.decode", "multiprocessing.reduction.ForkingPickler.loads",
        "pandas.read_pickle", "joblib.load", "torch.load"])
 YAML_LOAD = frozenset({"yaml.load", "yaml.load_all"})
+NUMPY_LOAD = frozenset({"numpy.load"})
 YAML_SAFE_LOADERS = frozenset("yaml." + name for name in (
     "SafeLoader", "CSafeLoader", "BaseLoader", "CBaseLoader"))
 TLS_ATTRS = frozenset({"_create_unverified_context", "_create_stdlib_context",
@@ -175,7 +190,7 @@ STAR_MODULES = {"pickle": "deserialize", "_pickle": "deserialize", "cPickle": "d
                 "cProfile": "code", "profile": "code", "pdb": "code", "code": "code"}
 # An unbound name falls back to the builtin of that name only where one exists (any other
 # unbound name is a NameError when run, so it names nothing).
-BUILTIN_NAMES = frozenset(builtins.__dict__) | {"__builtins__"}
+BUILTIN_NAMES = frozenset(builtins.__dict__)
 _GETATTR = frozenset({"getattr", "builtins.getattr"})
 _HASATTR = frozenset({"hasattr", "builtins.hasattr"})
 _DELATTR = frozenset({"delattr", "builtins.delattr"})
@@ -300,8 +315,9 @@ ALLOWLIST = (
      " table holding the one function it patches; never runs a shell"),
     ("opf/tools/_opf_adopt_hook.py", "self_test", "shell", 4,
      "self-test deny table: the (module, name) seams it patches to refuse file, socket and"
-     " process effects (subprocess.Popen and os names from a fixed literal tuple); replaced,"
-     " never called"),
+     " process effects (subprocess.Popen and os names from a fixed literal tuple); its one call,"
+     " the seam probe subprocess.Popen(None), runs only while the deny patch is in force and"
+     " passes no command, so it reaches the refusal and never a shell"),
     ("opf/tools/_opf_adopt_observe.py", "self_test.deny_effects", "shell", 1,
      "self-test deny patch: mock.patch.object(os, name) over a fixed literal tuple of spawn and"
      " exec names, each replaced with a refusal; never called"),
@@ -549,6 +565,7 @@ class _Scanner(ast.NodeVisitor):
         self.findings = []
         self.called = set()
         self.based = set()
+        self.stored = set()
 
     def on(self, check):
         return check not in self.disabled
@@ -576,7 +593,7 @@ class _Scanner(ast.NodeVisitor):
                     return out
             scope = scope.parent
         if fallback and name in BUILTIN_NAMES:
-            out.add("builtins" if name == "__builtins__" else name)
+            out.add(name)
         return out
 
     def resolve(self, node):
@@ -699,6 +716,13 @@ class _Scanner(ast.NodeVisitor):
             command = _first(_positional(node, 0), _kw(pairs, "cmd"), _kw(pairs, "command"))
             if command is None or not _literal_command(command):
                 self.add(node, "shell", "shell-always", name + " over a non-literal command")
+        if name in NUMPY_LOAD and self.on("dsz-numpy"):
+            # allow_pickle is numpy.load's third positional parameter.
+            allow = _positional(node, 2)
+            if any(isinstance(arg, ast.Starred) for arg in node.args[:3]) \
+                    or (allow is not None and not _is_false(allow)):
+                self.add(node, "deserialize", "dsz-numpy",
+                         name + " with a positional allow_pickle that is not literal False")
         if name == SSL_CONTEXT and self.on("tls-context"):
             protocol = _first(_positional(node, 0), _kw(pairs, "protocol"))
             if not self.proves(protocol, {"ssl.PROTOCOL_TLS_CLIENT"}):
@@ -762,22 +786,24 @@ class _Scanner(ast.NodeVisitor):
             self.add(node, "tls", "tls-ref", "assignment to " + attr)
 
     def _target(self, target, value, node):
+        self.stored.add(id(target))
         if isinstance(target, ast.Attribute):
             self._check_store(target.attr, value, node, True)
         elif isinstance(target, ast.Name):
             self._check_store(target.id, value, node, False)
 
     def visit_Assign(self, node):
+        # An unpacked target is judged as any other store (visit_Attribute, visit_Name).
         for target in node.targets:
-            for leaf in ast.walk(target):
-                if isinstance(leaf, (ast.Attribute, ast.Name)) \
-                        and isinstance(leaf.ctx, ast.Store):
-                    self._target(leaf, node.value if leaf is target else None, node)
+            self._target(target, node.value, node)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node):
         if node.value is not None:
             self._target(node.target, node.value, node)
+        else:
+            # A bare annotation stores no value.
+            self.stored.add(id(node.target))
         self.generic_visit(node)
 
     def visit_AugAssign(self, node):
@@ -788,15 +814,23 @@ class _Scanner(ast.NodeVisitor):
         self._target(node.target, node.value, node)
         self.generic_visit(node)
 
+    def _store(self, node, attr, attribute):
+        """Any other store (an unpacked, for, with or comprehension target) binds a value the
+        scan cannot see, so it is judged as one."""
+        if isinstance(node.ctx, ast.Store) and id(node) not in self.stored:
+            self._check_store(attr, None, node, attribute)
+
     def visit_Attribute(self, node):
         self.based.add(id(node.value))
         if isinstance(node.ctx, ast.Load):
             names = self._reference(node, node.attr)
             self._escape(node, names)
+        self._store(node, node.attr, True)
         self.generic_visit(node)
 
     def visit_Name(self, node):
         if not isinstance(node.ctx, ast.Load):
+            self._store(node, node.id, False)
             return
         names = self._reference(node, None)
         imported = self.candidates(node.id, False) if self.on("alias") else set()
@@ -1059,8 +1093,10 @@ def main(argv=None):
 
 
 # Positive vectors: (source, checks). Each must yield a finding with all checks on, and NO
-# finding with any one of its checks disabled, so every vector fails without its check. Each
-# branch of a check has its own vector, so a branch removed is a vector no longer detected.
+# finding with any one of its checks disabled, so every vector fails without its check. That
+# pins each check, not every branch inside one: a branch is pinned only where a vector needs it
+# (each branch a mutation sweep left unpinned has one below), and a branch without one can be
+# removed with the self-test still passing.
 POSITIVE_VECTORS = (
     ("import pickle\npickle.loads(b'')\n", ("dsz-ref",)),
     ("import marshal\nmarshal.loads(b'')\n", ("dsz-ref",)),
@@ -1074,8 +1110,14 @@ POSITIVE_VECTORS = (
     ("import yaml\nyaml.load(text)\n", ("dsz-yaml",)),
     ("import yaml\nyaml.load(text, Loader=chosen)\n", ("dsz-yaml",)),
     ("import yaml\nyaml.load(text, chosen)\n", ("dsz-yaml",)),
+    ("import yaml\nyaml.load(text, Loader=cfg.loader)\n", ("dsz-yaml",)),
+    # A walrus in a comprehension binds in the enclosing scope, so the safe import is not proof.
+    ("import yaml\nfrom yaml import SafeLoader as L\n[(L := make(i)) for i in items]\n"
+     "yaml.load(text, Loader=L)\n", ("dsz-yaml",)),
     ("import yaml\nloader = yaml.load_all\n", ("dsz-yaml",)),
     ("import numpy\nnumpy.load(path, allow_pickle=True)\n", ("dsz-numpy",)),
+    ("import numpy as np\nnp.load(path, None, True)\n", ("dsz-numpy",)),
+    ("import numpy\nnumpy.load(path, *rest)\n", ("dsz-numpy",)),
     ("import requests\nrequests.get(url, verify=False)\n", ("tls-verify",)),
     ("import requests\nrequests.get(url, verify=0)\n", ("tls-verify",)),
     ("import requests\nrequests.get(url, verify=flag)\n", ("tls-verify",)),
@@ -1085,6 +1127,7 @@ POSITIVE_VECTORS = (
     ("session.verify = False\n", ("tls-verify",)),
     ("client.get(url, verify_ssl=False)\n", ("tls-verify",)),
     ("connect(host, ssl=False)\n", ("tls-verify",)),
+    ("connect(host, ssl=0)\n", ("tls-verify",)),
     ("import ssl\nctx = ssl._create_unverified_context()\n", ("tls-ref",)),
     ("import ssl\nmode = ssl.CERT_NONE\n", ("tls-ref",)),
     ("from ssl import CERT_NONE as none\nmode = none\n", ("alias", "tls-ref")),
@@ -1105,6 +1148,13 @@ POSITIVE_VECTORS = (
      "    ctx.verify_mode = mode\n", ("tls-verify-mode",)),
     ("import http.client\nhttp.client.ssl.SSLContext()\n", ("chain", "tls-context")),
     ("ctx.check_hostname = False\n", ("tls-hostname",)),
+    ("ctx.check_hostname, other = False, 0\n", ("tls-hostname",)),
+    ("for ctx.check_hostname in [False]:\n    pass\n", ("tls-hostname",)),
+    ("for ctx.verify_mode in [0]:\n    pass\n", ("tls-verify-mode",)),
+    ("with make() as ctx.check_hostname:\n    pass\n", ("tls-hostname",)),
+    ("modes = [0 for ctx.verify_mode in [0]]\n", ("tls-verify-mode",)),
+    ("for session.verify in [False]:\n    pass\n", ("tls-verify",)),
+    ("for check_hostname in [False]:\n    pass\n", ("tls-hostname",)),
     ("class Ctx:\n    check_hostname = chosen\n", ("tls-hostname",)),
     ("make_context(check_hostname=False)\n", ("tls-hostname",)),
     ("setattr(ctx, 'check_hostname', False)\n", ("tls-hostname",)),
@@ -1150,7 +1200,6 @@ POSITIVE_VECTORS = (
     ("def f(text):\n    exec(text)\n", ("code-ref",)),
     ("run = exec\n", ("code-ref",)),
     ("import builtins as b\nb.exec(text)\n", ("alias", "code-ref")),
-    ("__builtins__.exec(text)\n", ("alias", "code-ref")),
     ("import types\ntypes.FunctionType(compile(text, 'x', 'exec'), {})()\n", ("code-ref",)),
     ("import pydoc\npydoc.builtins.exec(text)\n", ("chain", "code-ref")),
     ("spec.loader.exec_module(module)\n", ("code-loader",)),
@@ -1173,6 +1222,7 @@ POSITIVE_VECTORS = (
     ("import pickle\nmatch pickle:\n    case m:\n        m.loads(d)\n", ("module-escape",)),
     ("import os\nrun(os)\n", ("module-escape",)),
     ("import shutil\nm = shutil.os\n", ("chain", "module-escape")),
+    ("from shutil import os as o\nm = o\n", ("chain", "module-escape")),
     # Scope: a binding in another scope never hides the one Python resolves here.
     ("import pickle\ndef _u():\n    import json as pickle\npickle.loads(data)\n",
      ("scope", "dsz-ref")),
@@ -1188,6 +1238,9 @@ POSITIVE_VECTORS = (
      ("alias", "dsz-ref")),
     ("def outer():\n    def inner():\n        nonlocal p\n        import pickle as p\n"
      "    p = None\n    inner()\n    return p.loads(x)\n", ("alias", "dsz-ref")),
+    ("def outer():\n    def mid():\n        def inner():\n            nonlocal p\n"
+     "            import pickle as p\n        inner()\n    p = None\n    mid()\n"
+     "    return p.loads(x)\n", ("alias", "dsz-ref")),
 )
 
 # Negative vectors: the safe spellings each check must leave alone.
@@ -1210,6 +1263,8 @@ NEGATIVE_VECTORS = (
     "import asyncio\nasyncio.open_connection(host, port, ssl=ctx)\n",
     "import numpy\nnumpy.load(path, allow_pickle=False)\n",
     "class Ctx:\n    check_hostname = True\n",
+    "class Opts:\n    check_hostname: bool\n    verify_mode: int\n",
+    "import numpy\nnumpy.load(path, None, False)\nnumpy.load(path, 'r')\n",
     "pattern.exec(text)\nre.compile(text)\n",
     "import pickle\ndef f(pickle):\n    return pickle.loads(x)\n",
     "import os, subprocess, code\nfrom unittest.mock import patch\n"

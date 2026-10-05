@@ -5,7 +5,8 @@
 #   `mechanisms` RESTATES that linkage (namespaced gate:/hook: refs, unique and sorted) so this file is
 #   reviewable standalone, and tools/gen_enforcement_register.py CROSS-VALIDATES it against the ledger, so
 #   the two can never fork. partial: the same linkage invariant as enforced, and the linked mechanisms are
-#   known to cover only part of the rule (their residues name the uncovered clauses). none: enforcement is
+#   known to cover only part of the rule (their residues name what each does not catch, not every
+#   uncovered clause of every linked rule). none: enforcement is
 #   not built yet. pending: not built yet, and `description` states the intended build. This file records
 #   the DECISION only; the linkage itself is authored in the gate and hook manifests and rendered into
 #   .aiqt/enforceability.json, never re-authored here.
