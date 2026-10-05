@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c9e88629e85bc07a9564d19739b1f91d5d7d8fe2416f1a4866b65dde1159af0e"
+tree-sha256 = "605191ed1b985bf7ffc55f493d01799648091769314994b7d9642fecbe026e35"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3166,8 +3166,8 @@ sha256 = "e19ad231e932a8b9fb463c4bc4d2f5837742b563d7c9f8fd0bd775b6c8832ede"
 
 [[sources]]
 path = "tools/_selftest_exit_report.py"
-bytes = 4995
-sha256 = "39768cb2f52c4a59b3570544294c3b64c0deba91139265aed5c02a5dd032e1e7"
+bytes = 8104
+sha256 = "191e186fac1f7f181614435894fdb3314a211770686e626157195878be88e97a"
 
 [[sources]]
 path = "tools/_standards.py"
@@ -3216,8 +3216,8 @@ sha256 = "7f6b2539235b5eea9dc6a61636336ebbdeb7917d1e23f35a6663107ee519ab7b"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 184912
-sha256 = "87a4f9c429d1fb01d8a3836ab8d55c93846106037224992b21e01611d87e1a73"
+bytes = 184865
+sha256 = "cdb1f516a6d91dee25e404d2f462e851ba24269c6329004cc7ef5471e52a08c8"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -3381,8 +3381,8 @@ sha256 = "683e94db8330824c5b73ee79164ec0d30ee555b2ba9b852af0a82e0a7b4b3f08"
 
 [[sources]]
 path = "tools/check_selftest_execution.py"
-bytes = 67284
-sha256 = "31e81b64a5c533f25e4136c75370dbcb116694b90fdeb3cfa6471407ca91891e"
+bytes = 75090
+sha256 = "bb9a2f8434e83c19c5efe5ae8749382848ab9ca0341b7a0e660271eb610cef3c"
 
 [[sources]]
 path = "tools/check_site.py"

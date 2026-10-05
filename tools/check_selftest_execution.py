@@ -49,16 +49,18 @@ The child's full stdout and stderr are forwarded UNFILTERED to this
 gate's own streams (no grep, no truncation), and its verdict is judged by its real return code, its
 error stream, and the strict report reconcile, never by its prose. The fail-closed child contract
 (.aiqt/core/rules/security-seci-fail-closed.md): a pass needs a zero exit, the report FINALIZED at the
-child's exit, and an error stream empty apart from the suite's exact declared lines (DECLARED_STDERR;
-no registered suite declares any). The child arms tools/_selftest_exit_report.py as its first atexit
-registration, so the report is written only after every non-daemon thread is joined, every later
-atexit callback has run, and a bounded garbage collection, and the process then ends with os._exit;
-the report carries format_version 2, finalized true, and the exit_code that must equal the child's
-real exit status. A fault the child survived (an atexit callback, a destructor, a thread) therefore
-reaches the error stream and refuses the verdict, and an in-band (format 1) report is refused. The
-child-side residual (a destructor of an object still reachable at exit never runs, a daemon thread is
-killed, and in-process code can replace sys.stderr or the hooks that report a fault) is disclosed in
-that module. A report that is missing, truncated, malformed,
+child's exit, and a WHOLE error stream byte-identical to the suite's declared bytes (DECLARED_STDERR;
+a suite with no entry must leave it empty, and no registered suite declares any). The child arms
+tools/_selftest_exit_report.py as its first atexit registration, so the report is written only after
+every non-daemon thread is joined, every later atexit callback has run, and a bounded garbage
+collection, and the process then ends with os._exit; the report carries format_version 2, finalized
+true, and the exit_code that must equal the child's real exit status. A fault the child survived (an
+atexit callback, a destructor, a thread) therefore reaches the error stream and refuses the verdict; a
+thread that ends in a failure SystemExit, which writes nothing to stderr, and a status recorded
+through exit_with whose exit was caught before the process left by another path, both make the child
+write no report and exit 2; and an in-band (format 1) report is refused. The child-side teardown
+residual (a destructor of an object still reachable at exit never runs, a daemon thread is killed) is
+disclosed in that module. A report that is missing, truncated, malformed,
 wrong-suite, non-regular, or carrying a duplicate or wrong-typed entry is CANNOT-EVALUATE, never a
 pass, whatever the child's exit code; completeness is never inferred from output volume or from the
 absence of a reported problem.
@@ -69,8 +71,9 @@ cannot-evaluate (an unreadable, malformed, or suite-missing expectation manifest
 absent, non-regular, a symlink, or escapes the repo; runner source that does not parse or carries an
 unresolvable, aliased (a non-call check reference), comprehension-bound, or duplicate check id; a
 static source-to-manifest set mismatch; an unconfirmable repo
-root; unavailable temp storage; a launch failure; a child return code outside {0, 1}; an undeclared
-line on the child's error stream; or an invalid, unfinalized, or exit-status-mismatched report).
+root; unavailable temp storage; a launch failure; a child return code outside {0, 1}; a child error
+stream that differs by any byte from the suite's declared bytes; or an invalid, unfinalized, or
+exit-status-mismatched report).
 
 DISCLOSED RESIDUAL: this gate proves INVOCATION IDENTITY only. It does not prove an invoked assertion is
 discriminating (a constant-true check counts as executed), carries no mutation sensitivity, sees nothing
@@ -107,7 +110,12 @@ reconcile still proves the executed set independently. Repo-root confirmation is
 proxy anchored to this gate's own file, not a full git-identity check; and the static scan and the
 launch read the runner's source at two moments, so a concurrent same-user writer between them is
 outside this repo's sole-orchestrator threat model (the runtime layer still reconciles what
-actually ran). The child runs un-timed
+actually ran). The fail-closed child contract's one permitted residual is loaded code replacing the
+reporting machinery: code running inside the child can write a complete finalized-shape report itself
+(for example, then os._exit(0), whether or not it armed the finalizer), or replace sys.stderr,
+sys.unraisablehook, threading.excepthook, os._exit, the atexit registrations, or the finalizer's
+state; this gate sees the child only from outside and no in-process secret is hidden from that code,
+so the channel is closed only by the suite's own source being reviewed and pinned. The child runs un-timed
 (parity with the roster's other selftest steps; the CI job timeout is the outer bound).
 """
 import ast
@@ -132,9 +140,12 @@ MANIFEST_TOP_KEYS = {"format-version", "suite"}
 SUITE_ROW_KEYS = {"id", "runner", "expected-check-ids"}
 REPORT_KEYS = {"format_version", "suite", "check_ids", "exit_code", "finalized"}
 REPORT_FORMAT_VERSION = 2
-# The exact stderr lines a registered suite may legitimately write, per suite id; any other byte on the
-# child's error stream is a fault, never a pass. Measured on every registered suite: none writes stderr
-# on a passing run, so no suite declares an allowance.
+# Per suite id, the exact bytes (a bytes value) the child's WHOLE error stream must equal on a run that
+# is a verdict; a suite with no entry must leave the stream empty, and any other byte is a fault, never
+# a pass. Measured through this gate on a passing run: orch-behaviour-selftest,
+# ci-status-behaviour-selftest, instruction-budget-selftest and python-floor-selftest each write 0
+# stderr bytes. git-fixture-env-selftest was not measured to completion, so its empty allowance is the
+# fail-closed default (any byte it writes refuses the run with 2), not a measurement.
 DECLARED_STDERR = {}
 
 
@@ -446,24 +457,28 @@ def _read_report(report_path, suite_id, returncode):
 
 
 def _stderr_fault(blob, suite_id):
-    """The child's error stream judged against the suite's exact declared allowance: None when every
-    line is declared (an empty stream always is), else a description of the first undeclared line. A
-    fault the child survived (an atexit callback, a destructor, a thread) reaches only this stream,
-    so it is never a pass."""
-    if not blob:
+    """The child's WHOLE error stream compared byte for byte with the suite's declared bytes (empty when
+    the suite declares none): None on equality, else a description of the first differing byte. No
+    decoding, line splitting, repetition, or reordering is applied, and a declaration that is not a
+    bytes value is itself a fault. A fault the child survived (an atexit callback, a destructor, a
+    thread) reaches only this stream, so it is never a pass."""
+    allowed = DECLARED_STDERR.get(suite_id, b"")
+    if type(allowed) is not bytes:
+        return "the declared stderr for suite {!r} is not a bytes value".format(suite_id)
+    if blob == allowed:
         return None
-    allowed = DECLARED_STDERR.get(suite_id, ())
-    for line in blob.decode("utf-8", errors="replace").splitlines():
-        if line not in allowed:
-            return "undeclared stderr line {!r}".format(line[:200])
-    return None
+    at = next((i for i, (got, want) in enumerate(zip(blob, allowed)) if got != want),
+              min(len(blob), len(allowed)))
+    return "stderr differs from the {} declared bytes at byte {}: {!r}".format(
+        len(allowed), at, blob[at:at + 200])
 
 
 def run_suite(root, suite_id):
     """Validate the manifest, statically reconcile the runner's source check() set against it BEFORE
     any launch, then launch the registered runner with a private report path, forward its full
-    output, require an error stream empty apart from the suite's declared lines, and reconcile the
-    executed set from the report finalized at the child's exit. Returns the gate exit code."""
+    output, require an error stream byte-identical to the suite's declared bytes (empty unless
+    declared), and reconcile the executed set from the report finalized at the child's exit. Returns
+    the gate exit code."""
     root = Path(root)
     manifest_path = root / "tools" / "selftest_checks.toml"
     suites = _manifest_suites(manifest_path)
@@ -639,6 +654,18 @@ FAULT_THREAD = ("import threading, time\n"
                 "def _thread_fault():\n    time.sleep(0.2)\n"
                 "    raise RuntimeError('ST_THREAD_FAULT')\n"
                 "threading.Thread(target=_thread_fault).start()\n")
+# Each vector's fault-free twin: the same machinery, no fault.
+TWIN_ATEXIT = "import atexit\natexit.register(int)\n"
+TWIN_DESTRUCTOR = ("class _Quiet:\n    def __del__(self):\n        pass\n"
+                   "_cycle = _Quiet()\n_cycle.self = _cycle\ndel _cycle\n")
+TWIN_THREAD = "import threading\nthreading.Thread(target=int).start()\n"
+
+
+def _thread_exit(arg):
+    """A non-daemon thread that ends through sys.exit(arg), joined before the suite exits: the default
+    threading.excepthook ignores SystemExit, so it writes nothing to stderr."""
+    return ("import threading\n_t = threading.Thread(target=sys.exit, args=({!r},))\n"
+            "_t.start()\n_t.join()\n".format(arg))
 
 
 def self_test():
@@ -1039,15 +1066,21 @@ def self_test():
         # 24 (fail-closed child contract): a fault the child survives AFTER its last check (an atexit
         # callback, a destructor of collectable garbage, a thread joined at shutdown) leaves exit 0
         # and a complete set, and is refused 2 through the error stream, under both the finalized
-        # report and the in-band report the gate formerly accepted; each fault-free twin passes
-        for label, vector, token in (("atexit", FAULT_ATEXIT, "ST_ATEXIT_FAULT"),
-                                     ("destructor", FAULT_DESTRUCTOR, "ST_DESTRUCTOR_FAULT"),
-                                     ("thread", FAULT_THREAD, "ST_THREAD_FAULT")):
+        # report and the in-band report the gate formerly accepted (an armed child also records the
+        # thread fault itself and exits 2); each vector's own fault-free twin passes
+        stream_refusal = "error stream carries a fault"
+        for label, vector, token, twin, refusal in (
+                ("atexit", FAULT_ATEXIT, "ST_ATEXIT_FAULT", TWIN_ATEXIT, stream_refusal),
+                ("destructor", FAULT_DESTRUCTOR, "ST_DESTRUCTOR_FAULT", TWIN_DESTRUCTOR,
+                 stream_refusal),
+                ("thread", FAULT_THREAD, "ST_THREAD_FAULT", TWIN_THREAD, "child exited 2")):
+            code, _out, err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0, before_exit=twin)))
+            expect("st/fault-{}-twin-passes".format(label), (code, err), (0, ""))
             code, _out, err = run(build(_manifest_text(),
                                         _report_body(GOOD_IDS, 0, before_exit=vector)))
             expect("st/fault-{}-finalized-2".format(label), code, 2)
             expect("st/fault-{}-finalized-named".format(label),
-                   (token in err, "error stream carries a fault" in err), (True, True))
+                   (token in err, refusal in err), (True, True))
             code, _out, err = run(build(_manifest_text(), _raw_body(
                 json.dumps({"format_version": 1, "suite": "demo", "check_ids": GOOD_IDS}),
                 before_exit=vector)))
@@ -1057,6 +1090,18 @@ def self_test():
             GOOD_IDS, 0, before_exit="import atexit, threading\natexit.register(int)\n"
             "threading.Thread(target=int).start()\n")))
         expect("st/fault-free-twin-passes", code, 0)
+        # a non-daemon thread's FAILURE exit (SystemExit with a nonzero or non-int code) writes
+        # nothing to stderr, and is still refused 2: the armed child records it and writes no report;
+        # its clean twin (SystemExit(0)) passes
+        for label, arg in (("one", 1), ("message", "thread failed")):
+            code, _out, err = run(build(_manifest_text(),
+                                        _report_body(GOOD_IDS, 0, before_exit=_thread_exit(arg))))
+            expect("st/fault-thread-exit-{}-2".format(label), code, 2)
+            expect("st/fault-thread-exit-{}-named".format(label),
+                   "ended with SystemExit({!r})".format(arg) in err, True)
+        code, _out, err = run(build(_manifest_text(),
+                                    _report_body(GOOD_IDS, 0, before_exit=_thread_exit(0))))
+        expect("st/fault-thread-exit-zero-twin-passes", (code, err), (0, ""))
 
         # 25: the finalizer contract itself: an armed child whose exit status bypassed exit_with
         # writes no report (no verdict), one that wrote its report in band before the finalizer
@@ -1078,12 +1123,46 @@ def self_test():
                                     + _report_body(GOOD_IDS, 0)))
         expect("st/finalizer-not-first-2", code, 2)
         expect("st/finalizer-not-first-named", "must be the first atexit registration" in err, True)
+        # a recorded status stands only if its own exit ends the process: a caught exit_with followed
+        # by a failure exit, by a fall-through, or by a code read and a different exit is refused 2,
+        # and so is exit_with from a non-main thread; an exit_with that unwinds through a finally or
+        # is re-raised by a handler still ends the process, and passes
+        arm_line = "_selftest_exit_report.arm(report, 'demo', {!r})\n".format(GOOD_IDS)
+        for label, tail in (
+                ("then-exit-1", "try:\n    _selftest_exit_report.exit_with(0)\n"
+                                "except SystemExit:\n    pass\nsys.exit(1)\n"),
+                ("then-fall-through", "try:\n    _selftest_exit_report.exit_with(0)\n"
+                                      "except SystemExit:\n    pass\n"),
+                ("code-read-then-exit-0", "try:\n    _selftest_exit_report.exit_with(1)\n"
+                                          "except SystemExit as exc:\n    exc.code\nsys.exit(0)\n")):
+            code, _out, err = run(build(_manifest_text(), arm_line + tail))
+            expect("st/finalizer-caught-{}-2".format(label), code, 2)
+            expect("st/finalizer-caught-{}-named".format(label),
+                   "is not the one the process exited with" in err, True)
+        code, _out, err = run(build(_manifest_text(), arm_line + (
+            "import threading\n"
+            "_t = threading.Thread(target=_selftest_exit_report.exit_with, args=(0,))\n"
+            "_t.start()\n_t.join()\n_selftest_exit_report.exit_with(0)\n")))
+        expect("st/finalizer-thread-exit-with-2", code, 2)
+        expect("st/finalizer-thread-exit-with-named", "outside the main thread" in err, True)
+        for label, tail in (
+                ("finally", "def _leave():\n    try:\n        _selftest_exit_report.exit_with(0)\n"
+                            "    finally:\n        int()\n_leave()\n"),
+                ("reraise", "try:\n    _selftest_exit_report.exit_with(0)\n"
+                            "except SystemExit:\n    raise\n")):
+            code, _out, err = run(build(_manifest_text(), arm_line + tail))
+            expect("st/finalizer-unwound-{}-passes".format(label), (code, err), (0, ""))
 
-        # 26: the declared stderr allowance is exact: a declared line passes, any other line (or a
-        # declared line's prefix) is still a fault; the pinned allowance is restored after
+        # 26: the declared stderr allowance is byte-exact over the WHOLE stream: the declared bytes
+        # pass, and a repetition, a line-separator variant (CRLF, vertical tab, file separator), a
+        # missing trailing newline, a prefix, an empty stream where bytes are declared, invalid UTF-8
+        # against its replacement character, and a declaration that is not bytes (a str whose
+        # substrings, or a tuple whose lines, would otherwise match) are each a fault; the pinned
+        # allowance is restored after
         noisy = "sys.stderr.write('declared framing\\n')\n"
+        framing = b"declared framing\n"
         real_declared = dict(DECLARED_STDERR)
-        DECLARED_STDERR["demo"] = ("declared framing",)
+        DECLARED_STDERR["demo"] = framing
         try:
             code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0,
                                                                         before_exit=noisy)))
@@ -1091,11 +1170,32 @@ def self_test():
             code, _out, _err = run(build(_manifest_text(), _report_body(
                 GOOD_IDS, 0, before_exit=noisy + "sys.stderr.write('declared\\n')\n")))
             expect("st/stderr-undeclared-2", code, 2)
+            code, _out, _err = run(build(_manifest_text(), _report_body(
+                GOOD_IDS, 0, before_exit=noisy + noisy)))
+            expect("st/stderr-declared-repeated-2", code, 2)
+            for label, blob in (("repeated", framing * 3),
+                                ("crlf", b"declared framing\r\n"),
+                                ("no-newline", b"declared framing"),
+                                ("vertical-tab", b"declared framing\x0b"),
+                                ("file-separator", b"declared framing\x1c" + framing),
+                                ("prefix", b"declared\n"),
+                                ("empty", b"")):
+                expect("st/stderr-exact-{}".format(label), _stderr_fault(blob, "demo") is None, False)
+            expect("st/stderr-exact-match", _stderr_fault(framing, "demo"), None)
+            DECLARED_STDERR["demo"] = "\ufffd\n".encode("utf-8")
+            expect("st/stderr-exact-invalid-utf8", _stderr_fault(b"\xff\n", "demo") is None, False)
+            for label, declared in (("str", "declared framing\n"), ("tuple", ("declared framing",))):
+                DECLARED_STDERR["demo"] = declared
+                expect("st/stderr-declared-{}-refused".format(label),
+                       (_stderr_fault(framing, "demo") is None, _stderr_fault(b"\n", "demo") is None),
+                       (False, False))
         finally:
             DECLARED_STDERR.clear()
             DECLARED_STDERR.update(real_declared)
         code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0, before_exit=noisy)))
         expect("st/stderr-undeclared-suite-2", code, 2)
+        expect("st/stderr-undeclared-newline", _stderr_fault(b"\n", "demo") is None, False)
+        expect("st/stderr-undeclared-empty", _stderr_fault(b"", "demo"), None)
 
         # Round 3 (FIX E note): leg 19 witnesses run_suite's mkdtemp guard; self_test's own base
         # tempdir guard above cannot be witnessed from inside this self-test without circularity,
@@ -1117,8 +1217,10 @@ def self_test():
           "a malformed expectation manifest before any launch, treats a missing, malformed, wrong-suite, "
           "duplicate-member, non-regular, in-band, unfinalized, or exit-status-mismatched report as no "
           "verdict, refuses an atexit, destructor, or thread fault the child survived (an error stream "
-          "carrying any undeclared line), refuses an armed child whose status or report bypassed the "
-          "exit finalizer, never masks a failing child behind a "
+          "differing by any byte from the declared bytes) while each fault-free twin passes, refuses a "
+          "silent failure SystemExit in a non-daemon thread, refuses an armed child whose status or "
+          "report bypassed the exit finalizer or whose recorded status was caught before another "
+          "exit, never masks a failing child behind a "
           "complete set, refuses a child harness error, refuses an escaping, non-regular, or symlinked "
           "runner without launching, reconciles the runner's static check() source set against the "
           "manifest before any launch (refusing an unregistered source check, a registered id with no "
