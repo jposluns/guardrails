@@ -490,6 +490,7 @@ opf/enforcement/ci/github-actions.yml text eol=lf
 opf/enforcement/ci/opf-ci.sh text eol=lf
 opf/enforcement/precommit/install.sh text eol=lf
 opf/enforcement/precommit/pre-commit text eol=lf
+opf/prompt-pack/flow/SKILL.md text eol=lf
 opf/prompt-pack/pack.toml text eol=lf
 opf/site/_redirects text eol=lf
 opf/site/about.html text eol=lf
