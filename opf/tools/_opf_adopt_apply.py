@@ -1551,20 +1551,55 @@ def _release_raised_said(raised):
 
 
 def _release_outcome(jr_fd, journal_root, mine, raised=None):
-    """Release this run's own journal lock (ownership-checked) and read back, beneath the held journal
-    descriptor, what that left, judged by the lock's identity, never by process identity: ("stays", why)
-    ONLY when the lock present is the inode and content this run's acquire wrote (`mine`); ("unidentified",
-    None) when a lock is present and `mine` is None; ("unreadable", error) when what is present cannot be
-    read; ("unconfirmed", why) when no lock of this run's is present but the release raised or was
-    interrupted, so it may not be durable; else ("released", None). The third element is the exception the
-    caller re-raises with the outcome attached (or records beside an outcome already in flight), else
-    None: every exception the release and its read-back raised that is not their own JournalError or
-    OSError resolves through the one first-interrupt selection (_journal._first_interrupt), in the order
-    raised, so it is the FIRST interrupt among them, else the first such ordinary exception. An
-    interrupt and an ordinary exception are held apart, never in one variable, so an ordinary exception
-    the release raised never stands in place of an interrupt its read-back raised after it; the read-back
-    still runs after either. ("altered", why) when the inode this run's acquire wrote is present with
-    other or malformed content: this run's lock was altered and stays, never presumed released.
+    """Release this run's own journal lock (ownership-checked), then read back, beneath the held journal
+    descriptor, what that left, judged by the lock's identity, never by process identity: (state, detail,
+    stop), each row as the OUTCOME TABLE below fixes it; the code below is that table.
+
+    Inputs: R, what the release raised, and B, what its read-back raised, each one of: nothing; "own" (a
+    JournalError or OSError, the lock code's own error); "ordinary" (any other Exception); "interrupt"
+    (a BaseException that is not an Exception). The read-back runs after every R. And `mine`, the
+    identity this run's acquire wrote (_lock_identity), known or None (that read found no lock).
+
+    stop, the third element, is the exception the caller raises or records: the FIRST interrupt of R and
+    B in the order raised (_journal._first_interrupt, the one first-interrupt selection), else the first
+    of them that is not "own", else None. An "own" exception is never stop; the detail names it.
+
+        R          B          stop  state
+        nothing    nothing    None  from the read-back (below)
+        own        nothing    None  from the read-back
+        ordinary   nothing    R     from the read-back
+        interrupt  nothing    R     from the read-back
+        nothing    own        None  "unreadable"
+        own        own        None  "unreadable"
+        ordinary   own        R     "unreadable"
+        interrupt  own        R     "unreadable"
+        nothing    ordinary   B     "unreadable"
+        own        ordinary   B     "unreadable"
+        ordinary   ordinary   R     "unreadable"
+        interrupt  ordinary   R     "unreadable"
+        nothing    interrupt  B     "unreadable"
+        own        interrupt  B     "unreadable"
+        ordinary   interrupt  B     "unreadable" (B is the first interrupt, though raised second)
+        interrupt  interrupt  R     "unreadable"
+
+    The state from a read-back that raised nothing, for every R: a lock present that is `mine` (its inode
+    and bytes) "stays"; one at `mine`'s inode with other bytes "altered" (altered in place, never presumed
+    released); one present with `mine` None "unidentified"; else (no lock, or one at a fresh inode, a
+    peer's) "unconfirmed" when R raised (the release may not be durable), "released" when it did not.
+
+    The detail names EVERY exception R and B raised, in every row and every state, whether or not it is
+    also stop, so none is dropped: with B nothing, R's clause (the exception itself when "own"), else "its
+    release left it" on "stays" and None on "unidentified" and "released"; on "unreadable", B itself when
+    R raised nothing and B is "own", else R's clause, then B's.
+
+    The caller (_release_note, then run_adopt_transaction) gives every row the same result whether
+    `mine` is known or None. Committed (no outcome in flight): stop None, the commit returns on
+    "released", else raises AdoptCommittedLockError naming the state's clause; stop set, stop propagates
+    as itself, COMMITTED and the state's clause in its note. Refused (an AdoptApplyError in flight): stop
+    None or ordinary, the refusal stands, the state's clause and stop named in it; stop an interrupt,
+    stop propagates as itself, the refusal and the state's clause in its note. Any other outcome in
+    flight keeps stop beside it, through the same first-interrupt selection.
+
     The bytes acquire_lock writes carry no value unique to one acquire (uid, pid, pid-start, session, utc
     to the second), so EVERY caller holds an O_RDONLY descriptor on the lock from the moment `mine` is
     read (_lock_identity's keep) until after this read-back, on every path: while it is held, a filesystem
@@ -1573,67 +1608,64 @@ def _release_outcome(jr_fd, journal_root, mine, raised=None):
     genuine in-place alteration), and a peer's lock lands at a fresh inode, read as released, never as this
     run's. A per-acquire token would change the journal lock format other readers validate, so none is
     added here. When `raised` is a list, the read-back's close records its exception there
-    (_lock_identity), so it never raises past an interrupt the release raised, nor conceals the outcome.
-    A read-back that raises makes the state "unreadable", its detail naming what the release raised and
-    then what the read-back raised, so the one not returned is never dropped: it is returned, never
-    raised, so a caller's own outcome (the failed acquire's error) stays named beside it."""
-    failed = interrupt = error = released = None
+    (_lock_identity), so it never raises past one the release raised, nor conceals the outcome."""
+    own = (_journal.JournalError, OSError)
+    released = read = now = None
     try:
         _journal.release_lock(journal_root)
-    except (_journal.JournalError, OSError) as exc:
-        failed = released = exc
-    except Exception as exc:    # noqa: BLE001  ordinary, not the release's own error: never held as an interrupt
-        error = released = exc
-        failed = "its release raised {}".format(_journal._exc_said(exc))
-    except BaseException as exc:    # noqa: BLE001  an interrupt: held apart from any ordinary exception
-        interrupt = released = exc
-        failed = "its release was interrupted ({})".format(_journal._exc_said(exc))
+    except BaseException as exc:    # noqa: BLE001  every class: resolved by the table, never dropped
+        released = exc
     try:
         now = _lock_identity(jr_fd, raised=raised)
-    except BaseException as exc:    # noqa: BLE001  resolved with the release's own, in the order raised
-        own = isinstance(exc, (_journal.JournalError, OSError))
-        stop = _journal._first_interrupt([e for e in (released, exc) if e is not None])
-        if stop is None:
-            stop = error if error is not None or own else exc
-        if own and released is None:
-            return "unreadable", exc, stop
+    except BaseException as exc:    # noqa: BLE001  every class: resolved by the table, never dropped
+        read = exc
+    excs = [exc for exc in (released, read) if exc is not None]     # in the order raised
+    stop = _journal._first_interrupt(excs)
+    if stop is None:
+        stop = next((exc for exc in excs if not isinstance(exc, own)), None)
+    failed = (None if released is None else released if isinstance(released, own)
+              else "its release raised {}".format(_journal._exc_said(released)) if isinstance(released, Exception)
+              else "its release was interrupted ({})".format(_journal._exc_said(released)))
+    if read is not None:
+        if failed is None and isinstance(read, own):
+            return "unreadable", read, stop
         return "unreadable", "; then ".join(s for s in (
-            None if released is None else failed if not isinstance(failed, BaseException)
+            None if failed is None else failed if isinstance(failed, str)
             else "its release raised {}".format(_journal._exc_said(failed)),
-            "its read-back raised {}".format(_journal._exc_said(exc))) if s), stop
+            "its read-back raised {}".format(_journal._exc_said(read))) if s), stop
     if now is not None and mine is not None and now == mine:
-        return "stays", failed or "its release left it", interrupt
+        return "stays", failed or "its release left it", stop
     if now is not None and mine is not None and now[:2] == mine[:2]:
         return "altered", "the inode its acquire wrote now holds other content{}".format(
-            "; {}".format(failed) if failed is not None else ""), interrupt
+            "; {}".format(failed) if failed is not None else ""), stop
     if now is not None and mine is None:
-        return "unidentified", None, interrupt
+        return "unidentified", failed, stop
     if failed is not None:
-        return "unconfirmed", failed, interrupt
-    return "released", None, interrupt
+        return "unconfirmed", failed, stop
+    return "released", None, stop
 
 
 def _release_note(jr_fd, journal_root, mine, raised=None):
     """The run's normal lock release, at the end of a transaction or a refusal under the lock: (state,
-    clause, interrupt), the clause None when the lock is released, else naming what stays or what may not
-    be durable, reported as _failed_lock_state reports it on the acquire path, never swallowed. `raised`
-    as _release_outcome's."""
-    state, detail, interrupt = _release_outcome(jr_fd, journal_root, mine, raised)
+    clause, stop), the clause None when the lock is released, else naming what stays or what may not be
+    durable and every exception the detail names, reported as _failed_lock_state reports it on the acquire
+    path, never swallowed. `raised` and stop as _release_outcome's (its outcome table)."""
+    state, detail, stop = _release_outcome(jr_fd, journal_root, mine, raised)
     if state == "released":
-        return state, None, interrupt
+        return state, None, stop
     if state == "unreadable":
-        return state, _unreadable_lock(detail), interrupt
+        return state, _unreadable_lock(detail), stop
     if state == "unidentified":
-        return state, ("a journal lock {}/lock is present after this run's release, and this run could not "
+        return state, ("a journal lock {}/lock is present after this run's release{}, and this run could not "
                        "read back the lock it wrote to tell whether it is its own: the next run refuses on "
-                       "it".format(JOURNAL_REL)), interrupt
+                       "it".format(JOURNAL_REL, "" if detail is None else " ({})".format(detail))), stop
     if state == "unconfirmed":
         return state, ("this run's journal lock was released, but the release may not be durable "
-                       "({})".format(detail)), interrupt
+                       "({})".format(detail)), stop
     if state == "altered":
-        return state, _altered_lock(detail), interrupt
+        return state, _altered_lock(detail), stop
     return state, ("this run's journal lock STAYS ({}): the next run refuses on it, and reconcile() breaks "
-                   "it once this process has exited".format(detail)), interrupt
+                   "it once this process has exited".format(detail)), stop
 
 
 def _altered_lock(detail):
@@ -1715,6 +1747,10 @@ def _failed_lock_state(jr_fd, journal_root, error, raised=None):
                            "not be durable ({})".format(detail)), interrupt
         if state == "altered":
             return state, _altered_lock(detail), interrupt
+        if state == "unidentified":
+            return state, ("this run's own journal lock WAS created, and a journal lock is present after its "
+                           "release{} that this run cannot tell from its own: it stays, and the next run "
+                           "refuses on it".format("" if detail is None else " ({})".format(detail))), interrupt
         return state, ("this run's own journal lock WAS created and STAYS ({}): the next run refuses on it, and "
                        "reconcile() breaks it once this process has exited".format(detail)), interrupt
     finally:
@@ -1860,6 +1896,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 raise AdoptApplyError("cannot take the adoption journal lock ({})".format(exc))
             except OSError as exc:
                 maybe_mine = getattr(exc, "lock_created", False)
+                lock_state = "unobserved"   # until the read below returns: never presumed untaken
                 lock_state, clause, interrupted = _failed_lock_state(jr_fd, journal_root, exc, closeout)
                 if interrupted is not None or lock_state not in ("untaken", "released"):
                     lock_note = clause      # named once, by the composer, in place of the claim
@@ -1870,6 +1907,9 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                     raise AdoptApplyError("cannot take the adoption journal lock ({})".format(exc))
                 raise AdoptApplyError("cannot take the adoption journal lock ({}); {}".format(exc, clause))
             except BaseException as exc:   # an interrupt or other error inside acquire: observed, never presumed
+                # "unobserved" until that read returns: an exception the read raises propagates past the
+                # assignment, and acquire may have created the lock, so the run never claims it holds none
+                lock_state = "unobserved"
                 lock_state, lock_note = _interrupted_lock_state(jr_fd, exc, closeout)
                 raise
             held = True
@@ -4903,13 +4943,14 @@ def _self_test_checks():
                   observed="exception={!r} injected={!r} leaked={!r}".format(raised, injected, leaked))
 
         def ordered_run(sweep_plan, anchor_plan=(), read_plan=(), release_plan=(), release_real=True,
-                        acquire_plan=(), compose=compose_refused_here):
+                        acquire_plan=(), compose=compose_refused_here, mine_none=False):
             """One run over `compose` (a refusal by default) with exceptions injected, each once and in order:
             at the sweep's _open_parent cleanup close (`sweep_plan`), at the final close-out's anchor
             closes (`anchor_plan`, once the sweep's has fired), as a lock read's _read_fd under
             _lock_identity (`read_plan`, each entry (the code _lock_identity must be called from, factory)),
             and right after the lock release (`release_plan`) or the lock acquire (`acquire_plan`); with
-            `release_real` False the release leaves the lock in place, so its read-back reads it. (the
+            `release_real` False the release leaves the lock in place, so its read-back reads it; with
+            `mine_none` the run's own lock identity read finds no lock, so `mine` is None. (the
             propagating exception, its notes' text, every injected exception, the descriptors leaked)."""
             fired_all = []
             quiet_o, fired_o = _quiet_plan(sweep_plan, sweep_code)
@@ -4943,6 +4984,14 @@ def _self_test_checks():
                 if acquires:
                     fired_all.append(acquires.pop(0)())
                     raise fired_all[-1]
+            real_identity_o = _lock_identity
+
+            def identity_unavailable(jr_fd, keep=None, raised=None):
+                # the run's own identity read (the one with `keep`) finds no lock, as when the lock is
+                # briefly absent there; it then restores the real one, so every later read calls it directly
+                # and its frames stay what read_plan matches
+                setattr(me, "_lock_identity", real_identity_o)
+                return None if keep is not None else real_identity_o(jr_fd, keep, raised)
             raised_o = None
             with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp_o:
                 saved_umask = os.umask(0o022)
@@ -4953,10 +5002,12 @@ def _self_test_checks():
                             mock.patch.object(store, "_close_fd_exc_safe", anchor_close), \
                             mock.patch.object(_journal, "_read_fd", read_fd), \
                             mock.patch.object(_journal, "release_lock", release_lock), \
-                            mock.patch.object(_journal, "acquire_lock", acquire_lock):
+                            mock.patch.object(_journal, "acquire_lock", acquire_lock), \
+                            mock.patch.object(me, "_lock_identity",
+                                              identity_unavailable if mine_none else real_identity_o):
                         try:
                             run_adopt_transaction(root_o, rid, compose)
-                        except (AdoptApplyError, RuntimeError, KeyboardInterrupt) as exc:
+                        except (Exception, KeyboardInterrupt) as exc:     # noqa: BLE001  checked below
                             raised_o = exc
                     leaked_o = sorted(_fds_open() - baseline_o)
                 finally:
@@ -5046,6 +5097,90 @@ def _self_test_checks():
               and "an injected compose refusal" in text and not leaked,
               observed="exception={!r} injected={!r} note={!r} leaked={!r}".format(
                   raised, fired, text[-600:], leaked))
+        # 6a'''b3m (D-U10-SECOND-FAULT, round 16): _release_outcome's OUTCOME TABLE, one vector per row.
+        # The release raises R and its read-back B, each nothing, "own" (OSError, JournalError), "ordinary"
+        # or "interrupt"; this run's lock identity is known or unavailable (`mine` None); the run commits
+        # or refuses. The release leaves the lock in place, so the read-back reads it. Each row requires
+        # the table's stop (written out here, not computed by the code under test): on a commit stop
+        # propagates as itself, else AdoptCommittedLockError; on a refusal an interrupt stop propagates
+        # as itself, else the refusal stands. In every row EVERY injected exception is named in the full
+        # rendering (message, notes, chain), with COMMITTED or the refusal and the state's clause, and no
+        # descriptor leaks (red against an ordinary or own release exception dropped on "unidentified",
+        # and an ordinary release exception never returned on a read-back that raised nothing).
+        table_stop = {("nothing", "nothing"): None, ("own", "nothing"): None, ("ordinary", "nothing"): "R",
+                      ("interrupt", "nothing"): "R", ("nothing", "own"): None, ("own", "own"): None,
+                      ("ordinary", "own"): "R", ("interrupt", "own"): "R", ("nothing", "ordinary"): "B",
+                      ("own", "ordinary"): "B", ("ordinary", "ordinary"): "R", ("interrupt", "ordinary"): "R",
+                      ("nothing", "interrupt"): "B", ("own", "interrupt"): "B", ("ordinary", "interrupt"): "B",
+                      ("interrupt", "interrupt"): "R"}
+        table_make = {("R", "own"): lambda: OSError(errno.EIO, "R-own-release-EIO"),
+                      ("R", "ordinary"): lambda: _InjectedCloseFault("R-ordinary-release-fault"),
+                      ("R", "interrupt"): lambda: _InjectedCloseInterrupt("R-interrupt-release-interrupt"),
+                      ("B", "own"): lambda: _journal.JournalError("B-own-read-back-error"),
+                      ("B", "ordinary"): lambda: _InjectedCloseFault("B-ordinary-read-back-fault"),
+                      ("B", "interrupt"): lambda: _InjectedCloseInterrupt("B-interrupt-read-back-interrupt")}
+
+        def rendering(exc):
+            """Every exception of `exc`'s chain (cause and context), each as str and with its notes."""
+            seen, todo, parts = [], [exc], []
+            while todo:
+                cur = todo.pop(0)
+                if cur is None or any(cur is was for was in seen):
+                    continue
+                seen.append(cur)
+                parts.append("{} {}".format(cur, _journal._exc_said(cur)))
+                todo += [cur.__cause__, cur.__context__]
+            return " ".join(parts)
+        for (r_kind, b_kind), want in table_stop.items():
+            for mine_none in (False, True):
+                for committed in (True, False):
+                    raised, text, fired, leaked = ordered_run(
+                        (), read_plan=(((outcome_code, table_make["B", b_kind]),) if b_kind != "nothing" else ()),
+                        release_plan=((table_make["R", r_kind],) if r_kind != "nothing" else ()),
+                        release_real=False, compose=compose_committed if committed else compose_refused_here,
+                        mine_none=mine_none)
+                    tags = ["{}-{}-".format(tag, kind) for tag, kind in (("R", r_kind), ("B", b_kind))
+                            if kind != "nothing"]
+                    stop = None if want is None else next(
+                        (exc for exc in fired if "{}-".format(want) in str(exc)), None)
+                    if committed:
+                        stood = raised is stop if want is not None else type(raised) is AdoptCommittedLockError
+                    else:
+                        stood = (raised is stop if want is not None and not isinstance(stop, Exception)
+                                 else type(raised) is AdoptApplyError)
+                    full = rendering(raised)
+                    clause = ("present but unreadable" if b_kind != "nothing" else
+                              "could not read back the lock it wrote" if mine_none else "STAYS")
+                    check("release-outcome-table-R-{}-B-{}-mine-{}-{}".format(
+                              r_kind, b_kind, "unavailable" if mine_none else "known",
+                              "committed" if committed else "refused"),
+                          len(fired) == len(tags) and (want is None or stop is not None) and stood
+                          and all(tag in full for tag in tags)
+                          and ("COMMITTED" if committed else "an injected compose refusal") in full
+                          and clause in full and not leaked,
+                          observed="exception={!r} injected={!r} rendering={!r} leaked={!r}".format(
+                              raised, fired, full[-900:], leaked))
+        # the same table where the real release ran before R was raised (the lock gone, so "unconfirmed"):
+        # stop is R unless R is "own", and R is named (red against an ordinary R returned as no stop)
+        for r_kind in ("own", "ordinary", "interrupt"):
+            for committed in (True, False):
+                raised, text, fired, leaked = ordered_run(
+                    (), release_plan=(table_make["R", r_kind],), release_real=True,
+                    compose=compose_committed if committed else compose_refused_here)
+                stop = fired[0] if fired and r_kind != "own" else None
+                if committed:
+                    stood = raised is stop if stop is not None else type(raised) is AdoptCommittedLockError
+                else:
+                    stood = (raised is stop if stop is not None and not isinstance(stop, Exception)
+                             else type(raised) is AdoptApplyError)
+                full = rendering(raised)
+                check("release-outcome-table-R-{}-B-nothing-lock-gone-{}".format(
+                          r_kind, "committed" if committed else "refused"),
+                      len(fired) == 1 and stood and "R-{}-".format(r_kind) in full
+                      and ("COMMITTED" if committed else "an injected compose refusal") in full
+                      and "may not be durable" in full and not leaked,
+                      observed="exception={!r} injected={!r} rendering={!r} leaked={!r}".format(
+                          raised, fired, full[-900:], leaked))
         # an interrupt inside the lock acquire, then another in the read of what it left: the acquire's,
         # the first, propagates as itself, the read's named beside it; an ordinary fault in the acquire,
         # then an interrupt in that read: the read's interrupt propagates, the acquire's fault noted on it
@@ -5059,7 +5194,7 @@ def _self_test_checks():
                 (), read_plan=((interrupted_code, lambda: _InjectedCloseInterrupt("lock read interrupt")),),
                 acquire_plan=(first_m,))
             check(name, len(fired) == 2 and raised is fired[want] and repr(fired[1 - want]) in text
-                  and not leaked,
+                  and "holds no journal lock" not in text and not leaked,
                   observed="exception={!r} injected={!r} note={!r} leaked={!r}".format(
                       raised, fired, text[-600:], leaked))
         # an interrupt at the early lock close (after the release saw the lock gone), then one at the
