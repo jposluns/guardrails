@@ -10,18 +10,29 @@ the loss is a finding before any run is trusted.
 Surface: every Python script tools/run_all_checks.sh launches, read through the parity gate's validated roster
 loader (check_ci_parity.read_runner_text and extract_local, never a second shell parser), plus every runner in
 tools/selftest_checks.toml, whose schema is validated by the execution gate's own validator
-(check_selftest_execution._manifest_rows). The gate is in the roster, so it checks itself. Every control input
-(the roster, the registry and each listed script) is opened non-blocking without following a final symlink,
-and is refused unless the opened descriptor is a regular file, so a FIFO, device, directory or symlink is
-cannot-evaluate and never blocks the run.
+(check_selftest_execution._manifest_rows). Every control input (the roster, the registry and each listed
+script) is opened non-blocking without following a final symlink, and is refused unless the opened descriptor
+is a regular file, so a FIFO, device, directory or symlink is cannot-evaluate and never blocks the run.
+
+This file is on its own surface, but no gate can hold its own entry: with its guard lost, both of its steps
+exit 0 with no output, because nothing in the file runs. Its own entry is therefore held by an independent,
+existing mechanism. Its self-test is registered in tools/selftest_checks.toml (suite entry-guard-selftest), and
+both rosters launch it only through check_selftest_execution.py --suite, which requires the child to write an
+execution report naming every registered check; a child that runs nothing writes none, and that gate reads a
+missing report as cannot-evaluate (exit 2). The self-test reproduces this on a scratch copy of this file with
+its guard deleted, and launches this file's live step as a child and requires its PASS line, so a live path
+that exits 0 without checking fails the self-test, and with it the execution gate.
 
 Invariant, per script: the file parses (from its raw bytes, so a byte-order mark or a coding declaration is
 honoured as Python honours it), its top-level body holds exactly one `if` statement whose test is
 `__name__ == "__main__"`, that statement is the last top-level statement, has no else (or elif), its body ends
 in a call statement (an expression statement whose value is a call, or `raise SystemExit(<call>)`) with no
-`raise` statement before it in that body, and no such `if` appears below the top level. Only that orientation
-of the test is recognised; a reversed `"__main__" == __name__` or a `!=` test reads as a missing guard. A call
-inside a definition, a lambda, a nested branch or a try in the guard body is not a call statement and fails.
+`raise` statement anywhere before it in that body (at any depth: inside an if, a try, a with or a loop, and
+conservatively inside a definition too), and no such `if` appears below the top level. The test's left side
+must be the bare name `__name__` and its right side the exact string `"__main__"`; only that orientation is
+recognised, so a reversed `"__main__" == __name__`, a `!=` test, a misspelled string or another name on the
+left (`__file__`) reads as a missing guard. A call inside a definition, a lambda, a nested branch or a try in
+the guard body is not a call statement and fails.
 
 Intent is carried by the declared surface: a deliberate removal (a script turned into a library module)
 removes its roster line or registry row in the same reviewed change. A guard lost while the script is still
@@ -29,6 +40,8 @@ launched or registered is a finding. The gate does not read a diff.
 
   check_entry_guard.py              check the repository
   check_entry_guard.py --self-test  assert the gate's own vectors, and that each vector is discriminating
+  check_entry_guard.py [--self-test] --execution-report ABS_PATH
+                                    the self-test, writing its execution report (as the execution gate runs it)
 Exit: 0 every script passes; 1 findings, each failing script named with one reason; 2 cannot evaluate (the
 roster or registry is missing, not a regular file, unreadable, malformed or schema-invalid, the roster loader
 reports a diagnostic, the roster launches no Python script, or a listed script is missing, not a regular file,
@@ -38,21 +51,29 @@ It proves only that the entry exists in that form and that its final call statem
 before it leaves the module. A static check cannot see a neutralization that keeps that form: the call
 statement calling something that does not run the checks or that exits with a constant status (sys.exit(0),
 print(), a bare main() whose returned failure status is dropped); an earlier statement in the guard body that
-exits or raises through a call (sys.exit, os._exit, a function that raises); a top-level statement before the
-guard that exits, raises or never returns (raise SystemExit(0), sys.exit, os._exit, an endless loop), rebinds
-__name__, or rebinds or shadows the called name (an assignment, a later def, an import, a module __getattr__);
-an import whose side effect exits, replaces sys.exit or replaces a builtin; and a dispatch or check deleted
-inside a function the entry calls, which is caught for a registered suite only by the execution gate. A
-symlinked parent directory is followed (only the final path component is opened without following). It does
-not read the CI workflow (the parity gate holds the two rosters equal), does not see a script the roster never
-launches, and cannot tell a legitimate from an illegitimate coordinated removal of an entry and its roster
-line in one reviewed change.
+exits or raises through a call (sys.exit, os._exit, a function that raises), rebinds the called name
+(main = lambda: 0) or replaces the exit function (sys.exit = print); a top-level statement before the guard
+that exits, raises or never returns (raise SystemExit(0), sys.exit, os._exit, an endless loop), rebinds
+__name__, rebinds or shadows the called name (an assignment, a later def, an import, a module __getattr__), or
+registers a hook that overrides the exit status (atexit.register(os._exit, 0), a signal handler,
+sys.excepthook); an import whose side effect exits, replaces sys.exit or replaces a builtin; a dispatch or
+check deleted inside a function the entry calls, which is caught for a registered suite only by the execution
+gate; and any other statement that changes control flow or the exit status before or during the final call.
+This file's own entry is held by the execution gate only while its registry row and both --suite roster lines
+stay; a coordinated removal of them is outside it. A symlinked parent directory is followed (only the final
+path component is opened without following). It does not read the CI workflow (the parity gate holds the two
+rosters equal), does not see a script the roster never launches, and cannot tell a legitimate from an
+illegitimate coordinated removal of an entry and its roster line in one reviewed change. The self-test proves
+each vector discriminating against its own table of single-check removal mutants, not against every possible
+regression, and the execution gate accounts for its checks by family (every vector, every mutant, each launch
+leg), not per vector.
 """
 import ast
 import contextlib
 import errno
 import importlib.util
 import io
+import json
 import os
 import signal
 import stat
@@ -69,6 +90,8 @@ import check_selftest_execution  # noqa: E402  (the authoritative registry schem
 ROOT = Path(__file__).resolve().parents[1]
 ROSTER_REL = check_ci_parity.LOCAL_SOURCE
 REGISTRY_REL = "tools/selftest_checks.toml"
+# This gate's own self-test suite in the registry: the execution gate holds this file's entry.
+SUITE_ID = "entry-guard-selftest"
 # Non-blocking, so a FIFO opens at once and is then refused by type; no final-symlink follow, so a symlink
 # is refused at open (ELOOP); close-on-exec, so no launched child inherits the descriptor.
 OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -211,7 +234,7 @@ def entry_finding(tree):
         return "guard has an else"
     if not _call_statement(guard.body[-1]):
         return "guard body does not end in a call statement"
-    if any(isinstance(statement, ast.Raise) for statement in guard.body[:-1]):
+    if any(isinstance(node, ast.Raise) for statement in guard.body[:-1] for node in ast.walk(statement)):
         return "guard call statement unreachable after a raise"
     if nested:
         return "guard nested below the top level"
@@ -294,6 +317,7 @@ def _guarded(body):
 
 
 NO_CALL = "guard body does not end in a call statement"
+UNREACHABLE = "guard call statement unreachable after a raise"
 # (vector, target script text, reason) for a target the roster launches: each is one edit from INTACT.
 SHAPES = (
     ("late-statement", INTACT + "\nprint('late')\n", "guard not the last statement"),
@@ -309,9 +333,17 @@ SHAPES = (
     ("guard-try", _guarded("try:\n    sys.exit(main())\nexcept SystemExit:\n    pass"), NO_CALL),
     ("guard-raise-constant", _guarded("raise SystemExit(0)"), NO_CALL),
     ("guard-raise-other", _guarded("raise ValueError(main())"), NO_CALL),
-    ("guard-raise-first", _guarded("raise SystemExit(0)\nsys.exit(main())"),
-     "guard call statement unreachable after a raise"),
+    ("guard-raise-first", _guarded("raise SystemExit(0)\nsys.exit(main())"), UNREACHABLE),
+    ("guard-raise-nested-if", _guarded("if True:\n    raise SystemExit(0)\nsys.exit(main())"), UNREACHABLE),
+    ("guard-raise-nested-try", _guarded("try:\n    raise SystemExit(0)\nfinally:\n    pass\nsys.exit(main())"),
+     UNREACHABLE),
+    ("name-lhs-file", INTACT.replace('if __name__ == "__main__"', 'if __file__ == "__main__"'), "guard missing"),
+    ("main-literal-short", INTACT.replace('__name__ == "__main__"', '__name__ == "main"'), "guard missing"),
+    ("main-literal-transposed", INTACT.replace('__name__ == "__main__"', '__name__ == "__mian__"'),
+     "guard missing"),
     ("nested-if", INTACT.replace(GUARD, "if True:\n" + _indented(GUARD)), "guard nested below the top level"),
+    ("nested-deep", INTACT.replace(GUARD, "if True:\n" + _indented("if True:\n" + _indented(GUARD))),
+     "guard nested below the top level"),
     ("nested-def", INTACT.replace(GUARD, "def entry():\n" + _indented(GUARD)),
      "guard nested below the top level"),
     ("nested-plus-valid", INTACT.replace("def main():", "def helper():\n" + _indented(GUARD.replace(
@@ -407,10 +439,44 @@ def _gate(module, root, timeout=GATE_TIMEOUT):
     return code, out.getvalue() + err.getvalue()
 
 
-def _launch(path):
-    result = subprocess.run([sys.executable, "-I", "-B", str(path)], capture_output=True, text=True,
-                            timeout=CHILD_TIMEOUT, cwd=str(Path(path).parent), env=dict(LC_ALL="C.UTF-8"))
+def _launch(path, *args, cwd=None):
+    result = subprocess.run([sys.executable, "-I", "-B", str(path)] + list(args), capture_output=True, text=True,
+                            timeout=CHILD_TIMEOUT, cwd=str(cwd or Path(path).parent), env=dict(LC_ALL="C.UTF-8"))
     return result.returncode, result.stdout + result.stderr
+
+
+OWN_ENTRY = '\n\nif __name__ == "__main__":\n    sys.exit(main())\n'
+OWN_REL = "tools/" + Path(__file__).name
+
+
+def _guardless_copy(base):
+    """A scratch repository holding this checker with its own entry deleted, beside the execution gate, the
+    roster loader and the real registry, or None when this file does not end in its own entry."""
+    head, entry, tail = Path(__file__).read_text(encoding="utf-8").rpartition(OWN_ENTRY)
+    if not entry or tail:
+        return None
+    root = Path(base) / "guardless"
+    (root / "tools").mkdir(parents=True)
+    (root / ".git").write_text("gitdir: absent\n", encoding="ascii")
+    (root / OWN_REL).write_text(head + "\n", encoding="utf-8")
+    for rel in ("tools/check_selftest_execution.py", "tools/check_ci_parity.py", REGISTRY_REL):
+        (root / rel).write_bytes((ROOT / rel).read_bytes())
+    return root
+
+
+def _registered_check_ids():
+    """This suite's registered check ids, read through the gate's own reader and schema validator: (set of ids,
+    None), or (None, reason)."""
+    try:
+        data = tomllib.loads(_read_regular(ROOT / REGISTRY_REL, REGISTRY_REL).decode("utf-8"))
+    except (CannotEvaluate, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+        return None, "{}: {}".format(REGISTRY_REL, exc)
+    with contextlib.redirect_stderr(io.StringIO()):
+        rows = check_selftest_execution._manifest_rows(data, REGISTRY_REL)
+    row = next((row for row in rows or () if row["id"] == SUITE_ID), None)
+    if row is None:
+        return None, "{} registers no valid suite {}".format(REGISTRY_REL, SUITE_ID)
+    return set(row["expected-check-ids"]), None
 
 
 @contextlib.contextmanager
@@ -575,6 +641,8 @@ MUTANTS = (
     ("parse-raw-bytes", "ast.parse(data, filename=rel)", 'ast.parse(data.decode("utf-8"), filename=rel)',
      "accepted/coding-latin-1"),
     ("guard-eq", "and isinstance(test.ops[0], ast.Eq)", "and True", "shape/not-equal"),
+    ("name-lhs", 'and isinstance(test.left, ast.Name) and test.left.id == "__name__"', "", "shape/name-lhs-file"),
+    ("main-literal", 'and test.comparators[0].value == "__main__")', ")", "shape/main-literal-short"),
     ("guards-none", "if not guards:", "if False:", "splice/guard-missing"),
     ("nested-reason", 'return "guard nested below the top level" if nested else "guard missing"',
      'return "guard missing"', "shape/nested-if"),
@@ -587,9 +655,14 @@ MUTANTS = (
     ("raise-systemexit", 'isinstance(exc.func, ast.Name) and exc.func.id == "SystemExit"', "True",
      "shape/guard-raise-other"),
     ("raise-call-arg", "and isinstance(exc.args[0], ast.Call))", ")", "shape/guard-raise-constant"),
-    ("guard-reachable", "if any(isinstance(statement, ast.Raise) for statement in guard.body[:-1]):",
+    ("guard-reachable",
+     "if any(isinstance(node, ast.Raise) for statement in guard.body[:-1] for node in ast.walk(statement)):",
      "if False:", "shape/guard-raise-first"),
+    ("guard-reachable-depth", "for statement in guard.body[:-1] for node in ast.walk(statement)",
+     "for node in guard.body[:-1]", "shape/guard-raise-nested-if"),
     ("guard-nested", "    if nested:\n", "    if False:\n", "shape/nested-plus-valid"),
+    ("nested-depth", "for inner in ast.walk(node) if inner is not node", "for inner in ast.iter_child_nodes(node)",
+     "shape/nested-deep"),
 )
 # The intact twin is the one vector no removal can fail: each finding vector is one edit from it.
 UNMUTATED = {"intact/passes"}
@@ -609,7 +682,7 @@ def _load_mutant(source, directory, number):
     return module
 
 
-def self_test():
+def self_test(report_path=None):
     results = []
 
     def check(check_id, ok, detail=""):
@@ -619,65 +692,110 @@ def self_test():
     with tempfile.TemporaryDirectory(prefix="entry-guard-selftest-") as base:
         vectors = _fixtures(base)
         # 1. every vector holds against this gate
-        for vector, ok, detail in _run_vectors(this, vectors):
-            check("vector/" + vector, ok, detail)
+        outcomes = _run_vectors(this, vectors)
+        failing = [(vector, detail) for vector, ok, detail in outcomes if not ok]
+        check("vector/every-vector-holds", vectors and len(outcomes) == len(vectors) and not failing, failing)
 
-        # 2. the splice reproduction, run directly: the intact script reaches its checks, the spliced one
-        # exits 0 silent, and so does a neutralized guard whose body only defines a function
+        # 2. the splice reproduction, run directly: the intact script reaches its checks, and the spliced one,
+        # a guard whose body only defines a function, a guard whose call follows a nested raise, and a
+        # misspelled guard each exit 0 silent
         roots = dict((vector, root) for vector, root, _code, _text, _patch in vectors)
         code, output = _launch(roots["intact/passes"] / TARGET)
         check("run/intact-reaches-checks", code == 0 and "checks ran" in output, output)
-        for vector in ("splice/guard-missing", "shape/guard-def"):
+        for check_id, vector in (("run/splice-silent-green", "splice/guard-missing"),
+                                 ("run/guard-def-silent-green", "shape/guard-def"),
+                                 ("run/raise-nested-silent-green", "shape/guard-raise-nested-if"),
+                                 ("run/main-literal-silent-green", "shape/main-literal-short")):
             code, output = _launch(roots[vector] / TARGET)
-            check("run/" + vector + "-silent-green", code == 0 and output == "", output)
+            check(check_id, code == 0 and output == "", output)
 
-        # 3. every mutant (one check removed) fails its named vector, and every vector but the intact twin
+        # 3. this gate's own entry, held independently: with its guard deleted, this file exits 0 silent when
+        # launched, and the execution gate, launched as both rosters launch this self-test, refuses it
+        # because the child wrote no execution report
+        guardless = _guardless_copy(base)
+        silent = caught = (None, "this file does not end in its own entry")
+        if guardless is not None:
+            silent = _launch(guardless / OWN_REL)
+            caught = _launch(guardless / "tools" / "check_selftest_execution.py", "--suite", SUITE_ID,
+                             cwd=guardless)
+        check("own-entry/guard-loss-silent-green", silent == (0, ""), silent)
+        check("own-entry/guard-loss-caught-by-execution-gate",
+              caught[0] == 2 and "no execution report" in caught[1], caught)
+
+        # 4. every mutant (one check removed) fails its named vector, and every vector but the intact twin
         # fails under at least one mutant
         gate_source, fixtures, self_test_source = Path(__file__).read_text(encoding="utf-8").partition(
             "\nINTACT = ")
-        exposed = set()
+        exposed, uncaught = set(), []
         mutant_dir = Path(base) / "mutants"
         mutant_dir.mkdir()
         for number, (mutant, old, new, vector) in enumerate(MUTANTS, 1):
             if gate_source.count(old) != 1:
-                check("mutant/" + mutant + "-caught", False,
-                      "anchor found {} times".format(gate_source.count(old)))
+                uncaught.append((mutant, "anchor found {} times".format(gate_source.count(old))))
                 continue
             module = _load_mutant(gate_source.replace(old, new) + fixtures + self_test_source, mutant_dir,
                                   number)
             failed = set(name for name, ok, _detail in _run_vectors(module, vectors) if not ok)
             exposed |= failed
-            check("mutant/" + mutant + "-caught", vector in failed, sorted(failed))
+            if vector not in failed:
+                uncaught.append((mutant, sorted(failed)))
+        check("mutant/every-mutant-caught", MUTANTS and not uncaught, uncaught)
         never = sorted(set(vector for vector, _root, _code, _text, _patch in vectors) - exposed - UNMUTATED)
         check("mutant/every-vector-discriminates", not never, never)
 
-    # 4. the live leg: the real surface passes and is no smaller than the recorded floor
+    # 5. the live leg: the real surface passes and is no smaller than the recorded floor, both in process and
+    # through this file's own entry, launched as the roster launches the gate step
     code, output = _gate(this, ROOT, timeout=CHILD_TIMEOUT)
     marker = "entry-guard checked "
     count = int(output.split(marker, 1)[1].split()[0]) if code == 0 and marker in output else None
     check("live/real-tree-passes", count is not None and count >= LIVE_FLOOR, output)
+    code, output = _launch(Path(__file__), cwd=ROOT)
+    check("live/direct-launch-passes", code == 0 and output == "PASS: {}{} launched scripts\n".format(
+        marker, count), (code, output))
 
-    failed = [(check_id, detail) for check_id, ok, detail in results if not ok]
+    # the in-run self-guard: the executed set is exactly this suite's registered set
+    executed = [check_id for check_id, _ok, _detail in results]
+    expected, problem = _registered_check_ids()
+    harness = []
+    if problem is not None:
+        harness.append(("execution-set/registry", problem))
+    elif len(set(executed)) != len(executed) or set(executed) != expected:
+        harness.append(("execution-set/reconciled", dict(missing=sorted(expected - set(executed)),
+                                                         extra=sorted(set(executed) - expected))))
+    if report_path is not None:
+        try:
+            with open(report_path, "w", encoding="utf-8") as handle:
+                json.dump(dict(format_version=1, suite=SUITE_ID, check_ids=executed), handle)
+                handle.write("\n")
+        except OSError as exc:
+            print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(report_path, exc),
+                  file=sys.stderr)
+            return 2
+
+    failed = [(check_id, detail) for check_id, ok, detail in results if not ok] + harness
     if failed:
         print("SELF-TEST FAIL: entry-guard {} of {} check(s) failed".format(len(failed), len(results)))
         for check_id, detail in failed:
             print("  {}: {!r}".format(check_id, detail))
         return 1
     print("SELF-TEST PASS: entry-guard {} checks ({} vectors: splice reproduced and caught; displaced, "
-          "duplicated, else-bearing, callless, dormant-call, unreachable, nested and unlaunched-runner entries "
-          "are findings; non-regular, unreadable, malformed and schema-invalid inputs fail closed; {} mutants "
-          "each caught, every vector discriminating; live surface {} scripts)".format(
-              len(results), len(vectors), len(MUTANTS), count))
+          "duplicated, else-bearing, misnamed, callless, dormant-call, unreachable, nested and unlaunched-runner "
+          "entries are findings; non-regular, unreadable, malformed and schema-invalid inputs fail closed; {} "
+          "mutants each caught, every vector discriminating; this gate's own lost guard caught by the execution "
+          "gate; live surface {} scripts)".format(len(results), len(vectors), len(MUTANTS), count))
     return 0
 
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
+    if (len(args) in (2, 3) and args[-2] == "--execution-report" and os.path.isabs(args[-1])
+            and args[:-2] in ([], ["--self-test"])):
+        return self_test(args[-1])
     if args == ["--self-test"]:
         return self_test()
     if not args:
         return run(ROOT)
-    print("usage: check_entry_guard.py [--self-test]", file=sys.stderr)
+    print("usage: check_entry_guard.py [--self-test] [--execution-report ABS_PATH]", file=sys.stderr)
     return 2
 
 
