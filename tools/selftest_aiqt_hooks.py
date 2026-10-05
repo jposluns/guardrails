@@ -1560,20 +1560,26 @@ def _main_isolated(monitor):
 
         # === boundary: the true fail-open boundary ALLOWS ====================================
         expect("(bound-a) non-git command allows", "ls -la {}".format(rp), "allow")
-        # An UNPARSEABLE command (unbalanced quote) is not a free ALLOW: a raw scan finds git AND a lossy
-        # verb (checkout) it cannot prove safe -> ASK (F-60.1); a non-lossy unparseable stays ALLOW. Round-15
-        # STRUCTURAL fix: the opt-out is NOT consulted on the unparseable path (the guard cannot parse the
-        # command, so it cannot soundly trust an opt-out-looking prefix inside it), so an opt-out-prefixed
-        # unparseable in-scope command ALSO ASKS (see the r15-raw-* battery below).
-        expect("(bound-b) unparseable + lossy verb allows", 'git checkout -- "unbalanced', "allow", cwd=rp)
+        # D-DISCARD-SOUND-RULE GATE (round-3 QA): an UNPARSEABLE command whose raw or de-quoted text
+        # names git plus a lossy verb now DENIES outright - the old fallback decided BEFORE the sound
+        # rule (clean-session allow with zero snapshots under ambient GIT_* or env --chdir, codex round-3
+        # blocker), and the opt-out is never honoured on an unparseable command. A non-lossy unparseable
+        # command stays the true-boundary ALLOW.
+        expect("(bound-b) unparseable + lossy verb denies (sound-rule gate)",
+               'git checkout -- "unbalanced', "deny", cwd=rp)
         expect("(bound-b2) unparseable non-lossy command allows", 'ls -la "unbalanced', "allow")
-        expect("(bound-b3) unparseable + lossy + opt-out prefix still ALLOWS (round-15: opt-out not honoured on unparseable)",
-               'GUARDRAIL_ALLOW_DISCARD=1 git reset --hard "unbalanced', "allow", cwd=rp)
-        # (bound-b4) a relative -C redirect with no session cwd is "opaque" (unresolvable); on a
-        # NON-destructive form (checkout -b creates a branch, discards nothing) git_discard allows with a
-        # note. Falsifiable: a silent allow there reads "allow"; an explicit allow, "explicit-allow".
-        expect("(bound-b4) opaque relative -C redirect on a non-destructive form allows with a note",
-               "git -C rel checkout -b nb", "allow-note")
+        expect("(bound-b3) unparseable + lossy + opt-out prefix denies (opt-out not honoured on unparseable)",
+               'GUARDRAIL_ALLOW_DISCARD=1 git reset --hard "unbalanced', "deny", cwd=rp)
+        # (bound-b4) a relative -C redirect on a NON-destructive form (checkout -b creates a branch,
+        # discards nothing): with NO session cwd the sound-rule gate now DENIES every in-scope command
+        # (round-3 QA, claude blocker 1 class); WITH a session cwd the opaque redirect keeps its
+        # non-destructive allow-note. Falsifiable both ways.
+        expect("(bound-b4) opaque relative -C on a non-destructive form with no cwd denies (gate)",
+               "git -C rel checkout -b nb", "deny")
+        expect("(bound-b4-cwd) relative -C on a non-destructive form with a cwd allows with a note",
+               "git -C rel checkout -b nb", "allow-note", cwd=rp)
+        expect("(bound-b4-opaque) a truly opaque -C (empty value) on a non-destructive form with a cwd "
+               "allows with a note", 'git -C "" checkout -b nb', "allow-note", cwd=rp)
 
         # === a PROVABLY CLEAN tree: every recognized discard is safe -> ALLOW ================
         expect("(clean-a) reset --hard clean allows", "git reset --hard", "allow", cwd=rp)
@@ -2127,7 +2133,11 @@ def _main_isolated(monitor):
             # the target-plus-session snapshots are unchanged
             ("resolved-C", "git -C {} reset --hard ; true".format(_npnc_t_s), "deny", 0, "allow-note", 2),
             ("resolved-cd", "cd {} && git reset --hard".format(_npnc_t_s), "deny", 0, "allow-note", 2),
-            ("pristine-C", "git -C {} reset --hard".format(_npnc_t_s), "allow-note", 1, "allow-note", 1),
+            # round-3 QA gate: with NO session cwd even the pristine resolved -C target DENIES (the one
+            # sound-rule gate runs in front of the pristine path too; an accepted, disclosed over-refusal
+            # that closes the pristine no-cwd class, claude round-3 blocker 1); the cwd arm still
+            # snapshots the -C target.
+            ("pristine-C", "git -C {} reset --hard".format(_npnc_t_s), "deny", 0, "allow-note", 1),
         )
         aiqt_hooks._record_recovery = _npnc_count
         try:
@@ -2328,6 +2338,98 @@ def _main_isolated(monitor):
                     failures.append("(npn3-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
                                     "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
                                                                       _got_c[0], _got_c[2]))
+        finally:
+            aiqt_hooks._record_recovery = _orig_npnc_rec
+
+        # === ROUND-3 QA (D-DISCARD-SOUND-RULE GATE): one fail-closed gate in front of EVERY path.
+        # === Reproduction rows flip on the pre-gate bytes (each arm listed as deny below was an
+        # === allow or allow-note there, several with executed, unrecoverable loss); the keep-*
+        # === and pin-* rows are false-refusal/behaviour pins that must NOT drift under the gate.
+        _npn4_cases = (
+            # claude r3 blocker 1: the pristine no-cwd forced checkout -B allow-noted, 0 snapshots
+            ("gate-coB", 'git checkout -f -B main HEAD', "deny", 0, "allow-note", 1),
+            ("gate-coB-attached", 'git checkout -fB main', "deny", 0, "allow-note", 1),
+            ("gate-coB-long", 'git checkout --force -B main', "deny", 0, "allow-note", 1),
+            # codex r3 blocker: the lexer-error fallback decided BEFORE the sound rule
+            ("gate-unparse", 'git reset --hard <<EOF\nEOF', "deny", 0, "deny", 0),
+            ("gate-unparse-herestring", "git reset --hard <<<''", "deny", 0, "deny", 0),
+            ("gate-unparse-envchdir", 'env --chdir={} git reset --hard <<EOF\nEOF'.format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("gate-unparse-envC", "env -C{} git reset --hard <<<''".format(_npnc_t_s), "deny", 0, "deny", 0),
+            # claude r3 major 2 (F-97 on the non-pristine path): an unrecognized flagged sub or an
+            # inline alias riding a redirect is never left unsnapshotted-and-allowed again
+            ("unproven-checkout-index", 'git -C {} checkout-index -a -f ; true'.format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("unproven-read-tree", 'git -C {} read-tree -u --reset HEAD ; true'.format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("unproven-alias", "git -C {} -c alias.zz='reset --hard' zz ; true".format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("unproven-inline-gitdir", 'GIT_DIR={0}/.git GIT_WORK_TREE={0} git checkout-index -a -f ; true'.format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("unproven-wrapped", 'env git -C {} checkout-index -a -f'.format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("unproven-bang-alias", "git -c 'alias.zz=!cd {} && git reset --hard' zz ; true".format(_npnc_t_s), "deny", 0, "deny", 0),
+            # claude r3 medium 7: the de-quoted rendering closes quote/backslash fragmentation
+            ("dq-frag-envgit", "env git re'set' --hard", "deny", 0, "allow-note", 1),
+            ("dq-frag-gitword", "env g''it re''set --hard", "deny", 0, "allow-note", 1),
+            ("dq-frag-command", "command g'it' reset --hard", "deny", 0, "allow-note", 1),
+            ("dq-frag-sh", 'bash -c \'git re""set --hard\'', "deny", 0, "allow-note", 1),
+            # claude r3 medium 4: a quoted or escaped redirect marker, and a bare cd, cannot hide
+            ("dq-marker-quoted-C", 'bash -c \'git "-C" {} reset --hard\''.format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("dq-marker-quoted-cd", 'bash -c \'"cd" {} && git reset --hard\''.format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("dq-marker-escaped-cd", "bash -c 'c\\d {} && git reset --hard'".format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("dq-marker-bare-cd", "bash -c 'cd;git reset --hard'", "deny", 0, "deny", 0),
+            ("hd-quoted-marker-body", 'bash <<\'EOF\'\ngit "-C" {} reset --hard\nEOF'.format(_npnc_t_s), "deny", 0, "deny", 0),
+            # claude r3 medium 5: a directory change the walk cannot follow fails closed
+            ("cd-eval", 'eval cd {} && git reset --hard'.format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("cd-builtin", 'builtin cd {} && git reset --hard'.format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("cd-execdir", "find {} -maxdepth 0 -execdir git reset --hard ';'".format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("cd-py-chdir", 'python3 -c "import os; os.chdir(\'{}\'); os.system(\'git reset --hard\')"'.format(str(_npnc_t)), "deny", 0, "deny", 0),
+            # claude r3 medium 6: the disclosed over-refusals hold (pin-*) AND the common benign
+            # forms keep their decisions (keep-*): the standard heredoc commit-message form and a
+            # commit subject naming a verb stay snapshot-backed, the explicit opt-out stays allowed
+            ("pin-grep-C", "grep -rn -C3 'git reset --hard' .", "deny", 0, "deny", 0),
+            ("pin-hd-commit-marker", 'git commit --allow-empty -q -m "$(cat <<\'EOF\'\nDiscard guard: deny git -C/--chdir reset --hard forms\nEOF\n)"', "deny", 0, "deny", 0),
+            ("keep-hd-commit", 'git commit --allow-empty -q -m "$(cat <<\'EOF\'\nDiscard guard: deny git reset --hard forms\nEOF\n)"', "deny", 0, "allow-note", 1),
+            ("keep-commit-msg", 'git commit -m "reset docs" && git push', "deny", 0, "allow-note", 1),
+            ("keep-optout", "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "allow", 0, "allow", 0),
+        )
+        aiqt_hooks._record_recovery = _npnc_count
+        try:
+            for _lab, _cmd, _w_nc, _n_nc, _w_c, _n_c in _npn4_cases:
+                _got_nc = _npnc_run(_cmd, None)
+                if (_got_nc[0], _got_nc[2]) != (_w_nc, _n_nc):
+                    failures.append("(npn4-{}-nocwd) {!r} with no session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_nc, _n_nc,
+                                                                      _got_nc[0], _got_nc[2]))
+                _got_c = _npnc_run(_cmd, str(_npnc))
+                if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
+                    failures.append("(npn4-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
+                                                                      _got_c[0], _got_c[2]))
+            # the gate's ambient arm: EVERY in-scope command denies under a non-cosmetic ambient
+            # GIT_* override - unparseable, pristine, and allow forms alike - naming the GIT_*
+            # cause; only the explicit pristine opt-out passes (codex r3 blocker, ambient rows;
+            # each deny row was a silent allow or an allow-note on the pre-gate bytes)
+            _npn4_amb = (
+                ("amb4-unparse-dirty", 'git reset --hard <<EOF\nEOF', str(_npnc), "deny", 0),
+                ("amb4-unparse-clean", 'git reset --hard <<EOF\nEOF', str(_npn2_c), "deny", 0),
+                ("amb4-herestring-clean", "git reset --hard <<<''", str(_npn2_c), "deny", 0),
+                ("amb4-pristine-dirty", "git reset --hard", str(_npnc), "deny", 0),
+                ("amb4-allowform-clean", "git checkout -b npn4b", str(_npn2_c), "deny", 0),
+                ("amb4-optout", "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", str(_npnc), "allow", 0),
+            )
+            os.environ["GIT_DIR"] = str(tmp / "npn4-ambient" / ".git")
+            try:
+                for _lab, _cmd, _cwd, _w, _n in _npn4_amb:
+                    _got = _npnc_run(_cmd, _cwd)
+                    if (_got[0], _got[2]) != (_w, _n):
+                        failures.append("(npn4-{}) {!r} under an ambient GIT_DIR override: expected {} "
+                                        "with {} snapshot(s), got {} with {}"
+                                        .format(_lab, _cmd, _w, _n, _got[0], _got[2]))
+                    elif (_w == "deny" and "GIT_*" not in _got[1]
+                            and "could not be parsed" not in _got[1]):
+                        # an UNPARSEABLE in-scope command denies at the gate's parse check (which runs
+                        # first: the opt-out is only honoured on a parseable pristine command, so the
+                        # parse outcome governs the message); a parseable one names the GIT_* cause.
+                        failures.append("(npn4-{}-wording) the ambient-override deny must name the GIT_* "
+                                        "or unparseable cause, got {!r}".format(_lab, _got[1]))
+            finally:
+                os.environ.pop("GIT_DIR", None)
         finally:
             aiqt_hooks._record_recovery = _orig_npnc_rec
 
@@ -2758,11 +2860,11 @@ def _main_isolated(monitor):
 
         # (rec-idxfile) A: an ambient GIT_INDEX_FILE is a TARGET-REDIRECT var. The probe would scrub it and
         # read the real cwd repo, but the guard cannot scrub it from the ACTUAL command, which would discard
-        # the custom index the probe never saw. So the guard CANNOT prove the command's target IS the session
-        # cwd: it ASKS (never a silent allow) and takes a BEST-EFFORT snapshot of the SESSION CWD (dirty here),
-        # while the recovery git calls scrub the ambient GIT_INDEX_FILE so the real index and the bogus ambient
-        # path stay untouched (the snapshot may not capture a redirected tree, but it recovers the common
-        # non-redirecting case).
+        # the custom index the probe never saw. Round-3 QA gate: the guard can no longer prove ANY snapshot
+        # contains what the redirected command would discard, so every in-scope command under a non-cosmetic
+        # ambient GIT_* override now DENIES (pristine included; the leading opt-out on a pristine bare form
+        # is the sole bypass), with NO snapshot (a session snapshot could land on the wrong repository), and
+        # the real index and the bogus ambient path stay untouched.
         rec_idx = _init_repo(tmp / "rec-idxfile")
         (rec_idx / "file.txt").write_text("committed line\nidx staged\n", encoding="utf-8")
         _git(rec_idx, "add", "file.txt")  # staged content in the REAL index
@@ -2775,16 +2877,16 @@ def _main_isolated(monitor):
             got_idx = _decision(handler, "git checkout -- file.txt", cwd=str(rec_idx))
         finally:
             os.environ.pop("GIT_INDEX_FILE", None)
-        if got_idx != "allow-note":
-            failures.append("(rec-idxfile) an ambient GIT_INDEX_FILE target-redirect snapshot-then-allows on a "
-                            "dirty cwd (best-effort snapshot taken), got {}".format(got_idx))
+        if got_idx != "deny":
+            failures.append("(rec-idxfile) an ambient GIT_INDEX_FILE target-redirect on a dirty cwd must "
+                            "DENY (sound-rule gate), got {}".format(got_idx))
         if real_index.read_bytes() != idx_before:
             failures.append("(rec-idxfile-index) the REAL .git/index changed under an ambient GIT_INDEX_FILE")
         if ambient.exists():
             failures.append("(rec-idxfile-ambient) the ambient GIT_INDEX_FILE path was written")
-        if not _recovery_refs(rec_idx):
-            failures.append("(rec-idxfile-snap) the ambient-override ASK on a dirty cwd must take a "
-                            "best-effort recovery snapshot of the session cwd")
+        if _recovery_refs(rec_idx):
+            failures.append("(rec-idxfile-snap) the ambient-override DENY must take NO snapshot (it could "
+                            "land on the wrong repository; the deny carries the safe route instead)")
 
         # (rec-ambient) an assortment of NON-redirect ambient GIT_* env vars (identity, pager) does not break
         # the decision or the snapshot isolation: a dirty-tree ASK still ASKS, a snapshot ref is created, and
@@ -2917,11 +3019,10 @@ def _main_isolated(monitor):
         # The PROBE still scrubs them and reads the REAL dirty repo (so a false clean-decoy ALLOW is off the
         # table), but the guard cannot scrub them from the ACTUAL command, which would act on the redirected
         # decoy, not the probed cwd. So the guard cannot prove the command's target IS the session cwd: it
-        # ASKS (never a DENY it cannot justify about the wrong target, never a false ALLOW), takes a
-        # BEST-EFFORT snapshot of the real session cwd (dirty here; it may not capture the redirected target),
-        # writes nothing to the decoy, and leaves the real repo untouched. (Old wrong
-        # premise: that neutralizing the probe let the guard confidently DENY on the real repo, ignoring that
-        # the real command still carries the redirect and would not even touch the probed repo.)
+        # DENIES under the round-3 sound-rule gate (a best-effort session snapshot could land on a
+        # repository other than the one the redirected command changes, so no snapshot is provably the
+        # right one; the deny names the unset-the-override route), writes nothing to the decoy, and
+        # leaves the real repo untouched.
         rec_decoy = _init_repo(tmp / "rec-decoy")
         (rec_decoy / "file.txt").write_text("committed line\nreal dirty work\n", encoding="utf-8")
         decoy = _init_repo(tmp / "rec-decoy-clean")  # a CLEAN decoy the ambient env points at
@@ -2942,12 +3043,12 @@ def _main_isolated(monitor):
             failures.append("(rec-decoy-probe) with ambient GIT_DIR/GIT_WORK_TREE at a clean decoy, the probe "
                             "must still scrub them and read the REAL dirty repo (False), got {}"
                             .format(probe_decoy))
-        if got_decoy != "allow-note":
-            failures.append("(rec-decoy) an ambient GIT_DIR/GIT_WORK_TREE target-redirect snapshot-then-allows "
-                            "on a dirty cwd (best-effort snapshot on the real repo), got {}".format(got_decoy))
-        if not _recovery_refs(rec_decoy):
-            failures.append("(rec-decoy-snap) the ambient-override ASK on a dirty cwd must take a best-effort "
-                            "recovery snapshot on the real repo")
+        if got_decoy != "deny":
+            failures.append("(rec-decoy) an ambient GIT_DIR/GIT_WORK_TREE target-redirect on a dirty cwd "
+                            "must DENY (sound-rule gate), got {}".format(got_decoy))
+        if _recovery_refs(rec_decoy):
+            failures.append("(rec-decoy-snap) the ambient-override DENY must take NO snapshot (it could land "
+                            "on the wrong repository)")
         if _recovery_refs(decoy):
             failures.append("(rec-decoy-wrongwrite) a recovery ref was written to the DECOY repo")
         if (rec_decoy / ".git" / "index").read_bytes() != real_idx_bytes:
@@ -2961,15 +3062,17 @@ def _main_isolated(monitor):
         # (rec-viewoverride) FAIL-SAFE repository-view check (round-9): the guard no longer enumerates a
         # FIXED list of redirecting GIT_* vars (a whack-a-mole - Codex round-8 found GIT_NO_REPLACE_OBJECTS,
         # GIT_REPLACE_REF_BASE, and GIT_REFERENCE_BACKEND all missed by it). It now ASKS whenever ANY ambient
-        # GIT_*-prefixed var is set EXCEPT a small cosmetic allowlist, so an unknown or new var fails safe to
-        # ASK. Each case runs a clean-tree PRISTINE discard that would otherwise ALLOW, so a flip to ASK is
+        # GIT_*-prefixed var is set EXCEPT a small cosmetic allowlist, so an unknown or new var fails safe.
+        # Round-3 QA gate: that fail-safe is now a DENY for EVERY in-scope command (the override can point
+        # every git the shell runs at a different repository, so no snapshot is provably the right one).
+        # Each case runs a clean-tree PRISTINE discard that would otherwise ALLOW, so a flip to DENY is
         # attributable to the ambient var alone.
         rec_view = _init_repo(tmp / "rec-viewoverride")
         # control: with no ambient GIT_* override the clean-tree pristine discard ALLOWs.
         expect("(rec-viewoverride-base) clean pristine discard allows with no ambient GIT_* override",
                "git checkout -- file.txt", "allow", cwd=str(rec_view))
-        # the three vars the old fixed list missed, plus an arbitrary UNKNOWN var: each MUST now force ASK
-        # (fail-safe), even though the tree is clean and the form is a pristine discard.
+        # the three vars the old fixed list missed, plus an arbitrary UNKNOWN var: each MUST now force DENY
+        # (fail-safe gate), even though the tree is clean and the form is a pristine discard.
         for _newvar in ("GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_REFERENCE_BACKEND",
                         "GIT_FUTURE_THING"):
             os.environ[_newvar] = "1"
@@ -2977,10 +3080,10 @@ def _main_isolated(monitor):
                 got_view = _decision(handler, "git checkout -- file.txt", cwd=str(rec_view))
             finally:
                 os.environ.pop(_newvar, None)
-            if got_view != "allow-note":
-                failures.append("(rec-viewoverride-{}) an ambient non-cosmetic {} on a clean cwd (nothing to "
-                                "snapshot) snapshot-then-allows, got {}".format(_newvar, _newvar, got_view))
-        # the ORIGINAL six target-redirect vars still ASK under the fail-safe check.
+            if got_view != "deny":
+                failures.append("(rec-viewoverride-{}) an ambient non-cosmetic {} must DENY an in-scope "
+                                "discard (sound-rule gate), got {}".format(_newvar, _newvar, got_view))
+        # the ORIGINAL six target-redirect vars DENY under the fail-safe gate.
         for _redir in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
                        "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE"):
             os.environ[_redir] = "1"
@@ -2988,11 +3091,11 @@ def _main_isolated(monitor):
                 got_redir = _decision(handler, "git checkout -- file.txt", cwd=str(rec_view))
             finally:
                 os.environ.pop(_redir, None)
-            if got_redir != "allow-note":
-                failures.append("(rec-viewoverride-{}) the redirect var {} on a clean cwd snapshot-then-allows "
-                                "(nothing to snapshot), got {}".format(_redir, _redir, got_redir))
-        # a COSMETIC ambient var (GIT_PAGER, GIT_EDITOR) does NOT force ASK: the clean-tree pristine discard
-        # still ALLOWs, so the allowlist genuinely lets the harmless UI/identity vars through.
+            if got_redir != "deny":
+                failures.append("(rec-viewoverride-{}) the redirect var {} must DENY an in-scope discard "
+                                "(sound-rule gate), got {}".format(_redir, _redir, got_redir))
+        # a COSMETIC ambient var (GIT_PAGER, GIT_EDITOR) does NOT force the deny: the clean-tree pristine
+        # discard still ALLOWs, so the allowlist genuinely lets the harmless UI/identity vars through.
         for _cos, _cosval in (("GIT_PAGER", "cat"), ("GIT_EDITOR", "true")):
             os.environ[_cos] = _cosval
             try:
@@ -3000,15 +3103,14 @@ def _main_isolated(monitor):
             finally:
                 os.environ.pop(_cos, None)
             if got_cos != "allow":
-                failures.append("(rec-viewoverride-cosmetic-{}) a cosmetic ambient {} must NOT force ASK on a "
-                                "clean pristine discard, got {}".format(_cos, _cos, got_cos))
+                failures.append("(rec-viewoverride-cosmetic-{}) a cosmetic ambient {} must NOT force a deny "
+                                "on a clean pristine discard, got {}".format(_cos, _cos, got_cos))
         # (rec-viewoverride-allowform) Fix 2 (structural completion): the fail-safe now covers the
         # NON-DESTRUCTIVE allow forms too. A pristine allow form (reset --soft, plain switch, clean -n,
         # checkout -b) ALLOWs on a clean tree with NO ambient override, but under a NON-COSMETIC ambient GIT_*
-        # var it ASKS - the redirected repository view invalidates the form's safety premise, so an allow form
-        # can no longer bypass the ambient-override ASK (before Fix 2 these ALLOWed, silently skipping the
-        # fail-safe). The clean tree means no snapshot is warranted; the ASK is attributable to the ambient
-        # var alone.
+        # var it DENIES (round-3 gate) - the redirected repository view invalidates the form's safety
+        # premise, so an allow form can no longer bypass the ambient-override fail-safe (before Fix 2 these
+        # ALLOWed, silently skipping it). The deny is attributable to the ambient var alone.
         allow_forms = ("git reset --soft", "git switch other", "git clean -n", "git checkout -b newbr")
         for _cmd in allow_forms:
             expect("(rec-viewoverride-allow-base) {} allows with no ambient override".format(_cmd),
@@ -3018,25 +3120,25 @@ def _main_isolated(monitor):
             try:
                 for _cmd in allow_forms:
                     got_af = _decision(handler, _cmd, cwd=str(rec_view))
-                    if got_af != "allow-note":
+                    if got_af != "deny":
                         failures.append("(rec-viewoverride-allow-{}-{}) an ambient non-cosmetic {} on the allow "
-                                        "form '{}' on a clean cwd snapshot-then-allows (nothing to snapshot), "
+                                        "form '{}' must DENY (sound-rule gate), "
                                         "got {}".format(_amb2, _cmd.replace(" ", "_"), _amb2, _cmd, got_af))
             finally:
                 os.environ.pop(_amb2, None)
         # (rec-viewoverride-trace) Fix 1: GIT_TRACE is NO LONGER cosmetic - an absolute GIT_TRACE value makes
         # the ACTUAL command append trace output to that path (which could be a repo file), so an ambient
-        # GIT_TRACE now forces ASK even on a clean pristine discard that used to ALLOW. The recovery/probe git
-        # calls still scrub the GIT_TRACE family, so the guard itself writes no trace file.
+        # GIT_TRACE now forces the gate DENY even on a clean pristine discard that used to ALLOW. The
+        # recovery/probe git calls still scrub the GIT_TRACE family, so the guard itself writes no trace file.
         trace_view = tmp / "vo-trace.log"
         os.environ["GIT_TRACE"] = str(trace_view)
         try:
             got_trv = _decision(handler, "git checkout -- file.txt", cwd=str(rec_view))
         finally:
             os.environ.pop("GIT_TRACE", None)
-        if got_trv != "allow-note":
+        if got_trv != "deny":
             failures.append("(rec-viewoverride-trace) an ambient GIT_TRACE on a clean pristine discard "
-                            "snapshot-then-allows (no longer cosmetic, nothing to snapshot), got {}"
+                            "must DENY (no longer cosmetic; sound-rule gate), got {}"
                             .format(got_trv))
         if trace_view.exists():
             failures.append("(rec-viewoverride-trace-file) the guard's git calls must scrub GIT_TRACE; no "
@@ -3056,18 +3158,17 @@ def _main_isolated(monitor):
             failures.append("(rec-heredoc-snap) expected a best-effort recovery ref for an unparseable "
                             "dirty-tree discard (Class C)")
 
-        # (rec-unbalanced) an unbalanced-quote discard (no target redirect) reaches _git_discard_fallback; on a
-        # DIRTY session cwd its recovery snapshot succeeds, so it allows with a recovery-pointer note.
-        # Falsifiable: a silent allow there reads "allow"; an explicit allow, "explicit-allow".
+        # (rec-unbalanced) an unbalanced-quote discard is UNPARSEABLE, so the round-3 sound-rule gate
+        # DENIES it before any snapshot (the old fallback snapshot-then-allowed here; its clean-session
+        # sibling was the codex round-3 blocker), and no recovery ref is written.
         rec_ub = _init_repo(tmp / "rec-unbalanced")
         (rec_ub / "file.txt").write_text("committed line\nunbalanced dirty\n", encoding="utf-8")
         got_ub = _decision(handler, 'git reset --hard "unbalanced', cwd=str(rec_ub))
-        if got_ub != "allow-note":
-            failures.append("(rec-unbalanced) an unparseable discard on a dirty tree whose recovery snapshot "
-                            "succeeds allows with a note, got {}".format(got_ub))
-        if not _recovery_refs(rec_ub):
-            failures.append("(rec-unbalanced-snap) expected a recovery ref before the unparseable discard's "
-                            "allow-with-note")
+        if got_ub != "deny":
+            failures.append("(rec-unbalanced) an unparseable discard on a dirty tree must DENY (sound-rule "
+                            "gate), got {}".format(got_ub))
+        if _recovery_refs(rec_ub):
+            failures.append("(rec-unbalanced-snap) the unparseable-command DENY must write no recovery ref")
 
         # (rec-subdir-tmp) C2: cwd is a SUBDIR of the repo and TMPDIR points at the worktree ROOT (above cwd).
         # The temp-dir containment check anchors on the resolved TOPLEVEL, not the cwd, so the temp dir is
@@ -3234,9 +3335,9 @@ def _main_isolated(monitor):
         # (rec-cfgcount) C5 (round-9 fail-safe): ambient GIT_CONFIG_COUNT/KEY_0/VALUE_0 injecting core.worktree
         # at a CLEAN decoy, plus GIT_DISCOVERY_ACROSS_FILESYSTEM, are all NON-COSMETIC ambient GIT_* vars, so
         # the fail-safe repository-view check makes the target UNRESOLVABLE: the guard cannot prove the ACTUAL
-        # command (which still carries the injected core.worktree) targets the session cwd, so reset --hard
-        # ASKS (never a DENY it cannot justify about the wrong target, never a false ALLOW) and takes a
-        # best-effort snapshot of the session cwd (dirty here), exactly like an ambient GIT_DIR/GIT_INDEX_FILE
+        # command (which still carries the injected core.worktree) targets the session cwd, so under the
+        # round-3 sound-rule gate reset --hard DENIES with NO snapshot (a session snapshot could land on a
+        # repository other than the injected target), exactly like an ambient GIT_DIR/GIT_INDEX_FILE
         # (see rec-decoy/rec-idxfile). Separately,
         # the PROBE still scrubs every ambient GIT_* (the allowlist scrub disables the KEY/VALUE injection and
         # the discovery-boundary override), so it reads the REAL dirty repo (False); nothing is written to the
@@ -3263,13 +3364,13 @@ def _main_isolated(monitor):
             failures.append("(rec-cfgcount-probe) with GIT_CONFIG_COUNT injecting core.worktree at a clean "
                             "decoy, the probe must still read the REAL dirty repo (False), got {}"
                             .format(probe_cfg))
-        if got_cfg != "allow-note":
+        if got_cfg != "deny":
             failures.append("(rec-cfgcount) reset --hard under an injected core.worktree decoy via a "
-                            "non-cosmetic ambient GIT_CONFIG_COUNT snapshot-then-allows on a dirty cwd "
-                            "(best-effort snapshot on the real repo), got {}".format(got_cfg))
-        if not _recovery_refs(rec_cfg):
-            failures.append("(rec-cfgcount-snap) the ambient-override ASK on a dirty cwd must take a "
-                            "best-effort recovery snapshot on the REAL repo")
+                            "non-cosmetic ambient GIT_CONFIG_COUNT must DENY (sound-rule gate), "
+                            "got {}".format(got_cfg))
+        if _recovery_refs(rec_cfg):
+            failures.append("(rec-cfgcount-snap) the ambient-override DENY must take NO snapshot (it could "
+                            "land on the wrong repository)")
         if _recovery_refs(cfg_decoy):
             failures.append("(rec-cfgcount-wrongwrite) a recovery ref was written to the DECOY (an injected "
                             "core.worktree leaked into the snapshot)")
@@ -3375,14 +3476,14 @@ def _main_isolated(monitor):
         finally:
             os.environ.pop("GIT_TRACE", None)
             os.environ.pop("GIT_TRACE2", None)
-        if got_tr != "allow-note":
-            failures.append("(rec-gittrace) dirty-tree snapshot-then-allow with an ambient GIT_TRACE: "
-                            "expected allow-note, got {}".format(got_tr))
+        if got_tr != "deny":
+            failures.append("(rec-gittrace) a dirty-tree discard with an ambient GIT_TRACE must DENY "
+                            "(non-cosmetic override; sound-rule gate), got {}".format(got_tr))
         if trace_target.exists() or trace2_target.exists():
             failures.append("(rec-gittrace-file) an ambient GIT_TRACE/GIT_TRACE2 trace file was written; a "
                             "real-state call did not scrub the GIT_TRACE family")
-        if not _recovery_refs(rec_tr):
-            failures.append("(rec-gittrace-snap) expected a recovery ref on the dirty tree ASK")
+        if _recovery_refs(rec_tr):
+            failures.append("(rec-gittrace-snap) the ambient-override DENY must write no recovery ref")
 
         # (rec-scrub-allowlist) Fix 1: _isolate_git_env takes an ALLOWLIST posture - it scrubs EVERY ambient
         # GIT_*-prefixed var, not an enumerated family, so a random GIT_FOO and the round-5 GIT_ATTR_SOURCE
@@ -3674,9 +3775,10 @@ def _main_isolated(monitor):
         expect("(r6-f4-fallback-redirect) unparseable 'git -C Tdirty restore <<EOF' on a clean cwd DENIES "
                "(finding 4)", "git -C {} restore -- file.txt <<EOF\nx\nEOF".format(r6tc), "deny",
                cwd=str(r6clean))
-        # CONTROL: an unparseable lossy discard with NO redirect still allows on a clean cwd (no target moved).
-        expect("(r6-f4-ctl-noredirect) unparseable 'git checkout -- x <<EOF' with no redirect still allows",
-               "git checkout -- file.txt <<EOF\nx\nEOF", "allow", cwd=str(r6clean))
+        # Round-3 QA gate: an unparseable lossy discard DENIES even with no redirect and a clean cwd -
+        # the clean-session allow was exactly the fallback hole the sound rule closes (codex blocker).
+        expect("(r6-f4-ctl-noredirect) unparseable 'git checkout -- x <<EOF' with no redirect denies (gate)",
+               "git checkout -- file.txt <<EOF\nx\nEOF", "deny", cwd=str(r6clean))
         # FINDING 5: a --git-dir/GIT_DIR STAGED discard to a DIFFERENT repo destroys that repo's index, which a
         # session snapshot cannot capture -> DENY (was allow-with-session-snap). (reset --hard case: r13-3c-f5.)
         r6stg = _init_repo(tmp / "r6-staged")
@@ -8613,11 +8715,14 @@ def _main_isolated(monitor):
           "recovery-pointer note, a confirmed whole-tree clobber on a dirty tree DENIES (with a snapshot "
           "when one could be made), and it DENIES-and-educates only when a warranted recovery snapshot "
           "cannot be created (a forced snapshot failure, an over-cap or bad-path snapshot, a temp dir "
-          "inside the repo, a ref collision, an embedded-NUL or no-session cwd) or the command cannot be "
+          "inside the repo, a ref collision, an embedded-NUL cwd) or the sound-rule gate fails it closed "
+          "(no usable session cwd, a non-cosmetic ambient GIT_* view-override, an env --chdir/-C "
+          "wrapper override, an unparseable in-scope command) or the command cannot be "
           "classified/resolved (an inline -c alias, an unrecognized flagged subcommand such as "
-          "checkout-index or read-tree --reset, an unresolvable worktree); a provably-clean tree ALLOWS "
-          "with no snapshot; an ambient GIT_*/redirect view-override snapshot-then-allows on a dirty cwd "
-          "and ALLOWS on a clean one (nothing to snapshot); stash/branch are not snapshottable and "
+          "checkout-index or read-tree --reset on a redirect, an unresolvable worktree or "
+          "directory-change marker); a provably-clean tree ALLOWS "
+          "with no snapshot (the leading opt-out on a pristine bare form bypasses the gate); "
+          "stash/branch are not snapshottable and "
           "allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
           "deletion, DENIES fail-safe a push it cannot prove misses the protected line (a "
           "--mirror/--all/wildcard/prune sweep) and an unparseable apparent force-push/delete, DENIES a "
