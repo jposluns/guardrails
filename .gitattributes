@@ -13,6 +13,7 @@
 .aiqt/core/gates/manifest.toml text eol=lf
 .aiqt/core/hooks/ORCHESTRATION.md text eol=lf
 .aiqt/core/hooks/manifest.toml text eol=lf
+.aiqt/core/hooks/preview.toml text eol=lf
 .aiqt/core/hooks/scripts/aiqt_hooks.py text eol=lf
 .aiqt/core/id-history.toml text eol=lf
 .aiqt/core/instruction-budget.toml text eol=lf
