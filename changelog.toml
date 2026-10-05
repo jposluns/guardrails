@@ -17,6 +17,11 @@ items = [
   "AIQT 1.0.5 ships the chat assistant: the AIQT governance core packaged for a chat assistant, as a Skill you upload to Claude or a portable instruction file for other assistants (ChatGPT, Copilot, Gemini). It guides the assistant toward the AIQT standard: claims matched to their sources, checks kept at full strength, and \"finished\" verified before it is said. The evidence page shows what has been tested on each platform.",
   "Includes the portable AIQT governance core and a curated security-rule subset for chat use.",
 ]
+# Recorded as history, not a schema field: v1.0.5 is an annotated tag applied retroactively to commit
+# c5d77b086040228b11afa33e147ee209d5203919, where VERSION became 1.0.5. Its release root
+# (.aiqt/release/root.txt at that commit) is
+# sha256:e96f4836bbdcda3815198454292f68bcb9c79b748ea20c9c4a5dbaddf4cec18c.
+tag = "v1.0.5"
 # Reserved optional key: a release MAY carry a `refs` array of TYPED references ("pr:17",
 # "decision:GD-110") consumed by tools/check_record_drift.py as a record-drift truth source. Inert to
 # gen_changelog and the version gates; narrative numbers in prose are never matched (GD-112 D9).
