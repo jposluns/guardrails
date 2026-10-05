@@ -82,6 +82,24 @@ real. The clean store is built through the OPF helpers' own canonical emitters a
 hand-built), the same construction _opf_check's own self-test proves VALID. Offline, stdlib only, fail-closed,
 launched isolated (-I -B). The tempdir is removed in a finally (test-hermeticity). When git is not on PATH the
 self-test SKIPs clean (a committed HEAD is required for the tracked/prior observations).
+
+The pre-commit floor (opf/enforcement/precommit: the staged-snapshot hook and its per-clone core.hooksPath
+installer) rides fixtures of the same kind, each holding a copy of the pack at its pack path. The installer
+sets core.hooksPath to the pack directory relative to the top level, and a rerun is a no-op; it refuses
+(2, configuration unchanged) a core.hooksPath already set to another value, a hook present in the hooks
+directory it would silently stop, and a hook git could not execute, and an inherited GIT_DIR naming another
+repository cannot redirect it. Through real `git commit` runs over an installed fixture: a clean staged
+change commits; a staged tamper of an immutable record body is refused by doctor's resurrection finding over
+the snapshot (the hook output must carry that finding, so a refusal for another reason does not satisfy the
+vector), with HEAD unmoved, while the same commit in a clone without the hook succeeds; the staged snapshot,
+not the working tree, is what is checked (a staged tamper with restored working-tree bytes is refused, an
+unstaged tamper does not block a clean staged change); `git commit PATH` and `git commit -a` are checked
+against the temporary index git names in GIT_INDEX_FILE; an unborn branch commits a clean store; and a
+dedicated sync target equal to the clone's remote stays VALID in the snapshot. Under a recording stub tool,
+run by hand: exact order and arguments (doctor --require-store, then render --check, over one snapshot root
+under TMPDIR), each launched -I -B; the clone left unchanged over the read-only snapshot described above; a doctor
+finding stopping before render, a render error forwarded, an out-of-vocabulary status normalized to 2 and a
+surplus operand a usage 2 with no step run; and every snapshot directory removed on exit.
 """
 import sys
 
@@ -1061,6 +1079,249 @@ def _self_test_isolated():
             shutil.rmtree(str(base), ignore_errors=True)
         return failures
 
+    def _precommit_suite():
+        """The pre-commit floor (enforcement pack, spec 1.3.0 (draft) 14.1: staged-snapshot pre-commit checks
+        with the per-clone installation residual disclosed). Each fixture is a committed clean store holding
+        a copy of opf/enforcement/precommit at its pack path, with OPF_TOOL pointing at this opf.py and
+        TMPDIR at a controlled directory. Returns the list of assertion failures; raises OSError if a fixture
+        cannot be built (a harness error, exit 2 via _classify)."""
+        failures = []
+
+        def expect(label, got, want):
+            if got != want:
+                failures.append("pre-commit: {}: got {}, expected {}".format(label, got, want))
+
+        pack = Path(__file__).resolve().parent.parent / "enforcement" / "precommit"
+        if not (pack / "pre-commit").is_file() or not (pack / "install.sh").is_file():
+            raise OSError("the pre-commit pack {} is incomplete".format(pack))
+        rel = "opf/enforcement/precommit"
+        base = Path(tempfile.mkdtemp(prefix="opf-precommit-selftest-")).resolve()
+        home = base / "home"
+        home.mkdir()
+        snaps = base / "tmp"
+        snaps.mkdir()
+        stub = base / "stub_opf.py"
+        stub.write_text(
+            "import os, sys\n"
+            "with open(os.environ['OPF_STUB_LOG'], 'a', encoding='utf-8') as log:\n"
+            "    log.write(chr(31).join(sys.argv[1:]) + chr(10))\n"
+            "with open(os.environ['OPF_STUB_LOG'] + '.flags', 'a', encoding='utf-8') as log:\n"
+            "    log.write('{} {}'.format(sys.flags.isolated, sys.flags.dont_write_bytecode) + chr(10))\n"
+            "verb = sys.argv[1].upper() if len(sys.argv) > 1 else 'NONE'\n"
+            "sys.exit(int(os.environ.get('OPF_STUB_RC_' + verb, '0')))\n",
+            encoding="utf-8")
+
+        def _env(extra=None):
+            # The fixture git env (every ambient GIT_ variable dropped, global and system config
+            # neutralized, HOME the fixture home) plus the pack's overrides.
+            env = _git_env(home)
+            env.update(OPF_PYTHON=sys.executable, OPF_TOOL=str(Path(__file__).resolve().parent / "opf.py"),
+                       TMPDIR=str(snaps))
+            if extra:
+                env.update(extra)
+            return env
+
+        def _run(args, cwd, extra=None):
+            # Run a pack script under sh and return its exit status. A missing sh is a harness error.
+            sh = shutil.which("sh")
+            if sh is None:
+                raise OSError("sh not found on PATH; the pre-commit pack cannot be run")
+            argv = [os.path.abspath(sh)] + list(args)
+            try:
+                proc = subprocess.run(argv, cwd=str(cwd), env=_env(extra),
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise OSError("could not run {} in {} ({})".format(args, cwd, exc))
+            return proc.returncode
+
+        def _fixture(name, machine=None, remote=None, commit=True):
+            root = base / name
+            root.mkdir()
+            _write_machine(root, machine if machine is not None else clean_machine())
+            _write_product(root)
+            shutil.copytree(str(pack), str(root / rel))
+            _git(root, home, "init")
+            if remote is not None:
+                _git(root, home, "remote", "add", "origin", remote)
+            if commit:
+                _git(root, home, "add", "-A")
+                _git(root, home, "commit", "-m", "seed store")
+            return root
+
+        def _install(root, extra=None):
+            return _run([str(root / rel / "install.sh")], base, extra)
+
+        def _git_out(root, *args):
+            proc = subprocess.run([git, "--no-replace-objects", "-C", str(root), "-c", "gc.auto=0",
+                                   "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"] + list(args),
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, env=_git_env(home), timeout=_GIT_TIMEOUT_S)
+            return proc.stdout.decode("utf-8", "replace").strip() if proc.returncode == 0 else None
+
+        def _hookspath(root):
+            return _git_out(root, "config", "--local", "--get", "core.hooksPath")
+
+        def _head(root):
+            return _git_out(root, "rev-parse", "-q", "--verify", "HEAD")
+
+        def _commit(root, *args):
+            # A real `git commit`, so git itself runs the installed hook with its own GIT_INDEX_FILE.
+            # Returns (exit status, combined output).
+            try:
+                proc = subprocess.run([git, "--no-replace-objects", "-C", str(root),
+                                       "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
+                                       "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
+                                       "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                                       "commit", "-q", "-m", "change"] + list(args),
+                                      cwd=str(root), env=_env(), stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, timeout=300)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise OSError("could not run git commit in {} ({})".format(root, exc))
+            return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+        def _refused(root, *args):
+            # (refused, HEAD unchanged, refused BY doctor's resurrection finding over the snapshot) for one
+            # commit attempt; a refusal for any other reason (a cannot-evaluate, say) is not this vector.
+            before = _head(root)
+            rc, text = _commit(root, *args)
+            return rc != EXIT_OK, _head(root) == before, "FINDING: C-HISTORY-RESURRECTION" in text
+
+        def _committed(root, *args):
+            # (exit status, HEAD moved) for one commit attempt.
+            before = _head(root)
+            rc, _text = _commit(root, *args)
+            return rc, _head(root) != before
+
+        def _tamper(root):
+            _write_machine(root, {"done.index.toml": idx([dn(1, "BI-1", title="tampered")])})
+
+        def _untamper(root):
+            _write_machine(root, {"done.index.toml": idx([dn(1, "BI-1")])})
+
+        done_rel = "{}/{}/done.index.toml".format(_opf_store.WORKING_DIRNAME,
+                                                     _opf_store.DEFAULT_MACHINE_SUBDIR)
+        try:
+            # --- The installer. It sets core.hooksPath to the pack directory relative to the top level
+            # (0), and a rerun is a no-op (0). ---
+            inst = _fixture("install")
+            expect("install-sets-hookspath", (_install(inst), _hookspath(inst)), (EXIT_OK, rel))
+            expect("install-rerun-no-op", (_install(inst), _hookspath(inst)), (EXIT_OK, rel))
+            # A core.hooksPath already set to another value is refused (2) and left as it was.
+            other = _fixture("install-other")
+            _git(other, home, "config", "core.hooksPath", "elsewhere")
+            expect("install-refuses-other-hookspath", (_install(other), _hookspath(other)),
+                   (EXIT_ERROR, "elsewhere"))
+            # A hook in the current hooks directory, which core.hooksPath would silently stop, is refused.
+            planted = _fixture("install-planted")
+            (planted / ".git" / "hooks").mkdir(exist_ok=True)
+            (planted / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            expect("install-refuses-existing-hook", (_install(planted), _hookspath(planted)),
+                   (EXIT_ERROR, None))
+            # A hook git could not execute (git skips it with a warning and commits) is refused.
+            noexec = _fixture("install-noexec")
+            os.chmod(str(noexec / rel / "pre-commit"), 0o644)
+            expect("install-refuses-non-executable-hook", (_install(noexec), _hookspath(noexec)),
+                   (EXIT_ERROR, None))
+            # An inherited GIT_DIR naming another repository cannot redirect the install: it lands in the
+            # clone that holds the installer, and the other repository is untouched.
+            target = _fixture("install-target")
+            decoy = _fixture("install-decoy")
+            expect("install-ignores-ambient-git-dir",
+                   (_install(target, {"GIT_DIR": str(decoy / ".git")}), _hookspath(target),
+                    _hookspath(decoy)), (EXIT_OK, rel, None))
+            # A surplus operand is a usage error.
+            expect("install-usage", _run([str(inst / rel / "install.sh"), "x"], base), EXIT_ERROR)
+
+            # --- End to end through git commit, over the installed fixture. A clean staged change commits.
+            (inst / "README.md").write_text("readme\n", encoding="utf-8")
+            _git(inst, home, "add", "README.md")
+            expect("commit-clean-passes", _committed(inst), (EXIT_OK, True))
+            # A staged tamper of an immutable record body is refused and HEAD does not move. The same
+            # commit in a clone WITHOUT the hook succeeds, so it is the hook that refuses it.
+            _tamper(inst)
+            _git(inst, home, "add", done_rel)
+            expect("commit-staged-tamper-refused", _refused(inst), (True, True, True))
+            bare = _fixture("no-hook")
+            _tamper(bare)
+            _git(bare, home, "add", done_rel)
+            expect("commit-staged-tamper-without-hook-passes", _committed(bare), (EXIT_OK, True))
+            # The STAGED snapshot is checked, not the working tree: a staged tamper whose working-tree bytes
+            # were restored is still refused ...
+            _untamper(inst)
+            expect("commit-staged-tamper-clean-worktree-refused", _refused(inst), (True, True, True))
+            # ... and an unstaged working-tree tamper does not block a clean staged change.
+            _git(inst, home, "reset", "-q", "--", done_rel)
+            _tamper(inst)
+            (inst / "NOTES.md").write_text("notes\n", encoding="utf-8")
+            _git(inst, home, "add", "NOTES.md")
+            expect("commit-unstaged-tamper-ignored", _committed(inst), (EXIT_OK, True))
+            # `git commit PATH` and `git commit -a` commit a temporary index that git names in
+            # GIT_INDEX_FILE; the hook checks that index, so both are refused over the working-tree tamper.
+            expect("commit-path-temp-index-refused", _refused(inst, "--", done_rel), (True, True, True))
+            expect("commit-all-temp-index-refused", _refused(inst, "-a"), (True, True, True))
+            # An unborn branch (no commit yet) has an honestly empty history: a clean store commits.
+            unborn = _fixture("unborn", commit=False)
+            expect("unborn-install", _install(unborn), EXIT_OK)
+            _git(unborn, home, "add", "-A")
+            expect("commit-unborn-clean-passes", _committed(unborn), (EXIT_OK, True))
+            # The snapshot carries the remote: a store whose manifest names a dedicated sync target equal to
+            # the clone's remote is VALID, and the same snapshot without that remote is INVALID.
+            url = "https://example.invalid/org/store.git"
+            synced = clean_machine()
+            synced["manifest.toml"] = dict(synced["manifest.toml"], store={"sync_target": url})
+            remote = _fixture("remote", machine=synced, remote=url)
+            expect("remote-doctor-valid", _run_doctor(remote, capture=True), EXIT_OK)
+            expect("remote-install", _install(remote), EXIT_OK)
+            (remote / "README.md").write_text("readme\n", encoding="utf-8")
+            _git(remote, home, "add", "README.md")
+            expect("commit-remote-sync-target-passes", _committed(remote), (EXIT_OK, True))
+
+            # --- The hook's contract, run by hand under a recording stub tool. ---
+            serial = [0]
+
+            def _stubbed(root, rc_doctor=0, rc_render=0, args=()):
+                serial[0] += 1
+                log = base / "stub-log-{}".format(serial[0])
+                rc = _run([rel + "/pre-commit"] + list(args), root, {
+                    "OPF_TOOL": str(stub), "OPF_STUB_LOG": str(log),
+                    "OPF_STUB_RC_DOCTOR": str(rc_doctor), "OPF_STUB_RC_RENDER": str(rc_render)})
+                calls = []
+                if log.is_file():
+                    calls = [line.split(chr(31)) for line in log.read_text(encoding="utf-8").splitlines()]
+                flags_log = Path(str(log) + ".flags")
+                flags = flags_log.read_text(encoding="utf-8").splitlines() if flags_log.is_file() else []
+                return rc, calls, flags
+
+            # Exact order and arguments (doctor --require-store, then render --check, both over ONE snapshot
+            # root under TMPDIR), each launched isolated (-I -B), leaving the clone unchanged.
+            stubbed = _fixture("stubbed")
+            snap_before = _tree_digest(stubbed, home)
+            rc, calls, flags = _stubbed(stubbed)
+            roots = [c[-1] for c in calls]
+            snap_root = Path(roots[0]) if roots else None
+            expect("hook-order-and-args", (rc, [c[:-1] for c in calls]),
+                   (EXIT_OK, [["doctor", "--require-store", "--root"], ["render", "--check", "--root"]]))
+            expect("hook-snapshot-root", (len(set(roots)), snap_root is not None and snap_root.name == "tree"
+                                          and snap_root.parent.parent == snaps), (1, True))
+            expect("hook-isolated-launch", flags, ["1 1", "1 1"])
+            expect("hook-read-only", _tree_digest(stubbed, home) == snap_before, True)
+            # Per-step propagation: a doctor finding stops before render; a render error is the exit; an
+            # out-of-vocabulary status is normalized to 2; a surplus operand is a usage 2 with no step run.
+            rc, calls, _f = _stubbed(stubbed, rc_doctor=1)
+            expect("hook-doctor-finding-stops", (rc, [c[0] for c in calls]), (EXIT_FINDING, ["doctor"]))
+            rc, calls, _f = _stubbed(stubbed, rc_render=2)
+            expect("hook-render-error-propagates", (rc, [c[0] for c in calls]),
+                   (EXIT_ERROR, ["doctor", "render"]))
+            rc, calls, _f = _stubbed(stubbed, rc_doctor=3)
+            expect("hook-abnormal-status-normalized", (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor"]))
+            rc, calls, _f = _stubbed(stubbed, args=("x",))
+            expect("hook-usage", (rc, calls), (EXIT_ERROR, []))
+            # Every snapshot is removed on exit.
+            expect("hook-snapshots-removed", sorted(os.listdir(str(snaps))), [])
+        finally:
+            shutil.rmtree(str(base), ignore_errors=True)
+        return failures
+
     # Guard the gate's OWN status contract both ways, so the documented assertion(1)-vs-harness(2) distinction
     # is a check that reds if it regresses (change-carries-check), not merely prose.
     def _raise_harness_error():
@@ -1079,7 +1340,7 @@ def _self_test_isolated():
             print("check_opf_doctor self-test: FAIL: status-contract: {}".format(c), file=sys.stderr)
         return EXIT_FINDING
 
-    rc = _classify(_doctor_suite)
+    rc = max(_classify(_doctor_suite), _classify(_precommit_suite))
     if rc == EXIT_OK:
         print("check_opf_doctor self-test: PASS (opf doctor returns 0 on a clean committed store / 1 after an "
               "immutable-body mutation vs the committed prior / 2 on a broken store / 0 NOT APPLICABLE, end to "
@@ -1112,7 +1373,12 @@ def _self_test_isolated():
               "child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
               "relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "
-              "status contract 1=assertion 2=harness)")
+              "status contract 1=assertion 2=harness; pre-commit floor: installer sets a relative "
+              "core.hooksPath and refuses another hooksPath, a shadowed hook, a non-executable hook and an "
+              "ambient GIT_DIR redirect; git commit over the staged snapshot refuses a staged tamper by "
+              "doctor's finding, ignores an unstaged one, checks GIT_INDEX_FILE for commit PATH and -a, "
+              "passes an unborn branch and a remote sync target; stubbed hook order, -I -B, read-only, "
+              "propagation, normalization, usage and snapshot cleanup)")
     return rc
 
 

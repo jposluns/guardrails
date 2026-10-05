@@ -1,0 +1,105 @@
+#!/bin/sh
+# OPF pre-commit floor: the staged-snapshot hook (enforcement pack, spec 1.3.0 (draft) 14.1: the pack MUST
+# provide staged-snapshot pre-commit checks with the per-clone installation residual disclosed).
+#
+#   sh opf/enforcement/precommit/install.sh     once per clone: git then runs this hook before each commit
+#   sh opf/enforcement/precommit/pre-commit     by hand, from the repository top level
+#
+# It checks the snapshot the commit would record, never the working tree:
+#   1. git write-tree records the staged index as a tree. Git points GIT_INDEX_FILE at the index it is
+#      about to commit, so `git commit -a` and `git commit PATH` are checked against that index.
+#   2. A throwaway repository in a temporary directory borrows this repository's objects
+#      (objects/info/alternates), points HEAD at the current commit (none on an unborn branch), carries
+#      each remote's push URL, and checks the staged tree out as its index and working tree.
+#   3. The CI floor's two checks run over that snapshot, in order, stopping at the first failure:
+#      opf doctor --require-store, then opf render --check (see ../ci/opf-ci.sh).
+# Exit status is 0/1/2 only (0 clean, 1 finding, 2 cannot-evaluate), normalized as in opf-ci.sh; git
+# refuses the commit on any status but 0. The temporary directory is removed on exit. The only write to
+# this repository is the tree objects git write-tree stores, which the commit itself would store.
+#
+# Environment overrides:
+#   OPF_PYTHON  the interpreter (default: python3); always launched isolated (-I -B)
+#   OPF_TOOL    the path to opf.py (default: ../../tools/opf.py beside this file, the pack layout)
+#   TMPDIR      where the snapshot is built (default: /tmp)
+#
+# Residuals this hook does not close (spec 14.1), so CI stays the shared floor:
+#   - Per-clone installation: core.hooksPath is local configuration. It is not cloned or pushed, so a
+#     clone that never ran install.sh runs no hook.
+#   - Bypass: git commit --no-verify skips the hook, and the same user can unset core.hooksPath or edit
+#     this file.
+#   - The checks run the working-tree opf.py (OPF_TOOL), not the staged one.
+#   - The snapshot checkout reads no global, system or local configuration of this repository, so a
+#     clean or smudge filter that configuration defines is not applied to the snapshot.
+#   - Only this repository's staged tree is snapshotted; a store that lives in another repository is not.
+set -u
+if [ "$#" -gt 0 ]; then
+    echo "opf-pre-commit: usage: sh pre-commit (no operands; run it from the repository top level)" >&2
+    exit 2
+fi
+# CDPATH is cleared for this one command, as in opf-ci.sh: a CDPATH match makes `cd` print a line.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 2
+opf_python=${OPF_PYTHON:-python3}
+opf_tool=${OPF_TOOL:-$here/../../tools/opf.py}
+fail() {
+    echo "opf-pre-commit: cannot evaluate: $1" >&2
+    exit 2
+}
+# Run one check step and normalize its status: the step's own 0/1/2 is returned unchanged, and any other
+# status (a launch failure such as 126 or 127, or a signal death) becomes 2 (cannot-evaluate).
+run_step() {
+    "$opf_python" -I -B "$opf_tool" "$@"
+    rc=$?
+    case "$rc" in
+        0|1|2) return "$rc" ;;
+    esac
+    return 2
+}
+
+# These reads use git's own hook environment, so they see the repository and index being committed.
+tree=$(git write-tree) || fail "git write-tree could not record the staged index as a tree"
+if head=$(git rev-parse -q --verify 'HEAD^{commit}'); then
+    :
+else
+    # Only an unborn branch may have no HEAD commit; anything else is unreadable, never an empty history.
+    ref=$(git symbolic-ref -q HEAD) || fail "HEAD names no commit and is not an unborn branch"
+    found=$(git for-each-ref "$ref") || fail "git for-each-ref could not read $ref"
+    [ -z "$found" ] || fail "HEAD names $ref, which does not resolve to a commit"
+    head=
+fi
+objects=$(git rev-parse --path-format=absolute --git-path objects) || fail "could not locate the object store"
+remotes=$(git remote) || fail "git remote could not list the remotes"
+
+snap=$(mktemp -d "${TMPDIR:-/tmp}/opf-pre-commit.XXXXXX") || fail "could not create a temporary directory"
+trap 'rm -rf -- "$snap"' EXIT
+trap 'exit 2' HUP INT TERM
+: > "$snap/remotes" || fail "could not write the remote list"
+for name in $remotes; do
+    url=$(git remote get-url --push "$name") || fail "could not read the push URL of remote $name"
+    printf '%s\n%s\n' "$name" "$url" >> "$snap/remotes" || fail "could not write the remote list"
+done
+
+# The snapshot is built with every GIT_ variable dropped, so the hook environment cannot rebind these
+# commands to this repository, and with global and system configuration neutralized.
+(
+    for var in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+        unset "$var"
+    done
+    GIT_CONFIG_GLOBAL=/dev/null
+    GIT_CONFIG_NOSYSTEM=1
+    export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
+    git -c init.defaultBranch=opf-snapshot init -q --template= "$snap/tree" || exit 2
+    mkdir -p "$snap/tree/.git/objects/info" || exit 2
+    printf '%s\n' "$objects" > "$snap/tree/.git/objects/info/alternates" || exit 2
+    if [ -n "$head" ]; then
+        git -C "$snap/tree" update-ref HEAD "$head" || exit 2
+    fi
+    while IFS= read -r name && IFS= read -r url; do
+        git -C "$snap/tree" config "remote.$name.url" "$url" || exit 2
+    done < "$snap/remotes"
+    git -C "$snap/tree" read-tree "$tree" || exit 2
+    git -C "$snap/tree" checkout-index -a -u -q || exit 2
+) || fail "could not build the staged snapshot in $snap"
+
+run_step doctor --require-store --root "$snap/tree" || exit $?
+run_step render --check --root "$snap/tree"
+exit $?
