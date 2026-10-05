@@ -22081,7 +22081,7 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 # derivation). THREAT MODEL (D-385-ACCIDENTAL-UNIT): the runner defends against ACCIDENTAL unit
 # faults -- a crash, a hang, an early exit, stray or excess output, leftover children, a stale or
 # missing completion record. Deliberate SABOTAGE by a unit is outside that contract and is
-# disclosed below as residuals S1 to S5: units are the repository's own reviewed code, running as
+# disclosed below as residuals S1 to S6: units are the repository's own reviewed code, running as
 # the same user as the runner, and a same-user process can reach the runner in ways no check inside
 # the runner closes. Every guarantee stated here holds against that model, not against a unit
 # written to defeat it. Against accidental faults, the GUARANTEE that `opf.py --self-test` cannot
@@ -22111,8 +22111,9 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 # O_NOFOLLOW|O_NONBLOCK, required regular by fstat on the newly opened descriptor -- each capture
 # also required to still be the very file the runner created, by device and inode against the
 # fstat the runner took of its launch descriptor (QA30: a substituted regular file is a named
-# failure, never a laundered pass) -- and every read is bounded (a planted FIFO is a named failure,
-# never a hang); the path lookup itself is not bounded (the FUSE residual, S5); a
+# failure, unless it reuses the freed inode number, S4) -- and every read is bounded (a planted
+# FIFO is a named failure, never a hang); the path lookup itself is not bounded, and O_NOFOLLOW
+# guards only its LAST component (S5: a mount, or the box itself swapped for a symlink); a
 # platform lacking O_NOFOLLOW or O_NONBLOCK is refused by name, fail closed, never an unguarded
 # name-based open (QA30 gemini). What the kill reaches, exactly:
 # everything the unit runs in-process or forks WITHOUT leaving its process group dies with the
@@ -22135,10 +22136,21 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 # own stdout or stderr through /proc/<runner-pid>/fd (same user, so the access check passes) and
 # hand it to an escapee, which then holds the suite's real stream open past the runner's exit (a
 # reader waiting for EOF waits on it) or writes into it; (S4) a unit can rewrite or truncate a
-# capture through its own still-open descriptor before it exits; (S5) an escapee can mount a
-# filesystem it controls (FUSE, where host policy lets the unit's user mount) over the capture
-# directory and park the by-path read-backs (S1 to S5 are _run_unit_subprocess's residuals (g)
-# to (k)). Each budget sits ABOVE the unit's own end-to-end internal budget (the kill-timeout
+# capture through its own still-open descriptor before it exits, and, the launch descriptors
+# being closed, a unit that unlinks a capture frees its inode, so a file it plants at that path
+# can receive the SAME device and inode numbers on a filesystem that reuses them (ext4 and xfs
+# can) and pass the identity check (not reproduced: the probing hosts' tmpfs and btrfs allocated
+# increasing numbers); (S5) the by-path read-backs can be parked or redirected: an escapee can
+# mount a filesystem it controls (FUSE, where host policy lets the unit's user mount) over the
+# capture directory, and the LEADER ALONE, with no mount and no escapee, can rename the box away
+# and leave a symlink at its name -- O_NOFOLLOW guards only the last path component, so every
+# re-open then resolves through that symlink (QA31 claude MINOR 3; reproduced in QA32: the runner
+# read back through it and returned 0, both names left behind), and a target slow to resolve
+# (an automount, a FUSE path) parks the lookup (not reproduced); (S6) the box's recursive removal
+# runs AFTER the verdict and outside every bound, its memory roughly quadratic in the depth of a
+# directory chain the unit leaves there, and an escaped descendant, never killed, keeps writing
+# after it (S1 to S6 are _run_unit_subprocess's residuals (g) to (l)).
+# Each budget sits ABOVE the unit's own end-to-end internal budget (the kill-timeout
 # rule), stated per row from the unit's committed timeouts, windows and worker counts; the
 # aggregator's internal budget is ENFORCED inside the bounded child itself
 # (_AGGREGATOR_INTERNAL_BUDGET), and NOTHING -- no derivation, no source scan -- runs in the parent
@@ -22241,9 +22253,11 @@ _UNIT_OUTPUT_CAP = 4 << 20
 # the limit (QA29 claude MINOR 4: the observed spellings are `exited 120`, a signal kill, or the
 # record failure), and a unit that CATCHES its own EFBIG and still exits 0 with its record intact
 # passes -- bounded, not failed.
-# _UNIT_OUTPUT_CAP still caps the copy. Residuals, disclosed: the bound is PER FILE, not aggregate
-# (many files, or an escaped descendant's new files, can still consume storage until the outer
-# bound), and a unit legitimately needing a larger single file fails here, for review.
+# _UNIT_OUTPUT_CAP still caps the copy. Residuals, disclosed: the bound is PER FILE, not aggregate,
+# and storage is NOT bounded: many files can consume it within the outer bound, and an escaped
+# descendant -- never killed, at the outer bound or after -- can keep writing new files for as
+# long as it runs, past the runner's return and the box's removal (residual (l) of
+# _run_unit_subprocess); a unit legitimately needing a larger single file fails here, for review.
 _UNIT_FSIZE_LIMIT = 256 << 20
 
 # The environment a unit subprocess starts from: ONLY these caller variables pass through (where to
@@ -22397,8 +22411,11 @@ def _unit_copy_capped(stream, path, label, kind, ident):
     as is a unit that rewrites or truncates the stream through its OWN still-open descriptor
     before exiting: while it lives the capture is the unit's own output, indistinguishable from
     output never written, so the identity check defends the READ-BACK, not the unit's own pen).
-    The path lookup behind the re-open is not bounded: a filesystem a unit's escapee mounted over
-    the box can park it (the disclosed FUSE residual, _run_unit_subprocess (k)).
+    The path lookup behind the re-open is not bounded, and O_NOFOLLOW guards only its last
+    component: a filesystem a unit's escapee mounted over the box, or a symlink the unit left at
+    the box's own name, can park or redirect it (_run_unit_subprocess (k)); and the identity check
+    cannot tell apart a planted file that received the freed capture's inode number
+    (_run_unit_subprocess (j)).
     A write failure of the copy itself is still swallowed (the exit code, the completion record and
     the readable captures, never the delivered text, are the unit's verdict)."""
     import errno
@@ -22482,7 +22499,13 @@ def _unit_internal_watchdog(label, budget):
     retired sys.stderr.write could park the helper for its whole remaining lifetime on a full
     pipe, so the report now goes out in poll-gated chunks of at most PIPE_BUF bytes under a 2 s
     bound, DROPPED past that bound or where select.poll is missing, with the shared O_NONBLOCK
-    flag never touched; the record, not the stderr text, is the durable report), then writes the
+    flag never touched; the record, not the stderr text, is the durable report. That bound holds
+    only while the helper is the pipe's ONLY writer: each chunk's os.write is a blocking write made
+    after a POLLOUT poll, so a co-writer on the same pipe that fills it between the poll and the
+    write parks the helper, and with it the record write and the closing group kill, until a
+    reader drains the pipe -- possible only when the unit entry is run by hand with stderr on a
+    pipe, since under the runner descriptor 2 is a regular file; QA31 claude MINOR 4, not
+    reproduced), then writes the
     NAMED internal-budget failure to this unit's captured
     stderr (its inherited descriptor) and a fail-closed completion record carrying this unit's pid,
     the record re-opened O_NOFOLLOW|O_NONBLOCK and required regular by fstat on the opened
@@ -22659,7 +22682,7 @@ def _run_unit_subprocess(label, bound, argv=None):
     QA26/QA27 in-process forked runner). THREAT MODEL (D-385-ACCIDENTAL-UNIT): this runner defends
     against ACCIDENTAL unit faults -- a crash, a hang, an early exit, stray or excess output,
     leftover children, a stale or missing completion record; deliberate sabotage by a unit is a
-    disclosed residual, (g) to (k) below, because units are the repository's own reviewed code
+    disclosed residual, (g) to (l) below, because units are the repository's own reviewed code
     running as the same user, and every guarantee stated here holds against that model only. The
     child starts with start_new_session=True (it leads its
     own session and process group, so its pgid equals its pid), stdin from the null device, stdout
@@ -22711,7 +22734,8 @@ def _run_unit_subprocess(label, bound, argv=None):
     launch descriptors), so a
     fresh regular file planted at a capture's path is rejected too (QA30 codex MAJOR / claude
     MINOR 1: a unit that unlinked its stderr capture and planted an empty regular file there
-    laundered a tainted stream into a pass) -- and a unit
+    laundered a tainted stream into a pass), unless it received the freed capture's inode number
+    (residual (j)) -- and a unit
     exiting 0 whose captured error stream carries an uncaught-exception traceback is refused -- a
     passing verdict requires a readable, complete capture and an empty or clean error stream
     (clean: free of the `Traceback (most recent call last):` marker within the capped read; units
@@ -22719,7 +22743,7 @@ def _run_unit_subprocess(label, bound, argv=None):
     copy itself cannot change the unit's verdict.
     Disclosed residuals, each named with why it sits outside this runner's contract
     (D-385-RESCOPE: a hostile or instrumented CALLER is that process's own business, (a) to (f);
-    D-385-ACCIDENTAL-UNIT: a unit that sabotages its runner on purpose, (g) to (k)):
+    D-385-ACCIDENTAL-UNIT: a unit that sabotages its runner on purpose, (g) to (l)):
     (a) an in-process competing reaper (QA29 codex B1's second half): caller code -- a thread, a
     library, an interposed os.waitid -- that reaps this runner's child between the WNOWAIT
     observation and this runner's kill and reap unpins the leader's pid, so the group kill can
@@ -22762,12 +22786,37 @@ def _run_unit_subprocess(label, bound, argv=None):
     check passes) and hand it to an escapee, which keeps the stream open past this runner's exit
     (a reader waiting for EOF waits on it) or writes into it, past every bound and cap here.
     (j) a unit can rewrite or truncate a capture through its own still-open descriptor before it
-    exits; while it lives the capture is its own output (_unit_copy_capped).
-    (k) an escapee that MOUNTS a filesystem it controls over the runner's capture directory (FUSE,
-    where host policy lets the unit's uid mount at all) can park the post-completion result and
-    capture read-backs, which re-open PATHS under that directory after the outer bound:
-    O_NOFOLLOW|O_NONBLOCK bounds neither a FUSE path lookup nor the open behind it (QA30 claude
-    MINOR 5, not reproduced -- the probing host refused the mount).
+    exits; while it lives the capture is its own output (_unit_copy_capped). And because this
+    runner's launch descriptors are closed once the child starts, a unit that unlinks a capture
+    frees its inode, so a file it then plants at that path can receive the SAME device and inode
+    numbers on a filesystem that reuses them (ext4 and xfs can) and pass the identity check: the
+    `never a laundered pass` of a planted file holds only where the number is not reused (QA31
+    claude MINOR 2, not reproduced -- the probing hosts' tmpfs and btrfs allocated increasing
+    numbers).
+    (k) the by-path read-backs, which re-open PATHS under the box after the outer bound, can be
+    PARKED or REDIRECTED: an escapee that MOUNTS a filesystem it controls over the box (FUSE,
+    where host policy lets the unit's uid mount at all) can park them, O_NOFOLLOW|O_NONBLOCK
+    bounding neither a FUSE path lookup nor the open behind it (QA30 claude MINOR 5, not
+    reproduced -- the probing host refused the mount); and the LEADER ALONE, with no mount and no
+    escapee, can rename the box away and leave a symlink at its name, since O_NOFOLLOW guards only
+    the LAST path component: every re-open then resolves through that symlink to wherever it
+    points (QA31 claude MINOR 3; reproduced in QA32: the leader renamed the box to `<box>.real`
+    and symlinked the box name to it, the runner read back through it and returned 0, and both
+    names were left behind, the box removal not following the symlink), and a target slow to
+    resolve (an automount, a FUSE path) parks the lookup the same way (not reproduced).
+    (l) the box's removal is NOT BOUNDED: TemporaryDirectory's recursive cleanup runs when this
+    runner returns, AFTER the verdict and outside every deadline here, its time and memory growing
+    with whatever the unit left in the box -- a directory chain N deep costs memory roughly
+    QUADRATIC in N (QA32 claude: about 23, 36 and 86 MB peak runner RSS at 2,000, 4,000 and 8,000
+    deep; QA31 claude: a MemoryError past a 10 s bound at 90,000 deep, and a host OOM kill with no
+    memory cap); an exception raised there fails that unit closed through run_self_tests (exit
+    2, never a pass), but an OOM kill can take the runner or any other process on the host; a
+    removal error is ignored (ignore_cleanup_errors) and leaves the remnant behind (QA32 codex: a
+    16,001-deep chain was left behind); and an escaped descendant is never killed, at the outer
+    bound or after, so it can keep writing into the box, or anywhere else, after the removal,
+    consuming storage without bound (the escaped-writer design reaches this by accident, not only
+    by sabotage). The removal is not bounded here (no depth or entry cap abandons the box with a
+    named cannot-evaluate).
     Further disclosed: a descendant that LEAVES the unit's process group (its own setpgid or
     setsid, or a start_new_session launch) is not killed and never signalled (the escaped-writer
     design); copied output past _UNIT_OUTPUT_CAP is truncated with a note; _UNIT_FSIZE_LIMIT
@@ -22840,7 +22889,8 @@ def _run_unit_subprocess(label, bound, argv=None):
                 with open(out_path, "wb") as out_file, open(err_path, "wb") as err_file:
                     # The captures' identity at launch (QA30 codex MAJOR): the read-back later
                     # requires the SAME device and inode, so a unit that unlinks a capture and
-                    # plants another file at its path is a named failure, never a laundered pass.
+                    # plants another file at its path is a named failure, unless the planted
+                    # file received the freed inode's number (residual (j)).
                     out_ident = os.fstat(out_file.fileno())
                     err_ident = os.fstat(err_file.fileno())
                     child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out_file,
@@ -23454,7 +23504,8 @@ def _unit_bound_self_test():
         "time.sleep(30)\n")
     wrapper_source = (
         "import subprocess, sys\n"
-        "arm = subprocess.Popen([sys.executable, '-I', '-c', " + repr(arm_source) + "])\n"
+        "arm = subprocess.Popen([sys.executable, '-I', '-c', " + repr(arm_source) + "],\n"
+        "                       stdout=subprocess.DEVNULL)\n"
         "rc = arm.wait(timeout=20)\n"
         "print('WRAPPER-ALIVE', rc, flush=True)\n")
     probe = subprocess.run(
@@ -23914,7 +23965,8 @@ def _unit_bound_self_test():
           "before its non-blocking report and spares a job-control sibling, delivery leaves the "
           "shared O_NONBLOCK flag alone, and a passing verdict requires a readable capture and a "
           "clean error stream; and the QA30 vectors hold: a substituted capture is rejected by "
-          "device and inode, the watchdog's stderr report never blocks its lifetime, a platform "
+          "device and inode, the watchdog's stderr report never blocks its lifetime on a full "
+          "pipe nobody reads, a platform "
           "without O_NOFOLLOW or O_NONBLOCK is refused by name, and an interrupt inside the reap "
           "licences no second group kill)")
     return EXIT_OK
