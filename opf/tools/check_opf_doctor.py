@@ -101,8 +101,11 @@ main one, and equal to the top level (`gitdir: .`); a git directory outside ever
 (--separate-git-dir) installs. Also refused: a core.worktree a linked worktree reads naming a directory that
 holds the git directory, a git directory inside the main worktree's core.worktree from a linked worktree
 (one outside it installs), a registry entry naming a top level of /, a linked worktree at the hooks
-directory, a hand-written .git file naming the git directory, a linked worktree moved by hand, and a
-termination signal mid-install, which rolls back. A core.hooksPath only another linked worktree reads (its config.worktree, or
+directory, a hand-written .git file naming the git directory, a linked worktree moved by hand, an empty
+core.worktree (a stand-in git answers one), and a termination signal mid-install, which rolls back; a
+signal just after the hooks directory's mkdir, the private directory's mkdir, the ln, or the final rmdir
+leaves nothing and says so. The main worktree's core.worktree is checked with no .git entry at that top
+level. A core.hooksPath only another linked worktree reads (its config.worktree, or
 an includeIf onbranch: for its branch) is refused, and so is a worktree registry that cannot be read
 (unprivileged user only). The existing stub is compared byte for byte: one more trailing newline, or a
 symbolic link to the exact text, is refused. A write that fails partway (a zero file-size limit) leaves no
@@ -1600,6 +1603,36 @@ def _self_test_isolated():
             _git(icw, home, "worktree", "add", "-q", "-b", "lw", str(icw_lw))
             expect("install-refuses-gitdir-in-main-core-worktree-from-linked",
                    (_install(icw_lw), (icw / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # The same with the main worktree's .git file removed, so that only the core.worktree on the
+            # common git directory names the top level holding it (no .git entry there for the walk to see):
+            # run from a linked worktree, it is refused (2) with no stub written there.
+            icwo = _fixture("install-inner-core-worktree-only")
+            os.rename(str(icwo / ".git"), str(icwo / "gd"))
+            (icwo / ".git").write_text("gitdir: gd\n", encoding="utf-8")
+            _git(icwo, home, "config", "core.worktree", str(icwo))
+            icwo_lw = base / "install inner core worktree only linked"
+            _git(icwo, home, "worktree", "add", "-q", "-b", "lw", str(icwo_lw))
+            os.unlink(str(icwo / ".git"))
+            expect("install-refuses-gitdir-in-main-core-worktree-only-from-linked",
+                   (_install(icwo_lw), (icwo / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # An empty core.worktree is refused (2), not taken as unset, with no stub written. Git 2.53 will
+            # not run with one, so a stand-in git answers an empty core.worktree for each linked worktree
+            # entry (read under extensions.worktreeConfig) and runs the real git otherwise.
+            ecw = _fixture("install-empty-core-worktree")
+            _git(ecw, home, "worktree", "add", "-q", "-b", "lw", str(base / "install empty core worktree wt"))
+            _git(ecw, home, "config", "extensions.worktreeConfig", "true")
+            ecw_bin = base / "bin-empty-core-worktree"
+            ecw_bin.mkdir()
+            (ecw_bin / "git").write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "    --git-dir=*/worktrees/*)\n"
+                "        if [ \"$2\" = config ] && [ \"$3\" = --get ] && [ \"$4\" = core.worktree ]; then echo; exit 0; fi ;;\n"
+                "esac\n"
+                "exec \"$OPF_REAL_GIT\" \"$@\"\n", encoding="utf-8")
+            os.chmod(str(ecw_bin / "git"), 0o755)
+            ecw_env = dict(PATH=str(ecw_bin) + os.pathsep + _env().get("PATH", os.defpath), OPF_REAL_GIT=git)
+            expect("install-refuses-empty-core-worktree", (_install(ecw, ecw_env), _stub(ecw)), (EXIT_ERROR, None))
             # A linked worktree whose registry entry names a top level of / (its gitdir file reads /.git)
             # holds every path, so the install is refused (2) with no stub written.
             rooted = _fixture("install-root-top")
@@ -1659,6 +1692,43 @@ def _self_test_isolated():
             expect("install-signal-rolls-back",
                    (rc, sorted(n for n in os.listdir(str(signalled / ".git" / "hooks"))
                                if n == "pre-commit" or n.startswith(".opf-"))), (EXIT_ERROR, []))
+            # A signal that lands just after a write (the stand-in runs the real command, then sends TERM; the
+            # installer runs the trap as soon as that command returns): after the mkdir of the hooks directory,
+            # the mkdir of the private directory, the ln, and the final rmdir. Each is refused (2), leaves no
+            # hooks directory it created, no stub and no private directory, and says nothing this run wrote is
+            # left (true only then).
+            real_rmdir = shutil.which("rmdir")
+            if real_rmdir is None:
+                raise OSError("rmdir not found on PATH; the signal vectors cannot be built")
+            sh_path = shutil.which("sh")
+            if sh_path is None:
+                raise OSError("sh not found on PATH; the signal vectors cannot be built")
+            for label, tool, real, when in (("hooks-mkdir", "mkdir", real_mkdir, '[ "$1" = -- ]'),
+                                            ("private-mkdir", "mkdir", real_mkdir, '[ "$1" = -m ]'),
+                                            ("ln", "ln", real_ln, ":"),
+                                            ("rmdir", "rmdir", real_rmdir, ":")):
+                after = _fixture("install-signal-after-" + label)
+                after_hooks = after / ".git" / "hooks"
+                if label == "hooks-mkdir":
+                    if after_hooks.exists():
+                        shutil.rmtree(str(after_hooks))
+                else:
+                    after_hooks.mkdir(exist_ok=True)
+                after_env = _path_without(tool, install_tools, "install-signal-after-" + label)
+                after_shim = Path(after_env["PATH"]) / tool
+                after_shim.write_text('#!/bin/sh\n"$OPF_QA_REAL" "$@" || exit $?\n'
+                                      + when + ' && kill -TERM "$PPID"\nexit 0\n', encoding="utf-8")
+                os.chmod(str(after_shim), 0o755)
+                after_env.update(OPF_QA_REAL=os.path.abspath(real))
+                after_err = base / ("install-signal-after-" + label + ".err")
+                rc = _run(["-c", '"$2" "$0" 2> "$1"', str(after / rel / "install.sh"), str(after_err),
+                           os.path.abspath(sh_path)], base, after_env)
+                left = (after_hooks.exists() if label == "hooks-mkdir" else
+                        sorted(n for n in os.listdir(str(after_hooks)) if n == "pre-commit" or n.startswith(".opf-")))
+                expect("install-signal-after-" + label + "-leaves-nothing",
+                       (rc, left, after_err.read_text(encoding="utf-8", errors="replace").strip()),
+                       (EXIT_ERROR, False if label == "hooks-mkdir" else [],
+                        "opf-pre-commit install: refused: stopped by a signal; nothing this run wrote is left"))
             # A branch cannot add a hook: a post-checkout and a post-merge committed in the pack directory on
             # another branch do not run on checkout or merge, since no tracked directory is a hooks path.
             branchy = _fixture("branch-hooks")
@@ -1923,7 +1993,7 @@ def _self_test_isolated():
               "hooksPath (another linked worktree's included), an existing pre-commit hook (compared byte "
               "for byte, never through a symlink), a symlinked hooks destination, a git directory in any "
               "worktree's top level (from a linked worktree, from the main one, and equal to the top level) "
-              "while a separate git directory installs, a core.worktree top level (linked and main, from a linked worktree), a top level of /, a worktree at the hooks directory, an unregistered or moved working tree, a signal rolled back, an unreadable worktree registry, an "
+              "while a separate git directory installs, a core.worktree top level (linked and main, from a linked worktree, the main one with no .git entry), an empty core.worktree, a top level of /, a worktree at the hooks directory, an unregistered or moved working tree, a signal rolled back (after chmod, either mkdir, ln and the last rmdir, nothing left and said so), an unreadable worktree registry, an "
               "unreadable pack hook and an ambient GIT_DIR redirect; no dirname, inherited GIT_TRACE*, a "
               "configured trace2 target, read-back rollback, a partial write left nowhere, a link or "
               "directory arriving at the stub path refused and kept with nothing left, a backslash kept in "

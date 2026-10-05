@@ -31,7 +31,8 @@
 #     directory is that worktree's own .git directory: git could track the files of the hooks directory
 #     there, and a branch could supply a hook. A core.worktree that names no directory is refused too, as
 #     is a hooks directory below any directory that holds a .git entry with no .git component between
-#     them (a working tree the registry does not name, or names at a path it has since left). Run from a
+#     them (a working tree the registry does not name, or names at a path it has since left). An empty
+#     core.worktree is refused too, not taken as unset. Run from a
 #     linked worktree of a clone whose git directory is not named .git and sets no core.worktree, the
 #     top level of the main worktree is recorded nowhere (git worktree list names the git directory
 #     itself), so it is refused: run it from the main worktree;
@@ -47,7 +48,9 @@
 # regular, readable, executable file with the exact stub text, or such an arrival), it removes only what
 # this run created, and the hooks directory if it created it, before it exits 2, and names anything it
 # could not remove.
-# A hangup, interrupt or termination signal runs the same removal and exits 2.
+# A hangup, interrupt or termination signal runs the same removal and exits 2, at any point: each write
+# is recorded before it is made, and the removal looks at what is there, so a write the signal follows is
+# removed or named, and the refusal says nothing this run wrote is left only when that is so.
 # Exit status: 0 installed or already installed, 2 refused or cannot evaluate.
 #
 # Threat model: the installer runs unprivileged, as the user who owns the clone. It defends against a
@@ -183,7 +186,8 @@ untracked_in() {
 untracked_in "$top"
 # The top level a core.worktree sets for the worktree whose git directory is $1, if one is set: relative
 # to that git directory, as git reads it, resolved to its physical path and checked like the others. It
-# is read in every scope, which can only add a top level to check. One that names no directory refuses.
+# is read in every scope, which can only add a top level to check. One that names no directory, or is
+# empty, refuses (an empty one is not taken as unset).
 core_worktree_untracked() {
     got=$(git --git-dir="$1" config --get core.worktree && echo .)
     case "$?" in
@@ -196,6 +200,7 @@ core_worktree_untracked() {
         *) fail "could not read core.worktree for the worktree whose git directory is $1" ;;
     esac
     case "$got" in
+        '') fail "core.worktree is set to an empty value for the worktree whose git directory is $1; that names no directory (git 2.53 will not run with one), so it is refused rather than taken as unset: unset it or make it name that worktree" ;;
         *"$nl"*) fail "the core.worktree $got holds a newline, which this installer does not handle" ;;
         /*) cwt=$got ;;
         *) cwt=$1/$got ;;
@@ -321,35 +326,39 @@ exit 2"
 is_stub() {
     [ ! -L "$1" ] && [ -f "$1" ] && [ -r "$1" ] && [ -x "$1" ] && printf '%s\n' "$body" | cmp -s -- - "$1"
 }
-made_dir=
 priv=$hooks/.opf-pre-commit-install.$$
 tmp=$priv/.opf-pre-commit-stub.$$
+strayed=$stub/${tmp##*/}
+# Each write is recorded before it is made (made_dir, made_priv, linking), at a path checked to be free
+# just before, and the removal looks at what is there: a signal that lands just after a write (the
+# shell runs the trap once the command it is waiting for returns) finds that write recorded.
+made_dir=
 made_priv=
+linking=
 linked=
-strayed=
 # Undo what this run created, and nothing else: the stub only while it is still this run's link (the
-# same file as the temporary one, or the exact stub text once that is removed), a link ln made inside a
-# directory that arrived at the stub path only while it is the same file as the temporary one, then the
-# private directory and the hooks directory if this run created them. Anything it cannot remove is named.
-# The signals trapped below are ignored while it runs.
+# same file as the temporary one, or, once ln is checked and the temporary one removed, the exact stub
+# text), a link ln made inside a directory that arrived at the stub path only while it is the same file
+# as the temporary one, then the private directory and the hooks directory if this run created them and
+# they are there. Anything it cannot remove is named. The signals trapped below are ignored while it runs.
 rollback() {
     trap '' HUP INT TERM
     left=
-    if [ -n "$linked" ] && [ ! -L "$stub" ]; then
-        if [ "$stub" -ef "$tmp" ] || { [ ! -e "$tmp" ] && is_stub "$stub"; }; then
+    if [ -n "$linking" ]; then
+        if [ ! -L "$stub" ] && { [ "$stub" -ef "$tmp" ] || { [ -n "$linked" ] && [ ! -e "$tmp" ] && is_stub "$stub"; }; }; then
             rm -f -- "$stub"
             [ ! -e "$stub" ] && [ ! -L "$stub" ] || left="$left $stub"
         fi
+        if [ "$strayed" -ef "$tmp" ]; then
+            rm -f -- "$strayed"
+            [ ! "$strayed" -ef "$tmp" ] || left="$left $strayed"
+        fi
     fi
-    if [ -n "$strayed" ] && [ "$strayed" -ef "$tmp" ]; then
-        rm -f -- "$strayed"
-        [ ! "$strayed" -ef "$tmp" ] || left="$left $strayed"
-    fi
-    if [ -n "$made_priv" ]; then
+    if [ -n "$made_priv" ] && { [ -e "$priv" ] || [ -L "$priv" ]; }; then
         rm -f -- "$tmp"
         rmdir -- "$priv" || left="$left $priv"
     fi
-    if [ -n "$made_dir" ]; then
+    if [ -n "$made_dir" ] && { [ -e "$hooks" ] || [ -L "$hooks" ]; }; then
         rmdir -- "$hooks" || left="$left $hooks"
     fi
     [ -z "$left" ] || fail "$1; this run could not remove what it wrote at:$left; remove it by hand"
@@ -372,18 +381,21 @@ elif [ -e "$hooks" ]; then
         fail "$stub is a pre-commit hook that installing would replace; remove it, or have it run ./$rel/pre-commit, first"
     fi
 else
-    mkdir -- "$hooks" || fail "could not create the hooks directory $hooks"
     made_dir=1
+    mkdir -- "$hooks" || rollback "could not create the hooks directory $hooks"
 fi
 # The stub is written and checked in a private directory this run creates (mkdir never takes an
 # existing name, so everything in it is this run's), then linked into place: ln never replaces a file, so
 # a hook that appeared since the check above is kept, and git never runs a part-written stub.
-mkdir -m 700 -- "$priv" || rollback "could not create the private directory $priv (if an earlier run left it, remove it)"
+[ ! -e "$priv" ] && [ ! -L "$priv" ] || \
+    rollback "the private directory $priv is already there (an earlier run left it; remove it)"
 made_priv=1
+mkdir -m 700 -- "$priv" || rollback "could not create the private directory $priv"
 ( set -C; printf '%s\n' "$body" > "$tmp" ) || rollback "could not write the stub as $tmp"
 chmod 755 "$tmp" || rollback "could not make $tmp executable"
 is_stub "$tmp" || rollback "$tmp did not read back as a readable, executable file with the exact stub text"
 [ ! -e "$stub" ] && [ ! -L "$stub" ] || rollback "something appeared at $stub while the stub was being written (it is kept)"
+linking=1
 ln -- "$tmp" "$stub" || \
     rollback "could not link the stub into place as $stub (anything there is kept; ln also fails on a filesystem without hard links)"
 # ln links into a directory, or a link to one, that arrived at the stub path since the check above,
@@ -391,13 +403,11 @@ ln -- "$tmp" "$stub" || \
 if [ ! -L "$stub" ] && [ "$stub" -ef "$tmp" ]; then
     linked=1
 else
-    strayed=$stub/${tmp##*/}
     rollback "something arrived at $stub while the stub was being placed (it is kept)"
 fi
 is_stub "$stub" || rollback "the stub $stub did not read back as a readable, executable file with the exact stub text"
 rm -f -- "$tmp" && [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || rollback "could not remove the temporary file $tmp"
 rmdir -- "$priv" || rollback "could not remove the private directory $priv"
-made_priv=
 trap - HUP INT TERM
 printf '%s\n' "opf-pre-commit install: installed for this clone and its linked worktrees ($stub runs ./$rel/pre-commit)."
 echo "opf-pre-commit install: other clones must run this installer too; git commit --no-verify, cherry-pick, revert, rebase, am and a clean merge commit without the hook, and CI does not catch a history violation committed that way (see pre-commit)."
