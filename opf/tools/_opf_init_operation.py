@@ -3441,10 +3441,18 @@ def _physical_tests(base, env, ok, signal):
     wt = os.path.join(base, "wt-linked")
     _git(["worktree", "add", "-q", "--detach", wt], main, env)
     rc, res, err = _child(wt, env)
+    gd = _git(["rev-parse", "--absolute-git-dir"], wt, env, allow_fail=True)
+    wt_gitdir = gd.stdout.decode().strip() if gd.returncode == 0 else ""
+    wt_home = os.path.join(wt_gitdir, _opf_init_substrate.SUBSTRATE_DIRNAME) if wt_gitdir else ""
     ok("R11-linked-worktree", res and res["status"] == VIEWS_READY
-       and os.path.isdir(_ops_dir(main)) and not os.path.exists(os.path.join(wt, ".git",
-                                                                                "opf-init")),
+       and os.path.isdir(_ops_dir(main)) and os.path.isdir(wt_gitdir)
+       and os.path.realpath(wt_gitdir) != os.path.realpath(os.path.join(main, ".git"))
+       and not os.path.lexists(wt_home),
        str(res) + err[-400:])
+    # The probe above must be able to fail: the per-worktree home it names is visible once created.
+    if wt_home and not os.path.lexists(wt_home):
+        os.mkdir(wt_home)
+    ok("R11-linked-worktree-probe-live", bool(wt_home) and os.path.isdir(wt_home))
     plain_dir = os.path.join(base, "not-a-repo")
     os.mkdir(plain_dir)
     rc, res, _err = _child(plain_dir, env)

@@ -1880,9 +1880,14 @@ def _self_test_isolated():
             linked = _fixture("linked repo")
             linked_wt = base / "linked wt"
             _git(linked, home, "worktree", "add", "-q", "-b", "side", str(linked_wt))
+            linked_wt_cfg = _git_out(linked_wt, "rev-parse", "--path-format=absolute", "--git-path",
+                                     "config.worktree")
+            linked_cfg_before = (linked / ".git" / "config").read_bytes()
             expect("linked-install", (_install(linked_wt), _stub_ok(linked), _hookspath(linked_wt),
-                                      (linked / ".git" / "config.worktree").exists()),
-                   (EXIT_OK, True, None, False))
+                                      (linked / ".git" / "config.worktree").exists(),
+                                      linked_wt_cfg is None or Path(linked_wt_cfg).exists(),
+                                      (linked / ".git" / "config").read_bytes() == linked_cfg_before),
+                   (EXIT_OK, True, None, False, False, True))
             (linked_wt / "README.md").write_text("readme\n", encoding="utf-8")
             _git(linked_wt, home, "add", "README.md")
             expect("linked-commit-clean-passes", _committed(linked_wt), (EXIT_OK, True))
