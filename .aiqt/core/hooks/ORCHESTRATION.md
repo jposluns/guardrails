@@ -178,27 +178,31 @@ malformed.
   the budget has run out is never an allow.
 - `max_brief_bytes` caps the brief size (default 1048576).
 
-The hook checks only a provably plain dispatch. A plain dispatch is written with literal words: each
-word is unquoted, or one whole single- or double-quoted run (a double-quoted run holding no `$`,
-backquote, backslash or `!`). Commands may be joined by a newline, `;`, `&`, `&&`, `||` or a pipe. The
-only redirection allowed is reading `/dev/null` (`</dev/null`, `N</dev/null`). Exactly one command's
-command word is a declared command (a path to it counts), with no wrapper before it and no
-assignment. No other word in the command names a declared command, and no command word is `cd`,
-`pushd`, `popd`, `eval`, `exec`, `source`, `.`, or another word that changes the directory or the
-shell's state or opens a compound command. The brief must be the last argument, given once as
-`--brief PATH` or `--brief=PATH`, with no `--` before it. A parser the hook does not know may also
-take a brief from an alias or a grouped short option, so a brief given last is the one a last-wins
-parser keeps. A second brief, including an abbreviation such as `--brie PATH`, is refused, and so is
-a dispatch fed by a pipe. A relative brief path resolves against the session cwd. The brief is
-opened once, without blocking and without following a symlink, and must be a regular file.
+The hook checks only a provably plain dispatch, decided on the raw characters before any lexing by
+the shared plain-command specification. A command is plain only when every character is printable
+ASCII (no tab, newline, NUL or non-ASCII character); none of `$`, backquote, backslash, `;`, `&`,
+`|`, `<`, `>`, `(`, `)`, `{`, `}`, `[`, `]`, `*`, `?`, `!`, `#` or `~` appears outside a single-quoted
+segment; a double-quoted segment holds none of them; no quote is left open; words are separated by
+spaces only; and the command word is a bare name or path, unquoted, that is not a shell, an
+interpreter, `eval`, `exec`, `source`, `.`, `env`, `command`, `builtin`, `xargs`, `nohup`, `timeout`,
+`sudo` or another wrapper that runs a command. A plain dispatch is therefore the only command of the
+call: no operator, no redirection (not even `</dev/null`) and no second command. Its command word is
+a declared command (a path to it counts), compared without regard to case. The brief must be the last
+argument, given once as `--brief PATH` or `--brief=PATH`, with no `--` before it; a two-character
+brief option is never accepted in its `-b=PATH` form, which a getopt parser reads as the value
+`=PATH`. A parser the hook does not know may also take a brief from an alias or a grouped short
+option, so a brief given last is the one a last-wins parser keeps. A second brief, including an
+abbreviation such as `--brie PATH`, is refused. A relative brief path resolves against the session
+cwd; a path under `/proc` or `/dev` is withheld as `UNVERIFIABLE:`, since it names a different file
+in the hook's process. The brief is opened once, without blocking and without following a symlink,
+and must be a regular file; one leading byte-order mark is dropped.
 
 Any other command that names a declared command is withheld as `UNVERIFIABLE:` with a message
-that says how to write the dispatch plainly. This covers a wrapper (`env`, `timeout`, `nohup`,
-`sudo`, `xargs`), an expansion, a brace, a glob, ANSI-C or locale quoting, a quote or backslash
-inside the name, a heredoc, here-string or process substitution, any other redirection, and a
-nested shell string. For a command that is not plain, a name is looked for in the raw text and in
-the text with ANSI-C bodies decoded and quotes, backslashes, `$`, braces and commas removed. A
-command that names no declared command is allowed.
+that says how to write the dispatch plainly, and so is any command that is not plain and holds ANSI-C
+or locale quoting (`$'...'`, `$"..."`), whose decoded text the hook does not read. For a command that is
+not plain, a name is looked for, without regard to case, in the raw text and in the text with quotes,
+backslashes, `$`, braces and commas deleted; nothing is decoded. A command that names no declared
+command is allowed.
 
 The hook reads labels only from the brief, only at column 0, and only as the exact label followed by
 one space. The value is the rest of that line. The brief must be UTF-8 with no NUL and no line
@@ -227,7 +231,8 @@ For a `revision` target, the hook checks the following in order. The first failu
    reads each symlink target, and compares the result and the file mode with the pin's tree entry.
    An assume-unchanged or skip-worktree flag, `core.ignoreStat`, the stat cache, an fsmonitor answer
    or a configured filter therefore cannot report a changed file as clean. A path the pin deletes
-   must be absent. A checked-out submodule must be at the pinned commit.
+   must be absent. A checked-out submodule must be at the pinned commit. With `core.fileMode`
+   false, a file that differs from the pin only in its executable bit is clean, as git reads it.
 
 Every git read disables replacement refs, grafts, pathspec magic, the commit-graph cache, the
 fsmonitor, the untracked cache and submodule recursion, and takes no optional locks. The changed set
@@ -239,10 +244,16 @@ The hook refuses with a deny that names the reason. When it cannot evaluate, it 
 reason prefixed `UNVERIFIABLE:`, so that outcome stays distinct. Cannot-evaluate cases include a
 duplicate label, an unreadable brief, a failed or timed-out git probe, an exhausted time budget, and
 an authority that fails or prints anything other than one commit id. A linked worktree is scoped
-by its main worktree's registry. When git cannot resolve the session repository (a broken
-configuration, a refused ownership check, a deleted cwd), or resolves one with no registry, the hook
-looks for the registry on the cwd's ancestors. If git cannot resolve the repository and a binding is
-found, every dispatch is withheld as `UNVERIFIABLE:`. A malformed binding, a registry that cannot be read (including a FIFO,
+by its main worktree's registry, found through git or, when git cannot run (a broken shared
+configuration), through the raw `.git` and `commondir` files. A linked worktree whose main worktree
+cannot be located (a git directory separated from the main worktree) withholds every background
+Bash call; a foreground call there proceeds with a note. When git cannot resolve the session
+repository (a broken configuration, a refused ownership check, a deleted cwd), or resolves one with
+no binding, the hook looks for the registry on the cwd's ancestors, so a `core.worktree` setting that
+moves the top level cannot turn the check off. If git cannot resolve the repository, or resolves one
+that is not the registry's own (a nested repository, a moved top level), and a binding is found,
+every dispatch is withheld as `UNVERIFIABLE:`. The authority runs from the top level of the worktree
+whose registry binds the dispatch, so a relative `authority.argv` is always the registry's own. A malformed binding, a registry that cannot be read (including a FIFO,
 a device or a symlink in its place), or an ancestor search that cannot be made withholds every
 background Bash call. A foreground call is then allowed with a note.
 
@@ -260,8 +271,10 @@ Limits:
   from pieces, command output, a brace or glob pattern that splits the name) is not found.
 - Some commands are refused although they dispatch nothing: any command that mentions a declared
   command name outside one plain dispatch, such as `grep orch-dispatch` or a commit message that
-  names it. A plain dispatch with an output redirection (`> log`) is refused as well; redirect the
-  dispatcher's output another way or run it without one. A declared file whose checkout was converted (line
+  names it, and any command that is not plain and uses ANSI-C or locale quoting. A dispatch joined to
+  another command or redirected (`> log`, `</dev/null`, `&&`, `;`, `&`) is refused as well; run the
+  dispatch as a call of its own, and redirect its output another way.
+- Uncommitted edits inside a checked-out submodule whose HEAD is at the pinned commit are not read. A declared file whose checkout was converted (line
   endings or a filter) differs by content from the pin and is refused.
 
 ## Platforms without hooks

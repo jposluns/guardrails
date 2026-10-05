@@ -544,6 +544,22 @@ expected-check-ids = [
   "rdp/malformed-binding-without-tool-input-unverifiable",
   "rdp/failed-state-probe-unverifiable",
   "rdp/handler-crash-fails-closed",
+  "rdp/abbreviated-brief-before-last-denies",
+  "rdp/compound-or-redirected-dispatch-unverifiable",
+  "rdp/plain-spec-vector-table",
+  "rdp/ansi-c-nul-name-unverifiable",
+  "rdp/unicode-digit-not-plain-unverifiable",
+  "rdp/same-call-rewrite-unverifiable",
+  "rdp/case-folded-command-name",
+  "rdp/short-option-equals-form-denies",
+  "rdp/bom-brief-allows",
+  "rdp/proc-self-brief-unverifiable",
+  "rdp/late-verdict-never-used",
+  "rdp/filemode-false-ignores-exec-bit",
+  "rdp/authority-runs-from-registry-worktree",
+  "rdp/core-worktree-cannot-unscope",
+  "rdp/linked-worktree-broken-config-scoped",
+  "rdp/linked-worktree-separate-gitdir-withheld",
 ]
 
 [[suite]]

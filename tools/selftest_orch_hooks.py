@@ -438,7 +438,7 @@ def _rdp_cases(tmp):
         "orch-dispatch --brief " + good + " < " + good,
         "orch-dispatch",
         "orch-dispatch --brief " + good + " --brief=" + good)],
-        ["unverifiable", "unverifiable", "deny", "unverifiable", "deny", "deny"])
+        ["unverifiable", "unverifiable", "unverifiable", "unverifiable", "deny", "deny"])
     # A file literally named $BRIEF exists, so only the expansion check stops the literal read of it.
     (f.root / "$BRIEF").write_text("Review-target: working-tree\n", encoding="utf-8")
     check("rdp/opaque-brief-arg-unverifiable", _rdp_kind(f.run("orch-dispatch --brief $BRIEF")), "unverifiable")
@@ -631,8 +631,11 @@ def _rdp_cases(tmp):
     good = f.good()
     check("rdp/abbreviated-second-brief-denies", [_rdp_kind(f.run("orch-dispatch --brief " + good + c)) for c in (
         " --brie " + branch_only, " --bri=" + branch_only)], ["deny", "deny"])
+    # An abbreviation BEFORE the brief, where the last-argument rule cannot catch it.
+    check("rdp/abbreviated-brief-before-last-denies", _rdp_kind(f.run(
+        "orch-dispatch --brie " + branch_only + " --brief " + good)), "deny")
     check("rdp/unrelated-descriptor-redirect", [_rdp_kind(f.run("orch-dispatch --brief " + good + c)) for c in (
-        " 3</dev/null", " 0<" + good, " <&3")], ["allow", "unverifiable", "unverifiable"])
+        " 3</dev/null", " 0<" + good, " <&3")], ["unverifiable", "unverifiable", "unverifiable"])
 
     ff = RdpFixture(base, "fifos")
     fifo_brief = ff.briefs / "fifo-brief.txt"
@@ -792,10 +795,16 @@ def _rdp_cases(tmp):
         "PWD=src orch-dispatch --brief brief.txt", "orch-dispatch --brief brief.txt; orch-dispatch --brief brief.txt")],
         ["unverifiable"] * 6)
     check("rdp/plain-dispatch-forms-allow", [_rdp_kind(pl.run(c)) for c in (
+        "orch-dispatch --family x --brief=brief.txt", "orch-dispatch \"--brief\" 'brief.txt'",
+        "/usr/local/bin/orch-dispatch --brief brief.txt", "  orch-dispatch  --brief  b'rief'.txt  ")],
+        ["allow"] * 4)
+    # The shared specification admits ONE simple command: an operator, a redirection (even </dev/null) or a
+    # quoted command word makes the dispatch not plain.
+    check("rdp/compound-or-redirected-dispatch-unverifiable", [_rdp_kind(pl.run(c)) for c in (
         "orch-dispatch --brief brief.txt </dev/null", "orch-dispatch --brief brief.txt 0</dev/null",
-        "orch-dispatch --family x --brief=brief.txt", "'orch-dispatch' \"--brief\" 'brief.txt'",
-        "/usr/local/bin/orch-dispatch --brief brief.txt", "git status && orch-dispatch --brief brief.txt",
-        "orch-dispatch --brief brief.txt | tee /dev/null", "orch-dispatch --brief brief.txt &")], ["allow"] * 8)
+        "'orch-dispatch' --brief brief.txt", "git status && orch-dispatch --brief brief.txt",
+        "orch-dispatch --brief brief.txt | tee /dev/null", "orch-dispatch --brief brief.txt &")],
+        ["unverifiable"] * 6)
     # A linked worktree, inside the orchestrated tree or beside it, is scoped by the main worktree's registry.
     lw = RdpFixture(base, "linked")
     lw_branch = lw.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
@@ -908,6 +917,128 @@ def _rdp_cases(tmp):
             aiqt_hooks._review_git = real_review_git
     check("rdp/failed-state-probe-unverifiable", failed_probe, ["unverifiable", "unverifiable"])
 
+    # ---------- QA round 4: one strict plain-command classifier (the shared specification) ----------
+    check("rdp/plain-spec-vector-table", [(c, aiqt_hooks._rdp_plain_words(c)[0] is not None)
+                                          for c, _p in aiqt_hooks._RDP_PLAIN_VECTORS],
+          list(aiqt_hooks._RDP_PLAIN_VECTORS))
+    bad = mf.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    good = mf.good()
+    # Bash truncates an ANSI-C quoted word at a NUL, so these run orch-dispatch with the unpinned brief.
+    check("rdp/ansi-c-nul-name-unverifiable", [_rdp_kind(mf.run(c + "patch --brief " + bad)) for c in (
+        "$'orch-dis\\0junk'", "$'orch-dis\\x00junk'", "$'orch-dis\\u0000junk'")], ["unverifiable"] * 3)
+    # A non-ASCII digit is no descriptor to bash: it stays the brief argument, so the command is not plain.
+    check("rdp/unicode-digit-not-plain-unverifiable", [_rdp_kind(mf.run(
+        "orch-dispatch --brief " + d + "</dev/null " + good)) for d in ("\u00b2", "\u0661", "\uff10")],
+        ["unverifiable"] * 3)
+    # An earlier command in the same call can rewrite the brief or the tree after the check.
+    check("rdp/same-call-rewrite-unverifiable", [_rdp_kind(mf.run(c)) for c in (
+        "cp " + bad + " " + good + "; orch-dispatch --brief " + good,
+        "cp " + bad + " " + good + " && orch-dispatch --brief " + good,
+        "git -C " + str(mf.root) + " checkout -q " + mf.seed + " && orch-dispatch --brief " + good,
+        "orch-dispatch --brief " + good + " & cp " + bad + " " + good,
+        "printf -v HOME %s /tmp; orch-dispatch --brief " + good)], ["unverifiable"] * 5)
+    check("rdp/case-folded-command-name", [_rdp_kind(mf.run(n + " --brief " + bad)) for n in (
+        "ORCH-DISPATCH", "Orch-Dispatch", "/usr/bin/ORCH-dispatch")], ["deny"] * 3)
+    mf.write_registry(dict(mf.binding, brief_option="-b"))
+    check("rdp/short-option-equals-form-denies", [_rdp_kind(mf.run("orch-dispatch -b" + c + good)) for c in (
+        "=", " ")], ["deny", "allow"])
+    mf.write_registry(mf.binding)
+    bom = mf.briefs / "bom.txt"
+    bom.write_bytes(b"\xef\xbb\xbf" + "".join(line + "\n" for line in [
+        "Review-target: revision", "Reviewed-revision: " + mf.pin] + [
+        "Review-path: " + p for p in mf.CHANGED]).encode("utf-8"))
+    check("rdp/bom-brief-allows", _rdp_kind(mf.dispatch(str(bom))), "allow")
+    # /proc/self names the hook's own process, not the dispatcher's: here the hook's cwd holds a good brief.
+    saved_cwd = os.getcwd()
+    os.chdir(str(mf.briefs))
+    try:
+        proc_kind = _rdp_kind(mf.dispatch("/proc/self/cwd/brief.txt"))
+    finally:
+        os.chdir(saved_cwd)
+    check("rdp/proc-self-brief-unverifiable", proc_kind, "unverifiable")
+    # The worker finishes after the deadline and after the caller's reset of the shared deadline (simulated
+    # by the worker clearing it), so the worker's own overdue check cannot see it: the verdict is not used.
+    real_judge = aiqt_hooks._rdp_judge
+
+    def _late_judge(*args, **kwargs):
+        aiqt_hooks.time.sleep(0.35)
+        aiqt_hooks._RDP_DEADLINE[0] = None
+        return ("allow", "")
+    saved_budget = aiqt_hooks._RDP_BUDGET
+    aiqt_hooks._RDP_BUDGET = 0.3
+    aiqt_hooks._rdp_judge = _late_judge
+    try:
+        late_kind = _rdp_kind(mf.dispatch(good))
+    finally:
+        aiqt_hooks._rdp_judge = real_judge
+        aiqt_hooks._RDP_BUDGET = saved_budget
+    check("rdp/late-verdict-never-used", late_kind, "unverifiable")
+    fx = RdpFixture(base, "filemode")
+    (fx.root / "src" / "b.py").chmod(0o755)
+    _rdp_git(fx.root, "add", "src/b.py")
+    _rdp_git(fx.root, "commit", "-q", "-m", "exec")
+    fx_pin = _rdp_git(fx.root, "rev-parse", "HEAD")
+    fx.authority(fx_pin + "\n")
+    (fx.root / "src" / "b.py").chmod(0o644)
+    fx_got = []
+    for mode in ("false", "true"):
+        _rdp_git(fx.root, "config", "core.fileMode", mode)
+        fx_got.append(_rdp_kind(fx.dispatch(fx.good(pin=fx_pin, paths=("src/b.py",)))))
+    check("rdp/filemode-false-ignores-exec-bit", fx_got, ["allow", "deny"])
+    # A relative authority runs from the registry's worktree: a linked worktree without its own copy still
+    # gets the registry's authority, and a nested repository's own authority and commit are never used.
+    ra = RdpFixture(base, "relauth")
+    auth = "import subprocess, sys\nsys.stdout.write(subprocess.run(['git', 'rev-parse', 'HEAD'], " \
+           "capture_output=True, text=True).stdout)\n"
+    (ra.root / "auth.py").write_text(auth, encoding="utf-8")
+    ra.write_registry(dict(ra.binding, authority=dict(argv=[sys.executable, "-I", "-B", "auth.py"], timeout=5)))
+    _rdp_git(ra.root, "worktree", "add", "-q", "--detach", str(base / "relauth-linked"), ra.pin)
+    nested = ra.root / "nested"
+    _rdp_git(base, "init", "-q", "-b", "main", str(nested))
+    (nested / "x.txt").write_text("x\n", encoding="utf-8")
+    _rdp_git(nested, "add", "x.txt")
+    _rdp_git(nested, "commit", "-q", "-m", "nested")
+    nested_pin = _rdp_git(nested, "rev-parse", "HEAD")
+    (nested / "auth.py").write_text(auth, encoding="utf-8")
+
+    def _from(cwd, brief, background=False):
+        return _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(cwd), session_id="s1", tool_name="Bash",
+            tool_input=dict(command="orch-dispatch --brief " + brief, run_in_background=background))))
+    check("rdp/authority-runs-from-registry-worktree", [
+        _from(base / "relauth-linked", ra.good()),
+        _from(nested, ra.good(pin=nested_pin, paths=("x.txt",)))], ["allow", "unverifiable"])
+    # core.worktree moves git's top level to a directory whose registry has no binding: the cwd's own
+    # registry still scopes the session, and the redirected top level is foreign to it.
+    cw = RdpFixture(base, "coreworktree")
+    elsewhere = base / "coreworktree-elsewhere"
+    (elsewhere / ".aiqt").mkdir(parents=True)
+    (elsewhere / ".aiqt" / "orchestration.local.json").write_text(json.dumps(dict(
+        version=1, state_dir=str(cw.briefs / "state2"))), encoding="utf-8")
+    cw_branch = cw.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    cw_got = [_rdp_kind(cw.dispatch(cw_branch))]
+    _rdp_git(cw.root, "config", "core.worktree", str(elsewhere))
+    cw_got.append(_rdp_kind(cw.dispatch(cw_branch)))
+    check("rdp/core-worktree-cannot-unscope", cw_got, ["deny", "unverifiable"])
+    # A linked worktree beside its main worktree stays scoped when the shared configuration breaks git
+    # (read from the raw .git and commondir files), and when the git directory is separated from the main
+    # worktree (no main worktree can be located: withheld as a registry state that cannot be read).
+    lb = RdpFixture(base, "linkedbroken")
+    lb_branch = lb.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    _rdp_git(lb.root, "worktree", "add", "-q", "--detach", str(base / "linkedbroken-beside"), lb.pin)
+    lb_got = [_from(base / "linkedbroken-beside", lb_branch)]
+    with open(str(lb.root / ".git" / "config"), "a", encoding="utf-8") as fh:
+        fh.write("\n[broken\n")
+    lb_got.append(_from(base / "linkedbroken-beside", lb_branch))
+    check("rdp/linked-worktree-broken-config-scoped", lb_got, ["deny", "unverifiable"])
+    ls_ = RdpFixture(base, "linkedsep")
+    ls_branch = ls_.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    _rdp_git(ls_.root, "worktree", "add", "-q", "--detach", str(base / "linkedsep-beside"), ls_.pin)
+    _rdp_git(ls_.root, "init", "-q", "--separate-git-dir=" + str(base / "linkedsep-meta"))
+    subprocess.run(["git", "-C", str(ls_.root), "worktree", "repair"], capture_output=True, timeout=30)
+    check("rdp/linked-worktree-separate-gitdir-withheld", [
+        _from(base / "linkedsep-beside", ls_branch, background=True), _from(base / "linkedsep-beside", ls_branch),
+        _rdp_kind(ls_.dispatch(ls_branch))], ["unverifiable", "warn", "deny"])
     import contextlib
     import io
     saved_decide, saved_stdin = aiqt_hooks._rdp_decide, sys.stdin

@@ -10334,12 +10334,13 @@ def orch_dispatch_ledger(data):
 # --- review dispatch pin (vfxcmt) --------------------------------------------------------------------
 # PreToolUse Bash, registry scoped. Inert unless the orchestration registry declares a `review_dispatch`
 # binding (ORCHESTRATION.md, "The review dispatch binding"). A Bash call that names a declared dispatch
-# command must be a provably plain dispatch (_rdp_plain_lex), or it is UNVERIFIABLE. For a plain dispatch it
+# command must be a provably plain dispatch (_rdp_plain_words), or it is UNVERIFIABLE. For a plain dispatch it
 # reads the brief file passed as that command's one brief argument and reconciles the brief's column-0 labels against the repository BEFORE the
 # command runs: an explicit review target; for a revision review, a full-length pin that resolves to exactly
 # that commit and equals the authoritative task revision the adopter's authority command prints; the
 # declared review paths equal to the pin's changed set (base derived from the commit's raw parent headers);
-# and no uncommitted state over any declared path. A refusal is a deny naming its reason; a cannot-evaluate
+# and no uncommitted state over any declared path, except edits inside a checked-out submodule whose HEAD is
+# at the pinned gitlink, which are not read. A refusal is a deny naming its reason; a cannot-evaluate
 # is a deny prefixed UNVERIFIABLE: so it stays distinct. Every git probe runs through _review_git, which
 # neutralizes replacement refs, grafts, pathspec magic and the commit-graph cache.
 _RDP_KEYS = frozenset(("commands", "brief_option", "labels", "authority", "max_brief_bytes"))
@@ -10503,7 +10504,8 @@ def _rdp_read_fd(fd, limit):
 def _rdp_read_brief(path, max_bytes):
     """(text, None) for a readable brief, or (None, reason) for a cannot-evaluate: missing, a symlink, not a
     regular file, an I/O or permission error, over max_bytes, invalid UTF-8, a NUL, or a non-physical line
-    boundary. The brief is opened ONCE, non-blocking and without following a final symlink, and the type
+    boundary. One leading byte-order mark is dropped, so a brief saved with one still shows its first
+    label at column 0. The brief is opened ONCE, non-blocking and without following a final symlink, and the type
     is checked on that open descriptor, so no swap can land between a check and the open, and a FIFO or
     device never blocks the hook."""
     try:
@@ -10524,6 +10526,8 @@ def _rdp_read_brief(path, max_bytes):
         text = blob.decode("utf-8")
     except UnicodeDecodeError as exc:
         return (None, "the brief {} is not valid UTF-8 ({})".format(path, exc))
+    if text.startswith("\ufeff"):
+        text = text[1:]
     if "\x00" in text:
         return (None, "the brief {} contains a NUL".format(path))
     if any(ch in text for ch in _RDP_NONPHYSICAL):
@@ -10650,10 +10654,12 @@ def _rdp_gitlink_entry(repo, relpath, want):
     return ("160000", lines[1]) if lines[1] == want[1] else ("other", "")
 
 
-def _rdp_reconcile(cfg, found, root, brief, repo_default):
+def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
     """Reconcile a revision-target brief against the repository: ("allow"|"note"|"deny"|"unverifiable",
     message). repo_default is the top level of the repository the dispatch runs in, used when the brief
-    names no repository. The checks run in a fixed order and the first failure decides."""
+    names no repository. The authority runs from auth_dir, the top level of the worktree whose registry
+    binds the dispatch (root when None), so a relative authority argv is the registry's own, never a copy a
+    linked or nested worktree supplies. The checks run in a fixed order and the first failure decides."""
     labels = cfg["labels"]
     pins = found["revision"]
     if not pins:
@@ -10692,7 +10698,7 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default):
                 "command".format(_RDP_BUDGET))
     try:
         auth = subprocess.run(cfg["argv"] + [brief], capture_output=True, text=True,
-                              timeout=auth_timeout, cwd=root)
+                              timeout=auth_timeout, cwd=auth_dir or root)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         return ("unverifiable", "the authority command failed to run ({})".format(exc))
     if auth.returncode != 0:
@@ -10771,6 +10777,10 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default):
         if not tab or len(fields) != 3:
             return ("unverifiable", "the tree of {} cannot be parsed".format(pin))
         entries[name] = (fields[0].decode("ascii", "replace"), fields[2].decode("ascii", "replace"))
+    # With core.fileMode false git itself ignores the executable bit of a working-tree file, so a file
+    # whose content matches the pin and whose mode differs only in that bit is clean, as git status says.
+    p = _review_git(repo, "config", "--bool", "core.fileMode")
+    exec_bit_ignored = p is not None and p.returncode == 0 and p.stdout.strip() == b"false"
     differ = []
     for path in paths:
         key = path.encode("utf-8")
@@ -10788,6 +10798,9 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default):
         except (OSError, ValueError) as exc:
             return ("unverifiable", "the working-tree entry of declared path {!r} cannot be read ({})".format(
                 path, exc))
+        if exec_bit_ignored and want is not None and got is not None and want[1] == got[1] \
+                and {want[0], got[0]} == {"100644", "100755"}:
+            got = want
         if got != want:
             differ.append(path)
     if differ:
@@ -10804,165 +10817,120 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default):
     return ("allow", "")
 
 
-# A provably plain dispatch is written only with these characters outside quotes (and printable non-ASCII
-# letters, which bash also reads literally); every other character is shell syntax this hook does not read.
-_RDP_PLAIN_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-./:=+%@,^")
-_RDP_WORD_END = " \t\n;&|<"
-# The command words that change the directory or the shell's state, run text as a command, or open a
-# compound command: a command holding one as any segment's command word is never a provably plain dispatch.
-_RDP_SHELL_CONTROL = frozenset((
-    "cd", "pushd", "popd", "eval", "exec", "source", ".", "alias", "unalias", "shopt", "set", "builtin",
-    "command", "enable", "function", "trap", "hash", "export", "declare", "typeset", "local", "readonly",
-    "unset", "let", "coproc", "time", "select", "case", "esac", "if", "then", "else", "elif", "fi", "for",
-    "while", "until", "do", "done", "in"))
-_RDP_ANSI_C_SIMPLE = dict(a="\a", b="\b", e="\x1b", E="\x1b", f="\f", n="\n", r="\r", t="\t", v="\v")
-_RDP_ANSI_C_SIMPLE.update(zip("\\'\"?", "\\'\"?"))
-_RDP_ANSI_C_WIDTH = dict(x=2, u=4, U=8)
-
-
-def _rdp_plain_lex(command):
-    """The command read as provably plain simple commands: (segments, None), each segment a tuple (words,
-    the operator before it, whether its standard input is /dev/null), or (None, reason) for any command
-    that is not plain. Plain means: words made only of _RDP_PLAIN_CHARS (or printable non-ASCII), or one
-    whole-word single- or double-quoted run (a double-quoted run holding no $, backquote, backslash or !);
-    commands separated by newline, ;, &, &&, || or a pipe; and no redirection except reading /dev/null
-    (`</dev/null`, `N</dev/null`). Everything else (an expansion, a substitution, a glob, a brace, a
-    tilde, an escape, ANSI-C or locale quoting, a word mixing quoted and unquoted parts, a comment, a
-    subshell or group, a heredoc or here-string, a line continuation, any other redirection, a control
-    character) is not plain."""
-    segments = []
-    words = []
-    before = ""
-    stdin_null = False
-    i = 0
-    n = len(command)
-    while i < n:
-        c = command[i]
-        if c in " \t":
-            i += 1
-            continue
-        if c == "\n" or c in ";&|":
-            two = command[i:i + 2]
-            if two in ("&>", ";;", ";&"):
-                return (None, "the operator " + repr(two))
-            op = two if two in ("&&", "||", "|&") else c
-            if not words:
-                if op == "\n":
-                    i += 1
-                    continue
-                return (None, "an empty command before " + repr(op))
-            segments.append((words, before, stdin_null))
-            words = []
-            before = op
-            stdin_null = False
-            i += len(op)
-            continue
-        if c == "<":
-            k = i + 1
-            if k < n and command[k] in "<>&(":
-                return (None, "the redirection " + repr(command[i:k + 1]))
-            while k < n and command[k] in " \t":
-                k += 1
-            end = k + len("/dev/null")
-            if command[k:end] != "/dev/null" or (end < n and command[end] not in _RDP_WORD_END):
-                return (None, "a redirection other than </dev/null")
-            stdin_null = True
-            i = end
-            continue
-        if c == "'":
-            j = command.find("'", i + 1)
-            if j < 0:
-                return (None, "an unterminated quote")
-            text = command[i + 1:j]
-            if not text.isprintable():
-                return (None, "a control character in a quoted word")
-            end = j + 1
-        elif c == '"':
-            j = command.find('"', i + 1)
-            if j < 0:
-                return (None, "an unterminated quote")
-            text = command[i + 1:j]
-            if not text.isprintable() or any(ch in "$`\\!" for ch in text):
-                return (None, "a double-quoted word holding an expansion, an escape or !")
-            end = j + 1
-        else:
-            j = i
-            while j < n and (command[j] in _RDP_PLAIN_CHARS or (ord(command[j]) > 127
-                                                                 and command[j].isprintable())):
-                j += 1
-            if j == i:
-                return (None, "the character " + repr(c))
-            text = command[i:j]
-            end = j
-            if text.isdigit() and end < n and command[end] == "<":
-                i = end   # the descriptor of a redirection; the redirection itself is read next
-                continue
-        if end < n and command[end] not in _RDP_WORD_END:
-            return (None, "a word that joins quoted, unquoted or special parts")
-        words.append(text)
-        i = end
-    if words:
-        segments.append((words, before, stdin_null))
-    elif before not in ("", "\n", ";", "&"):
-        return (None, "a command that ends with " + repr(before))
-    return (segments, None)
-
-
-def _rdp_ansi_c(body):
-    """The text bash makes of the body of an ANSI-C quoted word."""
-    out = []
-    k = 0
-    n = len(body)
-    while k < n:
-        ch = body[k]
-        if ch != "\\" or k + 1 >= n:
-            out.append(ch)
-            k += 1
-            continue
-        e = body[k + 1]
-        if e in _RDP_ANSI_C_SIMPLE:
-            out.append(_RDP_ANSI_C_SIMPLE[e])
-            k += 2
-        elif e in _RDP_ANSI_C_WIDTH:
-            m = re.match("[0-9A-Fa-f]+", body[k + 2:k + 2 + _RDP_ANSI_C_WIDTH[e]])
-            if m:
-                out.append(chr(min(int(m.group(0), 16), 0x10FFFF)))
-                k += 2 + len(m.group(0))
-            else:
-                out.append("\\" + e)
-                k += 2
-        elif e in "01234567":
-            m = re.match("[0-7]+", body[k + 1:k + 4])
-            out.append(chr(int(m.group(0), 8) & 0xFF))
-            k += 1 + len(m.group(0))
-        elif e == "c" and k + 2 < n:
-            out.append(chr(ord(body[k + 2]) & 0x1F))
-            k += 3
-        else:
-            out.append("\\" + e)
-            k += 2
-    return "".join(out)
-
-
-def _rdp_mentions(command, commands):
-    """The declared commands a command that is not plain could name once bash removes its quoting: each
-    name found in the raw text, or in the text with each ANSI-C quoted body decoded, each read as written
-    and again with every quote, backslash, line continuation, dollar sign, brace and comma deleted (so a
-    quote-split name, an ANSI-C or locale quoted name, a brace list holding the name, and a variable set to
-    the name and expanded all name it). An over-approximation: a mention in prose is found too."""
-    decoded = re.sub("[$]'((?:[^'\\\\]|\\\\.)*)'", lambda m: _rdp_ansi_c(m.group(1)), command, flags=re.S)
-    texts = []
-    for text in (command, decoded):
-        flat = text.replace("\\\n", "")
-        for ch in "'\"\\$,{}":
-            flat = flat.replace(ch, "")
-        texts += [text, flat]
-    return sorted(name for name in commands if any(name in t for t in texts))
+# The shared "provably plain" command specification, decided on the raw characters before any lexing. A
+# command is provably plain only when ALL hold: (1) every character is printable ASCII, space to tilde (no
+# tab, newline, carriage return, NUL or non-ASCII character, so no Unicode digit, homoglyph or invisible
+# character); (2) no character of _RDP_PLAIN_FORBIDDEN appears outside a single-quoted segment; (3) a
+# single-quoted segment is literal, a double-quoted segment holds no character of _RDP_PLAIN_FORBIDDEN, and
+# an unterminated quote is not plain; (4) words are separated by spaces only, and the first word, the
+# command, is a bare name or path of _RDP_COMMAND_WORD_CHARS (so it is unquoted and no assignment leads)
+# that is not a shell, an interpreter or a wrapper (_RDP_WRAPPERS). Rules 1 and 2 exclude every expansion,
+# substitution, glob, redirection, operator, comment and escape, so a plain command is exactly one simple
+# command whose words are its literal text.
+_RDP_PLAIN_FORBIDDEN = frozenset("$`\\;&|<>(){}[]*?!#~")
+_RDP_COMMAND_WORD_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-")
+# The command words that run another command, or text, as a command: shells, interpreters, and the
+# builtins and wrappers that run their arguments. Compared without regard to case, and again with a
+# trailing version removed (python3.12, perl5.36). An explicit list is sound here only because rules 1 and
+# 2 already exclude every expansion, so the command word is exactly the text written.
+_RDP_WRAPPERS = frozenset((
+    "sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", "mksh", "pdksh", "oksh", "yash", "fish", "csh",
+    "tcsh", "busybox", "toybox", "python", "pypy", "perl", "ruby", "irb", "node", "nodejs", "deno", "bun",
+    "php", "lua", "luajit", "tclsh", "wish", "expect", "awk", "gawk", "mawk", "nawk", "osascript", "pwsh",
+    "powershell", "rscript", "julia", "guile", "racket", "groovy", "jshell", "ghci", "runghc", "eval",
+    "exec", "source", ".", "env", "command", "builtin", "xargs", "nohup", "timeout", "sudo", "doas", "su",
+    "runuser", "nice", "ionice", "chrt", "taskset", "setsid", "setpriv", "stdbuf", "unbuffer", "time",
+    "watch", "flock", "chroot", "unshare", "nsenter", "systemd-run", "script", "strace", "ltrace", "gdb",
+    "valgrind", "parallel", "fakeroot", "proot", "firejail", "bwrap", "caffeinate", "rlwrap", "entr", "ssh",
+    "find", "sed", "make", "coproc", "trap", "alias", "function"))
+# The shared vector table every implementation of the specification carries as self-test rows: (command,
+# whether it is provably plain). `git log --output=f` is plain: an output option is each hook's own
+# semantic check, not lexing.
+_RDP_PLAIN_VECTORS = (
+    ("git status", True), ("git commit -m 'fix: a; b'", True), ("ls -la docs/x.md", True),
+    ("opf record --type finding", True), ("git log --output=f", True),
+    ("git status; rm x", False), ("git $'re\\x00set'", False), ('git commit -m "$(id)"', False),
+    ("python3 -c 'print(1)'", False), ("env GIT_DIR=x git log", False), ("GIT_DIR=x git log", False),
+    ("git st*", False), ("git log \\\n", False), ("git log \u0661", False), ("bash -c 'x'", False),
+    ("xargs git reset", False))
 
 
 def _rdp_basename(word):
     """The command name a literal command word runs: its last path component."""
     return word.rsplit("/", 1)[-1]
+
+
+def _rdp_is_wrapper(word):
+    """Whether the command word word runs another command (_RDP_WRAPPERS)."""
+    name = _rdp_basename(word).casefold()
+    return name in _RDP_WRAPPERS or name.rstrip("0123456789.") in _RDP_WRAPPERS
+
+
+def _rdp_plain_words(command):
+    """(words, None) when command is provably plain under the shared specification above, words being the
+    literal word values with the quotes removed; otherwise (None, reason). The verdict is taken on the raw
+    characters: nothing is decoded and no escape or expansion is interpreted, and anything the
+    specification does not name as plain is not plain."""
+    if not isinstance(command, str):
+        return (None, "the command is not a string")
+    for ch in command:
+        if not " " <= ch <= "~":
+            return (None, "the character {!r} is not printable ASCII".format(ch))
+    words = []
+    word = None
+    i = 0
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if c == " ":
+            if word is not None:
+                words.append(word)
+                word = None
+            i += 1
+            continue
+        if c in "'\"":
+            j = command.find(c, i + 1)
+            if j < 0:
+                return (None, "an unterminated quote")
+            body = command[i + 1:j]
+            bad = [ch for ch in body if ch in _RDP_PLAIN_FORBIDDEN]
+            if c == '"' and bad:
+                return (None, "a double-quoted segment holding {!r}".format(bad[0]))
+            word = (word or "") + body
+            i = j + 1
+            continue
+        if c in _RDP_PLAIN_FORBIDDEN:
+            return (None, "the character {!r}".format(c))
+        word = (word or "") + c
+        i += 1
+    if word is not None:
+        words.append(word)
+    head = command.lstrip(" ").split(" ", 1)[0]
+    if not head or any(ch not in _RDP_COMMAND_WORD_CHARS for ch in head):
+        return (None, "a command word that is not a bare name or path")
+    if _rdp_is_wrapper(head):
+        return (None, "the command word {!r} runs another command".format(head))
+    return (words, None)
+
+
+def _rdp_mentions(command, commands):
+    """The declared commands a command could name once bash removes its quoting, compared without regard to
+    case: each name found in the raw text, or in the raw text with every quote, backslash, line
+    continuation, dollar sign, brace and comma deleted (so a quote-split name, a brace list holding the
+    name, and a variable set to the name and expanded all name it). Character deletions only: no quoting
+    is decoded. An over-approximation: a mention in prose is found too."""
+    flat = command.replace("\\\n", "")
+    for ch in "'\"\\$,{}":
+        flat = flat.replace(ch, "")
+    texts = (command.casefold(), flat.casefold())
+    return sorted(name for name in commands if any(name.casefold() in t for t in texts))
+
+
+def _rdp_opaque_quoting(command):
+    """Whether command holds ANSI-C or locale quoting ($'...' or $"..."): bash decodes such a body (escapes,
+    a NUL that ends the word, a translation) into text this hook does not read, so no name check over the
+    raw text can see what it runs."""
+    return "$'" in command or '$"' in command
 
 
 def _rdp_registry_dir(cwd):
@@ -11010,77 +10978,171 @@ def _rdp_decide(data):
     The whole decision runs inside the _RDP_BUDGET deadline, and in a worker thread the caller waits for
     only until that deadline: a read or probe blocked in the kernel (a slow or hung filesystem, a git or
     authority child) cannot hold the hook past it, and the decision is then UNVERIFIABLE. Each read also
-    checks the deadline itself, so a decision that finishes late never allows. A crash in the worker is
-    raised here, so it still reaches main's fail-closed exit."""
+    checks the deadline itself, and the worker stamps the moment it finished, so a decision that finishes
+    late never allows, even one that finished after this caller cleared the shared deadline. A crash in the
+    worker is raised here, so it still reaches main's fail-closed exit."""
     box = []
+    clock = time.monotonic
 
     def _work():
         try:
-            box.append((True, _rdp_decide_within(data)))
+            out = (True, _rdp_decide_within(data))
         except BaseException as exc:   # handed to the caller, which raises it
-            box.append((False, exc))
-    _RDP_DEADLINE[0] = time.monotonic() + _RDP_BUDGET
+            out = (False, exc)
+        box.append(out + (clock(),))
+    deadline = clock() + _RDP_BUDGET
+    _RDP_DEADLINE[0] = deadline
     try:
         worker = __import__("threading").Thread(target=_work, name="review-dispatch-pin", daemon=True)
         worker.start()
-        worker.join(max(0.0, _RDP_DEADLINE[0] - time.monotonic()) + _RDP_JOIN_GRACE)
+        worker.join(max(0.0, deadline - clock()) + _RDP_JOIN_GRACE)
     finally:
         _RDP_DEADLINE[0] = None
     if not box:
         return ("unverifiable", "the check did not finish within its {} second budget".format(_RDP_BUDGET))
-    ok, value = box[0]
+    ok, value, finished = box[0]
     if not ok:
         raise value
+    if value[0] in ("allow", "note") and finished >= deadline:
+        return ("unverifiable", "the check finished past its {} second budget, so its result is not "
+                "used".format(_RDP_BUDGET))
     return value
 
 
 def _rdp_main_worktree(root):
-    """The main worktree's top level when root is a linked worktree whose common git directory is the
-    main worktree's .git directory; None otherwise or when git cannot say."""
+    """For a linked worktree at root: (the main worktree's top level, None), or (None, detail) when root is
+    a linked worktree whose main worktree cannot be located (a separate git directory whose common
+    directory is not a main worktree's .git and names no core.worktree). (None, None) when root is not a
+    linked worktree. Raises OSError when git cannot say."""
     p = _review_git(root, "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir")
     if p is None or p.returncode != 0:
-        return None
+        raise OSError("git cannot read the common git directory of {}".format(root))
     lines = p.stdout.decode("utf-8", "surrogateescape").split("\n")
-    if len(lines) < 3 or lines[0] == lines[1] or os.path.basename(lines[0]) != ".git":
+    if len(lines) < 3:
+        raise OSError("git printed no common git directory for {}".format(root))
+    if os.path.realpath(lines[0]) == os.path.realpath(lines[1]):
+        return (None, None)
+    if os.path.basename(lines[0]) == ".git":
+        return (os.path.dirname(lines[0]), None)
+    q = _review_git(root, "config", "--file", os.path.join(lines[0], "config"), "--get", "core.worktree")
+    if q is not None and q.returncode == 0:
+        top = q.stdout.decode("utf-8", "surrogateescape").rstrip("\n")
+        if top:
+            return (os.path.normpath(os.path.join(lines[0], top)), None)
+    return (None, "the session is a linked worktree of the git directory {}, whose main worktree cannot be "
+            "located".format(lines[0]))
+
+
+def _rdp_read_small(path):
+    """The text of a small regular file read without following a final symlink and without blocking, or
+    None when it is absent, not a regular file, unreadable or over 4096 bytes."""
+    try:
+        fd = os.open(path, _RDP_OPEN_FLAGS | os.O_NOFOLLOW)
+    except (OSError, ValueError):
         return None
-    return os.path.dirname(lines[0])
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        blob = _rdp_read_fd(fd, 4097)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(blob) > 4096:
+        return None
+    return blob.decode("utf-8", "surrogateescape")
+
+
+def _rdp_gitfile_main(cwd):
+    """Where git cannot be run (a broken shared configuration, say): the main worktree's top level of the
+    linked worktree holding cwd, read from the raw files git itself reads (the worktree's .git file names
+    its git directory, whose commondir file names the common directory, the main worktree's .git). None
+    when cwd is not inside a linked worktree whose common directory is a .git directory."""
+    path = os.path.realpath(cwd)
+    while True:
+        try:
+            st = os.lstat(os.path.join(path, ".git"))
+        except OSError:
+            st = None
+        if st is not None:
+            if not stat.S_ISREG(st.st_mode):
+                return None
+            text = _rdp_read_small(os.path.join(path, ".git"))
+            if text is None or not text.startswith("gitdir: "):
+                return None
+            gitdir = os.path.join(path, text[len("gitdir: "):].strip())
+            common = _rdp_read_small(os.path.join(gitdir, "commondir"))
+            if common is None or not common.strip():
+                return None
+            common = os.path.normpath(os.path.join(gitdir, common.strip()))
+            return os.path.dirname(common) if os.path.basename(common) == ".git" else None
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
 
 
 def _rdp_decide_within(data):
-    """_rdp_decide's body, run with the deadline set."""
+    """_rdp_decide's body, run with the deadline set. The scope is the UNION of every way to the registry:
+    the git-resolved top level, the main worktree of a linked worktree (through git, or through the raw
+    .git and commondir files where git cannot run), and the cwd's ancestors. Git success can only ADD a
+    binding, never remove one, so a repository configuration (core.worktree, a separate git directory) or a
+    broken shared configuration cannot turn the check off. A binding found anywhere but the session
+    repository's own registry (or its main worktree's) is FOREIGN: a dispatch under it is a cannot-evaluate,
+    since the nested or redirected repository it would be checked in is not the one the registry binds."""
     cwd = data.get("cwd")
     tool_input = data.get("tool_input")
     root = _orch_root(data)
-    reg_dir = root
-    status, reg = _orch_registry(root, nofollow=True) if root is not None else ("absent", None)
-    if status == "absent" and root is not None:
-        # A linked worktree carries no registry of its own: the main worktree's registry scopes it.
-        main_top = _rdp_main_worktree(root)
+    withheld = None
+    own = []
+    if root is not None:
+        own.append(root)
+        try:
+            main_top, why = _rdp_main_worktree(root)
+        except OSError as exc:
+            main_top, why = None, str(exc)
         if main_top is not None:
-            reg_dir = main_top
-            status, reg = _orch_registry(main_top, nofollow=True)
-    if status == "absent":
-        # git cannot resolve the session's top level (no repository, a broken configuration, a refused
-        # ownership check, a deleted cwd), or resolves one without a registry (a worktree or repository
-        # nested inside an orchestrated tree). Neither is proof the session is out of scope: the registry is
-        # looked for on cwd's ancestors, and a binding found there scopes the session.
-        where, found_dir = _rdp_registry_dir(cwd)
-        if where == "none":
-            return ("allow", "")
-        if where == "fail":
-            return _rdp_withhold(tool_input, "the session repository cannot be discovered and " + found_dir)
-        reg_dir = found_dir
+            own.append(main_top)
+        withheld = why
+    else:
+        main_top = _rdp_gitfile_main(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None
+        if main_top is not None:
+            own.append(main_top)
+    for reg_dir in own:
         status, reg = _orch_registry(reg_dir, nofollow=True)
-    if status == "absent":
-        return ("allow", "")
-    binding, cfg = _rdp_binding(reg) if status == "ok" else ("bad", reg)
-    if binding is None:
-        return ("allow", "")
+        if status == "absent":
+            continue
+        binding, cfg = _rdp_binding(reg) if status == "ok" else ("bad", reg)
+        if binding is None:
+            break
+        return _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign=False)
+    # git cannot resolve the session's top level (no repository, a broken configuration, a refused ownership
+    # check, a deleted cwd), or resolves one without a binding (a worktree or repository nested inside an
+    # orchestrated tree, or a top level moved off the cwd's ancestors by core.worktree). Neither is proof the
+    # session is out of scope: the registry is looked for on cwd's ancestors, and a binding found there
+    # scopes the session.
+    where, found_dir = _rdp_registry_dir(cwd)
+    if where == "fail":
+        return _rdp_withhold(tool_input, "the session repository cannot be discovered and " + found_dir)
+    if where == "found" and not any(os.path.realpath(found_dir) == os.path.realpath(d) for d in own):
+        status, reg = _orch_registry(found_dir, nofollow=True)
+        if status != "absent":
+            binding, cfg = _rdp_binding(reg) if status == "ok" else ("bad", reg)
+            if binding is not None:
+                foreign = root is not None and os.path.realpath(found_dir) != os.path.realpath(root)
+                return _rdp_bound(data, tool_input, binding, cfg, root, found_dir, foreign=foreign)
+    if withheld:
+        return _rdp_withhold(tool_input, withheld)
+    return ("allow", "")
+
+
+def _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign):
+    """The decision in a session scoped by the binding of the registry at reg_dir."""
     if binding == "bad":
         # A malformed binding cannot say which commands dispatch.
         return _rdp_withhold(tool_input, "the orchestration registry or its review_dispatch binding is "
                              "malformed ({})".format(cfg))
-    result = _rdp_judge(data, cfg, root, reg_dir, tool_input)
+    result = _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=foreign)
     if result[0] in ("allow", "note") and _rdp_overdue():
         # A read or probe that overran the deadline leaves a result that was not reached within the
         # budget: a cannot-evaluate, never an allow.
@@ -11090,59 +11152,52 @@ def _rdp_decide_within(data):
 
 
 def _rdp_not_plain(cfg, names, why):
-    """The UNVERIFIABLE message for a command that names a declared dispatch command but is not a provably
+    """The UNVERIFIABLE message for a command that may run a declared dispatch command but is not a provably
     plain dispatch."""
-    return ("unverifiable", "the command names the declared dispatch command {} but is not a plain "
-            "dispatch ({}), so the hook cannot tell which brief it reads or where; write the dispatch "
-            "plainly, as a command of its own: {} [OPTIONS] {} PATH, literal words only (a whole "
-            "word may be quoted), the brief option last, no wrapper or variable, no redirection other than "
-            "</dev/null, and no cd, eval or other shell control in the same command".format(
-                names[0], why, names[0], cfg["brief_option"]))
+    name = names[0] if names else sorted(cfg["commands"])[0]
+    return ("unverifiable", "the command {} but is not a plain dispatch ({}), so the hook cannot tell what "
+            "it runs, which brief it reads or where; write the dispatch plainly, as the only command of "
+            "the call: {} [OPTIONS] {} PATH, literal printable ASCII words only (a single-quoted segment, or "
+            "a double-quoted one holding no shell character, may appear inside a word), the brief option "
+            "last, no wrapper, variable, operator, redirection or second command".format(
+                "names the declared dispatch command " + name if names else "uses ANSI-C or locale quoting",
+                why, name, cfg["brief_option"]))
 
 
-def _rdp_judge(data, cfg, root, reg_dir, tool_input):
+def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
     """The decision for a Bash payload in a session with a well-formed binding. Only a provably plain
-    dispatch (_rdp_plain_lex: literal words, exactly one segment whose command word is a declared command,
-    no other word naming one, no shell control word) gets the pin check; any other command that names a
-    declared command is UNVERIFIABLE, and a command that names none is allowed."""
+    command (_rdp_plain_words) whose command word is a declared command gets the pin check; a command that
+    is not plain is UNVERIFIABLE when it names a declared command (_rdp_mentions) or holds ANSI-C or locale
+    quoting, and a plain command that names none is allowed. Names are compared without regard to case,
+    since a case-insensitive filesystem runs ORCH-DISPATCH as orch-dispatch."""
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
         return ("unverifiable", "the Bash tool_input carries no command string")
     commands = cfg["commands"]
-    segments, why = _rdp_plain_lex(command)
-    if segments is None:
+    words, why = _rdp_plain_words(command)
+    if words is None:
         names = _rdp_mentions(command, commands)
-        return _rdp_not_plain(cfg, names, why) if names else ("allow", "")
-    dispatches = [seg for seg in segments if _rdp_basename(seg[0][0]) in commands]
-    first = dispatches[0] if dispatches else None
-    for seg in segments:
-        # The one dispatch's own arguments may mention a declared name (in a brief path, say); no other word
-        # may, since a wrapper, a second dispatch or a nested shell string could run it.
-        for w in (seg[0][:1] if seg is first else seg[0]):
-            named = sorted(name for name in commands
-                           if name in w and not (seg is first and _rdp_basename(w) == name))
-            if named:
-                return _rdp_not_plain(cfg, named, "it names {} other than as the command word of one "
-                                      "dispatch".format(named[0]))
-    if first is None:
+        return _rdp_not_plain(cfg, names, why) if names or _rdp_opaque_quoting(command) else ("allow", "")
+    word = _rdp_basename(words[0])
+    if word.casefold() not in {name.casefold() for name in commands}:
+        # The one dispatch's own arguments may mention a declared name (in a brief path, say); a plain
+        # command that is no dispatch may not, since it could run one (a find -exec, say).
+        named = _rdp_mentions(" ".join(words), commands)
+        if named:
+            return _rdp_not_plain(cfg, named, "it names {} other than as the command word of a "
+                                  "dispatch".format(named[0]))
         return ("allow", "")
-    word = _rdp_basename(first[0][0])
-    for seg in segments:
-        if seg[0][0] in _RDP_SHELL_CONTROL or _ENV_ASSIGN_RE.match(seg[0][0]):
-            return _rdp_not_plain(cfg, [word], "it runs {!r}, which can change the directory, the "
-                                  "shell's state or what runs".format(seg[0][0]))
-    words, before, _stdin_null = first
-    if before in ("|", "|&"):
-        return ("deny", "the {} dispatch reads its standard input from a pipe; pass the brief as one "
-                "file argument ({} PATH)".format(word, cfg["brief_option"]))
     args = words[1:]
     option = cfg["brief_option"]
+    if len(option) == 2 and any(a.startswith(option + "=") for a in args):
+        return ("deny", "the {} dispatch writes the short brief option as {}=PATH, which a getopt parser "
+                "reads as a value starting with an equals sign; write {} PATH".format(word, option, option))
     briefs = _rdp_brief_args(args, option)
     if len(briefs) != 1 or not briefs[0] or briefs[0] == "-":
         return ("deny", "the {} dispatch must pass exactly one brief file as {} PATH (found "
                 "{})".format(word, option, len(briefs)))
-    last = (len(args) >= 2 and args[-2] == option) or args[-1].startswith(option + "=") or (
-        len(option) == 2 and args[-1].startswith(option) and args[-1] != option and args[-1][2] != "=")
+    last = (len(args) >= 2 and args[-2] == option) or (len(option) > 2 and args[-1].startswith(option + "=")) \
+        or (len(option) == 2 and args[-1].startswith(option) and args[-1] != option)
     if not last or "--" in args[:-1]:
         # A parser this hook does not know may take the brief from an alias or a grouped short option
         # (`-b`, `-xb`); given last, the declared option is the one a last-wins parser keeps.
@@ -11152,10 +11207,18 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input):
     if root is None:
         return ("unverifiable", "git cannot resolve the session repository from the cwd {!r}, so the "
                 "{} dispatch cannot be checked".format(cwd, word))
+    if foreign:
+        return ("unverifiable", "the session repository {} is not the repository of the registry that "
+                "binds the {} dispatch ({}): a nested repository, or a top level moved by core.worktree, "
+                "would supply its own commit and authority".format(root, word, reg_dir))
     if not isinstance(cwd, str) or not os.path.isabs(cwd):
         return ("unverifiable", "the session cwd {!r} is not an absolute path, so the directory the "
                 "{} dispatch runs in cannot be resolved".format(cwd, word))
     brief = briefs[0] if os.path.isabs(briefs[0]) else os.path.join(cwd, briefs[0])
+    for form in (os.path.normpath(brief), os.path.realpath(brief)):
+        if form.startswith(("/proc/", "/dev/")) or form in ("/proc", "/dev"):
+            return ("unverifiable", "the brief {} is under /proc or /dev, which name a different file in "
+                    "this hook's process than in the dispatcher's".format(brief))
     text, why = _rdp_read_brief(brief, cfg["max_brief_bytes"])
     if text is None:
         return ("unverifiable", why)
@@ -11176,13 +11239,14 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input):
                           "{}: {}".format(brief, target))
         return ("note", "AIQT rule vfxcmt: the brief {} declares target {}, so no revision was "
                 "reconciled; a review of committed work must pin it".format(brief, target))
-    return _rdp_reconcile(cfg, found, root, brief, root)
+    return _rdp_reconcile(cfg, found, root, brief, root, reg_dir)
 
 
 def review_dispatch_pin(data):
     """vfxcmt, PreToolUse Bash: a review dispatch made through a registry-declared command pins an
     immutable, authoritative revision whose changed set is the declared review set and whose declared
-    paths carry no uncommitted state, BEFORE the dispatch runs. Inert without a review_dispatch binding.
+    paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
+    dispatch runs. Inert without a review_dispatch binding.
     A refusal denies and names its reason; a cannot-evaluate denies with an UNVERIFIABLE: prefix; a
     declared non-revision target, a malformed binding on a foreground call, or a branch label that does
     not resolve to the pin is allowed with a note. A crash reaches main's PreToolUse fail-closed exit 2.
