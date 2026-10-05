@@ -11,7 +11,7 @@ description: The OPF operating loop for an AI development assistant. Read the ad
   verification is never shortened for speed.
 ---
 
-<!-- OPF-FLOW: release=0.3.0 template-sha256=457359c4d3f2dd9bed53049d029e5fcdbad4f667d3bac09213c2145e44e46a33 -->
+<!-- OPF-FLOW: release=0.3.0 template-sha256=7ebef9598be84534c9d33332408c5c2604ffbb5596e2a079adf090c74b82e545 -->
 
 # /flow: the OPF operating loop
 
@@ -76,7 +76,8 @@ Three rules govern everything else:
    never frozen: it resolves one decision the run surfaced, it is read through the decision
    rule alone at every point this skill reads an answer, at a run start (section 3, step 5),
    at the anchors section 1, step 1 names, in selection's trigger test and at a park's sweep
-   or `unpark` (sections 1 and 3), and at the section 7 merge gate, and it grants only what
+   or `unpark` (sections 1 and 3), at the section 7 convergence and stall tests, and at the
+   section 7 merge gate, and it grants only what
    its fixed grammar grants on that one decision, so a granting answer landed mid-run is
    carried out at the next such read.
 
@@ -192,7 +193,8 @@ Three rules govern everything else:
    still counts. The run reads an answer through this one path each time it needs it, never
    from a copy. Two effects of an answer last, each read afresh at every use, so a maintainer
    changes it by superseding the answer: a gap's `waive`, read at every parent close check, and
-   the residuals an `accept` names, read at the section 7 merge gate and, for a unit already
+   the residuals an `accept` names, read, from the decisions the unit's own `park` entries
+   name, at the section 7 convergence and stall tests and merge gate and, for a unit already
    resumed under another option, at every anchor (step 1), so an `accept` that supersedes the
    answer a unit resumed under takes that unit to the merge gate at the next anchor; the gate
    carries out in the `accept`'s place any other option a superseding answer names. Every other
@@ -633,8 +635,9 @@ ASCII other than `%`, comma and space, so `%41` is malformed, never `A`), or an 
 malformed, and every reader fails closed on it (section 3, step 4). `lane=` comes from the
 closed set `advance-<i>` (`<i>` the advancement lane number, 1 upward), `harden`, and `merge`: a
 `start` entry sets the advancement or hardening lane, and a `converge` entry sets `merge`, the
-lane the stream then sits in; a unit that merges under a maintainer's `accept` (section 7) has
-no clean round to converge on, so its `merge` entry carries `lane=merge` instead; an `unpark`
+lane the stream then sits in; a unit that merges under a maintainer's `accept` with no
+converging round (section 7) has no `converge` entry to set it, so its `merge` entry carries
+`lane=merge` instead; an `unpark`
 that returns a unit from the merge lane, or sends one there under an `accept` (section 3,
 step 5), carries `lane=` itself, as does a merge-delta `verdict`
 entry that returns one (section 7).
@@ -682,11 +685,11 @@ item ID; every `park` entry carries it, and every sweep matches on it.
 | `start` | `drafting`; this entry also carries `lane=`, `scope=`, `branch=`, and `tier=`, the stream's activation facts (section 3) |
 | `apply` | `verifying` |
 | `verdict` | `fixing` (`result=findings`: confirmed findings to fix) or `verifying` (`result=clean` on a VERIFY, next DISCOVERY pending; or `result=failed`, the round re-issued); a merge-delta round's entry (`phase=merge-delta`, section 7) carries `merging` on `result=clean`, the refreshed head pinned, and on `result=findings` carries `fixing` plus the `lane=` that returns the unit where a finding of medium or worse severity stays on it, or `merging` where its every confirmed finding is routed out of the unit (section 7); it carries `phase=`, `result=`, and `rev=` |
-| `converge` | `converged`; it carries the converging DISCOVERY round's `phase=discovery`, `result=clean`, and `rev=`, and `lane=merge` |
+| `converge` | `converged`; it carries the converging DISCOVERY round's `phase=discovery` and `rev=`, and `lane=merge`, with `result=clean` for a clean convergence, or `result=findings` for one converged with accepted residuals (section 7), each accepted residual named by its `finding` ID on the entry's later lines |
 | `park` | `parked`; it carries `trigger=` |
 | `unpark` | the status the stream resumes at, never `parked` or `done`: for an overlap or lane park (section 3, step 5) it is that of the unit's latest flow entry whose status is not `parked`, whose `next` line the entry also copies; for a section 7 park, the status the carried-out option gives it; an `unpark` that ends an overlap or lane park and also carries out a deferred section 7 option (section 7) takes the option's status, this second rule |
 | `rescope` | the stream's current status, unchanged: any value here but `parked` or `done`; the entry re-declares `scope=` (section 3, step 5) |
-| `merge` | `merging`; for a unit merging under a maintainer's `accept`, which writes no `converge` entry, it also carries `lane=merge` |
+| `merge` | `merging`; for a unit merging under a maintainer's `accept` with no `converge` entry (section 7), it also carries `lane=merge` |
 | `finish` | `done` |
 
 The grammar deliberately cannot collide with the writer's own lifecycle lines, which open with
@@ -806,8 +809,9 @@ carries one out by re-declaring `tier=` on the unit's next flow entry.
 the mechanical gates. A light unit's panel, every family in `review_families_light`, is its
 DISCOVERY panel, recorded with `phase=discovery`, and the finding, convergence,
 verification-rule, reliability, and at-stall bullets below apply to it with that roster, its fixes
-committed before its next panel since it runs no VERIFY, so a clean, complete, non-degraded
-light panel writes the `converge` entry that takes the unit to `lane=merge`.
+committed before its next panel since it runs no VERIFY, so a complete, non-degraded light
+panel on which the unit converges (the convergence bullet below) writes the `converge` entry
+that takes the unit to `lane=merge`.
 
 **Substantive and sensitive units** take the discovery/verify cycle:
 
@@ -818,24 +822,24 @@ light panel writes the `converge` entry that takes the unit to `lane=merge`.
   the width of its class, and committed before VERIFY dispatches. A verdict whose quoted
   evidence does not match the reviewed revision fails the delivery: it is re-dispatched, and the
   failure is recorded.
-- **Convergence** is declared only on a clean, complete, non-degraded DISCOVERY panel: every
-  required family returns a real, non-empty, non-timed-out verdict reporting zero findings on
-  the same pinned revision. A complete, non-degraded panel whose reports leave zero findings
-  open on the unit is clean for this test, judged on the panel's grade (the routing bullet
-  below), never on the run's own regrading: every reported finding the panel grades medium
-  or worse is one the unit's `verdict` entries record as closed (the verification rule
-  below) or one a maintainer's `accept` names by its `finding` ID (the at-stall bullet
-  below, read through the decision rule), and every other reported finding is one the
-  unit's `verdict` or `converge` entries record as routed out of the unit (the routing
-  bullet below), the round's own routings of findings it newly confirms included: a unit
-  whose open set is so empty is converged, never looping, so the round writes the
-  `converge` entry exactly as a
-  zero-findings panel does, the re-reports and the routings listed on that entry's later
-  lines; a reported hypothesis refuted at validation is never a confirmed `finding` (findings
-  are validated at source, above) and likewise never keeps a panel from counting as clean
-  for this test. An empty or timed-out verdict makes the round failed, never clean,
-  unless another leg's confirmed findings make it a `findings` round (section 5). A clean VERIFY
-  never declares convergence and never replaces the next discovery panel.
+- **Convergence** is declared only on a complete, non-degraded DISCOVERY panel, every
+  required family returning a real, non-empty, non-timed-out verdict on the same pinned
+  revision, and is judged by one plain rule: the unit is converged when that latest
+  full-panel round reports no finding the panel grades medium or worse that is not named
+  in a standing `accept` (the at-stall bullet below, read through the decision rule from
+  the decisions the unit's own `park` entries name). The panel's own grade decides (the
+  routing bullet below): the run never regrades a finding and never matches a re-reported
+  finding to an earlier closed ID to dismiss it; a re-report is open, a recurrence the
+  verification rule below records. A convergence that relies on an `accept` is recorded
+  as converged with accepted residuals, its `converge` entry carrying `result=findings`
+  and naming each accepted residual by its `finding` ID (section 5), never as clean. A
+  finding the panel grades minor never blocks convergence: it routes out of the unit as
+  the routing bullet below directs, the hardening lane when its files overlap nothing
+  active. The converging round writes the `converge` entry (section 5), which takes the
+  unit to `lane=merge`. An empty or timed-out verdict makes the round failed, never
+  converged, unless another leg's confirmed findings make it a `findings` round (section
+  5). A clean VERIFY never declares convergence and never replaces the next discovery
+  panel.
 - **The verification rule**, the progress-gated rule that governs fixing rounds in place of any
   fixed round cap: fix rounds continue while each round makes progress, and progress is read
   from declared records of the unit's rounds, never from memory and never by prose-matching.
@@ -858,17 +862,18 @@ light panel writes the `converge` entry that takes the unit to `lane=merge`.
   inferred later from prose. This rule reads each DISCOVERY round over its window: that
   round's `verdict` entry together with every VERIFY and merge-delta `verdict` entry since
   the unit's previous non-failed DISCOVERY entry, their listed openings, closures, and
-  routings combined. Convergence is judged first: a round on which the unit converges (the
-  convergence bullet above, the light-panel rule included) is progress and never a stall, so
-  no round both converges and declares one. The unit's first non-failed DISCOVERY round is
-  the baseline, and this rule never declares a stall on it. A **stall** is a later round
-  whose window shows no net closure (it closes no more findings than it opens, a routed
-  finding counting as neither) and leaves findings open on the unit, an oscillation (a
-  recorded reopening), or regressions without
-  offsetting closures; a round whose window leaves no finding open on the unit, judged as
-  the convergence bullet's test is, every remaining finding routed away, closed, or named
-  in a maintainer's `accept` included, never counts toward a stall and never blocks
-  convergence: complete and non-degraded it converges (the convergence bullet above), and
+  routings combined. The unit's first non-failed DISCOVERY round is the baseline, and this
+  rule never declares a stall on it. A **stall** is a later round whose window shows no
+  net reduction in the unit's open medium-or-worse findings (it closes no more such
+  findings than it opens, severity at the panel's grade, the routing bullet below) and
+  that leaves such a finding open outside a standing `accept` or records an oscillation:
+  a closed finding re-reported and confirmed is an oscillation, recorded as the reopen
+  rule above says, and it counts as no reduction however its later fix lands, so a round
+  whose window records one stalls and never converges, even where its panel's own reports
+  would pass the convergence bullet's test; a round with no oscillation in its window
+  that leaves no medium-or-worse finding open outside a standing `accept` (read as the
+  convergence bullet reads one) is never a stall: complete and non-degraded it converges
+  (the convergence bullet above), and
   otherwise its failed, empty, or timed-out legs are reviewer reliability (the reliability
   bullet below), never a stall. A finding that disappears with no deliberate intervening
   change is not
@@ -1032,7 +1037,10 @@ convergence rule.
   severity read at the panel's grade, the highest any reporting leg gives the finding, never
   the run's own regrading. Minor
   findings route by file overlap: the umbrella's next unit when the files overlap it, the
-  hardening lane when they overlap nothing active, parked otherwise.
+  hardening lane when they overlap nothing active, parked otherwise. A routed finding a
+  later round re-reports at medium or worse severity returns to the unit that found it:
+  that round's `verdict` entry lists it as an opening and withdraws the routing, so one
+  record owns it.
 - Fix rounds continue until the unit converges or the verification rule (above) declares a
   stall. A stall goes to the maintainer as a scoped `pending_decision`, not another round, and
   parks the unit on it through the at-stall path above, unless a governing `flow rule stall
@@ -1061,7 +1069,10 @@ convergence rule.
   within those limits never by itself shows that gate met. A unit reaches this gate only when
   its latest `converge` entry follows every `apply` entry and every DISCOVERY and VERIFY
   `verdict` entry it has (a higher `WL` number), or under a maintainer's `accept` for
-  exactly the residuals it names (above); a merge-delta `verdict` entry
+  exactly the residuals it names (above), and a `converge` entry recorded with accepted
+  residuals (section 5) counts here only with each `accept` it names read afresh as this
+  gate reads every acceptance (above), a superseding option carried out in its place; a
+  merge-delta `verdict` entry
   (`phase=merge-delta`, section 5) sits outside that comparison and never unseats a recorded
   convergence: clean, or its every confirmed finding routed out of the unit (the merge-delta
   bullet below), the convergence stands and the refreshed head pins; on a finding of medium
@@ -1102,7 +1113,10 @@ convergence rule.
   unit as in hand (section 1, step 2), never as a second unit in one lane. A unit under an
   `accept` is returned exactly the same way, out of the merge lane and the section 3, step
   5 straight-to-the-gate path, and fixes in its start lane: the standing `accept` covers
-  only the findings it names (the merge bullet above), never a finding of this round, and
+  only the findings it names (the merge bullet above), never a finding of this round (a
+  re-report of a still-open residual the `accept` names, the `accept` read afresh at the
+  gate, is not a finding of this round, not an opening, returns the unit nowhere, and
+  never blocks the pin), and
   the returned unit, accepted or not, reaches the merge gate again only through that
   ordinary verification, a new `converge` entry (the convergence bullet above) or a fresh
   maintainer decision at a park it takes there, the `accept` never standing in for the
@@ -1398,7 +1412,7 @@ verification_floor = the store's declared profile floor
 <!-- /OVERLAY:flow-verification-floor -->
 
 <!-- OVERLAY:flow-verification-convergence-rule -->
-verification_convergence_rule = the section 7 verification rule: fix rounds continue while each round makes progress, read over each round's window of `verdict` entries; a stall is a later round (never the unit's first non-failed DISCOVERY round, never one on which the unit converges, and never one whose window leaves no finding open on the unit) whose window shows no net closure, an oscillation, or regressions without offsetting closures; a finding that disappears with no deliberate intervening change is not progress (the AIQT Guardrails pack's `rerun-pass-is-still-failure` rule); a binding may be stricter, never weaker, never counts a failed round, and never stalls on a round count alone
+verification_convergence_rule = the section 7 verification rule: fix rounds continue while each round makes progress, read over each round's window of `verdict` entries; a stall is a later round (never the unit's first non-failed DISCOVERY round) with no net reduction in the unit's open medium-or-worse findings that leaves such a finding open outside a standing `accept` or records an oscillation, a closed finding re-reported, which counts as no reduction; a finding that disappears with no deliberate intervening change is not progress (the AIQT Guardrails pack's `rerun-pass-is-still-failure` rule); a binding may be stricter, never weaker, never counts a failed round, and never stalls on a round count alone
 <!-- /OVERLAY:flow-verification-convergence-rule -->
 
 <!-- OVERLAY:flow-status-surface -->
