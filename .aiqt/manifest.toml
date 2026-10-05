@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "bd81df314f5d341f97ca21a0b05b75e7f1b536e8a4b3f460d0031cfb1b776d48"
+tree-sha256 = "8bf4925d9f481625b243d0635e1f53813a78faf6456be7ce5b1f936c5bf037a9"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 254929
-sha256 = "941517e5e768d12ff4d2c234a0eb94c5d2da6cc414f62e0a5dd8180212d494de"
+bytes = 254972
+sha256 = "99472ee6447cdad552e9bf272966747c377e76a586175625848259b30ec7ae63"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2241,8 +2241,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41485
-sha256 = "2f080ffa44c8c42885023d60051a26fe86bbe5b2325c4e87a43337be80ea444b"
+bytes = 41527
+sha256 = "7d855714c2b0dc105ff579cf0cee6cfea90fad2ca7b7bd1e54fb0258830ea12d"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2440,9 +2440,14 @@ bytes = 10627
 sha256 = "02f97b775948be98897e6ffb2b28999a37c387ad4170104dc72ea38f5cd8bc64"
 
 [[sources]]
+path = "opf/prompt-pack/flow/SKILL.md"
+bytes = 115690
+sha256 = "87ef3ca951e0f60e1f9ea8a397e594b86e0fdcf5f61de2749453d016bb274492"
+
+[[sources]]
 path = "opf/prompt-pack/pack.toml"
-bytes = 833
-sha256 = "69f62d00fa86a2d19576717df0356ddcbd1c56367586199250b28d370f90b16a"
+bytes = 1239
+sha256 = "4b82c865ff29eafe90c188b633c06d1c6d5a2359f8d9859bcf69086c543a2847"
 
 [[sources]]
 path = "opf/site/_redirects"
