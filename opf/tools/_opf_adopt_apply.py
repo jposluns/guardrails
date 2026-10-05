@@ -139,10 +139,11 @@ per-descriptor try (what that loop has not reached stays open), or between the f
 or in the outcome report after them (what was not reached stays open, and that interrupt then
 propagates in place of the run's own outcome, which is then not named beside it); or inside a
 _journal helper (acquire_lock's lock descriptor among them, and the rest of a _journal close-out loop,
-in _open_parent, ensure_journal_dirs, _open_dir_contained or _journal_txn_dirs, once one of its closes
-raises anything but OSError); or inside the store's _open_working_dir_fd, where an interrupt (or any
-exception but OSError) raised by its parent close leaves the `.working` descriptor it had just opened
-open, that exception propagating as itself.
+in ensure_journal_dirs, _open_dir_contained or _journal_txn_dirs, once one of its closes raises anything
+but OSError; _open_parent's cleanup closes every descriptor it opened even then, so only the one an
+interrupt lands on between its pop and its close stays open); or inside the store's
+_open_working_dir_fd, where an interrupt (or any exception but OSError) raised by its parent close
+leaves the `.working` descriptor it had just opened open, that exception propagating as itself.
 Leak-freedom under interrupt, or under an exception raised in those windows, is NOT claimed. The
 finish ops add their own: all three finish ops
 compose into this shell's transactions, which refuse a resolved store (no lease join), so once init-store
@@ -154,6 +155,17 @@ gate to the render and check engines; the receipt core's content (files, approva
 transaction ids, checks, probes) is the stage driver's to assemble, held here only to the shipped
 validator and the plan bindings adoption_record names; and the trust gate proves member bytes against the
 agreed release inventory, never the publisher's authenticity beyond it.
+
+Exceptions on the closing paths, guaranteed: the run's FIRST interrupt always propagates as itself (a
+close-out or a _journal helper close that meets an earlier error and then an interrupt raises the
+interrupt, never notes it on the error), and every close exception is named where a reader sees it: in
+the propagating exception, or in the run's report, which renders each exception with the notes recorded
+on it (_journal._exc_said), never only in a note on an exception a caller then drops. A close OSError
+that yields to an exception already in flight (#378) is released and not named, as before. Residual
+(disclosed, not chased): when a SECOND fault arrives during a cleanup that is already failing, which of
+the two propagates and which is named beside it (in a note, or as the other's context) is not
+specified, for instance a _journal close exception with an error in flight propagates in its place,
+that error noted on it and kept as its context.
 
 Outcome model: single-sourced from `_opf_store` exactly as the sibling `_opf_adopt` does; the inventory
 grading is the doctor's own shared validator (`_opf_check._evidence_rows`), so a malformed inventory or a
@@ -1442,19 +1454,23 @@ def _close_held_into(fds, raised, close=None):
 
 
 def _close_raised(raised):
-    """Re-raise the FIRST exception of a close-out (`raised`, in the order they were raised), each later
-    one recorded on it as a note naming it, so none is discarded without trace; nothing when it is
+    """Re-raise the FIRST interrupt of a close-out (`raised`, in the order they were raised), so a later
+    interrupt is never demoted to a note on an earlier error, else its first exception; every other one
+    is recorded on it as a note naming it, so none is discarded without trace; nothing when it is
     empty."""
     if raised:
-        first = raised[0]
-        for later in raised[1:]:
-            first.add_note("a later close-out exception, recorded here and not re-raised: {!r}".format(later))
+        first = next((exc for exc in raised if not isinstance(exc, Exception)), raised[0])
+        for later in raised:
+            if later is not first:
+                first.add_note("another close-out exception, recorded here and not re-raised: {}".format(
+                    _journal._exc_said(later)))
         raise first
 
 
 def _close_held(fds):
     """Close every descriptor held in the list `fds` through _close_held_into, every one even when a close
-    raises, then re-raise the FIRST exception it met, each later one noted on it (_close_raised)."""
+    raises, then re-raise the FIRST interrupt it met, else its first exception, each other one noted on it
+    (_close_raised)."""
     raised = []
     _close_held_into(fds, raised)
     _close_raised(raised)
@@ -1472,9 +1488,10 @@ def _close_out_said(raised):
         return None
     return "the run's descriptor close-out RAISED {} beside that outcome, never in its place: {}".format(
         "an exception" if len(raised) == 1 else "{} exceptions, in order".format(len(raised)),
-        "; then ".join("{!r} ({})".format(exc, "a close error: that close has still released its descriptor"
-                                          if isinstance(exc, OSError) else "the descriptor it had popped "
-                                          "may stay open until the process exits") for exc in raised))
+        "; then ".join("{} ({})".format(_journal._exc_said(exc),
+                                        "a close error: that close has still released its descriptor"
+                                        if isinstance(exc, OSError) else "the descriptor it had popped "
+                                        "may stay open until the process exits") for exc in raised))
 
 
 def _observation_raised_said(raised):
@@ -1486,7 +1503,7 @@ def _observation_raised_said(raised):
             "finished, so what this run left there is not known (one raised inside a close-out there may "
             "leave the one descriptor that close-out had popped open until the process exits): {}".format(
                 "an exception" if len(raised) == 1 else "{} exceptions, in order".format(len(raised)),
-                "; then ".join(repr(exc) for exc in raised)))
+                "; then ".join(_journal._exc_said(exc) for exc in raised)))
 
 
 def _release_raised_said(raised):
@@ -1498,7 +1515,7 @@ def _release_raised_said(raised):
         return None
     return "the run's journal lock release or read RAISED {} beside that outcome, never in its place: {}".format(
         "an exception" if len(raised) == 1 else "{} exceptions, in order".format(len(raised)),
-        "; then ".join(repr(exc) for exc in raised))
+        "; then ".join(_journal._exc_said(exc) for exc in raised))
 
 
 def _release_outcome(jr_fd, journal_root, mine, raised=None):
@@ -1977,8 +1994,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 stood = [phase_said, "the run's refusal stands beside this interrupt: "
                          + _refusal_text(str(failure), observed, ours)]
             else:
-                stood = [phase_said, "the run's own exception stands beside this interrupt: {!r}".format(
-                    failure)] + (observed or [])
+                stood = [phase_said, "the run's own exception stands beside this interrupt: {}".format(
+                    _journal._exc_said(failure))] + (observed or [])
             stood = "; ".join(stood + ([closed_said] if closed_said else []))
             stop.add_note(stood if stood.endswith(" (fail-closed)") else stood + " (fail-closed)")
             raise stop
@@ -4516,7 +4533,8 @@ def _self_test_checks():
         # exception in place of the outcome in flight). A release interrupt beside a refusal keeps the
         # refusal's reason in its note (the same red). A fault at the failed acquire's owner read keeps the
         # acquire's error in the refusal (red against _failed_lock_state letting it escape). _open_parent's
-        # cleanup close fault keeps the FileNotFoundError in flight and closes the rest; _pid_start's close
+        # cleanup close fault propagates past the FileNotFoundError in flight (that error noted on it and
+        # kept as its context, never left only as a note on it) and closes the rest; _pid_start's close
         # fault keeps the interrupt in its read. A missing ancestor of several listed files is opened ONCE
         # (red against the missing-ancestor cache removed). No injection leaks a descriptor.
         rlo_at_code, rlo_code = _journal.read_lock_owner_at.__code__, _journal.read_lock_owner.__code__
@@ -4578,6 +4596,10 @@ def _self_test_checks():
              dict(plan={rlo_at_code: helper_fault}, under=outcome_code),
              lambda raised, fired, text: type(raised) is _InjectedCloseInterrupt and str(raised) == "body"
              and repr(fired[0]) in text),
+            ("journal-helper-close-faults-beside-the-body-interrupt-all-named", compose_interrupted,
+             dict(plan={rlo_at_code: helper_interrupt, rlo_code: helper_fault}, under=outcome_code),
+             lambda raised, fired, text: type(raised) is _InjectedCloseInterrupt and str(raised) == "body"
+             and repr(fired[0]) in text and repr(fired[1]) in text),
             ("release-interrupt-keeps-the-refusal-reason", compose_refused_here,
              dict(plan={}, under=outcome_code, release=release_interrupted),
              lambda raised, fired, text: type(raised) is _InjectedCloseInterrupt and str(raised) == "release"
@@ -4619,10 +4641,129 @@ def _self_test_checks():
                 leaked = sorted(_fds_open() - baseline)
             finally:
                 os.close(tfd)
-        check("journal-open-parent-close-fault-keeps-the-missing-component",
-              type(raised) is FileNotFoundError and fired and repr(fired[0]) in " ".join(
+        check("journal-open-parent-close-fault-propagates-past-the-missing-component",
+              bool(fired) and raised is fired[0] and isinstance(raised.__context__, FileNotFoundError)
+              and "FileNotFoundError" in " ".join(getattr(raised, "__notes__", []) or []) and not leaked,
+              observed="exception={!r} injected={!r} leaked={!r}".format(raised, fired, leaked))
+        # 6a'''b3k (D-U10-SECOND-FAULT): the run's FIRST interrupt propagates as itself, and every close
+        # exception is named where a reader sees it, never only in a note on an exception a caller drops.
+        # Each injection makes the real close first, then raises. A fault then an interrupt at the closes of
+        # one close-out (_close_held, _open_parent's cleanup directly and under the refused run's sweep)
+        # raise the INTERRUPT, the fault noted on it (red against the first exception raised, the interrupt
+        # demoted to a note). A cleanup close fault beneath a missing parent propagates out of the sweep and
+        # out of _lstat_contained (red against it noted on the FileNotFoundError they read as absent). A
+        # report names what is recorded on each exception it names (red against repr alone), and an
+        # interrupt then a fault at the release's two lock reads beside a body interrupt both stand named.
+        open_parent_code, sweep_code = _journal._open_parent.__code__, _remove_journal_dirs.__code__
+
+        def _quiet_plan(plan, under):
+            """A _journal._close_fd_quietly that makes its real close, then, called beneath _open_parent's
+            frame and (unless None) the frame whose code is `under`, raises the next plan entry once.
+            (the patched close, the injected exceptions in order)."""
+            real_quiet_k, fired_k = _journal._close_fd_quietly, []
+
+            def quiet(fd):
+                real_quiet_k(fd)
+                codes, frame = set(), sys._getframe(1)
+                while frame is not None:
+                    codes.add(frame.f_code)
+                    frame = frame.f_back
+                if len(fired_k) < len(plan) and open_parent_code in codes and (under is None or under in codes):
+                    fired_k.append(plan[len(fired_k)]())
+                    raise fired_k[-1]
+            return quiet, fired_k
+        fault_then_interrupt = (lambda: _InjectedCloseFault("cleanup close #1"),
+                                lambda: _InjectedCloseInterrupt("cleanup close #2"))
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            os.makedirs(os.path.join(temp, "a", "b", "c"))
+            quiet, fired = _quiet_plan(fault_then_interrupt, None)
+            raised = None
+            walk_fd = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                baseline = _fds_open()
+                with mock.patch.object(_journal, "_close_fd_quietly", quiet):
+                    try:
+                        _journal._open_parent(walk_fd, "a/b/c/x")
+                    except (RuntimeError, KeyboardInterrupt) as exc:
+                        raised = exc
+                leaked = sorted(_fds_open() - baseline)
+            finally:
+                os.close(walk_fd)
+        check("journal-open-parent-first-interrupt-propagates-as-itself",
+              len(fired) == 2 and raised is fired[1] and repr(fired[0]) in " ".join(
                   getattr(raised, "__notes__", []) or []) and not leaked,
               observed="exception={!r} injected={!r} leaked={!r}".format(raised, fired, leaked))
+        pair, closing, raised = [os.open(os.devnull, os.O_RDONLY) for _ in range(2)], [], None
+        real_quiet_c = _journal._close_fd_quietly
+
+        def quiet_pair(fd):
+            real_quiet_c(fd)
+            if len(closing) < 2:
+                closing.append(fault_then_interrupt[len(closing)]())
+                raise closing[-1]
+        baseline = _fds_open()
+        with mock.patch.object(_journal, "_close_fd_quietly", quiet_pair):
+            try:
+                _close_held(pair)
+            except (RuntimeError, KeyboardInterrupt) as exc:
+                raised = exc
+        leaked = sorted(_fds_open() - baseline)
+        check("close-out-first-interrupt-propagates-as-itself",
+              len(closing) == 2 and raised is closing[1] and repr(closing[0]) in " ".join(
+                  getattr(raised, "__notes__", []) or []) and not pair and not leaked,
+              observed="exception={!r} injected={!r} leaked={!r}".format(raised, closing, leaked))
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            saved_umask = os.umask(0o022)
+            raised = None
+            try:
+                root, files = fixture(temp)
+                quiet, fired = _quiet_plan(fault_then_interrupt, sweep_code)
+                baseline = _fds_open()
+                with mock.patch.object(_journal, "_close_fd_quietly", quiet):
+                    try:
+                        run_adopt_transaction(root, rid, compose_refused_here)
+                    except (AdoptApplyError, RuntimeError, KeyboardInterrupt) as exc:
+                        raised = exc
+                leaked = sorted(_fds_open() - baseline)
+            finally:
+                os.umask(saved_umask)
+        text = " ".join(getattr(raised, "__notes__", []) or [])
+        check("sweep-close-first-interrupt-propagates-as-itself",
+              len(fired) == 2 and raised is fired[1] and repr(fired[0]) in text
+              and "an injected compose refusal" in text and not leaked,
+              observed="exception={!r} injected={!r} note={!r} leaked={!r}".format(
+                  raised, fired, text[-600:], leaked))
+        for name, under, call in (
+                ("sweep-missing-parent-close-fault-is-not-discarded", sweep_code,
+                 lambda base_fd: _remove_journal_dirs(base_fd, ["x/missing/z"], raised=[])),
+                ("lstat-missing-parent-close-fault-is-not-discarded", _journal._lstat_contained.__code__,
+                 lambda base_fd: _journal._lstat_contained(base_fd, "x/missing/z"))):
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                os.makedirs(os.path.join(temp, "x"))
+                quiet, fired = _quiet_plan(fault_then_interrupt[:1], under)
+                raised = returned = None
+                miss_fd = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    baseline = _fds_open()
+                    with mock.patch.object(_journal, "_close_fd_quietly", quiet):
+                        try:
+                            returned = call(miss_fd)
+                        except RuntimeError as exc:
+                            raised = exc
+                    leaked = sorted(_fds_open() - baseline)
+                finally:
+                    os.close(miss_fd)
+            check(name, len(fired) == 1 and raised is fired[0]
+                  and isinstance(raised.__context__, FileNotFoundError) and not leaked,
+                  observed="exception={!r} returned={!r} injected={!r} leaked={!r}".format(
+                      raised, returned, fired, leaked))
+        carrier = _InjectedCloseInterrupt("carrier")
+        carrier.add_note("a close raised {!r} while this interrupt was in flight".format(
+            _InjectedCloseFault("noted close fault")))
+        for name, said in (("close-out-report-names-what-is-noted", _close_out_said([carrier])),
+                           ("observation-report-names-what-is-noted", _observation_raised_said([carrier])),
+                           ("release-report-names-what-is-noted", _release_raised_said([carrier]))):
+            check(name, repr(_InjectedCloseFault("noted close fault")) in (said or ""), observed=said)
 
         class _StatFile:
             """A /proc stat file whose read is interrupted and whose close then raises a fault."""

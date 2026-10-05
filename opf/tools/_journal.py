@@ -196,41 +196,44 @@ def _in_flight_in(frame):
     return exc if tb is not None and tb.tb_frame is frame else None
 
 
+def _exc_said(exc):
+    """repr(exc), followed by every note recorded on it: a report that names an exception by its repr
+    never drops what was recorded there (a close exception noted on it among them)."""
+    notes = getattr(exc, "__notes__", None) or []
+    return repr(exc) if not notes else "{!r} [recorded on it: {}]".format(exc, " | ".join(notes))
+
+
 def _yield_close_exceptions(inflight, raised):
-    """The rule for every exception a close raised that is not an OSError (`raised`, in order). With none
-    in flight (`inflight` None) the first is raised, each later one noted on it. With one in flight, none
-    replaces it: each is noted on it, and it keeps propagating. The one exception: an interrupt (a
-    BaseException that is not an Exception) never yields to an ERROR in flight (an Exception), so an
-    interrupt is never dropped: the first such interrupt propagates as itself, with that error and every
-    other one noted on it. Nothing is lost without trace."""
+    """The rule for every exception a close raised that is not an OSError (`raised`, in order). An
+    INTERRUPT in flight (a BaseException that is not an Exception, `inflight`) keeps propagating as itself,
+    each of them noted on it. Otherwise one of them propagates: the FIRST interrupt among them, so the
+    first interrupt is never demoted to a note, else the first of them; each other one, and an ERROR in
+    flight (an Exception, also its context), is noted on it. A close exception is therefore never only a
+    note on an error a caller may catch as a clean signal and drop (_open_parent's FileNotFoundError,
+    release_lock's JournalError among them); which of two faults propagates is the disclosed second-fault
+    residual (module docstring of _opf_adopt_apply)."""
     if not raised:
         return
-    if inflight is None:
-        first = raised[0]
-        for later in raised[1:]:
-            first.add_note("a later close exception, recorded here and not re-raised: {!r}".format(later))
-        raise first
-    stop = None
-    if isinstance(inflight, Exception):
-        stop = next((exc for exc in raised if not isinstance(exc, Exception)), None)
-    if stop is None:
+    if inflight is not None and not isinstance(inflight, Exception):
         for exc in raised:
-            inflight.add_note("a close raised {!r} while this exception was in flight: recorded here, never "
-                              "raised in its place".format(exc))
+            inflight.add_note("a close raised {} while this interrupt was in flight: recorded here, never "
+                              "raised in its place".format(_exc_said(exc)))
         return
-    stop.add_note("raised by a close while {!r} was in flight: an interrupt never yields to an error, which "
-                  "is recorded here".format(inflight))
+    stop = next((exc for exc in raised if not isinstance(exc, Exception)), raised[0])
+    if inflight is not None:
+        stop.add_note("raised by a close while {} was in flight (this exception's context), which is "
+                      "recorded here".format(_exc_said(inflight)))
     for exc in raised:
         if exc is not stop:
-            stop.add_note("another close exception, recorded here and not re-raised: {!r}".format(exc))
+            stop.add_note("another close exception, recorded here and not re-raised: {}".format(_exc_said(exc)))
     raise stop
 
 
 def _close_fds_yielding(fds, frame):
     """Close every descriptor in the list `fds` (a cleanup loop's), in order, each taken out of the list
     BEFORE its one quiet close (_close_fd_quietly), so a close that raises anything but OSError never
-    abandons the rest; then every such exception yields to the one in flight in `frame`
-    (_yield_close_exceptions), or with none in flight the first is raised."""
+    abandons the rest; then every such exception is resolved against the one in flight in `frame`
+    (_yield_close_exceptions)."""
     inflight = _in_flight_in(frame)
     raised = []
     while fds:
@@ -253,9 +256,10 @@ def _close_fd_yielding(fd):
     normally from inside the caller's `except` block) is not in flight here and never quiets the close.
     Residual (disclosed): a `finally` reached NORMALLY while lexically inside an `except` handler of the
     SAME function would read that handled exception as in flight; no call site is nested that way.
-    A close that raises anything but OSError (an interrupt, or an injected exception) while an exception
-    is in flight never replaces it either: it is noted on it (_yield_close_exceptions), except that an
-    interrupt never yields to an error in flight, and then propagates with that error noted on it."""
+    A close that raises anything but OSError (an interrupt, or an injected exception) while an interrupt
+    is in flight never replaces it: it is noted on it. While an error is in flight, that close exception
+    propagates with the error noted on it, so it is never left only as a note on an error a caller catches
+    and drops (_yield_close_exceptions)."""
     inflight = _in_flight_in(sys._getframe(1))
     if inflight is None:
         _close_fd_propagating(fd)
@@ -276,8 +280,10 @@ def _open_parent(root_fd, relpath):
     the caller reads as absent, since a missing parent means the target is absent); any other error (a
     non-directory or symlinked intermediate component) raises JournalError. The intermediate
     descriptors are closed through _close_fds_yielding: a close that raises anything but OSError never
-    abandons the rest nor replaces an exception in flight here; one raised with none in flight closes the
-    duplicated parent descriptor too (it is never returned), yielding to that exception."""
+    abandons the rest nor replaces an interrupt in flight here; with a FileNotFoundError or JournalError in
+    flight it propagates in its place (that error noted on it), so a caller reading that error as a clean
+    signal never drops it. Once the cleanup raises, the duplicated parent descriptor is closed too (it is
+    never returned)."""
     parts = _check_rel(relpath)
     cur = root_fd
     opened = []
@@ -831,9 +837,9 @@ def _first(frames, ftype):
 def _pid_start(pid):
     """The process start-time field from /proc/<pid>/stat (Linux only; empty string elsewhere). Read
     from after the last ')' so a program name containing ') ' cannot shift the field split. The file is
-    closed in a `finally` whose close yields to an exception in flight there (_yield_close_exceptions), so
-    a close that raises never replaces an interrupt in the read; a close OSError reads as unknown, as the
-    read's own does."""
+    closed in a `finally` whose close is resolved against an exception in flight there
+    (_yield_close_exceptions), so a close that raises never replaces an interrupt in the read; a close
+    OSError reads as unknown, as the read's own does."""
     try:
         fh = open("/proc/{}/stat".format(pid), "rb")
     except OSError:
