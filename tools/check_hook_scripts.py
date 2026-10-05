@@ -50,7 +50,10 @@ reviewed edit here. Six legs:
       [sys.executable, "-I", "-S", "-B", <this file>, "--parity-child", ...] that loads both files with
       importlib. The child writes its structured result at interpreter shutdown, AFTER the loaded
       files' own cleanup (non-daemon threads joined, their atexit hooks run, pending cyclic-garbage
-      finalizers collected), and then ends ITSELF with os._exit, so no interpreter finalization
+      finalizers collected REPEATEDLY until a pass frees nothing, within _GC_PASS_BOUND passes,
+      past which the child refuses by name -- merge train 2 QA r4, codex MEDIUM: a collected
+      finalizer may create NEW cyclic cleanup work, which one collection left for the ending
+      os._exit to skip), and then ends ITSELF with os._exit, so no interpreter finalization
       runs after the result (merge train 2 QA r3); a fault the loaded code reports into a replaced
       or silenced reporting machinery is seen by an audit hook and makes the child exit 2, and
       reporting machinery left replaced is put back and refused the same way. The parent accepts
@@ -170,6 +173,12 @@ ABSENT_IN_PACK = ("_is_worker", "_sibling_or_skip")
 # Leg (p): the parity child's completeness terminator, written after the JSON result line at
 # the child's shutdown; a result without it was cut short by the loaded code's cleanup (secfcl).
 PARITY_COMPLETE = "AIQT-PARITY-RESULT-COMPLETE"
+# How many garbage-collection passes the parity child's emit may make before one frees nothing
+# (merge train 2 QA r4, codex MEDIUM: a collected finalizer may CREATE new cyclic cleanup work,
+# which the r3 single collection left for the ending os._exit to skip); a run that never
+# settles inside this bound is refused by name, never a result over cleanup work that cannot be
+# shown complete.
+_GC_PASS_BOUND = 10
 
 
 class GateError(Exception):
@@ -652,8 +661,11 @@ def parity_child(spec):
     already-complete result remains, disclosed in DISCLOSED RESIDUALS above, as is the channel by
     which loaded code replaces this reporting machinery outright (a forged result plus terminator
     on a clean exit). Merge train 2 QA r3 closes that finalizer: emit collects the cyclic garbage
-    BEFORE the result, so pending finalizers run first, and then ends the child ITSELF with
-    os._exit(0), so no interpreter finalization runs after the result (codex MEDIUM). The
+    BEFORE the result, so pending finalizers run first -- r4 collects REPEATEDLY, until a pass
+    frees nothing, within _GC_PASS_BOUND passes, past which emit refuses by name (codex MEDIUM:
+    a collected finalizer that creates new cyclic cleanup work needs more than one pass) -- and
+    then ends the child ITSELF with os._exit(0), so no interpreter finalization runs after the
+    result (codex MEDIUM). The
     reporting machinery is guarded (claude MINOR 2): an audit hook armed before either file loads
     sees every `sys.unraisablehook` and `sys.excepthook` event (CPython raises them before it
     calls whatever hook is installed), and sys.stderr, sys.excepthook, sys.unraisablehook and
@@ -686,7 +698,16 @@ def parity_child(spec):
         if not outcome:
             return
         restore()
-        gc.collect()
+        # Collect REPEATEDLY until a pass frees nothing (merge train 2 QA r4, codex MEDIUM: a
+        # collected finalizer may create NEW cyclic cleanup work, which a single collection left
+        # for the os._exit below to skip); exceeding _GC_PASS_BOUND fails closed.
+        for _ in range(_GC_PASS_BOUND):
+            if gc.collect() == 0:
+                break
+        else:
+            faults.append("garbage collection still freed objects after %d passes, so cleanup "
+                          "work finalizers keep creating cannot be shown complete"
+                          % _GC_PASS_BOUND)
         restore()
         if faults:
             try:
@@ -1166,6 +1187,42 @@ def self_test_main():
                 ("excepthook-replaced", "\n\nimport sys as _seeded_sys\n"
                  "_seeded_sys.excepthook = lambda *args: None\n",
                  "parity child: a fault in loaded code's cleanup"),
+                # Merge train 2 QA r4 (codex MEDIUM): a collected finalizer that creates NEW
+                # cyclic cleanup work whose own finalizer faults -- one collection missed it and
+                # the child passed -- and a finalizer chain no collection pass inside
+                # _GC_PASS_BOUND ends, which must refuse by name, never emit a result.
+                ("finalizer-chained-fault", "\n\nimport atexit as _seeded_atexit\n"
+                 "import os as _seeded_os\n"
+                 "\n\nclass _SeededInner:\n"
+                 "    def __init__(self):\n"
+                 "        self.cycle = self\n"
+                 "        self.remove = _seeded_os.remove\n"
+                 "\n    def __del__(self):\n"
+                 "        self.remove('/nonexistent-aiqt-parity-selftest-chain')\n"
+                 "\n\nclass _SeededOuter:\n"
+                 "    def __init__(self):\n"
+                 "        self.cycle = self\n"
+                 "        self.inner = _SeededInner\n"
+                 "\n    def __del__(self):\n"
+                 "        self.inner()\n"
+                 "\n\n_seeded_atexit.register(_SeededOuter)\n",
+                 # The bounded diagnostic shows the stream's head: the unraisable report of the
+                 # Inner fault raised during the repeated collection (the child's own named
+                 # "parity child: a fault ..." line follows past the bound).
+                 "Exception ignored"),
+                ("finalizer-unsettled-gc", "\n\nimport atexit as _seeded_atexit\n"
+                 "\n\ndef _seeded_make_link(depth):\n"
+                 "    class _SeededLink:\n"
+                 "        def __init__(self, depth):\n"
+                 "            self.cycle = self\n"
+                 "            self.depth = depth\n"
+                 "            self.make = _seeded_make_link\n"
+                 "\n        def __del__(self):\n"
+                 "            if self.depth > 0:\n"
+                 "                self.make(self.depth - 1)\n"
+                 "\n    _SeededLink(depth)\n"
+                 "\n\n_seeded_atexit.register(_seeded_make_link, 12)\n",
+                 "still freed objects after"),
         ):
             root = fresh("p-" + name)
             _patch(root / STOP_REL, "", "", append)
@@ -1197,7 +1254,9 @@ def self_test_main():
           "writes and exits after the emitted result, a seeded forged two-line stdout cut off by "
           "a cleanup exit, a seeded finalizer that ends the child silently, a seeded cleanup "
           "fault under a replaced sys.stderr or a silenced sys.unraisablehook, a seeded replaced "
-          "sys.excepthook, and a seeded cleanup exit that cuts "
+          "sys.excepthook, a seeded finalizer whose newly created cyclic cleanup work faults "
+          "under the repeated collection, a seeded finalizer chain outlasting the bounded "
+          "collection, and a seeded cleanup exit that cuts "
           "off its shutdown-written result are cannot-evaluate (secfcl)")
     return 0
 

@@ -22237,9 +22237,11 @@ _UNIT_OUTER_BOUNDS = {
     # clock (30 s worst); and the merge-train r2 leg (30) three more quick bounded subprocesses
     # under 30 s bounds (each imports the module in its child), with their removals: about
     # 320 s more worst; and the merge-train r3 legs six more of those (about 640 s more worst)
-    # plus an in-process scan of one small capture per fault marker. About 2880 s end to end
-    # worst, so 3000 holds the kill-timeout rule (the measured run takes well under 150 s).
-    "opf-unit-bound": 3000.0,
+    # plus an in-process scan of one small capture per fault marker; and the merge-train r4
+    # legs five more bounded child-entry subprocesses under 30 s bounds, one of them running a
+    # quick grandchild (about 540 s more worst). About 3420 s end to end worst, so 3600 holds
+    # the kill-timeout rule (the measured run takes well under 200 s).
+    "opf-unit-bound": 3600.0,
 }
 
 # Test-only flip (QA26): True removes the outer deadline (the runner's wait gets no timeout: the
@@ -22459,8 +22461,12 @@ _UNIT_TAIL_KEEP = 512
 #   `Error in atexit._run_exitfuncs` and `Unhandled exception in thread started by` -- the
 #     wording of older interpreters for an exit-handler fault (Modules/atexitmodule.c, to 3.11)
 #     and a thread fault (Modules/_threadmodule.c, to 3.7).
-# A marker ANYWHERE in a passing unit's complete error stream, before the boundary or after it,
-# fails the unit closed (secfcl: no fault on its error stream).
+# Since merge train 2 QA r4 (codex MAJOR: a frameless fault message this list does not know --
+# asyncio's `Future exception was never retrieved` for one -- still passed) the marker scan
+# DECIDES NOTHING ALONE: a list of known fault messages can never be complete, so a passing
+# unit's error stream must be EMPTY apart from the child's cleanup boundary line and the unit's
+# exactly declared expected lines (_UNIT_STDERR_ALLOWED), and the first marker found is kept only
+# as an extra explanation inside that failure message.
 _UNIT_FAULT_MARKERS = (
     b"Traceback (most recent call last):",
     b"Exception ignored",
@@ -22482,7 +22488,96 @@ def _unit_fault_marker(data):
     return None
 
 
-def _unit_copy_capped(stream, path, label, kind, ident):
+# How long one line of a captured error stream may be before the line scan refuses it unseen
+# (merge train 2 QA r4): every allowed line -- the cleanup boundary line and every declared row
+# below -- is far shorter, so a longer line is foreign by construction, and the cap bounds the
+# scan's per-line carry memory.
+_UNIT_LINE_CAP = 4096
+
+# The EXACT stderr lines each unit legitimately writes on a CLEAN PASS, measured by running
+# every registered unit at this revision and recording its complete captured error stream
+# (merge train 2 QA r4, codex MAJOR). Each row is the exact BYTES of one expected line
+# (escaped in _unit_allowed_stderr_lines, so a row is never a pattern); a passing unit's
+# every stderr line must equal one of its rows or be the child's cleanup boundary line,
+# and anything else fails closed. Every unit NOT listed here was measured to write NOTHING
+# but its boundary line. A unit whose legitimate diagnostics change fails closed by name
+# until its rows are re-declared here, reviewed: that is the fail-closed direction (secfcl),
+# never a widened pattern.
+_UNIT_STDERR_ALLOWED = {
+    # opf-absorb: its changelog-drafter legs print the draft banner, the undeclared-done
+    # note, the NOT APPLICABLE refusal and the named parse refusal to stderr on a
+    # clean pass (measured).
+    "opf-absorb": (
+        b"opf absorb: DRAFT candidate entry for 'unreleased' on stdout -- a machine draft for human curation, NOT authoritative; edit it into CHANGELOG.md and publish through the recorded freeze flow (the tool writes nothing)",
+        b'opf absorb: note: the `done` type is not declared in the manifest; drafting from the worklog only (done completion receipts are not incorporated)',
+        b'opf absorb: NOT APPLICABLE (not an OPFiles adopter (no store found (.working/ is absent); opf init is the remedy); the changelog drafter does not apply)',
+        b'opf absorb: cannot evaluate:',
+        b"  - cannot parse .working/toml/version.toml (Expected '=' after a key in a key/value pair (at line 1, column 5))",
+    ),
+    # opf-views: its renderer refusal legs print each named cannot-evaluate, usage refusal
+    # and store-integrity line to stderr on a clean pass (measured).
+    "opf-views": (
+        b"opf render: cannot evaluate: VERSION deliverable declared but the version ledger has no release to render (spec 6.1: VERSION is the latest release's SemVer bytes); fail-closed, never a zero-byte write",
+        b"opf render: cannot evaluate: declared source .working/toml/block.index.toml is missing (a view declares type 'block', so its index must exist; an empty type is an empty index, not an absent one)",
+        b"opf render: cannot evaluate: .working/toml/finding.index.toml: record #1 (FN-1) is malformed: status: status state 'not-a-state' is not a finding state ['accepted', 'fixed', 'open', 'refuted', 'routed']",
+        b'opf render: cannot evaluate: .working/toml/backlog_item.index.toml schema 2 is not an integer equal to the supported schema 1 (a present index must carry an exact integer schema marker; fail-closed)',
+        b'opf render: cannot evaluate: .working/toml/backlog_item.index.toml schema True is not an integer equal to the supported schema 1 (a present index must carry an exact integer schema marker; fail-closed)',
+        b'opf render: cannot evaluate: .working/toml/backlog_item.index.toml schema None is not an integer equal to the supported schema 1 (a present index must carry an exact integer schema marker; fail-closed)',
+        b'opf render: cannot evaluate: .working/toml/backlog_item.index.toml has unknown top-level key(s): bogus_table',
+        b'opf render: cannot evaluate: .working/toml/backlog_item.index.toml: [[record]] is not an array of tables',
+        b"opf render: cannot evaluate: view 'DONE.md' declares duplicate source(s) done (spec 10.2)",
+        b"opf render: cannot evaluate: view 'TODO.md' declares target 'README.md' but its spec destination is '.working/TODO.md'; a manifest cannot rebind a view off its spec destination (fail-closed, spec 5.8/9)",
+        b'opf render: cannot evaluate: refusing to write .working/TODO.md: destination is not a regular file (a symlink or special file is never followed; fail-closed)',
+        b"opf render: cannot evaluate: view 'DONE.md' declared sources ['done', 'finding'] do not equal its required set ['done'] (missing [], extra ['finding']; spec 10.2)",
+        b"opf render: cannot evaluate: view 'DONE.md' declared sources ['done', 'finding'] do not equal its required set ['done'] (missing [], extra ['finding']; spec 10.2)",
+        b'opf render: cannot evaluate: decision resolution graph forks: PD-1 superseded by more than one decision (spec 8.5 requires one current effective resolution per chain); fail-closed',
+        b'opf render: cannot evaluate: decision resolution graph has a supersedes cycle at PD-1 (spec 8.5: a supersession chain is acyclic); fail-closed',
+        b'opf render: cannot evaluate: store machine-directory name is not valid UTF-8 (OPF store paths are UTF-8 by convention); render refused',
+        b'opf render: cannot evaluate: per-record layout not yet supported by U4 views; deferred',
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+200B outside any allowance); refusing rather than emitting or silently altering owner text",
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+200C outside any allowance); refusing rather than emitting or silently altering owner text",
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+200D outside any allowance); refusing rather than emitting or silently altering owner text",
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+2060 outside any allowance); refusing rather than emitting or silently altering owner text",
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: zero-width character U+FEFF outside any allowance); refusing rather than emitting or silently altering owner text",
+        b"opf render: cannot evaluate: view 'BACKLOG.md' would emit byte-canon-invalid output (byte offset 380: bidirectional control character U+202E outside any allowance); refusing rather than emitting or silently altering owner text",
+        b'opf render: give exactly one of --check / --write',
+        b'opf render: give exactly one of --check / --write',
+        b'opf render: --root requires a directory argument',
+        b"opf render: unrecognized argument '--bogus'",
+        b"opf render: unrecognized argument '--chek'",
+        b"opf render: --root requires a non-empty directory argument, not ''",
+        b"opf render: --root requires a non-empty directory argument, not '--bogus'",
+        b'opf render: cannot evaluate: refusing to write; store SOURCE integrity is not sound (U6 validate_store); nothing written',
+        b'  FINDING: C-TRACKED: the resolved store is not under version control (spec 5.1)',
+        b'opf render: cannot evaluate: refusing to write; store SOURCE integrity is not sound (U6 validate_store); nothing written',
+        b'  CANNOT-EVALUATE: C-TRACKED: no `tracked` observation was supplied; the tracked-store requirement (spec 5.1) is not evaluable by a parse-only engine',
+        b'  CANNOT-EVALUATE: C-HISTORY-APPEND-ONLY: no prior committed snapshot was supplied; across-time release immutability (spec 6.1/13) is not evaluated',
+        b'  CANNOT-EVALUATE: C-HISTORY-COUNTERS: no prior committed snapshot was supplied; counter non-regression (spec 8.2) is not evaluated',
+        b'  CANNOT-EVALUATE: C-HISTORY-RESURRECTION: no prior committed snapshot was supplied; no-resurrection across time (spec 8.4) is not evaluated',
+        b'opf render: cannot evaluate: refusing to write; store SOURCE integrity is not sound (U6 validate_store); nothing written',
+        b"  FINDING: C-ID-SPACE: duplicate id 'BI-2': IDs are never reused (spec 8.2)",
+        b"opf render: cannot evaluate: C-CHANGELOG-GATES: CHANGELOG.md is not valid UTF-8 ('utf-8' codec can't decode byte 0xff in position 12: invalid start byte)",
+        b"opf render: CHANGELOG.md could not be evaluated; fix the named input above, then re-run 'opf doctor' (render does not generate the curated changelog)",
+        b'opf render: cannot evaluate: refusing to write .working/BACKLOG.md: store-integrity gate (U6 validate_store) not composed; a mutating render is refused at the write boundary as a defence-in-depth backstop (fail-closed, spec 5.7/5.8/11)',
+    ),
+}
+
+
+def _unit_allowed_stderr_lines(label):
+    """The anchored patterns every line of a PASSING `label` unit's complete captured error
+    stream must fullmatch (merge train 2 QA r4, codex MAJOR: the asyncio report `Future exception
+    was never retrieved` carries no marker _UNIT_FAULT_MARKERS knew, and a list of known fault
+    messages can never be complete, so the runner now requires an EMPTY error stream apart from
+    these): the child's own cleanup boundary line -- any pid here; the tail check separately
+    requires the LEADER's exact pid -- plus the unit's declared rows in _UNIT_STDERR_ALLOWED."""
+    import re
+    boundary = re.escape("{} {}".format(_UNIT_BOUNDARY, label).encode("utf-8"))
+    return tuple([re.compile(boundary + b" [0-9]{1,10}")]
+                 + [re.compile(re.escape(row))
+                    for row in _UNIT_STDERR_ALLOWED.get(label, ())])
+
+
+def _unit_copy_capped(stream, path, label, kind, ident, allowed=None):
     """Copy a unit's captured output file to a caller stream: at most _UNIT_OUTPUT_CAP bytes, the
     rest dropped with the named truncation note, delivered through _unit_deliver's bounded,
     thread-free writer. The capture path lives in the runner's private box, but the unit held it
@@ -22515,8 +22610,15 @@ def _unit_copy_capped(stream, path, label, kind, ident):
     the unit closed with the anomaly). `tainted` names the first CPython fault marker
     (_UNIT_FAULT_MARKERS: an uncaught-exception traceback, an `Exception ignored` report, a fatal
     error, and the rest; merge train 2 QA r3, codex MAJOR) the COMPLETE stream carries, or is
-    None -- the runner refuses a PASSING exit over a tainted
-    error stream (a unit that rewrites or truncates the stream through its OWN still-open
+    None -- since merge train 2 QA r4 (codex MAJOR) the marker decides nothing alone and is kept
+    only as an extra explanation in the runner's failure message. `foreign`, the DECIDING scan,
+    is None, or the first line of the COMPLETE stream (truncated for display) that fullmatches
+    none of the anchored patterns in `allowed` (None skips the line scan entirely, the stdout
+    copy's case; a line longer than _UNIT_LINE_CAP, or a final unterminated one, is foreign too)
+    -- the runner refuses a PASSING exit over a foreign line: a passing unit's error stream is
+    EMPTY apart from its boundary line and its declared rows, because a list of known fault
+    messages can never be complete
+    (a unit that rewrites or truncates the stream through its OWN still-open
     descriptor
     before exiting stays disclosed: while it lives the capture is the unit's own output,
     indistinguishable from
@@ -22527,38 +22629,64 @@ def _unit_copy_capped(stream, path, label, kind, ident):
     cannot tell apart a planted file that received the freed capture's inode number
     (_run_unit_subprocess (j)).
     A write failure of the copy itself is still swallowed (the exit code, the completion record and
-    the readable captures, never the delivered text, are the unit's verdict)."""
+    the readable captures, never the delivered text, are the unit's verdict).
+    Returns (anomaly, tainted, tail, foreign)."""
     import errno
     guard = _unit_guard_flags()
     if guard is None:
         return ("its {} capture cannot be read back on this platform, which lacks O_NOFOLLOW or "
                 "O_NONBLOCK: with no race-free guard against a planted symlink or FIFO the "
                 "read-back fails closed rather than opening unguarded (QA30 gemini)".format(kind),
-                False, b"")
+                False, b"", None)
     try:
         fd = os.open(path, os.O_RDONLY | guard)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             return ("its {} capture path was replaced by a symlink (not followed, not read)".format(kind),
-                    False, b"")
+                    False, b"", None)
         return ("its {} capture could not be opened for reading back (errno {}); a passing verdict "
-                "requires a readable, complete capture".format(kind, exc.errno), False, b"")
+                "requires a readable, complete capture".format(kind, exc.errno), False, b"", None)
     with os.fdopen(fd, "rb") as handle:
         try:
             info = os.fstat(handle.fileno())
             if not stat.S_ISREG(info.st_mode):
                 return ("its {} capture path is no longer a regular file (mode {:o}); a FIFO or "
                         "device there is never opened blocking, never read".format(kind, info.st_mode),
-                        False, b"")
+                        False, b"", None)
             if (info.st_dev, info.st_ino) != (ident.st_dev, ident.st_ino):
                 return ("its {} capture path no longer names the capture file this runner created "
                         "(device/inode {}:{} against {}:{} at launch): the original capture was "
                         "unlinked or renamed away and another file planted at its path, so the "
                         "stream cannot be read back complete (QA30 codex MAJOR)".format(
-                            kind, info.st_dev, info.st_ino, ident.st_dev, ident.st_ino), False, b"")
+                            kind, info.st_dev, info.st_ino, ident.st_dev, ident.st_ino), False, b"", None)
             span = max(len(marker) for marker in _UNIT_FAULT_MARKERS)
+            pending = [b""]
+            foreign = [None]
+
+            def scan_lines(chunk, final=False):
+                # The DECIDING per-line scan (merge train 2 QA r4, codex MAJOR): every complete
+                # line must fullmatch one of `allowed`; the carry between chunks is one partial
+                # line, bounded by _UNIT_LINE_CAP (every allowed line is far shorter, so a longer
+                # one is foreign unread). A final unterminated line is still a line.
+                if allowed is None or foreign[0] is not None:
+                    return
+                window = pending[0] + chunk
+                lines = window.split(b"\n")
+                pending[0] = lines.pop()
+                if final and pending[0]:
+                    lines.append(pending[0])
+                    pending[0] = b""
+                for line in lines:
+                    if not any(pattern.fullmatch(line) for pattern in allowed):
+                        foreign[0] = line[:200]
+                        return
+                if len(pending[0]) > _UNIT_LINE_CAP:
+                    foreign[0] = pending[0][:200]
+                    pending[0] = b""
+
             data = handle.read(_UNIT_OUTPUT_CAP)
             tainted = _unit_fault_marker(data)
+            scan_lines(data)
             tail = data[-_UNIT_TAIL_KEEP:]
             # The delivered copy stops at the cap; the SCAN goes on to the END of the stream in
             # bounded memory (merge train 2 QA, codex MAJOR: a traceback wholly past the cap
@@ -22583,12 +22711,15 @@ def _unit_copy_capped(stream, path, label, kind, ident):
                             "reading back ({} read against {}): a capture still growing under "
                             "some live writer cannot be scanned complete, and a passing verdict "
                             "requires a complete scan of the stream (merge train 2 QA, codex "
-                            "MAJOR)".format(kind, scanned, info.st_size), False, b"")
-                if tainted:
+                            "MAJOR)".format(kind, scanned, info.st_size), False, b"", None)
+                if (foreign[0] is not None) if allowed is not None else bool(tainted):
                     break   # the verdict is settled and the truncation known; nothing more to learn
-                window = carry + chunk
-                tainted = _unit_fault_marker(window)
-                carry = window[max(len(window) - span + 1, 0):]
+                scan_lines(chunk)
+                if not tainted:
+                    marker_window = carry + chunk
+                    tainted = _unit_fault_marker(marker_window)
+                    carry = marker_window[max(len(marker_window) - span + 1, 0):]
+            scan_lines(b"", final=True)
             if truncated:
                 extra = max(info.st_size - _UNIT_OUTPUT_CAP, 1)
                 data += ("\n[opf self-test: {} {} exceeded the {}-byte copy cap; about {} more bytes "
@@ -22596,10 +22727,10 @@ def _unit_copy_capped(stream, path, label, kind, ident):
                          .encode("utf-8"))
         except OSError as exc:
             return ("its {} capture could not be read back (errno {}); a passing verdict requires "
-                    "a readable, complete capture".format(kind, exc.errno), False, b"")
+                    "a readable, complete capture".format(kind, exc.errno), False, b"", None)
     if data:
         _unit_deliver(stream, data, 10.0)
-    return (None, tainted, tail)
+    return (None, tainted, tail, foreign[0])
 
 
 def _unit_write_record(label, code):
@@ -22779,6 +22910,13 @@ def _unit_internal_watchdog(label, budget):
     return release
 
 
+# How many garbage-collection passes the record handler may make before one frees nothing
+# (merge train 2 QA r4, codex MEDIUM: a finalizer may CREATE new cyclic cleanup work -- an
+# Outer.__del__ that builds a cyclic Inner -- which the r3 single collection left for the ending
+# os._exit to skip, its cleanup silently lost); a run of passes that NEVER settles inside this
+# bound fails closed: cleanup work still appearing then cannot be shown complete.
+_UNIT_GC_PASS_BOUND = 10
+
 # The reporting machinery a cleanup fault is reported through (merge train 2 QA r3, claude MINORs
 # 1 and 2): the error stream and the three hooks CPython hands an uncaught or unraisable exception.
 _UNIT_REPORTING = (("sys", "stderr"), ("sys", "excepthook"), ("sys", "unraisablehook"),
@@ -22828,7 +22966,10 @@ def _cmd_self_test_unit(label):
     hook that raises writes no `Traceback` header and used to pass). The record handler makes the
     record TRULY LAST (merge train 2 QA r3, codex MEDIUM: a cyclic-garbage finalizer that ran in
     interpreter finalization, after the record, and ended the child with os._exit(0) passed): it
-    collects the cyclic garbage FIRST, so pending finalizers run before the record, flushes the
+    collects the cyclic garbage FIRST -- repeatedly, until a pass frees nothing, within
+    _UNIT_GC_PASS_BOUND passes, past which it fails closed (merge train 2 QA r4, codex MEDIUM: a
+    collected finalizer may create new cyclic cleanup work, which one collection left for the
+    os._exit to skip) -- so pending finalizers run before the record, flushes the
     streams, writes the record and then ends the process ITSELF with os._exit(code), so no
     interpreter finalization runs after it (an object still reachable then is never finalized,
     so its finalizer neither runs nor faults). It is checked to be the FIRST exit handler
@@ -22873,7 +23014,19 @@ def _cmd_self_test_unit(label):
             return   # the unit never settled: no record, and the parent fails closed
         code = settled[0]
         found = _unit_restore_reporting(reporting)
-        gc.collect()
+        # Collect REPEATEDLY until a pass frees nothing (merge train 2 QA r4, codex MEDIUM: a
+        # collected finalizer may create NEW cyclic cleanup work, which a single collection left
+        # for the os._exit below to skip); exceeding _UNIT_GC_PASS_BOUND fails closed.
+        gc_settled = False
+        for _ in range(_UNIT_GC_PASS_BOUND):
+            if gc.collect() == 0:
+                gc_settled = True
+                break
+        if not gc_settled:
+            cleanup_faults.append(
+                "garbage collection still freed objects after {} passes, so cleanup work its "
+                "finalizers keep creating cannot be shown complete (merge train 2 QA r4, codex "
+                "MEDIUM)".format(_UNIT_GC_PASS_BOUND))
         found += _unit_restore_reporting(reporting)
         if found:
             cleanup_faults.append("cleanup code replaced the reporting machinery ({})".format(
@@ -23105,14 +23258,16 @@ def _run_unit_subprocess(label, bound, argv=None):
     MINOR 1: a unit that unlinked its stderr capture and planted an empty regular file there
     laundered a tainted stream into a pass), unless it received the freed capture's inode number
     (residual (j)) -- and a unit
-    exiting 0 whose captured error stream carries a CPython fault marker is refused -- a
-    passing verdict requires a readable, complete capture and an empty or clean error stream
-    (clean: free of every fault marker in _UNIT_FAULT_MARKERS -- the traceback header, the
-    frameless `Exception ignored` report, `Fatal Python error` and the rest, merge train 2 QA r3,
-    codex MAJOR -- anywhere in the COMPLETE capture, before the cleanup boundary or after it --
-    the scan reads past the delivery cap to the end of the stream, merge train 2 QA,
-    codex MAJOR; units
-    legitimately print fixture diagnostics to stderr on a pass) AND, past that, requires the
+    exiting 0 whose captured error stream carries any UNDECLARED line is refused -- a
+    passing verdict requires a readable, complete capture and an error stream EMPTY apart from
+    the child's cleanup boundary line and the unit's exactly declared expected lines
+    (_UNIT_STDERR_ALLOWED: the measured fixture diagnostics a unit legitimately prints on a
+    pass; merge train 2 QA r4, codex MAJOR: a frameless fault message the marker list did not
+    know -- asyncio's `Future exception was never retrieved` -- passed the r3 marker scan, and a
+    list of known fault messages can never be complete, so the line scan DECIDES and the first
+    CPython fault marker found is only an extra explanation in the failure -- the scan covers
+    the COMPLETE capture, before the cleanup boundary and after it, past the delivery cap to the
+    end of the stream, merge train 2 QA, codex MAJOR) AND, past that, requires the
     captured error stream to END at the child's cleanup boundary line `opf-unit-cleanup-boundary
     <label> <pid>` (_cmd_self_test_unit writes it once the unit has returned and the streams are
     flushed, as the child's last expected output): any bytes after it -- an exit handler's
@@ -23481,10 +23636,11 @@ def _unit_run_in_box(label, bound, argv, box):
                        "its record is written -- an early os._exit(0) included -- and a record "
                        "carrying any pid but the leader's fail closed".format(
                            label, status, child.pid, (record or "")[:80]))
-    copy_anomaly, _out_tainted, _out_tail = _unit_copy_capped(sys.stdout, out_path, label,
-                                                               "stdout", out_ident)
-    err_anomaly, err_tainted, err_tail = _unit_copy_capped(sys.stderr, err_path, label, "stderr",
-                                                           err_ident)
+    copy_anomaly, _out_tainted, _out_tail, _out_foreign = _unit_copy_capped(
+        sys.stdout, out_path, label, "stdout", out_ident)
+    err_anomaly, err_tainted, err_tail, err_foreign = _unit_copy_capped(
+        sys.stderr, err_path, label, "stderr", err_ident,
+        allowed=_unit_allowed_stderr_lines(label))
     copy_anomaly = err_anomaly or copy_anomaly
     if failure is None and copy_anomaly is not None:
         failure = ("opf self-test: {} {}; failing closed, never a hang (QA28)"
@@ -23498,12 +23654,18 @@ def _unit_run_in_box(label, bound, argv, box):
         # writes no record gives the same one, QA34 codex). Naming the capture state reports what
         # was observed, never who removed anything.
         failure = "{}; and {}".format(failure, copy_anomaly)
-    if failure is None and status == EXIT_OK and err_tainted:
-        failure = ("opf self-test: {} exited 0 but its error stream carries the CPython fault "
-                   "marker {!r}; a passing verdict requires an empty or clean error stream, free "
-                   "of every fault marker before the cleanup boundary and after it (QA29 codex "
-                   "MAJOR 5; merge train 2 QA r3, codex MAJOR), failing closed".format(
-                       label, err_tainted))
+    if failure is None and status == EXIT_OK and err_foreign is not None:
+        extra = ""
+        if err_tainted:
+            extra = (", and the stream carries the CPython fault marker {!r} (an explanation "
+                     "only: a list of known fault messages can never be complete)"
+                     .format(err_tainted))
+        failure = ("opf self-test: {} exited 0 but its error stream carries the undeclared line "
+                   "{!r}{}; a passing verdict requires an error stream EMPTY apart from the "
+                   "child's cleanup boundary line and the unit's exactly declared expected lines "
+                   "(_UNIT_STDERR_ALLOWED; QA29 codex MAJOR 5; merge train 2 QA r3 and r4, codex "
+                   "MAJORs), failing closed".format(
+                       label, err_foreign.decode("utf-8", "replace"), extra))
     if failure is None and status == EXIT_OK and not err_tail.endswith(
             "{} {} {}\n".format(_UNIT_BOUNDARY, label, child.pid).encode("utf-8")):
         failure = ("opf self-test: {} exited 0 but its captured error stream does not end at its "
@@ -23597,7 +23759,12 @@ def _unit_bound_self_test():
     replaced sys.stderr, (35) a silenced sys.unraisablehook or (36) a closed sys.stderr, and (37) a
     cleanup handler that replaces sys.excepthook, each fail closed (merge train 2 QA r3, codex
     MAJOR and MEDIUM, claude MINORs 1 and 2); the benign control (30c) also leaves a benign
-    cyclic finalizer. Returns 0 clean, 1 on a failure."""
+    cyclic finalizer. The r4 legs: (38) a grandchild's frameless asyncio fault, a message the
+    marker list never knew, (39) a collected finalizer that creates NEW cyclic cleanup work
+    whose own finalizer faults, (40) a finalizer chain no collection pass inside
+    _UNIT_GC_PASS_BOUND ends, and (41) an undeclared benign stderr line, each fail closed, while
+    a unit writing exactly its declared _UNIT_STDERR_ALLOWED row still passes (merge train 2 QA
+    r4, codex MAJOR and MEDIUM). Returns 0 clean, 1 on a failure."""
     import contextlib
     import inspect
     import io
@@ -24656,8 +24823,8 @@ def _unit_bound_self_test():
             with open(path, "wb") as handle:
                 handle.write(b"fixture diagnostic\n" + marker + b" probe\n")
             ident = os.stat(path)
-            anomaly, tainted, _tail = _unit_copy_capped(io.StringIO(), path, "synthetic-marker",
-                                                        "stderr", ident)
+            anomaly, tainted, _tail, _foreign = _unit_copy_capped(
+                io.StringIO(), path, "synthetic-marker", "stderr", ident)
             if anomaly is not None or tainted != marker.decode("ascii"):
                 faults.append("the error-stream scan did not name the CPython fault marker {!r} "
                               "(anomaly {!r}, tainted {!r}; merge train 2 QA r3, codex "
@@ -24703,6 +24870,105 @@ def _unit_bound_self_test():
             faults.append("{} did not fail closed by name (code {}, expected {!r}, stderr tail "
                           "{!r}; merge train 2 QA r3)".format(case, code, needle, err_text[-240:]))
 
+    # (38) merge train 2 QA r4, codex MAJOR: a grandchild's frameless asyncio fault -- `Future
+    # exception was never retrieved`, a message _UNIT_FAULT_MARKERS never knew -- lands on the
+    # inherited error stream before the cleanup boundary over a zero exit; only the empty-stream
+    # line scan stands between it and a pass (it passed the r3 marker scan).
+    asyncio_probe = ("import asyncio\n"
+                     "loop = asyncio.new_event_loop()\n"
+                     "future = loop.create_future()\n"
+                     "future.set_exception(ValueError('cleanup failed'))\n"
+                     "del future\n"
+                     "loop.close()\n")
+    code, _took, _out_text, err_text = run_vector(
+        "synthetic-asyncio-fault", 30.0, child_entry(
+            "synthetic-asyncio-fault",
+            "    import subprocess\n"
+            "    subprocess.run([sys.executable, '-I', '-B', '-c', "
+            + repr(asyncio_probe) + "], check=True)\n"))
+    if code != EXIT_MALFORMED or "undeclared line" not in err_text:
+        faults.append("an exit 0 over a frameless fault message the marker list does not know "
+                      "still passed (code {}, stderr tail {!r}): a passing unit's error stream "
+                      "is empty apart from its declared lines (merge train 2 QA r4, codex "
+                      "MAJOR)".format(code, err_text[-240:]))
+
+    # (39) merge train 2 QA r4, codex MEDIUM: a collected finalizer that creates NEW cyclic
+    # cleanup work; one collection pass left the Inner's cleanup for os._exit to skip, so its
+    # fault was never raised and the unit passed. The repeated collection reaches it, and the
+    # audit hook turns the fault into the named exit 2.
+    code, _took, _out_text, err_text = run_vector(
+        "synthetic-chained-finalizer", 30.0, child_entry(
+            "synthetic-chained-finalizer",
+            "    class Inner:\n"
+            "        def __init__(self):\n"
+            "            self.cycle = self\n"
+            "            self.remove = os.remove\n"
+            "        def __del__(self):\n"
+            "            self.remove('/nonexistent-opf-selftest-r4-chain')\n"
+            "    class Outer:\n"
+            "        def __init__(self):\n"
+            "            self.cycle = self\n"
+            "            self.inner = Inner\n"
+            "        def __del__(self):\n"
+            "            self.inner()\n"
+            "    atexit.register(Outer)\n"))
+    if code != EXIT_MALFORMED or "opf-unit-cleanup-fault" not in err_text:
+        faults.append("a finalizer-created cyclic finalizer's fault still passed (code {}, "
+                      "stderr tail {!r}): garbage is collected until a pass frees nothing, so "
+                      "cleanup work created by finalizers runs before the record (merge train 2 "
+                      "QA r4, codex MEDIUM)".format(code, err_text[-240:]))
+
+    # (40) the collection bound fails CLOSED: a finalizer chain deeper than _UNIT_GC_PASS_BOUND
+    # keeps every pass freeing something, and the handler refuses by name instead of exiting
+    # over cleanup work it cannot show complete.
+    code, _took, _out_text, err_text = run_vector(
+        "synthetic-unsettled-gc", 30.0, child_entry(
+            "synthetic-unsettled-gc",
+            "    def make_link(depth):\n"
+            "        class Link:\n"
+            "            def __init__(self, depth):\n"
+            "                self.cycle = self\n"
+            "                self.depth = depth\n"
+            "                self.make = make_link\n"
+            "            def __del__(self):\n"
+            "                if self.depth > 0:\n"
+            "                    self.make(self.depth - 1)\n"
+            "        Link(depth)\n"
+            "    atexit.register(make_link, " + str(_UNIT_GC_PASS_BOUND + 2) + ")\n"))
+    if code != EXIT_MALFORMED or "still freed objects after" not in err_text:
+        faults.append("a finalizer chain outlasting the collection bound was not the named "
+                      "fail-closed exit 2 (code {}, stderr tail {!r}; merge train 2 QA r4, "
+                      "codex MEDIUM)".format(code, err_text[-240:]))
+
+    # (41) the declared-allowlist contract, both ways (merge train 2 QA r4, codex MAJOR): a unit
+    # writing EXACTLY its declared row still passes (no over-rejection; the parent-side table is
+    # patched for this label and restored in the finally), and an undeclared line -- here the
+    # very asyncio message of (38), written directly -- fails closed by name.
+    saved_rows = _UNIT_STDERR_ALLOWED.get("synthetic-declared")
+    try:
+        _UNIT_STDERR_ALLOWED["synthetic-declared"] = (b"declared fixture diagnostic",)
+        code, _took, _out_text, err_text = run_vector(
+            "synthetic-declared", 30.0, child_entry(
+                "synthetic-declared",
+                "    os.write(2, b'declared fixture diagnostic\\n')\n"))
+        if code != EXIT_OK:
+            faults.append("a unit writing exactly its declared stderr line did not pass (code "
+                          "{}, stderr tail {!r}): no over-rejection (merge train 2 QA r4)"
+                          .format(code, err_text[-240:]))
+        code, _took, _out_text, err_text = run_vector(
+            "synthetic-declared", 30.0, child_entry(
+                "synthetic-declared",
+                "    os.write(2, b'Future exception was never retrieved\\n')\n"))
+        if code != EXIT_MALFORMED or "undeclared line" not in err_text:
+            faults.append("an undeclared line on a passing unit's error stream was not the "
+                          "named fail-closed exit 2 (code {}, stderr tail {!r}; merge train 2 "
+                          "QA r4, codex MAJOR)".format(code, err_text[-240:]))
+    finally:
+        if saved_rows is None:
+            _UNIT_STDERR_ALLOWED.pop("synthetic-declared", None)
+        else:
+            _UNIT_STDERR_ALLOWED["synthetic-declared"] = saved_rows
+
     if faults:
         print("opf unit-bound self-test: FAIL ({})".format("; ".join(faults)[:2000]), file=sys.stderr)
         return EXIT_FINDING
@@ -24739,7 +25005,12 @@ def _unit_bound_self_test():
           "handler still passes; and the r3 legs hold: every CPython fault marker is named by the "
           "scan, and a grandchild's frameless fault before the boundary, a finalizer that ends "
           "the child silently, and a cleanup fault under a replaced or closed sys.stderr or a "
-          "silenced sys.unraisablehook, and a replaced sys.excepthook, each fail closed)")
+          "silenced sys.unraisablehook, and a replaced sys.excepthook, each fail closed; and "
+          "the r4 legs hold: a frameless fault message the marker list does not know, an "
+          "undeclared line on a passing unit's error stream, a collected finalizer's newly "
+          "created cyclic cleanup work whose finalizer faults, and a finalizer chain outlasting "
+          "the bounded repeated collection each fail closed, while a unit writing exactly its "
+          "declared stderr line still passes)")
     return EXIT_OK
 
 
