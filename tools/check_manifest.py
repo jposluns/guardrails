@@ -993,6 +993,62 @@ def _self_test_main_isolated():
                 failures.append("{}: a NUL root must be git-cannot-answer (None), got {!r} and {!r}"
                                 .format(_label, got, got_ignored))
 
+        # D-400 fixture env, QA round 2 (MINOR-3), both precheck copies: the ownership branch of
+        # _git_lines, driven directly with subprocess.run patched to record the child environment.
+        # OWNED (a scratch root this user owns): the caller's global and system configuration are
+        # pinned away (HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM at os.devnull,
+        # GIT_CONFIG_NOSYSTEM=1). NOT OWNED (os.geteuid patched to another uid): the caller's HOME
+        # stands and no config pin is added, the disclosed residual. A git refusal reported as
+        # dubious ownership is exit 2 on the owned root and None (git-absent) on the not-owned one.
+        # MUTATIONS: dropping the pin fails the owned vector; pinning unconditionally fails the
+        # not-owned vector; reading the owned dubious-ownership refusal as None fails the refusal
+        # vector; refusing it on a not-owned root fails the not-owned refusal vector.
+        import subprocess
+        _pins = dict(HOME=os.devnull, XDG_CONFIG_HOME=os.devnull, GIT_CONFIG_GLOBAL=os.devnull,
+                     GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        _caller = dict(HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg")
+        _dubious = b"fatal: detected dubious ownership in repository at '/x'\n"
+        with tempfile.TemporaryDirectory(prefix="aiqt-git-owner-") as _owned_root:
+            _own_uid = os.stat(_owned_root).st_uid
+            for _label, _mod in (("_gen_common", _gc), ("_containment", _ct)):
+                for _branch, _euid in (("owned", _own_uid), ("not-owned", _own_uid + 1)):
+                    for _rc, _err in ((0, b""), (128, _dubious)):
+                        _seen = []
+
+                        def _fake_run(argv, **kwargs):
+                            _seen.append(kwargs.get("env"))
+                            return subprocess.CompletedProcess(argv, _rc, b"answer\n", _err)
+                        _errs = io.StringIO()
+                        try:
+                            with patch.dict(os.environ, _caller), patch.object(subprocess, "run", _fake_run), \
+                                    patch.object(os, "geteuid", lambda: _euid), \
+                                    redirect_stdout(io.StringIO()), redirect_stderr(_errs):
+                                got = _mod._git_lines(_owned_root, ["rev-parse", "--show-toplevel"])
+                        except SystemExit as exc:
+                            got = "exit " + repr(exc.code)
+                        env = _seen[0] if len(_seen) == 1 and isinstance(_seen[0], dict) else dict()
+                        shown = dict((key, env.get(key)) for key in _pins)
+                        pinned = all(env.get(key) == value for key, value in _pins.items())
+                        kept = (env.get("HOME") == "/caller-home"
+                                and not any(key.startswith("GIT_CONFIG") for key in env))
+                        want = (b"answer\n" if _rc == 0
+                                else ("exit 2" if _branch == "owned" else None))
+                        if _branch == "owned" and not pinned:
+                            failures.append("D-400 fixture env, {}: on an owned root the caller's "
+                                            "global and system git configuration must be pinned "
+                                            "away, got env {}".format(_label, shown))
+                        if _branch == "not-owned" and not kept:
+                            failures.append("D-400 fixture env, {}: on a root another uid owns the "
+                                            "caller's git configuration must stand unpinned, got "
+                                            "env {}".format(_label, shown))
+                        if got != want:
+                            failures.append("D-400 fixture env, {}: {} root, git rc {}: expected {!r}, "
+                                            "got {!r}".format(_label, _branch, _rc, want, got))
+                        if got == "exit 2" and "dubious ownership" not in _errs.getvalue():
+                            failures.append("D-400 fixture env, {}: the owned-root dubious-ownership "
+                                            "refusal must name its cause, got {!r} on stderr"
+                                            .format(_label, _errs.getvalue()))
+
         # (r) D-400-SPECIAL-FILE-PRECHECK rulings 1, 2 and 5: each --precheck ENTRY POINT, run as a
         #     SUBPROCESS against hostile trees built around the real module files, asserting the exit
         #     code and the named path. The trees are git-init'd so the fixed-location root derivation

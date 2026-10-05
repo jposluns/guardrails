@@ -73,7 +73,17 @@ def _git_lines(root, args):
     never fewer). stdin is closed and the call is bounded, so this probe itself cannot be parked by a
     hostile tree; the ignore-control files and nested .git markers git WOULD read with a plain
     blocking open are screened by the caller before the one query that reads them (see
-    precheck_special_files)."""
+    precheck_special_files).
+
+    CONFIGURATION. On a root the effective user owns, git runs with the caller's global and system
+    configuration pinned away, so on that root the caller's core.fsmonitor does not run and the
+    caller's global ignore file cannot hide a path from the walk. That holds ONLY on such a root. On
+    a root another uid owns, or whose owner cannot be read, the caller's global and system
+    configuration still apply, its core.fsmonitor and global ignore file included: a disclosed
+    residual, which tools/selftest_git_fixture_env.py reports as config exposure for any self-test
+    that reaches it. On an owned root, a refusal git reports as dubious ownership (its git dir
+    belongs to another uid) is a named refusal, exit 2, never None, so the root cross-check is never
+    silently skipped there."""
     import subprocess
     # QA round 7 (codex M4 = claude M2): every GIT_* variable is scrubbed from the child
     # environment, as check_portability and scrub_git_environment already do. An inherited
@@ -82,26 +92,47 @@ def _git_lines(root, args):
     # certifies (a nested or decoy repository above all), which would exempt a planted special
     # file from the walk or blind the tracked-content shadow test.
     env = dict((key, value) for key, value in os.environ.items() if not key.startswith("GIT_"))
-    # D-400 fixture env: on a root this user owns, the global and system configuration are pinned
-    # away too (HOME and XDG_CONFIG_HOME at os.devnull, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM at
-    # os.devnull, GIT_CONFIG_NOSYSTEM=1), so a caller's core.fsmonitor never runs inside a gate and a
-    # caller's global ignore file cannot hide a path from the walk (fewer ignored paths, so more
-    # refusals, never fewer). Only on a root another uid owns (or where ownership cannot be read) is
-    # the caller's configuration kept, because git refuses such a checkout as dubious ownership
-    # unless the caller's global config trusts it (the caller_env_without_git stance).
+    # D-400 fixture env: ONLY on a root the effective user owns are the caller's global and system
+    # configuration pinned away (HOME and XDG_CONFIG_HOME at os.devnull, GIT_CONFIG_GLOBAL and
+    # GIT_CONFIG_SYSTEM at os.devnull, GIT_CONFIG_NOSYSTEM=1; LC_ALL=C keeps git's refusal text
+    # untranslated for the ownership test below). On such a root a caller's core.fsmonitor does not
+    # run in this query and a caller's global ignore file cannot hide a path from the walk (fewer
+    # ignored paths, so more refusals, never fewer). On a root another uid owns, or whose owner
+    # cannot be read, the caller's configuration still applies, fsmonitor and global ignore file
+    # included; the fixture-env observer reports that exposure. This stays a disclosed residual
+    # rather than being narrowed: git refuses such a checkout as dubious ownership unless the
+    # caller's own global or system configuration trusts it (the caller_env_without_git stance), and
+    # trusting the root here instead (a command-scope safe.directory for this one root) would make
+    # git honour the other owner's repository-local configuration (its core.fsmonitor run as this
+    # user, its core.excludesFile hiding a path from the walk) for a caller who never trusted that
+    # checkout, which is the one protection dubious ownership exists for, on the very root under
+    # check; pinning without trust would instead make every such query git-absent while the gates'
+    # own git reads, under the caller's configuration, still answer.
     try:
         owned = os.stat(root).st_uid == os.geteuid()
     except (OSError, ValueError, AttributeError):
         owned = False
     if owned:
         env.update(HOME=os.devnull, XDG_CONFIG_HOME=os.devnull, GIT_CONFIG_NOSYSTEM="1",
-                   GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+                   GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, LC_ALL="C")
     try:
         proc = subprocess.run(["git", "-C", os.fspath(root), *args], stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=60, env=env)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
+        # D-400 fixture env, QA round 2 (MINOR-1): on an owned root whose git dir another uid owns,
+        # the pinned git refuses as dubious ownership (a caller's safe.directory is pinned away
+        # here), while the gates' own git reads may still answer under the caller's configuration.
+        # Reading that refusal as git-absent would silently skip the root cross-check, so it is
+        # refused by name. Both message forms git has used are matched (2.35.2 and 2.36: "is owned
+        # by someone else"; 2.37 on: "dubious ownership").
+        if owned and (b"dubious ownership" in proc.stderr or b"is owned by someone else" in proc.stderr):
+            print("error: git refuses {} as dubious ownership although this user owns it (its git "
+                  "dir belongs to another user; a caller's safe.directory does not apply to this "
+                  "query on an owned root); cannot confirm which tree to walk; fail-closed (give the "
+                  "git dir to the owner of the root)".format(root), file=sys.stderr)
+            raise SystemExit(2)
         return None
     return proc.stdout
 
@@ -114,7 +145,10 @@ def _git_toplevel(root):
     never to choose one (D-400-SPECIAL-FILE-PRECHECK root derivation). An answer that is not one
     NUL-free absolute path (empty, several lines, an embedded NUL or other undecodable bytes, a
     relative path) is cannot-evaluate, exit 2, by name: never a raw ValueError out of the path call,
-    and never read as git-absent, which would skip the confirmation."""
+    and never read as git-absent, which would skip the confirmation. On a root the effective user
+    owns, a refusal git reports as dubious ownership is exit 2 in _git_lines, never None. On a root
+    another uid owns, git answers or refuses under the caller's own configuration (see _git_lines),
+    and a refusal there is None: git-absent, as for every git read under that configuration."""
     out = _git_lines(root, ["rev-parse", "--show-toplevel"])
     if out is None:
         return None
@@ -859,7 +893,8 @@ if __name__ == "__main__":
     # and certify the wrong tree while the runner's gates read the invoked one. Whenever git can
     # answer, rev-parse must CONFIRM the derivation, and a disagreement is cannot-evaluate. Without
     # git (an exported tree) the fixed location stands alone and the walk runs with no ignore
-    # filter. Exit 0 when the walk finds nothing to refuse; exit 2 on a refusal, a root
+    # filter. On a root this user owns, a dubious-ownership refusal is exit 2 (_git_lines), never
+    # read as git-absent. Exit 0 when the walk finds nothing to refuse; exit 2 on a refusal, a root
     # disagreement, or an unknown argument.
     if sys.argv[1:] != ["--precheck"]:
         print("usage: python3 -I -B {} --precheck".format(sys.argv[0] or __file__), file=sys.stderr)

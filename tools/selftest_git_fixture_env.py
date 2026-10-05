@@ -1430,8 +1430,9 @@ def _manifest_extra_setup_failures():
         check(check_id, refused, True)
 
 
-# These registered self-tests exercise data/text/filesystem fixtures, not a git
-# lifecycle. They still require a successful observed system-config-lane run.
+# These registered self-tests exercise data/text/filesystem fixtures and have no discovered
+# git lifecycle wrapper; an entry whose vectors do launch git says how those launches are
+# isolated. They still require a successful observed system-config-lane run.
 # New modules and removed wrappers are NOT implicitly exempt.
 OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_journal.py": "Descriptor-helper vectors over in-process pipes with patched os primitives.",
@@ -1442,7 +1443,17 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
-    "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
+    "opf/tools/check_opf_homes.py": ("Homes contract and schema boundary vectors. Its gitignore "
+                                     "reconciliation vectors do build scratch repositories (git "
+                                     "init, add, commit and update-index) through its run_git "
+                                     "helper (an isolated HOME and XDG_CONFIG_HOME, "
+                                     "GIT_CONFIG_NOSYSTEM=1 and the three maintenance pins), and "
+                                     "the code under test reads them through the write guard's "
+                                     "own git launchers; its "
+                                     "special-file vectors launch a child interpreter whose only git "
+                                     "reads are the precheck's _git_lines queries on a scratch root "
+                                     "this user owns, run with the caller's global and system "
+                                     "configuration pinned away."),
     "opf/tools/check_opf_init_contract.py": "Source-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
     "opf/tools/check_opf_init_p0.py": "P0 store validation and runner registration vectors.",
@@ -2038,13 +2049,17 @@ _SCAN_ALLOWED_UNPINNED = (
      "the F-367 probe's own traced commit: the green leg passes the pinned fixture env and the"
      " red leg strips exactly the maintenance pins, so pinning this argv would blind both legs"),
     ("tools/_gen_common.py", "_git_lines", ("git",),
-     "production precheck root/ignore funnel over the real checkout (rev-parse --show-toplevel"
-     " and ls-files --others --ignored --exclude-standard reads), bounded with stdin closed;"
-     " read-only by design, and production launches stay unchanged"),
+     "production precheck root/ignore funnel over the real checkout (rev-parse, ls-files, ls-tree,"
+     " symbolic-ref and for-each-ref reads), bounded with stdin closed; read-only by design, so no"
+     " maintenance pin applies; on a root the effective user owns it runs git with the caller's"
+     " global and system configuration pinned away (D-400 fixture env), while on a root another"
+     " uid owns the caller's configuration still applies and the config observer reports it"),
     ("opf/tools/_containment.py", "_git_lines", ("git",),
-     "the OPF copy of the production precheck root/ignore funnel (rev-parse --show-toplevel and"
-     " ls-files --others --ignored --exclude-standard reads), bounded with stdin closed;"
-     " read-only by design, and production launches stay unchanged"),
+     "the OPF copy of the production precheck root/ignore funnel (rev-parse, ls-files, ls-tree,"
+     " symbolic-ref and for-each-ref reads), bounded with stdin closed; read-only by design, so no"
+     " maintenance pin applies; on a root the effective user owns it runs git with the caller's"
+     " global and system configuration pinned away (D-400 fixture env), while on a root another"
+     " uid owns the caller's configuration still applies and the config observer reports it"),
     ("tools/aiqt_corpus.py", "git", ("git",),
      "production read-only helper over the real repository (rev-parse/show/ls-files style"
      " reads); its callers never pass a maintenance-triggering subcommand, and production"
