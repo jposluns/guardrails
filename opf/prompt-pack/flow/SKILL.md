@@ -11,7 +11,7 @@ description: The OPF operating loop for an AI development assistant. Read the ad
   verification is never shortened for speed.
 ---
 
-<!-- OPF-FLOW: release=0.3.0 template-sha256=80a20f7107fb8abc89cdd4abf8b4b8208ad72018801f3431b1ef9616207e75ee -->
+<!-- OPF-FLOW: release=0.3.0 template-sha256=fe66ab845087921825b8d4232632507f20ca8d0df06c8f7928f4e760fa98503c -->
 
 # /flow: the OPF operating loop
 
@@ -166,7 +166,9 @@ Three rules govern everything else:
    unqualified `decided` landing, which only a maintainer makes (a `/proposed` landing, the only
    landing open to an assistant or automation actor under section 8.4, is a proposal and
    resolves nothing, whatever standing grant exists); a backlog item trigger once the
-   overlapping stream merges, finishes, or parks, the step then moving only where the section 3,
+   overlapping stream merges, finishes, or parks, save that a zero-rate lane park's trigger
+   naming the unit's own item (section 3, step 5) resolves on no stream state and is swept
+   only at that step's own sweep points, the step then moving only where the section 3,
    step 5 re-check finds it disjoint, its lane free, and the rate open. The decision rule, the one
    read path for every answer the run acts on, stated here once and referred to everywhere else:
    a decision's answer is the latest member of its `supersedes` chain that a maintainer landed
@@ -512,7 +514,9 @@ viability advice above. Then, by mode:
    it joins that queue ahead of any unit that converged after its park, and no lane park is
    written for it; a unit unparked under an `accept` (section 7), which authors nothing more
    and goes straight to the merge gate, joins that queue the same way whatever lane its
-   entries last named, its `merge` entry then carrying `lane=merge` (section 5). An
+   entries last named, its `unpark` entry carrying `lane=merge` itself, so no take-up reads
+   its old lane as held while it waits, its `merge` entry then carrying `lane=merge`
+   (section 5). An
    advancement or hardening
    lane is resumed only once no other live stream holds that lane and, for an advancement
    lane, fewer advancement streams than the recorded rate are live. Until both hold, the unit
@@ -520,9 +524,12 @@ viability advice above. Then, by mode:
    item ID of the stream holding that lane; where that lane is free but the rate is full, that
    of the live advancement stream with the lowest item ID; or, where the recorded rate is 0
    and no advancement stream is live to name, the rate's home: under the store binding the ID
-   of the flow-rate record the run read at run start, the frozen one unattended (section 0,
-   step 5), and under a committed-configuration binding, which reads and writes no flow-rate
-   record (section 2), the unit's own item ID, a trigger no stream sweep matches. A lane park
+   of the flow-rate record in force when the park is written, attended the latest clean
+   maintainer-authored rate record (the section 2 selector), which a zero rate always leaves
+   on record since only such a record sets 0, and unattended the frozen one the run read at
+   run start (section 0, step 5), and under a committed-configuration binding, which reads
+   and writes no flow-rate record (section 2), the unit's own item ID, a trigger no stream
+   sweep matches. A lane park
    is swept, and this re-check re-run, when its trigger stream converges, merges, finishes,
    or parks, whenever any advancement stream leaves its lane one of those ways, and, for a
    zero-rate lane park, at every run start, where the rate is read afresh under either
@@ -628,7 +635,8 @@ closed set `advance-<i>` (`<i>` the advancement lane number, 1 upward), `harden`
 `start` entry sets the advancement or hardening lane, and a `converge` entry sets `merge`, the
 lane the stream then sits in; a unit that merges under a maintainer's `accept` (section 7) has
 no clean round to converge on, so its `merge` entry carries `lane=merge` instead; an `unpark`
-that returns a unit from the merge lane carries `lane=` itself, as does a merge-delta `verdict`
+that returns a unit from the merge lane, or sends one there under an `accept` (section 3,
+step 5), carries `lane=` itself, as does a merge-delta `verdict`
 entry that returns one (section 7).
 
 `tier=` is `light`, `substantive`, or `sensitive` (section 7). `phase=` is `discovery`,
@@ -662,8 +670,9 @@ refuses, rather than skipping, only a `follows` target it cannot read or a linki
 `create` entry it cannot find, and a walk that refuses lets no standing rule act on the unit
 (section 7). `trigger=` is the record ID a park waits on: the `pending_decision`'s ID, the
 overlapping or lane-holding stream's backlog item ID, or a zero-rate lane park's trigger, the
-run-start flow-rate record's ID or, under a committed-configuration binding, the unit's own
-item ID (section 3, step 5); every `park` entry carries it, and every sweep matches on it.
+ID of the flow-rate record in force when the park is written, the frozen run-start one
+unattended (section 3, step 5), or, under a committed-configuration binding, the unit's own
+item ID; every `park` entry carries it, and every sweep matches on it.
 
 `<event>` is from the closed set `start`, `apply`, `verdict`, `converge`, `park`, `unpark`,
 `rescope`, `merge`, `finish`, and constrains the `status=` value:
@@ -675,7 +684,7 @@ item ID (section 3, step 5); every `park` entry carries it, and every sweep matc
 | `verdict` | `fixing` (`result=findings`: confirmed findings to fix) or `verifying` (`result=clean` on a VERIFY, next DISCOVERY pending; or `result=failed`, the round re-issued); a merge-delta round's entry (`phase=merge-delta`, section 7) carries `merging` on `result=clean`, the refreshed head pinned, and on `result=findings` carries `fixing` plus the `lane=` that returns the unit; it carries `phase=`, `result=`, and `rev=` |
 | `converge` | `converged`; it carries the converging DISCOVERY round's `phase=discovery`, `result=clean`, and `rev=`, and `lane=merge` |
 | `park` | `parked`; it carries `trigger=` |
-| `unpark` | the status the stream resumes at, never `parked` or `done`: for an overlap or lane park (section 3, step 5) it is that of the unit's latest flow entry whose status is not `parked`, whose `next` line the entry also copies; for a section 7 park, the status the carried-out option gives it |
+| `unpark` | the status the stream resumes at, never `parked` or `done`: for an overlap or lane park (section 3, step 5) it is that of the unit's latest flow entry whose status is not `parked`, whose `next` line the entry also copies; for a section 7 park, the status the carried-out option gives it; an `unpark` that ends an overlap or lane park and also carries out a deferred section 7 option (section 7) takes the option's status, this second rule |
 | `rescope` | the stream's current status, unchanged: any value here but `parked` or `done`; the entry re-declares `scope=` (section 3, step 5) |
 | `merge` | `merging`; for a unit merging under a maintainer's `accept`, which writes no `converge` entry, it also carries `lane=merge` |
 | `finish` | `done` |
@@ -781,9 +790,16 @@ the heavier tier. Record the tier in the `tier=` field of the unit's `flow start
 factual basis on the lines after that entry's two fixed lines (section 5); a change of tier
 re-declares `tier=` on the unit's next flow entry, and the current tier is the latest flow entry
 carrying `tier=`. Escalation is immediate when scope or diff character changes; de-escalation
-needs the maintainer's recorded decision, a clean `maintainer_decision` whose `decision` opens
+needs the maintainer's recorded decision, a clean `maintainer_decision` authored with
+`actor.kind` `maintainer`, never written, scribed, or proposed by the session (an
+importer-authored one never counts, and the section 2 scribe rule never extends to it), whose
+`decision` opens
 with the fixed line `flow tier <tier>`, naming the lower tier, linking `relates` to the unit's
-item, with a recorded factual basis on its later lines, never a throughput argument; the run
+item, with a recorded factual basis on its later lines, never a throughput argument; the
+governing record for a unit is the one such record that no other such record links
+`supersedes` to (OPF-SPEC.md sections 8.5 and 8.6), two or more unsuperseded ones meaning
+none governs, each a standing grant in the section 0, step 5 frozen set, so one landed
+mid-run lowers nothing unattended before the next run start, and the run
 carries one out by re-declaring `tier=` on the unit's next flow entry.
 
 **Light units** take at least two independent reviewer families (`review_families_light`) and
@@ -804,7 +820,15 @@ light panel writes the `converge` entry that takes the unit to `lane=merge`.
   failure is recorded.
 - **Convergence** is declared only on a clean, complete, non-degraded DISCOVERY panel: every
   required family returns a real, non-empty, non-timed-out verdict reporting zero findings on
-  the same pinned revision. An empty or timed-out verdict makes the round failed, never clean,
+  the same pinned revision. A complete, non-degraded panel whose every reported finding is
+  one the unit's `verdict` entries record as routed out of the unit (the routing bullet
+  below), the round's own routings of findings it newly confirms included, reports zero
+  findings open on the unit and is clean for this test: a unit whose open set is empty is
+  converged, never looping, so the round writes the `converge` entry exactly as a
+  zero-findings panel does, the re-reports and the routings listed on that entry's later
+  lines; a reported hypothesis refuted at validation is never a confirmed `finding` (findings
+  are validated at source, above) and likewise never keeps a panel from counting as clean
+  for this test. An empty or timed-out verdict makes the round failed, never clean,
   unless another leg's confirmed findings make it a `findings` round (section 5). A clean VERIFY
   never declares convergence and never replaces the next discovery panel.
 - **The verification rule**, the progress-gated rule that governs fixing rounds in place of any
@@ -829,14 +853,22 @@ light panel writes the `converge` entry that takes the unit to `lane=merge`.
   inferred later from prose. This rule reads each DISCOVERY round over its window: that
   round's `verdict` entry together with every VERIFY and merge-delta `verdict` entry since
   the unit's previous non-failed DISCOVERY entry, their listed openings, closures, and
-  routings combined. Convergence is judged first: a round on which the unit converges (the
+  routings combined, save that a merge-delta entry and the later closures of exactly the
+  findings it opened are a window of that merge-delta round's own, set off against each
+  other there and counted in no DISCOVERY round's window. Convergence is judged first: a
+  round on which the unit converges (the
   convergence bullet above, the light-panel rule included) is progress and never a stall, so
   no round both converges and declares one. The unit's first non-failed DISCOVERY round is
   the baseline, and this rule never declares a stall on it. A **stall** is a later round
   whose window shows no net closure (it closes no more findings than it opens, a routed
-  finding counting as neither) while findings stay open on the unit, an oscillation (a
+  finding counting as neither) and leaves findings open on the unit, an oscillation (a
   recorded reopening), or regressions without
-  offsetting closures; a finding that disappears with no deliberate intervening change is not
+  offsetting closures; a round whose window leaves no finding open on the unit, every
+  remaining finding routed away included, never counts toward a stall and never blocks
+  convergence: complete and non-degraded it converges (the convergence bullet above), and
+  otherwise its failed, empty, or timed-out legs are reviewer reliability (the reliability
+  bullet below), never a stall. A finding that disappears with no deliberate intervening
+  change is not
   progress (the AIQT Guardrails pack's `rerun-pass-is-still-failure` rule). A failed round
   (`result=failed`) is reviewer reliability, not verification evidence: the reliability bullet
   handles it, and it never counts toward a declared stall. When this rule declares a stall, the
@@ -898,7 +930,8 @@ light panel writes the `converge` entry that takes the unit to `lane=merge`.
   extends to this transition, so an answer the session records resolves nothing until that
   ratification. The run then unparks the unit through an `unpark` flow entry, after the section
   3, step 5 re-check, and carries out that option; where that re-check instead keeps the unit
-  parked behind an overlapping stream, the option is not yet carried out, and the run carries it
+  parked behind an overlapping stream or a held lane, the option is not yet carried out, and
+  the run carries it
   out at the `unpark` that ends that later park, reading the answer then, through the decision
   rule, from the `pending_decision` named by the latest of the unit's `park` entries whose
   `trigger=` names one. A unit that returns from the merge lane (`merge` is the lane its
@@ -906,7 +939,9 @@ light panel writes the `converge` entry that takes the unit to `lane=merge`.
   entry, section 5) resumes under any option but `accept` in the lane its `start` entry set,
   declared by `lane=` on the `unpark` entry itself, so its lane is on record before any
   other stream's take-up reads the lanes, and taken under the section 3, step 5 re-check;
-  under `accept` it stays in the merge lane and goes to the merge gate (below).
+  under `accept` it stays in the merge lane and goes to the merge gate (below); a
+  merge-delta finding on an accepted unit takes the merge-delta bullet's return (below),
+  never this clause.
   `continue` resumes DISCOVERY rounds, and a further stall the
   verification rule declares parks the unit again through this same path; `rescope` narrows the
   unit as the standing-rules bullet defines; only `accept` accepts a residual, and only those it
@@ -1021,8 +1056,14 @@ convergence rule.
   below pass on it. A unit merging within those limits, one under an `accept` included, is still
   held to every requirement of the bound gate, the default binding's included, and staying
   within those limits never by itself shows that gate met. A unit reaches this gate only when
-  its latest `converge` entry follows every `verdict` and `apply` entry it has (a higher `WL`
-  number), or under a maintainer's `accept` for exactly the residuals it names (above); a unit
+  its latest `converge` entry follows every `apply` entry and every DISCOVERY and VERIFY
+  `verdict` entry it has (a higher `WL` number), or under a maintainer's `accept` for
+  exactly the residuals it names (above); a merge-delta `verdict` entry
+  (`phase=merge-delta`, section 5) sits outside that comparison, judged in its own window at
+  this gate, and never unseats a recorded convergence: clean, the convergence stands and the
+  refreshed head pins; on findings the unit returns to fix rounds (the merge-delta bullet
+  below), its later entries making its next convergence a new `converge` entry; failed, the
+  round is re-issued (the reliability bullet); a unit
   at `converged` or `merging` without either parks on a fresh `pending_decision` naming the
   missing convergence, through the at-stall path's park. When the floor, CI, that delivery
   rule, or the bound gate refuses a merge, the unit parks the same way, on a `pending_decision`
@@ -1049,7 +1090,14 @@ convergence rule.
   lane for the lane its `start` entry set, declared by `lane=` on that `verdict` entry and
   taken under the section 3, step 5 re-check, a lane park included while that lane is held,
   so it never authors fixes in the merge lane (section 2) and never sits beside the stream
-  holding its lane. Only a clean merge-delta verification, with the full suite, pins the
+  holding its lane; the unit holds that lane only once the re-check passes, so a resumed run
+  re-runs that re-check before reading the unit as in hand (section 1, step 2), never as a
+  second unit in one lane. This one return governs a unit merging under an `accept` too,
+  over the at-stall bullet's accept clause: it fixes exactly these findings in its start
+  lane while the `accept` stands, and once they are closed it returns to the merge gate
+  under that standing `accept`, read afresh there (the decision rule), a fresh merge-delta
+  verification then run on the new refreshed head. Only a clean merge-delta verification,
+  with the full suite, pins the
   refreshed head as the reviewed head (the revision rule above).
 - After every merge: records rotation in the same act (the merged unit's own item to
   `done/proposed` or ratified `done`, the worklog entry, the views re-rendered). A parent item's
@@ -1340,7 +1388,7 @@ verification_floor = the store's declared profile floor
 <!-- /OVERLAY:flow-verification-floor -->
 
 <!-- OVERLAY:flow-verification-convergence-rule -->
-verification_convergence_rule = the section 7 verification rule: fix rounds continue while each round makes progress, read over each round's window of `verdict` entries; a stall is a later round (never the unit's first non-failed DISCOVERY round, and never one on which the unit converges) whose window shows no net closure, an oscillation, or regressions without offsetting closures; a finding that disappears with no deliberate intervening change is not progress (the AIQT Guardrails pack's `rerun-pass-is-still-failure` rule); a binding may be stricter, never weaker, never counts a failed round, and never stalls on a round count alone
+verification_convergence_rule = the section 7 verification rule: fix rounds continue while each round makes progress, read over each round's window of `verdict` entries; a stall is a later round (never the unit's first non-failed DISCOVERY round, never one on which the unit converges, and never one whose window leaves no finding open on the unit) whose window shows no net closure, an oscillation, or regressions without offsetting closures; a finding that disappears with no deliberate intervening change is not progress (the AIQT Guardrails pack's `rerun-pass-is-still-failure` rule); a binding may be stricter, never weaker, never counts a failed round, and never stalls on a round count alone
 <!-- /OVERLAY:flow-verification-convergence-rule -->
 
 <!-- OVERLAY:flow-status-surface -->
