@@ -81,9 +81,10 @@
       <div class="card">
         <h3>By hand (fallback)</h3>
         <p>Create the plain-TOML store, configure your own checks, and work records-first. The standard
-          requires no particular tool. The reference tooling validates spec 1.2.0 stores in either
-          layout, with limits: it does not render or drift-check per-record views, and the baseline
-          validator reports module-tier and importer record content schemas as cannot-evaluate.
+          requires no particular tool. The reference tooling requires Python 3.14 or newer. It
+          validates spec 1.2.0 stores in either layout, with limits: it does not render or
+          drift-check per-record views, and the baseline validator reports module-tier and importer
+          record content schemas as cannot-evaluate.
           For a store with module-tier or importer records, or a per-record store that declares views,
           doctor's overall verdict is cannot-evaluate (exit 2).</p>
       </div>
@@ -103,10 +104,9 @@
     <p class="eyebrow">Command reference</p>
     <h2>The opf commands, one by one</h2>
     <p class="lead">OPFiles names a standard command vocabulary; the <code>opf</code> reference CLI is
-      one implementation of it. The reference tooling requires Python 3.14 or newer. A base adopter can
-      use their own tooling instead, or adopt by hand. The standard and the reference suite are both a
-      draft, so this reference documents each command by what it does at source today, except where
-      marked Planned.</p>
+      one implementation of it. A base adopter can use their own tooling instead, or adopt by hand. The
+      standard and the reference suite are both a draft, so this reference documents each command by
+      what it does at source today, except where marked Planned.</p>
     <p><code>doctor</code> distinguishes <b style="color:var(--ink)">0</b> clean,
       <b style="color:var(--ink)">1</b> a finding, and <b style="color:var(--ink)">2</b> cannot-evaluate.
       <code>render --check</code> uses exit 1 for drift; <code>render --write</code> can also exit 1
@@ -331,9 +331,10 @@
     <h2>The manual path, step by step</h2>
     <p class="lead">OPFiles specifies formats, layout, naming, lifecycle, and enforcement posture, and
       requires no particular tool: the specification states that a project can conform with
-      hand-maintained files and its own checks. The reference tooling validates spec 1.2.0 stores in
-      either layout, with limits: it does not render or drift-check per-record views, and the baseline
-      validator reports module-tier and importer record content schemas as cannot-evaluate.
+      hand-maintained files and its own checks. The reference tooling requires Python 3.14 or newer.
+      It validates spec 1.2.0 stores in either layout, with limits: it does not render or drift-check
+      per-record views, and the baseline validator reports module-tier and importer record content
+      schemas as cannot-evaluate.
       For a store with module-tier or importer records, or a per-record store that declares views,
       doctor's overall verdict is cannot-evaluate (exit 2).</p>
     <p>The shape of the manual path is short: create the store (either run <code>opf init</code> to

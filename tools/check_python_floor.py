@@ -5,6 +5,9 @@ floor of the pack's executable tooling, and every other statement of that floor 
 Legs, in order:
   source         the single source parses, carries exactly its declared keys, and names the decided
                  floor (FLOOR below; a change to either is a reviewed change to both).
+  switch         the single source keeps documentation-check at its decided value (DOCUMENTATION_CHECK
+                 below, true since the declarations unit switched it on), so turning the documentation
+                 check off is a finding (exit 1) and a reviewed change to this gate, never a silent pass.
   pins           every `python-version:` interpreter pin in .github/workflows/*.yml, in PIN_FILES (the
                  shipped adopter CI template and its inline copy) and in every local action file (each
                  action.yml or action.yaml under the tree outside SKIPPED_DIR_NAMES, and the target of
@@ -93,8 +96,11 @@ Legs, in order:
                  shipped entrypoint switches it on): every shipped entrypoint, a .py file outside
                  EXCLUDED_TREES with a module-level `if __name__ == "__main__":`, must be listed in
                  guarded-surfaces.
-  documentation  OFF until the source sets documentation-check = true (the declarations unit switches
-                 it on): each DECLARATION_FILES entry must contain "Python <floor> or newer".
+  documentation  ON (documentation-check = true, held by the switch leg): each DECLARATION_FILES entry
+                 must contain "Python <floor> or newer".
+  claims         ON with the documentation leg: no DECLARATION_FILES entry may name a Python version
+                 below the floor (OLDER_CLAIM_RE below), so an older claim beside the floor statement
+                 is a finding, naming file and line.
 
   check_python_floor.py              run every leg over this repository
   check_python_floor.py --self-test  fixture trees for every leg, plus red-on-revert: for each leg, a
@@ -137,7 +143,16 @@ run as a fork or copy under a name that does not name setup-python, which is not
 setup-python step; and a remote action, a remote reusable workflow
 (owner/repo/.github/workflows/x.yml@ref) and a docker:// image, whose content is not in the tree
 and is not read, so a setup-python step inside one is not seen. The leg scans only the files named
-above. The documentation leg matches the exact phrase, not its meaning.
+above. The documentation leg matches the exact phrase, not its meaning: a sentence that negates it
+("do not require Python 3.14 or newer") passes, and the phrase reflowed across a line break is a
+finding. The claims leg reads only the forms OLDER_CLAIM_RE names: the word Python or CPython (then
+optionally "version" or "versions") or the interpreter name pythonM.N, followed by the version, and a
+bare 3.N followed by a plus sign or by "or newer", "or later", "or above", "or higher", "and newer",
+"and later" or "and up". It does not read a version spelled in words, one separated from the word
+Python by markup other than whitespace and a no-break space, or the later end of a range ("Python 3.11
+to 3.13" is a finding for 3.11 only). It judges every older version it reads, whatever the sentence
+says about it, so a sentence that names an older version only to say it is refused is also a finding,
+a disclosed over-rejection: state the floor without naming older versions.
 
 Run this gate isolated: python3 -I -B tools/check_python_floor.py
 """
@@ -160,6 +175,9 @@ SUITE_ID = "python-floor-selftest"
 # The decided floor. The source leg asserts the single source names it; every other leg reads the
 # floor from the single source.
 FLOOR = (3, 14)
+# The decided value of the documentation-check switch. The switch leg asserts the single source keeps
+# it, so turning the documentation check off is a finding and a reviewed change to this gate too.
+DOCUMENTATION_CHECK = True
 SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "completeness-check",
                "documentation-check"}
 WORKFLOWS_REL = ".github/workflows"
@@ -236,6 +254,14 @@ SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install.html",
                      "opf/site/adopt.md", "opf/site/adopt.html", "opf/spec/OPF-QUICKSTART.md",
                      ".preview/README.md")
+# A Python version a declaration file names (the claims leg): the word Python or CPython, optionally
+# "version" or "versions", then the version, whitespace and no-break spaces allowed between; the
+# interpreter name pythonM.N; or a bare 3.N followed by a plus sign or an "or newer" style phrase.
+OLDER_CLAIM_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])c?python(?:\s|&nbsp;|&#160;)*"
+    r"(?:versions?(?:\s|&nbsp;|&#160;)+)?v?(?P<major>[0-9]+)\.(?P<minor>[0-9]+)"
+    r"|(?<![0-9.])(?P<bare>3)\.(?P<bare_minor>[0-9]+)"
+    r"(?=\+|\s+(?:or\s+(?:newer|later|above|higher)|and\s+(?:newer|later|up))\b)")
 SURFACE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
 FLOOR_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)")
 FLAG_SETS = ((), ("-O",), ("-OO",))
@@ -326,6 +352,15 @@ def source_findings(source):
     if source["floor"] != FLOOR:
         return ["{}: python-floor is {}.{}, but the decided floor is {}.{}".format(
             SOURCE_REL, *source["floor"], *FLOOR)]
+    return []
+
+
+def switch_findings(source):
+    if source["documentation"] != DOCUMENTATION_CHECK:
+        return ["{}: documentation-check is {}, but its decided value is {} (DOCUMENTATION_CHECK in "
+                "tools/check_python_floor.py); changing it is a reviewed change to this gate".format(
+                    SOURCE_REL, *("true" if value else "false"
+                                  for value in (source["documentation"], DOCUMENTATION_CHECK)))]
     return []
 
 
@@ -987,6 +1022,25 @@ def documentation_findings(root, floor):
             if phrase not in _read_text(root / rel)]
 
 
+def documentation_claim_findings(root, floor):
+    """Each Python version below the floor that a declaration file names, with its line."""
+    found = []
+    for rel in DECLARATION_FILES:
+        text = _read_text(root / rel)
+        for match in OLDER_CLAIM_RE.finditer(text):
+            major, minor = (match.group("major", "minor") if match.group("major") is not None
+                            else match.group("bare", "bare_minor"))
+            try:
+                version = (int(major), int(minor))
+            except ValueError as exc:
+                raise CannotEvaluate("{}: a version too long to read: {}".format(rel, exc))
+            if version < floor:
+                found.append("{}:{}: names Python {}.{}, below the floor {}.{}; a declaration may "
+                             "not state an older version".format(
+                                 rel, text.count("\n", 0, match.start()) + 1, *version, *floor))
+    return found
+
+
 def evaluate(root):
     """Run every enabled leg over root; return (exit code, report lines)."""
     try:
@@ -994,6 +1048,7 @@ def evaluate(root):
         floor = source["floor"]
         findings = []
         findings.extend(source_findings(source))
+        findings.extend(switch_findings(source))
         findings.extend(pin_findings(root, floor))
         findings.extend(guard_findings(root, source["surfaces"], floor))
         findings.extend(dynamic_findings(root, source["surfaces"], floor))
@@ -1001,12 +1056,13 @@ def evaluate(root):
             findings.extend(completeness_findings(root, source["surfaces"]))
         if source["documentation"]:
             findings.extend(documentation_findings(root, floor))
+            findings.extend(documentation_claim_findings(root, floor))
     except CannotEvaluate as exc:
         return 2, ["CANNOT EVALUATE: {}".format(exc)]
     if findings:
         return 1, ["FAIL: " + finding for finding in findings]
     return 0, ["PASS: python floor {}.{} ({}): source, pins, guard and dynamic legs over {} "
-               "guarded surface(s); completeness check {}, documentation check {}".format(
+               "guarded surface(s); completeness check {}, documentation and claims checks {}".format(
                    floor[0], floor[1], SOURCE_REL, len(source["surfaces"]),
                    "ON" if source["completeness"] else "OFF (completeness-check = false)",
                    "ON" if source["documentation"] else "OFF (documentation-check = false)")]
@@ -1022,11 +1078,13 @@ _EXECUTED_SET = set()
 # Red-on-revert: each leg's call in evaluate(), removed in a copy of this gate.
 REVERT_CALLS = (
     ("source", "source_findings(source)"),
+    ("switch", "switch_findings(source)"),
     ("pins", "pin_findings(root, floor)"),
     ("guard", "guard_findings(root, source[\"surfaces\"], floor)"),
     ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor)"),
     ("completeness", "completeness_findings(root, source[\"surfaces\"])"),
     ("documentation", "documentation_findings(root, floor)"),
+    ("claims", "documentation_claim_findings(root, floor)"),
 )
 
 
@@ -1040,7 +1098,7 @@ def check(name, got, want):
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
 
 
-def _source_text(floor="3.14", surfaces=(), completeness=False, documentation=False, extra=""):
+def _source_text(floor="3.14", surfaces=(), completeness=False, documentation=True, extra=""):
     return ("format-version = 1\npython-floor = {}\nguarded-surfaces = {}\ncompleteness-check = {}\n"
             "documentation-check = {}\n{}".format(
                 json.dumps(floor), json.dumps(list(surfaces)), "true" if completeness else "false",
@@ -1053,10 +1111,19 @@ def _write(root, rel, text):
     path.write_text(text, encoding="utf-8")
 
 
-def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'"):
+def _declared(floor_text="3.14"):
+    """Every declaration file, stating the floor."""
+    return dict.fromkeys(DECLARATION_FILES, "Requires Python {} or newer.\n".format(floor_text))
+
+
+def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'",
+             declarations=True):
     """A clean tree; workflow_pin is the version on quality.yml line 6, or with pin_quote="" the whole
-    text after that line's indentation."""
+    text after that line's indentation. Every declaration file states the floor unless declarations
+    is false; files are written after them."""
     root = Path(tempfile.mkdtemp(prefix="tree-", dir=base))
+    for rel, text in (_declared() if declarations else {}).items():
+        _write(root, rel, text)
     _write(root, SOURCE_REL, _source_text() if source is None else source)
     pin = "python-version: {0}{1}{0}".format(pin_quote, workflow_pin) if pin_quote else workflow_pin
     _write(root, WORKFLOWS_REL + "/quality.yml",
@@ -1379,8 +1446,8 @@ def _self_test_cases(base):
 
     check("guard/canonical-passes", evaluate(_fixture(base, source=listed, files=demo)), (0, [
         "PASS: python floor 3.14 ({}): source, pins, guard and dynamic legs over 1 guarded "
-        "surface(s); completeness check OFF (completeness-check = false), documentation check OFF "
-        "(documentation-check = false)".format(SOURCE_REL)]))
+        "surface(s); completeness check OFF (completeness-check = false), documentation and claims "
+        "checks ON".format(SOURCE_REL)]))
     guard_marker = "canonical floor guard"
     for check_id, text in (
             ("guard/absent-finding", _entry("import sys\n")),
@@ -1482,19 +1549,42 @@ def _self_test_cases(base):
             ".venv/lib/tool.py": _entry("import sys\n"),
             "tools/helper.py": "VALUE = 1\n"}))[0], 0)
 
-    declared = dict.fromkeys(DECLARATION_FILES, "Requires Python 3.14 or newer.\n")
-    check("documentation/off-ignores-missing", evaluate(_fixture(base))[0], 0)
-    code, lines = evaluate(_fixture(base, source=_source_text(documentation=True), files=dict(
-        declared, **{DECLARATION_FILES[0]: "Requires Python.\n"})))
+    code, lines = evaluate(_fixture(base, source=_source_text(documentation=False), declarations=False))
+    check("switch/off-finding", (code, [line for line in lines if "documentation-check is" in line]),
+          (1, ["FAIL: {}: documentation-check is false, but its decided value is true "
+               "(DOCUMENTATION_CHECK in tools/check_python_floor.py); changing it is a reviewed change "
+               "to this gate".format(SOURCE_REL)]))
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[0]: "Requires Python.\n"}))
     check("documentation/on-missing-phrase-finding",
           (code, [line for line in lines if "does not state" in line]),
           (1, ["FAIL: README.md: does not state 'Python 3.14 or newer'"]))
-    check("documentation/on-present-passes",
-          evaluate(_fixture(base, source=_source_text(documentation=True), files=declared))[0], 0)
+    check("documentation/on-present-passes", evaluate(_fixture(base, files=_declared()))[0], 0)
     check("documentation/on-absent-file-cannot-evaluate",
-          evaluate(_fixture(base, source=_source_text(documentation=True)))[0], 2)
+          evaluate(_fixture(base, declarations=False))[0], 2)
+    # An older claim beside the floor statement: the visible sentence names 3.11, a comment the floor.
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[3]: (
+        "<!-- Python 3.14 or newer -->\n<p>The hooks require Python 3.11 or newer.</p>\n")}))
+    check("claims/older-beside-phrase-finding",
+          (code, [line for line in lines if "names Python" in line]),
+          (1, ["FAIL: site/install.html:2: names Python 3.11, below the floor 3.14; a declaration may "
+               "not state an older version"]))
+    forms = ("Requires Python 3.14 or newer.\nCPython 3.13\npython3.12\nPython\n3.10\nPython&nbsp;3.9\n"
+             "Python versions 3.12\nruns on 3.11+\nor 3.13 or later\nPython 2.7\nPython\u00a03.8\n")
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[0]: forms}))
+    check("claims/older-forms-findings",
+          (code, [line.split(": names ")[0] + " " + line.split(" ")[4] for line in lines
+                  if "names Python" in line]),
+          (1, ["FAIL: README.md:2 3.13,", "FAIL: README.md:3 3.12,", "FAIL: README.md:4 3.10,",
+               "FAIL: README.md:6 3.9,", "FAIL: README.md:7 3.12,", "FAIL: README.md:8 3.11,",
+               "FAIL: README.md:9 3.13,", "FAIL: README.md:10 2.7,", "FAIL: README.md:11 3.8,"]))
+    check("claims/floor-newer-and-other-versions-pass", evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 3.14.4, Python 3.15, python3.14, "
+        "3.14+ and 3.20 or later.\nRun python3 tools/x.py; spec 1.2.0 or later; OPF 1.3.0 and up; "
+        "AIQT 2.7+; 13.1+.\n"}))[0], 0)
+    check("claims/oversized-version-cannot-evaluate", evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 3." + "1" * 5000 + "\n"}))[0], 2)
 
-    _red_on_revert(base, good, declared)
+    _red_on_revert(base, good)
     _rule_reverts(base)
 
 
@@ -1509,7 +1599,7 @@ def _gate_run(root, gate_source):
     return proc.returncode, proc.stdout.decode("utf-8", "backslashreplace").splitlines()
 
 
-def _red_on_revert(base, good, declared):
+def _red_on_revert(base, good):
     """Each leg red on its fixture with the intact gate, which names that leg's own finding, and green
     on the same fixture with that leg's check removed from a copy of this gate."""
     gate_source = _read_text(Path(__file__).resolve())
@@ -1523,8 +1613,10 @@ def _red_on_revert(base, good, declared):
     listed = _source_text(surfaces=["tools/demo.py"])
     # Each case: the leg, its fixture, and the text of that leg's own finding.
     cases = (
-        ("source", dict(source=_source_text(floor="3.13"), workflow_pin="3.13", template_pin="3.13"),
+        ("source", dict(source=_source_text(floor="3.13"), workflow_pin="3.13", template_pin="3.13",
+                        files=_declared("3.13")),
          "decided floor"),
+        ("switch", dict(source=_source_text(documentation=False)), "documentation-check is false"),
         ("pins", dict(workflow_pin="3.12"), "quality.yml:6: python-version '3.12' differs"),
         ("guard", dict(source=listed, files={"tools/demo.py": _entry(good, before="import os\n")}),
          "canonical floor guard"),
@@ -1533,9 +1625,10 @@ def _red_on_revert(base, good, declared):
         ("completeness", dict(source=_source_text(completeness=True),
                               files={"tools/demo.py": _entry("import sys\n")}),
          "tools/demo.py: a shipped entrypoint"),
-        ("documentation", dict(source=_source_text(documentation=True), files=dict(
-            declared, **{DECLARATION_FILES[-1]: "Requires Python.\n"})),
+        ("documentation", dict(files={DECLARATION_FILES[-1]: "Requires Python.\n"}),
          DECLARATION_FILES[-1] + ": does not state"),
+        ("claims", dict(files={DECLARATION_FILES[-1]: "Requires Python 3.14 or newer; 3.12+ works.\n"}),
+         DECLARATION_FILES[-1] + ":1: names Python 3.12"),
     )
     results = {}
     for leg, kwargs, marker in cases:
@@ -1543,11 +1636,13 @@ def _red_on_revert(base, good, declared):
         named = any(line.startswith("FAIL: ") and marker in line for line in intact_lines)
         results[leg] = (intact_rc, named, _gate_run(_fixture(base, **kwargs), mutants[leg])[0])
     check("revert/source-leg", results["source"], (1, True, 0))
+    check("revert/switch-leg", results["switch"], (1, True, 0))
     check("revert/pins-leg", results["pins"], (1, True, 0))
     check("revert/guard-leg", results["guard"], (1, True, 0))
     check("revert/dynamic-leg", results["dynamic"], (1, True, 0))
     check("revert/completeness-leg", results["completeness"], (1, True, 0))
     check("revert/documentation-leg", results["documentation"], (1, True, 0))
+    check("revert/claims-leg", results["claims"], (1, True, 0))
 
 
 def _rule_reverts(base):
