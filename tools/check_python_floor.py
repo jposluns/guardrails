@@ -82,11 +82,13 @@ Legs, in order:
                  refused as missing. The line is judged as written, script text included, a
                  disclosed over-rejection.
   guard          each guarded-surfaces entrypoint opens with the canonical refusal guard, AST-matched
-                 against GUARD_TEMPLATE with the file's own basename and the floor; only a module
+                 against GUARD_TEMPLATE with the file's own basename, the floor and its refusal exit (1
+                 for an entry also listed in nonblocking-surfaces, otherwise 2); only a module
                  docstring and `from __future__` imports may precede its `import sys`.
   dynamic        each guarded-surfaces entrypoint, run in a child (-I -B plus each of no flag, -O and
                  -OO) from a fresh empty working directory with sys.version_info patched to each of two
-                 versions below the floor, exits 2 with empty stdout and the exact refusal on stderr, and
+                 versions below the floor, exits with its refusal exit (as for the guard leg) with
+                 empty stdout and the exact refusal on stderr, and
                  leaves the working directory empty; the guard prefix alone, run at the floor's .0
                  release and at the real interpreter version, continues.
   completeness   OFF until the source sets completeness-check = true (the unit that guards the last
@@ -160,8 +162,8 @@ SUITE_ID = "python-floor-selftest"
 # The decided floor. The source leg asserts the single source names it; every other leg reads the
 # floor from the single source.
 FLOOR = (3, 14)
-SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "completeness-check",
-               "documentation-check"}
+SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "nonblocking-surfaces",
+               "completeness-check", "documentation-check"}
 WORKFLOWS_REL = ".github/workflows"
 PIN_FILES = ("opf/enforcement/ci/github-actions.yml", "opf/tools/check_opf_doctor.py")
 PIN_KEY = "python-version"
@@ -236,14 +238,19 @@ SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install.html",
                      "opf/site/adopt.md", "opf/site/adopt.html", "opf/spec/OPF-QUICKSTART.md",
                      ".preview/README.md")
-# A repo-relative .py path. A segment may open with one dot (a hidden directory such as .preview); a
-# segment that is . or .. is refused separately (load_source).
+# A repo-relative .py path. Each segment opens with at most one dot (a hidden directory such as .preview)
+# and then a letter, digit or underscore, so the pattern itself refuses an empty, . or .. segment and a
+# leading /. load_source also refuses a . or .. segment by splitting on /, a second layer.
 SURFACE_RE = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
 FLOOR_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)")
 FLAG_SETS = ((), ("-O",), ("-OO",))
 CHILD_TIMEOUT = 60
 CONTINUED = "CONTINUED"
-# The canonical guard. The CLI form: stdout stays empty and the process exits 2 (cannot evaluate).
+# The canonical guard. The CLI form: stdout stays empty and the process exits 2 (cannot evaluate). A
+# nonblocking-surfaces entry exits 1 instead: it is a hook whose event reads exit 2 as a block (a Stop
+# hook's exit 2 blocks the stop, and the guard runs before the hook's own block cap).
+REFUSAL_EXIT = 2
+NONBLOCKING_EXIT = 1
 GUARD_TEMPLATE = '''import sys
 
 if tuple(sys.version_info[:2]) < ({major}, {minor}):
@@ -251,7 +258,7 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
         "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
         "Nothing was run (cannot evaluate).\\n"
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
-    raise SystemExit(2)
+    raise SystemExit({code})
 '''
 # Child programs. sys.version_info is replaced by a plain tuple before the entrypoint (or the guard
 # prefix) runs; the guard reads only sys.version_info, so the tuple stands in for an older interpreter.
@@ -312,6 +319,12 @@ def load_source(root):
     surfaces = data["guarded-surfaces"]
     if not isinstance(surfaces, list) or not all(isinstance(item, str) for item in surfaces):
         raise CannotEvaluate("{}: guarded-surfaces must be a list of strings".format(SOURCE_REL))
+    nonblocking = data["nonblocking-surfaces"]
+    if not isinstance(nonblocking, list) or not all(isinstance(item, str) for item in nonblocking):
+        raise CannotEvaluate("{}: nonblocking-surfaces must be a list of strings".format(SOURCE_REL))
+    if nonblocking != sorted(set(nonblocking)) or not set(nonblocking) <= set(surfaces):
+        raise CannotEvaluate("{}: nonblocking-surfaces must be sorted, unique and each listed in "
+                             "guarded-surfaces".format(SOURCE_REL))
     for item in surfaces:
         if not SURFACE_RE.fullmatch(item) or any(part in (".", "..") for part in item.split("/")):
             raise CannotEvaluate("{}: guarded-surfaces entry {!r} is not a repo-relative .py path"
@@ -321,7 +334,8 @@ def load_source(root):
     for item in surfaces:
         _read_text(root / item)
     return {"floor": (int(match.group(1)), int(match.group(2))), "surfaces": tuple(surfaces),
-            "completeness": data["completeness-check"], "documentation": data["documentation-check"]}
+            "nonblocking": frozenset(nonblocking), "completeness": data["completeness-check"],
+            "documentation": data["documentation-check"]}
 
 
 def source_findings(source):
@@ -814,12 +828,16 @@ def _dump(node):
     return ast.dump(node, include_attributes=False)
 
 
-def guard_text(name, floor):
-    return GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1])
+def guard_text(name, floor, code=REFUSAL_EXIT):
+    return GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1], code=code)
 
 
-def _canonical(name, floor):
-    return [_dump(node) for node in ast.parse(guard_text(name, floor)).body]
+def refusal_exit(rel, nonblocking):
+    return NONBLOCKING_EXIT if rel in nonblocking else REFUSAL_EXIT
+
+
+def _canonical(name, floor, code=REFUSAL_EXIT):
+    return [_dump(node) for node in ast.parse(guard_text(name, floor, code)).body]
 
 
 def _preamble_end(tree):
@@ -840,11 +858,12 @@ def _too_complex(rel, exc):
     return CannotEvaluate("{}: too complex to evaluate: {}: {}".format(rel, type(exc).__name__, exc))
 
 
-def guard_findings(root, surfaces, floor):
+def guard_findings(root, surfaces, floor, nonblocking=()):
     findings = []
     for rel in surfaces:
         tree = _parse(root, rel)
-        want = _canonical(Path(rel).name, floor)
+        code = refusal_exit(rel, nonblocking)
+        want = _canonical(Path(rel).name, floor, code)
         start = _preamble_end(tree)
         try:
             opens = [_dump(node) for node in tree.body[start:start + len(want)]] == want
@@ -854,8 +873,8 @@ def guard_findings(root, surfaces, floor):
             findings.append(
                 "{}: does not open with the canonical floor guard (only a docstring and `from "
                 "__future__` imports may precede `import sys` and `if tuple(sys.version_info[:2]) < "
-                "({}, {}):`, refusing as {} with exit 2; see GUARD_TEMPLATE)".format(
-                    rel, floor[0], floor[1], Path(rel).name))
+                "({}, {}):`, refusing as {} with exit {}; see GUARD_TEMPLATE)".format(
+                    rel, floor[0], floor[1], Path(rel).name, code))
     return findings
 
 
@@ -902,31 +921,32 @@ def boundary_observed(prefix, version, flags):
         raise CannotEvaluate("temporary working directory: {}".format(exc))
 
 
-def guard_prefix(tree, name, floor):
+def guard_prefix(tree, name, floor, code=REFUSAL_EXIT):
     """Source of the top-level statements up to and including the canonical guard, or None."""
-    want = _canonical(name, floor)[-1]
+    want = _canonical(name, floor, code)[-1]
     for index, node in enumerate(tree.body):
         if _dump(node) == want:
             return ast.unparse(ast.Module(body=tree.body[:index + 1], type_ignores=[]))
     return None
 
 
-def dynamic_findings(root, surfaces, floor):
+def dynamic_findings(root, surfaces, floor, nonblocking=()):
     findings = []
     for rel in surfaces:
         name = Path(rel).name
+        code = refusal_exit(rel, nonblocking)
         for version in below_floor(floor):
-            want = (2, "", expected_refusal(name, floor, version, sys.executable), [])
+            want = (code, "", expected_refusal(name, floor, version, sys.executable), [])
             for flags in FLAG_SETS:
                 got = refusal_observed(root / rel, version, flags)
                 if got != want:
                     findings.append(
                         "{} at patched {}.{}.{} under {}: got exit {}, stdout {!r}, stderr "
-                        "{!r}, working-dir entries {!r}; want exit 2, empty stdout, the exact refusal "
+                        "{!r}, working-dir entries {!r}; want exit {}, empty stdout, the exact refusal "
                         "and an untouched working directory".format(
-                            rel, *version, " ".join(flags) or "no flag", *got))
+                            rel, *version, " ".join(flags) or "no flag", *got, code))
         try:
-            prefix = guard_prefix(_parse(root, rel), name, floor)
+            prefix = guard_prefix(_parse(root, rel), name, floor, code)
         except (MemoryError, RecursionError) as exc:
             raise _too_complex(rel, exc)
         if prefix is None:
@@ -997,8 +1017,8 @@ def evaluate(root):
         findings = []
         findings.extend(source_findings(source))
         findings.extend(pin_findings(root, floor))
-        findings.extend(guard_findings(root, source["surfaces"], floor))
-        findings.extend(dynamic_findings(root, source["surfaces"], floor))
+        findings.extend(guard_findings(root, source["surfaces"], floor, source["nonblocking"]))
+        findings.extend(dynamic_findings(root, source["surfaces"], floor, source["nonblocking"]))
         if source["completeness"]:
             findings.extend(completeness_findings(root, source["surfaces"]))
         if source["documentation"]:
@@ -1025,8 +1045,8 @@ _EXECUTED_SET = set()
 REVERT_CALLS = (
     ("source", "source_findings(source)"),
     ("pins", "pin_findings(root, floor)"),
-    ("guard", "guard_findings(root, source[\"surfaces\"], floor)"),
-    ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor)"),
+    ("guard", "guard_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
+    ("dynamic", "dynamic_findings(root, source[\"surfaces\"], floor, source[\"nonblocking\"])"),
     ("completeness", "completeness_findings(root, source[\"surfaces\"])"),
     ("documentation", "documentation_findings(root, floor)"),
 )
@@ -1042,11 +1062,12 @@ def check(name, got, want):
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
 
 
-def _source_text(floor="3.14", surfaces=(), completeness=False, documentation=False, extra=""):
-    return ("format-version = 1\npython-floor = {}\nguarded-surfaces = {}\ncompleteness-check = {}\n"
-            "documentation-check = {}\n{}".format(
-                json.dumps(floor), json.dumps(list(surfaces)), "true" if completeness else "false",
-                "true" if documentation else "false", extra))
+def _source_text(floor="3.14", surfaces=(), completeness=False, documentation=False, extra="",
+                 nonblocking=()):
+    return ("format-version = 1\npython-floor = {}\nguarded-surfaces = {}\nnonblocking-surfaces = {}\n"
+            "completeness-check = {}\ndocumentation-check = {}\n{}".format(
+                json.dumps(floor), json.dumps(list(surfaces)), json.dumps(list(nonblocking)),
+                "true" if completeness else "false", "true" if documentation else "false", extra))
 
 
 def _write(root, rel, text):
@@ -1109,6 +1130,16 @@ def _self_test_cases(base):
     check("source/hidden-dir-surface-passes", evaluate(_fixture(
         base, source=_source_text(surfaces=[".preview/demo.py"]),
         files={".preview/demo.py": demo["tools/demo.py"]}))[0], 0)
+    # One leading dot per segment, in the first segment and a later one: each tree holds the file, so a
+    # pattern that allowed two dots would pass it (exit 0) instead of refusing the entry (exit 2).
+    check("source/two-leading-dots-cannot-evaluate", [evaluate(_fixture(
+        base, source=_source_text(surfaces=[rel]), files={rel: demo["tools/demo.py"]}))[0]
+        for rel in ("..preview/demo.py", "tools/..hidden/demo.py")], [2, 2])
+    check("source/nonblocking-not-guarded-cannot-evaluate", evaluate(_fixture(
+        base, source=_source_text(nonblocking=["tools/demo.py"]), files=demo))[0], 2)
+    check("source/nonblocking-not-list-cannot-evaluate", evaluate(_fixture(
+        base, source=_source_text(surfaces=["tools/demo.py"]).replace(
+            "nonblocking-surfaces = []", "nonblocking-surfaces = \"tools/demo.py\""), files=demo))[0], 2)
     check("source/unsorted-surfaces-cannot-evaluate", evaluate(_fixture(
         base, source=_source_text(surfaces=["tools/demo.py", "tools/a.py"]),
         files={"tools/a.py": _entry(guard_text("a.py", floor)), **demo}))[0], 2)
@@ -1397,6 +1428,17 @@ def _self_test_cases(base):
              _entry("import sys\n\nassert tuple(sys.version_info[:2]) >= (%d, %d)\n" % floor))):
         code, lines = evaluate(_fixture(base, source=listed, files={"tools/demo.py": text}))
         check(check_id, (code, _has(lines, guard_marker)), (1, True))
+    # A nonblocking-surfaces entry refuses with exit 1 (guard and dynamic legs); exit 2 there, or exit 1
+    # on an entry not listed, is a guard finding.
+    nonblocking = _source_text(surfaces=["tools/demo.py"], nonblocking=["tools/demo.py"])
+    good_nonblocking = _entry(guard_text("demo.py", floor, NONBLOCKING_EXIT))
+    check("guard/nonblocking-exit-1-passes",
+          evaluate(_fixture(base, source=nonblocking, files={"tools/demo.py": good_nonblocking}))[0], 0)
+    for check_id, source, text in (
+            ("guard/nonblocking-exit-2-finding", nonblocking, _entry(good)),
+            ("guard/unlisted-exit-1-finding", listed, good_nonblocking)):
+        code, lines = evaluate(_fixture(base, source=source, files={"tools/demo.py": text}))
+        check(check_id, (code, _has(lines, guard_marker)), (1, True))
     # A parser or traversal overflow is INJECTED (ast.parse raising, ast.dump raising on a marked node)
     # rather than provoked by a deeply nested body: the depth at which CPython's parser, its AST
     # construction or ast.dump overflows, and the class it raises, are interpreter implementation limits
@@ -1451,6 +1493,9 @@ def _self_test_cases(base):
     check("dynamic/refusal-exact-under-OO", refusal_observed(path, version, ("-OO",)),
           (2, "", expected_refusal("demo.py", floor, version, sys.executable), []))
     check("dynamic/below-floor-vectors", below_floor((3, 14)), ((3, 13, 9), (3, 12, 0)))
+    path = _fixture(base, files={"tools/demo.py": good_nonblocking}) / "tools" / "demo.py"
+    check("dynamic/nonblocking-refusal-exact", refusal_observed(path, version, ()),
+          (1, "", expected_refusal("demo.py", floor, version, sys.executable), []))
     code, lines = evaluate(_fixture(base, source=listed, files={
         "tools/demo.py": _entry(good, after="return\n")}))
     check("dynamic/compile-failure-finding",

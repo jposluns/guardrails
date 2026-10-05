@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "3259c6b394c1ad2f8e8379180b510d25879e3a871e10d41884d5b6b1f209c72a"
+tree-sha256 = "8728d3b7cdfc7303bbf2800389d70f28ae111add93951aa7fa2ea61dee424dcc"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -111,8 +111,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 3053
-sha256 = "1dde0edd6d8b58911cb9b546577a14f5dec437c4b2bf50a8f005cf8e23f67ff8"
+bytes = 3424
+sha256 = "57cc9f8eec2def7f5522c516007ebdba1ddbd0c6f111bb1fa4b60ebc70f3a98a"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2251,13 +2251,13 @@ sha256 = "100ac19dceab9be4d4278453b880deba79a043839323cdf13d154cba0c8cdea1"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 23945
-sha256 = "ecefea92651bd46401348c21c3e349ee787a6cc951ab569b9217521b99ee6a94"
+bytes = 24067
+sha256 = "519a8d8731cb0d4c1f1a56f506c2e57cab64067b67ec62e3985eff216ee0a35c"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 636
-sha256 = "6da2556bc873d96a55ece06fffb9f0d5bda7a378941ab20d3a71ce77146261e0"
+sha256 = "a6e14f5b6cc5b4455ddf3b0c070094f199e2773c7c8b10c69da216198abddaa9"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -2276,8 +2276,8 @@ sha256 = "0fb0a63d0635441d079a477ed5840a61ec5fc91726eb6ab223648df282dd0382"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 326401
-sha256 = "00c2443c7f73dad00b9fdcd7ae2f0722ab757bf33406d4d7ca8506f20f999eb7"
+bytes = 326836
+sha256 = "662c8dd6e0a0faf0297c25b804d0b1389ab5e14573432350b3772c04ffc070d0"
 
 [[sources]]
 path = ".preview/unbounded-wait.py"
@@ -3326,8 +3326,8 @@ sha256 = "83cf95b293c000625a35643929b82e23eeadb2770ad9dad0ac1604767437597f"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 100942
-sha256 = "a124b6caa29b4b9a8f5ec43ec681d390bfa8521d7f9bb79e947d8f45510b3712"
+bytes = 104524
+sha256 = "c5f9980f11a15fc4962c4cc20982d6d2537f8f3df384f8dc28c57b5d01fbe5d0"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -3606,8 +3606,8 @@ sha256 = "b448a94715f2f63ae90dfa035cd56d869fd3d9ff6767fdf307bcc34677b69123"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 40124
-sha256 = "890660f29506970cad70f61d4a558f0449961736b7b59318b5e6d99e97283b97"
+bytes = 40419
+sha256 = "8447cba3a4bd4848da43e329be4c63a958752fe33333d8ef8f0daf8e161a35d8"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

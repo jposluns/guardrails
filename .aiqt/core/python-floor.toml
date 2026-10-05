@@ -11,6 +11,9 @@
 #                     unique. Each is checked statically (the guard leads the file) and dynamically (run
 #                     in a child with a patched sys.version_info below the floor, it refuses with the exact
 #                     message and exit code). It starts EMPTY and grows unit by unit.
+# nonblocking-surfaces the guarded-surfaces entries whose guard exits 1 instead of 2, sorted, unique and each
+#                     also listed above: a hook whose event reads exit 2 as a block (a Stop hook's exit 2
+#                     blocks the stop, and the guard runs before the hook's own block cap).
 # completeness-check  false until every shipped entrypoint is listed above; true then makes an unlisted
 #                     shipped entrypoint a finding.
 # documentation-check false until the declarations land; true then requires each declaration file to state
@@ -64,6 +67,9 @@ guarded-surfaces = [
     "opf/tools/opf.py",
     "opf/tools/selftest_commonmark_conformance.py",
     "opf/tools/selftest_commonmark_headings.py",
+]
+nonblocking-surfaces = [
+    ".preview/stamp-truth-stop.py",
 ]
 completeness-check = false
 documentation-check = false
