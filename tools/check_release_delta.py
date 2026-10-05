@@ -299,6 +299,68 @@ def _stage1_no_committed_state(repo, launch=()):
     return _stage1_git(repo, ["show-ref", "--verify", "--quiet", ref]).returncode == 1
 
 
+def _stage1_read_capture(path):
+    """Read back a stage-2 capture (the structured result, the error-stream file) from stage 1's
+    fresh private directory as raw bytes, or None when it cannot be read back as a regular file:
+    ONE descriptor opened O_RDONLY | O_NOFOLLOW | O_NONBLOCK, fstat-required S_ISREG before any
+    read, so a special file the committed child code swapped in at the capture path is refused at
+    once, never a blocking open (the fail-closed rule, security-seci-fail-closed: the committed
+    copy ran with access to that directory). Stdlib only: stage 1 may import nothing from the
+    checkout, so this is a local twin of the shared non-blocking readers."""
+    import stat
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError):
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _stage2_arm_result():
+    """The stage-2 child half of the fail-closed contract (security-seci-fail-closed; the
+    check_release_delta twin of FIX-TRAIN2-R2's opf unit-runner record): when stage 1 named a
+    result path (AIQT_RELEASE_DELTA_STAGE2_RESULT), register the result writer with atexit FIRST,
+    before any checkout import below runs or registers cleanup, so atexit's LIFO order runs it
+    LAST, after every later-registered cleanup of this child; the result is ONE line,
+    `release-delta-stage2 <code> <pid>`, written only once the stage-2 dispatch SETTLED a verdict
+    code. A committed copy that exits without settling one (a bare SystemExit(0) in loaded code, a
+    replaced dispatch) or whose shutdown faults before Python can run the handlers writes NO
+    complete result, and stage 1 refuses the pass (merge train 3 QA, codex MAJOR: a committed
+    atexit handler that raises leaves exit 0 behind with only a stderr traceback). The pid is this
+    writer's own, so a stale or foreign record never matches. A write failure is left to stage 1's
+    missing-result check (fail closed). Returns the mutable state the dispatch settles, or None
+    when no result path is named (a hand-run stage 2, every other mode)."""
+    path = os.environ.get("AIQT_RELEASE_DELTA_STAGE2_RESULT")
+    if not path:
+        return None
+    import atexit
+    state = {"code": None}
+
+    def _write_result():
+        if state["code"] is None:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("release-delta-stage2 {} {}\n".format(state["code"], os.getpid()))
+        except OSError:
+            pass
+    atexit.register(_write_result)
+    return state
+
+
 # The physical gate root stage 1 established when it hands off to the single-stage checkout gate
 # (QA round-10 claude F2): main() judges THIS root, never _gen_common.repo_root(), whose fallback is
 # the cwd, a directory stage 1 never inspected. None until stage 1 positively hands off.
@@ -375,14 +437,59 @@ def _stage1_main():
                   "tools/check_release_delta.py; the committed revision must carry the gate that "
                   "judges it; fail-closed", file=sys.stderr)
             return 2
+        # The fail-closed child contract (security-seci-fail-closed; FIX-TRAIN2-R2's opf
+        # unit-runner record, built here for the stage-2 launch): a zero exit alone is never a
+        # pass. The child must ALSO write the complete structured result its exit handler
+        # (registered first, run last, after its cleanup) binds to its own exit code and pid,
+        # and its captured error stream must carry no fault (merge train 3 QA, codex MAJOR: a
+        # committed gate whose shutdown faults -- an atexit handler that raises -- exits 0 with
+        # only a stderr traceback, and one that is a bare SystemExit(0) exits 0 having judged
+        # nothing). The captures live in stage 1's fresh private directory and are read back
+        # through the non-blocking fstat-checked reader, so the committed child code cannot
+        # park stage 1 on a swapped special file.
+        result_path = os.path.join(tmp, "stage2-result")
+        err_path = os.path.join(tmp, "stage2-stderr")
+        child_env = dict(os.environ)
+        child_env["AIQT_RELEASE_DELTA_STAGE2_RESULT"] = result_path
         try:
-            child = subprocess.run([sys.executable, "-I", "-B", "-X", "pycache_prefix=" + pyc_dir,
-                                    gate, "--stage2-repo", repo, "--stage2-tree", tree_dir])
+            with open(err_path, "wb") as err_file:
+                child = subprocess.Popen([sys.executable, "-I", "-B", "-X",
+                                          "pycache_prefix=" + pyc_dir, gate, "--stage2-repo",
+                                          repo, "--stage2-tree", tree_dir],
+                                         stderr=err_file, env=child_env)
+                child_rc = child.wait()
         except OSError as exc:
             print("error: stage-1 re-execution: cannot launch the committed gate ({}); "
                   "fail-closed".format(exc), file=sys.stderr)
             return 2
-        return child.returncode
+        err_bytes = _stage1_read_capture(err_path)
+        if err_bytes:
+            sys.stderr.buffer.write(err_bytes)
+            sys.stderr.buffer.flush()
+        if child_rc != 0:
+            return child_rc
+        record = _stage1_read_capture(result_path)
+        if record != "release-delta-stage2 0 {}\n".format(child.pid).encode("ascii"):
+            print("error: stage-1 re-execution: the committed gate exited 0 but wrote no "
+                  "complete stage-2 result bound to its own exit code and pid ({}); a zero "
+                  "exit alone is never a pass (security-seci-fail-closed: a silent exit, a "
+                  "replaced dispatch or an unreadable result judges nothing); "
+                  "fail-closed".format("the capture is unreadable or not a regular file"
+                                       if record is None else repr(record[:120])),
+                  file=sys.stderr)
+            return 2
+        if err_bytes is None:
+            print("error: stage-1 re-execution: the committed gate exited 0 but its stage-2 "
+                  "error-stream capture cannot be read back as a regular file; a passing "
+                  "verdict requires a readable, complete capture; fail-closed", file=sys.stderr)
+            return 2
+        if b"Traceback (most recent call last):" in err_bytes:
+            print("error: stage-1 re-execution: the committed gate exited 0 but its stage-2 "
+                  "error stream carries an uncaught-exception traceback (a fault outside any "
+                  "handler, shutdown and cleanup included, never yields a pass; "
+                  "security-seci-fail-closed); fail-closed", file=sys.stderr)
+            return 2
+        return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -391,6 +498,11 @@ if __name__ == "__main__" and sys.argv[1:] == []:
     _stage1_rc = _stage1_main()
     if _stage1_rc is not None:
         sys.exit(_stage1_rc)
+
+# The stage-2 child half of the fail-closed contract is armed HERE, before any checkout import
+# below runs or registers cleanup, so the atexit result writer is registered FIRST and runs LAST
+# (_stage2_arm_result; security-seci-fail-closed).
+_STAGE2_RESULT = _stage2_arm_result() if __name__ == "__main__" else None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml            # noqa: E402
@@ -4398,8 +4510,18 @@ def _post_release_e2e(tmp, failures, only=None):
                             want9 = (2, "no probe positively established")
                         else:
                             (anc9 / "tools").mkdir()
+                            # The committed stub honours the stage-2 fail-closed contract (the
+                            # result record a zero exit must carry), so this case still proves
+                            # the PHYSICAL root ran the COMMITTED copy and exits 0.
                             (anc9 / "tools" / "check_release_delta.py").write_text(
-                                "print(" + repr(stub9) + ")\n", encoding="utf-8")
+                                "import os\n"
+                                "print(" + repr(stub9) + ")\n"
+                                "_p9 = os.environ.get('AIQT_RELEASE_DELTA_STAGE2_RESULT')\n"
+                                "if _p9:\n"
+                                "    with open(_p9, 'w', encoding='utf-8') as _h9:\n"
+                                "        _h9.write('release-delta-stage2 0 '\n"
+                                "                  + str(os.getpid()) + chr(10))\n",
+                                encoding="utf-8")
                             _git_init_commit(anc9, "r9 healthy ancestor")
                             want9 = (0, stub9)
                         rel9 = os.path.join("alias", "..", "project", "tools",
@@ -4629,6 +4751,49 @@ def _post_release_e2e(tmp, failures, only=None):
                                             "pins are not effective".format(label7f))
                     finally:
                         _g(gfx7, "config", "--unset-all", "core.fsmonitor")
+
+        # ---- merge train 3 QA (codex MAJOR): the fail-closed child contract of the stage-2
+        # launch (security-seci-fail-closed). A COMMITTED gate copy that faults in shutdown (an
+        # atexit handler that raises leaves exit 0 behind with only a stderr traceback) or that
+        # exits 0 without running the dispatch (a bare SystemExit(0)) writes no complete stage-2
+        # result, so stage 1 must exit 2 by name, never pass the zero exit through. The committed
+        # copy is the malicious file; the WORKING-TREE copy is this pinned gate, which launches.
+        label7s = ("(R7 stage2 fault) a committed gate whose shutdown faults or that exits "
+                   "silently never passes the stage-2 contract")
+        if _sel(label7s):
+            import shutil as _shutil7s
+            for tag7s, body7s in (
+                    ("shutdown-fault", "import atexit\n"
+                     "def _fault():\n"
+                     "    raise RuntimeError('QA stage2 cleanup fault')\n"
+                     "atexit.register(_fault)\n"),
+                    ("silent-exit", "raise SystemExit(0)\n")):
+                mal7 = tmp / ("r7-stage2-" + tag7s)
+                (mal7 / "tools").mkdir(parents=True)
+                gate7 = mal7 / "tools" / "check_release_delta.py"
+                gate7.write_text(body7s, encoding="utf-8")
+                try:
+                    _git_init_commit(mal7, "r7 stage2 " + tag7s + " fixture")
+                except subprocess.CalledProcessError as exc7s:
+                    failures.append("fixture setup ({} [{}]): could not commit ({})".format(
+                        label7s, tag7s, exc7s))
+                    continue
+                _shutil7s.copyfile(str(Path(__file__).resolve()), str(gate7))
+                try:
+                    proc7s = subprocess.run([sys.executable, "-I", "-B", str(gate7)],
+                                            cwd=str(mal7), capture_output=True, env=env,
+                                            timeout=600)
+                except (OSError, subprocess.TimeoutExpired) as exc7s:
+                    failures.append("fixture setup ({} [{}]): could not run the gate CLI "
+                                    "({})".format(label7s, tag7s, exc7s))
+                    continue
+                out7s = (proc7s.stdout + proc7s.stderr).decode("utf-8", "replace")
+                if proc7s.returncode != 2 or "stage-2" not in out7s:
+                    failures.append("{} [{}]: expected exit 2 naming the stage-2 contract (a "
+                                    "zero child exit with no complete result or a faulted "
+                                    "error stream is never a pass), got rc={}: {}".format(
+                                        label7s, tag7s, proc7s.returncode,
+                                        out7s.strip()[-300:]))
 
 
     # ---- QA round-5 claude m2: the per-object re-hash covers a commit, tree and tag, not only a blob -
@@ -6275,7 +6440,13 @@ def main():
             print("error: --stage2-tree does not contain the running gate file; the stage-2 copy "
                   "must run from the materialized committed tree; fail-closed", file=sys.stderr)
             return 2
-        return run(Path(opts["stage2_repo"]).resolve())
+        stage2_rc = run(Path(opts["stage2_repo"]).resolve())
+        if _STAGE2_RESULT is not None:
+            # The settled verdict the atexit result writer (registered first, run last) binds to
+            # this child's exit code and pid; stage 1 requires it beside exit 0 and a fault-free
+            # error stream (security-seci-fail-closed).
+            _STAGE2_RESULT["code"] = stage2_rc
+        return stage2_rc
     if mode == "self-test":
         return self_test_main()
     if mode == "repin":

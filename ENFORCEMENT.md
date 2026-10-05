@@ -91,7 +91,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Do not bury the review surface under raw dumps | `cnsdif` | Hook-linked | `hook:diff-source`, class b; `hook:diff-wall-stop`, class b |
 | An orchestrator keeps a mistakes register | `mstreg` | Gate-linked (class a) | `gate:mistakes-register`, class a |
 | Reconcile the record against reality | `recncl` | Gate-linked (class a) | `gate:record-drift`, class a; `gate:record-sections`, class c; `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
-| Records first | `recfst` | Hook-linked | `hook:orch-ask-unattended`, class b; `hook:orch-dispatch-ledger`, class c |
+| Records first | `recfst` | Hook-linked | `hook:future-stamp-write`, class c; `hook:orch-ask-unattended`, class b; `hook:orch-dispatch-ledger`, class c |
 | Close each session on green | `sescls` | No control | No shipped control cites this rule. |
 | Resume from the durable handoff | `sesres` | Hook-linked | `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
 | A standing constraint persists across context loss | `cnstpr` | No control | No shipped control cites this rule. |

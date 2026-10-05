@@ -289,7 +289,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "recfst"
 status = "enforced"
-mechanisms = ["hook:orch-ask-unattended", "hook:orch-dispatch-ledger"]
+mechanisms = ["hook:future-stamp-write", "hook:orch-ask-unattended", "hook:orch-dispatch-ledger"]
 
 [[rule]]
 corpus-id = "recncl"

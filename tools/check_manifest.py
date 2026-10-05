@@ -1160,6 +1160,53 @@ def _self_test_main_isolated():
             _entry_expect("an in-root directory symlink over a FIFO", dirlink_tree, "gen", 2,
                           "deep.fifo")
 
+            # Merge train 3 QA (claude BLOCKER 1, #397's R7 guarantee): a REPOSITORY-LOCAL
+            # core.fsmonitor program is attacker-chosen code and must never run under the
+            # precheck's own git queries; _git_lines pins core.fsmonitor=false (with
+            # core.hooksPath and protocol.allow beside it) ON THE ARGV, so the pin holds
+            # whatever the root's owner or the caller's configuration. A CONTROL run of plain
+            # pinned-maintenance git first proves this git version fires the hook on an
+            # unpinned read; where it does not, the marker proves nothing and only the exit
+            # code is held. The fixture's add and commit run BEFORE the hook is configured, so
+            # the control is the first read that can fire it.
+            import shlex as _shlex_fsm
+            fsmon_tree = _mini_tree("fsmonitor")
+            if fsmon_tree is None:
+                failures.append("(r) cannot git-init the repository-local fsmonitor tree")
+            else:
+                fsmon_marker = tmp / "precheck-fsmon-invocations"
+                fsmon_marker.write_bytes(b"")
+                fsmon_hook = tmp / "precheck-fsmon.sh"
+                fsmon_hook.write_text("#!/bin/sh\n: >> " + _shlex_fsm.quote(str(fsmon_marker))
+                                      + "\nexit 1\n", encoding="utf-8")
+                fsmon_hook.chmod(0o755)
+
+                def _fsmon_git(*args):
+                    return subprocess.run(
+                        ["git", "-C", str(fsmon_tree), "-c", "gc.auto=0",
+                         "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false", *args],
+                        capture_output=True, timeout=60)
+
+                setup_ok = all(_fsmon_git(*args).returncode == 0 for args in (
+                    ("add", "-A"),
+                    ("-c", "user.name=Selftest", "-c", "user.email=selftest@example.invalid",
+                     "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fsmonitor fixture"),
+                    ("config", "core.fsmonitor", str(fsmon_hook))))
+                if not setup_ok:
+                    failures.append("(r) cannot commit or configure the repository-local "
+                                    "fsmonitor tree")
+                else:
+                    _fsmon_git("ls-files")   # the control: plain git honours the repo config
+                    fsmon_fired = os.stat(fsmon_marker).st_size != 0
+                    fsmon_marker.write_bytes(b"")
+                    _entry_expect("a repository-local core.fsmonitor hook", fsmon_tree, "gen", 0)
+                    _entry_expect("a repository-local core.fsmonitor hook", fsmon_tree, "opf", 0)
+                    if fsmon_fired and os.stat(fsmon_marker).st_size != 0:
+                        failures.append("(r) the repository-local core.fsmonitor hook RAN under "
+                                        "a --precheck entry; the _git_lines repository-config "
+                                        "pins are not effective (merge train 3 QA, claude "
+                                        "BLOCKER 1)")
+
             gen_src = _entry_src["gen"].decode("utf-8")
             mutant_tree = _mini_tree("neutered-main")
             if gen_src.count("    precheck_special_files(_root)\n") != 1 or mutant_tree is None:

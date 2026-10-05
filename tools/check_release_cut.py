@@ -594,9 +594,12 @@ _RAW_READ_HOOK_SCRIPT_DIRS = (".aiqt/core/hooks/scripts", "plugin/aiqt-guardrail
 _RAW_READ_HOOK_SCRIPT_RE = re.compile(r"[a-z0-9][a-z0-9-]*\.py")
 # OPTIONAL third-party imports: module -> the importers allowed to name it. An import of one of
 # these resolves only when it is (1) made by a listed importer and (2) a direct statement of a
-# try body whose handler catches ImportError or ModuleNotFoundError, so the importer runs without
-# the module; any other spelling (unguarded, another importer, another module) still fails the
-# lint by name. gen_rules imports PyYAML only inside its --self-test cross-check
+# try body INSIDE A FUNCTION whose every ImportError / ModuleNotFoundError handler is exactly a
+# plain `return` (or `return None`) that never touches the module, so on the module's absence the
+# importer PROVABLY returns without it (merge train 3 QA, codex MEDIUM: the earlier handler-name
+# test also accepted `except ImportError: raise`, a required dependency); any other spelling
+# (unguarded, module-level, a re-raising or fallback-binding handler, another importer, another
+# module) still fails the lint by name. gen_rules imports PyYAML only inside its --self-test cross-check
 # (_yaml_agreement, _yaml_adopter_agreement), which returns None and skips the comparison when
 # PyYAML is absent; no gate, generator run or workflow step installs or requires it.
 _RAW_READ_OPTIONAL_IMPORTS = {"yaml": ("tools/gen_rules.py",)}
@@ -604,21 +607,41 @@ _RAW_READ_IMPORT_ERRORS = ("ImportError", "ModuleNotFoundError")
 
 
 def _raw_read_guarded_imports(tree):
-    """ids of the Import / ImportFrom nodes that are direct statements of a try body whose
-    handlers include one naming ImportError or ModuleNotFoundError (alone or in a tuple)."""
+    """ids of the Import / ImportFrom nodes the optional-import exemption may cover: each is a
+    direct statement of a try body INSIDE a function, and EVERY handler of that try naming
+    ImportError or ModuleNotFoundError (alone or in a tuple) is exactly one plain `return` or
+    `return None`, so on the module's absence the importer provably returns without using (or
+    binding a fallback for) the module. A module-level try (whose handler cannot return), a
+    handler that re-raises, falls through, binds a substitute or touches any name, or a mixed
+    handler set makes the import a REQUIRED dependency and it stays outside the exemption
+    (merge train 3 QA, codex MEDIUM: `except ImportError: raise` passed the handler-name test
+    while making the module mandatory)."""
     guarded = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Try):
+    for scope in ast.walk(tree):
+        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        caught = False
-        for handler in node.handlers:
-            kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
-            if any(isinstance(kind, ast.Name) and kind.id in _RAW_READ_IMPORT_ERRORS
-                   for kind in kinds):
+        for node in ast.walk(scope):
+            if not isinstance(node, ast.Try):
+                continue
+            caught = False
+            for handler in node.handlers:
+                kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) \
+                    else [handler.type]
+                if not any(isinstance(kind, ast.Name) and kind.id in _RAW_READ_IMPORT_ERRORS
+                           for kind in kinds):
+                    continue
+                returns_bare = (len(handler.body) == 1
+                                and isinstance(handler.body[0], ast.Return)
+                                and (handler.body[0].value is None
+                                     or (isinstance(handler.body[0].value, ast.Constant)
+                                         and handler.body[0].value.value is None)))
+                if not returns_bare:
+                    caught = False
+                    break
                 caught = True
-        if caught:
-            guarded.update(id(stmt) for stmt in node.body
-                           if isinstance(stmt, (ast.Import, ast.ImportFrom)))
+            if caught:
+                guarded.update(id(stmt) for stmt in node.body
+                               if isinstance(stmt, (ast.Import, ast.ImportFrom)))
     return guarded
 
 
@@ -1594,13 +1617,13 @@ RAW_READ_SITE_REASONS = dict((
     ("opf/tools/opf.py::_unit_copy_capped::os.open",
      _RAW_READ_SITE_GUARD),
     ("opf/tools/opf.py::_unit_remove_box::os.open",
-     "(c) the flags are O_RDONLY | O_DIRECTORY plus the O_NOFOLLOW | O_NONBLOCK guard of _unit_guard_flags, so the open of anything but a directory fails at once, a planted symlink is not followed and no open can block; the opened directory is checked against the identity the runner recorded; no file content is read through it"),
+     "(c) the flags are O_RDONLY | O_DIRECTORY plus the O_NOFOLLOW | O_NONBLOCK guard of _unit_guard_flags WHERE THE PLATFORM PROVIDES IT; the sole live caller (_run_unit_subprocess) refuses to run, and makes no box, where _unit_guard_flags is unavailable, and the self-test vectors run under that same runner's platform refusal, so this open never runs unguarded; the open of anything but a directory fails at once, a planted symlink is not followed and no open can block; the opened directory is checked against the identity the runner recorded; no file content is read through it"),
     ("opf/tools/opf.py::_unit_run_in_box::os.open",
      _RAW_READ_SITE_GUARD),
     ("opf/tools/opf.py::_watchdog_completion_case::read_bytes",
      "(b) two sites read /proc/<pid>/stat, a kernel interface that never blocks; the third reads the module's own committed file (__file__), an in-root path the D-400 precheck walk certifies, whose conversion to a local non-blocking reader is pending and tracked by this pin"),
     ("opf/tools/opf.py::_watchdog_completion_case::read_text",
-     "(a) eight sites read fixture files (a budget log and guardian, descendant, grandchild and forked pid files) the same test wrote inside a tempfile.TemporaryDirectory it created; (b) the other six read /proc task children files, a kernel interface that never blocks"),
+     "(a) seven sites read fixture files (a budget log and guardian, descendant, grandchild and forked pid files) the same test wrote inside a tempfile.TemporaryDirectory it created; (b) the other seven read /proc task children files, a kernel interface that never blocks (merge train 3 QA, codex MINOR: the split is seven and seven, the guardian /proc children read beside the six task-children reads)"),
     ("opf/tools/opf.py::edited::read_text",
      _RAW_READ_SITE_OPF_OWN),
     ("opf/tools/opf.py::ended::open",
@@ -1608,7 +1631,7 @@ RAW_READ_SITE_REASONS = dict((
     ("opf/tools/opf.py::load::read_text",
      _RAW_READ_SITE_OPF_OWN),
     ("opf/tools/opf.py::reopens::os.open",
-     "(b) reopens a /proc/self/fd entry of a pipe descriptor the same self-test created, to prove the reopen is refused or allowed; a reopened descriptor is closed at once and no content is read through it"),
+     "(b) reopens /proc fd entries of SOCKET descriptors the same self-test created (its own socketpair report ends through /proc/self/fd, and the supervisor's inherited write end and the gated module's socket stdout/stderr through /proc/<pid>/fd of processes it launched), to prove each reopen is refused; a socket fd entry fails the open at once (ENXIO), a reopened descriptor is closed at once and no content is read through it"),
     ("opf/tools/opf.py::state::read_bytes",
      _RAW_READ_SITE_PROC),
     ("tools/check_ci_parity.py::_cdpath_outcome::read_text",
@@ -1632,7 +1655,7 @@ RAW_READ_SITE_REASONS = dict((
     ("tools/check_release_delta.py::_append::read_text",
      _RAW_READ_SITE_FIXTURE),
     ("tools/check_release_delta.py::_assert_gate_code_matches_head::read_bytes",
-     "reads one of the gate's own code files after requiring it to be committed in HEAD's tree, an in-root path the D-400 precheck walk certifies, to compare it with the committed blob; conversion to read_source_bytes is pending and tracked by this pin"),
+     "reads one of the gate's own code files after requiring it to be committed in HEAD's tree, to compare it with the committed blob: under the normal two-stage launch that file sits inside the stage-1 materialized tree (a fresh private tempfile.mkdtemp directory stage 1 itself wrote from re-hash-verified committed objects, which the D-400 precheck walk does NOT cover), and only under a direct single-stage launch is it an in-root path that walk certifies; conversion to read_source_bytes is pending and tracked by this pin"),
     ("tools/check_release_delta.py::_drift_entry_state::os.open",
      "(c) both sites open with os.O_DIRECTORY (the components below the root also O_NOFOLLOW), so the open of anything but a directory fails at once and a directory open cannot block; the final entry is opened O_NONBLOCK | O_NOFOLLOW and is not counted; no file content is read through these two"),
     ("tools/check_release_delta.py::_forge_one::read_bytes",
@@ -3835,9 +3858,12 @@ def _self_test_isolated(red_on_revert):
                 check("raw-read-lint-special-transitive-module-fails",
                       any("entry_b" in failure and "not a regular file" in failure
                           for failure in failures_special))
-            # An OPTIONAL third-party import resolves only when a listed importer guards it with
-            # an ImportError handler; unguarded, from another importer, under a handler that does
-            # not catch ImportError, or of an unlisted module, it still fails by name.
+            # An OPTIONAL third-party import resolves only when a listed importer guards it
+            # INSIDE A FUNCTION with an ImportError handler that is exactly a plain `return`
+            # (`return None`); unguarded, at module level, under a handler that re-raises or
+            # binds a fallback or returns the module, under a handler that does not catch
+            # ImportError, from another importer, or of an unlisted module, it still fails by
+            # name (merge train 3 QA, codex MEDIUM).
             (lint_root / "tools" / "run_all_checks.sh").write_text(
                 "python3 -I -B tools/gen_rules.py\npython3 -I -B tools/entry_c.py\n",
                 encoding="utf-8")
@@ -3845,8 +3871,15 @@ def _self_test_isolated(red_on_revert):
             optional_cases = (
                 ("guarded", "def f():\n    try:\n        import yaml\n"
                  "    except ImportError:\n        return None\n", "x = 1\n", ()),
-                ("guarded-tuple", "try:\n    import yaml\n"
-                 "except (OSError, ModuleNotFoundError):\n    yaml = None\n", "x = 1\n", ()),
+                ("guarded-tuple", "def f():\n    try:\n        import yaml\n"
+                 "    except (OSError, ModuleNotFoundError):\n        return None\n",
+                 "x = 1\n", ()),
+                ("module-level-fallback", "try:\n    import yaml\n"
+                 "except ImportError:\n    yaml = None\n", "x = 1\n", ("'yaml'",)),
+                ("reraise-handler", "def f():\n    try:\n        import yaml\n"
+                 "    except ImportError:\n        raise\n", "x = 1\n", ("'yaml'",)),
+                ("handler-uses-module", "def f():\n    try:\n        import yaml\n"
+                 "    except ImportError:\n        return yaml\n", "x = 1\n", ("'yaml'",)),
                 ("unguarded", "import yaml\n", "x = 1\n", ("'yaml'",)),
                 ("wrong-handler", "try:\n    import yaml\nexcept ValueError:\n    pass\n",
                  "x = 1\n", ("'yaml'",)),

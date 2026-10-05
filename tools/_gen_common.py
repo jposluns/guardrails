@@ -83,7 +83,15 @@ def _git_lines(root, args):
     residual, which tools/selftest_git_fixture_env.py reports as config exposure for any self-test
     that reaches it. On an owned root, a refusal git reports as dubious ownership (its git dir
     belongs to another uid) is a named refusal, exit 2, never None, so the root cross-check is never
-    silently skipped there."""
+    silently skipped there.
+
+    REPOSITORY-LOCAL configuration (merge train 3 QA, claude BLOCKER 1): on EVERY call, whatever
+    the root's owner, the argv pins core.fsmonitor=false, core.hooksPath=/dev/null and
+    protocol.allow=never, with GIT_NO_LAZY_FETCH=1 in the environment, so a repository-local
+    core.fsmonitor program, a hook, or a lazy-fetch transport helper (core.sshCommand, a remote
+    or credential helper) chosen by whoever controls the root's .git/config never runs under this
+    funnel's queries; these plumbing reads apply no clean/smudge filter. A command-line -c pin
+    outranks every configuration file, repository-local included."""
     import subprocess
     # QA round 7 (codex M4 = claude M2): every GIT_* variable is scrubbed from the child
     # environment, as check_portability and scrub_git_environment already do. An inherited
@@ -108,6 +116,16 @@ def _git_lines(root, args):
     # checkout, which is the one protection dubious ownership exists for, on the very root under
     # check; pinning without trust would instead make every such query git-absent while the gates'
     # own git reads, under the caller's configuration, still answer.
+    # Merge train 3 QA (claude BLOCKER 1, breaking #397's R7 guarantee): the REPOSITORY-LOCAL
+    # configuration of the root under check is attacker-chosen too, so every query through this
+    # one funnel pins away, ON THE ARGV and so on every root whatever its owner, the repository
+    # config that could run code mid-walk: core.fsmonitor=false (a repo-config fsmonitor program
+    # ran under the walk's ls-files queries), core.hooksPath=/dev/null (no hook resolves), and
+    # protocol.allow=never with GIT_NO_LAZY_FETCH=1 (a promisor/partial-clone repository can
+    # never start a lazy fetch, and with it core.sshCommand, a remote helper or a credential
+    # helper, while ls-tree reads objects). These read-only plumbing queries apply no
+    # clean/smudge filter, so filters add no further surface here.
+    env["GIT_NO_LAZY_FETCH"] = "1"
     try:
         owned = os.stat(root).st_uid == os.geteuid()
     except (OSError, ValueError, AttributeError):
@@ -116,7 +134,9 @@ def _git_lines(root, args):
         env.update(HOME=os.devnull, XDG_CONFIG_HOME=os.devnull, GIT_CONFIG_NOSYSTEM="1",
                    GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, LC_ALL="C")
     try:
-        proc = subprocess.run(["git", "-C", os.fspath(root), *args], stdin=subprocess.DEVNULL,
+        proc = subprocess.run(["git", "-c", "core.fsmonitor=false",
+                               "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
+                               "-C", os.fspath(root), *args], stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=60, env=env)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None

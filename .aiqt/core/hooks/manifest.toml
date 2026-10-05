@@ -365,7 +365,7 @@ residue = "An INFORMING hook, not an enforcement point: after a tool call that s
 
 [[hook]]
 id = "future-stamp-write"
-rules = ["tstamp"]  # accur / timestamp-from-clock
+rules = ["recfst", "tstamp"]  # trust / records-first; accur / timestamp-from-clock
 platform = "claude-code"
 event = "PreToolUse"
 matcher = "Write|Edit|MultiEdit|Bash"

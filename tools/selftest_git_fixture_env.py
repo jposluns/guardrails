@@ -2053,15 +2053,21 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/_gen_common.py", "_git_lines", ("git",),
      "production precheck root/ignore funnel over the real checkout (rev-parse, ls-files, ls-tree,"
      " symbolic-ref and for-each-ref reads), bounded with stdin closed; read-only by design, so no"
-     " maintenance pin applies; on a root the effective user owns it runs git with the caller's"
-     " global and system configuration pinned away (D-400 fixture env), while on a root another"
-     " uid owns the caller's configuration still applies and the config observer reports it"),
+     " maintenance pin applies; every call pins the repository-local code-running configuration on"
+     " the argv (core.fsmonitor=false, core.hooksPath=/dev/null, protocol.allow=never, with"
+     " GIT_NO_LAZY_FETCH=1 in the env; merge train 3 QA), and on a root the effective user owns it"
+     " also runs git with the caller's global and system configuration pinned away (D-400 fixture"
+     " env), while on a root another uid owns the caller's configuration still applies and the"
+     " config observer reports it"),
     ("opf/tools/_containment.py", "_git_lines", ("git",),
      "the OPF copy of the production precheck root/ignore funnel (rev-parse, ls-files, ls-tree,"
      " symbolic-ref and for-each-ref reads), bounded with stdin closed; read-only by design, so no"
-     " maintenance pin applies; on a root the effective user owns it runs git with the caller's"
-     " global and system configuration pinned away (D-400 fixture env), while on a root another"
-     " uid owns the caller's configuration still applies and the config observer reports it"),
+     " maintenance pin applies; every call pins the repository-local code-running configuration on"
+     " the argv (core.fsmonitor=false, core.hooksPath=/dev/null, protocol.allow=never, with"
+     " GIT_NO_LAZY_FETCH=1 in the env; merge train 3 QA), and on a root the effective user owns it"
+     " also runs git with the caller's global and system configuration pinned away (D-400 fixture"
+     " env), while on a root another uid owns the caller's configuration still applies and the"
+     " config observer reports it"),
     ("tools/aiqt_corpus.py", "git", ("git",),
      "production read-only helper over the real repository (rev-parse/show/ls-files style"
      " reads); its callers never pass a maintenance-triggering subcommand, and production"

@@ -1081,6 +1081,11 @@ _DISPATCH_FORMS = dict(
     **{"_opf_views.py": ((), ("--check",)), "_opf_absorb.py": ((), ("--freeze-digest",)),
        "_opf_changelog.py": ((),)},
     **{"selftest_commonmark_conformance.py": ((), ("--interpreters", "python3"))},
+    # The special-file precheck gate (D-400-SPECIAL-FILE-PRECHECK): its ONE live form, which this
+    # directory's runner calls ahead of every gate; every other argument list, the bare run
+    # included, is refused with a usage line (merge train 3 QA, claude BLOCKER 2: #400 added the
+    # entry undeclared here, so the aggregator dispatch and runtime probes failed at the head).
+    **{"_containment.py": (("--precheck",),)},
     **{"_opf_adopt_observe.py": (("--self-test",), ("--self-test", "--vectors-only")),
        "_opf_pack_manifest.py": (("--self-test",), ("--self-test", "--vectors-only")),
        "check_opf_init_observe.py": (("--self-test",), ("--self-test", "--red-on-revert")),
@@ -1236,6 +1241,10 @@ def _dispatch_runner_forms(directory, names, runners=_DISPATCH_RUNNERS):
             for at, word in enumerate(words):
                 name = word.rsplit("/", 1)[-1]
                 if name not in names or not ("opf/tools/" in word or path == own and word.startswith("$here/")):
+                    continue
+                if at and words[at - 1] in ("-f", "-h", "-x", "-e", "!"):
+                    # A shell-test OPERAND (the runners' `[ -f $here/_containment.py ]` bootstrap
+                    # line), not an invocation: the words after it (`]`) are no argument form.
                     continue
                 args = []
                 for each in words[at + 1:]:
@@ -1413,6 +1422,10 @@ _DISPATCH_FIXTURES = (
     ("runner_form.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
      '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
      _DISPATCH_LIBRARY, "a runner calls runner_form.py"),
+    ("precheck_form.py", "import sys\n\n\ndef main(argv):\n"
+     '    if argv == ["--precheck"]:\n        return 0\n'
+     '    print("usage: precheck_form.py --precheck", file=sys.stderr)\n    return 2\n\n\n'
+     'if __name__ == "__main__":\n    sys.exit(main(sys.argv[1:]))\n', (("--precheck",),), None),
     ("unused_form.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def main(argv):\n"
      '    if argv == ["--self-test"]:\n        return self_test()\n    if argv:\n'
      '        print("usage: unused_form.py [--self-test]", file=sys.stderr)\n        return 2\n    return 0\n\n\n'
@@ -1422,6 +1435,7 @@ _DISPATCH_FIXTURES = (
 # runner_form.py is called with a form its table lacks.
 _DISPATCH_FIXTURE_RUNNER = (
     "python3 -I -B opf/tools/clean_live.py\n"
+    "python3 -I -B opf/tools/precheck_form.py --precheck\n"
     "python3 -I -B opf/tools/runner_form.py --self-test --vectors-only\n"
     "python3 -I -B opf/tools/selftest_commonmark_conformance.py\n")
 # The reverted conformance pre-check: _self_check runs again before the argument list is checked.
