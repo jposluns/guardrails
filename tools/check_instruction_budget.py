@@ -1352,6 +1352,9 @@ def _quiet(fn, *args):
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             return fn(*args)
+    except KeyboardInterrupt as exc:
+        sys.stderr.write(err.getvalue())
+        _propagate_interrupt(exc)
     except BaseException:
         sys.stderr.write(err.getvalue())
         raise
@@ -1379,7 +1382,8 @@ class _GuardedMutant:
     """A loaded _mutant whose every function is called under a guard: a call that ends the process
     (SystemExit 0 or None, GeneratorExit, any other BaseException) is a harness error (exit 2), never the
     mutant's own status. An Exception propagates as itself, since callers read the mutant's own GateError,
-    and so does a KeyboardInterrupt. Any other attribute is the mutant's own."""
+    and so does a KeyboardInterrupt of exactly that class; a subclass, which only loaded code raises, is a
+    harness error too and is never re-raised. Any other attribute is the mutant's own."""
 
     def __init__(self, module):
         self._module = module
@@ -1392,8 +1396,14 @@ class _GuardedMutant:
         def guarded(*args, **kwargs):
             try:
                 return value(*args, **kwargs)
-            except (Exception, KeyboardInterrupt):
+            except Exception:
                 raise
+            except KeyboardInterrupt as exc:
+                if type(exc) is KeyboardInterrupt:
+                    raise
+                print("SELF-TEST HARNESS ERROR: a call into the mutant ({}) raised a KeyboardInterrupt "
+                      "subclass; fail-closed".format(name), file=sys.stderr)
+                sys.exit(2)
             except BaseException:  # noqa: BLE001  a mutant ending the process in a call is a harness error
                 print("SELF-TEST HARNESS ERROR: a call into the mutant ({}) ended the process; "
                       "fail-closed".format(name), file=sys.stderr)
@@ -1407,7 +1417,8 @@ def _mutant(tmp, old, new, *more):
     boundary or target that does not match exactly once is a harness error (exit 2), and so is a load that
     ends the process or faults (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception)
     or a later call into the mutant that ends the process: the mutant can never end the self-test with its
-    own status. A KeyboardInterrupt propagates, so an operator's Ctrl-C stops the run."""
+    own status. A KeyboardInterrupt of exactly that class propagates, so an operator's Ctrl-C stops the run;
+    a subclass, which only loaded code raises, is a harness error too and is never re-raised."""
     import importlib.util
     source = Path(__file__).read_text(encoding="utf-8")
     if source.count(MUTATION_BOUNDARY) != 1:
@@ -1430,8 +1441,12 @@ def _mutant(tmp, old, new, *more):
     saved = list(sys.path)
     try:
         spec.loader.exec_module(mutant)
-    except KeyboardInterrupt:
-        raise
+    except KeyboardInterrupt as exc:
+        if type(exc) is KeyboardInterrupt:
+            raise
+        print("SELF-TEST HARNESS ERROR: the mutant raised a KeyboardInterrupt subclass at load; fail-closed",
+              file=sys.stderr)
+        sys.exit(2)
     except BaseException:  # noqa: BLE001  a mutant ending the process at load is a harness error, never a pass
         print("SELF-TEST HARNESS ERROR: the mutant ended the process or faulted at load; fail-closed",
               file=sys.stderr)
@@ -1456,6 +1471,65 @@ def _is_interrupt(exc, sent):
     return len(args) == 1 and type(args[0]) is str and args[0] == sent
 
 
+def _propagate_interrupt(exc):
+    """Re-raise the caught KeyboardInterrupt `exc` when its class is exactly KeyboardInterrupt (what an
+    operator's Ctrl-C raises); a subclass, which only loaded code raises, is never re-raised: a fresh
+    KeyboardInterrupt with its context suppressed is raised instead, so no code from the caught instance runs
+    (a __notes__ property that raises SystemExit 0 while the interpreter reports it, for example)."""
+    if type(exc) is KeyboardInterrupt:
+        raise exc
+    raise KeyboardInterrupt from None
+
+
+def _interrupt_filter_outcomes(sent):
+    """The interrupt filters over hostile inputs: _is_interrupt of an exact KeyboardInterrupt(sent), of a
+    subclass whose args property returns (sent,), and of an exact KeyboardInterrupt whose argument is a str
+    subclass or an object whose __eq__ is always true; whether _propagate_interrupt raises a fresh exact
+    KeyboardInterrupt, its context suppressed, for that subclass; and the names of any instance code they ran.
+    Expected: (True, False, False, False, True, [])."""
+    ran = []
+
+    class _ArgsProperty(KeyboardInterrupt):
+        @property
+        def args(self):
+            ran.append("args")
+            return (sent,)
+
+        def __str__(self):
+            ran.append("str")
+            return sent
+
+    class _StrEq(str):
+        def __eq__(self, other):
+            ran.append("str-subclass-eq")
+            return True
+
+        __hash__ = str.__hash__
+
+    class _AnyEq:
+        def __eq__(self, other):
+            ran.append("eq")
+            return True
+
+        __hash__ = object.__hash__
+
+    outcomes = [_is_interrupt(KeyboardInterrupt(sent), sent), _is_interrupt(_ArgsProperty(), sent),
+                _is_interrupt(KeyboardInterrupt(_StrEq(sent)), sent),
+                _is_interrupt(KeyboardInterrupt(_AnyEq()), sent)]
+    try:
+        try:
+            raise _ArgsProperty()
+        except KeyboardInterrupt as exc:
+            _propagate_interrupt(exc)
+    except KeyboardInterrupt as exc:
+        if type(exc) is KeyboardInterrupt and type(exc.__context__) is not _ArgsProperty:
+            raise  # not this probe's own, such as an operator's real Ctrl-C
+        outcomes.append(type(exc) is KeyboardInterrupt and exc.args == () and exc.__suppress_context__)
+    else:
+        outcomes.append("returned")
+    return tuple(outcomes) + (ran,)
+
+
 def _escape_of(fn, *args):
     """The exit status of `fn(*args)`, or the escaping exception's class name, with every output discarded;
     "returned" when it returns. Only POISON_INTERRUPT is recorded as "KeyboardInterrupt"."""
@@ -1469,7 +1543,7 @@ def _escape_of(fn, *args):
         return code if code is None or type(code) is int else "SystemExit"
     except KeyboardInterrupt as exc:
         if not _is_interrupt(exc, POISON_INTERRUPT):
-            raise
+            _propagate_interrupt(exc)
         return "KeyboardInterrupt"
     except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
         return type(exc).__name__
@@ -1513,8 +1587,9 @@ def _blocks(read, fifo):
     """True when `read(fifo, where)` is still blocked after a second; a blocked read is then released by
     opening the FIFO for writing, so the self-test never hangs. The read runs in a worker thread, where an
     exit (a guarded mutant's harness error, exit 2, included) ends only that thread: when a KeyboardInterrupt
-    ends the read, _blocks re-raises that same KeyboardInterrupt in the calling thread once the worker is
-    released, so it reaches the caller as an interrupt; when anything else but an Exception ends it, _blocks
+    of exactly that class ends the read, _blocks re-raises that same KeyboardInterrupt in the calling thread
+    once the worker is released, so it reaches the caller as an interrupt; when anything else but an
+    Exception ends it (a KeyboardInterrupt subclass, which only loaded code raises, included), _blocks
     itself exits 2 in the calling thread, as the harness error the read's guard reports, never the
     self-test's own status. Neither path reads the caught instance."""
     import threading
@@ -1527,7 +1602,10 @@ def _blocks(read, fifo):
         except Exception:  # the mutant module carries its own GateError class
             pass
         except KeyboardInterrupt as exc:  # ends only this thread; _blocks re-raises it in the calling thread
-            interrupted.append(exc)
+            if type(exc) is KeyboardInterrupt:
+                interrupted.append(exc)
+            else:  # a subclass is never re-raised; _blocks exits 2 for it
+                ended.append(True)
         except BaseException:  # noqa: BLE001  ends only this thread; _blocks exits 2 for it
             ended.append(True)
     worker = threading.Thread(target=_attempt, daemon=True)
@@ -2173,6 +2251,48 @@ def self_test(report_path=None):
                 ("harness/mutant-load-keyboardinterrupt-propagates",
                  "raise KeyboardInterrupt({!r})\n".format(POISON_INTERRUPT), "KeyboardInterrupt")):
             check(check_id, _mutant_load_exit(tmp, body), want)
+        # A KeyboardInterrupt subclass whose __str__ and __notes__ raise SystemExit(0) is a harness error (exit
+        # 2) at load, in a later call and in _blocks' worker thread, never re-raised as itself (an uncaught one
+        # ends the interpreter's report with status 0). Red if any of the three guards re-raises it.
+        subclass_exits = ("class _InterruptExits(KeyboardInterrupt):\n    def __str__(self):\n"
+                          "        raise SystemExit(0)\n\n    @property\n    def __notes__(self):\n"
+                          "        raise SystemExit(0)\n\n\n")
+        check("harness/mutant-load-keyboardinterrupt-subclass-exit-2",
+              _mutant_load_exit(tmp, subclass_exits + "raise _InterruptExits()\n"), 2)
+        subclass_call = _mutant(tmp, "\ndef run(root):\n",
+                                "\n" + subclass_exits + "def run(root):\n    raise _InterruptExits()\n")
+        check("harness/mutant-call-keyboardinterrupt-subclass-exit-2", _escape_of(subclass_call.run, tmp), 2)
+        thread_subclass = _mutant(tmp, "\ndef read_text(path, where):\n",
+                                  "\n" + subclass_exits + "def read_text(path, where):\n    raise _InterruptExits()\n")
+        check("harness/mutant-call-in-worker-thread-keyboardinterrupt-subclass-exit-2",
+              _escape_of(_blocks, thread_subclass.read_text, tmp / "worker-thread-read-subclass"), 2)
+        # The recorder filters run no code from the caught instance: _is_interrupt and _propagate_interrupt
+        # (red if either reads an args property, compares through an argument's __eq__ or re-raises a
+        # subclass), and _escape_of, which returns only an exact SystemExit's int or None code (red if it reads
+        # a code property or returns a non-int code).
+        check("harness/interrupt-filters-run-no-instance-code", _interrupt_filter_outcomes(POISON_INTERRUPT),
+              (True, False, False, False, True, []))
+        code_ran = []
+
+        class _CodeProperty(SystemExit):
+            @property
+            def code(self):
+                code_ran.append("code")
+                return 0
+
+        class _AnyEqCode:
+            def __eq__(self, other):
+                code_ran.append("eq")
+                return True
+
+            __hash__ = object.__hash__
+
+        def _raise(exc):
+            raise exc
+        check("harness/escape-of-reads-only-an-exact-int-code",
+              (_escape_of(_raise, _CodeProperty(0)) == "SystemExit",
+               _escape_of(_raise, SystemExit(_AnyEqCode())) == "SystemExit", _escape_of(_raise, SystemExit(3)),
+               code_ran), (True, True, 3, []))
         # A later call into a loaded mutant that ends the process is a harness error (exit 2) too, never the
         # mutant's own status; an Exception and a KeyboardInterrupt propagate as themselves.
         for check_id, statement, want in (
@@ -2211,7 +2331,7 @@ def self_test(report_path=None):
                 run_vector()
             except KeyboardInterrupt as exc:
                 if not _is_interrupt(exc, other):
-                    raise
+                    _propagate_interrupt(exc)
                 propagated = True
             else:
                 propagated = False

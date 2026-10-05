@@ -276,15 +276,18 @@ def _close_vectors_guarded(base):
     """`_close_vectors(base)` with everything it runs in this process guarded: the lazy _close_selftest
     import, the later calls into it and the reverted body. A process-ending exit or a fault there
     (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception) is reported and returns None,
-    which _self_test makes CANNOT-EVALUATE (exit 2), never the vectors' own status. A KeyboardInterrupt
-    propagates unchanged, so an operator's Ctrl-C stops the run. The message is fixed by the except clause
+    which _self_test makes CANNOT-EVALUATE (exit 2), never the vectors' own status. A KeyboardInterrupt of
+    exactly that class propagates unchanged, so an operator's Ctrl-C stops the run; a subclass, which only
+    loaded code raises, is cannot-evaluate too and is never re-raised. The message is fixed by the except clause
     that caught the exception and never inspects or formats the escaping object (no isinstance, attribute,
     repr or str of it), so a hostile exception (one whose __class__ property raises SystemExit 0, for
     example) cannot run code from the handler."""
     try:
         return _close_vectors(base)
-    except KeyboardInterrupt:
-        raise
+    except KeyboardInterrupt as exc:
+        if type(exc) is KeyboardInterrupt:
+            raise
+        kind = "a KeyboardInterrupt subclass"
     except Exception:
         kind = "an exception"
     except BaseException:  # noqa: BLE001  a sibling ending the process is cannot-evaluate, never a pass
@@ -308,10 +311,75 @@ def _is_interrupt(exc, sent):
     args = exc.args
     return len(args) == 1 and type(args[0]) is str and args[0] == sent
 
+
+def _propagate_interrupt(exc):
+    """Re-raise the caught KeyboardInterrupt `exc` when its class is exactly KeyboardInterrupt (what an
+    operator's Ctrl-C raises); a subclass, which only loaded code raises, is never re-raised: a fresh
+    KeyboardInterrupt with its context suppressed is raised instead, so no code from the caught instance runs
+    (a __notes__ property that raises SystemExit 0 while the interpreter reports it, for example)."""
+    if type(exc) is KeyboardInterrupt:
+        raise exc
+    raise KeyboardInterrupt from None
+
+
+def _interrupt_filter_outcomes(sent):
+    """The interrupt filters over hostile inputs: _is_interrupt of an exact KeyboardInterrupt(sent), of a
+    subclass whose args property returns (sent,), and of an exact KeyboardInterrupt whose argument is a str
+    subclass or an object whose __eq__ is always true; whether _propagate_interrupt raises a fresh exact
+    KeyboardInterrupt, its context suppressed, for that subclass; and the names of any instance code they ran.
+    Expected: (True, False, False, False, True, [])."""
+    ran = []
+
+    class _ArgsProperty(KeyboardInterrupt):
+        @property
+        def args(self):
+            ran.append("args")
+            return (sent,)
+
+        def __str__(self):
+            ran.append("str")
+            return sent
+
+    class _StrEq(str):
+        def __eq__(self, other):
+            ran.append("str-subclass-eq")
+            return True
+
+        __hash__ = str.__hash__
+
+    class _AnyEq:
+        def __eq__(self, other):
+            ran.append("eq")
+            return True
+
+        __hash__ = object.__hash__
+
+    outcomes = [_is_interrupt(KeyboardInterrupt(sent), sent), _is_interrupt(_ArgsProperty(), sent),
+                _is_interrupt(KeyboardInterrupt(_StrEq(sent)), sent),
+                _is_interrupt(KeyboardInterrupt(_AnyEq()), sent)]
+    try:
+        try:
+            raise _ArgsProperty()
+        except KeyboardInterrupt as exc:
+            _propagate_interrupt(exc)
+    except KeyboardInterrupt as exc:
+        if type(exc) is KeyboardInterrupt and type(exc.__context__) is not _ArgsProperty:
+            raise  # not this probe's own, such as an operator's real Ctrl-C
+        outcomes.append(type(exc) is KeyboardInterrupt and exc.args == () and exc.__suppress_context__)
+    else:
+        outcomes.append("returned")
+    return tuple(outcomes) + (ran,)
+
+
 # An exception whose __class__ property raises SystemExit(0): a guard that inspects the caught instance
 # (isinstance included) runs that property and ends the process with status 0 from its own handler.
 CLOSE_DESCRIPTOR_EXIT = ("class _ClassExits(BaseException):\n    @property\n    def __class__(self):\n"
                          "        raise SystemExit(0)\n\n\n")
+# A KeyboardInterrupt subclass whose __str__ and __notes__ raise SystemExit(0): re-raised as the caught
+# instance, it ends the interpreter's report with status 0.
+CLOSE_INTERRUPT_SUBCLASS_EXIT = ("class _InterruptExits(KeyboardInterrupt):\n    def __str__(self):\n"
+                                 "        raise SystemExit(0)\n\n    @property\n    def __notes__(self):\n"
+                                 "        raise SystemExit(0)\n\n\n")
 
 
 def _poisoned_close_outcome(base, tag, body):
@@ -330,7 +398,7 @@ def _poisoned_close_outcome(base, tag, body):
             return _close_vectors_guarded(poison)
     except KeyboardInterrupt as exc:
         if not _is_interrupt(exc, CLOSE_POISON_INTERRUPT):
-            raise
+            _propagate_interrupt(exc)
         return "KeyboardInterrupt"
     except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
         return type(exc).__name__
@@ -363,7 +431,11 @@ def _close_guard_vectors(base):
               "KeyboardInterrupt"),
              ("import exception whose __class__ exits 0", CLOSE_DESCRIPTOR_EXIT + "raise _ClassExits()\n", None),
              ("later call exception whose __class__ exits 0",
-              CLOSE_DESCRIPTOR_EXIT + later.format("raise _ClassExits()"), None))
+              CLOSE_DESCRIPTOR_EXIT + later.format("raise _ClassExits()"), None),
+             ("import KeyboardInterrupt subclass that exits 0",
+              CLOSE_INTERRUPT_SUBCLASS_EXIT + "raise _InterruptExits()\n", None),
+             ("later call KeyboardInterrupt subclass that exits 0",
+              CLOSE_INTERRUPT_SUBCLASS_EXIT + later.format("raise _InterruptExits()"), None))
     failures = []
     for k, (label, body, want) in enumerate(cases):
         got = _poisoned_close_outcome(base, k, body)
@@ -380,11 +452,15 @@ def _close_guard_vectors(base):
             got = _poisoned_close_outcome(base, "other-" + label.replace(" ", "-"), body)
         except KeyboardInterrupt as exc:
             if not _is_interrupt(exc, other):
-                raise
+                _propagate_interrupt(exc)
         else:
             failures.append("another KeyboardInterrupt at {} was recorded as {!r}, not propagated".format(
                 label, got))
-    return failures, len(cases) + len(other_cases)
+    # The recorder filters run no code from the caught instance.
+    filters = _interrupt_filter_outcomes(sent)
+    if filters != (True, False, False, False, True, []):
+        failures.append("the interrupt filters over hostile inputs gave {!r}".format(filters))
+    return failures, len(cases) + len(other_cases) + 1
 
 
 def _self_test():

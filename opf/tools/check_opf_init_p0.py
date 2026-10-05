@@ -272,14 +272,15 @@ REVERSIONS = (
 
 
 def _names_identity(exc, identity):
-    """True only when exc is an exact AssertionError whose args are exactly (identity,). Only exact built-in
+    """True only when exc is an exact AssertionError whose args are exactly (identity,), or, for identity
+    None, whose one argument is any exact str. Only exact built-in
     types are read (type(exc), the args tuple of an exact AssertionError and an exact str in it), so no code
     from the caught instance runs (no __str__, __eq__, __class__ or args property of a subclass or of an
     argument), and the comparison cannot itself end the process."""
     if type(exc) is not AssertionError:
         return False
     args = exc.args
-    return len(args) == 1 and type(args[0]) is str and args[0] == identity
+    return len(args) == 1 and type(args[0]) is str and (identity is None or args[0] == identity)
 
 
 def red_on_revert(source, f):
@@ -311,12 +312,19 @@ def red_on_revert(source, f):
         # or None, GeneratorExit, any other BaseException) is a harness failure, CANNOT-EVALUATE (exit 2) in
         # main, never this gate's status; a KeyboardInterrupt propagates so an operator's Ctrl-C stops the run.
         # No handler here runs code from the caught instance: an AssertionError subclass from the reverted
-        # source (whose __str__ could raise SystemExit 0) is cannot-evaluate with a fixed message, and an
-        # exact AssertionError is compared through _names_identity alone.
+        # source (whose __str__ could raise SystemExit 0) is cannot-evaluate with a fixed message, and so is an
+        # exact AssertionError without one exact-str argument; any other is compared through _names_identity
+        # alone. A KeyboardInterrupt of exactly that class propagates; a subclass, which only loaded code
+        # raises, is cannot-evaluate and is never re-raised.
         try:
             exec(compile(source.replace(old, new), module.__file__, "exec"), module.__dict__)
-        except (Exception, KeyboardInterrupt):
+        except Exception:
             raise
+        except KeyboardInterrupt as exc:
+            if type(exc) is KeyboardInterrupt:
+                raise
+            raise RuntimeError("revert/" + guard + ": the reverted source raised a KeyboardInterrupt subclass at "
+                               "load; fail-closed") from None
         except BaseException:  # noqa: BLE001  a process ending at load is cannot-evaluate, never a pass
             raise RuntimeError("revert/" + guard + ": the reverted source ended the process at load; "
                                "fail-closed") from None
@@ -327,9 +335,17 @@ def red_on_revert(source, f):
             if type(exc) is not AssertionError:
                 raise RuntimeError("revert/" + guard + ": the reverted source raised an AssertionError subclass "
                                    "in a call; fail-closed") from None
+            if not _names_identity(exc, None):
+                raise RuntimeError("revert/" + guard + ": the reverted source raised an AssertionError without "
+                                   "one exact-str argument in a call; fail-closed") from None
             check(_names_identity(exc, identity), "revert/" + guard + "/wrong-assertion")
-        except (Exception, KeyboardInterrupt):
+        except Exception:
             raise
+        except KeyboardInterrupt as exc:
+            if type(exc) is KeyboardInterrupt:
+                raise
+            raise RuntimeError("revert/" + guard + ": the reverted source raised a KeyboardInterrupt subclass in "
+                               "a call; fail-closed") from None
         except BaseException:  # noqa: BLE001  a process ending in a call is cannot-evaluate, never a pass
             raise RuntimeError("revert/" + guard + ": the reverted source ended the process in a call; "
                                "fail-closed") from None
@@ -355,6 +371,65 @@ def _is_interrupt(exc, sent):
     return len(args) == 1 and type(args[0]) is str and args[0] == sent
 
 
+def _propagate_interrupt(exc):
+    """Re-raise the caught KeyboardInterrupt `exc` when its class is exactly KeyboardInterrupt (what an
+    operator's Ctrl-C raises); a subclass, which only loaded code raises, is never re-raised: a fresh
+    KeyboardInterrupt with its context suppressed is raised instead, so no code from the caught instance runs
+    (a __notes__ property that raises SystemExit 0 while the interpreter reports it, for example)."""
+    if type(exc) is KeyboardInterrupt:
+        raise exc
+    raise KeyboardInterrupt from None
+
+
+def _interrupt_filter_outcomes(sent):
+    """The interrupt filters over hostile inputs: _is_interrupt of an exact KeyboardInterrupt(sent), of a
+    subclass whose args property returns (sent,), and of an exact KeyboardInterrupt whose argument is a str
+    subclass or an object whose __eq__ is always true; whether _propagate_interrupt raises a fresh exact
+    KeyboardInterrupt, its context suppressed, for that subclass; and the names of any instance code they ran.
+    Expected: (True, False, False, False, True, [])."""
+    ran = []
+
+    class _ArgsProperty(KeyboardInterrupt):
+        @property
+        def args(self):
+            ran.append("args")
+            return (sent,)
+
+        def __str__(self):
+            ran.append("str")
+            return sent
+
+    class _StrEq(str):
+        def __eq__(self, other):
+            ran.append("str-subclass-eq")
+            return True
+
+        __hash__ = str.__hash__
+
+    class _AnyEq:
+        def __eq__(self, other):
+            ran.append("eq")
+            return True
+
+        __hash__ = object.__hash__
+
+    outcomes = [_is_interrupt(KeyboardInterrupt(sent), sent), _is_interrupt(_ArgsProperty(), sent),
+                _is_interrupt(KeyboardInterrupt(_StrEq(sent)), sent),
+                _is_interrupt(KeyboardInterrupt(_AnyEq()), sent)]
+    try:
+        try:
+            raise _ArgsProperty()
+        except KeyboardInterrupt as exc:
+            _propagate_interrupt(exc)
+    except KeyboardInterrupt as exc:
+        if type(exc) is KeyboardInterrupt and type(exc.__context__) is not _ArgsProperty:
+            raise  # not this probe's own, such as an operator's real Ctrl-C
+        outcomes.append(type(exc) is KeyboardInterrupt and exc.args == () and exc.__suppress_context__)
+    else:
+        outcomes.append("returned")
+    return tuple(outcomes) + (ran,)
+
+
 def _loaded_exit_outcome(source, body, f):
     """The class of what escapes red_on_revert over `source` with `body` appended, or None. Only
     LOADED_EXIT_INTERRUPT is recorded as KeyboardInterrupt; any other KeyboardInterrupt propagates."""
@@ -362,7 +437,7 @@ def _loaded_exit_outcome(source, body, f):
         red_on_revert(source + "\n" + body, f)
     except KeyboardInterrupt as exc:
         if not _is_interrupt(exc, LOADED_EXIT_INTERRUPT):
-            raise
+            _propagate_interrupt(exc)
         return KeyboardInterrupt
     except BaseException as exc:  # noqa: BLE001  any other escape is recorded, never this test's own end
         return type(exc)
@@ -380,7 +455,10 @@ def red_on_revert_loaded_exit(source, f):
                               ("BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n",
                                RuntimeError),
                               ("KeyboardInterrupt", "raise KeyboardInterrupt({!r})\n".format(LOADED_EXIT_INTERRUPT),
-                               KeyboardInterrupt)):
+                               KeyboardInterrupt),
+                              ("KeyboardInterrupt subclass that exits 0",
+                               HOSTILE_STR_BODY.format("KeyboardInterrupt", "_StrExits()") + "raise _StrExits()\n",
+                               RuntimeError)):
         check(_loaded_exit_outcome(source, body, f) is want, "revert/loaded-exit/" + label)
         print("PASS revert/loaded-exit/" + label)
     # Any other KeyboardInterrupt (here one carrying another value, standing in for a real Ctrl-C) propagates.
@@ -389,59 +467,84 @@ def red_on_revert_loaded_exit(source, f):
         _loaded_exit_outcome(source, "raise KeyboardInterrupt({!r})\n".format(other), f)
     except KeyboardInterrupt as exc:
         if not _is_interrupt(exc, other):
-            raise
+            _propagate_interrupt(exc)
         propagated = True
     else:
         propagated = False
     check(propagated, "revert/loaded-exit/other-interrupt-not-recorded")
     print("PASS revert/loaded-exit/other-interrupt-not-recorded")
+    # The recorder filters run no code from the caught instance. Red if _is_interrupt reads an args property
+    # or compares through an argument's __eq__, or _propagate_interrupt re-raises a subclass.
+    check(_interrupt_filter_outcomes(LOADED_EXIT_INTERRUPT) == (True, False, False, False, True, []),
+          "revert/interrupt-filters-run-no-instance-code")
+    print("PASS revert/interrupt-filters-run-no-instance-code")
 
 
 # Appended to a reverted source: every public function the reverted module defines is replaced by one that
-# raises an exception, of the base class formatted in, whose __str__ (and so format and repr) raises
-# SystemExit(0). A handler that stringifies or formats the caught instance then ends the gate with status 0.
+# raises the expression formatted in second, after a class _StrExits of the base formatted in first whose
+# __str__ (and so format and repr), __eq__ and __notes__ raise SystemExit(0). A handler that stringifies,
+# formats or compares the caught instance, or re-raises a KeyboardInterrupt subclass as itself (the
+# interpreter reads its __notes__ when it reports it), then ends the gate with status 0.
 HOSTILE_STR_BODY = (
     "class _StrExits({}):\n"
     "    def __str__(self):\n"
     "        raise SystemExit(0)\n"
     "\n"
     "    __repr__ = __str__\n"
+    "\n"
+    "    def __eq__(self, other):\n"
+    "        raise SystemExit(0)\n"
+    "\n"
+    "    __hash__ = object.__hash__\n"
+    "\n"
+    "    @property\n"
+    "    def __notes__(self):\n"
+    "        raise SystemExit(0)\n"
     "\n\n"
     "def _raise_str_exits(*args, **kwargs):\n"
-    "    raise _StrExits()\n"
+    "    raise {}\n"
     "\n\n"
     "for _n, _v in list(globals().items()):\n"
     "    if type(_v) is type(_raise_str_exits) and _v.__module__ == __name__ and not _n.startswith('_'):\n"
     "        globals()[_n] = _raise_str_exits\n")
 
+# (label, the base of _StrExits, what a call into the reverted source raises).
+HOSTILE_STR_CASES = (("AssertionError", "AssertionError", "_StrExits()"),
+                     ("Exception", "Exception", "_StrExits()"),
+                     ("KeyboardInterrupt", "KeyboardInterrupt", "_StrExits()"),
+                     ("assertion-with-hostile-argument", "object", "AssertionError(_StrExits())"))
+
 
 def red_on_revert_hostile_str(source, f):
-    """An exception whose __str__ raises SystemExit(0), raised from a call into the reverted source, is a
-    harness failure (exit 2 from _failure_status, main's handler), never exit 0 from a handler that
-    stringifies, formats or compares the caught instance: as an AssertionError subclass red_on_revert raises
-    its fixed RuntimeError, and as an Exception subclass it reaches _failure_status, which gives 2 without
-    reading it. Red if red_on_revert or _failure_status runs code from the caught instance."""
+    """Each HOSTILE_STR_CASES call into the reverted source is a harness failure, exit 2 from main itself,
+    never exit 0 from a handler that stringifies, formats or compares the caught instance or re-raises it:
+    an AssertionError subclass, an exact AssertionError whose argument is not an exact str and a
+    KeyboardInterrupt subclass each make red_on_revert raise its fixed RuntimeError, and an Exception subclass
+    reaches main's handler, which gives 2 through _failure_status without reading it. Each runs through main
+    (its fixtures replaced, for that one run, by red_on_revert over the hostile source), so it is red if
+    red_on_revert, main's handler or _failure_status runs code from the caught instance."""
     import contextlib
     import io
-    for base in ("AssertionError", "Exception"):
+    names = globals()
+    real_fixtures = names["fixtures"]
+    for label, base, raised in HOSTILE_STR_CASES:
+        def _hostile_fixtures(hostile=source + "\n" + HOSTILE_STR_BODY.format(base, raised), label=label):
+            red_on_revert(hostile, f)
+            raise AssertionError("revert/hostile-str/" + label + "/not-raised")
+        names["fixtures"] = _hostile_fixtures
         try:
-            red_on_revert(source + "\n" + HOSTILE_STR_BODY.format(base), f)
-        except KeyboardInterrupt:
-            raise
-        except Exception as exc:
-            try:
-                with contextlib.redirect_stderr(io.StringIO()):
-                    got = _failure_status(exc)
-            except KeyboardInterrupt:
+            with contextlib.redirect_stderr(io.StringIO()):
+                got = main([])
+        except KeyboardInterrupt as exc:
+            if type(exc) is KeyboardInterrupt:
                 raise
-            except BaseException as escaped:  # noqa: BLE001  recorded, never this test's own end
-                got = type(escaped)
-        except BaseException as exc:  # noqa: BLE001  recorded, never this test's own end
-            got = type(exc)
-        else:
-            got = None
-        check(type(got) is int and got == 2, "revert/hostile-str/" + base)
-        print("PASS revert/hostile-str/" + base)
+            got = "a KeyboardInterrupt subclass"  # recorded, never re-raised; only loaded code raises one
+        except BaseException as escaped:  # noqa: BLE001  recorded, never this test's own end
+            got = type(escaped)
+        finally:
+            names["fixtures"] = real_fixtures
+        check(type(got) is int and got == 2, "revert/hostile-str/" + label)
+        print("PASS revert/hostile-str/" + label)
 
 
 # Prefixed to the runner text in place of a python3 shell function. A
@@ -1158,12 +1261,12 @@ def _failure_status(exc):
     return 2
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--red-on-revert", action="store_true")
     parser.add_argument("--vectors-only", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         f = fixtures()
         ids = run_vectors(p0, f)
