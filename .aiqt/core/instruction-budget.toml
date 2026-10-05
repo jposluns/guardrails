@@ -15,14 +15,22 @@
 #                        Raised 112222 -> 128358 when the counting rule changed, not the content: the gate
 #                        began counting the modelled header of each of the 134 loaded files (16136 units;
 #                        rule files 111862 and managed block 360 unchanged; no .claude/CLAUDE.md).
-#                        Raised 128358 -> 128883 on 2026-10-04 when guard-input-soundness gained its paragraph
-#                        on a hand-kept list that selects a generated view (grdinp.12): rule files 111862 ->
-#                        112387 (+525 units); managed block 360 and file headers 16136 unchanged.
+#                        Raised 128358 -> 128966 for content, with the maintainer's recorded approval of
+#                        2026-10-04: a new second paragraph in security-seci-fail-closed (608 units; rule
+#                        files 111862 -> 112470; headers 16136 and managed block 360 unchanged).
+#                        Raised 128966 -> 129060 for content, with the maintainer's second recorded approval
+#                        of 2026-10-04, for the measured extra: that paragraph reworded so the child-process
+#                        route can pass (94 units; rule files 112470 -> 112564; headers and managed block
+#                        unchanged).
+#                        Raised 129060 -> 129585 on 2026-10-04 when guard-input-soundness gained its paragraph
+#                        on a hand-kept list that selects a generated view (grdinp.12): rule files 112564 ->
+#                        113089 (+525 units); managed block 360 and file headers 16136 unchanged.
 #   ceiling              the target PACK figure; reported, not enforced. Its value predates header counting,
-#                        which added 16136 units to PACK at the ratchet raise above; it was not raised with it.
+#                        which added 16136 units to PACK at the 112222 -> 128358 ratchet raise; it was not
+#                        raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 128883
+ratchet = 129585
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"

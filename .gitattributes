@@ -507,6 +507,7 @@ opf/site/store-meta.html text eol=lf
 opf/site/styles.css text eol=lf
 opf/site/theme.js text eol=lf
 opf/site/tooling.html text eol=lf
+opf/spec/OPF-IMPLEMENTATION-PROMPT.md text eol=lf
 opf/spec/OPF-INIT-D2B-REVIEW.md text eol=lf
 opf/spec/OPF-INIT-D2B.md text eol=lf
 opf/spec/OPF-QUICKSTART.md text eol=lf
