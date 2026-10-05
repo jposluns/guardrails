@@ -2392,9 +2392,11 @@ def _main_isolated(monitor):
             ("pin-grep-C", "grep -rn -C3 'git reset --hard' .", "deny", 0, "deny", 0),
             ("pin-hd-commit-marker", 'git commit --allow-empty -q -m "$(cat <<\'EOF\'\nDiscard guard: deny git -C/--chdir reset --hard forms\nEOF\n)"', "deny", 0, "deny", 0),
             ("keep-hd-commit", 'git commit --allow-empty -q -m "$(cat <<\'EOF\'\nDiscard guard: deny git reset --hard forms\nEOF\n)"', "deny", 0, "allow-note", 1),
-            # D-DISCARD-ALLOWLIST: a provably plain commit-and-push is out of scope; the opt-out no longer
-            # lifts the cwd precondition (it still skips the snapshot past it)
-            ("keep-commit-msg", 'git commit -m "reset docs" && git push', "allow", 0, "allow", 0),
+            # Round 5: commit and push are no longer in the read-only allowlist (commit can trigger an
+            # auto-gc prune; push can delete refs), so the commit-and-push form is back to the
+            # deny-nocwd / snapshot-then-allow posture; the opt-out no longer lifts the cwd
+            # precondition (it still skips the snapshot past it)
+            ("keep-commit-msg", 'git commit -m "reset docs" && git push', "deny", 0, "allow-note", 1),
             ("keep-optout", "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "deny", 0, "allow", 0),
         )
         aiqt_hooks._record_recovery = _npnc_count
@@ -2445,9 +2447,11 @@ def _main_isolated(monitor):
         # === D-DISCARD-ALLOWLIST: the top gate is an allowlist. Each non-plain shell form below hides a
         # === discard from the raw text scan (the pinned bytes allowed every one with no snapshot); it is
         # === not provably plain, so it denies with no cwd and snapshot-then-allows with a dirty one. The
-        # === plain-* rows are provably plain non-discarding commands that keep the exact handling's
-        # === allow; the stray-* rows put a git word outside a git command-word position, which is never
-        # === provably plain.
+        # === plain-* rows are provably plain READ-ONLY commands that keep the exact handling's
+        # === allow; the commit-msg row is round-5 UPDATED (commit/push left the read-only allowlist, so
+        # === a commit message naming a lossy verb is again possibly discarding, a disclosed
+        # === over-refusal); the stray-* rows put a git word outside a git command-word position, which
+        # === is never provably plain.
         _np5_cases = (
             ("continuation", "git merge \\\n--abort", "deny", 0, "allow-note", 1),
             ("ansi-c", "git $'\\x72eset' --hard", "deny", 0, "allow-note", 1),
@@ -2460,7 +2464,7 @@ def _main_isolated(monitor):
             ("fragment", "g'i't merge --abort", "deny", 0, "allow-note", 1),
             ("plain-status", "git status --short", "allow", 0, "allow", 0),
             ("plain-log-grep", "git log --oneline | grep reset", "allow", 0, "allow", 0),
-            ("plain-commit-msg", 'git commit -m "reset the clock" && git push', "allow", 0, "allow", 0),
+            ("plain-commit-msg", 'git commit -m "reset the clock" && git push', "deny", 0, "allow-note", 1),
             ("plain-diff-gitdir", "git --git-dir=.git diff HEAD -- file.txt", "allow", 0, "allow", 0),
             ("stray-reserved", "if true; then git reset --hard; fi", "deny", 0, "allow-note", 1),
             ("stray-xargs", "echo --hard | xargs git reset", "deny", 0, "allow-note", 1),
@@ -2491,6 +2495,81 @@ def _main_isolated(monitor):
             _pp = getattr(aiqt_hooks, "_provably_plain", None)
             if _pp is None or _pp(_cmd) is not _w:
                 failures.append("(np5-{}) _provably_plain({!r}) must be {}".format(_lab, _cmd, _w))
+
+        # === Round 5 (np6): the allowlist admits ONLY subcommand FORMS provably read-only in every
+        # === option. Each mutating-form row below was admitted as plain by the pinned bytes (allow,
+        # === 0 snapshots, even with no cwd, though reflog expire/delete, gc, prune, repack, pack-refs
+        # === and notes can destroy stashes, reflog entries and recovery objects, and --output/bundle/
+        # === archive overwrite a caller-named file); each now routes to the possibly-discarding
+        # === branch: deny with no cwd, snapshot-then-allow with a dirty one. The np6t-* rows pin the
+        # === off-path targets (codex round-5 major): a -C or git worktree path target of an
+        # === UNRECOGNIZED verb is snapshotted too (2 snapshots: the named target and the dirty
+        # === session cwd), and a --git-dir redirect or an unresolvable worktree operand DENIES even
+        # === with a cwd. The np6-plain-* rows pin the read-only forms that stay allowed.
+        _np6_cases = (
+            ("reflog-expire", "git reflog expire --expire=now --all", "deny", 0, "allow-note", 1),
+            ("reflog-delete", "git reflog delete 'refs/stash@{1}'", "deny", 0, "allow-note", 1),
+            ("notes-prune", "git notes prune", "deny", 0, "allow-note", 1),
+            ("gc-prune", "git gc --prune=now", "deny", 0, "allow-note", 1),
+            ("prune-now", "git prune --expire=now", "deny", 0, "allow-note", 1),
+            ("repack-ad", "git repack -a -d", "deny", 0, "allow-note", 1),
+            ("pack-refs", "git pack-refs --all --prune", "deny", 0, "allow-note", 1),
+            ("maintenance-run", "git maintenance run", "deny", 0, "allow-note", 1),
+            ("init-sepdir", "git init --separate-git-dir=elsewhere", "deny", 0, "allow-note", 1),
+            ("clone-into", "git clone https://example.invalid/r.git .", "deny", 0, "allow-note", 1),
+            ("diff-output", "git diff --output=np6-victim.txt", "deny", 0, "allow-note", 1),
+            ("log-output", "git log --output=np6-victim.txt", "deny", 0, "allow-note", 1),
+            ("show-output", "git show --output=np6-victim.txt", "deny", 0, "allow-note", 1),
+            ("archive-output", "git archive --output=np6-victim.txt HEAD", "deny", 0, "allow-note", 1),
+            ("bundle-create", "git bundle create np6-victim.txt HEAD", "deny", 0, "allow-note", 1),
+            ("grep-pager", "git grep -Ovi TODO", "deny", 0, "allow-note", 1),
+            ("tag-delete", "git tag -d np6tag", "deny", 0, "allow-note", 1),
+            ("tag-create", "git tag np6tag", "deny", 0, "allow-note", 1),
+            ("add-index", "git add -A", "deny", 0, "allow-note", 1),
+            ("commit-plain", "git commit -q -m np6", "deny", 0, "allow-note", 1),
+            ("fetch-prune", "git fetch --prune origin", "deny", 0, "allow-note", 1),
+            ("push-delete", "git push origin --delete topic", "deny", 0, "allow-note", 1),
+            ("config-write", "git config core.autocrlf false", "deny", 0, "allow-note", 1),
+            ("symref-write", "git symbolic-ref HEAD refs/heads/np6", "deny", 0, "allow-note", 1),
+            ("t-mv-other", "git -C {} mv -f src dest".format(_npnc_t_s), "deny", 0, "allow-note", 2),
+            ("t-wrapped-mv", "env git -C {} mv -f src dest".format(_npnc_t_s), "deny", 0, "allow-note", 2),
+            ("t-wt-remove", "git worktree remove --force {}".format(_npnc_t_s), "deny", 0, "allow-note", 2),
+            ("t-wt-remove-unres", "git worktree remove --force np6-gone", "deny", 0, "deny", 0),
+            ("t-gitdir-other", "git --git-dir={}/.git np6cmd".format(_npnc_t_s), "deny", 0, "deny", 0),
+            ("plain-tag-list", "git tag --list 'v*'", "allow", 0, "allow", 0),
+            ("plain-branch-list", "git branch -a --contains HEAD", "allow", 0, "allow", 0),
+            ("plain-diff-noout", "git diff --stat HEAD", "allow", 0, "allow", 0),
+            ("plain-grep", "git grep -n TODO", "allow", 0, "allow", 0),
+        )
+        aiqt_hooks._record_recovery = _npnc_count
+        try:
+            for _lab, _cmd, _w_nc, _n_nc, _w_c, _n_c in _np6_cases:
+                _got_nc = _npnc_run(_cmd, None)
+                if (_got_nc[0], _got_nc[2]) != (_w_nc, _n_nc):
+                    failures.append("(np6-{}-nocwd) {!r} with no session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_nc, _n_nc,
+                                                                      _got_nc[0], _got_nc[2]))
+                _got_c = _npnc_run(_cmd, str(_npnc))
+                if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
+                    failures.append("(np6-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
+                                                                      _got_c[0], _got_c[2]))
+        finally:
+            aiqt_hooks._record_recovery = _orig_npnc_rec
+        for _lab, _cmd, _w in (
+                ("np6-pp-reflog", "git reflog", False), ("np6-pp-gc", "git gc", False),
+                ("np6-pp-diff-output", "git diff --output=x.txt", False),
+                ("np6-pp-diff-output-sep", "git log --output x.txt", False),
+                ("np6-pp-tag-d", "git tag -d v1", False), ("np6-pp-tag-create", "git tag v1", False),
+                ("np6-pp-add", "git add .", False), ("np6-pp-commit", "git commit -m x", False),
+                ("np6-pp-push", "git push", False), ("np6-pp-fsck", "git fsck", False),
+                ("np6-pp-grep-O", "git grep -O cat TODO", False),
+                ("np6-pp-diff", "git diff HEAD", True), ("np6-pp-tag-list", "git tag -l", True),
+                ("np6-pp-tag-bare", "git tag", True), ("np6-pp-branch-list", "git branch -a", True),
+                ("np6-pp-grep", "git grep -n TODO", True), ("np6-pp-status", "git status", True)):
+            _pp = getattr(aiqt_hooks, "_provably_plain", None)
+            if _pp is None or _pp(_cmd) is not _w:
+                failures.append("({}) _provably_plain({!r}) must be {}".format(_lab, _cmd, _w))
 
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file allows with a note on dirty tree",
@@ -8770,17 +8849,23 @@ def _main_isolated(monitor):
           "expbnd (git_explicit_binding) ALLOWS with a note an ambient git target or a relocated whole-tree "
           "breadth op, and DENIES-and-educates a whole-tree breadth stage paired with a publish in one "
           "command (finding 11). prsunc "
-          "(git_discard) recovers-then-allows: a recoverable discard is snapshotted then ALLOWED with a "
-          "recovery-pointer note, a confirmed whole-tree clobber on a dirty tree DENIES (with a snapshot "
+          "(git_discard) recovers-then-allows behind a defensive allowlist: a PROVABLY PLAIN "
+          "(read-only-form) command allows untouched; every other command naming git is possibly "
+          "discarding - a recoverable discard is snapshotted then ALLOWED with a recovery-pointer note "
+          "(an unparseable in-scope command WITH a usable cwd snapshots the session cwd then allows, "
+          "unless its text carries a target redirect, which denies), a confirmed whole-tree clobber on "
+          "a dirty tree DENIES (with a snapshot "
           "when one could be made), and it DENIES-and-educates only when a warranted recovery snapshot "
           "cannot be created (a forced snapshot failure, an over-cap or bad-path snapshot, a temp dir "
-          "inside the repo, a ref collision, an embedded-NUL cwd) or the sound-rule gate fails it closed "
+          "inside the repo, a ref collision, an embedded-NUL cwd) or the allowlist gate fails it closed "
           "(no usable session cwd, a non-cosmetic ambient GIT_* view-override, an env --chdir/-C "
-          "wrapper override, an unparseable in-scope command) or the command cannot be "
+          "wrapper override - and the leading opt-out lifts neither the cwd nor the ambient "
+          "precondition, it only skips the snapshot of a pristine bare form once they hold) or the "
+          "command cannot be "
           "classified/resolved (an inline -c alias, an unrecognized flagged subcommand such as "
-          "checkout-index or read-tree --reset on a redirect, an unresolvable worktree or "
-          "directory-change marker); a provably-clean tree ALLOWS "
-          "with no snapshot (the leading opt-out on a pristine bare form bypasses the gate); "
+          "checkout-index or read-tree --reset on a redirect, an unresolvable worktree, a named "
+          "repository or worktree target that cannot be pinned, or an unresolvable "
+          "directory-change marker); a provably-clean tree ALLOWS with no snapshot; "
           "stash/branch are not snapshottable and "
           "allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
           "deletion, DENIES fail-safe a push it cannot prove misses the protected line (a "
