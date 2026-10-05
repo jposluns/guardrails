@@ -82,6 +82,20 @@ def _git_lines(root, args):
     # certifies (a nested or decoy repository above all), which would exempt a planted special
     # file from the walk or blind the tracked-content shadow test.
     env = dict((key, value) for key, value in os.environ.items() if not key.startswith("GIT_"))
+    # D-400 fixture env: on a root this user owns, the global and system configuration are pinned
+    # away too (HOME and XDG_CONFIG_HOME at os.devnull, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM at
+    # os.devnull, GIT_CONFIG_NOSYSTEM=1), so a caller's core.fsmonitor never runs inside a gate and a
+    # caller's global ignore file cannot hide a path from the walk (fewer ignored paths, so more
+    # refusals, never fewer). Only on a root another uid owns (or where ownership cannot be read) is
+    # the caller's configuration kept, because git refuses such a checkout as dubious ownership
+    # unless the caller's global config trusts it (the caller_env_without_git stance).
+    try:
+        owned = os.stat(root).st_uid == os.geteuid()
+    except (OSError, ValueError, AttributeError):
+        owned = False
+    if owned:
+        env.update(HOME=os.devnull, XDG_CONFIG_HOME=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                   GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
     try:
         proc = subprocess.run(["git", "-C", os.fspath(root), *args], stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=60, env=env)
