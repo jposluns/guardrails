@@ -10,7 +10,9 @@
 # guarded-surfaces    the repo-relative entrypoints that carry the canonical refusal guard, sorted and
 #                     unique. Each is checked statically (the guard leads the file) and dynamically (run
 #                     in a child with a patched sys.version_info below the floor, it refuses with the exact
-#                     message and exit code). It starts EMPTY and grows unit by unit.
+#                     message and exit code). It starts EMPTY and grows unit by unit. The core hook and its
+#                     plugin copy carry the guard's hook form (HOOK_SURFACES in the gate): a fail-open
+#                     event's mode warns on exit 0 instead of refusing.
 # completeness-check  false until every shipped entrypoint is listed above; true then makes an unlisted
 #                     shipped entrypoint a finding.
 # documentation-check false until the declarations land; true then requires each declaration file to state
@@ -19,6 +21,7 @@
 format-version = 1
 python-floor = "3.14"
 guarded-surfaces = [
+    ".aiqt/core/hooks/scripts/aiqt_hooks.py",
     "opf/tools/_journal.py",
     "opf/tools/_opf_absorb.py",
     "opf/tools/_opf_adopt.py",
@@ -58,6 +61,7 @@ guarded-surfaces = [
     "opf/tools/opf.py",
     "opf/tools/selftest_commonmark_conformance.py",
     "opf/tools/selftest_commonmark_headings.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
 ]
 completeness-check = false
 documentation-check = false

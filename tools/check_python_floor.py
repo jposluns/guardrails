@@ -83,12 +83,21 @@ Legs, in order:
                  disclosed over-rejection.
   guard          each guarded-surfaces entrypoint opens with the canonical refusal guard, AST-matched
                  against GUARD_TEMPLATE with the file's own basename and the floor; only a module
-                 docstring and `from __future__` imports may precede its `import sys`.
+                 docstring and `from __future__` imports may precede its `import sys`. A HOOK_SURFACES
+                 entry (a hook whose events differ in the direction an error must fail) carries the
+                 hook form instead, HOOK_GUARD_TEMPLATE: a FLOOR_FAIL_OPEN_MODES tuple literal of
+                 sorted, unique mode names between `import sys` and the version test, and under the
+                 floor a mode in that literal warns (a systemMessage on stdout, exit 0) while any other
+                 argv refuses exactly as the canonical guard does. The hook's own self-test holds the
+                 literal equal to its fail-open handlers.
   dynamic        each guarded-surfaces entrypoint, run in a child (-I -B plus each of no flag, -O and
                  -OO) from a fresh empty working directory with sys.version_info patched to each of two
                  versions below the floor, exits 2 with empty stdout and the exact refusal on stderr, and
                  leaves the working directory empty; the guard prefix alone, run at the floor's .0
-                 release and at the real interpreter version, continues.
+                 release and at the real interpreter version, continues. A HOOK_SURFACES entry is also
+                 run (no flag, the first patched version) with each FLOOR_FAIL_OPEN_MODES mode, which
+                 must exit 0 with the exact warning on stdout and the refusal on stderr, and with
+                 DENY_PROBE_MODE, a mode outside the literal, which must refuse with exit 2.
   completeness   OFF until the source sets completeness-check = true (the unit that guards the last
                  shipped entrypoint switches it on): every shipped entrypoint, a .py file outside
                  EXCLUDED_TREES with a module-level `if __name__ == "__main__":`, must be listed in
@@ -236,7 +245,8 @@ SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install.html",
                      "opf/site/adopt.md", "opf/site/adopt.html", "opf/spec/OPF-QUICKSTART.md",
                      ".preview/README.md")
-SURFACE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
+# One leading dot per part is allowed (the .aiqt/ source tree); "." and ".." parts are refused apart.
+SURFACE_RE = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
 FLOOR_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)")
 FLAG_SETS = ((), ("-O",), ("-OO",))
 CHILD_TIMEOUT = 60
@@ -251,13 +261,40 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 '''
+# The hook form, for HOOK_SURFACES only: the hook's events differ in the direction an error must fail, so
+# a mode named in the FLOOR_FAIL_OPEN_MODES literal (a Stop-type, SessionStart, TeammateIdle,
+# UserPromptSubmit or PostToolUse handler) warns on exit 0, never blocking, and every other argv (a
+# PreToolUse handler, an unknown mode, no mode) fails closed with exit 2 and the canonical refusal.
+HOOK_GUARD_TEMPLATE = '''import sys
+
+FLOOR_FAIL_OPEN_MODES = {modes}
+
+if tuple(sys.version_info[:2]) < ({major}, {minor}):
+    _floor_refusal = (
+        "error: {name} requires Python {major}.{minor} or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    sys.stderr.write(_floor_refusal)
+    if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
+        import json
+        sys.stdout.write(json.dumps(dict(systemMessage=(
+            "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+            "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\\n")
+        raise SystemExit(0)
+    raise SystemExit(2)
+'''
+HOOK_SURFACES = (".aiqt/core/hooks/scripts/aiqt_hooks.py",
+                 "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
+MODES_NAME = "FLOOR_FAIL_OPEN_MODES"
+MODE_RE = re.compile(r"[a-z][a-z0-9_]*")
+DENY_PROBE_MODE = "floor_deny_probe"
 # Child programs. sys.version_info is replaced by a plain tuple before the entrypoint (or the guard
 # prefix) runs; the guard reads only sys.version_info, so the tuple stands in for an older interpreter.
 REFUSAL_CHILD = (
     "import runpy, sys\n"
     "path = sys.argv[1]\n"
     "version = tuple(int(part) for part in sys.argv[2].split('.'))\n"
-    "sys.argv = [path]\n"
+    "sys.argv = [path] + sys.argv[3:]\n"
     "sys.version_info = version + ('final', 0)\n"
     "runpy.run_path(path, run_name='__main__')\n")
 BOUNDARY_CHILD = (
@@ -812,12 +849,33 @@ def _dump(node):
     return ast.dump(node, include_attributes=False)
 
 
-def guard_text(name, floor):
-    return GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1])
+def guard_text(name, floor, modes=None):
+    """The canonical guard, or with modes (a tuple of mode names) its hook form."""
+    if modes is None:
+        return GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1])
+    return HOOK_GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1], modes=repr(tuple(modes)))
 
 
-def _canonical(name, floor):
-    return [_dump(node) for node in ast.parse(guard_text(name, floor)).body]
+def _canonical(name, floor, modes=None):
+    return [_dump(node) for node in ast.parse(guard_text(name, floor, modes)).body]
+
+
+def hook_modes(tree):
+    """The FLOOR_FAIL_OPEN_MODES literal of a hook-form guard: the tuple of mode names the second
+    statement after the preamble assigns, or None when that statement is not one plain assignment of a
+    non-empty, sorted, unique tuple of lower-case identifier strings to that name."""
+    start = _preamble_end(tree)
+    node = tree.body[start + 1] if len(tree.body) > start + 1 else None
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) and node.targets[0].id == MODES_NAME
+            and isinstance(node.value, ast.Tuple) and node.value.elts):
+        return None
+    modes = []
+    for elt in node.value.elts:
+        if not (isinstance(elt, ast.Constant) and type(elt.value) is str and MODE_RE.fullmatch(elt.value)):
+            return None
+        modes.append(elt.value)
+    return tuple(modes) if modes == sorted(set(modes)) else None
 
 
 def _preamble_end(tree):
@@ -842,13 +900,23 @@ def guard_findings(root, surfaces, floor):
     findings = []
     for rel in surfaces:
         tree = _parse(root, rel)
-        want = _canonical(Path(rel).name, floor)
         start = _preamble_end(tree)
         try:
-            opens = [_dump(node) for node in tree.body[start:start + len(want)]] == want
+            modes = hook_modes(tree) if rel in HOOK_SURFACES else None
+            want = None if rel in HOOK_SURFACES and modes is None \
+                else _canonical(Path(rel).name, floor, modes)
+            opens = want is not None \
+                and [_dump(node) for node in tree.body[start:start + len(want)]] == want
         except (MemoryError, RecursionError) as exc:
             raise _too_complex(rel, exc)
-        if not opens:
+        if not opens and rel in HOOK_SURFACES:
+            findings.append(
+                "{}: does not open with the canonical floor guard in its hook form (only a docstring "
+                "and `from __future__` imports may precede `import sys`, then a {} tuple of sorted, "
+                "unique mode names, then `if tuple(sys.version_info[:2]) < ({}, {}):` warning on exit 0 "
+                "for a listed mode and refusing as {} with exit 2 otherwise; see HOOK_GUARD_TEMPLATE)"
+                .format(rel, MODES_NAME, floor[0], floor[1], Path(rel).name))
+        elif not opens:
             findings.append(
                 "{}: does not open with the canonical floor guard (only a docstring and `from "
                 "__future__` imports may precede `import sys` and `if tuple(sys.version_info[:2]) < "
@@ -869,6 +937,14 @@ def expected_refusal(name, floor, version, executable):
             % ((name,) + tuple(floor) + tuple(version) + (executable or "unknown interpreter",)))
 
 
+def expected_warning(name, floor, version, executable, mode):
+    """The hook form's stdout for a fail-open mode under the floor: one systemMessage JSON line."""
+    return json.dumps(dict(systemMessage=(
+        "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+        "(non-blocking by design on this event)."
+        % (mode, expected_refusal(name, floor, version, executable).strip())))) + "\n"
+
+
 def _child(code, args, flags, cwd):
     try:
         proc = subprocess.run([sys.executable, "-I", "-B", *flags, "-c", code, *args], cwd=cwd,
@@ -880,11 +956,12 @@ def _child(code, args, flags, cwd):
             proc.stderr.decode("utf-8", "backslashreplace"))
 
 
-def refusal_observed(path, version, flags):
-    """Run one entrypoint at a patched version; return (exit, stdout, stderr, working-dir entries)."""
+def refusal_observed(path, version, flags, args=()):
+    """Run one entrypoint at a patched version with the argv args; return (exit, stdout, stderr,
+    working-dir entries)."""
     try:
         with tempfile.TemporaryDirectory(prefix="python-floor-cwd-") as cwd:
-            rc, out, err = _child(REFUSAL_CHILD, [str(path), "%d.%d.%d" % version], flags, cwd)
+            rc, out, err = _child(REFUSAL_CHILD, [str(path), "%d.%d.%d" % version, *args], flags, cwd)
             return rc, out, err, sorted(os.listdir(cwd))
     except OSError as exc:
         raise CannotEvaluate("temporary working directory: {}".format(exc))
@@ -900,9 +977,10 @@ def boundary_observed(prefix, version, flags):
         raise CannotEvaluate("temporary working directory: {}".format(exc))
 
 
-def guard_prefix(tree, name, floor):
-    """Source of the top-level statements up to and including the canonical guard, or None."""
-    want = _canonical(name, floor)[-1]
+def guard_prefix(tree, name, floor, modes=None):
+    """Source of the top-level statements up to and including the canonical guard (with modes, its hook
+    form), or None."""
+    want = _canonical(name, floor, modes)[-1]
     for index, node in enumerate(tree.body):
         if _dump(node) == want:
             return ast.unparse(ast.Module(body=tree.body[:index + 1], type_ignores=[]))
@@ -924,9 +1002,29 @@ def dynamic_findings(root, surfaces, floor):
                         "and an untouched working directory".format(
                             rel, *version, " ".join(flags) or "no flag", *got))
         try:
-            prefix = guard_prefix(_parse(root, rel), name, floor)
+            tree = _parse(root, rel)
+            modes = hook_modes(tree) if rel in HOOK_SURFACES else None
+            prefix = None if rel in HOOK_SURFACES and modes is None \
+                else guard_prefix(tree, name, floor, modes)
         except (MemoryError, RecursionError) as exc:
             raise _too_complex(rel, exc)
+        version = below_floor(floor)[0]
+        refusal = expected_refusal(name, floor, version, sys.executable)
+        for mode in modes or ():
+            got = refusal_observed(root / rel, version, (), [mode])
+            if got != (0, expected_warning(name, floor, version, sys.executable, mode), refusal, []):
+                findings.append(
+                    "{} at patched {}.{}.{} with the fail-open mode {}: got exit {}, stdout {!r}, stderr "
+                    "{!r}, working-dir entries {!r}; want exit 0, the exact warning, the refusal on "
+                    "stderr and an untouched working directory".format(rel, *version, mode, *got))
+        if modes is not None:
+            got = refusal_observed(root / rel, version, (), [DENY_PROBE_MODE])
+            if got != (2, "", refusal, []):
+                findings.append(
+                    "{} at patched {}.{}.{} with the mode {}, outside {}: got exit {}, stdout {!r}, "
+                    "stderr {!r}, working-dir entries {!r}; want exit 2, empty stdout, the exact refusal "
+                    "and an untouched working directory".format(
+                        rel, *version, DENY_PROBE_MODE, MODES_NAME, *got))
         if prefix is None:
             findings.append("{}: no canonical guard statement to run at the floor boundary".format(rel))
             continue
@@ -1467,6 +1565,45 @@ def _self_test_cases(base):
         finally:
             ast.dump = real_dump
     check("dynamic/deep-tree-cannot-evaluate", got, [True, True])
+
+    # The hook form (HOOK_SURFACES): a fixture hook at the core hook's path with two demo modes.
+    hook_rel, demo_modes = HOOK_SURFACES[0], ("mode_a", "mode_b")
+    hook_good = guard_text("aiqt_hooks.py", floor, demo_modes)
+    hook = dict([(hook_rel, _entry(hook_good, before='"""Fixture hook."""\n'))])
+    hook_listed = _source_text(surfaces=[hook_rel])
+    check("guard/hook-form-passes", evaluate(_fixture(base, source=hook_listed, files=hook))[0], 0)
+    for check_id, text in (
+            ("guard/hook-cli-form-finding", _entry(guard_text("aiqt_hooks.py", floor))),
+            ("guard/hook-unsorted-modes-finding",
+             _entry(guard_text("aiqt_hooks.py", floor, ("mode_b", "mode_a")))),
+            ("guard/hook-duplicate-modes-finding",
+             _entry(guard_text("aiqt_hooks.py", floor, ("mode_a", "mode_a")))),
+            ("guard/hook-computed-modes-finding", _entry(hook_good.replace(
+                "FLOOR_FAIL_OPEN_MODES = ('mode_a', 'mode_b')", "FLOOR_FAIL_OPEN_MODES = tuple(['mode_a'])"))),
+            ("guard/hook-blocking-fail-open-finding",
+             _entry(hook_good.replace("raise SystemExit(0)", "raise SystemExit(2)")))):
+        code, lines = evaluate(_fixture(base, source=hook_listed, files=dict([(hook_rel, text)])))
+        check(check_id, (code, _has(lines, "canonical floor guard in its hook form")), (1, True))
+    code, lines = evaluate(_fixture(base, source=listed, files=dict(
+        [("tools/demo.py", _entry(guard_text("demo.py", floor, demo_modes)))])))
+    check("guard/hook-form-on-cli-surface-finding", (code, _has(lines, guard_marker)), (1, True))
+    hook_path = _fixture(base, files=hook) / hook_rel
+    hook_refusal = expected_refusal("aiqt_hooks.py", floor, version, sys.executable)
+    check("dynamic/hook-fail-open-mode-warns", refusal_observed(hook_path, version, (), ["mode_b"]),
+          (0, expected_warning("aiqt_hooks.py", floor, version, sys.executable, "mode_b"), hook_refusal, []))
+    check("dynamic/hook-other-mode-refuses",
+          refusal_observed(hook_path, version, (), [DENY_PROBE_MODE]), (2, "", hook_refusal, []))
+    check("dynamic/hook-no-mode-refuses", refusal_observed(hook_path, version, ()),
+          (2, "", hook_refusal, []))
+    blocking = dict([(hook_rel, _entry(hook_good.replace("raise SystemExit(0)", "raise SystemExit(2)")))])
+    blocked = dynamic_findings(_fixture(base, files=blocking), [hook_rel], floor)
+    check("dynamic/hook-blocking-fail-open-finding",
+          sorted(set(line.split(": got")[0] for line in blocked if "fail-open mode" in line)),
+          ["{} at patched {}.{}.{} with the fail-open mode {}".format(hook_rel, *version, mode)
+           for mode in demo_modes])
+    hook_prefix = guard_prefix(ast.parse(hook[hook_rel]), "aiqt_hooks.py", floor, demo_modes)
+    check("dynamic/hook-boundary-continues-at-floor", boundary_observed(hook_prefix, floor + (0,), ()),
+          (0, CONTINUED + "\n", ""))
 
     unguarded = {"tools/demo.py": _entry("import sys\n")}
     check("completeness/off-ignores-unguarded", evaluate(_fixture(base, files=unguarded))[0], 0)
