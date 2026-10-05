@@ -4,12 +4,14 @@
 # every member row. Maintainers must update the row, version and digest when a member changes.
 # The gate checks byte and digest agreement; it does not enforce the version-bump obligation.
 # Member documents are consumed by deployment (an adopter or deployer copies a member beside its digest
-# into the assistant harness, for example flow/SKILL.md into a skills directory) and, once the adoption
-# stage driver lands, by a plan's prompt_pack {version, digest} binding.
+# into the assistant harness, for example flow/SKILL.md into a skills directory), by a deployer that
+# renders a member with a per-project overlay into a per-account command (the member doubles as the
+# render template; its overlay slots and the drift check are specified inside the member) and, once
+# the adoption stage driver lands, by a plan's prompt_pack {version, digest} binding.
 format = "opf.prompt-pack/v1"
 version = "0.2.0"
-digest = "sha256:52f103358a0fb4b896d78b44810d12855a990e368dd18e69d755d7b18fdfb5ed"
+digest = "sha256:05c4540a27530b06c80912198a328c904887c2ad766122e9c7dcc21c46e5e76e"
 
 [[members]]
 path = "flow/SKILL.md"
-sha256 = "794e5d8c208a1682f97b0728383675fe01da31dde77cbd952d1a3793d4e67195"
+sha256 = "4f2a9855ba3363bfb44bf19dafcc281588f56c51d740cd560bbb1f746b9b1648"
