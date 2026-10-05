@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml  # noqa: E402
+from _gen_common import repo_root, load_toml, read_source_text  # noqa: E402
 
 REGISTRY_FILES = (".aiqt/orchestration.local.json", ".aiqt/orchestration.json")
 ROW_RE = re.compile(r"^-\s+(?P<id>\S+)\s*::\s*(?P<state>\w+)\s*::\s*merge_pending\s*::\s*"
@@ -41,8 +41,9 @@ def load_registry(root):
     for rel in REGISTRY_FILES:
         p = root / rel
         if p.exists():
-            with open(p, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
+            # read_source_text, not open(): a FIFO at the registry path must be refused by the
+            # fstat-checked reader, never block the gate (QA round 6, codex B1 family).
+            data = json.loads(read_source_text(p))
             # CONV4-CL3 (D13): require the version to be the int 1 by TYPE, so a bool True (1 == True in
             # Python) or a float 1.0 cannot satisfy the version-1 gate and slip a malformed registry through.
             if not isinstance(data, dict) or type(data.get("version")) is not int or data.get("version") != 1:
@@ -125,7 +126,11 @@ def run(root):
         return 0
     path = Path(declared) if os.path.isabs(declared) else root / declared
     try:
-        text = path.read_text(encoding="utf-8")
+        # read_source_text: the registry may DECLARE a findings path outside the tree (an absolute
+        # path, a path through an ignored link), which the D-400 precheck walk can never certify;
+        # the fstat-checked reader refuses a non-regular file by name instead of blocking on it
+        # (QA round 6, codex B1).
+        text = read_source_text(path)
     except OSError as exc:
         print("error: the DECLARED findings register is unreadable ({}); a declared input "
               "never reads as nothing to check".format(exc))
@@ -226,6 +231,28 @@ def self_test():
         register.write_text("- F-2 :: OPEN :: merge_pending :: refs=decision:GD-110 :: title\n",
                             encoding="utf-8")
         _case("recorded-decision-detected", run(repo), 1)
+        # QA round 6 (codex B1): a DECLARED findings path that is a FIFO -- outside the tree
+        # (an absolute path the precheck walk can never certify) or inside it -- is refused by
+        # the fstat-checked reader, exit 2, never a blocking read. Fails without the
+        # read_source_text conversion (the raw read hangs; the timeout alarm is not needed
+        # because the open itself is non-blocking).
+        if hasattr(os, "mkfifo"):
+            outside = tmp / "outside-findings.md"
+            os.mkfifo(outside)
+            (repo / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
+                {"version": 1, "record": {"findings": str(outside)},
+                 "truth": {"changelog": "truth/releases.toml"}}), encoding="utf-8")
+            _case("declared-external-fifo-refused", run(repo), 2)
+            inside = repo / "findings-fifo.md"
+            os.mkfifo(inside)
+            (repo / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
+                {"version": 1, "record": {"findings": "findings-fifo.md"},
+                 "truth": {"changelog": "truth/releases.toml"}}), encoding="utf-8")
+            _case("declared-in-root-fifo-refused", run(repo), 2)
+            inside.unlink()
+            (repo / ".aiqt" / "orchestration.local.json").write_text(json.dumps(
+                {"version": 1, "record": {"findings": str(register)},
+                 "truth": {"changelog": "truth/releases.toml"}}), encoding="utf-8")
         # a truly unmerged ref passes
         register.write_text("- F-3 :: OPEN :: merge_pending :: refs=pr:9999 :: title\n",
                             encoding="utf-8")

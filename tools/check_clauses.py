@@ -125,7 +125,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: check_clauses.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml  # noqa: E402
+from _gen_common import repo_root, load_toml, read_source_bytes, precheck_special_files  # noqa: E402
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 from check_versions import _parse as _semver  # noqa: E402  reuse the shipped bare-SemVer parser
 from gen_rules import (parse_source, CID_RE, detail_heading_line, body_first_line,  # noqa: E402  reuse the
@@ -582,7 +582,7 @@ def check_detail_coverage(rows, rule_sources):
     findings = []
     for corpus, src in sorted(rule_sources.items()):
         try:
-            raw = src.read_bytes()
+            raw = read_source_bytes(src)  # the shared reader: a FIFO or symlink is refused (OSError), never a hang
         except OSError as exc:
             raise GateError("cannot read rule source {} ({})".format(src, exc))
         _first_body, heading = _layout_of(raw, str(src))
@@ -663,7 +663,7 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
                                 .format(where, source_path, row.get("corpus-id")))
         if source_path not in digest_cache:
             try:
-                raw = abs_path.read_bytes()
+                raw = read_source_bytes(abs_path)
             except FileNotFoundError:
                 digest_cache[source_path] = ("missing", None, None, None, None)
             except OSError as exc:  # a permission or I/O error is environmental: fail closed
@@ -1885,7 +1885,7 @@ def main():
         return 2
     if opts["self_test"]:
         return self_test_main()
-    root = Path(opts["root"]).resolve() if opts["root"] else repo_root()
+    root = precheck_special_files(Path(opts["root"]).resolve()) if opts["root"] else repo_root()
     rules_dir = Path(opts["rules_dir"]) if opts["rules_dir"] else root / ".aiqt" / "core" / "rules"
     inventory = Path(opts["inventory"]) if opts["inventory"] else root / ".aiqt" / "core" / "clauses.toml"
     register = Path(opts["register"]) if opts["register"] else root / ".aiqt" / "core" / "id-history.toml"

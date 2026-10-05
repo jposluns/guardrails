@@ -47,6 +47,7 @@ import gen_hooks            # noqa: E402  build_desired, PLUGIN_ROOT_PARTS, HOOK
 import gen_skill            # noqa: E402  build_outputs, RESERVED_PARTS (the generated chat-skill surface)
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
 from _standards import dir_present, load_manifests, map_keys, validate_mappings, ManifestError  # noqa: E402
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 
 # Status constants for a single check's outcome.
@@ -630,7 +631,7 @@ def main():
     root, self_test = parsed
     if self_test:
         return self_test_main()
-    return run(root or Path.cwd())
+    return run(precheck_special_files(root or Path.cwd()))
 
 
 # --- self-test --------------------------------------------------------------------------------------

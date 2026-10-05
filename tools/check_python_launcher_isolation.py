@@ -642,7 +642,8 @@ def _repo_root():
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test_main()
-    return run(_repo_root())
+    from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+    return run(precheck_special_files(_repo_root()))
 
 
 # --- self-test ----------------------------------------------------------------------------------------

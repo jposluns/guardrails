@@ -255,6 +255,7 @@ from urllib.parse import urlsplit, unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 import gen_gensrc  # noqa: E402  build_registry: the in-memory gensrc recomputation (collector 3)
 import gen_manifest  # noqa: E402  load_ownership: the [checkout].binary roster (collector 3 skip set)
 import gen_enforceability  # noqa: E402  build_ledger: recompute the residual map for the source-side residue-cleanliness leg
@@ -2325,7 +2326,7 @@ def _collect(root, registry, binary_set):
 def main():
     if "--self-test" in sys.argv[1:]:
         return _self_test()
-    root = Path(__file__).resolve().parents[1]
+    root = precheck_special_files(Path(__file__).resolve().parents[1])
     try:
         registry = json.loads(gen_gensrc.build_registry(root))["generated"]
         _, _, _, binary_set = gen_manifest.load_ownership(root)

@@ -45,10 +45,13 @@ declared output or at one of those four inputs is refused, never read and accept
 checkout, made with cp -al, is refused; an input's refusal says to break the link by copying the file and
 moving the copy over it, never to git rm it). The rule corpus is NOT read
 that way: it is read by gen_rules.load_corpus, a shared loader this generator does not change, and then this
-generator's own _rule_body rereads each included rule by plain path (for the source-corpus hash), with no link
-or type check. tools/check_manifest.py refuses a symlinked corpus source (exit 2), but neither it, the loader
-nor _rule_body refuses a FIFO at a corpus path (each blocks on it; load_corpus reaches it first): a disclosed
-gap in the corpus reads, outside the descriptor reader. It does NOT claim defence against a CONCURRENT writer racing the run inside the
+generator's own _rule_body rereads each included rule by path (for the source-corpus hash). Both reads go
+through the shared non-blocking source reader (_gen_common.read_source_text: O_NOFOLLOW on the final
+component, O_NONBLOCK, fstat a regular file), and load_corpus also refuses a '*.md' corpus entry that is not
+a regular file, so a symlink, FIFO, device or directory at a corpus path is refused (exit 2), never read
+through or blocked on; tools/check_manifest.py also refuses a symlinked corpus source (exit 2). That reader
+does not check the link count or the parent components, so a hard link at a corpus path, or a link at one of
+its parent directories, is read through: a disclosed gap in the corpus reads, outside the descriptor reader. It does NOT claim defence against a CONCURRENT writer racing the run inside the
 checkout: whoever can write the checkout during the run can rewrite this generator itself. Disclosed
 residual: a held descriptor pins a directory's inode, not its ancestry, so a directory renamed out of the
 repository mid-run, or a file moved onto this run's temporary name during the run, is out of scope.
@@ -74,7 +77,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: gen_skill.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import repo_root, read_source_text, reconcile  # noqa: E402
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -301,9 +304,11 @@ def parse_source_text(text):
 def _rule_body(path):
     """The rule body with its YAML frontmatter stripped (same extraction as gen_agents.body_of, without
     the H1 demotion). Used only for the deterministic source-corpus hash, never rendered into the body. Read
-    by plain path, with no link or type check (a FIFO here blocks, as it already does in load_corpus): the
-    disclosed corpus gap in the module threat model."""
-    text = path.read_text(encoding="utf-8")
+    by path through the shared non-blocking source reader (read_source_text, as load_corpus reads it), so a
+    symlink final component or a FIFO, device or directory here is refused (an OSError, exit 2), never read
+    through or blocked on; a hard link or a linked parent directory is not checked: the disclosed corpus gap
+    in the module threat model."""
+    text = read_source_text(path)
     end = text.find("\n---\n", 4)
     return text[end + 5:].strip()
 

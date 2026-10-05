@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import load_toml, repo_root  # noqa: E402
+from _gen_common import load_toml, repo_root, precheck_special_files  # noqa: E402
 import gen_rules  # noqa: E402  (load_corpus, for the authoritative corpus-id set)
 
 APPLICABILITY_REL = ".aiqt/core/applicability.toml"
@@ -209,7 +209,7 @@ def main():
     if not args:
         return run(repo_root())
     if len(args) == 2 and args[0] == "--root":
-        return run(Path(args[1]))
+        return run(precheck_special_files(Path(args[1])))
     print("usage: check_applies.py [--root DIR] | --self-test", file=sys.stderr)
     return 2
 

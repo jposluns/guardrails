@@ -10,12 +10,19 @@ dir=$(dirname -- "$0") || exit 2
 [ -n "$dir" ] || exit 2
 CDPATH= cd -- "$dir/.." || exit 2
 
-# Every gate below launches isolated: `python3 -I -B tools/<gate>.py`. `-I` (isolated mode) drops the
-# script's own directory from sys.path so a tool-written sibling (a stray tools/os.py) cannot shadow a
-# stdlib import and neuter a gate; the check_python_launcher_isolation gate enforces this across the
-# roster. `-I` implies `-E`, which makes the export below ineffective for the gate itself, so `-B`
-# carries the bytecode suppression per step. The export remains only for any non-isolated grandchild a
-# gate may spawn (which does not inherit `-I`).
+# Every gate below launches isolated: `python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache
+# tools/<gate>.py`. `-I` (isolated mode) drops the script's own directory from sys.path so a
+# tool-written sibling (a stray tools/os.py) cannot shadow a stdlib import and neuter a gate; the
+# check_python_launcher_isolation gate enforces this across the roster. `-I` implies `-E`, which
+# makes the export below ineffective for the gate itself, so `-B` carries the bytecode suppression
+# per step. The export remains only for any non-isolated grandchild a gate may spawn (which does
+# not inherit `-I`). QA round 7 (claude B1): `-B` stops only the WRITES; the interpreter still
+# READS an existing __pycache__/<module>.pyc with a plain blocking open when a gate imports an
+# in-tree module, so every gate launch also redirects that read with -X pycache_prefix to a path
+# under /dev/null, where nothing can exist at any privilege (every lookup is ENOTDIR and Python
+# compiles from source); the walk below independently refuses any SYMLINK named __pycache__. The
+# precheck invocation itself carries no -X: run as a script it imports nothing in-tree, so the
+# interpreter reads no in-tree __pycache__ for it.
 # The portability gate now enumerates the git-tracked shippable surface, so a stray ignored
 # __pycache__/*.pyc artefact no longer trips it. PYTHONDONTWRITEBYTECODE=1 remains tree hygiene: a gate
 # runner reports the tree without littering it. Do NOT blanket `git clean` ignored paths, which
@@ -29,6 +36,26 @@ notrun=0
 # names are listed again before RESULT: FAIL; a failing suite never needs a hand re-run to find it.
 failed_names=""
 
+# D-400-SPECIAL-FILE-PRECHECK: ONE walk of the repository tree BEFORE any gate runs. A special file (a
+# FIFO above all: a plain read of a FIFO with no writer blocks forever), a symlink to one (a
+# git-ignored link included), an unresolvable (looping) non-ignored symlink, or a non-ignored symlink
+# to a directory outside the repository root is refused by name and the run STOPS here with exit 2; a
+# dangling symlink and a symlink to a regular file pass (neither can block a read). The walk DESCENDS
+# git-ignored directories (a stray .venv, editor or build output) and every nested .git directory that
+# is not the repository's own git dir (and, QA round 7, the own git dir is exempt only at the
+# repository ROOT: a root gitfile naming an in-tree directory gets that directory walked), refusing
+# a special file by name wherever it sits; a SYMLINK named __pycache__ is refused by name, ignored
+# or not (the interpreter itself reads through it at import time); every GIT_* variable is scrubbed
+# from the walk's git queries, so an inherited GIT_DIR cannot redirect them; only the contents of
+# any OTHER accepted (ignored, non-shadowing) out-of-root directory link stay outside the walk,
+# covered by the gates' non-blocking, fstat-checked readers (see the precheck docstring). The
+# shell test on the first line is the BOOTSTRAP: python3 would block LOADING the precheck script
+# itself if that path were a FIFO, so a non-regular or symlinked script is refused by name before
+# python3 touches it. Residual: the interpreter binary and THIS runner script are read before the
+# bootstrap line can run. Every gate and self-test below then acts on a checked tree.
+[ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }
+python3 -I -B tools/_gen_common.py --precheck || exit 2
+
 run_gate() {
   local name="$1"; shift
   echo "--- ${name} ---"
@@ -41,8 +68,8 @@ run_gate() {
   echo
 }
 
-run_gate "secrets"   python3 -I -B tools/check_secrets.py
-run_gate "secrets-selftest" python3 -I -B tools/check_secrets.py --self-test
+run_gate "secrets"   python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_secrets.py
+run_gate "secrets-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_secrets.py --self-test
 
 # gitleaks is a second, independent secret gate. If it is not installed locally it is
 # reported NOT RUN rather than skipped silently: a gate that quietly does not run is
@@ -71,192 +98,192 @@ else
   notrun=1
 fi
 echo
-run_gate "leaks"     python3 -I -B tools/check_leaks.py
-run_gate "msg-leaks-selftest" python3 -I -B tools/check_msg_leaks.py --self-test  # real scan needs CI event context
-run_gate "portability-selftest" python3 -I -B tools/check_portability.py --self-test
-run_gate "portability" python3 -I -B tools/check_portability.py
-run_gate "derived-command-parameters-selftest" python3 -I -B tools/check_derived_command_parameters.py --self-test
-run_gate "derived-command-parameters" python3 -I -B tools/check_derived_command_parameters.py
-run_gate "dashes"    python3 -I -B tools/check_no_dashes.py
-run_gate "links"     python3 -I -B tools/check_links.py
-run_gate "site-selftest" python3 -I -B tools/check_site.py --self-test
-run_gate "site"      python3 -I -B tools/check_site.py
-run_gate "overclaim-selftest" python3 -I -B tools/check_overclaim.py --self-test
-run_gate "overclaim" python3 -I -B tools/check_overclaim.py
-run_gate "license-qual-selftest" python3 -I -B tools/check_license_qualification.py --self-test
-run_gate "license-qual" python3 -I -B tools/check_license_qualification.py
-run_gate "footer-selftest" python3 -I -B tools/check_footer.py --self-test
-run_gate "footer" python3 -I -B tools/check_footer.py
+run_gate "leaks"     python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_leaks.py
+run_gate "msg-leaks-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_msg_leaks.py --self-test  # real scan needs CI event context
+run_gate "portability-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_portability.py --self-test
+run_gate "portability" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_portability.py
+run_gate "derived-command-parameters-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_derived_command_parameters.py --self-test
+run_gate "derived-command-parameters" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_derived_command_parameters.py
+run_gate "dashes"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_no_dashes.py
+run_gate "links"     python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_links.py
+run_gate "site-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_site.py --self-test
+run_gate "site"      python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_site.py
+run_gate "overclaim-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_overclaim.py --self-test
+run_gate "overclaim" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_overclaim.py
+run_gate "license-qual-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_license_qualification.py --self-test
+run_gate "license-qual" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_license_qualification.py
+run_gate "footer-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_footer.py --self-test
+run_gate "footer" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_footer.py
 # Repository-only assertion lives outside the shipped tooling.
-run_gate "newtab-repo-contract" python3 -I -B .github/check_newtab_contract.py
-run_gate "newtab-selftest" python3 -I -B tools/check_newtab.py --self-test
-run_gate "newtab" python3 -I -B tools/check_newtab.py
-run_gate "site-versions-selftest" python3 -I -B tools/check_site_versions.py --self-test
-run_gate "site-versions" python3 -I -B tools/check_site_versions.py
-run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
-run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-test
-run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
-run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
-run_gate "opf-journal-direct-selftest" python3 -I -B opf/tools/_journal.py --self-test
-run_gate "opf-observe-direct-selftest" python3 -I -B opf/tools/_opf_observe.py --self-test
-run_gate "opf-drift-selftest" python3 -I -B opf/tools/check_opf_drift.py --self-test
-run_gate "opf-drift" python3 -I -B opf/tools/check_opf_drift.py
-run_gate "opf-doctor-selftest" python3 -I -B opf/tools/check_opf_doctor.py --self-test
-run_gate "opf-doctor" python3 -I -B opf/tools/check_opf_doctor.py
-run_gate "opf-init-selftest" python3 -I -B opf/tools/check_opf_init.py --self-test
-run_gate "opf-init" python3 -I -B opf/tools/check_opf_init.py
-run_gate "opf-init-contract-selftest" python3 -I -B opf/tools/_opf_init_contract.py --self-test
-run_gate "opf-init-contract-check-selftest" python3 -I -B opf/tools/check_opf_init_contract.py --self-test
-run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contract.py
-run_gate "opf-upgrade-selftest" python3 -I -B opf/tools/check_opf_upgrade.py --self-test
-run_gate "opf-upgrade" python3 -I -B opf/tools/check_opf_upgrade.py
-run_gate "opf-record-selftest" python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
-run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
-run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
-run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
-run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
-run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
-run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
-run_gate "opf-prompt-pack" python3 -I -B opf/tools/check_opf_prompt_pack.py
-run_gate "opf-oplock-selftest" python3 -I -B opf/tools/_opf_oplock.py --self-test
-run_gate "opf-init-substrate-selftest" python3 -I -B opf/tools/_opf_init_substrate.py --self-test
-run_gate "opf-init-builders-selftest" python3 -I -B opf/tools/_opf_init.py --self-test
-run_gate "opf-init-operation-selftest" python3 -I -B opf/tools/_opf_init_operation.py --self-test
-run_gate "opf-init-p0-selftest" python3 -I -B opf/tools/check_opf_init_p0.py --self-test --red-on-revert
-run_gate "opf-init-observe-selftest" python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
-run_gate "opf-standalone-closure" python3 -I -B tools/check_opf_standalone_closure.py
-run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
-run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
-run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
-run_gate "versions"        python3 -I -B tools/check_versions.py
-run_gate "release-cut-selftest" python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
-run_gate "release-cut"          python3 -I -B tools/check_release_cut.py
-run_gate "version-monotonicity-selftest" python3 -I -B tools/check_version_monotonicity.py --self-test
-run_gate "version-monotonicity" python3 -I -B tools/check_version_monotonicity.py
-run_gate "branch-root-selftest" python3 -I -B tools/check_branch_root.py --self-test
-run_gate "branch-root"          python3 -I -B tools/check_branch_root.py --max-lag 200
-run_gate "release-delta-selftest" python3 -I -B tools/check_release_delta.py --self-test
-run_gate "release-delta"          python3 -I -B tools/check_release_delta.py
-run_gate "release-build-selftest" python3 -I -B tools/check_release_build.py --self-test
-run_gate "release-build"          python3 -I -B tools/check_release_build.py
-run_gate "clauses-selftest" python3 -I -B tools/check_clauses.py --self-test
-run_gate "clauses"          python3 -I -B tools/check_clauses.py --genesis
+run_gate "newtab-repo-contract" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache .github/check_newtab_contract.py
+run_gate "newtab-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_newtab.py --self-test
+run_gate "newtab" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_newtab.py
+run_gate "site-versions-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_site_versions.py --self-test
+run_gate "site-versions" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_site_versions.py
+run_gate "opf-render-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/selftest_opf_render.py
+run_gate "opf-homes-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_homes.py --self-test
+run_gate "opf-homes-contract" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_homes.py
+run_gate "opf-tooling-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/opf.py --self-test
+run_gate "opf-journal-direct-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_journal.py --self-test
+run_gate "opf-observe-direct-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_opf_observe.py --self-test
+run_gate "opf-drift-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_drift.py --self-test
+run_gate "opf-drift" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_drift.py
+run_gate "opf-doctor-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_doctor.py --self-test
+run_gate "opf-doctor" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_doctor.py
+run_gate "opf-init-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_init.py --self-test
+run_gate "opf-init" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_init.py
+run_gate "opf-init-contract-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_opf_init_contract.py --self-test
+run_gate "opf-init-contract-check-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_init_contract.py --self-test
+run_gate "opf-init-contract-check" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_init_contract.py
+run_gate "opf-upgrade-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_upgrade.py --self-test
+run_gate "opf-upgrade" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_upgrade.py
+run_gate "opf-record-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_record.py --self-test --red-on-revert
+run_gate "opf-adopt-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_opf_adopt.py --self-test
+run_gate "opf-adopt-apply-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_opf_adopt_apply.py --self-test
+run_gate "opf-adopt-hook-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_opf_adopt_hook.py --self-test
+run_gate "opf-pack-manifest-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_opf_pack_manifest.py --self-test
+run_gate "opf-adopt-observe-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_opf_adopt_observe.py --self-test
+run_gate "opf-prompt-pack-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_prompt_pack.py --self-test
+run_gate "opf-prompt-pack" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_prompt_pack.py
+run_gate "opf-oplock-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_opf_oplock.py --self-test
+run_gate "opf-init-substrate-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_opf_init_substrate.py --self-test
+run_gate "opf-init-builders-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_opf_init.py --self-test
+run_gate "opf-init-operation-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/_opf_init_operation.py --self-test
+run_gate "opf-init-p0-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_init_p0.py --self-test --red-on-revert
+run_gate "opf-init-observe-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/check_opf_init_observe.py --self-test --red-on-revert
+run_gate "opf-standalone-closure" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_opf_standalone_closure.py
+run_gate "aiqt-corpus-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/selftest_aiqt_corpus.py
+run_gate "roadmap-drift"   python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_roadmap.py --check
+run_gate "changelog-drift" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_changelog.py --check
+run_gate "versions"        python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_versions.py
+run_gate "release-cut-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_release_cut.py --self-test --red-on-revert
+run_gate "release-cut"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_release_cut.py
+run_gate "version-monotonicity-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_version_monotonicity.py --self-test
+run_gate "version-monotonicity" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_version_monotonicity.py
+run_gate "branch-root-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_branch_root.py --self-test
+run_gate "branch-root"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_branch_root.py --max-lag 200
+run_gate "release-delta-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_release_delta.py --self-test
+run_gate "release-delta"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_release_delta.py
+run_gate "release-build-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_release_build.py --self-test
+run_gate "release-build"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_release_build.py
+run_gate "clauses-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_clauses.py --self-test
+run_gate "clauses"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_clauses.py --genesis
 # VER-CORE Section 12 step 6: migration engine, crosswalk tooling, archive (VC-6). The crash-injection
 # self-test is the mandatory 9.3 gate; the live check_crosswalk leg reports NOT APPLICABLE in this repo
 # (the pack is not an adopter install), self-tested first over synthetic trees.
-run_gate "crosswalk-gen-selftest" python3 -I -B tools/gen_crosswalk.py --self-test
-run_gate "crosswalk-schema-drift" python3 -I -B tools/gen_crosswalk.py --check
-run_gate "crosswalk-selftest"     python3 -I -B tools/check_crosswalk.py --self-test
-run_gate "crosswalk"              python3 -I -B tools/check_crosswalk.py
-run_gate "migrate-crashinject"    python3 -I -B tools/migrate.py --self-test
+run_gate "crosswalk-gen-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_crosswalk.py --self-test
+run_gate "crosswalk-schema-drift" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_crosswalk.py --check
+run_gate "crosswalk-selftest"     python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_crosswalk.py --self-test
+run_gate "crosswalk"              python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_crosswalk.py
+run_gate "migrate-crashinject"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/migrate.py --self-test
 # VER-CORE Section 12 step 7 (VC-7): pin lifecycle (pin.py) and the core doctor (doctor.py). The
 # self-tests exercise the plan-4.5 scenarios over synthetic installs; the live `doctor --root .` leg
 # reports NOT APPLICABLE in this repo (the pack is not an adopter install). doctor is READ-ONLY.
-run_gate "pin-selftest"           python3 -I -B tools/pin.py --self-test
-run_gate "doctor-selftest"        python3 -I -B tools/doctor.py --self-test
-run_gate "doctor"                 python3 -I -B tools/doctor.py --root .
-run_gate "rules-selftest"  python3 -I -B tools/gen_rules.py --self-test
-run_gate "artifact-checksums-selftest" python3 -I -B tools/check_artifact_checksums.py --self-test
-run_gate "artifact-checksums"          python3 -I -B tools/check_artifact_checksums.py
-run_gate "rules-drift"     python3 -I -B tools/gen_rules.py --check
-run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
-run_gate "mappings-page-drift" python3 -I -B tools/gen_mappings.py --check
-run_gate "reference-roster-selftest" python3 -I -B tools/gen_reference_facts.py --self-test
-run_gate "reference-roster-drift" python3 -I -B tools/gen_reference_facts.py --check
-run_gate "reference-facts-selftest" python3 -I -B tools/check_reference_facts.py --self-test
-run_gate "reference-facts" python3 -I -B tools/check_reference_facts.py
-run_gate "disclosure-selftest" python3 -I -B tools/gen_disclosure.py --self-test
-run_gate "disclosure-drift"    python3 -I -B tools/gen_disclosure.py --check
-run_gate "install-selftest" python3 -I -B tools/gen_install.py --self-test
-run_gate "install-drift"    python3 -I -B tools/gen_install.py --check
-run_gate "install-page-selftest" python3 -I -B tools/check_install_page.py --self-test
-run_gate "install-page" python3 -I -B tools/check_install_page.py
-run_gate "sized-instructions-selftest" python3 -I -B tools/check_sized_instructions.py --self-test
-run_gate "sized-instructions" python3 -I -B tools/check_sized_instructions.py
-run_gate "instruction-budget-selftest" python3 -I -B tools/check_instruction_budget.py --self-test
-run_gate "instruction-budget" python3 -I -B tools/check_instruction_budget.py
-run_gate "notice-drift"    python3 -I -B tools/gen_notice.py --check
-run_gate "claude-drift"    python3 -I -B tools/gen_claude.py --check
-run_gate "adapters-drift"  python3 -I -B tools/gen_adapters.py --check
-run_gate "cursor-selftest"  python3 -I -B tools/gen_cursor.py --self-test
-run_gate "cursor-drift"  python3 -I -B tools/gen_cursor.py --check
-run_gate "worker-pack-selftest" python3 -I -B tools/gen_worker_pack.py --self-test
-run_gate "worker-pack-drift" python3 -I -B tools/gen_worker_pack.py --check
-run_gate "hooks-selftest" python3 -I -B tools/gen_hooks.py --self-test
-run_gate "secret-patterns-drift" python3 -I -B tools/gen_secret_patterns.py --check
-run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
-run_gate "hooks-behaviour-selftest" python3 -I -B tools/selftest_aiqt_hooks.py
-run_gate "hooks-preview-selftest" python3 -I -B tools/check_hooks_preview.py --self-test
-run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
-run_gate "hook-scripts-selftest" python3 -I -B tools/check_hook_scripts.py --self-test
-run_gate "hook-scripts" python3 -I -B tools/check_hook_scripts.py
-run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
-run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
-run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
-run_gate "git-fixture-env-selftest" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
-run_gate "instruction-budget-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
-run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
-run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
-run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test
-run_gate "mistakes-register-selftest" python3 -I -B tools/check_mistakes_register.py --self-test
-run_gate "mistakes-register"          python3 -I -B tools/check_mistakes_register.py
-run_gate "aei-enumerator-selftest" python3 -I -B tools/aei_backlog_md.py --self-test
-run_gate "skill-selftest"  python3 -I -B tools/gen_skill.py --self-test
-run_gate "skill-drift"     python3 -I -B tools/gen_skill.py --check
-run_gate "gensrc-registry-selftest" python3 -I -B tools/gen_gensrc.py --self-test
-run_gate "gensrc-registry-drift" python3 -I -B tools/gen_gensrc.py --check
-run_gate "gensrc-failclose-selftest" python3 -I -B tools/check_gensrc_failclose.py --self-test
-run_gate "gensrc-failclose" python3 -I -B tools/check_gensrc_failclose.py
-run_gate "enforceability-selftest" python3 -I -B tools/gen_enforceability.py --self-test
-run_gate "enforceability-drift" python3 -I -B tools/gen_enforceability.py --check
-run_gate "enforcement-register-selftest" python3 -I -B tools/gen_enforcement_register.py --self-test
-run_gate "enforcement-register-drift" python3 -I -B tools/gen_enforcement_register.py --check
-run_gate "launcher-isolation-selftest" python3 -I -B tools/check_python_launcher_isolation.py --self-test
-run_gate "launcher-isolation" python3 -I -B tools/check_python_launcher_isolation.py
-run_gate "python-floor-selftest" python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest
-run_gate "python-floor" python3 -I -B tools/check_python_floor.py
-run_gate "renderers-selftest"    python3 -I -B tools/gen_renderers.py --self-test
-run_gate "renderers-drift"       python3 -I -B tools/gen_renderers.py --check
-run_gate "manifest-gen-selftest" python3 -I -B tools/gen_manifest.py --self-test
-run_gate "manifest-gen-drift"    python3 -I -B tools/gen_manifest.py --check
-run_gate "manifest-selftest"     python3 -I -B tools/check_manifest.py --self-test
-run_gate "manifest"              python3 -I -B tools/check_manifest.py
-run_gate "byte-canon-selftest"   python3 -I -B tools/check_byte_canon.py --self-test
-run_gate "byte-canon"            python3 -I -B tools/check_byte_canon.py
-run_gate "clauses-manifest-sources" python3 -I -B tools/check_clauses.py --genesis --with-manifest
-run_gate "placement"      python3 -I -B tools/check_rule_placement.py
-run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
-run_gate "applies"         python3 -I -B tools/check_applies.py
-run_gate "mappings"       python3 -I -B tools/check_mappings.py
-run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
-run_gate "conformance"    python3 -I -B tools/conformance.py --root .
-run_gate "commonmark-headings-selftest" python3 -I -B opf/tools/selftest_commonmark_headings.py --self-test
-run_gate "commonmark-conformance" python3 -I -B opf/tools/selftest_commonmark_conformance.py
-run_gate "currency-selftest" python3 -I -B tools/check_standards_currency.py --self-test
-run_gate "cwe-importer-selftest" python3 -I -B tools/import_cwe.py --self-test
+run_gate "pin-selftest"           python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/pin.py --self-test
+run_gate "doctor-selftest"        python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/doctor.py --self-test
+run_gate "doctor"                 python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/doctor.py --root .
+run_gate "rules-selftest"  python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_rules.py --self-test
+run_gate "artifact-checksums-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_artifact_checksums.py --self-test
+run_gate "artifact-checksums"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_artifact_checksums.py
+run_gate "rules-drift"     python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_rules.py --check
+run_gate "agents-drift"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_agents.py --check
+run_gate "mappings-page-drift" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_mappings.py --check
+run_gate "reference-roster-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_reference_facts.py --self-test
+run_gate "reference-roster-drift" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_reference_facts.py --check
+run_gate "reference-facts-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_reference_facts.py --self-test
+run_gate "reference-facts" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_reference_facts.py
+run_gate "disclosure-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_disclosure.py --self-test
+run_gate "disclosure-drift"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_disclosure.py --check
+run_gate "install-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_install.py --self-test
+run_gate "install-drift"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_install.py --check
+run_gate "install-page-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_install_page.py --self-test
+run_gate "install-page" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_install_page.py
+run_gate "sized-instructions-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_sized_instructions.py --self-test
+run_gate "sized-instructions" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_sized_instructions.py
+run_gate "instruction-budget-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_instruction_budget.py --self-test
+run_gate "instruction-budget" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_instruction_budget.py
+run_gate "notice-drift"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_notice.py --check
+run_gate "claude-drift"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_claude.py --check
+run_gate "adapters-drift"  python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_adapters.py --check
+run_gate "cursor-selftest"  python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_cursor.py --self-test
+run_gate "cursor-drift"  python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_cursor.py --check
+run_gate "worker-pack-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_worker_pack.py --self-test
+run_gate "worker-pack-drift" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_worker_pack.py --check
+run_gate "hooks-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_hooks.py --self-test
+run_gate "secret-patterns-drift" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_secret_patterns.py --check
+run_gate "hooks-drift"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_hooks.py --check
+run_gate "hooks-behaviour-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/selftest_aiqt_hooks.py
+run_gate "hooks-preview-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_hooks_preview.py --self-test
+run_gate "hooks-preview" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_hooks_preview.py
+run_gate "hook-scripts-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_hook_scripts.py --self-test
+run_gate "hook-scripts" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_hook_scripts.py
+run_gate "selftest-execution-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_selftest_execution.py --self-test
+run_gate "orch-behaviour-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_selftest_execution.py --suite orch-behaviour-selftest
+run_gate "ci-status-behaviour-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+run_gate "git-fixture-env-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_selftest_execution.py --suite git-fixture-env-selftest
+run_gate "instruction-budget-behaviour-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_selftest_execution.py --suite instruction-budget-selftest
+run_gate "record-drift-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_record_drift.py --self-test
+run_gate "record-drift"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_record_drift.py
+run_gate "record-sections-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_record_sections.py --self-test
+run_gate "mistakes-register-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_mistakes_register.py --self-test
+run_gate "mistakes-register"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_mistakes_register.py
+run_gate "aei-enumerator-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/aei_backlog_md.py --self-test
+run_gate "skill-selftest"  python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_skill.py --self-test
+run_gate "skill-drift"     python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_skill.py --check
+run_gate "gensrc-registry-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_gensrc.py --self-test
+run_gate "gensrc-registry-drift" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_gensrc.py --check
+run_gate "gensrc-failclose-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_gensrc_failclose.py --self-test
+run_gate "gensrc-failclose" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_gensrc_failclose.py
+run_gate "enforceability-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_enforceability.py --self-test
+run_gate "enforceability-drift" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_enforceability.py --check
+run_gate "enforcement-register-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_enforcement_register.py --self-test
+run_gate "enforcement-register-drift" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_enforcement_register.py --check
+run_gate "launcher-isolation-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_python_launcher_isolation.py --self-test
+run_gate "launcher-isolation" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_python_launcher_isolation.py
+run_gate "python-floor-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_selftest_execution.py --suite python-floor-selftest
+run_gate "python-floor" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_python_floor.py
+run_gate "renderers-selftest"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_renderers.py --self-test
+run_gate "renderers-drift"       python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_renderers.py --check
+run_gate "manifest-gen-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_manifest.py --self-test
+run_gate "manifest-gen-drift"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/gen_manifest.py --check
+run_gate "manifest-selftest"     python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_manifest.py --self-test
+run_gate "manifest"              python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_manifest.py
+run_gate "byte-canon-selftest"   python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_byte_canon.py --self-test
+run_gate "byte-canon"            python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_byte_canon.py
+run_gate "clauses-manifest-sources" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_clauses.py --genesis --with-manifest
+run_gate "placement"      python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_rule_placement.py
+run_gate "applies-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_applies.py --self-test
+run_gate "applies"         python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_applies.py
+run_gate "mappings"       python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_mappings.py
+run_gate "conformance-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/conformance.py --self-test
+run_gate "conformance"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/conformance.py --root .
+run_gate "commonmark-headings-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/selftest_commonmark_headings.py --self-test
+run_gate "commonmark-conformance" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache opf/tools/selftest_commonmark_conformance.py
+run_gate "currency-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_standards_currency.py --self-test
+run_gate "cwe-importer-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/import_cwe.py --self-test
 
-run_gate "ci-parity-selftest" python3 -I -B tools/check_ci_parity.py --self-test
-run_gate "ci-parity"          python3 -I -B tools/check_ci_parity.py
+run_gate "ci-parity-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_ci_parity.py --self-test
+run_gate "ci-parity"          python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_ci_parity.py
 
 # Git option-table drift: the self-test exercises the parser/comparator over fixtures (no git invoked);
 # the live leg compares installed git branch/tag help spellings against the hook's static option literal
 # and an independently maintained role catalog, failing on membership or write-role drift.
-run_gate "git-option-table-selftest" python3 -I -B tools/check_git_option_table.py --self-test
-run_gate "git-option-table" python3 -I -B tools/check_git_option_table.py
+run_gate "git-option-table-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_git_option_table.py --self-test
+run_gate "git-option-table" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_git_option_table.py
 
 # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit that
 # proves the harness end to end, and the internal-name leak gate. Their self-tests are gating (a broken
 # harness is a real failure); the internal-name scan is gating too.
-run_gate "qa-adapter-selftest"      python3 -I -B tools/_qa_adapter.py --self-test
-run_gate "audit-reference-selftest" python3 -I -B tools/audit_reference.py --self-test
-run_gate "internal-names-selftest"  python3 -I -B tools/check_internal_names.py --self-test
-run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
+run_gate "qa-adapter-selftest"      python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/_qa_adapter.py --self-test
+run_gate "audit-reference-selftest" python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/audit_reference.py --self-test
+run_gate "internal-names-selftest"  python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_internal_names.py --self-test
+run_gate "internal-names"           python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_internal_names.py
 
 # ADVISORY QA digest, run under run_gate. It runs the reference audit and prints a compact digest that
 # distinguishes a required-unavailable surface from an optional-disabled one. audit_reference.py --digest
 # always exits 0 on a finding, so an advisory FINDING never gates; only a tool CRASH (unexpected non-zero
 # exit) fails the build, which is the correct behaviour for a broken advisory tool.
-run_gate "qa-advisory-digest"       python3 -I -B tools/audit_reference.py --digest
+run_gate "qa-advisory-digest"       python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/audit_reference.py --digest
 
 if [ "$failed" -ne 0 ]; then
   echo "FAILED GATES: ${failed_names}"

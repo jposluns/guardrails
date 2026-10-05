@@ -52,6 +52,7 @@ from pathlib import Path
 # reintroduced index-0 insertion in this file.
 sys.path.append(str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 import check_leaks  # noqa: E402  reuse the leak gate's normalization + structural host/account patterns
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
@@ -213,7 +214,7 @@ def scan_scope(root, scope_relpaths, hashes, maxn):
 
 
 def main():
-    root = Path(__file__).resolve().parents[1]
+    root = precheck_special_files(Path(__file__).resolve().parents[1])
     argv = sys.argv[1:]
     # UNKNOWN-OPTION REJECTION precedes the --self-test dispatch: this gate accepts only --self-test (or no
     # args for a real scan), so any other token (a misspelled --self-testx, a stray flag) is a LOUD exit 2,
@@ -475,9 +476,14 @@ def _self_test():
             #     isolated: the self-test must actually RUN (it emits its SELF-TEST marker). Reverting the
             #     sys.path.append import fix to an index-0 insertion puts the script dir first, so under -I the
             #     sibling shadows check_leaks' `import hashlib` and silently exits 0 before the self-test runs.
-            sib = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-sibling-"))
+            # The copies live under <fixture>/tools/ so the copy's main() resolves its repository root
+            # (parents[1] of the script) to the FIXTURE root, and its D-400 special-file precheck walks
+            # only that hermetic tree, never the system temp directory. _gen_common.py rides along: the
+            # gate imports precheck_special_files from it.
+            sib = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-sibling-")) / "tools"
             try:
-                for name in ("check_internal_names.py", "_walk.py", "check_leaks.py"):
+                sib.mkdir()
+                for name in ("check_internal_names.py", "_walk.py", "check_leaks.py", "_gen_common.py"):
                     shutil.copy(str(Path(toolsdir) / name), str(sib / name))
                 for hostile in ("json.py", "hashlib.py"):
                     (sib / hostile).write_text("raise SystemExit(0)\n", encoding="utf-8")
@@ -488,7 +494,7 @@ def _self_test():
                                     "prevented the self-test from running (finding-6): rc={} out={!r} "
                                     "err={!r}".format(proc.returncode, proc.stdout, proc.stderr))
             finally:
-                shutil.rmtree(sib, ignore_errors=True)
+                shutil.rmtree(sib.parent, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
