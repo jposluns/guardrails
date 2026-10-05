@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8728d3b7cdfc7303bbf2800389d70f28ae111add93951aa7fa2ea61dee424dcc"
+tree-sha256 = "1d99e4fc666e682078c89e50372295c4b45b18e4a59c22f8ed2c39aa38f3a0fe"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -111,8 +111,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 3424
-sha256 = "57cc9f8eec2def7f5522c516007ebdba1ddbd0c6f111bb1fa4b60ebc70f3a98a"
+bytes = 3639
+sha256 = "e668b8fc983c4574aa9716c10891490c62b21c166b4d7776397a7754b2e9d9f5"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -3176,8 +3176,8 @@ sha256 = "08ea73b8873bdb0871e9e449303d5c176a0c64863ae0a7feafe96c6c75f29a54"
 
 [[sources]]
 path = "tools/aei_backlog_md.py"
-bytes = 19638
-sha256 = "aeaba2aa17340217c2fb3e682e1ef4d83508262d951faaaf32d014510936ca9c"
+bytes = 19958
+sha256 = "c7b12be96b9bf01309e9818720081e5c51df9f1a2884c4bd0913c8cd9b5fd9ce"
 
 [[sources]]
 path = "tools/aiqt_corpus.py"
@@ -3421,13 +3421,13 @@ sha256 = "049a29bfad79e5f02b0839d7d75d925414a9bbf356d5cffeef804c38add50ca4"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 68122
-sha256 = "9205a2311e4bc71d7fca81e8721b80fbf53b1b1146129fc37901b2fc16d77aef"
+bytes = 68517
+sha256 = "4e6ef62e253a3efb70229f8f7c3094b5ab3bd70479cab924e94ebaa6ac2728a8"
 
 [[sources]]
 path = "tools/doctor.py"
-bytes = 29254
-sha256 = "46a75673610e3ec8efa8ca8ad566730d81898d0193fbac554a2a17283cc25fde"
+bytes = 29639
+sha256 = "e0179139b46bb95fad75e9fa2258266052c85711ecfe835c545f6f8d9618ae25"
 
 [[sources]]
 path = "tools/gen_adapters.py"
@@ -3561,8 +3561,8 @@ sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
 path = "tools/migrate.py"
-bytes = 133435
-sha256 = "d810a12e9d2109c5bfdd86efe8f863c9c7d26a8ef5b6b6c38cbcbcad633eeaf4"
+bytes = 133707
+sha256 = "b054fc3f73ed4bacc69e3e0b92aa0334f1f32ff7cad59c2c22d76962a7b538eb"
 
 [[sources]]
 path = "tools/opf_render.py"
@@ -3571,23 +3571,23 @@ sha256 = "f9db0d0389214445e76ba144772f49f206de891507e4c392e9a52ce57893a898"
 
 [[sources]]
 path = "tools/orch_doctor.py"
-bytes = 3424
-sha256 = "58e80aa8b91779eb46a7fd93c140d8b6a41d5a62efbccc0ccc1f166c12356c82"
+bytes = 3824
+sha256 = "e34bba5db2a2caf3108df555eb65bc3dd8145a7a8b218449d96d31beea5a91ed"
 
 [[sources]]
 path = "tools/orch_preflight.py"
-bytes = 2182
-sha256 = "072807dbcf29bb3334e2fde0afed42fd5b8b118bd570175e398d6de049031918"
+bytes = 2585
+sha256 = "aa357ec68c3c8f8465ca182797db6594ec17d3b99f1af56a20ecd5cf54b930d1"
 
 [[sources]]
 path = "tools/orch_register.py"
-bytes = 4438
-sha256 = "562e84da57aeb23909a7e7a05d79b3fead0f30c03f8a274ca12ac5a993cf517f"
+bytes = 4757
+sha256 = "2fa85c2be339b03854024395635f64985fe91519e02b1c51cecabd67c142a39f"
 
 [[sources]]
 path = "tools/pin.py"
-bytes = 106852
-sha256 = "8c4c6377e6133509f6dedc2b4ed39e82fc99eefde947d8851620389a93c10e2c"
+bytes = 107124
+sha256 = "21e3d8ae910d0c10103055d5c3fa992f72e2729d8a4e81b2634403b96c550d70"
 
 [[sources]]
 path = "tools/run_all_checks.sh"

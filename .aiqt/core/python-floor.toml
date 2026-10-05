@@ -67,6 +67,14 @@ guarded-surfaces = [
     "opf/tools/opf.py",
     "opf/tools/selftest_commonmark_conformance.py",
     "opf/tools/selftest_commonmark_headings.py",
+    "tools/aei_backlog_md.py",
+    "tools/conformance.py",
+    "tools/doctor.py",
+    "tools/migrate.py",
+    "tools/orch_doctor.py",
+    "tools/orch_preflight.py",
+    "tools/orch_register.py",
+    "tools/pin.py",
 ]
 nonblocking-surfaces = [
     ".preview/stamp-truth-stop.py",
