@@ -2296,12 +2296,17 @@ def bash_absolute_paths(data):
 # command to an unsnapshotted ALLOW. The guarded actor could type it into the very command under guard, so it
 # could not carry the operator-only authority it claimed; it is removed, no in-band override exists, and the
 # operator channel is hook configuration. The assignment is now an ordinary leading env assignment that
-# changes no decision: _segment_dir_simple still treats it as benign (it redirects nothing), so a prefixed
-# pristine form is classified exactly as the bare one. The value capture is `(.*)` so an empty final
-# assignment is seen (bash last-wins) by the migration note below.
-_REMOVED_DISCARD_PREFIX_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.*)$")
+# grants nothing the same command without it, or with any other leading assignment of the same value, would
+# not get: _segment_dir_simple still treats it as benign (it redirects nothing), so with a metacharacter-free
+# value a prefixed pristine form is classified exactly as the bare one; a value carrying a shell
+# metacharacter, even quoted, makes the command non-pristine (_SHELL_META_RE scans the raw string), so it
+# takes the guard's existing non-pristine path exactly as FOO=<the same value> would. The pattern accepts
+# both '=' and '+=' and a value spanning newlines (re.DOTALL, used with fullmatch), the token shapes
+# _ENV_ASSIGN_RE treats as a leading assignment; the value capture lets the migration note below see an
+# empty final assignment (bash last-wins) and fold a '+=' append.
+_REMOVED_DISCARD_PREFIX_RE = re.compile(r"GUARDRAIL_ALLOW_DISCARD(\+?)=(.*)", re.DOTALL)
 # MIGRATION (this release only; the next release deletes this sentence, _removed_prefix_note and its
-# self-test vector): every reason the pristine path emits for a command whose leading
+# self-test vectors rmo-4 and rmo-7; the git_discard residue records the same sunset): every reason the pristine path emits for a command whose leading
 # GUARDRAIL_ALLOW_DISCARD is truthy gains this sentence, so a stale runbook learns the route.
 _REMOVED_DISCARD_PREFIX_NOTE = (
     " NOTE: the GUARDRAIL_ALLOW_DISCARD prefix no longer overrides this guard (it was removed because the "
@@ -2349,13 +2354,15 @@ _DISCARD_ALTS = (
 def _removed_prefix_note(tokens):
     """MIGRATION (this release only): _REMOVED_DISCARD_PREFIX_NOTE when THIS pristine git segment's leading
     assignment region carries a truthy final GUARDRAIL_ALLOW_DISCARD value (bash last-wins; an empty value or
-    0, false, no or off, case-insensitive, is not truthy), else the empty string. It adds reason text only:
-    the caller's decision is the one the unprefixed command gets."""
+    0, false, no or off, case-insensitive, is not truthy; a '+=' appends to the value an earlier assignment
+    in the same region set), else the empty string. It adds reason text only: the caller's decision is the
+    one the unprefixed command gets."""
     last = None
     for tok in tokens[:_command_word_index(tokens)]:
         m = _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok)
         if m:
-            last = m.group(1)  # bash last-wins: keep the LAST leading assignment's value
+            # bash last-wins: keep the LAST leading assignment's value; '+=' appends to it
+            last = ((last or "") + m.group(2)) if m.group(1) else m.group(2)
     if last is None or last.lower() in ("", "0", "false", "no", "off"):
         return ""
     return _REMOVED_DISCARD_PREFIX_NOTE
@@ -3504,8 +3511,8 @@ def _ambient_repo_view_override():
 
 def _segment_dir_simple(tokens):
     """True when a git segment names its worktree simply enough that the session dir IS the worktree the
-    command acts on: no leading env-assignment other than the removed GUARDRAIL_ALLOW_DISCARD prefix, which
-    redirects nothing (any other, such as a GIT_DIR/GIT_WORK_TREE, could
+    command acts on: no leading env-assignment other than the removed GUARDRAIL_ALLOW_DISCARD prefix ('=' or
+    '+=', any value), which redirects nothing (any other, such as a GIT_DIR/GIT_WORK_TREE, could
     redirect it), and no global option before the subcommand (a -C/--git-dir/--work-tree/-c, possibly
     abbreviated or attached, could redirect the worktree or change config). Anything else -> not simple ->
     the handler ASKS rather than trust a clean probe in the session dir. This is the coarse replacement
@@ -3513,7 +3520,7 @@ def _segment_dir_simple(tokens):
     repeatedly fooled into probing a clean dir and silently allowing - F-62/F-64/F-66)."""
     cw_idx = _command_word_index(tokens)
     for tok in tokens[:cw_idx]:
-        if _REMOVED_DISCARD_PREFIX_RE.match(tok):
+        if _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok):
             continue  # the removed override's assignment is benign: it redirects nothing
         return False  # some other leading env-assignment: it may redirect the worktree or config
     i = cw_idx + 1  # the token after the 'git' command word
@@ -3605,7 +3612,7 @@ def _segment_repo_dir(tokens, cwd):
                     redirect is present with NO -C, the session cwd (git discovers the repo from cwd; the
                     --work-tree only moves the worktree). Callers snapshot/probe THIS dir, never --work-tree.
       - None      : no dir-relocating redirect this helper resolves: a bare command, or one carrying only
-                    --git-dir/GIT_DIR (which names the repo directly, not a discoverable dir), -c, or a
+                    --git-dir/GIT_DIR (which names the repo directly, not a discoverable dir), -c, or
                     another leading env assignment. The caller keeps its own conservative cannot-pin handling.
       - "opaque"  : a -C redirect is present but unresolvable (value-less, or relative with no cwd to anchor).
     A --git-dir/GIT_DIR redirect returns None (the repo is named directly, left to the caller's cannot-pin
@@ -4712,7 +4719,11 @@ def git_discard(data):
     is silently ALLOWED unless it is a pristine
     bare git whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even on
     a dirty tree), or on a provably-clean tree - worst case it ASKS; no in-band override exists (a leading
-    GUARDRAIL_ALLOW_DISCARD assignment, the removed override, changes no decision); the guarantee is bounded to
+    GUARDRAIL_ALLOW_DISCARD assignment, the removed override, grants nothing the same command without it, or
+    with any other leading assignment of the same value, would not get: a metacharacter-free value leaves the
+    bare command's decision, and a value carrying a shell metacharacter, even quoted, takes the existing
+    non-pristine path as that other assignment would, which with no session cwd and no resolved redirect
+    target takes no snapshot and allows with a note); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
     reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
@@ -4903,7 +4914,7 @@ def git_discard(data):
                   "resolved plus the session directory before allowing", np_snap)
 
     # A pristine single bare git command. No in-band override exists: a leading GUARDRAIL_ALLOW_DISCARD
-    # assignment (the removed override) changes no decision below. MIGRATION (this release only): every
+    # assignment (the removed override; a pristine one carries no metacharacter) changes no decision below. MIGRATION (this release only): every
     # reason this path emits ends with `note`, the removed-prefix sentence when that prefix is truthy (empty
     # otherwise), through `alts` (the safe alternatives plus the note) or a helper's `note` parameter.
     note = _removed_prefix_note(pristine)

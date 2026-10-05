@@ -27,7 +27,8 @@ guard with THREE outcomes (allow/ask/deny); under the key above its former ASK i
 verb, ASK unless the command is a PRISTINE SINGLE BARE `git <verb>` invocation (no shell metacharacter
 anywhere even quoted, no reserved word, no wrapper/redirect/compound, and a command word literally `git`)
 AND either its form is genuinely non-destructive or the whole tree is PROVABLY CLEAN, in which case ALLOW (no
-in-band override exists: a leading GUARDRAIL_ALLOW_DISCARD, the removed override, changes no decision); a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
+in-band override exists: a leading GUARDRAIL_ALLOW_DISCARD, the removed override, grants nothing the same command
+without it, or with any other leading assignment of the same value, would not get); a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
 --force) on a confirmed-dirty tree DENIES. This suite proves the EN-6 pristine gate: every shell-grammar and
 wrapper form that hides a real `git reset --hard` while the raw scan still sees a contiguous git+verb keyword
 (an `if`/`for`, a backtick or `$()` substitution, a `|&`, a leading or interspersed redirect, and the
@@ -1931,7 +1932,9 @@ def _main_isolated(monitor):
 
         # === REMOVED OVERRIDE: the GUARDRAIL_ALLOW_DISCARD prefix (vectors rmo-1 to rmo-5) ================
         # The prefix was writable by the guarded actor and skipped the recovery snapshot, so it is removed; a
-        # leading assignment of it is an ordinary env assignment with the decision of the unprefixed command.
+        # leading assignment of it is an ordinary env assignment that grants nothing: with a metacharacter-
+        # free value the command gets the unprefixed command's decision (rmo-1), and with a metacharacter
+        # value it gets exactly what FOO=<the same value> gets (rmo-6).
         _rmo = "GUARDRAIL_ALLOW_DISCARD=1 "
         _rmo_note = (getattr(aiqt_hooks, "_REMOVED_DISCARD_PREFIX_NOTE", None)
                      or "(the removed-prefix migration note is missing)").strip()
@@ -1951,8 +1954,8 @@ def _main_isolated(monitor):
                     texts.append(str(hso.get("permissionDecisionReason", "")))
             return _reduce_result(code, stdout_obj), " ".join(texts)
 
-        # (rmo-1) Equivalence battery: per in-scope form class the prefixed command gets the decision of the
-        # bare command, both pinned so neither drifts. (rmo-2) No advertisement: no bare-command reason or
+        # (rmo-1) Equivalence battery: per in-scope form class the prefixed command ('=' and the '+=' append
+        # spelling) gets the decision of the bare command, all pinned so none drifts. (rmo-2) No advertisement: no bare-command reason or
         # banner names the prefix, and a prefixed one names it only inside the migration sentence.
         _rmo_battery = (
             ("pristine-clean", "git reset --hard", _rmo_clean, None, "allow"),
@@ -1968,17 +1971,18 @@ def _main_isolated(monitor):
                 os.environ[_env] = "removed-override-selftest"
             try:
                 _bare, _bare_text = _rmo_text(_cmd, _cwd)
-                _pref, _pref_text = _rmo_text(_rmo + _cmd, _cwd)
+                _prefs = [(_p, _rmo_text(_p + _cmd, _cwd)) for _p in (_rmo, "GUARDRAIL_ALLOW_DISCARD+=1 ")]
             finally:
                 if _env is not None:
                     os.environ.pop(_env, None)
-            if _bare != _want or _pref != _want:
-                failures.append("(rmo-1-{}) the bare and the prefixed command must both be {}, got {} and {}"
-                                .format(_case, _want, _bare, _pref))
-            if ("GUARDRAIL_ALLOW_DISCARD" in _bare_text
-                    or "GUARDRAIL_ALLOW_DISCARD" in _pref_text.replace(_rmo_note, "")):
-                failures.append("(rmo-2-{}) a reason or banner names the removed prefix outside the migration "
-                                "sentence: {!r} / {!r}".format(_case, _bare_text, _pref_text))
+            for _p, (_pref, _pref_text) in _prefs:
+                if _bare != _want or _pref != _want:
+                    failures.append("(rmo-1-{}) the bare and the {!r}-prefixed command must both be {}, got {} "
+                                    "and {}".format(_case, _p, _want, _bare, _pref))
+                if ("GUARDRAIL_ALLOW_DISCARD" in _bare_text
+                        or "GUARDRAIL_ALLOW_DISCARD" in _pref_text.replace(_rmo_note, "")):
+                    failures.append("(rmo-2-{}) a reason or banner names the removed prefix outside the "
+                                    "migration sentence: {!r} / {!r}".format(_case, _bare_text, _pref_text))
         # (rmo-2) the deny paths the battery does not reach: both snapshot-failure denies (forced) and the
         # no-session-cwd unparseable deny, which once told the actor the prefix "then opts out".
         _orig_rmo_rec = aiqt_hooks._record_recovery
@@ -1992,22 +1996,56 @@ def _main_isolated(monitor):
             if _dec != "deny" or "GUARDRAIL_ALLOW_DISCARD" in _text:
                 failures.append("(rmo-2-deny-{}) expected a deny that does not name the removed prefix, got {} "
                                 "{!r}".format(_i, _dec, _text))
-        # (rmo-2) structural: no string constant in the hook module (reason, banner or docstring) spells the
-        # prefix with a value, the form every retired advertisement used.
-        _rmo_tree = ast.parse(Path(aiqt_hooks.__file__).read_text(encoding="utf-8"))
-        _rmo_adv = sorted(set(n.lineno for n in ast.walk(_rmo_tree) if isinstance(n, ast.Constant)
-                              and isinstance(n.value, str) and "GUARDRAIL_ALLOW_DISCARD=1" in n.value))
+        # (rmo-2) structural: no string in the hook module (reason, banner or docstring) spells the prefix as
+        # an assignment, the form every retired advertisement used, in ANY spelling: any value, '=' or '+=',
+        # any case, or assembled by '+' concatenation or an f-string. The one exempt string is the pattern of
+        # _REMOVED_DISCARD_PREFIX_RE itself, which recognizes the assignment and advertises nothing.
+        _rmo_adv_re = re.compile(r"(?i)GUARDRAIL_ALLOW_DISCARD[\s()\\+?]*=")
+        _rmo_exempt = getattr(getattr(aiqt_hooks, "_REMOVED_DISCARD_PREFIX_RE", None), "pattern", None)
+
+        def _rmo_fold(node):
+            """The text of a str constant, a '+' chain of them, or an f-string (fields as ''), else None."""
+            if isinstance(node, ast.Constant):
+                return node.value if isinstance(node.value, str) else None
+            if isinstance(node, ast.JoinedStr):
+                return "".join(v.value if isinstance(v, ast.Constant) else "" for v in node.values)
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                _l, _r = _rmo_fold(node.left), _rmo_fold(node.right)
+                return None if _l is None or _r is None else _l + _r
+            return None
+
+        def _rmo_adv_lines(source):
+            """Line numbers of every string in `source` that spells a GUARDRAIL_ALLOW_DISCARD assignment."""
+            _hits = set()
+            for _n in ast.walk(ast.parse(source)):
+                _t = _rmo_fold(_n)
+                if _t is not None and _t != _rmo_exempt and _rmo_adv_re.search(_t):
+                    _hits.add(_n.lineno)
+            return sorted(_hits)
+
+        _rmo_adv = _rmo_adv_lines(Path(aiqt_hooks.__file__).read_text(encoding="utf-8"))
         if _rmo_adv:
-            failures.append("(rmo-2-source) aiqt_hooks.py string constants still advertise "
-                            "GUARDRAIL_ALLOW_DISCARD=1 at lines {}".format(_rmo_adv))
+            failures.append("(rmo-2-source) aiqt_hooks.py strings still spell a GUARDRAIL_ALLOW_DISCARD "
+                            "assignment at lines {}".format(_rmo_adv))
+        # (rmo-2-scan) the scan itself catches every spelling a retired advertisement could take, and passes
+        # a mention that spells no assignment.
+        for _src in ('X = "Prefix GUARDRAIL_ALLOW_DISCARD=1 to override."',
+                     'X = "prefix GUARDRAIL_ALLOW_DISCARD=true"', 'X = "set guardrail_allow_discard=yes"',
+                     'X = "GUARDRAIL_ALLOW_DISCARD+=1 git reset --hard"',
+                     'X = "GUARDRAIL_ALLOW_DISCARD" + "=1"', 'X = "GUARDRAIL_ALLOW_" + ("DISCARD" + "=on")',
+                     'X = f"GUARDRAIL_ALLOW_DISCARD={v}"', 'def f():\n    "Use GUARDRAIL_ALLOW_DISCARD = 1."\n'):
+            if not _rmo_adv_lines(_src):
+                failures.append("(rmo-2-scan) the advertisement scan misses {!r}".format(_src))
+        if _rmo_adv_lines('X = "the GUARDRAIL_ALLOW_DISCARD prefix no longer overrides this guard"'):
+            failures.append("(rmo-2-scan-mention) the advertisement scan flags a mention that spells no assignment")
         # (rmo-3) Pristine classification unchanged: the prefix (truthy or falsy) stays an ordinary leading
         # assignment that redirects nothing, so the prefixed pristine form on a clean tree reaches the probe
         # and ALLOWs (on the dirty tree the same command denies, rmo-1, so the probe decided).
-        for _v in ("1", "0"):
-            _toks = ["GUARDRAIL_ALLOW_DISCARD=" + _v, "git", "reset", "--hard"]
+        for _v in ("=1", "=0", "+=1"):
+            _toks = ["GUARDRAIL_ALLOW_DISCARD" + _v, "git", "reset", "--hard"]
             if (not aiqt_hooks._segment_dir_simple(_toks)
                     or _decision(handler, " ".join(_toks), cwd=_rmo_clean) != "allow"):
-                failures.append("(rmo-3-{}) a leading GUARDRAIL_ALLOW_DISCARD={} must stay a benign leading "
+                failures.append("(rmo-3-{}) a leading GUARDRAIL_ALLOW_DISCARD{} must stay a benign leading "
                                 "assignment that reaches the clean probe and allows".format(_v, _v))
         # (rmo-4) MIGRATION, this release only (the next release deletes this vector and keeps rmo-2): a
         # truthy prefix adds the removal sentence, naming 'git stash' as the route, to the reason of the
@@ -2024,6 +2062,56 @@ def _main_isolated(monitor):
         if _dec != "deny" or _rmo_note in _text:
             failures.append("(rmo-4-falsy) a falsy prefix must deny without the migration sentence, got {} "
                             "{!r}".format(_dec, _text))
+        # (rmo-6) A metacharacter value, even quoted, makes the command non-pristine exactly as any other
+        # leading assignment of that value does: the prefixed command gets exactly what FOO=<the same value>
+        # gets (decision, reason text with the snapshot ref name normalised, and recovery-snapshot count), on the dirty session tree and with no
+        # session cwd. That is the existing non-pristine path, which the bare command does not take (it
+        # denies, rmo-1): with a dirty session tree it snapshots then allows with a note, and with no session
+        # cwd it currently allows with a note and takes no snapshot, for FOO and the prefix alike.
+        _rmo_snaps = []
+
+        def _rmo_count(repo, verb):
+            _rmo_snaps.append(repo)
+            return _orig_rmo_rec(repo, verb)
+
+        aiqt_hooks._record_recovery = _rmo_count
+        try:
+            for _v in ("';'", "'!'", "'x|y'", '"a;b"', "'$x'", "'*'"):
+                for _where, _cwd in (("cwd", rp), ("nocwd", None)):
+                    _got = []
+                    for _name in ("GUARDRAIL_ALLOW_DISCARD", "FOO"):
+                        del _rmo_snaps[:]
+                        _dec, _text = _rmo_text("{}={} git reset --hard".format(_name, _v), _cwd)
+                        _got.append((_dec, re.sub(r"refs/aiqt-recovery/[0-9A-Za-z-]+", "refs/aiqt-recovery/<id>",
+                                                  _text), len(_rmo_snaps)))
+                    if (_got[0] != _got[1] or _got[0][0] != "allow-note"
+                            or (_where == "cwd") != (_got[0][2] > 0)):
+                        failures.append("(rmo-6-{}-{}) the prefix with a metacharacter value must get exactly "
+                                        "what FOO with that value gets (a noted allow, snapshotted only with a "
+                                        "session cwd), got {!r}".format(_where, _v, _got))
+        finally:
+            aiqt_hooks._record_recovery = _orig_rmo_rec
+        # (rmo-7) The prefix pattern accepts the token shapes _ENV_ASSIGN_RE treats as a leading assignment:
+        # '+=' (the migration note folds it as an append, bash last-wins) and a value spanning a newline, so
+        # _segment_dir_simple and _removed_prefix_note agree on every token. MIGRATION, this release only:
+        # the next release deletes the note half of this vector together with rmo-4.
+        for _toks, _want_note in (
+                (["GUARDRAIL_ALLOW_DISCARD+=1", "git", "reset", "--hard"], True),
+                (["GUARDRAIL_ALLOW_DISCARD=0", "GUARDRAIL_ALLOW_DISCARD+=1", "git", "reset", "--hard"], True),
+                (["GUARDRAIL_ALLOW_DISCARD=", "GUARDRAIL_ALLOW_DISCARD+=", "git", "reset", "--hard"], False),
+                (["GUARDRAIL_ALLOW_DISCARD=1", "GUARDRAIL_ALLOW_DISCARD=0", "git", "reset", "--hard"], False),
+                (["GUARDRAIL_ALLOW_DISCARD=1\n", "git", "commit"], True),
+                (["GUARDRAIL_ALLOW_DISCARD=a\nb", "git", "commit"], True),
+                (["GUARDRAIL_ALLOW_DISCARD=\n0", "git", "commit"], True)):
+            _simple = aiqt_hooks._segment_dir_simple(_toks)
+            _has_note = bool(aiqt_hooks._removed_prefix_note(_toks))
+            if not _simple or _has_note != _want_note:
+                failures.append("(rmo-7) {!r}: expected a benign assignment (simple) with note={}, got "
+                                "simple={} note={}".format(_toks, _want_note, _simple, _has_note))
+        _dec, _text = _rmo_text("GUARDRAIL_ALLOW_DISCARD+=1 git reset --hard", rp)
+        if _dec != "deny" or _rmo_note not in _text:
+            failures.append("(rmo-7-append) the '+=' prefixed dirty clobber must deny like the bare command, "
+                            "with the migration sentence, got {} {!r}".format(_dec, _text))
         # (rmo-5) Dead code: the retired opt-out names are bound in neither script copy (the source module
         # live, and both files by their top-level bindings), so no future caller resurrects the path.
         _rmo_dead = ("_DISCARD_OPTOUT_RE", "_DISCARD_FALSY", "_segment_has_optout", "_OPTOUT_PRISTINE",
@@ -4105,6 +4193,7 @@ def _main_isolated(monitor):
                 ("attached-C", "git -C{F} commit"),
                 ("relative-C", "git -C . commit"),
                 ("removed-discard-prefix", "GUARDRAIL_ALLOW_DISCARD=1 git -C {F} commit"),
+                ("removed-discard-prefix-append", "GUARDRAIL_ALLOW_DISCARD+=1 git -C {F} commit"),
                 ("cd-config", "cd {M} && git -c core.worktree={M} -C {F} commit"),
                 ("cd-config-env", "cd {M} && git --config-env=core.worktree=WT -C {F} commit"),
                 ("cd-assignment", "cd {M} && FOO=bar git -C {F} commit"),
