@@ -4,9 +4,10 @@ description: The OPF operating loop for an AI development assistant. Read the ad
   store (the backlog, pipeline, and TODO views and the records beneath them) to decide what to
   work on, and keep the store updated for everything being worked. As /flow N, run N advancement
   workstreams plus an always-present hardening lane and an always-present serial merge lane,
-  after advising the maintainer how many advancement streams are viable. Parallelism lives in
-  drafting and review; authority, record writes, and merges stay serial; verification is never
-  shortened for speed.
+  after advising the maintainer how many advancement streams are viable; /flow N records that
+  rate in the store. A bare /flow is a check, an advice, and a reminder to keep working at the
+  recorded rate. Parallelism lives in drafting and review; authority, record writes, and merges
+  stay serial; verification is never shortened for speed.
 ---
 
 # /flow: the OPF operating loop
@@ -113,9 +114,10 @@ signal and a store record is a prohibited shape, because it reliably produces no
 
 `/flow N` runs N **advancement** workstreams, plus, at every N, one hardening lane and one merge
 lane: `/flow 1` runs three lanes, `/flow 2` runs four. A workstream is one unit of work on one
-branch in one isolated worktree, bound to one `active` backlog item. Bare `/flow` runs the
-section 1 cycle as a single stream, hardening items and merging being serial phases of that
-stream rather than lanes.
+branch in one isolated worktree, bound to one `active` backlog item. `/flow N` also sets the
+flow-rate record (below): the durable count of concurrent advancement workstreams this
+orchestrating session works at. A bare `/flow` never sets it; it is a check, an advice, and a
+reminder to keep working at the recorded rate (the bare `/flow` check, below).
 
 | Lane | Count | What it holds |
 |---|---|---|
@@ -162,10 +164,57 @@ flow advice: requested N=<n> advancement streams (+ hardening + merge = <n+2> la
   advice: run <min> advancement streams; binding constraint: <which input>
 ```
 
-In an attended run the maintainer's answer governs; absent an answer, the run starts at the
-advised count, never above it. In an unattended run the run starts at the smaller of the
-requested and advised counts, and the advice plus the chosen count are recorded with the
-activation worklog entries.
+In an attended run the maintainer's answer governs and is the rate the flow-rate record takes;
+absent an answer, the record takes the requested N and the run starts at the advised count,
+never above it. In an unattended run the record takes the requested N, the run starts at the
+smaller of the requested and advised counts, and the advice plus the chosen count are recorded
+with the activation worklog entries.
+
+**The flow-rate record.** Each orchestrating session keeps a durable record of its flow number:
+the count of concurrent advancement workstreams (the hardening and merge lanes ride on top of
+every N and are never part of the number). The number is operator-owned operating state and
+lives in the store, never in conversation memory. The current rate is read through the
+`flow_rate_source` slot (section 10). Its default, and the preferred binding, is the store: the
+latest clean `maintainer_decision` record (OPF-SPEC.md sections 8.1 and 8.5) whose `decision`
+opens with the fixed grammar line `flow rate <n>`, with the requested and advised counts and the
+advice basis in its rationale. Only that exact form counts, and the line lives in a
+`maintainer_decision`, a different record type from the section 5 worklog grammar, so the two
+grammars cannot collide. A `maintainer_decision` is created-terminal and immutable, so setting
+the rate appends a new record linking the one it overturns, and the latest clean record governs.
+An adopter MAY instead bind `flow_rate_source` to a value in its committed configuration;
+wherever the source is bound, a rate stated inside an ordinary message body never sets the
+record, because a `/flow` invocation is an operator command carried by the harness, not free
+prose to be pattern-matched. Where the bound source yields no rate, the rate is 1. Exactly two
+inputs set the record, both operator acts recorded under the maintainer's own authorship
+(`actor.kind` `maintainer`, the record's rule in OPF-SPEC.md section 8.5): `/flow N`, and the
+maintainer's answer to the bare `/flow` question below. The run operates at the recorded rate as
+governed by the viability advice above, never above the record.
+
+**Bare `/flow`: the check.** A bare `/flow` never changes the record and never changes the lane
+model: it is a check, an advice, and a reminder to keep working. On every bare `/flow` the
+assistant reads the current rate from the bound `flow_rate_source`, reads the operating mode
+from the bound `mode_source` (section 8), never from the message itself, and recomputes the
+viability advice above. Then, by mode:
+
+- **Attended**: present exactly one structured question, in this fixed shape:
+
+  ```
+  flow check: N=<n> advancement workstreams recorded (+ hardening + merge = <n+2> lanes)
+    advice: <advised> advancement streams viable
+      (k_scope=<a>, k_review=<b>, k_drain=<c>; binding constraint: <which input>)
+    keep N=<n>, adjust to the advised N=<advised>, or set another number?
+  ```
+
+  Work continues at the recorded rate while the question is open; the check is a reminder to
+  keep working, never a stop, and an unanswered question changes nothing. The answer, whichever
+  option it takes, lands a new flow-rate record (a keep re-records `<n>` with its fresh basis),
+  exactly as `/flow N` does, and the run adjusts to the new rate at the next natural boundary (a
+  stream finishing, a merge), never by abandoning verified work in flight.
+- **Unattended**: ask nothing. The bare `/flow` is simply the reminder to keep working at the
+  current recorded rate: restate the rate, the fresh advice, and the section 5 table in the
+  console, write nothing to the store beyond what section 5's triggers already write, and
+  continue. A fresh advice below the recorded rate governs stream starts, as always, but never
+  writes the record.
 
 ## 3. File-overlap detection, before a stream starts
 
@@ -404,6 +453,7 @@ in the specification, on the same posture as a profile (section 9.1 of OPF-SPEC.
 | `merge_check_cmd` | (required) how CI status on the exact pushed revision is read | {{flow.merge_check_cmd}} |
 | `merge_authority` | (required) who merges, and under which standing grant | {{flow.merge_authority}} |
 | `mode_source` | (required) the committed or operator-owned mode record | {{flow.mode_source}} |
+| `flow_rate_source` | the latest clean `maintainer_decision` opening `flow rate <n>`; none means a rate of 1 | {{flow.flow_rate_source}} |
 | `verification_floor` | the store's declared profile floor | {{flow.verification_floor}} |
 | `status_surface` | the console re-render of section 5 | {{flow.status_surface}} |
 | `branch_naming` | one branch per unit, named for its item | {{flow.branch_naming}} |
