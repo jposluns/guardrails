@@ -102,7 +102,7 @@ def _in_loaded(what, call, *args):
     except a KeyboardInterrupt, which is re-raised after a fixed message as a fresh KeyboardInterrupt (its
     context suppressed) so it stops the runner. Residuals, not covered: os._exit, atexit handlers, signal handlers, threads the loaded code starts,
     interpreter shutdown, mutation of sys or of this module's globals by the loaded code, deliberately
-    hostile objects (for example a metaclass or an exception class built to defeat this guard), and a
+    hostile objects (the one residual stated in the _opf_views class disclosure), and a
     process exit raised while this module's own top-level imports run, before this guard is entered."""
     try:
         return call(*args)
@@ -286,25 +286,76 @@ def _expect(condition, message=None):
         raise AssertionError(message)
 
 
+# The KeyboardInterrupt the self-test's interrupt fixtures raise on purpose. Only the fresh KeyboardInterrupt
+# _in_loaded raises for it is recorded; any other propagates, so an operator's Ctrl-C is never recorded.
+_LOADED_INTERRUPT = "opf-init-contract-selftest-loaded-interrupt"
+
+
+def _is_loaded_interrupt(exc, sent):
+    """True only for the fresh KeyboardInterrupt _in_loaded raises for a loaded KeyboardInterrupt(sent): an
+    exact KeyboardInterrupt with its context suppressed whose context is an exact KeyboardInterrupt with args
+    exactly (sent,), read through exact built-in types alone. An operator's Ctrl-C carries no args, so it never
+    matches: in the loaded code its replacement's context has no args, in _in_loaded's handler it is not
+    context-suppressed, and later its context is the fresh one."""
+    if type(exc) is not KeyboardInterrupt or exc.__suppress_context__ is not True:
+        return False
+    context = exc.__context__
+    if type(context) is not KeyboardInterrupt:
+        return False
+    args = context.args
+    return len(args) == 1 and type(args[0]) is str and args[0] == sent
+
+
+def _loaded_exit_failure(label, path):
+    """None when _validator_missing over the validator at `path` ends as the case `label` requires, else the
+    failure. A label naming KeyboardInterrupt requires the fresh KeyboardInterrupt _in_loaded raises for a
+    loaded KeyboardInterrupt(_LOADED_INTERRUPT), with the INTERRUPTED line; any other requires exit 2 with
+    the CANNOT-EVALUATE line. Every other KeyboardInterrupt (an operator's Ctrl-C included) propagates
+    unchanged; any other escape is recorded, never this test's own end."""
+    import contextlib
+    import io
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(captured):
+            _validator_missing(str(path), ("a.md",))
+    except KeyboardInterrupt as exc:
+        if not _is_loaded_interrupt(exc, _LOADED_INTERRUPT):
+            raise
+        if "KeyboardInterrupt" not in label:
+            return "{}: expected exit 2, got the loaded KeyboardInterrupt".format(label)
+        if not captured.getvalue().startswith("INTERRUPTED: "):
+            return "{}: a fresh KeyboardInterrupt without the INTERRUPTED line".format(label)
+    except BaseException as exc:  # noqa: BLE001  any other escape is recorded, never the test's own end
+        if "KeyboardInterrupt" in label:
+            return "{}: expected a fresh KeyboardInterrupt, got {}".format(label, _ending_kind(exc))
+        if not (type(exc) is SystemExit and type(exc.code) is int and exc.code == 2):
+            return "{}: expected exit 2, got {}".format(label, _ending_kind(exc))
+        if not captured.getvalue().startswith("CANNOT-EVALUATE: "):
+            return "{}: exit 2 without the CANNOT-EVALUATE line".format(label)
+    else:
+        return "{}: the loaded code's exit was not reached".format(label)
+    return None
+
+
 def _self_test_loaded_exit():
     """A loaded validator that ends the process, at load or in a later call the gate makes into it, yields
     this gate's CANNOT-EVALUATE exit 2 through _validator_missing (the function _checks calls), never its
-    own status. Any exception escaping is caught here and recorded, so the vector is red if the guard is
-    reverted (_PROCESS_ENDING emptied) or removed from _validator_missing. A case whose label names
+    own status. Any exception escaping is recorded by _loaded_exit_failure, so the vector is red if the guard
+    is reverted (_PROCESS_ENDING emptied) or removed from _validator_missing. A case whose label names
     KeyboardInterrupt must instead re-raise a fresh KeyboardInterrupt with the INTERRUPTED line, so the
-    vector is red if the interrupt is absorbed as exit 2. The CANNOT-EVALUATE line each
+    vector is red if the interrupt is absorbed as exit 2. Any other KeyboardInterrupt (one carrying another
+    value, standing in for an operator's Ctrl-C) must propagate, so the vector is red if the recorder records
+    it. The CANNOT-EVALUATE line each
     case is expected to write is captured and required, never printed, so a passing self-test shows none."""
-    import contextlib
-    import io
     import tempfile
     repr_exits = "class R:\n    def __repr__(self):\n        raise SystemExit(0)\n    __str__ = __repr__\n"
     cases = (
         ("load SystemExit(0)", "raise SystemExit(0)\n"),
         ("load SystemExit(None)", "raise SystemExit\n"),
-        ("load KeyboardInterrupt", "raise KeyboardInterrupt\n"),
+        ("load KeyboardInterrupt", "raise KeyboardInterrupt({!r})\n".format(_LOADED_INTERRUPT)),
         ("call KeyboardInterrupt in a member __eq__",
-         "class M:\n    def __eq__(self, other):\n        raise KeyboardInterrupt\n    __hash__ = None\n"
-         "_RESERVED = (M(),)\n"),
+         "class M:\n    def __eq__(self, other):\n        raise KeyboardInterrupt({!r})\n    __hash__ = None\n"
+         "_RESERVED = (M(),)\n".format(_LOADED_INTERRUPT)),
         ("load GeneratorExit", "raise GeneratorExit\n"),
         ("load BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n"),
         ("load SystemExit(code whose repr exits 0)", repr_exits + "raise SystemExit(R())\n"),
@@ -322,22 +373,23 @@ def _self_test_loaded_exit():
         for index, (label, body) in enumerate(cases):
             path = Path(tmp) / "loaded_exit_{}.py".format(index)
             path.write_text(body, encoding="utf-8")
-            captured = io.StringIO()
+            failure = _loaded_exit_failure(label, path)
+            if failure is not None:
+                failures.append(failure)
+        # A KeyboardInterrupt carrying another value (standing in for an operator's Ctrl-C) propagates out of
+        # the recorder, in a KeyboardInterrupt case and in an exit-2 case. Red if the recorder records it.
+        other = _LOADED_INTERRUPT + "-other"
+        for label, body in (("load KeyboardInterrupt", "raise KeyboardInterrupt({!r})\n".format(other)),
+                            ("load SystemExit(0)", "raise KeyboardInterrupt({!r})\n".format(other))):
+            path = Path(tmp) / "loaded_exit_other.py"
+            path.write_text(body, encoding="utf-8")
             try:
-                with contextlib.redirect_stderr(captured):
-                    _validator_missing(str(path), ("a.md",))
-            except BaseException as exc:  # noqa: BLE001  any escape is recorded, never the test's own end
-                if "KeyboardInterrupt" in label:
-                    if not (type(exc) is KeyboardInterrupt and exc.__suppress_context__
-                            and captured.getvalue().startswith("INTERRUPTED: ")):
-                        failures.append("{}: expected a fresh KeyboardInterrupt, got {}".format(
-                            label, _ending_kind(exc)))
-                elif not (type(exc) is SystemExit and type(exc.code) is int and exc.code == 2):
-                    failures.append("{}: expected exit 2, got {}".format(label, _ending_kind(exc)))
-                elif not captured.getvalue().startswith("CANNOT-EVALUATE: "):
-                    failures.append("{}: exit 2 without the CANNOT-EVALUATE line".format(label))
+                _loaded_exit_failure(label, path)
+            except KeyboardInterrupt as exc:
+                if not _is_loaded_interrupt(exc, other):
+                    raise
             else:
-                failures.append("{}: the loaded code's exit was not reached".format(label))
+                failures.append("{}: another KeyboardInterrupt was recorded, not propagated".format(label))
     _expect(not failures, "loaded-exit vectors: " + "; ".join(failures))
 
 

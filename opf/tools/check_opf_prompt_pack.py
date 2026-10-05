@@ -445,8 +445,8 @@ def _backstop(run):
     included). A KeyboardInterrupt is the one exception: after a fixed message it is re-raised as a fresh
     KeyboardInterrupt (its context suppressed, so no loaded object is formatted), which stops the runner.
     Residuals, not covered: os._exit, atexit handlers, signal handlers, threads the loaded code starts, interpreter shutdown, mutation of sys or of this module's globals by the loaded code,
-    deliberately hostile objects (for example a metaclass or an exception class built to defeat this
-    guard), and a process exit raised while this module's own top-level imports run, before this guard is
+    deliberately hostile objects (the one residual stated in the _opf_views class disclosure),
+    and a process exit raised while this module's own top-level imports run, before this guard is
     entered."""
     try:
         return run()

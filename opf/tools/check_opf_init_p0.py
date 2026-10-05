@@ -371,23 +371,34 @@ def _is_interrupt(exc, sent):
     return len(args) == 1 and type(args[0]) is str and args[0] == sent
 
 
-def _propagate_interrupt(exc):
-    """Re-raise the caught KeyboardInterrupt `exc` when its class is exactly KeyboardInterrupt (what an
-    operator's Ctrl-C raises); a subclass, which only loaded code raises, is never re-raised: a fresh
-    KeyboardInterrupt with its context suppressed is raised instead, so no code from the caught instance runs
-    (a __notes__ property that raises SystemExit 0 while the interpreter reports it, for example)."""
+def _interrupt_to_raise(exc):
+    """The KeyboardInterrupt _propagate_interrupt raises for the caught KeyboardInterrupt `exc`, chosen by the
+    exact class alone: `exc` itself, unchanged, when its class is exactly KeyboardInterrupt (what an
+    operator's Ctrl-C raises); for a subclass, which only loaded code raises, a fresh KeyboardInterrupt with
+    its context suppressed, so no code from the caught instance runs (a __notes__ property that raises
+    SystemExit 0 while the interpreter reports it, for example). It raises nothing, so the vector over it
+    catches no KeyboardInterrupt."""
     if type(exc) is KeyboardInterrupt:
-        raise exc
-    raise KeyboardInterrupt from None
+        return exc
+    fresh = KeyboardInterrupt()
+    fresh.__suppress_context__ = True
+    return fresh
+
+
+def _propagate_interrupt(exc):
+    """Raise what _interrupt_to_raise gives for the caught KeyboardInterrupt `exc`: an exact one propagates
+    unchanged, and a subclass is never re-raised."""
+    raise _interrupt_to_raise(exc)
 
 
 def _interrupt_filter_outcomes(sent):
     """The interrupt filters over hostile inputs: _is_interrupt of an exact KeyboardInterrupt(sent), of a
     subclass whose args property returns (sent,), and of an exact KeyboardInterrupt whose argument is a str
-    subclass or an object whose __eq__ is always true; whether _propagate_interrupt raises a fresh exact
-    KeyboardInterrupt, its context suppressed, for that subclass (probed in a worker thread, so an operator's
-    Ctrl-C is never caught here); and the names of any instance code they ran.
-    Expected: (True, False, False, False, True, [])."""
+    subclass or an object whose __eq__ is always true; whether _interrupt_to_raise gives an exact
+    KeyboardInterrupt back unchanged and, for that subclass, a fresh exact KeyboardInterrupt with no args and
+    its context suppressed; and the names of any instance code they ran. Nothing here raises or catches a
+    KeyboardInterrupt, so an operator's Ctrl-C arriving here propagates unchanged (_real_sigint_propagates
+    is red if it does not). Expected: (True, False, False, False, True, [])."""
     ran = []
 
     class _ArgsProperty(KeyboardInterrupt):
@@ -417,26 +428,50 @@ def _interrupt_filter_outcomes(sent):
     outcomes = [_is_interrupt(KeyboardInterrupt(sent), sent), _is_interrupt(_ArgsProperty(), sent),
                 _is_interrupt(KeyboardInterrupt(_StrEq(sent)), sent),
                 _is_interrupt(KeyboardInterrupt(_AnyEq()), sent)]
-    import threading
-    probed = []
-
-    def _probe():
-        # Runs in a worker thread: an operator's Ctrl-C is raised only in the main thread (in the join below,
-        # from which it propagates), so every KeyboardInterrupt caught here is this probe's own.
-        try:
-            try:
-                raise _ArgsProperty()
-            except KeyboardInterrupt as exc:
-                _propagate_interrupt(exc)
-        except KeyboardInterrupt as exc:
-            probed.append(type(exc) is KeyboardInterrupt and exc.args == () and exc.__suppress_context__)
-        else:
-            probed.append("returned")
-    worker = threading.Thread(target=_probe, daemon=True)
-    worker.start()
-    worker.join()
-    outcomes.append(probed[0] if probed else "raised")
+    own = KeyboardInterrupt(sent)
+    fresh = _interrupt_to_raise(_ArgsProperty())
+    outcomes.append(_interrupt_to_raise(own) is own and type(fresh) is KeyboardInterrupt and fresh.args == ()
+                    and fresh.__suppress_context__ is True)
     return tuple(outcomes) + (ran,)
+
+
+# Run in a child by _real_sigint_propagates: load the file named first by path, make its first
+# _interrupt_to_raise call deliver a real SIGINT to the child (as an operator's Ctrl-C does; a call outside the
+# main thread exits 3 instead), then run _interrupt_filter_outcomes. The child must end by that interrupt.
+_REAL_SIGINT_PROBE = """import importlib.util, os, signal, sys, threading
+signal.signal(signal.SIGINT, signal.default_int_handler)
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+spec = importlib.util.spec_from_file_location("_real_sigint_probe_target", sys.argv[1])
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+real = gate._interrupt_to_raise
+def hooked(exc):
+    gate._interrupt_to_raise = real
+    if threading.current_thread() is not threading.main_thread():
+        sys.exit(3)
+    signal.raise_signal(signal.SIGINT)
+    return real(exc)
+gate._interrupt_to_raise = hooked
+gate._interrupt_filter_outcomes(sys.argv[2])
+print("returned")
+"""
+
+
+def _real_sigint_propagates(sent):
+    """True when a real SIGINT delivered inside _interrupt_filter_outcomes, in a child process, ends that child
+    as an uncaught KeyboardInterrupt. Red if anything there catches a KeyboardInterrupt in the main thread (the
+    child then returns) or classifies in a worker thread (the hook exits 3 there). This process catches no
+    KeyboardInterrupt here: an operator's Ctrl-C reaches subprocess.run, which re-raises it."""
+    import signal
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="interrupt-filter-sigint-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_REAL_SIGINT_PROBE, encoding="utf-8")
+        child = subprocess.run([sys.executable, "-I", "-B", str(probe), str(Path(__file__).resolve()), sent],
+                               capture_output=True, text=True, timeout=120)
+    return (child.returncode in (-signal.SIGINT, 130) and "returned" not in child.stdout
+            and "KeyboardInterrupt" in child.stderr)
 
 
 def _loaded_exit_outcome(source, body, f):
@@ -487,6 +522,9 @@ def red_on_revert_loaded_exit(source, f):
     check(_interrupt_filter_outcomes(LOADED_EXIT_INTERRUPT) == (True, False, False, False, True, []),
           "revert/interrupt-filters-run-no-instance-code")
     print("PASS revert/interrupt-filters-run-no-instance-code")
+    # A real SIGINT inside the interrupt filters ends the run as an interrupt. Red if a probe there catches it.
+    check(_real_sigint_propagates(LOADED_EXIT_INTERRUPT), "revert/interrupt-filter-real-sigint-propagates")
+    print("PASS revert/interrupt-filter-real-sigint-propagates")
 
 
 # Appended to a reverted source: every public function the reverted module defines is replaced by one that
@@ -537,13 +575,18 @@ def red_on_revert_hostile_str(source, f):
     names = globals()
     real_fixtures = names["fixtures"]
     for label, base, raised in HOSTILE_STR_CASES:
+        reached = []
+
         def _hostile_fixtures(hostile=source + "\n" + HOSTILE_STR_BODY.format(base, raised), label=label):
+            reached.append(True)
             red_on_revert(hostile, f)
             raise AssertionError("revert/hostile-str/" + label + "/not-raised")
         names["fixtures"] = _hostile_fixtures
         try:
+            # fixtures() is main's first call inside its handler and never returns here, so no flag is read
+            # before the escape reaches the handler; --vectors-only keeps main in its narrowest mode regardless.
             with contextlib.redirect_stderr(io.StringIO()):
-                got = main([])
+                got = main(["--vectors-only"])
         except KeyboardInterrupt as exc:
             if type(exc) is KeyboardInterrupt:
                 raise
@@ -552,6 +595,7 @@ def red_on_revert_hostile_str(source, f):
             got = type(escaped)
         finally:
             names["fixtures"] = real_fixtures
+        check(reached == [True], "revert/hostile-str/" + label + "/fixtures-not-reached")
         check(type(got) is int and got == 2, "revert/hostile-str/" + label)
         print("PASS revert/hostile-str/" + label)
 

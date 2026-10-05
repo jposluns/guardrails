@@ -4897,7 +4897,7 @@ def _backstop(run, owner="_opf_emit"):
     and an aggregate running this self-test, rather than being absorbed as this unit's exit 2.
     Residuals, not covered: os._exit, atexit handlers, signal handlers, threads the loaded code starts,
     interpreter shutdown, mutation of sys or of this module's globals by the loaded code, deliberately
-    hostile objects (for example a metaclass or an exception class built to defeat this guard), and a
+    hostile objects (the one residual stated in the _opf_views class disclosure), and a
     process exit raised while this module's own top-level imports run, before this guard is entered."""
     try:
         return run()
