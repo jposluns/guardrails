@@ -284,7 +284,10 @@ def _self_test_loaded_exit():
     """A loaded validator that ends the process, at load or in a later call the gate makes into it, yields
     this gate's CANNOT-EVALUATE exit 2 through _validator_missing (the function _checks calls), never its
     own status. Any exception escaping is caught here and recorded, so the vector is red if the guard is
-    reverted (_PROCESS_ENDING emptied) or removed from _validator_missing."""
+    reverted (_PROCESS_ENDING emptied) or removed from _validator_missing. The CANNOT-EVALUATE line each
+    case is expected to write is captured and required, never printed, so a passing self-test shows none."""
+    import contextlib
+    import io
     import tempfile
     repr_exits = "class R:\n    def __repr__(self):\n        raise SystemExit(0)\n    __str__ = __repr__\n"
     cases = (
@@ -308,11 +311,15 @@ def _self_test_loaded_exit():
         for index, (label, body) in enumerate(cases):
             path = Path(tmp) / "loaded_exit_{}.py".format(index)
             path.write_text(body, encoding="utf-8")
+            captured = io.StringIO()
             try:
-                _validator_missing(str(path), ("a.md",))
+                with contextlib.redirect_stderr(captured):
+                    _validator_missing(str(path), ("a.md",))
             except BaseException as exc:  # noqa: BLE001  any escape is recorded, never the test's own end
                 if not (type(exc) is SystemExit and type(exc.code) is int and exc.code == 2):
                     failures.append("{}: expected exit 2, got {}".format(label, _ending_kind(exc)))
+                elif not captured.getvalue().startswith("CANNOT-EVALUATE: "):
+                    failures.append("{}: exit 2 without the CANNOT-EVALUATE line".format(label))
             else:
                 failures.append("{}: the loaded code's exit was not reached".format(label))
     _expect(not failures, "loaded-exit vectors: " + "; ".join(failures))
