@@ -158,6 +158,7 @@ import hashlib
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import threading
@@ -792,12 +793,15 @@ def journal_state(root_fd, journal_root):
         return None, []
     if not stat.S_ISDIR(st.st_mode):
         raise AdoptApplyError("the adoption journal {} is not a directory; fail-closed".format(JOURNAL_REL))
+    held = []   # jr_fd, then every held transaction directory descriptor: ONE list, ONE close-out
     try:
-        jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
-    except (_journal.JournalError, OSError) as exc:
-        raise AdoptApplyError("cannot open the adoption journal {} ({}); "
-                              "fail-closed".format(JOURNAL_REL, exc))
-    try:
+        with _interrupts_deferred():
+            try:
+                held.append(_journal.open_journal_root_fd(root_fd, JOURNAL_REL))
+            except (_journal.JournalError, OSError) as exc:
+                raise AdoptApplyError("cannot open the adoption journal {} ({}); "
+                                      "fail-closed".format(JOURNAL_REL, exc))
+        jr_fd = held[0]
         try:
             owner = _journal.read_lock_owner_at(jr_fd)
             # hold=True (round 4): every transaction directory descriptor is opened AT enumeration and
@@ -805,18 +809,20 @@ def journal_state(root_fd, journal_root):
             # identity, so a transaction directory swapped onto its name after the enumeration (an
             # interrupted transaction renamed aside and replaced by an empty decoy) is still classified
             # from the enumerated directory's own frames, never reopened by name and read as clean.
-            txns = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True, hold=True)
-            try:
-                opened = sorted(t.name for t, tfd in txns
-                                if _journal.classify_state(jr_fd, t, txn_fd=tfd) == "open")
-            finally:
-                for _t, tfd in txns:
-                    _journal._close_fd_quietly(tfd)
+            with _interrupts_deferred():
+                txns = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True, hold=True)
+                held.extend(tfd for _t, tfd in txns)
+            opened = sorted(t.name for t, tfd in txns
+                            if _journal.classify_state(jr_fd, t, txn_fd=tfd) == "open")
         except (_journal.JournalError, OSError) as exc:
             raise AdoptApplyError("the adoption journal {} cannot be read ({}); "
                                   "fail-closed".format(JOURNAL_REL, exc))
     finally:
-        _journal._close_fd_quietly(jr_fd)
+        try:
+            _close_held(held)   # the held transaction directories (deepest appended last), then jr_fd
+        except BaseException:
+            _close_held(held)   # interrupted before its deferral was in force: close the rest, then raise
+            raise
     return owner, opened
 
 
@@ -907,17 +913,23 @@ def _default_store_present_without_manifest(product_root):
     `.working/` present with no machine store ("present": a foreign store-shaped tree awaiting
     dispositions). "multiple" (ambiguous), "one" (a store raced in), "absent" (the resolver's
     cannot-evaluate came from something else), and every discovery error read False (fail-closed)."""
+    held = []
     try:
-        root_fd = _open_product_root(product_root)
-    except AdoptApplyError:
-        return False
-    try:
+        with _interrupts_deferred():
+            try:
+                held.append(_open_product_root(product_root))
+            except AdoptApplyError:
+                return False
         try:
-            status, _machine, _detail = store.discover_machine_store(root_fd, Path(product_root))
+            status, _machine, _detail = store.discover_machine_store(held[0], Path(product_root))
         except (store.StoreError, OSError):
             return False
     finally:
-        store._close_fd_exc_safe(root_fd)
+        try:
+            _close_held(held)
+        except BaseException:
+            _close_held(held)   # interrupted before its deferral was in force: close, then raise
+            raise
     return status == "present"
 
 
@@ -1030,14 +1042,17 @@ def _remove_journal_dirs(root_fd, created):
     unconfirmed = []
     gone = []
     for rel in reversed(created):
+        parent = []     # owns the parent descriptor from inside the deferral; the finally empties it
         try:
-            pfd, name = _journal._open_parent(root_fd, rel)
-        except FileNotFoundError:
-            continue    # never created: a preparation that failed part-way
-        except (_journal.JournalError, OSError) as exc:
-            left.append((rel, "not reached: {}".format(exc)))
-            continue
-        try:
+            with _interrupts_deferred():
+                try:
+                    pfd, name = _journal._open_parent(root_fd, rel)
+                except FileNotFoundError:
+                    continue    # never created: a preparation that failed part-way
+                except (_journal.JournalError, OSError) as exc:
+                    left.append((rel, "not reached: {}".format(exc)))
+                    continue
+                parent.append(pfd)
             try:
                 os.rmdir(name, dir_fd=pfd)
             except FileNotFoundError:
@@ -1052,7 +1067,11 @@ def _remove_journal_dirs(root_fd, created):
             except OSError as exc:
                 unconfirmed.append("{} (parent fsync failed: {})".format(rel, exc))
         finally:
-            _journal._close_fd_quietly(pfd)
+            try:
+                _close_held(parent)
+            except BaseException:
+                _close_held(parent)     # interrupted before its deferral was in force: re-run
+                raise
     return (["{} ({})".format(rel, why) for rel, why in left
              if not any(rel.startswith(g + "/") for g in gone)], unconfirmed)
 
@@ -1071,6 +1090,39 @@ def _entry_kind(st):
     return "symlink" if stat.S_ISLNK(st.st_mode) else "special entry"
 
 
+
+_DEFERRABLE_SIGNALS = frozenset(getattr(signal, name) for name in ("SIGINT", "SIGTERM")
+                                if hasattr(signal, name))
+_SIGMASK = getattr(signal, "pthread_sigmask", None)
+
+
+class _interrupts_deferred:
+    """Defers asynchronous interrupt delivery (SIGINT, SIGTERM) across ONE descriptor
+    acquisition-to-handoff or ONE close-out: __enter__ blocks the two signals (signal.pthread_sigmask)
+    and __exit__ restores exactly the mask it saw, on every path (return, break and raise alike), so a
+    signal that arrives inside is delivered AT that restore (CPython checks for pending signals as
+    pthread_sigmask returns), a point where every descriptor the block touched is either closed or owned
+    by a live list a pending close-out empties. Nesting-safe: each level restores the mask it saved, so
+    an inner exit never unblocks an outer deferral. DISCLOSED LIMITS: where pthread_sigmask does not
+    exist (Windows; both supported platforms have it) this defers nothing, and what remains there is the
+    pre-deferral exposure: a real signal between a C call's return and the binding of the descriptor it
+    returned, or at the entry of a close-out, can lose descriptors. Off the main thread it also defers
+    nothing, which loses nothing: CPython delivers signals only to the main thread. A SYNCHRONOUS raise
+    (sys.settrace injection) is never a signal and is deferred by nothing; the pop-before-close and
+    append-is-handoff ownership discipline alone covers it."""
+
+    def __enter__(self):
+        self._prior = None
+        if _SIGMASK is not None and threading.current_thread() is threading.main_thread():
+            self._prior = _SIGMASK(signal.SIG_BLOCK, _DEFERRABLE_SIGNALS)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._prior is not None:
+            _SIGMASK(signal.SIG_SETMASK, self._prior)
+        return False
+
+
 def _journal_listing(root_fd, keep=None):
     """A no-follow listing of the adoption journal tree beneath the held product-root descriptor: each
     JOURNAL_REL component, the direct entries of each ancestor, and every entry beneath the journal root,
@@ -1085,7 +1137,11 @@ def _journal_listing(root_fd, keep=None):
     unchanged; the caller re-reads each held identity with fstat at that comparison and closes every kept
     descriptor. Each is appended to `keep` the moment it is bound (one list operation, no later transfer
     step), so from then on the caller alone closes it, on every path, an interrupt included; one opened but
-    interrupted before that append is closed here. With no `keep` they are closed here."""
+    interrupted before that append is adopted by the close-out (_listing_close): with a `keep` it joins
+    the kept descriptors (keyed ""), which the caller closes, and with no `keep` every descriptor is
+    closed here. Each acquisition-to-handoff and the close-out run under deferred interrupts
+    (_interrupts_deferred), and the close-out is re-run once when an interrupt lands on the one boundary
+    before its deferral is in force, so one asynchronous interrupt leaks nothing and doubles no close."""
     found = {}
 
     def opened_as(rel, st, fd):
@@ -1118,16 +1174,22 @@ def _journal_listing(root_fd, keep=None):
                 continue
             found[sub] = (_entry_kind(st), st.st_dev, st.st_ino)
             if deep and stat.S_ISDIR(st.st_mode):
+                child = []      # owns the child descriptor from inside the deferral; the finally empties it
                 try:
-                    cfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
-                except OSError as exc:
-                    found[sub + "/"] = ("unlisted", str(exc))
-                    continue
-                try:
-                    if opened_as(sub, st, cfd):
-                        walk(cfd, sub, True)
+                    with _interrupts_deferred():
+                        try:
+                            child.append(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                                 dir_fd=dfd))
+                        except OSError as exc:
+                            found[sub + "/"] = ("unlisted", str(exc))
+                    if child and opened_as(sub, st, child[0]):
+                        walk(child[0], sub, True)
                 finally:
-                    _journal._close_fd_quietly(cfd)
+                    try:
+                        _close_held(child)
+                    except BaseException:
+                        _close_held(child)      # interrupted before its deferral was in force: re-run
+                        raise
 
     parts = JOURNAL_REL.split("/")
     opened = keep if keep is not None else []   # handed over as each is bound: the caller's list owns it
@@ -1145,22 +1207,43 @@ def _journal_listing(root_fd, keep=None):
             found[rel] = (_entry_kind(st), st.st_dev, st.st_ino)
             if not stat.S_ISDIR(st.st_mode):
                 break
-            try:
-                cur = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
-            except OSError as exc:
-                found[rel + "/"] = ("unlisted", str(exc))
-                break
-            opened.append((rel, cur))
+            with _interrupts_deferred():
+                try:
+                    cur = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
+                except OSError as exc:
+                    found[rel + "/"] = ("unlisted", str(exc))
+                    break
+                opened.append((rel, cur))
             if not opened_as(rel, st, cur):
                 break
             walk(cur, rel, i == len(parts) - 1)
     finally:
-        if keep is None:
-            for _rel, fd in reversed(opened):
-                _journal._close_fd_quietly(fd)
-        if cur != root_fd and cur not in [fd for _rel, fd in opened]:
-            _journal._close_fd_quietly(cur)     # bound, but interrupted before its append: closed here, once
+        stray = [cur]   # a plain store, no call or jump: no asynchronous delivery can land on this line
+        try:
+            _listing_close(opened, keep, stray, root_fd)
+        except BaseException:
+            _listing_close(opened, keep, stray, root_fd)    # interrupted before its deferral: re-run
+            raise
     return found
+
+
+def _listing_close(opened, keep, stray, root_fd):
+    """_journal_listing's close-out, under deferred interrupts and idempotent (every list operation
+    consumes what it closes), so its caller re-runs it when an interrupt lands on the one boundary before
+    the deferral is in force: `stray` holds the last component open, popped HERE on every path, and when
+    it is bound but was interrupted before its append (a synchronous raise; a real signal is deferred
+    across that handoff) it is adopted into `opened` first, so even its close is list-owned and runs
+    once, never again on a re-run; then with no `keep` every descriptor `opened` still holds is popped
+    and closed, deepest first. With a `keep`, the adopted stray is left in it for the caller, which
+    closes every kept descriptor."""
+    with _interrupts_deferred():
+        if stray:
+            cur = stray.pop()
+            if cur != root_fd and cur not in [fd for _rel, fd in opened]:
+                opened.append(("", cur))
+        if keep is None:
+            while opened:
+                _journal._close_fd_quietly(opened.pop()[1])
 
 
 def _journal_components():
@@ -1308,32 +1391,54 @@ def _lock_identity(jr_fd, keep=None):
     only after that comparison. With no `keep`, and whenever what is present cannot be read, it is closed
     here. Ownership passes with the append itself (one list operation): the finally closes the descriptor
     ONLY while it is not in `keep`, so at every point exactly one party closes it, once. The open sits
-    inside the protected block, so no instruction between its binding and that block goes uncovered."""
+    inside the protected block, so no instruction between its binding and that block goes uncovered, and
+    the whole read runs under deferred interrupts (_interrupts_deferred): a signal that arrives inside it
+    is delivered at the exit, where the descriptor is already closed or owned by `keep`, so the C-return
+    boundary of the open and the finally's own close are covered against real signals too."""
     lfd = None
-    try:
+    with _interrupts_deferred():
         try:
-            lfd = os.open("lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=jr_fd)
-        except FileNotFoundError:
-            return None
-        st = os.fstat(lfd)
-        if not stat.S_ISREG(st.st_mode):
-            raise _journal.JournalError("journal lock is not a regular file (fail-closed)")
-        identity = st.st_dev, st.st_ino, _journal._read_fd(lfd, cap=_journal._MAX_JOURNAL_READ_BYTES)
-        if keep is not None:
-            keep.append(lfd)
-        return identity
-    finally:
-        if lfd is not None and (keep is None or lfd not in keep):
-            _journal._close_fd_quietly(lfd)
+            try:
+                lfd = os.open("lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=jr_fd)
+            except FileNotFoundError:
+                return None
+            st = os.fstat(lfd)
+            if not stat.S_ISREG(st.st_mode):
+                raise _journal.JournalError("journal lock is not a regular file (fail-closed)")
+            identity = st.st_dev, st.st_ino, _journal._read_fd(lfd, cap=_journal._MAX_JOURNAL_READ_BYTES)
+            if keep is not None:
+                keep.append(lfd)
+            return identity
+        finally:
+            if lfd is not None and (keep is None or lfd not in keep):
+                _journal._close_fd_quietly(lfd)
 
 
 def _close_held(fds):
-    """Close every descriptor a caller HOLDS in the list `fds`, emptying it. Each is taken out of the list
-    BEFORE its one close, so a later pass over the same list (an outer finally) never closes a number
-    again: an interrupt between the two can at worst leave that one descriptor unclosed, never closed twice
-    (a second close can shut another thread's reused number, man 2 close)."""
-    while fds:
-        _journal._close_fd_quietly(fds.pop())
+    """Close every descriptor a caller HOLDS in the list `fds` (each a bare fd or a (rel, fd) pair),
+    emptying it, under deferred interrupts (_interrupts_deferred). Each is taken out of the list BEFORE
+    its one close, so a later pass over the same list (an outer finally, or this function's own retry)
+    never closes a number again (a second close can shut another thread's reused number, man 2 close).
+    An interrupt that lands on a boundary before the deferral is in force (this frame's entry, or a
+    synchronous raise between the pop and the close) is caught, the remaining descriptors are closed on
+    the next deferred pass, and the interrupt then propagates; one deferred to the exit is delivered
+    there, after the list is empty. A caller whose `fds` no pending cleanup can still reach re-runs this
+    on BaseException (the one boundary left open is this frame's own entry)."""
+    interrupt = None
+    while True:
+        try:
+            with _interrupts_deferred():
+                while fds:
+                    item = fds.pop()
+                    _journal._close_fd_quietly(item[1] if isinstance(item, tuple) else item)
+        except BaseException as exc:
+            if fds:
+                interrupt = exc
+                continue
+            raise
+        if interrupt is not None:
+            raise interrupt
+        return
 
 
 def _release_outcome(jr_fd, journal_root, mine):
@@ -1461,7 +1566,11 @@ def _failed_lock_state(jr_fd, journal_root, error):
         return state, ("this run's own journal lock WAS created and STAYS ({}): the next run refuses on it, and "
                        "reconcile() breaks it once this process has exited".format(detail)), interrupt
     finally:
-        _close_held(held)
+        try:
+            _close_held(held)
+        except BaseException:
+            _close_held(held)   # interrupted before its deferral was in force: close the rest, then raise
+            raise
 
 
 def _lock_said(lock_state, lock_note):
@@ -1493,12 +1602,21 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     not have made durable, and what its lock release left, in place of the claim. The first listing's
     descriptors on the journal path components are HELD until that closing comparison (as jr_fd is), the
     components' before-identities re-read from the held descriptors with fstat, and the descriptor on the
-    lock this run's acquire wrote is HELD until the release's read-back, so a filesystem that reuses freed
+    lock this run's acquire wrote is HELD through the release's read-back and, on every outcome but a
+    confirmed-gone lock, through that closing comparison too, so a filesystem that reuses freed
     inode numbers (ext4) can never hand a removed component's inode to a recreation, or the released lock's
     inode to a peer's lock, and make the comparison read it as unchanged or as this run's own. The lock's
-    descriptor is closed right after that read-back, BEFORE the cleanup and the closing listing (an NFS
+    descriptor is closed right after that read-back ONLY when the read-back, taken while the descriptor
+    still pinned the inode, saw this run's lock gone (released, or released but maybe not durably),
+    BEFORE the cleanup and the closing listing (an NFS
     client keeps a file unlinked while open as a .nfsXXXX entry until its last close), and the closing
-    listing attributes a lock from the recorded release outcome. A leftover only the
+    listing then attributes any lock present from that recorded outcome; on every other outcome, an
+    interrupted read-back included, the descriptor stays held, so the closing comparison never reads a
+    peer's lock on a reused inode as this run's own. Asynchronous interrupt delivery (SIGINT, SIGTERM) is
+    DEFERRED (_interrupts_deferred, with its disclosed platform limits) across every descriptor
+    acquisition-to-handoff and every close-out here and in the helpers above, and each close-out is
+    re-run once when an interrupt lands on the one boundary before its deferral is in force, so one
+    asynchronous interrupt anywhere leaks no descriptor and doubles no close. A leftover only the
     reconcile-first discipline clears is left to it rather than to hand removal, and one no sanctioned
     path clears is named as such. The lock release is read back by identity (the inode and content this
     run's acquire wrote, _lock_identity), never by process identity; at the end of a committed transaction
@@ -1520,17 +1638,20 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     txn = _txn_name(run_id, phase)
     if not callable(compose):
         raise AdoptApplyError(_refusal_text("compose must be a callable that fills the transaction's ApplyOps"))
-    root_fd = _open_product_root(product_root)
     journal_root = _journal_root(product_root)
-    jr_fd = jr_id = mine = before = interrupted = None
+    root_fd = jr_fd = jr_id = mine = before = interrupted = None
     maybe_mine = False
     created = []
     held_components = []    # the first listing's component descriptors, HELD until the closing comparison
     mine_held = []          # the lock identity's descriptor, HELD until after the closing comparison
+    anchors = []            # the product-root, then the journal descriptor: closed LAST, by the teardown
     failure = None
     lock_state, lock_note = "untaken", None
     held = retain = done = entered = False
     try:
+        with _interrupts_deferred():    # owned by `anchors` before a signal can be delivered
+            anchors.append(_open_product_root(product_root))
+            root_fd = anchors[-1]
         try:
             _journal.require_containment()
         except _journal.JournalError as exc:
@@ -1551,7 +1672,9 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         created = _absent_journal_dirs(root_fd)
         try:
             _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
-            jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+            with _interrupts_deferred():    # owned by `anchors` before a signal can be delivered
+                anchors.append(_journal.open_journal_root_fd(root_fd, JOURNAL_REL))
+                jr_fd = anchors[-1]
             jr_st = os.fstat(jr_fd)
             jr_id = (jr_st.st_dev, jr_st.st_ino)    # the journal directory this run writes to
         except (_journal.JournalError, OSError) as exc:
@@ -1626,20 +1749,30 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 try:
                     lock_state, lock_note, interrupted = _release_note(jr_fd, journal_root, mine)
                 finally:
-                    # closed right after the read-back, BEFORE the cleanup and the closing listing: an NFS
+                    # closed right after the read-back ONLY when that read-back, taken while this
+                    # descriptor still pinned the lock's inode, saw this run's lock gone (released, or
+                    # released but maybe not durably), BEFORE the cleanup and the closing listing: an NFS
                     # client renames a file unlinked while still open to .nfsXXXX until its last close, an
-                    # entry the closing listing would misreport and one that keeps rmdir from the journal
-                    _close_held(mine_held)
+                    # entry the closing listing would misreport and one that keeps rmdir from the journal.
+                    # On EVERY other outcome (stays, altered, unidentified, unreadable, or a read-back an
+                    # interrupt escaped, which left lock_state "held") the lock may still exist, so this
+                    # descriptor stays HELD through the closing comparison: while it is held no filesystem
+                    # can hand the lock's freed inode to a peer's lock and make that comparison read the
+                    # peer's lock as this run's own. An interrupted read-back behind a release that did
+                    # unlink can then hold a .nfsXXXX entry alive into the closing listing, which the
+                    # refusal names as a leftover: disclosed, never a misattribution.
+                    if lock_state in ("released", "unconfirmed"):
+                        _close_held(mine_held)
                 if interrupted is not None:
                     raise interrupted
     except BaseException as exc:
         failure = exc
         raise
     finally:
-        left, unconfirmed = [], []
-        observed = said = None
-        ours = True
         try:
+            observed = said = None      # inside the teardown-protected try from its first statement on
+            ours = True
+            left, unconfirmed = [], []
             if created and not (done or retain):
                 left, unconfirmed = _remove_journal_dirs(root_fd, created)
             if before is not None and not done:
@@ -1670,20 +1803,32 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                         before[rel] = ("unlisted", str(exc))
                     else:
                         before[rel] = (_entry_kind(cst), cst.st_dev, cst.st_ino)
-                # the lock is attributed from the recorded release outcome: its descriptor is closed by now,
-                # and a read-back taken while it was held that found no lock of this run's rules one out
+                # the lock is attributed from the recorded release outcome: on a confirmed-gone lock
+                # (lock_gone) its descriptor is closed by now, and the read-back taken while it was held
+                # rules this run's own lock out; on EVERY other outcome that descriptor is still HELD
+                # here, so no freed-inode reuse can make this comparison read a peer's lock as this run's
                 delta, ours = _observed(before, after, created, txn, mine, maybe_mine,
                                         lock_state in ("released", "unconfirmed"))
                 unbound = _journal_unbound(jr_fd, jr_id, after)
                 ours = ours or bool(said) or unbound is not None
                 observed = said + ([unbound] if unbound else []) + delta
         finally:
-            for _rel, cfd in reversed(held_components):   # held through the closing comparison, as jr_fd is
-                _journal._close_fd_quietly(cfd)
-            _close_held(mine_held)  # any still held: a retained lock, or no release reached
-            if jr_fd is not None:   # held through the closing observation, so its identity stays this run's
-                _journal._close_fd_quietly(jr_fd)
-            store._close_fd_exc_safe(root_fd)
+            # every descriptor the run still holds is owned by one of these three LIVE lists:
+            # held_components and (on any outcome but a confirmed-gone lock) mine_held, both HELD through
+            # the closing comparison, and anchors, whose jr_fd is held through the closing observation so
+            # its identity stays this run's, then root_fd. Each list is emptied pop-before-close under
+            # deferred interrupts; the except re-runs the closes when an interrupt lands on the one
+            # boundary before a deferral is in force, then re-raises it, so one asynchronous interrupt
+            # abandons no descriptor and doubles no close.
+            try:
+                _close_held(held_components)
+                _close_held(mine_held)      # any still held: a stay, a retained lock, or no release reached
+                _close_held(anchors)
+            except BaseException:
+                _close_held(held_components)
+                _close_held(mine_held)
+                _close_held(anchors)
+                raise
         if failure is not None and (not isinstance(failure, Exception) or failure is interrupted):
             # an interrupt still propagates as itself, with the transaction state and the outcome named
             if failure is interrupted or observed:
@@ -3516,9 +3661,14 @@ def _self_test_checks():
     # reused descriptor; the leak census is /proc/self/fd. The lock leg runs the identity read of a held
     # lock, the failure leg the one inside _failed_lock_state (its created lock stays, as the interrupt
     # note says, and is removed between runs), the listing leg the run's first listing over a journal of
-    # three components. Scope: the one boundary between a C call's return and the binding of the
-    # descriptor it returned (no Python code can protect it), and an interrupt inside a cleanup block of
-    # a caller (a finally that is already closing), are outside what any Python handoff can guarantee
+    # three components. Scope: the injection here is a SYNCHRONOUS raise, which no signal mask defers,
+    # so these legs prove the pop-before-close and append-is-handoff ownership discipline alone; the one
+    # boundary between a C call's return and the binding of the descriptor it returned, and an interrupt
+    # inside a close-out of a caller (a finally that is already closing), are outside what that
+    # discipline alone can guarantee, and the former is skipped here. A REAL signal is further deferred
+    # across both (_interrupts_deferred, each close-out re-run once when one lands before its deferral is
+    # in force), on the main thread wherever pthread_sigmask exists; where it does not, those two
+    # boundaries stay open, as _interrupts_deferred discloses
     # (red against an ownership flag set after the append: two closes; and against a transfer inside the
     # finally: a leak).
     handoff_legs = (("descriptor-handoff-interrupt-lock-identity", _lock_identity, False),
@@ -3596,6 +3746,13 @@ def _self_test_checks():
             outcome = None
             leaked = set()
             prior_trace = sys.gettrace()
+            # the process signal mask is saved and restored around each run, as the SIGINT disposition is
+            # around the real-signal vectors: a synchronous raise at one of the few opcodes between
+            # _interrupts_deferred's enter and its protected range aborts the frame without its exit, a
+            # point a REAL signal can never be delivered at (the deferral holds it pending there), so the
+            # restore is this harness's hygiene, not something production relies on
+            prior_mask = (signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                          if hasattr(signal, "pthread_sigmask") else None)
             try:
                 baseline = _fds_open()
                 with mock.patch.object(os, "close", ledger_close):
@@ -3610,6 +3767,8 @@ def _self_test_checks():
                         sys.settrace(prior_trace)
                 leaked = _fds_open() - baseline - guarded
             finally:
+                if prior_mask is not None:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, prior_mask)
                 for fd in sorted(guarded):
                     _journal._close_fd_quietly(fd)
                 _journal._close_fd_quietly(guard_r)
@@ -3712,6 +3871,143 @@ def _self_test_checks():
                       and "injected compose refusal; " + _NOTHING_WRITTEN in (err or "") and ".nfs" not in (err or ""),
                       observed="refusal={!r} silly-renamed={!r} still renamed={!r} left={!r}".format(
                           err, renamed, silly, left))
+    # 6a'''b5: the inode-reuse vector for a release that did NOT release (the "stays" outcome): the
+    # release leaves this run's lock in place, a peer then removes that lock and acquires its own between
+    # the read-back and the closing listing, and the stat family is remapped under the ext4 reuse rule
+    # above. On a non-released outcome the lock identity's descriptor stays HELD through the closing
+    # comparison, so the reuse never arms and the closing listing names the peer's lock as another run's
+    # (red against a descriptor closed right after the read-back on every outcome: the peer's lock lands
+    # on the freed inode and the closing listing reads it as this run's own journal lock).
+    if not census:
+        skipped.append(("release-stays-peer-reused-inode", no_census))
+    else:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            saved_umask = os.umask(0o022)
+            reuse = {}
+            seen = {}
+            try:
+                root, files = fixture(temp)
+                os.makedirs(root / JOURNAL_REL)
+                me = sys.modules[__name__]
+                journal_root_here = _journal_root(root)
+                real_listing = _journal_listing
+                real_acquire_now = _journal.acquire_lock
+
+                def release_leaves_lock(journal_root):
+                    seen["release ran"] = True      # left in place: the read-back records "stays"
+
+                def peer_before_closing_listing(root_fd, keep=None):
+                    if keep is None and seen.pop("release ran", None):
+                        lock = str(journal_root_here / "lock")
+                        own_st = _real_lstat(lock)
+                        own = (own_st.st_dev, own_st.st_ino)
+                        os.unlink(lock)
+                        real_acquire_now(journal_root_here, "opf-adopt-selftest-peer")
+                        peer_st = _real_lstat(lock)
+                        seen["own"] = own
+                        seen["peer"] = (peer_st.st_dev, peer_st.st_ino)
+                        seen["own freed"] = _inode_free(own)
+                        if seen["own freed"]:
+                            reuse[(peer_st.st_dev, peer_st.st_ino)] = own
+                    return real_listing(root_fd, keep=keep)
+
+                def compose_refused_stays(ops):
+                    raise AdoptApplyError("an injected compose refusal")
+                stat_w, lstat_w, fstat_w = (_reuse_remapped(_real_stat, reuse),
+                                            _reuse_remapped(_real_lstat, reuse),
+                                            _reuse_remapped(_real_fstat, reuse))
+                with mock.patch.object(_journal, "release_lock", release_leaves_lock), \
+                        mock.patch.object(me, "_journal_listing", peer_before_closing_listing), \
+                        mock.patch.object(os, "stat", stat_w), \
+                        mock.patch.object(os, "lstat", lstat_w), \
+                        mock.patch.object(os, "fstat", fstat_w), \
+                        mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {stat_w}), \
+                        mock.patch.object(os, "supports_follow_symlinks",
+                                          os.supports_follow_symlinks | {stat_w, lstat_w}):
+                    err = refusal(run_adopt_transaction, root, rid, compose_refused_stays)
+                check("release-stays-peer-reused-inode",
+                      "another run's journal lock, not this run's" in (err or "")
+                      and ", this run's journal lock" not in (err or "")
+                      and "STAYS" in (err or "")
+                      and seen.get("own freed") is False and not reuse,
+                      observed="refusal={!r} seen={!r}".format(err, seen))
+            finally:
+                os.umask(saved_umask)
+    # 6a'''b6: the inode-reuse vector for an INTERRUPTED release read-back: the release really releases,
+    # the read-back (_lock_identity with no keep) is interrupted before it records an outcome, a peer
+    # acquires before the closing listing, and the stat family is remapped under the ext4 reuse rule
+    # above. With no recorded outcome the lock identity's descriptor stays HELD through the closing
+    # comparison, so the reuse never arms and the interrupt's note names the peer's lock as another run's
+    # (red against a descriptor closed whatever the release left: the peer's lock lands on the freed inode
+    # and the note reads it as this run's own journal lock).
+    if not census:
+        skipped.append(("release-readback-interrupted-peer-reused-inode", no_census))
+    else:
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            saved_umask = os.umask(0o022)
+            reuse = {}
+            seen = {}
+            note = None
+            try:
+                root, files = fixture(temp)
+                os.makedirs(root / JOURNAL_REL)
+                me = sys.modules[__name__]
+                journal_root_here = _journal_root(root)
+                real_listing = _journal_listing
+                real_identity = _lock_identity
+                real_release = _journal.release_lock
+                real_acquire_now = _journal.acquire_lock
+
+                def release_for_real_then_arm(journal_root):
+                    lock = str(journal_root_here / "lock")
+                    own_st = _real_lstat(lock)
+                    seen["own"] = (own_st.st_dev, own_st.st_ino)
+                    real_release(journal_root)
+                    seen["release ran"] = True
+
+                def interrupted_readback(jr_fd, keep=None):
+                    if keep is None and seen.get("release ran"):
+                        raise KeyboardInterrupt("an injected interrupt inside the release read-back")
+                    return real_identity(jr_fd, keep=keep)
+
+                def peer_before_closing_listing2(root_fd, keep=None):
+                    if keep is None and seen.pop("release ran", None):
+                        real_acquire_now(journal_root_here, "opf-adopt-selftest-peer")
+                        peer_st = _real_lstat(str(journal_root_here / "lock"))
+                        seen["peer"] = (peer_st.st_dev, peer_st.st_ino)
+                        seen["own freed"] = _inode_free(seen["own"])
+                        if seen["own freed"]:
+                            reuse[(peer_st.st_dev, peer_st.st_ino)] = seen["own"]
+                    return real_listing(root_fd, keep=keep)
+
+                def compose_refused_readback(ops):
+                    raise AdoptApplyError("an injected compose refusal")
+                stat_w, lstat_w, fstat_w = (_reuse_remapped(_real_stat, reuse),
+                                            _reuse_remapped(_real_lstat, reuse),
+                                            _reuse_remapped(_real_fstat, reuse))
+                with mock.patch.object(_journal, "release_lock", release_for_real_then_arm), \
+                        mock.patch.object(me, "_lock_identity", interrupted_readback), \
+                        mock.patch.object(me, "_journal_listing", peer_before_closing_listing2), \
+                        mock.patch.object(os, "stat", stat_w), \
+                        mock.patch.object(os, "lstat", lstat_w), \
+                        mock.patch.object(os, "fstat", fstat_w), \
+                        mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {stat_w}), \
+                        mock.patch.object(os, "supports_follow_symlinks",
+                                          os.supports_follow_symlinks | {stat_w, lstat_w}):
+                    try:
+                        run_adopt_transaction(root, rid, compose_refused_readback)
+                        note = "the injected interrupt did not propagate"
+                    except KeyboardInterrupt as exc:
+                        note = "; ".join(getattr(exc, "__notes__", []) or [])
+                    except AdoptApplyError as exc:
+                        note = "refused instead: {}".format(exc)
+                check("release-readback-interrupted-peer-reused-inode",
+                      "another run's journal lock, not this run's" in (note or "")
+                      and ", this run's journal lock" not in (note or "")
+                      and seen.get("own freed") is False and not reuse,
+                      observed="note={!r} seen={!r}".format(note, seen))
+            finally:
+                os.umask(saved_umask)
     # 6a'''': a refusal past the journal's own pre-INTENT capture (its transaction directory, frames.log and
     # preimages written) never says "nothing written": the composer names each entry the run's two journal
     # listings differ by, over a journal that predates the run and over one the run created (red against
