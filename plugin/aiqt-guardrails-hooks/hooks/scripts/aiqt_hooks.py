@@ -8071,6 +8071,253 @@ def _orch_root(data):
     return _recovery_toplevel(cwd)
 
 
+# Orchestration-scope discovery (round 4): the truncation guard decides scope by the UNION of two legs.
+# Leg one walks the session cwd's PHYSICAL ancestor chain directly with no-follow, descriptor-anchored
+# lookups and needs no git at all, so a git discovery failure alone (no git binary on PATH, a
+# dubious-ownership refusal, a broken config, a bare repository, a cwd inside a .git directory, a timeout)
+# never denies an ordinary session: with no registry on the walk and none at a git-resolved toplevel the
+# session is out of scope, while the same session inside an orchestrated tree still finds the registry on
+# the walk and keeps the guard active. Leg two (restored from the rev-parse scoping after the round-4
+# finding) applies where git DOES resolve a toplevel for the cwd: core.worktree (set in a repository
+# config or a gitfile's gitdir target) can point the work tree OFF the cwd's physical ancestor chain,
+# where the walk alone would never visit its registry, so that toplevel's registry is consulted as well
+# (_orch_git_toplevel_has_registry); git success can only ADD a deny, and a git failure alone never
+# denies. The sibling orchestration guards still root via the scrubbed rev-parse primitive (_orch_root).
+_ORCH_WALK_BOUND = 4096  # ancestor-chain safety bound; a deeper chain is a walk failure, never an allow
+# O_PATH (Linux): a walk step then needs only SEARCH permission on the chain, exactly as path resolution
+# itself does, so a search-only (execute-only) ancestor such as a shared parent directory does not fail the
+# walk; where O_PATH is unavailable the O_RDONLY fallback additionally requires read permission on each
+# ancestor, an over-DENY in the fail direction (never an allow) on such platforms.
+_ORCH_O_WALK = getattr(os, "O_PATH", os.O_RDONLY)
+
+
+def _orch_dirfd_has_registry(dirfd):
+    """Whether the directory open at dirfd carries an orchestration registry entry, judged with NO-FOLLOW,
+    DESCRIPTOR-ANCHORED lookups (openat semantics, so a path component swapped mid-walk cannot redirect the
+    probe). Returns False ONLY on a clean not-present: the `.aiqt` entry, or both registry names inside a
+    real `.aiqt` directory, raise FileNotFoundError. EVERY other outcome returns True, reading as PRESENT
+    in the deny-safe direction: a successful no-follow stat of either registry name, whatever its file type
+    (presence, not validity, decides scope: a present-but-unreadable or malformed registry has always kept
+    the guard ACTIVE, never inert), and equally a `.aiqt` entry these lookups cannot cleanly rule out (a
+    symlink the O_NOFOLLOW open refuses, a regular file, an unreadable directory, or any other fault),
+    which must never read as absent - that would silently disarm an orchestrated tree."""
+    try:
+        aiqt_fd = os.open(".aiqt", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # a .aiqt entry this walk cannot examine is not cleanly absent: PRESENT (deny-safe)
+    try:
+        for rel in _ORCH_REGISTRY_FILES:
+            name = rel.rsplit("/", 1)[-1]
+            try:
+                os.stat(name, dir_fd=aiqt_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue  # this registry name is cleanly not present: try the next one
+            except OSError:
+                return True  # a name these lookups cannot stat is not cleanly absent: PRESENT (deny-safe)
+            return True
+        return False
+    finally:
+        os.close(aiqt_fd)
+
+
+def _orch_registry_walk(cwd):
+    """Locate the truncation guard's registry scope for a non-empty string cwd WITHOUT consulting git: walk
+    cwd's PHYSICAL ancestor chain (an O_PATH|O_DIRECTORY descriptor stepped with openat(fd, ".."), so no
+    component is ever re-resolved by name, a symlinked cwd path cannot alias the chain, and each step needs
+    only the SEARCH permission path resolution itself needs; ".." is never a symlink) looking for a
+    directory that carries an orchestration registry (_orch_dirfd_has_registry). The walk ends only where
+    parent and child share one dev/ino AND that identity is the filesystem root's own: a non-root dev/ino
+    repeat (a directory bind-mounted onto its own child makes the mount root and its ".." parent one
+    identity) is stepped THROUGH rather than misread as the root, so a registry above such a mount point
+    is still reached (verified by simulation; these test hosts cannot create mounts, and the path-anchored
+    recheck below independently re-probes the textual chain, so an fd-walk miss at a mount edge surfaces
+    as a found or a deny, never an allow). Returns ('found', None) when a chain directory carries a
+    registry (or one the no-follow lookups cannot cleanly rule out); ('none', None) only when the walk
+    reaches the root with every lookup a clean not-present AND the post-walk recheck agrees
+    (_orch_walk_recheck, the round-4 concurrent-move detection: descriptor anchoring preserves each opened
+    directory's identity, not its parent relationship, so a mid-walk rename of an ancestor can redirect
+    this walk past a continuously present registry; the recheck re-resolves and re-probes the chain BY
+    PATH, scopes the session IN when it finds a registry, and FAILS the walk on a chain mismatch, never
+    allowing); ('fail', (detail, fix)) when the walk cannot be carried out - a NUL in the path, a path
+    that cannot be stat'ed or is not a directory, a directory this process cannot read and enter, an
+    ancestor directory the walk cannot open or examine, a chain past _ORCH_WALK_BOUND, or the recheck
+    mismatch above - where detail completes "this Bash call's cwd ..." and fix names the action that
+    repairs it. AGREEMENT with the git path (_orch_root/_recovery_toplevel, which the sibling
+    orchestration guards still use) is NOT assumed: core.worktree can point a git-resolvable toplevel OFF
+    this chain, which is why the truncation guard UNIONS this walk with _orch_git_toplevel_has_registry;
+    the walk additionally reaches a registry above a nested repository or a filesystem boundary (git
+    discovery stops at a mount point; this walk does not) and decides scope even where git cannot run or
+    answer, which the rev-parse scoping turned into a blanket deny (the round-3 lockout, withdrawn). The
+    walk-and-recheck is not atomic, neither with itself nor with the Bash call it gates, and two windows
+    stay out of view (disclosed in the residue, see _orch_walk_recheck): a concurrent rename of an
+    ancestor directory timed against BOTH the walk and the recheck can hide a registry, and any change
+    after the recheck returns is unseen. Both lie outside this guard's threat model, which is ACCIDENTAL
+    truncation in an orchestrated tree, not a party able to rename this host's ancestor directories
+    concurrently with the hook."""
+    if "\x00" in cwd:
+        return ("fail", ("contains a NUL character",
+                         "Re-issue the call with a cwd carrying no control characters."))
+    try:
+        st = os.stat(cwd)
+    except (OSError, ValueError) as exc:
+        return ("fail", ("is not an existing path ({})".format(type(exc).__name__),
+                         "Re-issue the call from an existing directory."))
+    if not stat.S_ISDIR(st.st_mode):
+        return ("fail", ("is not a directory",
+                         "Re-issue the call with a directory, not a file, as the cwd."))
+    if not os.access(cwd, os.R_OK | os.X_OK):
+        return ("fail", ("is a directory this process cannot read and enter",
+                         "Grant this process read and search permission on it, or re-issue the call from "
+                         "a readable directory."))
+    try:
+        root_st = os.stat(os.sep)
+        root_id = (root_st.st_dev, root_st.st_ino)
+    except OSError:
+        # With the root identity unknowable, a parent/child dev/ino repeat is never read as the root:
+        # the walk runs to its depth bound and FAILS (a deny), never misreading a mount edge as the top.
+        root_id = None
+    try:
+        fd = os.open(cwd, _ORCH_O_WALK | os.O_DIRECTORY)
+    except OSError as exc:
+        return ("fail", ("could not be opened for the registry walk ({})".format(type(exc).__name__),
+                         "Re-issue the call from a directory this process can open."))
+    try:
+        cur = os.fstat(fd)
+        chain = [(cur.st_dev, cur.st_ino)]
+        for _ in range(_ORCH_WALK_BOUND):
+            if _orch_dirfd_has_registry(fd):
+                return ("found", None)
+            try:
+                parent = os.open("..", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError as exc:
+                return ("fail", ("has an ancestor directory this walk cannot open ({})"
+                                 .format(type(exc).__name__),
+                                 "Grant this process search permission on every ancestor directory of "
+                                 "the cwd, or re-issue the call from a directory whose ancestors it can "
+                                 "search."))
+            try:
+                pst = os.fstat(parent)
+            except OSError as exc:
+                os.close(parent)
+                return ("fail", ("has an ancestor directory this walk cannot examine ({})"
+                                 .format(type(exc).__name__),
+                                 "Re-issue the call from a directory whose ancestors this process can "
+                                 "read."))
+            if (pst.st_dev == cur.st_dev and pst.st_ino == cur.st_ino
+                    and (pst.st_dev, pst.st_ino) == root_id):
+                os.close(parent)
+                # The filesystem root with every lookup a clean not-present: confirm with the path-anchored
+                # recheck before reading the session as out of scope. A dev/ino repeat that is NOT the root
+                # (a directory bind-mounted onto its own child) falls through and is stepped through below.
+                return _orch_walk_recheck(cwd, chain)
+            os.close(fd)
+            fd, cur = parent, pst
+            chain.append((pst.st_dev, pst.st_ino))
+        return ("fail", ("sits deeper than this walk's {}-directory ancestor bound"
+                         .format(_ORCH_WALK_BOUND),
+                         "Re-issue the call from a directory at an ordinary filesystem depth."))
+    finally:
+        os.close(fd)
+
+
+def _orch_walk_recheck(cwd, chain):
+    """CONFIRM a registry walk that found nothing (round-4 concurrent-move detection): re-resolve cwd's
+    physical ancestor chain BY PATH (os.path.realpath, then each textual parent), re-probe every chain
+    directory with the same registry probe the walk uses (_orch_dirfd_has_registry, so the deny-safe
+    crafted-entry reads and the self-test ceiling apply identically), and compare the re-resolved
+    (st_dev, st_ino) sequence against `chain`, the dev/ino sequence the descriptor walk actually visited.
+    A registry found on this second, path-anchored pass scopes the session IN (('found', None)): that is
+    the mid-walk-rename case, where the descriptor chain was redirected past a continuously present
+    registry, and equally a registry that appeared while the walk ran. A sequence mismatch means an
+    ancestor moved while the walk read the chain, so the clean not-present result cannot be trusted:
+    ('fail', (detail, fix)), a deny, never an allow; a recheck step that cannot be carried out fails the
+    same way (deny-safe). Only when every probe stays a clean not-present AND the two independently
+    resolved chains agree does ('none', None) stand. RACE LIMIT (disclosed in the residue): the recheck is
+    NOT a point-in-time read but a sequence of lookups, as the walk is, so agreement means only that the
+    two sequences of observations matched. (1) A concurrent rename of an ancestor directory timed against
+    the walk AND the recheck can hide a registry: a registry relocated within the chain so it is never
+    where either pass probes, or a sibling directory swapped in under a textual chain path during the
+    recheck so it reports the same dev/ino the redirected walk recorded, leaves every probe a clean
+    not-present with the chains agreeing, and the call is allowed. (2) Any change AFTER the recheck
+    returns, including a registry that appears only then, is out of view (the inherent pre-execution
+    TOCTOU bound). Both are outside this guard's threat model: it stops ACCIDENTAL truncation in an
+    orchestrated tree, and a party able to rename this host's ancestor directories concurrently with the
+    hook is not that case. A mid-walk rename that is not also timed against the recheck is caught (a
+    found or a deny, pinned by the raced-ancestor rows); no further race machinery is added."""
+    try:
+        path = os.path.realpath(cwd)
+    except (OSError, ValueError):
+        return ("fail", ("could not be re-resolved after the registry walk",
+                         "Re-issue the call from a stable directory."))
+    seen = []
+    for _ in range(_ORCH_WALK_BOUND + 1):
+        try:
+            fd = os.open(path, _ORCH_O_WALK | os.O_DIRECTORY)
+        except OSError as exc:
+            return ("fail", ("has an ancestor chain this walk's recheck cannot re-resolve ({})"
+                             .format(type(exc).__name__),
+                             "Re-issue the call once the cwd's directory tree is stable."))
+        try:
+            try:
+                rst = os.fstat(fd)
+            except OSError as exc:
+                return ("fail", ("has an ancestor chain this walk's recheck cannot examine ({})"
+                                 .format(type(exc).__name__),
+                                 "Re-issue the call once the cwd's directory tree is stable."))
+            seen.append((rst.st_dev, rst.st_ino))
+            if _orch_dirfd_has_registry(fd):
+                return ("found", None)
+        finally:
+            os.close(fd)
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    else:
+        return ("fail", ("sits deeper than this walk's {}-directory ancestor bound"
+                         .format(_ORCH_WALK_BOUND),
+                         "Re-issue the call from a directory at an ordinary filesystem depth."))
+    if seen != chain:
+        return ("fail", ("changed its ancestor chain while the registry walk read it (a concurrent "
+                         "rename or mount moved an ancestor directory mid-walk, so the walk's clean "
+                         "not-present result cannot be trusted)",
+                         "Re-issue the call once the cwd's directory tree is stable."))
+    return ("none", None)
+
+
+def _orch_git_toplevel_has_registry(cwd):
+    """The UNION leg of the truncation guard's registry scope (round 4): where git DOES resolve a toplevel
+    for the session cwd (the scrubbed _recovery_toplevel primitive, exactly the rooting the old rev-parse
+    scoping and the sibling orchestration guards use), that toplevel's registry is consulted IN ADDITION
+    to the ancestor walk, because core.worktree (set in a repository config or a gitfile's gitdir target)
+    can point the work tree OFF the cwd's physical ancestor chain: from inside such a repository's
+    metadata directory the old scoping read the external work tree's registry and denied, and the walk
+    alone never visits it (the round-4 finding). Returns True (IN SCOPE) when git resolves a toplevel and
+    the same no-follow registry probe the walk uses (_orch_dirfd_has_registry, so a crafted entry stays
+    deny-safe PRESENT and the self-test ceiling masks this leg identically) does not cleanly rule a
+    registry out there, and True when the resolved toplevel exists but cannot be opened as a directory (a
+    toplevel git can name but this probe cannot examine is not cleanly registry-free: deny-safe, matching
+    the old scoping's present-but-unreadable read). Returns False when git cannot resolve a toplevel at
+    all (git success can only ADD a deny; a git failure alone never denies), when the resolved toplevel is
+    cleanly gone (FileNotFoundError: nothing to consult), or when its registry probe is a clean
+    not-present."""
+    top = _recovery_toplevel(cwd)
+    if top is None:
+        return False
+    try:
+        fd = os.open(top, _ORCH_O_WALK | os.O_DIRECTORY)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    try:
+        return bool(_orch_dirfd_has_registry(fd))
+    finally:
+        os.close(fd)
+
+
 def _orch_registry(root):
     """Load the orchestration registry: ('absent', None) only when a registry file is genuinely NOT PRESENT
     (a clean lstat FileNotFoundError; the suite is inert by design), ('ok', dict) on a schema-valid
@@ -9349,34 +9596,22 @@ _ORCH_SHELL_KEYWORDS = frozenset((
     "do", "done", "in", "function", "time", "coproc"))
 
 
-def _orch_foreground_detach(command):
-    """True when a foreground command carries an executable, unquoted, unescaped bare `&` control operator
-    that detaches a child, launching asynchronous work the foreground tool call does not track. The bare
-    detach `&` is distinguished from the shell forms that also carry an ampersand but do NOT detach: the
-    `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
-    pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, and an `&`
-    inside an unquoted, word-start `#` comment (comment text, not an operator). A dedicated quote- and
-    escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
-    classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. It also drops a
-    word-start `#` comment so a commented-out `&` does not prompt, but only to the END OF THAT LINE: a
-    comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
-    is still caught rather than smuggled past.
+# Bash's own word-start rule for a `#` comment: a `#` opens a comment only at the start of a word, and bash
+# delimits words with its blanks (space, tab) and newline and with its metacharacters (; & | ( ) < >). Other
+# characters that Python's str.isspace() accepts (carriage return, vertical tab, form feed, no-break space,
+# the 0x1c-0x1f separators, NEL, and the Unicode spaces) are ordinary word characters to bash.
+_ORCH_BASH_WORD_BREAKS = frozenset(" \t\n;&|()<>")
 
-    AMBIGUOUS QUOTING FAILS TOWARD ASK, never toward a silent allow: a scan that ends still inside an
-    unbalanced single or double quote cannot prove that a later `&` is quoted rather than an operator (an
-    unbalanced quote, or a construct this scan does not model such as ANSI-C `$'...'` or locale `$"..."`
-    quoting, can leave the scan `inside quotes` and skip a real trailing `&`), so it reports a detach
-    (True -> ASK) rather than allowing. A genuinely balanced, quoted `&` is literal and correctly ignored.
 
-    NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only. Grammar it does not
-    model (a here-document body, a nested shell string, an alias or function that renames a detacher, and
-    runtime detachers such as nohup/setsid/disown/coproc) is a disclosed residual; where such a construct
-    still leaves an unquoted bare `&`, or leaves the scan inside an unbalanced quote, it errs toward the
-    ASK, but a detacher that carries no bare `&` (setsid worker, a nested `bash -c '... &'`) is NOT caught
-    here and is a silent-allow residual disclosed in the manifest."""
+def _orch_foreground_scan(command, bash_word_starts):
+    """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
+    unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or double
+    quote, None otherwise. bash_word_starts selects where a `#` opens a comment: False keeps the historical
+    rule (after any str.isspace() character), True uses bash's rule (_ORCH_BASH_WORD_BREAKS). The guard runs
+    BOTH and denies when either reports, so the bash rule can only ADD denies to the historical one."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
-    word_start = True  # the next unquoted char begins a word (start of string, or after unquoted whitespace)
+    word_start = True  # the next unquoted char begins a word (start of string, or after a word break)
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -9409,7 +9644,7 @@ def _orch_foreground_detach(command):
             i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
             continue
         if ch.isspace():
-            prev_dup, word_start = False, True
+            prev_dup, word_start = False, (ch in _ORCH_BASH_WORD_BREAKS) if bash_word_starts else True
             i += 1
             continue
         if ch == "\\":
@@ -9427,23 +9662,94 @@ def _orch_foreground_detach(command):
         if ch == "&":
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt == "&":  # `&&` logical AND: not a detach
-                prev_dup, word_start = False, False
+                prev_dup, word_start = False, bash_word_starts
                 i += 2
                 continue
             if nxt == ">":  # `&>` / `&>>` redirect: not a detach
-                prev_dup, word_start = False, False
+                prev_dup, word_start = False, bash_word_starts
                 i += 1
                 continue
             if prev_dup:  # `>&` / `<&` / `|&` descriptor-dup or pipe-stderr: not a detach
-                prev_dup, word_start = False, False
+                prev_dup, word_start = False, bash_word_starts
                 i += 1
                 continue
-            return True  # an executable bare `&` control operator: a foreground detach
-        prev_dup, word_start = ch in (">", "<", "|"), False
+            return "detach"  # an executable bare `&` control operator: a foreground detach
+        prev_dup = ch in (">", "<", "|")
+        word_start = bash_word_starts and ch in _ORCH_BASH_WORD_BREAKS
         i += 1
-    # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; fail
-    # toward ASK rather than silently allow a possibly-real detach it could not see.
-    return in_single or in_double
+    # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; it fails
+    # toward the DENY (with its own reason) rather than silently allowing a possibly-real detach.
+    return "unbalanced" if in_single or in_double else None
+
+
+def _orch_foreground_detach_kind(command):
+    """"detach" when either scan rule meets a bare `&`, else "unbalanced" when either ends inside a quote,
+    else None. The historical rule and bash's `#` word-start rule are both run so that the bash rule only
+    ADDS denies: a `#` after a character bash does not treat as a word break (a carriage return, a
+    no-break space, a 0x1c separator, any other non-blank str.isspace() character) is not a comment to
+    bash, so an `&` after it is scanned; a `#` after a metacharacter (`;#`) IS a comment to bash, so a
+    quote in that comment no longer shifts the scan past a real `&` on the next line."""
+    kinds = (_orch_foreground_scan(command, False), _orch_foreground_scan(command, True))
+    if "detach" in kinds:
+        return "detach"
+    return "unbalanced" if "unbalanced" in kinds else None
+
+
+def _orch_foreground_detach(command):
+    """True when a foreground command carries an executable, unquoted, unescaped bare `&` control operator
+    that detaches a child, launching asynchronous work the foreground tool call does not track. The bare
+    detach `&` is distinguished from the shell forms that also carry an ampersand but do NOT detach: the
+    `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
+    pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, and an `&`
+    inside an unquoted, word-start `#` comment (comment text, not an operator). A dedicated quote- and
+    escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
+    classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. It also drops a
+    word-start `#` comment so a commented-out `&` does not prompt, but only to the END OF THAT LINE: a
+    comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
+    is still caught rather than smuggled past. Where a `#` starts a comment is read under two rules, the
+    historical one (after any str.isspace() character) and bash's (after a space, tab, newline, or
+    metacharacter), and either rule's detach denies (_orch_foreground_detach_kind).
+
+    A SCAN THAT ENDS INSIDE A QUOTE FAILS TOWARD DENY: a scan that ends still inside an unbalanced single
+    or double quote cannot prove that a later `&` is quoted rather than an operator (an unbalanced quote,
+    or a construct this scan does not model such as ANSI-C `$'...'` or locale `$"..."` quoting, can leave
+    the scan `inside quotes` and skip a real trailing `&`), so it reports a detach (True -> DENY, with an
+    unbalanced-quote reason) rather than allowing. This covers only a quote the scan still sees as open at
+    the END: a quote it misreads in mid-string can leave it balanced but misaligned, which silently allows
+    (the false-allow residual below). A genuinely balanced, quoted `&` is literal and correctly ignored.
+
+    NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only, as its own quote
+    tracking reads the outer level. Grammar it does not model (a here-document body, a nested shell string,
+    an alias or function that renames a detacher, and runtime detachers such as nohup/setsid/disown/coproc)
+    is a disclosed residual; where such a construct still leaves an unquoted bare `&`, or leaves the scan
+    inside an unbalanced quote at the end, it errs toward the DENY, but a detacher that carries no bare `&`
+    (setsid worker, a nested `bash -c '... &'`) is NOT caught here and is a silent-allow residual disclosed
+    in the manifest.
+
+    OVER-REFUSAL RESIDUAL (disclosed): a here-document body is scanned as CODE, not data, even under a
+    quoted delimiter (<<'EOF'). A safe here-document whose body carries an unquoted `&` (`cat > f <<'EOF'`
+    then `Fix A & B`) or an unbalanced apostrophe (`the user's file`) is therefore DENIED although nothing
+    detaches. In the commit-message form wrapped in double quotes ("$(cat <<'EOF' ... EOF)") the body is
+    read as double-quoted text, and each double quote in the body toggles that reading, so whether a body
+    `&` is denied depends on where it falls relative to those quotes (`say "a & b"` is denied, `say "hi" &
+    bye` is allowed). The remedy is to write the text to a file and pass the file. This misreading is NOT
+    only in the safe direction: the same body quotes cause the quote-shift false-allow below.
+
+    KNOWN FALSE-ALLOW RESIDUAL (confirmed against real bash, disclosed in the manifest, which lists the same
+    cases): the scan reads only the outer quoting level, and its quote and comment tracking can diverge from
+    bash's in further ways than those listed here, so this list is NOT complete. Known cases include a real
+    detach that is NOT seen (1) when its `&` sits inside a command substitution or backtick wrapped in
+    double quotes (echo "$(job &)"); (2) inside a string that eval or quote removal re-reads as code
+    (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3) after an ANSI-C $'...' quote with an escaped
+    quote that leaves the scan balanced but misaligned; (4) inside an arithmetic subscript that runs a
+    substitution; (5) QUOTE SHIFT: after a quote character that bash reads as data but the scan reads as a
+    quote, above all an apostrophe or double quote in a here-document body (quoted delimiter or not,
+    including the double-quoted commit-message form), which flips the scan's quote state so that a LATER
+    real bare `&` (between two here-documents, or before a second stray quote that rebalances the scan)
+    reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that follows a blank inside an unquoted ${...} parameter expansion,
+    which bash reads as expansion text but the scan reads as a comment start, so a real bare `&` later on
+    that line is skipped (echo ${x:- #} & job, echo ${line%% #*} & job)."""
+    return _orch_foreground_detach_kind(command) is not None
 
 
 # ROUND-2 FINDING 9: sinks that TRUNCATE their input, so a producer piped into one loses both its full
@@ -9507,6 +9813,21 @@ def _orch_effective_sink_word(argv):
     return argv[idx].lstrip("\\").rsplit("/", 1)[-1] if idx < n else ""
 
 
+def _orch_json_kind(value):
+    """A short JSON type phrase for a malformed-input deny message ('null', 'a string', 'an array')."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, list):
+        return "an array"
+    return "an object" if isinstance(value, dict) else "a " + type(value).__name__
+
+
 def orch_truncation_guard(data):
     """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: it
     performs NO shell parsing, so no lexical or quoting edge can fabricate a capture. A background dispatch
@@ -9524,33 +9845,139 @@ def orch_truncation_guard(data):
     that DETACHES a child with a bare `&` launches asynchronous work the foreground tool call does not track,
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
-    and wait); every other foreground call remains out of scope (the harness returns its output directly)."""
-    if data.get("tool_name") != "Bash":
+    and wait); every other foreground call remains out of scope (the harness returns its output directly).
+
+    MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
+    not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
+    malformed, never read as foreground), and a command that is not a string are each DENIED with a
+    reason naming the defect, never silently allowed. REGISTRY SCOPE (a disclosed residual, not a
+    fail-closed case): the registry is this suite's scope declaration, located by the UNION of a walk of
+    the cwd's physical ancestor chain with no-follow, descriptor-anchored lookups (_orch_registry_walk,
+    with its post-walk concurrent-move recheck) and, where git resolves a toplevel for the cwd, that
+    toplevel's registry too (_orch_git_toplevel_has_registry: core.worktree can point the work tree off
+    the ancestor chain; a git discovery failure alone - no git binary, a dubious-ownership refusal, a
+    broken config, a bare repository - still never denies), so with NO registry entry on that chain and
+    none at a git-resolved toplevel the guard is inert and allows every Bash call that passes the
+    pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
+    unreadable, or invalid keeps it active. PRE-SCOPE DENIES, checked BEFORE the
+    registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
+    not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
+    not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
+    that is not an existing directory this process can read and enter, an ancestor directory the walk
+    cannot open or examine, or an ancestor chain that changed while the walk read it:
+    _orch_registry_walk), each deny naming the defect and an action that repairs it. Only a plain
+    non-Bash string tool_name, and a cwd whose completed walk and git-toplevel union find no registry,
+    are out of scope (allow)."""
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("trkasy")
+    if not isinstance(tool_name, str) or not tool_name:
+        # A present but empty or non-string tool_name cannot be matched, so it is not read as a non-Bash
+        # tool (the wrtscp precedent): it is denied, never allowed out of scope.
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (fail-closed): malformed payload: tool_name is {}, not a "
+            "non-empty string, so this guard cannot tell whether the call is a Bash call; it is denied "
+            "rather than allowed unread (check-fails-closed-on-unreadable)."
+            .format("empty" if tool_name == "" else _orch_json_kind(tool_name)),
+            "AIQT guardrail: denied a PreToolUse call with an unreadable tool_name (rule trkasy, "
+            "fail-closed).")
+    if any(ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f for ch in tool_name):
+        # A NUL or any other control character (C0, DEL, C1) never appears in a real tool name, so such a
+        # name must not read as an ordinary non-Bash tool and take the out-of-scope allow unread (the
+        # round-3 finding: a tool_name of "Bash" plus a NUL was allowed silently); it denies pre-scope.
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (fail-closed): malformed payload: tool_name contains a "
+            "NUL or another control character, so it is not a real tool name and this guard cannot tell "
+            "whether the call is a Bash call; it is denied rather than allowed out of scope "
+            "(check-fails-closed-on-unreadable). Re-issue the call with the plain tool name.",
+            "AIQT guardrail: denied a PreToolUse call whose tool_name carries a control character (rule "
+            "trkasy, fail-closed).")
+    if tool_name != "Bash":
         return _allow()
-    root = _orch_root(data)
-    if root is None:
-        return _allow()
-    status, _reg = _orch_registry(root)
-    if status == "absent":
-        return _allow()
-    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        kind = "missing" if "cwd" not in data else ("empty" if cwd == "" else _orch_json_kind(cwd))
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (fail-closed): this Bash call's cwd is {}, not a "
+            "non-empty string, so this guard cannot locate the session repository or its orchestration "
+            "registry; it is denied rather than allowed unread (check-fails-closed-on-unreadable). Re-issue "
+            "the call with a string cwd.".format(kind),
+            "AIQT guardrail: denied a Bash call with no readable cwd (rule trkasy, fail-closed).")
+    scope, found = _orch_registry_walk(cwd)
+    if scope == "fail":
+        detail, fix = found
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (fail-closed): this Bash call's cwd {}, so this guard "
+            "cannot walk the cwd's ancestor directories for the orchestration registry that scopes it; it "
+            "is denied rather than read as out of scope (check-fails-closed-on-unreadable). {}"
+            .format(detail, fix),
+            "AIQT guardrail: denied a Bash call whose cwd could not be walked for an orchestration "
+            "registry (rule trkasy, fail-closed).")
+    if scope == "none":
+        # No registry on the cwd's ancestor chain. UNION (round 4): where git resolves a toplevel for this
+        # cwd, that toplevel's registry is consulted too, because core.worktree can point the work tree
+        # (and its registry) off the ancestor chain; git success can only add a deny here, and a git
+        # failure alone still never denies (the union leg reads False then and the allow stands).
+        if not _orch_git_toplevel_has_registry(cwd):
+            return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
+        return _deny(
+            "AIQT rule trkasy (track-launched-work): this Bash call's tool_input is {}, not a JSON object, "
+            "so this guard cannot read its command or its run_in_background flag. A check that cannot read "
+            "its input fails closed (check-fails-closed-on-unreadable): it is denied rather than allowed "
+            "unread. Re-issue the call with a tool_input object carrying a string command.".format(kind),
+            "AIQT guardrail: denied a Bash call whose tool_input is {}, not an object "
+            "(fail-closed).".format(kind))
     command = tool_input.get("command")
-    rib = tool_input.get("run_in_background") is True
+    rib = tool_input.get("run_in_background", False)
+    if not isinstance(rib, bool):
+        return _deny(
+            "AIQT rule trkasy (track-launched-work): this Bash call's run_in_background is {} ({}), not a "
+            "boolean, so this guard cannot tell a background dispatch from a foreground call; it is denied "
+            "rather than read as foreground (check-fails-closed-on-unreadable). Re-issue with "
+            "run_in_background true or false, or omit it for a foreground call."
+            .format(_orch_json_kind(rib), json.dumps(rib, default=str)[:40]),
+            "AIQT guardrail: denied a Bash call whose run_in_background is not a boolean (fail-closed).")
     if not rib:
         # Foreground scope is narrow: a plain foreground call returns its output directly and is out of
         # scope, but a bare `&` detaches a child into untracked asynchronous work whose result and failure
         # are then lost. A bare-& detach is never the right way to launch tracked work (the tracked
         # background dispatch is), so it DENIES-and-educates: the caller self-corrects to run_in_background
-        # (or waits in the foreground), which is what lets the dispatch ledger record it. An unreadable or
-        # non-detaching foreground command stays out of scope (ALLOW).
-        if isinstance(command, str) and _orch_foreground_detach(command):
+        # (or waits in the foreground), which is what lets the dispatch ledger record it. An unreadable
+        # (non-string) command fails closed; a non-detaching foreground command is out of scope (ALLOW).
+        if not isinstance(command, str):
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground Bash call's command is {}, not a "
+                "string, so this guard cannot scan it for a bare '&' detach; it is denied rather than "
+                "allowed unread (check-fails-closed-on-unreadable). Re-issue with a string command."
+                .format("missing" if "command" not in tool_input else _orch_json_kind(command)),
+                "AIQT guardrail: denied a foreground Bash call with no readable command string "
+                "(fail-closed).")
+        detach_kind = _orch_foreground_detach_kind(command)
+        if detach_kind == "unbalanced":
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command ends with a single or "
+                "double quote still open as this guard's scan reads it, so the scan cannot prove that a "
+                "later '&' is quoted text rather than a bare detach; it is denied rather than allowed "
+                "unread (check-fails-closed-on-unreadable). The open quote may be a real unbalanced quote, "
+                "or one the scan misreads: an apostrophe or double quote in a here-document body (scanned "
+                "as code even under a quoted delimiter) or an ANSI-C $'...' quote. Balance the quoting, or "
+                "write the text to a file and pass the file.",
+                "AIQT guardrail: denied a foreground command whose quoting this guard could not read to the "
+                "end (rule trkasy, fail-closed).")
+        if detach_kind == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
                 "bare '&', launching asynchronous work this tool call does not track, so its result and "
                 "failure would be lost; it is denied. Use the platform's tracked background dispatch "
                 "(run_in_background) and collect its completion, or keep the command in the foreground and "
                 "wait for it. If the detached result and completion are genuinely not needed, drop the '&' "
-                "and run it foreground.",
+                "and run it foreground. If this '&' is not a detach at all (for example a bitwise AND in an "
+                "arithmetic expansion, or an '&' in a here-document body, which this scan reads as code "
+                "even under a quoted delimiter), write the text to a file and pass the file instead; the "
+                "background-dispatch advice applies only to a real detach.",
                 "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
                 "trkasy); use the tracked background dispatch or run it in the foreground.")
         return _allow()  # foreground without a bare-& detach operator is out of scope by design
@@ -11268,15 +11695,18 @@ def main(argv):
         data = json.loads(sys.stdin.read())
         if not isinstance(data, dict):
             raise ValueError("payload is not a JSON object")
-    except (ValueError, UnicodeDecodeError, OSError) as exc:
-        # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload.
+    except Exception as exc:  # any failure to read the payload is an unreadable payload
+        # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and ALSO a
+        # RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those escape as a
+        # traceback with exit 1, which the platform treats as non-blocking. Every exception is named.
+        detail = "{}: {}".format(type(exc).__name__, exc)
         if is_fail_open:
             # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
             # payload (including a bare '{' or any garbage) can ever wedge the session.
-            return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(exc))
+            return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
         # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
         # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
-        print("aiqt_hooks: unreadable hook payload ({}); failing closed".format(exc), file=sys.stderr)
+        print("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail), file=sys.stderr)
         return 2
     try:
         code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
@@ -11284,10 +11714,11 @@ def main(argv):
         if is_fail_open:
             # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
             # pathological message): WARN and exit 0, never exit 2.
-            return _dispatcher_fail_open_warn(handler_name, "handler crash: {}".format(exc))
+            return _dispatcher_fail_open_warn(
+                handler_name, "handler crash: {}: {}".format(type(exc).__name__, exc))
         # A PreToolUse handler crash fails closed (block), not pass.
-        print("aiqt_hooks: handler {} failed ({}); failing closed".format(handler_name, exc),
-              file=sys.stderr)
+        print("aiqt_hooks: handler {} failed ({}: {}); failing closed".format(
+            handler_name, type(exc).__name__, exc), file=sys.stderr)
         return 2
     if stdout_obj is not None:
         print(json.dumps(stdout_obj))

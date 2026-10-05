@@ -8204,7 +8204,8 @@ def _main_isolated(monitor):
             elif _got.startswith("unexpected") or _got == "explicit-allow":
                 failures.append("(noask-gensrc-shape-{}-{!r}) gensrc_guard returned an unrecognized decision "
                                 "shape: {}".format(_tool, _fp, _got))
-    # orch PreToolUse guards must not ask either (inert-probe legs, kept for shape coverage).
+    # orch PreToolUse guards must not ask either (shape-coverage legs: the truncation guard now DENIES a
+    # nonexistent cwd fail-closed rather than treating it as out of scope; either way it must not ask).
     for _og, _od in ((aiqt_hooks.orch_truncation_guard,
                       {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                        "tool_input": {"command": "sleep 1 &"}, "cwd": "/nonexistent-noask-probe"}),
@@ -8221,8 +8222,9 @@ def _main_isolated(monitor):
                             "decision shape: {}".format(getattr(_og, "__name__", _og), _got))
 
     # ROUND-2 FINDING 18: exercise the orchestration PreToolUse guards on REAL triggering inputs (a real git
-    # repo + a version-1 orchestration registry), not only the inert /nonexistent probe (root None -> early
-    # allow). This ADDS orch_yield_tool (previously unexercised by this invariant, so a restored ask path
+    # repo + a version-1 orchestration registry), not only the /nonexistent probe (which never reaches the
+    # registry: the yield guard allows it as having no root, the truncation guard denies it pre-scope).
+    # This ADDS orch_yield_tool (previously unexercised by this invariant, so a restored ask path
     # there passed both suites) and drives orch_truncation on a REAL detach. Each must NOT return 'ask', and
     # the decision must GENUINELY RUN (a real deny), so a restored ask path - however its constructor is
     # named - is caught by behaviour, not by the evadable _ask-attribute check above.
