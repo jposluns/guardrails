@@ -10,8 +10,8 @@
 # the adoption stage driver lands, by a plan's prompt_pack {version, digest} binding.
 format = "opf.prompt-pack/v1"
 version = "0.3.0"
-digest = "sha256:677b0b9ec4e0b63964c8c99fbde4a695997007d3998136faa674c7be152eddae"
+digest = "sha256:a51286db29c75982af1cfd09d51f0783cedf498d5fd0aeee57e0125467a1c593"
 
 [[members]]
 path = "flow/SKILL.md"
-sha256 = "0532473fa7d569e83043a8428d0681cff75cc47ad1af89e96dc13340b85f478f"
+sha256 = "d8ab73508f8764b76f2635b4c3e81204c56ad8c938659af3a001b361b7f363d5"
