@@ -26,11 +26,15 @@
 #     repository's hooks directory, or a directory of a working tree that a branch could fill) or is not
 #     one this user can read, search and write;
 #   - the hooks directory lies inside the top level of any worktree of the clone (the one it runs from,
-#     the main worktree, or a linked worktree its registry names), the common git directory equal to that
-#     top level included, unless the common git directory is that worktree's own .git directory: git
-#     could track the files of the hooks directory there, and a branch could supply a hook. Run from a
-#     linked worktree of a clone whose git directory is not named .git, the top level of the main
-#     worktree cannot be found, so it is refused too: run it from the main worktree;
+#     the main worktree, a linked worktree its registry names, or the top level a core.worktree sets for
+#     any of them), the common git directory equal to that top level included, unless the common git
+#     directory is that worktree's own .git directory: git could track the files of the hooks directory
+#     there, and a branch could supply a hook. A core.worktree that names no directory is refused too, as
+#     is a hooks directory below any directory that holds a .git entry with no .git component between
+#     them (a working tree the registry does not name, or names at a path it has since left). Run from a
+#     linked worktree of a clone whose git directory is not named .git and sets no core.worktree, the
+#     top level of the main worktree is recorded nowhere (git worktree list names the git directory
+#     itself), so it is refused: run it from the main worktree;
 #   - a path it resolves holds a newline;
 #   - git is older than 2.32, the floor the hook needs (see pre-commit), or a command it needs (env, sed,
 #     dirname, git, cat, cmp, ln) fails (ln fails on a filesystem without hard links).
@@ -43,7 +47,19 @@
 # regular, readable, executable file with the exact stub text, or such an arrival), it removes only what
 # this run created, and the hooks directory if it created it, before it exits 2, and names anything it
 # could not remove.
+# A hangup, interrupt or termination signal runs the same removal and exits 2.
 # Exit status: 0 installed or already installed, 2 refused or cannot evaluate.
+#
+# Threat model: the installer runs unprivileged, as the user who owns the clone. It defends against a
+# misconfigured clone and against repository content a branch supplies. A concurrent process running as
+# that same user is out of scope: it could as well edit the installed stub or the pack hook. So these
+# same-user races are residuals, not defects: such a process that replaces the hooks directory (with a
+# link to another repository's hooks directory, say) between its check and the writes into it redirects
+# them, since each write names the path again; one that swaps the stub path between the symbolic-link
+# check and the same-file check after ln defeats that check; and one that retargets a link that arrived
+# at the stub path makes the removal look at the new target, so a link ln made in the first one is left
+# while the refusal says nothing this run wrote is left. A working tree named only at run time
+# (GIT_WORK_TREE or --work-tree) is not known to this installer either.
 #
 # Every inherited GIT_ variable is dropped before the first git call, except the three that name the
 # global and system configuration files (GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM), and
@@ -155,33 +171,59 @@ common=$got
 hooks=$common/hooks
 # The destination must not be a path a worktree could track: the hooks directory may lie inside a
 # worktree's top level only below that worktree's own .git directory, a path git never tracks.
+# A top level of / (written as / or, for the parent of /.git, as nothing) holds every path.
 untracked_in() {
+    utop=${1%/}
     case "$hooks" in
-        "$1"|"$1"/*)
-            [ "$common" = "$1/.git" ] || \
-                fail "the hooks directory $hooks is inside the top level $1 of a worktree of this clone, and the common git directory $common is not that worktree's own .git directory, so the files of the hooks directory could be tracked, and a branch could supply a hook" ;;
+        "$utop"|"$utop"/*)
+            [ "$common" = "$utop/.git" ] || \
+                fail "the hooks directory $hooks is inside the top level ${utop:-/} of a worktree of this clone, and the common git directory $common is not that worktree's own .git directory, so the files of the hooks directory could be tracked, and a branch could supply a hook" ;;
     esac
 }
 untracked_in "$top"
+# The top level a core.worktree sets for the worktree whose git directory is $1, if one is set: relative
+# to that git directory, as git reads it, resolved to its physical path and checked like the others. It
+# is read in every scope, which can only add a top level to check. One that names no directory refuses.
+core_worktree_untracked() {
+    got=$(git --git-dir="$1" config --get core.worktree && echo .)
+    case "$?" in
+        0) ;;
+        1) return 0 ;;
+        *) fail "could not read core.worktree for the worktree whose git directory is $1" ;;
+    esac
+    case "$got" in
+        *"$nl.") got=${got%"$nl."} ;;
+        *) fail "could not read core.worktree for the worktree whose git directory is $1" ;;
+    esac
+    case "$got" in
+        *"$nl"*) fail "the core.worktree $got holds a newline, which this installer does not handle" ;;
+        /*) cwt=$got ;;
+        *) cwt=$1/$got ;;
+    esac
+    [ -d "$cwt" ] || fail "core.worktree is set to $got for the worktree whose git directory is $1, and it names no directory, so the top level of that worktree cannot be checked; unset it or make it name that worktree"
+    capture physical "$cwt" || fail "could not resolve the top level $cwt that core.worktree sets for the worktree whose git directory is $1"
+    untracked_in "$got"
+}
 # The main worktree's top level. Run from the main worktree it is this one, checked above. Run from a
-# linked worktree, there is none in a bare repository, and it is the parent of a common git directory
-# named .git when core.worktree does not move it, so the hooks directory is below that worktree's own .git
-# directory; otherwise git records it nowhere (git worktree list names the git directory itself), so the
-# install is refused.
+# linked worktree, there is none in a bare repository; it is the top level a core.worktree on the common
+# git directory sets, when one is set (checked in the loop below); and otherwise it is the parent of a
+# common git directory named .git, so the hooks directory is below that worktree's own .git directory.
+# Otherwise git records it nowhere (git worktree list names the git directory itself, and the .git file
+# that points at it is in no file git keeps), so the install is refused.
 capture git -C "$top" rev-parse --path-format=absolute --git-dir || fail "could not locate the git directory"
 capture physical "$got" || fail "could not resolve the git directory $got"
 if [ "$got" != "$common" ]; then
     capture git --git-dir="$common" rev-parse --is-bare-repository || \
         fail "could not read whether the common git directory $common is bare"
     if [ "$got" != true ]; then
-        case "$common" in
-            */.git) ;;
-            *) fail "this is a linked worktree of a clone whose common git directory $common is not named .git, so the top level of the main worktree, which could hold it, cannot be found; run this installer from the main worktree" ;;
-        esac
         git --git-dir="$common" config --get core.worktree > /dev/null
         case "$?" in
-            1) ;;
-            0) fail "core.worktree is set for the main worktree of this clone, so its top level, which could hold the common git directory $common, is not read here; run this installer from the main worktree" ;;
+            0) ;;
+            1)
+                case "$common" in
+                    */.git) untracked_in "${common%/.git}" ;;
+                    *) fail "this is a linked worktree of a clone whose common git directory $common is not named .git and sets no core.worktree, so git records the top level of the main worktree, which could hold it, nowhere (git worktree list names the git directory itself); run this installer from the main worktree" ;;
+                esac ;;
             *) fail "could not read core.worktree for the main worktree of this clone" ;;
         esac
     fi
@@ -192,6 +234,14 @@ if [ -e "$common/worktrees" ] || [ -L "$common/worktrees" ]; then
     [ -d "$common/worktrees" ] && [ -r "$common/worktrees" ] && [ -x "$common/worktrees" ] || \
         fail "the worktree registry $common/worktrees cannot be read and searched by this user, so the linked worktrees of this clone cannot be checked"
 fi
+# A linked worktree reads a core.worktree only under extensions.worktreeConfig (its config.worktree, or
+# the shared configuration); the main worktree reads one always.
+wtconfig=$(git --git-dir="$common" config --type=bool --get extensions.worktreeConfig)
+case "$?" in
+    0) ;;
+    1) wtconfig=false ;;
+    *) fail "could not read extensions.worktreeConfig for this clone" ;;
+esac
 for wtdir in "$common" "$common"/worktrees/* "$common"/worktrees/.[!.]* "$common"/worktrees/..?*; do
     [ -e "$wtdir" ] || [ -L "$wtdir" ] || continue
     git --git-dir="$wtdir" rev-parse --git-dir > /dev/null || \
@@ -202,13 +252,18 @@ for wtdir in "$common" "$common"/worktrees/* "$common"/worktrees/.[!.]* "$common
         1) ;;
         *) fail "could not read core.hooksPath for the worktree whose git directory is $wtdir" ;;
     esac
-    [ "$wtdir" = "$common" ] && continue
+    if [ "$wtdir" = "$common" ]; then
+        core_worktree_untracked "$common"
+        continue
+    fi
+    [ "$wtconfig" != true ] || core_worktree_untracked "$wtdir"
     # A linked worktree's top level, from the gitdir file of its entry: the path of its .git file,
     # absolute or relative to the entry. A top level that no longer exists is compared as written.
     [ -f "$wtdir/gitdir" ] && [ -r "$wtdir/gitdir" ] || \
         fail "the gitdir file of the worktree entry $wtdir is missing or not readable, so the top level of that worktree cannot be checked (git worktree prune removes a stale entry)"
     capture cat -- "$wtdir/gitdir" || fail "could not read $wtdir/gitdir"
     case "$got" in
+        /.git) wtop=/ ;;
         */.git) wtop=${got%/.git} ;;
         *) fail "$wtdir/gitdir does not name the .git file of a worktree, so the top level of that worktree cannot be checked" ;;
     esac
@@ -221,6 +276,25 @@ for wtdir in "$common" "$common"/worktrees/* "$common"/worktrees/.[!.]* "$common
         wtop=$got
     fi
     untracked_in "$wtop"
+done
+# A working tree the registry does not name (a .git file written by hand), or names at a path it has
+# since left, is found by its .git entry: neither the hooks directory nor any directory above it may hold
+# one unless a .git component lies between them (git never tracks a path through one). Every directory
+# above it was entered to resolve its physical path, so a .git entry in each can be seen.
+anc=$hooks
+while :; do
+    if [ -e "$anc/.git" ] || [ -L "$anc/.git" ]; then
+        case "$anc" in
+            "$hooks") below= ;;
+            *) below=${hooks#"$anc"/} ;;
+        esac
+        case "/$below/" in
+            */.git/*) ;;
+            *) fail "the hooks directory $hooks is inside ${anc:-/}, which holds a .git entry, with no .git component between them: ${anc:-/} may be the top level of a working tree (one the worktree registry may not name), so the files of the hooks directory could be tracked, and a branch could supply a hook" ;;
+        esac
+    fi
+    [ -n "$anc" ] || break
+    anc=${anc%/*}
 done
 # The destination, confined by construction: with core.hooksPath unset, git runs hooks only from the
 # hooks directory of the common git directory, so that is the one directory written. Its physical path is
@@ -248,26 +322,6 @@ is_stub() {
     [ ! -L "$1" ] && [ -f "$1" ] && [ -r "$1" ] && [ -x "$1" ] && printf '%s\n' "$body" | cmp -s -- - "$1"
 }
 made_dir=
-if [ -L "$hooks" ]; then
-    fail "$hooks is a symbolic link; the stub is written only into a real hooks directory in the common git directory $common, never through a link to another repository or a working tree. Replace the link with a directory and run this installer again"
-elif [ -e "$hooks" ]; then
-    [ -d "$hooks" ] || fail "$hooks is not a directory, so no hook can be written there"
-    [ -r "$hooks" ] && [ -x "$hooks" ] && [ -w "$hooks" ] || \
-        fail "the hooks directory $hooks cannot be read, searched and written by this user"
-    if [ -e "$stub" ] || [ -L "$stub" ]; then
-        if is_stub "$stub"; then
-            printf '%s\n' "opf-pre-commit install: already installed in this clone ($stub)"
-            exit 0
-        fi
-        fail "$stub is a pre-commit hook that installing would replace; remove it, or have it run ./$rel/pre-commit, first"
-    fi
-else
-    mkdir -- "$hooks" || fail "could not create the hooks directory $hooks"
-    made_dir=1
-fi
-# The stub is written and checked in a private directory this run creates (mkdir never takes an
-# existing name, so everything in it is this run's), then linked into place: ln never replaces a file, so
-# a hook that appeared since the check above is kept, and git never runs a part-written stub.
 priv=$hooks/.opf-pre-commit-install.$$
 tmp=$priv/.opf-pre-commit-stub.$$
 made_priv=
@@ -277,7 +331,9 @@ strayed=
 # same file as the temporary one, or the exact stub text once that is removed), a link ln made inside a
 # directory that arrived at the stub path only while it is the same file as the temporary one, then the
 # private directory and the hooks directory if this run created them. Anything it cannot remove is named.
+# The signals trapped below are ignored while it runs.
 rollback() {
+    trap '' HUP INT TERM
     left=
     if [ -n "$linked" ] && [ ! -L "$stub" ]; then
         if [ "$stub" -ef "$tmp" ] || { [ ! -e "$tmp" ] && is_stub "$stub"; }; then
@@ -299,6 +355,29 @@ rollback() {
     [ -z "$left" ] || fail "$1; this run could not remove what it wrote at:$left; remove it by hand"
     fail "$1; nothing this run wrote is left"
 }
+# A hangup, interrupt or termination undoes the same way (the shell runs the trap once the command it
+# is waiting for returns).
+trap 'rollback "stopped by a signal"' HUP INT TERM
+if [ -L "$hooks" ]; then
+    fail "$hooks is a symbolic link; the stub is written only into a real hooks directory in the common git directory $common, never through a link to another repository or a working tree. Replace the link with a directory and run this installer again"
+elif [ -e "$hooks" ]; then
+    [ -d "$hooks" ] || fail "$hooks is not a directory, so no hook can be written there"
+    [ -r "$hooks" ] && [ -x "$hooks" ] && [ -w "$hooks" ] || \
+        fail "the hooks directory $hooks cannot be read, searched and written by this user"
+    if [ -e "$stub" ] || [ -L "$stub" ]; then
+        if is_stub "$stub"; then
+            printf '%s\n' "opf-pre-commit install: already installed in this clone ($stub)"
+            exit 0
+        fi
+        fail "$stub is a pre-commit hook that installing would replace; remove it, or have it run ./$rel/pre-commit, first"
+    fi
+else
+    mkdir -- "$hooks" || fail "could not create the hooks directory $hooks"
+    made_dir=1
+fi
+# The stub is written and checked in a private directory this run creates (mkdir never takes an
+# existing name, so everything in it is this run's), then linked into place: ln never replaces a file, so
+# a hook that appeared since the check above is kept, and git never runs a part-written stub.
 mkdir -m 700 -- "$priv" || rollback "could not create the private directory $priv (if an earlier run left it, remove it)"
 made_priv=1
 ( set -C; printf '%s\n' "$body" > "$tmp" ) || rollback "could not write the stub as $tmp"
@@ -319,5 +398,6 @@ is_stub "$stub" || rollback "the stub $stub did not read back as a readable, exe
 rm -f -- "$tmp" && [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || rollback "could not remove the temporary file $tmp"
 rmdir -- "$priv" || rollback "could not remove the private directory $priv"
 made_priv=
+trap - HUP INT TERM
 printf '%s\n' "opf-pre-commit install: installed for this clone and its linked worktrees ($stub runs ./$rel/pre-commit)."
 echo "opf-pre-commit install: other clones must run this installer too; git commit --no-verify, cherry-pick, revert, rebase, am and a clean merge commit without the hook, and CI does not catch a history violation committed that way (see pre-commit)."
