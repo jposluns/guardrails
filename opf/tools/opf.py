@@ -22076,10 +22076,13 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 # parent holds SIGCHLD at SIG_DFL from before the launch until the leader is reaped (no handler: an
 # inherited SIG_IGN would let the kernel auto-reap the leader and lose its real exit, QA28), forks
 # nothing in-process for units and relays nothing while waiting; it polls
-# os.waitid(WEXITED|WNOWAIT|WNOHANG), so the leader's exit is OBSERVED WITHOUT REAPING, and on EVERY
-# completion path -- a clean exit, a failing exit, the budget expiry, an interrupting exception --
+# os.waitid(WEXITED|WNOWAIT|WNOHANG), so the leader's exit is OBSERVED WITHOUT REAPING and its exit
+# status is taken from that observation itself (QA29 codex B1: a competing reap cannot launder the
+# real status away), and on every completion path that leaves the leader un-reaped -- a clean exit,
+# a failing exit, the budget expiry, an interrupting exception --
 # it SIGKILLs the unit's whole process group FIRST, while the un-reaped leader still pins the group
-# id, then reaps; at the unit's budget below it records a named exit-2 failure, whatever the unit
+# id, then reaps (never on the lost path and never after any reap: a reaped pid is unpinned, may be
+# reused, and licences no group kill); at the unit's budget below it records a named exit-2 failure, whatever the unit
 # was doing, and each unit child also starts under RLIMIT_FSIZE (_UNIT_FSIZE_LIMIT: capture
 # growth is bounded at the source, a write past it failing the unit closed by name) and, on Linux,
 # PR_SET_PDEATHSIG (a killed parent takes the leader with it).
@@ -22134,8 +22137,10 @@ _UNIT_OUTER_BOUNDS = {
     # flipped-bound pair (a 3 s sleeping unit twice), the in-process vocabulary and table checks,
     # and the QA28 vectors (seven more quick bounded subprocesses under 10-15 s bounds each, the
     # 1 s bounded-deliver probe, the 30 s-capped wrapper probe and two signalled drivers with 15 s
-    # waits and 10 s ended() scans): about 400 s end to end worst, so 600 holds the kill-timeout
-    # rule.
+    # waits and 10 s ended() scans), and the QA29 vectors (six more quick bounded subprocesses
+    # under 10-15 s bounds, two sub-second watchdog probes -- one waiting out a 6 s sibling --
+    # and an in-process delivery probe: about 40 s more worst): about 440 s end to end worst, so
+    # 600 holds the kill-timeout rule.
     "opf-unit-bound": 600.0,
 }
 
@@ -22188,12 +22193,16 @@ _UNIT_OUTPUT_CAP = 4 << 20
 # The at-source capture bound (QA28): every unit subprocess starts with RLIMIT_FSIZE at this many
 # bytes -- soft AND hard, set between the fork and the exec, so the unit cannot raise it back --
 # and no single file it writes, its captured stdout and stderr included, can grow past it: a write
-# beyond the limit fails the writer -- EFBIG (OSError) under Python, which ignores SIGXFSZ at
-# startup, the fatal default SIGXFSZ in a non-Python descendant -- and the unit fails closed with a
-# NAMED failure either way.
+# beyond the limit fails the writer with EFBIG (OSError) under Python, which ignores SIGXFSZ at
+# startup, and with the fatal default SIGXFSZ (its core dump following the system's core policy) in
+# a non-Python descendant. The BOUND is the guarantee; the resulting failure is usually a nonzero
+# exit, a killed-by-SIGXFSZ leader or a missing completion record, but it is NOT always named after
+# the limit (QA29 claude MINOR 4: the observed spellings are `exited 120`, a signal kill, or the
+# record failure), and a unit that CATCHES its own EFBIG and still exits 0 with its record intact
+# passes -- bounded, not failed.
 # _UNIT_OUTPUT_CAP still caps the copy. Residuals, disclosed: the bound is PER FILE, not aggregate
 # (many files, or an escaped descendant's new files, can still consume storage until the outer
-# bound), and a unit legitimately needing a larger single file fails NAMED here, for review.
+# bound), and a unit legitimately needing a larger single file fails here, for review.
 _UNIT_FSIZE_LIMIT = 256 << 20
 
 # The environment a unit subprocess starts from: ONLY these caller variables pass through (where to
@@ -22214,20 +22223,31 @@ def _unit_scrubbed_env():
 
 
 def _unit_deliver(stream, data, bound):
-    """Write `data` (bytes) to a caller stream without letting this parent block past `bound` seconds
-    and WITHOUT any helper thread (QA26/QA27 codex B1; QA28 codex B3: the retired bounded-join daemon
+    """Write `data` (bytes) to a caller stream without letting this parent block past `bound` seconds,
+    WITHOUT any helper thread (QA26/QA27 codex B1; QA28 codex B3: the retired bounded-join daemon
     writer, once abandoned on a blocked stream, kept the stream's buffer lock and either wedged or
-    SIGABRTed interpreter shutdown inside _enter_buffered_busy). An OS-backed stream is written
-    through its own descriptor, set non-blocking for the duration and restored after: the stream's
-    pending Python-level text is flushed first (a flush a full pipe refuses raises BlockingIOError
-    and stays buffered, so late text can still arrive out of order -- the exit code and completion
-    record, never the delivered text, are the suite's contract), then the bytes go out in bounded
-    os.write rounds, retried on EAGAIN until the deadline; whatever the stream has not accepted by
-    then is DROPPED, with one best-effort non-blocking note to the same descriptor saying how many
-    bytes were given up. A stream with no usable descriptor (the self-test's in-memory redirects) is
-    written directly: an in-process memory writer cannot block on the kernel (a hostile write() that
-    never returns is outside this bound, disclosed -- it would be this suite's own in-process code).
-    Every failure is swallowed: a write failure cannot change a unit's verdict."""
+    SIGABRTed interpreter shutdown inside _enter_buffered_busy) and WITHOUT touching the stream's
+    O_NONBLOCK flag (QA29 claude MEDIUM 1: that flag lives on the OPEN FILE DESCRIPTION, shared by
+    every process holding the same pipe, tty or file -- the shell that launched this suite, its
+    pipeline siblings, the gates that run after it -- so flipping it starves those writers with
+    EAGAIN while delivery runs, and a SIGKILL mid-delivery would leave it flipped for all of them).
+    An OS-backed stream is written through its own descriptor in rounds gated by poll(POLLOUT)
+    under the remaining time, each round writing at most select.PIPE_BUF bytes -- the size poll's
+    readiness guarantees a pipe accepts without blocking -- so the description's flags are never
+    changed and a blocking descriptor never blocks this parent past the bound. The stream's pending
+    Python-level text is flushed first, and only when poll reports the descriptor writable NOW
+    (a flush into a pipe with no room would block; skipped, the text stays buffered and can still
+    arrive out of order -- the exit code and completion record, never the delivered text, are the
+    suite's contract; a flush whose pending text overruns the room poll vouched for can still block,
+    the caller's-own-buffered-text residual, disclosed). Whatever the stream has not accepted by
+    the deadline is DROPPED, with one best-effort note, again only when writable now, saying how
+    many bytes were given up. A stream with no usable descriptor (the self-test's in-memory
+    redirects) is written directly: an in-process memory writer cannot block on the kernel (a
+    hostile write() that never returns is outside this bound, disclosed -- it would be this suite's
+    own in-process code). Where select.poll is missing the rounds run ungated (each write may block;
+    the poll-free-platform residual, disclosed). Every failure is swallowed: a write failure cannot
+    change a unit's verdict."""
+    import select
     import time
     fd = None
     try:
@@ -22243,40 +22263,58 @@ def _unit_deliver(stream, data, bound):
             pass
         return
     deadline = time.monotonic() + bound
+    chunk = getattr(select, "PIPE_BUF", 512)
     try:
-        was_blocking = os.get_blocking(fd)
-    except OSError:
-        return
-    try:
-        os.set_blocking(fd, False)
+        poller = select.poll()
+        poller.register(fd, select.POLLOUT)
+    except (AttributeError, OSError, ValueError):
+        poller = None
+
+    def writable_now():
+        # POLLOUT at this instant; an error-only event (no reader left) reads as not writable.
+        if poller is None:
+            return True
+        try:
+            events = poller.poll(0)
+        except OSError:
+            return False
+        return bool(events) and bool(events[0][1] & select.POLLOUT)
+
+    if writable_now():
         try:
             stream.flush()   # the caller's own pending text first, so the copy cannot overtake it
         except Exception:
             pass
-        view = memoryview(data)
-        undelivered = False
-        while len(view) and not undelivered:
+    view = memoryview(data)
+    undelivered = False
+    while len(view) and not undelivered:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            undelivered = True
+            break
+        if poller is not None:
             try:
-                view = view[os.write(fd, view):]
-            except (BlockingIOError, InterruptedError):
-                if time.monotonic() >= deadline:
-                    undelivered = True
-                else:
-                    time.sleep(0.01)
+                events = poller.poll(max(int(min(remaining, 0.2) * 1000), 1))
             except OSError:
                 break
-        if undelivered:
-            note = ("\n[opf self-test: a caller stream accepted no more output within {} s; {} "
-                    "bytes were dropped]\n".format(bound, len(view)).encode("utf-8"))
+            if not events:
+                continue   # not writable yet; the deadline is re-checked at the top
+            if not events[0][1] & select.POLLOUT:
+                break      # POLLERR and kin: nothing will drain this pipe, a write could only fail
+        try:
+            view = view[os.write(fd, view[:chunk]):]
+        except (BlockingIOError, InterruptedError):
+            time.sleep(0.01)   # the descriptor was already non-blocking (the caller's choice)
+        except OSError:
+            break
+    if undelivered:
+        note = ("\n[opf self-test: a caller stream accepted no more output within {} s; {} "
+                "bytes were dropped]\n".format(bound, len(view)).encode("utf-8"))
+        if writable_now():
             try:
                 os.write(fd, note)
             except OSError:
                 pass
-    finally:
-        try:
-            os.set_blocking(fd, was_blocking)
-        except OSError:
-            pass
 
 
 def _unit_copy_capped(stream, path, label, kind):
@@ -22286,34 +22324,44 @@ def _unit_copy_capped(stream, path, label, kind):
     open as its own descriptor and can reach it through /proc, so it is re-opened
     O_NOFOLLOW|O_NONBLOCK and required BY FSTAT ON THE OPENED DESCRIPTOR to still be a regular file
     (QA28 codex B2: a FIFO planted there made the old open block past every bound), and the read is
-    bounded by the cap. Returns None, or the NAMED anomaly when the path was replaced by a symlink
-    or a non-regular file -- the runner fails the unit closed with it; any other read or write
-    failure is swallowed (the exit code and completion record, never the copied text, are the
-    unit's verdict)."""
+    bounded by the cap. Returns (anomaly, tainted): `anomaly` is None, or the NAMED reason this
+    capture cannot stand -- replaced by a symlink or a non-regular file, or NOT READABLE back
+    (QA29 codex MAJOR 5: a unit that unlinked or broke its capture used to pass with the open
+    error swallowed; a passing verdict requires a readable, complete capture, so the runner fails
+    the unit closed with the anomaly). `tainted` says the capped read carries the uncaught-exception
+    marker `Traceback (most recent call last):` -- the runner refuses a PASSING exit over a tainted
+    error stream (a marker past the cap escapes the scan; the bounded-read residual, disclosed).
+    A write failure of the copy itself is still swallowed (the exit code, the completion record and
+    the readable captures, never the delivered text, are the unit's verdict)."""
     import errno
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            return "its {} capture path was replaced by a symlink (not followed, not read)".format(kind)
-        return None
+            return ("its {} capture path was replaced by a symlink (not followed, not read)".format(kind),
+                    False)
+        return ("its {} capture could not be opened for reading back (errno {}); a passing verdict "
+                "requires a readable, complete capture".format(kind, exc.errno), False)
     with os.fdopen(fd, "rb") as handle:
         try:
             info = os.fstat(handle.fileno())
             if not stat.S_ISREG(info.st_mode):
                 return ("its {} capture path is no longer a regular file (mode {:o}); a FIFO or "
-                        "device there is never opened blocking, never read".format(kind, info.st_mode))
+                        "device there is never opened blocking, never read".format(kind, info.st_mode),
+                        False)
             data = handle.read(_UNIT_OUTPUT_CAP)
             if handle.read(1):
                 extra = max(info.st_size - _UNIT_OUTPUT_CAP, 1)
                 data += ("\n[opf self-test: {} {} exceeded the {}-byte copy cap; about {} more bytes "
                          "were truncated]\n".format(label, kind, _UNIT_OUTPUT_CAP, extra)
                          .encode("utf-8"))
-        except OSError:
-            return None
+        except OSError as exc:
+            return ("its {} capture could not be read back (errno {}); a passing verdict requires "
+                    "a readable, complete capture".format(kind, exc.errno), False)
+    tainted = b"Traceback (most recent call last):" in data
     if data:
         _unit_deliver(stream, data, 10.0)
-    return None
+    return (None, tainted)
 
 
 def _unit_write_record(label, code):
@@ -22343,13 +22391,21 @@ def _unit_internal_watchdog(label, budget):
     timer on release -- the elapsed-aware-restore rule forbids that verbatim restore -- and a unit
     re-arming SIGALRM muted it; a helper THREAD would mark every fork the unit then makes as
     multi-threaded and could deadlock a forked child on another thread's locks). The watchdog is
-    its own helper PROCESS, launched into this unit's process group: at `budget` seconds it writes
-    the NAMED internal-budget failure to this unit's captured stderr (its inherited descriptor),
-    writes a fail-closed completion record carrying this unit's pid, and SIGKILLs ONLY this unit's
-    own processes, never another group's (QA28 claude MEDIUM 1: the `--self-test-unit` entry run by
-    hand inside a launcher's group must never take the launcher down): when this process leads its
-    own group (the runner's start_new_session launch, pgid == pid) the expiry kills that whole
-    group, the helper itself included; otherwise it kills this unit process alone and exits. The
+    its own helper PROCESS, launched into this unit's process group: at `budget` seconds it
+    SIGKILLs this unit FIRST (QA29 codex MAJOR 4: the retired blocking report -- a plain open of
+    the result path -- could be parked forever by a FIFO planted there, deferring the kill past the
+    unit's release and defeating the budget; the watchdog kills before it reports and never blocks
+    in its own lifetime), then writes the NAMED internal-budget failure to this unit's captured
+    stderr (its inherited descriptor) and a fail-closed completion record carrying this unit's pid,
+    the record re-opened O_NOFOLLOW|O_NONBLOCK and required regular by fstat on the opened
+    descriptor (a planted FIFO or symlink is skipped, never a blocking open), and SIGKILLs ONLY
+    this unit's own processes, never another group's (QA28 claude MEDIUM 1: the `--self-test-unit`
+    entry run by hand inside a launcher's group must never take the launcher down): when this
+    process leads its own group AND its own session (the runner's start_new_session launch,
+    pgid == pid == sid; a shell job-control pipeline head also has pgid == pid but SHARES its
+    session and its group with its pipeline siblings, QA29 claude MINOR 1, and must not match) the
+    expiry finishes by killing that whole group, the helper itself included; otherwise it kills
+    this unit process alone and exits. The
     helper watches its parent and exits on its own the moment the unit ends first, and the returned
     zero-argument release (called when the unit ends, before the real record is written, so a
     finished unit is never overwritten) kills and reaps it. No signal handler, itimer or mask is
@@ -22361,9 +22417,9 @@ def _unit_internal_watchdog(label, budget):
     import subprocess
     unit_pid = os.getpid()
     pgid = os.getpgrp()
-    own_group = pgid == unit_pid
+    own_group = pgid == unit_pid and os.getsid(0) == unit_pid
     source = (
-        "import os, signal, sys, time\n"
+        "import os, signal, stat, sys, time\n"
         "label, budget, unit_pid, pgid, own_group, result = sys.argv[1:7]\n"
         "budget, unit_pid, pgid = float(budget), int(unit_pid), int(pgid)\n"
         "deadline = time.monotonic() + budget\n"
@@ -22371,6 +22427,12 @@ def _unit_internal_watchdog(label, budget):
         "    time.sleep(0.05)\n"
         "    if os.getppid() != unit_pid:\n"
         "        os._exit(0)   # the unit ended first: nothing to enforce\n"
+        "if os.getppid() != unit_pid:\n"
+        "    os._exit(0)   # the unit ended at the deadline: still nothing to enforce\n"
+        "try:\n"
+        "    os.kill(unit_pid, signal.SIGKILL)   # the kill comes FIRST (QA29 codex MAJOR 4);\n"
+        "except OSError:\n"
+        "    pass                                # the report below can fail but never defer it\n"
         "try:\n"
         "    sys.stderr.write('opf self-test: ' + label + ' exceeded its ' + str(budget)\n"
         "                     + ' s INTERNAL budget (_AGGREGATOR_INTERNAL_BUDGET); the unit gives'\n"
@@ -22381,21 +22443,21 @@ def _unit_internal_watchdog(label, budget):
         "    pass\n"
         "if result:\n"
         "    try:\n"
-        "        with open(result, 'w', encoding='utf-8') as handle:\n"
-        "            handle.write(label + ' 2 ' + str(unit_pid) + '\\n')\n"
+        "        fd = os.open(result, os.O_WRONLY | os.O_CREAT\n"
+        "                     | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0), 0o600)\n"
+        "        try:\n"
+        "            if stat.S_ISREG(os.fstat(fd).st_mode):\n"
+        "                os.ftruncate(fd, 0)\n"
+        "                os.write(fd, (label + ' 2 ' + str(unit_pid) + '\\n').encode('utf-8'))\n"
+        "        finally:\n"
+        "            os.close(fd)\n"
         "    except OSError:\n"
         "        pass\n"
-        "if os.getppid() != unit_pid:\n"
-        "    os._exit(0)   # the unit ended at the deadline: still nothing to enforce\n"
         "if own_group == '1':\n"
         "    try:\n"
         "        os.killpg(pgid, signal.SIGKILL)   # this unit's OWN group, this helper included\n"
         "    except OSError:\n"
         "        pass\n"
-        "try:\n"
-        "    os.kill(unit_pid, signal.SIGKILL)\n"
-        "except OSError:\n"
-        "    pass\n"
         "os._exit(2)\n")
     try:
         helper = subprocess.Popen(
@@ -22479,28 +22541,63 @@ def _run_unit_subprocess(label, bound, argv=None):
     this parent holds SIGCHLD at SIG_DFL, restored after (QA28 codex B1 / claude MAJOR 1: an
     inherited SIG_IGN made the kernel auto-reap the leader, reducing the verdict to the record alone
     AND voiding the killpg licence). The parent waits by polling os.waitid(WEXITED|WNOWAIT|WNOHANG):
-    the leader's exit is OBSERVED WITHOUT REAPING, so on EVERY completion path -- a clean exit, a
-    failing exit, expiry, an interrupting exception -- the unit's whole process group is SIGKILLed
-    FIRST, while the un-reaped leader still pins pgid == pid (the killpg licence), and only then is
-    the leader reaped (QA28 codex MAJOR 4 / claude MINOR 3: a descendant that stayed in the group no
-    longer survives any completion). On expiry the kill is followed by a short bounded reap and the
-    named exit-2 failure; an interrupted parent (KeyboardInterrupt, SystemExit, anything raised out
-    of the wait) kills and reaps in its cleanup and lets the interruption propagate (QA28 claude
-    MEDIUM 2). The unit's verdict is its exit code AND the one-line completion record
+    the leader's exit is OBSERVED WITHOUT REAPING, its exit status is taken from that observation
+    ITSELF (QA29 codex B1: a competing reap after the observation can no longer launder the real
+    status into Popen.wait's ECHILD fallback of 0), and on every completion path that leaves the
+    leader un-reaped -- a clean exit, a failing exit, expiry, an interrupting exception -- the
+    unit's whole process group is SIGKILLed FIRST, while the un-reaped leader still pins
+    pgid == pid (the killpg licence), and only then is the leader reaped (QA28 codex MAJOR 4 /
+    claude MINOR 3: a descendant that stayed in the group no longer survives any completion). The
+    group is NEVER killed on the lost path and never after any reap (QA29 claude MINOR 2 / gemini:
+    a reaped leader's pid is unpinned and may already name an unrelated group). On expiry the kill
+    is followed by a short bounded reap and the named exit-2 failure; an interrupted parent
+    (KeyboardInterrupt, SystemExit, anything raised out of the wait) kills -- only while the leader
+    still pins its group -- and reaps in its cleanup and lets the interruption propagate (QA28
+    claude MEDIUM 2). The unit's verdict is its exit code AND the one-line completion record
     `<label> <code> <pid>` the child writes LAST (_cmd_self_test_unit), the pid BINDING the record
     to the leader (QA28 claude MINOR 2): a missing, mismatched or wrong-pid record fails closed
     (exit 2). The result and capture files are re-opened O_NOFOLLOW|O_NONBLOCK and must still be
     regular files by fstat on the opened descriptor, every read bounded (QA28 codex B2: a FIFO or
     symlink planted at a child-reachable path is a NAMED exit-2 failure, never a hang). Afterwards
     the unit's output files are copied to the caller's streams through _unit_copy_capped's bounded,
-    capped, thread-free writer; an ordinary copy or write failure cannot change the unit's verdict.
-    Disclosed residuals: a descendant that LEAVES the unit's process group (its own setpgid or
+    capped, thread-free writer, and the verdict REQUIRES those captures (QA29 codex MAJOR 5): a
+    capture that is unreadable, replaced or non-regular is a named exit-2 failure, and a unit
+    exiting 0 whose captured error stream carries an uncaught-exception traceback is refused -- a
+    passing verdict requires a readable, complete capture and an empty or clean error stream
+    (clean: free of the `Traceback (most recent call last):` marker within the capped read; units
+    legitimately print fixture diagnostics to stderr on a pass). An ordinary write failure of the
+    copy itself cannot change the unit's verdict.
+    Disclosed residuals, each named with why it sits outside this runner's contract
+    (D-385-RESCOPE: the runner defends against a misbehaving UNIT; a hostile or instrumented
+    CALLER is that process's own business):
+    (a) an in-process competing reaper (QA29 codex B1's second half): caller code -- a thread, a
+    library, an interposed os.waitid -- that reaps this runner's child between the WNOWAIT
+    observation and this runner's kill and reap unpins the leader's pid, so the group kill can
+    miss or hit a reused id; the verdict itself stays right (the status is the observation's);
+    caller-side because only code already inside this process can reap its children.
+    (b) the caller's own buffered text into its own full pipes at shutdown (QA29 codex B2):
+    interpreter finalization flushes the CALLER's pending stream text into the caller's blocked
+    pipe after this runner has returned; _unit_deliver skips its flush when the descriptor has no
+    room, but text the caller itself buffered belongs to the caller's shutdown, not to any unit.
+    (c) a threaded or instrumented caller blocking in preexec_fn (QA29 codex B3): an audit hook or
+    a lock another caller thread holds across fork can stall child_setup before the deadline or
+    the PDEATHSIG tether exists; only the caller's own threads and hooks can hold that lock.
+    (d) a parent killed by a signal it leaves unhandled -- SIGTERM or SIGHUP, for which Python
+    installs no handler, so no finally runs (QA29 claude MEDIUM 2) -- or by uncatchable SIGKILL:
+    PDEATHSIG takes the leader, but in-group descendants run to their own exits unsupervised;
+    installing handlers here would displace the CALLER's process-wide dispositions, which are the
+    caller's own to set.
+    (e) a SIGCHLD disposition the caller set natively (ctypes or C sigaction, bypassing Python's
+    signal table; QA29 claude MINOR 3): the save-and-restore here goes through Python's cached
+    table, so a natively set disposition is restored to what that table last knew, not to the
+    kernel's value; caller-side because only the caller can bypass its own interpreter.
+    Further disclosed: a descendant that LEAVES the unit's process group (its own setpgid or
     setsid, or a start_new_session launch) is not killed and never signalled (the escaped-writer
-    design); copied output past _UNIT_OUTPUT_CAP is truncated with a note; _UNIT_FSIZE_LIMIT bounds
-    each file, not the aggregate; a parent killed with an uncatchable signal takes the leader via
-    PDEATHSIG but group members then run to their own exits unsupervised; and where os.waitid is
-    unavailable the wait falls back to reap-then-kill (the WNOWAIT observation needs waitid). `argv`
-    overrides the child command for _unit_bound_self_test's synthetic vectors only.
+    design); copied output past _UNIT_OUTPUT_CAP is truncated with a note; _UNIT_FSIZE_LIMIT
+    bounds each file, not the aggregate; and where os.waitid is unavailable the wait falls back to
+    REAP-FIRST (the WNOWAIT observation needs waitid) and, the leader reaped, no group kill
+    follows (a reaped pid licences nothing), so a descendant that stayed in the group survives
+    there. `argv` overrides the child command for _unit_bound_self_test's synthetic vectors only.
     _UNIT_BOUND_DISABLED is the test-only flip (the wait audit's disclosed variable-timeout
     residual, deliberate here) that removes the deadline; _unit_bound_self_test proves it committed
     False and live."""
@@ -22565,46 +22662,61 @@ def _run_unit_subprocess(label, bound, argv=None):
             failure = None
             status = None
             settled = False
+            observed = None
+            pinned = True   # an un-reaped leader pins pgid == pid: the killpg licence (QA29)
             try:
                 deadline = None if _UNIT_BOUND_DISABLED else time.monotonic() + bound
                 outcome = "exited"
                 if getattr(os, "waitid", None) is None:
-                    # No WNOWAIT observation on this platform: the disclosed reap-then-kill fallback.
+                    # No WNOWAIT observation on this platform: the disclosed REAP-FIRST fallback.
+                    # The reap unpins the leader's pid, so no group kill may follow it (QA29).
                     try:
                         status = child.wait(timeout=(None if deadline is None else bound))
+                        pinned = False
                     except subprocess.TimeoutExpired:
                         outcome = "timeout"
                 else:
                     while True:
                         try:
-                            if os.waitid(os.P_PID, child.pid,
-                                         os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None:
-                                break
+                            observed = os.waitid(os.P_PID, child.pid,
+                                                 os.WEXITED | os.WNOWAIT | os.WNOHANG)
                         except OSError:
                             outcome = "lost"
+                            pinned = False   # reaped outside this runner: the pid licences nothing
+                            break
+                        if observed is not None:
                             break
                         if deadline is not None and time.monotonic() >= deadline:
                             outcome = "timeout"
                             break
                         time.sleep(0.01)
-                # The group, on EVERY completion path, BEFORE the leader is reaped: the un-reaped
-                # leader (WNOWAIT observed it; a timed-out wait reaped nothing) still pins
-                # pgid == pid -- the numeric killpg licence -- and a descendant that stayed in the
-                # group dies here even after a clean leader exit.
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                if outcome == "exited" and status is None:
+                # The group, on every completion path WHILE the un-reaped leader still pins
+                # pgid == pid (WNOWAIT observed it, or a timed-out wait reaped nothing): the
+                # numeric killpg licence. Never on the lost path and never after any reap (QA29
+                # claude MINOR 2 / gemini: a reaped leader's pid may already name an unrelated
+                # group). A descendant that stayed in the group dies here even after a clean exit.
+                if pinned:
                     try:
-                        status = child.wait(timeout=5.0)   # the observed exit: an immediate reap
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                if outcome == "exited" and status is None:
+                    # The exit status is the WNOWAIT observation's OWN (QA29 codex B1): a competing
+                    # in-process reap between observation and this reap can no longer launder the
+                    # real status into Popen.wait's ECHILD fallback of 0.
+                    status = (observed.si_status if observed.si_code == os.CLD_EXITED
+                              else -observed.si_status)
+                    try:
+                        child.wait(timeout=5.0)   # clear the zombie; the verdict keeps the observed status
+                        pinned = False
                     except subprocess.TimeoutExpired:
                         failure = ("opf self-test: {} was observed exited but its leader could not "
                                    "be reaped within 5.0 s; failing closed".format(label))
                 elif outcome == "timeout":
                     reaped = True
                     try:
-                        status = child.wait(timeout=5.0)
+                        child.wait(timeout=5.0)
+                        pinned = False
                     except subprocess.TimeoutExpired:
                         reaped = False
                     failure = ("opf self-test: {} exceeded its {} s outer bound; its process group "
@@ -22623,12 +22735,14 @@ def _run_unit_subprocess(label, bound, argv=None):
                 settled = True
             finally:
                 if not settled:
-                    # An interrupted parent (QA28 claude MEDIUM 2): kill the unit's whole group and
-                    # reap the leader on the way out, then let the interruption propagate.
-                    try:
-                        os.killpg(child.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
+                    # An interrupted parent (QA28 claude MEDIUM 2): kill the unit's whole group --
+                    # only while the un-reaped leader still pins it (QA29) -- and reap the leader
+                    # on the way out, then let the interruption propagate.
+                    if pinned:
+                        try:
+                            os.killpg(child.pid, signal.SIGKILL)
+                        except OSError:
+                            pass
                     try:
                         child.wait(timeout=5.0)
                     except (OSError, subprocess.TimeoutExpired):
@@ -22675,11 +22789,16 @@ def _run_unit_subprocess(label, bound, argv=None):
                            "its record is written -- an early os._exit(0) included -- and a record "
                            "written by any process but the leader fail closed".format(
                                label, status, child.pid, (record or "")[:80]))
-        copy_anomaly = _unit_copy_capped(sys.stdout, out_path, label, "stdout")
-        copy_anomaly = _unit_copy_capped(sys.stderr, err_path, label, "stderr") or copy_anomaly
+        copy_anomaly, _out_tainted = _unit_copy_capped(sys.stdout, out_path, label, "stdout")
+        err_anomaly, err_tainted = _unit_copy_capped(sys.stderr, err_path, label, "stderr")
+        copy_anomaly = err_anomaly or copy_anomaly
         if failure is None and copy_anomaly is not None:
             failure = ("opf self-test: {} {}; failing closed, never a hang (QA28)"
                        .format(label, copy_anomaly))
+        if failure is None and status == EXIT_OK and err_tainted:
+            failure = ("opf self-test: {} exited 0 but its error stream carries an "
+                       "uncaught-exception traceback; a passing verdict requires an empty or clean "
+                       "error stream (QA29 codex MAJOR 5), failing closed".format(label))
         if failure is not None:
             _unit_deliver(sys.stderr, (failure + "\n").encode("utf-8", "replace"), 10.0)
             return EXIT_MALFORMED
@@ -22717,7 +22836,17 @@ def _unit_bound_self_test():
     the source and fails closed by name, with the capture bounded; (15) the watchdog
     neither disturbs a caller's armed real timer, nor is muted by a unit re-arming SIGALRM, nor --
     run inside a launcher's group -- kills anything but the unit; (16) a SIGINTed driver kills and
-    reaps its running unit, and a SIGKILLed driver's unit leader dies with it (PDEATHSIG). Returns
+    reaps its running unit, and a SIGKILLed driver's unit leader dies with it (PDEATHSIG). The
+    QA29 vectors: (17) a competing reaper right after the WNOWAIT observation cannot launder a
+    nonzero exit into a pass (the verdict keeps the observed status); (18) the lost path -- a
+    leader reaped before the runner observed it -- issues NO group kill and is the named
+    reaped-outside exit 2; (19) the no-waitid fallback reaps first and then kills no group: an
+    in-group descendant survives there, the disclosed fallback residual; (20) a FIFO planted at
+    the result path cannot park the internal watchdog, which kills FIRST and reports
+    non-blocking, regular-only; (21) armed under a group leader that is not a session leader, the
+    watchdog spares the pipeline sibling sharing the group; (22) delivery never touches the
+    shared O_NONBLOCK flag and still delivers; (23) an unreadable stderr capture, and an exit 0
+    over an uncaught-exception traceback, fail closed by name. Returns
     0 clean, 1 on a failure."""
     import contextlib
     import io
@@ -23118,6 +23247,220 @@ def _unit_bound_self_test():
                 except OSError:
                     pass
 
+    # (17) QA29 codex B1: a competing in-process reaper that reaps the leader right after the
+    # WNOWAIT observation cannot launder a nonzero exit into a pass -- the verdict keeps the
+    # status the observation itself carried, so the planted success record cannot stand over the
+    # real exit 7.
+    real_waitid = os.waitid
+
+    def reaping_waitid(idtype, ident, options):
+        outcome = real_waitid(idtype, ident, options)
+        if outcome is not None:
+            try:
+                os.waitpid(ident, os.WNOHANG)   # the competing reap, right after the observation
+            except OSError:
+                pass
+        return outcome
+
+    os.waitid = reaping_waitid
+    try:
+        code, _took, _out_text, err_text = run_vector("synthetic-reaped", 10.0, (
+            "import os\n"
+            "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+            "    handle.write('synthetic-reaped 0 ' + str(os.getpid()) + '\\n')\n"
+            "os._exit(7)\n"))
+    finally:
+        os.waitid = real_waitid
+    if code != EXIT_MALFORMED or "exited 7" not in err_text:
+        faults.append("a competing reaper right after the WNOWAIT observation laundered an exit 7 "
+                      "under a planted success record (code {}, stderr tail {!r}): the verdict "
+                      "must keep the observed status".format(code, err_text[-200:]))
+
+    # (18) QA29 claude MINOR 2 / gemini: a leader reaped before this runner ever observed it (the
+    # lost path) licences NO group kill -- the pid is unpinned and may already be reused -- and
+    # the named reaped-outside failure is exit 2.
+    killpg_calls = []
+    real_killpg = os.killpg
+
+    def spying_killpg(pgid, sig):
+        killpg_calls.append(pgid)
+        return real_killpg(pgid, sig)
+
+    def lost_waitid(idtype, ident, options):
+        raise ChildProcessError("the leader was reaped outside the runner (modelled)")
+
+    os.waitid, os.killpg = lost_waitid, spying_killpg
+    try:
+        code, _took, _out_text, err_text = run_vector("synthetic-lost", 10.0, (
+            "import os\n"
+            "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+            "    handle.write('synthetic-lost 0 ' + str(os.getpid()) + '\\n')\n"
+            "os._exit(0)\n"))
+    finally:
+        os.waitid, os.killpg = real_waitid, real_killpg
+    if code != EXIT_MALFORMED or "reaped outside this runner" not in err_text:
+        faults.append("the lost path was not the named reaped-outside exit-2 failure (code {}, "
+                      "stderr tail {!r})".format(code, err_text[-200:]))
+    if killpg_calls:
+        faults.append("the lost path still issued a group kill ({} killpg call(s)): a reaped "
+                      "leader's pid licences nothing".format(len(killpg_calls)))
+
+    # (19) QA29, the no-waitid fallback: the reap comes FIRST there, so no group kill may follow
+    # it -- an in-group descendant SURVIVES a fallback completion (the disclosed fallback
+    # residual), because the reaped leader's pid may already name an unrelated group.
+    os.waitid = None   # the fallback platform, modelled; restored below
+    try:
+        code, _took, out_text, err_text = run_vector("synthetic-fallback", 10.0, (
+            "import os, time\n"
+            "kid = os.fork()\n"
+            "if kid == 0:\n"
+            "    time.sleep(4)\n"
+            "    os._exit(0)\n"
+            "print('FALLBACK', kid, flush=True)\n"
+            "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+            "    handle.write('synthetic-fallback 0 ' + str(os.getpid()) + '\\n')\n"
+            "os._exit(0)\n"))
+    finally:
+        os.waitid = real_waitid
+    told = next((line.split() for line in out_text.splitlines() if line.startswith("FALLBACK ")), None)
+    if code != EXIT_OK or told is None or len(told) != 2:
+        faults.append("the fallback-path unit did not pass cleanly or never told its fork "
+                      "(code {}, stdout {!r}, stderr tail {!r})".format(
+                          code, out_text[:120], err_text[-160:]))
+    elif ended(int(told[1]), 1.0):
+        faults.append("the no-waitid fallback still killed the unit's group after its reap "
+                      "(pid {} gone): a reaped pid licences no group kill".format(told[1]))
+
+    # (20) QA29 codex MAJOR 4: a FIFO planted at the result path cannot park the internal
+    # watchdog's report -- the watchdog kills FIRST and its report is non-blocking and
+    # regular-only, so the budget still fails the unit closed, by name, at the budget.
+    code, took, _out_text, err_text = run_vector("synthetic-fifo-watchdog", 15.0, (
+        "import os, sys, time\n"
+        "sys.path.insert(0, " + repr(here) + ")\n"
+        "import opf\n"
+        "os.mkfifo(os.environ['OPF_SELF_TEST_RESULT'])\n"
+        "opf._unit_internal_watchdog('synthetic-fifo-watchdog', 0.5)\n"
+        "time.sleep(4)\n"
+        "os.remove(os.environ['OPF_SELF_TEST_RESULT'])\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-fifo-watchdog 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n"))
+    if code != EXIT_MALFORMED or "INTERNAL budget" not in err_text or "killed by signal" not in err_text:
+        faults.append("a FIFO at the result path parked the watchdog's report past its budget "
+                      "(code {}, stderr tail {!r}): the watchdog must kill before it reports, "
+                      "never blocking".format(code, err_text[-240:]))
+    if took >= 3.0:
+        faults.append("the FIFO-parked watchdog did not enforce its 0.5 s budget ({:.1f} s)".format(took))
+
+    # (21) QA29 claude MINOR 1: armed under a group leader that is NOT a session leader (a shell
+    # job-control pipeline head), the watchdog kills only the unit -- never a pipeline sibling
+    # sharing that group.
+    leader = subprocess.Popen(
+        [sys.executable, "-I", "-c", (
+            "import sys, time\n"
+            "sys.path.insert(0, " + repr(here) + ")\n"
+            "import opf\n"
+            "opf._unit_internal_watchdog('synthetic-jobcontrol', 0.5)\n"
+            "time.sleep(30)\n")],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        preexec_fn=os.setpgrp)
+    sibling = None
+    try:
+        sibling = subprocess.Popen(
+            [sys.executable, "-I", "-c", "import time\ntime.sleep(6)\n"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            preexec_fn=lambda: os.setpgid(0, leader.pid))
+        try:
+            leader_rc = leader.wait(timeout=15.0)
+        except subprocess.TimeoutExpired:
+            leader_rc = None
+        try:
+            sibling_rc = sibling.wait(timeout=15.0)
+        except subprocess.TimeoutExpired:
+            sibling_rc = None
+        if leader_rc != -signal.SIGKILL:
+            faults.append("the job-control-style unit was not killed by its own watchdog "
+                          "(rc {})".format(leader_rc))
+        if sibling_rc != 0:
+            faults.append("a pipeline sibling sharing the unit's group did not survive the "
+                          "watchdog's expiry (rc {}): a group leader that is not a session leader "
+                          "licences no group kill".format(sibling_rc))
+    finally:
+        for proc in (leader, sibling):
+            if proc is not None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=10.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+
+    # (22) QA29 claude MEDIUM 1: delivery never touches os.set_blocking -- the O_NONBLOCK flag
+    # lives on the open file DESCRIPTION, shared by every process holding the pipe -- and still
+    # delivers through its poll-gated rounds.
+    drain_end, feed_end = os.pipe()
+    feed_sink = os.fdopen(feed_end, "w", encoding="utf-8")
+    flips = []
+    real_set_blocking = os.set_blocking
+
+    def spying_set_blocking(fd, blocking):
+        flips.append((fd, blocking))
+        return real_set_blocking(fd, blocking)
+
+    try:
+        os.set_blocking = spying_set_blocking
+        try:
+            _unit_deliver(feed_sink, b"q" * 4096, 5.0)
+        finally:
+            os.set_blocking = real_set_blocking
+        if flips:
+            faults.append("the bounded deliver flipped os.set_blocking on a caller descriptor "
+                          "({}): the O_NONBLOCK flag is shared with every holder of the open "
+                          "file description".format(flips))
+        real_set_blocking(drain_end, False)
+        try:
+            delivered = os.read(drain_end, 8192)
+        except BlockingIOError:
+            delivered = b""
+        if delivered != b"q" * 4096:
+            faults.append("the poll-gated deliver did not deliver into a pipe with room "
+                          "({} bytes arrived)".format(len(delivered)))
+    finally:
+        os.close(drain_end)
+        try:
+            feed_sink.close()
+        except OSError:
+            pass
+
+    # (23) QA29 codex MAJOR 5: a passing verdict requires a readable capture and a clean error
+    # stream -- a unit that unlinks its stderr capture, and a unit exiting 0 over an
+    # uncaught-exception traceback, both fail closed by name. (The stdout capture goes through
+    # the same _unit_copy_capped, so the unlink sibling holds for it too.)
+    code, _took, _out_text, err_text = run_vector("synthetic-unlinked-err", 10.0, (
+        "import os\n"
+        "os.remove(os.readlink('/proc/self/fd/2'))\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-unlinked-err 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n"))
+    if code != EXIT_MALFORMED or "stderr capture could not be opened" not in err_text:
+        faults.append("an unlinked stderr capture still passed (code {}, stderr tail {!r}): a "
+                      "passing verdict requires a readable, complete capture".format(
+                          code, err_text[-200:]))
+    code, _took, _out_text, err_text = run_vector("synthetic-tainted-err", 10.0, (
+        "import os, sys\n"
+        "sys.stderr.write('Traceback (most recent call last):\\n')\n"
+        "sys.stderr.write('ZeroDivisionError: division by zero\\n')\n"
+        "sys.stderr.flush()\n"
+        "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+        "    handle.write('synthetic-tainted-err 0 ' + str(os.getpid()) + '\\n')\n"
+        "os._exit(0)\n"))
+    if code != EXIT_MALFORMED or "error stream" not in err_text:
+        faults.append("an exit 0 over an uncaught-exception traceback still passed (code {}, "
+                      "stderr tail {!r}): a passing verdict requires an empty or clean error "
+                      "stream".format(code, err_text[-200:]))
+
     if faults:
         print("opf unit-bound self-test: FAIL ({})".format("; ".join(faults)[:2000]), file=sys.stderr)
         return EXIT_FINDING
@@ -23131,7 +23474,12 @@ def _unit_bound_self_test():
           "verdict survives an inherited SIGCHLD=SIG_IGN, a stayed descendant dies on a clean "
           "completion, planted FIFOs are named failures never hangs, delivery is bounded and "
           "thread-free, capture growth is stopped at the source, the watchdog borrows no timer and "
-          "kills only its own unit, and an interrupted or killed parent takes its unit with it)")
+          "kills only its own unit, and an interrupted or killed parent takes its unit with it; "
+          "and the QA29 vectors hold: the verdict keeps the status the WNOWAIT observation "
+          "carried, a lost or reaped leader's pid is never group-killed, the watchdog kills "
+          "before its non-blocking report and spares a job-control sibling, delivery leaves the "
+          "shared O_NONBLOCK flag alone, and a passing verdict requires a readable capture and a "
+          "clean error stream)")
     return EXIT_OK
 
 
