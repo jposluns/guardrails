@@ -22081,8 +22081,9 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 # derivation). THREAT MODEL (D-385-ACCIDENTAL-UNIT): the runner defends against ACCIDENTAL unit
 # faults -- a crash, a hang, an early exit, stray or excess output, leftover children, a stale or
 # missing completion record, a box left full. Deliberate SABOTAGE by a unit is outside that contract
-# and is disclosed below as residuals S1 to S6 (S6 only for a DELIBERATE escape: the accidental
-# reach S6 names is bounded, see there): units are the repository's own reviewed code, running as
+# and is disclosed below as residuals S1 to S5; S6, a descendant that LEFT the unit's group, is
+# disclosed whether it escaped by accident or on purpose (only the box's removal is bounded, never
+# the escapee, see there): units are the repository's own reviewed code, running as
 # the same user as the runner, and a same-user process can reach the runner in ways no check inside
 # the runner closes. Every guarantee stated here holds against that model, not against a unit
 # written to defeat it. Against accidental faults, the GUARANTEE that `opf.py --self-test` cannot
@@ -22150,13 +22151,17 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 # read back through it and returned 0, both names left behind), and a target slow to resolve
 # (an automount, a FUSE path) parks the lookup (not reproduced); the box's removal no longer
 # follows that symlink or passes it: a box path that no longer opens as the directory the runner
-# made is the named cannot-evaluate (QA33); (S6) a descendant that LEFT the unit's group is never
-# killed: the box's removal itself is BOUNDED (_unit_remove_box: depth, entry and time caps, after
-# the group kill; a box it cannot clear is the named cannot-evaluate, its remnant left in place),
-# which covers what an ACCIDENTAL fault reaches -- a chain or flood left in the box, an escapee
-# still writing there -- but an escapee's writes ELSEWHERE, and its CPU and memory, stay
-# unbounded until it ends, out of this runner's reach without OS isolation (S1 to S6 are
-# _run_unit_subprocess's residuals (g) to (l)).
+# made is the named cannot-evaluate (QA33); (S6) a descendant that LEFT the unit's group, by
+# accident or on purpose, is never killed: the box's removal itself is BOUNDED (_unit_remove_box:
+# depth, entry and time caps, after the group kill; a box it cannot clear is the named
+# cannot-evaluate, its remnant left in place), but that bound covers only what is IN the box when
+# it is removed -- a chain or flood left there, an entry an escapee adds while the walk runs. The
+# escapee itself stays unbounded until it ends, out of this runner's reach without OS isolation:
+# its CPU and memory, its writes anywhere its user may write, and the box's own pathname, which it
+# can RECREATE after the removal and write into (it holds the path through OPF_SELF_TEST_RESULT,
+# and the caller's TMPDIR is writable by its user; QA34, reproduced: a detached worker resuming
+# after a passing run recreated the box and wrote a file there, the run having returned 0)
+# (S1 to S6 are _run_unit_subprocess's residuals (g) to (l)).
 # Each budget sits ABOVE the unit's own end-to-end internal budget (the kill-timeout
 # rule), stated per row from the unit's committed timeouts, windows and worker counts; the
 # aggregator's internal budget is ENFORCED inside the bounded child itself
@@ -22200,8 +22205,17 @@ _UNIT_OUTER_BOUNDS = {
     # and an in-process delivery probe: about 40 s more worst), and the QA30 vectors (four more
     # quick bounded subprocesses under 10 s bounds, a blocked-stderr watchdog probe bounded by a
     # 10 s record wait and a 10 s cleanup reap, and a modelled in-reap interrupt: about 60 s more
-    # worst): about 500 s end to end worst, so 600 holds the kill-timeout rule.
-    "opf-unit-bound": 600.0,
+    # worst): about 500 s through the QA30 vectors. Re-derived for QA33 and QA34 (QA34 claude
+    # MINOR 4): the bounded box removal now follows every in-process runner call the unit makes (28
+    # removals, counted at run time; the platform-refusal leg makes no box), each up to
+    # _UNIT_BOX_REMOVAL_BOUND (30 s) plus its 10 s not-removed delivery: about 1120 s more worst
+    # (the signalled drivers' own removals sit inside the unit's bounded 15 s waits on them,
+    # counted above); the QA33 vector (28) adds six quick bounded subprocesses under 10 s bounds (a
+    # 5 s reap, two 10 s copies and a 10 s delivery each, their removals counted above): about
+    # 270 s more worst; and the QA34 listing-deadline leg one direct removal under a modelled
+    # clock (30 s worst). About 1920 s end to end worst, so 2400 holds the kill-timeout rule (the
+    # measured run takes about 24 s).
+    "opf-unit-bound": 2400.0,
 }
 
 # Test-only flip (QA26): True removes the outer deadline (the runner's wait gets no timeout: the
@@ -22263,10 +22277,11 @@ _UNIT_OUTPUT_CAP = 4 << 20
 # _UNIT_OUTPUT_CAP still caps the copy. Residuals, disclosed: the bound is PER FILE, not aggregate,
 # and aggregate storage is NOT bounded while the unit runs: many files can consume it within the
 # outer bound (a box left holding more than _UNIT_BOX_ENTRY_CAP entries is then the named
-# cannot-evaluate, QA33), and an escaped descendant -- never killed, at the outer bound or after --
-# can keep writing new files OUTSIDE the box for as long as it runs, past the runner's return
-# (residual (l) of _run_unit_subprocess); a unit legitimately needing a larger single file fails
-# here, for review.
+# cannot-evaluate, QA33, a bound on what is in the box when it is removed, nothing more), and an
+# escaped descendant -- never killed, at the outer bound or after -- can keep writing new files for
+# as long as it runs, past the runner's return, anywhere its user may write, the box's own
+# pathname included: it can recreate the box after the removal and write there (residual (l) of
+# _run_unit_subprocess); a unit legitimately needing a larger single file fails here, for review.
 _UNIT_FSIZE_LIMIT = 256 << 20
 
 # The environment a unit subprocess starts from: ONLY these caller variables pass through (where to
@@ -22704,15 +22719,20 @@ def _unit_remove_box(box, ident):
     rmdir is relative to its parent's descriptor), holding one descriptor per level plus one
     listing at a time, and stopping -- the remnant left where it is -- at the first of
     _UNIT_BOX_DEPTH_CAP levels, _UNIT_BOX_ENTRY_CAP entries listed in all, or
-    _UNIT_BOX_REMOVAL_BOUND seconds, the deadline checked before every entry. `ident` is the
+    _UNIT_BOX_REMOVAL_BOUND seconds, the deadline checked before every entry it acts on and
+    after every entry it lists (QA34 codex MINOR: a long listing had run past it unchecked, and
+    the walk then acted on one entry before the next check). `ident` is the
     box's (st_dev, st_ino) when it was made: a box path that no longer opens as that very
     directory (renamed away, a symlink left at its name) is not walked at all. An entry that
     appears while the walk runs (a descendant that left the unit's group writing on) makes the
-    final rmdir fail, which is reported too. Returns None once the box is gone, else the reason
+    final rmdir fail, which is reported too. The bound covers the box as it stands when removed,
+    never what follows: an escapee can recreate the path afterwards (residual (l) of
+    _run_unit_subprocess). Returns None once the box is gone, else the reason
     the removal stopped. A single filesystem call that itself blocks (a FUSE mount over the box)
     is not bounded by the deadline (residual (k))."""
     import time
     deadline = time.monotonic() + _UNIT_BOX_REMOVAL_BOUND
+    expired = "the removal reached its {} s bound".format(_UNIT_BOX_REMOVAL_BOUND)
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | (_unit_guard_flags() or 0)
     stack = []   # one [descriptor, names left to remove or None, name in the parent] per level
     listed = 0
@@ -22726,17 +22746,20 @@ def _unit_remove_box(box, ident):
             return "its path no longer names the directory the runner made"
         while stack:
             if time.monotonic() >= deadline:
-                return "the removal reached its {} s bound".format(_UNIT_BOX_REMOVAL_BOUND)
+                return expired
             frame = stack[-1]
             if frame[1] is None:
                 names = []
                 with os.scandir(frame[0]) as listing:
                     for entry in listing:
+                        if time.monotonic() >= deadline:
+                            return expired
                         listed += 1
                         if listed > _UNIT_BOX_ENTRY_CAP:
                             return "it holds more than {} entries".format(_UNIT_BOX_ENTRY_CAP)
                         names.append((entry.name, entry.is_dir(follow_symlinks=False)))
                 frame[1] = names
+                continue   # the deadline is checked again before the listing is acted on
             if frame[1]:
                 name, is_dir = frame[1].pop()
                 if not is_dir:
@@ -22765,8 +22788,9 @@ def _run_unit_subprocess(label, bound, argv=None):
     QA26/QA27 in-process forked runner). THREAT MODEL (D-385-ACCIDENTAL-UNIT): this runner defends
     against ACCIDENTAL unit faults -- a crash, a hang, an early exit, stray or excess output,
     leftover children, a stale or missing completion record, a box left full; deliberate sabotage
-    by a unit is a disclosed residual, (g) to (l) below ((l) only for a DELIBERATE escape: its
-    accidental reach is bounded), because units are the repository's own reviewed code
+    by a unit is a disclosed residual, (g) to (k) below, and a descendant that left the unit's
+    group, by accident or on purpose, is the disclosed residual (l) (only the box's removal is
+    bounded, never the escapee), because units are the repository's own reviewed code
     running as the same user, and every guarantee stated here holds against that model only. The
     child starts with start_new_session=True (it leads its
     own session and process group, so its pgid equals its pid), stdin from the null device, stdout
@@ -22808,7 +22832,9 @@ def _run_unit_subprocess(label, bound, argv=None):
     silently, so a passing unit ends exit 0 with no record and no output: the record failure,
     which then also names the unreadable capture and the box the removal no longer finds
     (QA33 claude MEDIUM 1: that signature was reproduced by removing a running unit's box; it
-    fails closed, never a pass).
+    fails closed, never a pass). An outside removal is the LEADING HYPOTHESIS for the historical
+    intermittent exit 0 with no record and no output, not an established cause: a unit that
+    unlinks its own captures and writes no record gives the same signature (QA34 codex).
     After the leader ends, the result and capture files are read back by RE-OPENING THEIR
     PATHS (the launch descriptors on the captures are closed as soon as the child has started, and
     nothing is read through them), O_NOFOLLOW|O_NONBLOCK; each must still be a regular file by
@@ -22833,8 +22859,9 @@ def _run_unit_subprocess(label, bound, argv=None):
     copy itself cannot change the unit's verdict.
     Disclosed residuals, each named with why it sits outside this runner's contract
     (D-385-RESCOPE: a hostile or instrumented CALLER is that process's own business, (a) to (f);
-    D-385-ACCIDENTAL-UNIT: a unit that sabotages its runner on purpose, (g) to (k), and (l)'s
-    deliberate escape, whose accidental reach the bounded box removal covers):
+    D-385-ACCIDENTAL-UNIT: a unit that sabotages its runner on purpose, (g) to (k); and (l), a
+    descendant that left the unit's group, by accident or on purpose: no check here reaches it,
+    and the bounded box removal covers only what is in the box when it runs):
     (a) an in-process competing reaper (QA29 codex B1's second half): caller code -- a thread, a
     library, an interposed os.waitid -- that reaps this runner's child between the WNOWAIT
     observation and this runner's kill and reap unpins the leader's pid, so the group kill can
@@ -22908,17 +22935,22 @@ def _run_unit_subprocess(label, bound, argv=None):
     seconds; a box it cannot clear -- a chain or a flood left there, an entry added while it ran,
     a removal error, a box path that no longer names the directory made -- turns ANY verdict
     into the named cannot-evaluate (exit 2, never a pass), naming the remnant, which stays in
-    place. That covers what an ACCIDENTAL fault reaches in the box, an accidental escapee still
-    writing there included (QA31 claude: a 90,000-deep chain had cost a MemoryError past a 10 s
-    bound, and a host OOM kill with no memory cap). What stays out of reach is a descendant that
+    place. That bounds only what is IN the box when it is removed -- a chain or a flood left
+    there, an entry an escapee adds while the walk runs (QA31 claude: a 90,000-deep chain had cost
+    a MemoryError past a 10 s bound, and a host OOM kill with no memory cap). What stays out of
+    reach, by accident or on purpose, is a descendant that
     LEFT the unit's process group (its own setsid or setpgid, a start_new_session launch): the
     group kill addresses the group alone, this runner never learns the escapee's pid, and once
     its parent dies the kernel reparents it to init or a subreaper, so nothing short of OS
     isolation the CALLER owns (a cgroup to kill, a PID namespace, a subreaper) can find and end
     it. Until it ends by itself it can run on, use CPU and memory, write new files anywhere its
     user may write (each under RLIMIT_FSIZE), keep an unlinked capture's storage while it holds
-    a descriptor on it, and signal or reach this runner as (g) and (i) say; once the box is gone
-    it cannot recreate it under the same name. The repository's own escaping launches -- the
+    a descriptor on it, signal or reach this runner as (g) and (i) say, and RECREATE the box's
+    pathname after the removal and write there: it holds the path through OPF_SELF_TEST_RESULT,
+    and the caller's TMPDIR is writable by its user (QA34 codex and claude, reproduced: a detached
+    worker resuming after a passing run recreated the box and wrote a file there, the run having
+    returned 0), so the removal bounds the box as it stands when removed, never what an escapee
+    does afterwards. The repository's own escaping launches -- the
     _FixtureProcess guardian and subject, the runtime-probe supervisors, the run_shell checks,
     the escape probe's writers -- are ended by their own units' code, not by this runner; a
     fault that leaves one running is disclosed here, and a DELIBERATE escape is sabotage
@@ -23180,8 +23212,13 @@ def _unit_run_in_box(label, bound, argv, box):
         failure = ("opf self-test: {} {}; failing closed, never a hang (QA28)"
                    .format(label, copy_anomaly))
     elif failure is not None and copy_anomaly is not None:
-        # QA33 claude MEDIUM 1: a missing record over an exit 0 whose captures are gone too is a box
-        # removed from OUTSIDE while the unit ran; naming the capture state says so.
+        # QA33 claude MEDIUM 1: a missing record over an exit 0 whose captures are gone too is
+        # CONSISTENT WITH a box removed from outside while the unit ran -- the leading hypothesis for
+        # the historical intermittent, not an established cause (evidence: before this the copy
+        # anomaly was dropped whenever a failure was already set, and an outside removal of a
+        # running unit's box reproduces the signature; but a unit that unlinks its own captures and
+        # writes no record gives the same one, QA34 codex). Naming the capture state reports what
+        # was observed, never who removed anything.
         failure = "{}; and {}".format(failure, copy_anomaly)
     if failure is None and status == EXIT_OK and err_tainted:
         failure = ("opf self-test: {} exited 0 but its error stream carries an "
@@ -23252,8 +23289,10 @@ def _unit_bound_self_test():
     recorded reap state, never from a flag assigned after the call). The QA33 vector: (28) the
     box's removal is bounded -- a box left alone is removed and passes, a box past the depth,
     entry or time bound or swapped for a symlink is the named cannot-evaluate with its remnant in
-    place, and a box removed while its unit runs is the named record failure that also names the
-    capture and the box. Returns 0 clean, 1 on a failure."""
+    place (the swapped box's renamed files untouched, never walked through the symlink), and a
+    box removed while its unit runs is the named record failure that also names the capture and
+    the box; and the QA34 leg: a deadline passing while the walk lists a directory stops it there,
+    before it removes anything. Returns 0 clean, 1 on a failure."""
     import contextlib
     import inspect
     import io
@@ -24093,7 +24132,9 @@ def _unit_bound_self_test():
     # (run under a 40-entry test cap) and (d) a removal past its deadline (run under a 0 s test
     # bound) each turn a clean exit and a matching record into the named cannot-evaluate, the
     # remnant left in place; (e) a box renamed away with a symlink left at its name is never
-    # walked through and is the same named exit 2; (f) a box removed while its unit runs (here by
+    # walked through (QA34 claude MINOR 2: the renamed box keeps its out, err and result, so a
+    # removal that followed the symlink and emptied it fails here, not only the final rmdir) and
+    # is the same named exit 2; (f) a box removed while its unit runs (here by
     # the unit itself, standing in for an outside TMPDIR sweep) is the named record failure that
     # also names the unreadable capture and the box the removal no longer finds (QA33 claude
     # MEDIUM 1).
@@ -24127,6 +24168,12 @@ def _unit_bound_self_test():
                 if flip is not None:
                     globals()[flip[0]] = saved_flip
             left = sorted(os.listdir(hold))
+            renamed_kept = [sorted(os.listdir(os.path.join(hold, name)))
+                            for name in left if name.endswith(".real")]
+        if case.startswith("(e)") and renamed_kept != [["err", "out", "result"]]:
+            faults.append("the bounded box removal, {}: the renamed box holds {} instead of its "
+                          "untouched err, out and result: the removal walked through the "
+                          "swapped-in symlink (QA34 claude MINOR 2)".format(case, renamed_kept))
         if code != expected:
             faults.append("the bounded box removal, {}: code {} instead of {} (stderr tail {!r})"
                           .format(case, code, expected, err_text[-240:]))
@@ -24158,6 +24205,51 @@ def _unit_bound_self_test():
         faults.append("the bounded box removal, (f) a box removed while its unit ran: not the "
                       "named record failure naming the capture and the box (code {}, stderr "
                       "tail {!r})".format(code, err_text[-300:]))
+    # (g) QA34 codex MINOR: the deadline is checked INSIDE a directory's listing too, and again
+    # before the listing is acted on. Under a modelled clock that passes the deadline as soon as
+    # the listing yields its first entry (time.monotonic and os.scandir patched for this one
+    # direct call, restored in a finally), the removal stops with its time bound and every entry
+    # stays in place; the walk without those checks listed on and removed one entry first.
+    real_scandir = os.scandir
+    real_monotonic = time.monotonic
+    listing_began = [False]
+
+    class ListingPastTheDeadline(object):
+        def __init__(self, target):
+            self.listing = real_scandir(target)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            self.listing.close()
+            return False
+
+        def __iter__(self):
+            for entry in self.listing:
+                listing_began[0] = True
+                yield entry
+
+    with tempfile.TemporaryDirectory(prefix="opf-unitbound-") as hold:
+        box = os.path.join(hold, "box")
+        os.mkdir(box)
+        for index in range(5):
+            with open(os.path.join(box, "f{}".format(index)), "wb"):
+                pass
+        made = os.lstat(box)
+        os.scandir = ListingPastTheDeadline
+        time.monotonic = lambda: real_monotonic() + (3600.0 if listing_began[0] else 0.0)
+        try:
+            stopped = _unit_remove_box(box, (made.st_dev, made.st_ino))
+        finally:
+            os.scandir = real_scandir
+            time.monotonic = real_monotonic
+        kept = sorted(os.listdir(box))
+    if stopped is None or "s bound" not in stopped or len(kept) != 5:
+        faults.append("the bounded box removal, (g) a deadline passing mid-listing: stopped {!r} "
+                      "with {} of 5 entries left; the walk must stop at its time bound inside "
+                      "the listing, before it removes anything (QA34 codex MINOR)".format(
+                          stopped, len(kept)))
 
     if faults:
         print("opf unit-bound self-test: FAIL ({})".format("; ".join(faults)[:2000]), file=sys.stderr)
@@ -24185,7 +24277,9 @@ def _unit_bound_self_test():
           "licences no second group kill; and the QA33 vector holds: a box left alone is removed, "
           "and a box past the removal's depth, entry or time bound, or swapped for a symlink, is "
           "the named cannot-evaluate with its remnant left in place, and a box removed while its "
-          "unit ran is the named record failure naming the capture and the box)")
+          "unit ran is the named record failure naming the capture and the box; and the QA34 "
+          "leg holds: a swapped box's renamed files are left untouched, and a deadline passing "
+          "mid-listing stops the walk before it removes anything)")
     return EXIT_OK
 
 
