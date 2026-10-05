@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "252faeed03512bf6084db63da47ccc684de625cf22ddc9b71cd7ce40f626155e"
+tree-sha256 = "4763fff144937fc130d9bbc32d6fb5d9f1f0f9152e1b0743048f54dbb3687c06"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2366,8 +2366,8 @@ sha256 = "79f4539151ecb22ab0bca929f9d0ec7b6efc2541dd8da708b259ea8642d3ec5a"
 
 [[sources]]
 path = "changelog.toml"
-bytes = 1938
-sha256 = "01b470d09e5ea9361a719fcf3c335065203501571d3253e5fcb8baec1cc47b07"
+bytes = 2172
+sha256 = "63d8e3c586b876cf601fbde6bbb5158aa3aae4a5ff492538d01c8c952e5966a3"
 
 [[sources]]
 path = "disclosure.toml"

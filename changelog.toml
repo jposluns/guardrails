@@ -4,7 +4,8 @@ note = "The user-facing changes for each public release."
 # Reserved optional key: a release MAY carry a [release.artifacts] sub-table recording the published
 # download digests, which arms the artifact-checksum gate (tools/check_artifact_checksums.py, GD-7). It is
 # inert to gen_changelog, check_versions, and the version-monotonicity gate. No release records it yet, so
-# the gate is dormant (NOT APPLICABLE); the first digests are added at the 1.0.5 content freeze. Shape:
+# the gate is dormant (NOT APPLICABLE); 1.0.5 was not released through the RELEASING.md protocol, so the
+# first digests are recorded at the first release that follows it. Shape:
 #   [release.artifacts]
 #   "site/downloads/aiqt-skill-<skill version>.zip" = "sha256:<64 lowercase hex>"
 #   "site/downloads/aiqt-instructions.txt" = "sha256:<64 lowercase hex>"
@@ -17,7 +18,9 @@ items = [
   "AIQT 1.0.5 ships the chat assistant: the AIQT governance core packaged for a chat assistant, as a Skill you upload to Claude or a portable instruction file for other assistants (ChatGPT, Copilot, Gemini). It guides the assistant toward the AIQT standard: claims matched to their sources, checks kept at full strength, and \"finished\" verified before it is said. The evidence page shows what has been tested on each platform.",
   "Includes the portable AIQT governance core and a curated security-rule subset for chat use.",
 ]
-# Recorded as history, not a schema field: v1.0.5 is an annotated tag applied retroactively to commit
+# Recorded as history, not a schema field: 1.0.5 did not go through RELEASING.md steps 3 to 5 (no
+# recorded artifact digests, no step 5 merge commit), so v1.0.5 is a historical marker, not a protocol
+# release: an annotated tag applied retroactively to commit
 # c5d77b086040228b11afa33e147ee209d5203919, where VERSION became 1.0.5. Its release root
 # (.aiqt/release/root.txt at that commit) is
 # sha256:e96f4836bbdcda3815198454292f68bcb9c79b748ea20c9c4a5dbaddf4cec18c.
