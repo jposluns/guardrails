@@ -153,8 +153,9 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   generation, implements no section 9.2 upgrade and no legacy-state grading, and refuses an older
   store or listed legacy state through an admission check. This prompt builds an upgrade-capable
   implementation: step 6 grades legacy state and step 8 implements the upgrade. Section 16.1 says
-  that an implementation that declares no class "MUST be treated as upgrade-capable, and every
-  upgrade requirement binds it". Declare, in the documentation of each release and in every
+  that an implementation whose declaration lacks only its class "MUST be treated as
+  upgrade-capable, and every upgrade requirement binds it". Declare, in the documentation of each
+  release and in every
   conformance report you emit, your release identity, the class `upgrade-capable`, and the
   supported `spec_version` (`1.3.0`), homes generation (1) and worklog storage generation (1)
   (section 16.1). Section 9.1 says that a profile, a store manifest field or a command-line request
@@ -1036,15 +1037,18 @@ Build the primitives every later step relies on.
   a check is meant to cover that cannot be read, parsed or resolved yields failure or
   cannot-evaluate, never a clean pass (section 3, Design principles, "Fail closed").
 - The class declaration check. Read the declaration file of "Choices to make before you start"
-  from the running release and check it. Section 16.1 states three rules for the declaration: "An
+  from the running release and check it. Section 16.1 states these rules for the declaration: "An
   implementation MUST declare, in the documentation of each release and in every conformance
   report it emits, its release identity, its class, and its supported `spec_version`, homes
-  generation, and worklog storage generation. An implementation that declares no class MUST be
-  treated as upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
-  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store
-  operation." The specification defines no format for the declaration and does not define the
-  three failing cases, so the cases below other than no class are this prompt's reading, yours to
-  confirm with the maintainer. Every command of yours that reads, grades or writes a store, `opf
+  generation, and worklog storage generation. An implementation whose declaration lacks only its
+  class MUST be treated as upgrade-capable, and every upgrade requirement binds it. An unreadable,
+  malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any
+  store operation. A missing declaration is malformed, since it states none of the release
+  identity, class, `spec_version`, and generations required above, so it yields cannot-evaluate."
+  The specification defines no format for the declaration and does not define the three failing
+  cases beyond a missing declaration, so the cases below other than no class and an absent file
+  are this prompt's reading, yours to confirm with the maintainer. Every command of yours that
+  reads, grades or writes a store, `opf
   init` and the step 13 and step 14 checks included, runs this check before it resolves, reads or
   writes any store, and on cannot-evaluate it stops with exit 2 and performs no store operation.
   The check gives each declaration one of these outcomes:
@@ -1052,9 +1056,8 @@ Build the primitives every later step relies on.
   - Malformed: the file does not parse; lacks the release identity, the `spec_version`, the homes
     generation or the worklog storage generation; carries any other key; or gives a value of the
     wrong form or a class that is neither `upgrade-capable` nor `fresh-only`. An absent file is
-    malformed: section 16.1 requires the declaration to carry the release identity, the class, the
-    `spec_version` and the generations, and an absent file carries none of them. The specification
-    does not yet name the absent case, so this is the prompt's reading. Cannot-evaluate.
+    malformed, as section 16.1 rules: "A missing declaration is malformed, since it states none of
+    the release identity, class, `spec_version`, and generations required above". Cannot-evaluate.
   - Contradictory: a value disagrees with what the running release is and implements, that is, a
     release identity other than the running release's own, a class key whose value is other than
     `upgrade-capable`, a `spec_version` other than the validator's ceiling (`1.3.0`), or a homes or
@@ -1067,9 +1070,8 @@ Build the primitives every later step relies on.
     requirement binds it, so the check passes with the class `upgrade-capable`; this case is not
     cannot-evaluate. A release that ships such a file still does not declare its class, as the first
     rule requires, so checklist item 20 is not passed for it. The no-class rule does not reach an
-    absent file, because that file declares nothing at all and so lacks the release identity,
-    `spec_version` and generations that the first rule also requires, which makes it malformed under
-    the third rule rather than a declaration that omits only its class.
+    absent file: section 16.1 limits it to a declaration that lacks only its class, and rules a
+    missing declaration malformed.
   - Valid: every field is present, well formed and in agreement with the running release. The
     check passes.
 
@@ -2953,8 +2955,8 @@ maintainer's ruling on an open point, report the ruling with it.
     cannot-evaluate (exit 2) before any store operation, as section 16.1 requires: "An unreadable,
     malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any
     store operation". With the declaration that lacks only its class key, they proceed as
-    upgrade-capable, as section 16.1 requires: "An implementation that declares no class MUST be
-    treated as upgrade-capable, and every upgrade requirement binds it".
+    upgrade-capable, as section 16.1 requires: "An implementation whose declaration lacks only its
+    class MUST be treated as upgrade-capable, and every upgrade requirement binds it".
 
 ## Out of scope for this prompt
 

@@ -173,9 +173,12 @@ per-record layout (section 9) additionally places one file per record under
 The imported files are registered managed leaves beside the clean-series files, using the same
 enabled-type roster; `worklog` uses `worklog.imported.toml` instead of an imported index.
 Their manifest, emitter, upgrade and containment registrations MUST agree. A 1.3.0 `opf init`
-and the section 9.2 upgrade MUST create the imported leaves for every enabled type, create-only and
-empty; enabling a further type or module later MUST create its imported leaf in the same act as its
-clean index. They are machine
+and the section 9.2 upgrade MUST create the imported leaves for every enabled type except
+`legacy_fragment`, create-only and empty; enabling a further type or module later MUST create its
+imported leaf in the same act as its clean index. `legacy_fragment` has no imported leaf and no
+imported counter row, since the imported series refuses the `LF` namespace (section 8.2). A 1.3.0
+`opf init` MUST write at zero the imported counter row of each type that has an imported leaf
+(section 8.2). They are machine
 records, distinct from the original-source evidence under `.working/imported/`. The first
 imported-series release MUST keep these files inline in either store layout and MUST NOT provide
 views over imported data; assistants read the TOML. Historical releases remain in `version.toml`
@@ -837,13 +840,15 @@ for example `imported:BI-7`. The complete lexical grammar is
 record's enabled type in section 8.1. Namespaces map one-to-one to types within each series.
 The imported series MUST refuse the `LF` namespace, since new imports do not use LF quarantine
 (section 8.1).
-`counters.toml` MUST hold independent monotonic high-water values per series and namespace:
-`BI` for clean backlog items and the quoted TOML key `"imported:BI"` for imported backlog items.
+`counters.toml` MUST hold independent monotonic high-water values per series and namespace, with
+the imported series' rows required once the store declares `spec_version` 1.3.0 or later: `BI` for
+clean backlog items and the quoted TOML key `"imported:BI"` for imported backlog items.
 The same rule includes `"imported:WL"`; clean release spans MUST tile only the clean `WL` number
-line. The doctor MUST require the imported counter rows only once the section 9.2 upgrade has
-created them. Uniqueness, counter high-water, contiguity and no-deletion checks MUST evaluate each
-series independently; allocation MUST increment its counter under the store's lock as one atomic
-claim, so no gap between choosing and reserving can double-allocate. Counters MUST NOT be reset and IDs
+line. The doctor MUST require the imported counter rows once the store declares `spec_version`
+1.3.0 or later, whether a 1.3.0 `opf init` or the section 9.2 upgrade created them. Uniqueness,
+counter high-water, contiguity and no-deletion checks MUST evaluate each series independently;
+allocation MUST increment its counter under the store's lock as one atomic claim, so no gap between
+choosing and reserving can double-allocate. Counters MUST NOT be reset and IDs
 MUST NOT be reused, even when a record is superseded, refuted, or its work reverted. Rotation, index
 rewrites, and store relocation MUST NOT touch `counters.toml`. Re-adoption MUST seed both series
 from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed
@@ -883,18 +888,21 @@ ratification (section 8.4).
 
 The imported envelope is closed and deterministic. It MUST carry `id`, `type`, a one-line `title`,
 `status` from the type's legal state set without `/proposed`, `actor.kind = "importer"`,
-`actor.id` naming the importing assistant, and an `import` provenance table. Imported worklog
+`actor.id` naming the importing assistant, and an `import` provenance table; its optional envelope
+fields are `summary`, `links`, `refs` and registered `x-<vendor>` tables. Imported worklog
 rows MUST use this envelope with `type = "worklog"` and `status = "recorded"`, plus their worklog
 fields. Standalone imported `done` receipts are legal history. Historical `created_at`,
 `updated_at`, `date` and `decided_at` are optional; when present they MUST be valid RFC 3339 UTC
 and no later than the writer's import clock instant. Import time MUST NOT stand in for event time.
 
-Other historical type fields MUST NOT be absent without an explicit missingness row. A missingness
-row MUST cover every absent field of the type's schema, optional fields included, while a field
-that the envelope table above marks optional needs no row when absent. Supplied
-fields MUST retain their declared value types and vocabularies; unknown keys still fail. Missing
-historical timestamps and type fields MUST be accounted for in `unrecorded = [{field, reason}]`,
-with one row per absent field, no duplicate fields and no row claiming a supplied field absent.
+Other historical type fields MUST NOT be absent without an explicit missingness row, optional type
+fields included: each absent field of the type's schema needs its own row, except an optional
+envelope field of the imported envelope above that the type's own schema does not require. An
+imported worklog row's `summary` is therefore never exempt, since the worklog schema requires it
+(section 6.2). Supplied fields MUST retain their declared value types and vocabularies; unknown
+keys still fail. Missing historical timestamps and type fields MUST be accounted for in
+`unrecorded = [{field, reason}]`, with one row per absent field, no duplicate fields and no row
+claiming a supplied field absent.
 `field` MUST name a field in that type's schema. The closed reasons are `not_recorded_in_source`,
 `unparsed`, `ambiguous`, `conflicting`, and `not_applicable`. The first means "never recorded
 historically in the supplied source", not a claim about all history. The required imported
@@ -909,9 +917,10 @@ Optional `import.history` retains verbatim source-precision values that cannot b
 normalized, such as a date-only string; a UTC midnight MUST NOT be fabricated. Optional
 `import.unparsed` holds verbatim source text that cannot be mapped. The assistant MUST retain such
 text rather than drop it. When present, `import.span` MUST be an array of two integers,
-`import.history` an array of tables, and `import.unparsed` an array of strings. The writer performs
-no byte-tiling or leftover accounting: byte-level coverage and semantic fidelity are not
-machine-proven. Preserved originals remain the restoration authority.
+`import.history` an array of `{field, value}` tables, each naming a field in that type's schema and
+holding its verbatim source value as a string, and `import.unparsed` an array of strings. The
+writer performs no byte-tiling or leftover accounting: byte-level coverage and semantic fidelity
+are not machine-proven. Preserved originals remain the restoration authority.
 
 Imported records and their worklog entries MUST be immutable after publication; corrections MUST be
 a fresh import run retaining the old evidence. A conforming imported series can reach doctor VALID:
@@ -1512,8 +1521,9 @@ fabricated). Declared views are then regenerated, so a stale committed view can 
 store takes the 1.0.0 delta above directly to 1.2.0.
 
 For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration and
-create-only initialization of missing imported managed leaves for enabled types, and addition
-of missing imported counter rows at zero only where no imported ancestry exists.
+create-only initialization of missing imported managed leaves for enabled types other than
+`legacy_fragment`, and addition of missing imported counter rows at zero only where no imported
+ancestry exists, never an `"imported:LF"` row.
 Existing records, evidence, clean counters and imported high-water values MUST be preserved;
 a populated collision, missing ancestral counter or unprovable prestate refuses.
 The upgrade MUST refuse before any write a store whose `[unmanaged]` entry equals or contains a
@@ -2097,12 +2107,11 @@ stores directly at them, and implements no section 9.2 upgrade and no legacy-sta
 
 An implementation MUST declare, in the documentation of each release and in every conformance report
 it emits, its release identity, its class, and its supported `spec_version`, homes generation, and
-worklog storage generation. An implementation that declares no class MUST be treated as
-upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or contradictory
-declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation. A missing
-declaration MUST be treated as malformed, because it states none of the release identity, class,
-`spec_version`, and generations required above, so it yields cannot-evaluate, never the no-class
-treatment.
+worklog storage generation. An implementation whose declaration lacks only its class MUST be
+treated as upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or
+contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation. A
+missing declaration is malformed, since it states none of the release identity, class,
+`spec_version`, and generations required above, so it yields cannot-evaluate.
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease
