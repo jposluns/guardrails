@@ -276,9 +276,20 @@
       "corpus-id": "cnstpr",
       "family": "aiqt",
       "gates": [],
-      "hooks": [],
+      "hooks": [
+        {
+          "channel": "preview",
+          "class": "b",
+          "default": "block",
+          "event": "Stop",
+          "file": ".preview/constraint-reread.py",
+          "id": "constraint-reread",
+          "platform": "claude-code",
+          "residue": "PREVIEW CHANNEL ONLY: a standalone file installed by hand from .preview/, not part of the pack's plugin, and off until AIQT_CONSTRAINT_RECORD names the project's durable record. After a compaction reported by the platform's own markers (SessionStart with source compact, or PreCompact), it reminds the assistant of the record's Constraint lines on every user prompt and refuses each turn end until the record holds a Constraints-reread entry dated after the compaction and not in the future; refusals are capped per continuous stop_hook_active run, after which the stop is allowed with a warning. It proves only that an entry was written, not that the record was read or a constraint honoured; it names only constraints written in the record; a compaction without one of those markers (a host without the events, a hook not registered for them, a new session) is not seen; with no state location or no session key in the payload a compaction is reminded once and then forgotten; concurrent hook runs can lose a count update; an entry beyond the first MiB of the record is not seen; and the host clock is trusted."
+        }
+      ],
       "source": ".aiqt/core/rules/trust-standing-constraints-persist.md",
-      "status": "prose-only"
+      "status": "hook-linked"
     },
     {
       "corpus-id": "cntdef",
@@ -1048,9 +1059,20 @@
       "corpus-id": "rerunf",
       "family": "aiqt",
       "gates": [],
-      "hooks": [],
+      "hooks": [
+        {
+          "channel": "preview",
+          "class": "b",
+          "default": "block",
+          "event": "Stop",
+          "file": ".preview/rerun-pass-check.py",
+          "id": "rerun-pass-check",
+          "platform": "claude-code",
+          "residue": "PREVIEW CHANNEL ONLY: a standalone file installed by hand from .preview/, not part of the pack's plugin. After a CI rerun command (gh run rerun, glab ci retry), or a recognized check command that failed and then passed with identical command text and no recorded change between, it adds a note after the tool call, and at turn end it refuses a final message that presents a pass as conclusive without naming the earlier failure, capped per continuous stop_hook_active run. It sees only those commands run through the shell tool: a rerun through a web page, a pushed empty commit, a runner or CI retry setting, a wrapping script, or a changed command line is not seen; a change made outside the tool calls it sees reads as no change (a false note), and a read-only-looking command with a side effect reads as no change; pass and fail are read from the event name and a few response fields, not the output; the Stop check reads only the final message against fixed phrase lists, so a claim worded otherwise passes and any disclosure word clears the reruns; it does not record or investigate the failure itself; with no readable state or no final message in the payload the stop is allowed; and concurrent hook runs can lose a state update."
+        }
+      ],
       "source": ".aiqt/core/rules/integ-rerun-pass-is-still-failure.md",
-      "status": "prose-only"
+      "status": "hook-linked"
     },
     {
       "corpus-id": "rmvpth",

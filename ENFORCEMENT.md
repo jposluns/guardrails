@@ -8,9 +8,9 @@ This register lists every rule and the shipped mechanical controls linked to it.
 
 | Status | Rules |
 |---|---:|
-| Enforced | 34 |
+| Enforced | 36 |
 | Pending | 0 |
-| None | 98 |
+| None | 96 |
 
 ## Rules
 
@@ -49,7 +49,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Preserve uncommitted work | `prsunc` | Enforced | `hook:git-discard`, class b |
 | Protected-branch integrity | `prtbrn` | Enforced | `hook:protected-line-guard`, class b |
 | A required step remains required under friction | `reqstp` | None | Enforcement has not been built yet. |
-| A rerun pass does not erase an earlier failure | `rerunf` | None | Enforcement has not been built yet. |
+| A rerun pass does not erase an earlier failure | `rerunf` | Enforced | `hook:rerun-pass-check`, class b |
 | A review in flight pins its artefact | `rvwpin` | None | Enforcement has not been built yet. |
 | Make retries safe to repeat | `rtsafe` | None | Enforcement has not been built yet. |
 | Separate task changes from pre-existing work | `septsk` | Enforced | `hook:write-scope`, class c |
@@ -92,7 +92,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Records first | `recfst` | Enforced | `hook:orch-ask-unattended`, class b; `hook:orch-dispatch-ledger`, class c |
 | Close each session on green | `sescls` | None | Enforcement has not been built yet. |
 | Resume from the durable handoff | `sesres` | Enforced | `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
-| A standing constraint persists across context loss | `cnstpr` | None | Enforcement has not been built yet. |
+| A standing constraint persists across context loss | `cnstpr` | Enforced | `hook:constraint-reread`, class b |
 | Trust recovery and escalation | `trstre` | None | Enforcement has not been built yet. |
 | Autonomy steps down after a confirmed trust loss | `trsrcv` | None | Enforcement has not been built yet. |
 | Decision classification before enacting | `deccls` | None | Enforcement has not been built yet. |
@@ -651,6 +651,19 @@ Technical limits (from the enforcement ledger):
 A BEST-EFFORT QUOTE-AWARE LEXICAL check via the shared tokenizer (_lex_command); it is DENY-and-educate (NO-ASK posture: this guard never returns an ask; read every ASK/ASKS/over-ASK below as that DENY-and-educate outcome, which NAMES the safe rewrite), so a detected substitution is denied with the reachable correct action rather than silently allowed, and it makes NO soundness or universal-coverage claim. In a parsed simple segment it resolves the effective command word past leading shell assignments and the recognized command modifiers command, exec, builtin, nohup, time, !, and env; for env it skips leading option tokens, the separated operands of common value-taking options, and NAME=VALUE assignments. When that word is literal git and the subcommand after recognized Git-global options is literal commit, it scans EVERY argv token after commit, including tokens after `--` or `--end-of-options`, for a backtick or $( marker in a substituting double-quoted or unquoted context, using the shared lexer's parallel per-token opacity plus the narrow unquoted-$( split form where a final opaque token ending in $ is immediately followed by the ( operator. It deliberately does no Git option binding because the shell expands argv before Git parses it. On an unparseable command, the raw fallback ASKS when coarse git-commit and substitution-marker probes both match; that fallback can over-match quoted prose or literal markers. HONEST RESIDUALS: the option tokens belonging to a recognized command modifier are not skipped (for example command -p git commit, time -p git commit, exec -c git commit, exec -a x git commit, and nohup -- git commit), so resolution advances one word past the modifier, stops on the option, and silently ALLOWs a substitution-bearing commit; command modifiers outside the recognized set (notably sudo, nice, timeout, doas, stdbuf, and ionice) are not resolved, so for example sudo git commit -m "$(x)" silently ALLOWs; reserved-word compounds (if/while/until and `{ ...; }`) are not parsed through to their inner git command; shell functions and aliases that rename git; git-config subcommand aliases (for example alias.ci=commit making git ci -m "$(x)") cannot be known lexically and silently ALLOW; sh -c or bash -c script bodies; eval or xargs indirection; redirect targets on a recognized commit segment are removed from argv by the lexer and are not scanned, so git commit -m ok > "$(x)" and git commit -m ok 2> "`x`" silently ALLOW; leading environment-assignment values and Git-global option/value tokens before commit; a pre-subcommand unquoted $( that fragments the lexer segment, letting the whole commit invocation including its message escape inspection; quote-mangled command words such as g''it are outside the claimed command-resolution surface even where the shared lexer happens to normalize a form to git; $VAR indirection, concatenation, PATH-shadowed commands, and any other non-literal command word that does not resolve lexically to git; commands outside the Bash tool; and unparseable commands beyond the raw fallback probes. Deliberate over-ASKs: $((...)) includes $(; a bare $ immediately before an escaped parenthesis (for example git commit -m $\(x\)) is marked opaque and the decoded-marker check sees $(, so it ASKS even though Bash passes literal $(x) and runs no substitution; ANSI-C $'...' is treated as an opaque marker-bearing token even though Bash does not substitute inside it; whole-token opacity means an escaped literal backtick or $( sharing a word with an unrelated unquoted expansion or glob prompts; and a post-boundary pathspec produced by substitution (for example git commit -- $(ls)) prompts because the shell still executes it. It targets the accidental case, not an adversary.
 ```
 
+### `hook:constraint-reread`
+
+- Platform: `claude-code`
+- Default: `block`
+- Entry point: `Stop`
+- Class: `b`
+
+Technical limits (from the enforcement ledger):
+
+```
+PREVIEW CHANNEL ONLY: a standalone file installed by hand from .preview/, not part of the pack's plugin, and off until AIQT_CONSTRAINT_RECORD names the project's durable record. After a compaction reported by the platform's own markers (SessionStart with source compact, or PreCompact), it reminds the assistant of the record's Constraint lines on every user prompt and refuses each turn end until the record holds a Constraints-reread entry dated after the compaction and not in the future; refusals are capped per continuous stop_hook_active run, after which the stop is allowed with a warning. It proves only that an entry was written, not that the record was read or a constraint honoured; it names only constraints written in the record; a compaction without one of those markers (a host without the events, a hook not registered for them, a new session) is not seen; with no state location or no session key in the payload a compaction is reminded once and then forgotten; concurrent hook runs can lose a count update; an entry beyond the first MiB of the record is not seen; and the host clock is trusted.
+```
+
 ### `hook:diff-source`
 
 - Platform: `claude-code`
@@ -911,6 +924,19 @@ PUSH COVERAGE REMAINS SEPARATE. Commit-free commands retain the existing lexical
 
 Push residuals include execution outside Bash; renamed executables, aliases, functions, and scripts; runtime-expanded destinations; fragmentation beyond parsed/raw detection; a wrapped push when another earlier or later segment parses as ordinary Git and suppresses the push fallback; protected branches under names other than main/master; remote-side or hosting-provider actions; persisted repository/worktree/global/system configuration and includes; command-local remote.<name>.push refspecs; environment GIT_CONFIG_* protocols, including the explicit-refspec ambient-override gap; and upstream/triangular mappings that can diverge from the session-HEAD proxy. push.default selects refs rather than forcing or deleting by itself. The raw mirror-config fallback recognizes common quoted spellings but cannot model arbitrary option/key/value fragmentation or cross-mechanism precedence. Negated force/delete flags, standalone --force-if-includes, and dry-run force/delete can over-deny. Parse-error/raw fallback scans can also over-match quoted prose or unrelated option values. Push coverage is best-effort and is not widened by the commit certificates.
 
+```
+
+### `hook:rerun-pass-check`
+
+- Platform: `claude-code`
+- Default: `block`
+- Entry point: `Stop`
+- Class: `b`
+
+Technical limits (from the enforcement ledger):
+
+```
+PREVIEW CHANNEL ONLY: a standalone file installed by hand from .preview/, not part of the pack's plugin. After a CI rerun command (gh run rerun, glab ci retry), or a recognized check command that failed and then passed with identical command text and no recorded change between, it adds a note after the tool call, and at turn end it refuses a final message that presents a pass as conclusive without naming the earlier failure, capped per continuous stop_hook_active run. It sees only those commands run through the shell tool: a rerun through a web page, a pushed empty commit, a runner or CI retry setting, a wrapping script, or a changed command line is not seen; a change made outside the tool calls it sees reads as no change (a false note), and a read-only-looking command with a side effect reads as no change; pass and fail are read from the event name and a few response fields, not the output; the Stop check reads only the final message against fixed phrase lists, so a claim worded otherwise passes and any disclosure word clears the reruns; it does not record or investigate the failure itself; with no readable state or no final message in the payload the stop is allowed; and concurrent hook runs can lose a state update.
 ```
 
 ### `hook:secrets-shift-left`

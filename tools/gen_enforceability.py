@@ -2,10 +2,11 @@
 """Generate .aiqt/enforceability.json, the machine-readable enforceability ledger (EN-5 PR-E).
 
 For every rule in the corpus the ledger records which shipped mechanical controls cite it: the runtime
-hooks from .aiqt/core/hooks/manifest.toml and the deterministic repository gates from
-.aiqt/core/gates/manifest.toml. Each control carries its own residue verbatim (what it does NOT catch),
-so linkage and its honest gap travel together. The manifests are the single edit points; this ledger is
-generated and drift-gated, so the two can never fork. It reuses the sibling generators' validated
+hooks from .aiqt/core/hooks/manifest.toml, the preview-channel hooks from .aiqt/core/hooks/preview.toml
+(standalone .preview/ files, not plugin hooks; each row carries "channel": "preview" and its "file"), and
+the deterministic repository gates from .aiqt/core/gates/manifest.toml. Each control carries its own
+residue verbatim (what it does NOT catch), so linkage and its honest gap travel together. The manifests
+are the single edit points; this ledger is generated and drift-gated, so the two can never fork. It reuses the sibling generators' validated
 loaders (gen_rules.load_corpus, gen_hooks.load_manifest) so the hooks-manifest validation is never
 forked, and _gen_common.reconcile for the drift/write step.
 
@@ -67,11 +68,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
-from gen_hooks import load_manifest, ID_RE, CID_RE  # noqa: E402  reuse the hooks-manifest loader and shapes
+from gen_hooks import load_manifest, ID_RE, CID_RE, KNOWN_EVENTS  # noqa: E402  reuse the hooks loader and shapes
 
 LEDGER_REL = ".aiqt/enforceability.json"
 GATES_MANIFEST_REL = ".aiqt/core/gates/manifest.toml"
 HOOKS_MANIFEST_REL = ".aiqt/core/hooks/manifest.toml"
+PREVIEW_MANIFEST_REL = ".aiqt/core/hooks/preview.toml"
+PREVIEW_KEYS = {"id", "file", "rules", "platform", "event", "matcher", "default", "class", "residue"}
+PREVIEW_EVENTS = set(KNOWN_EVENTS) | {"PostToolUseFailure", "PreCompact"}
+PREVIEW_TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+PREVIEW_FILE_RE = re.compile(r"^\.preview/[a-z0-9][a-z0-9-]*\.py$")
 RULES_DIR_REL = ".aiqt/core/rules"
 # The Quality roster: the local mirror plus its CI workflow. Reading them to scan their gate steps is a
 # VALIDATION-ONLY read that never changes the ledger bytes, so they are deliberately NOT GENSRC_OUTPUTS
@@ -111,7 +117,7 @@ BOUNDARY = (
 GENSRC_OUTPUTS = (
     {"target": ".aiqt/enforceability.json", "kind": "file",
      "sources": (".aiqt/core/rules/", ".aiqt/core/hooks/manifest.toml",
-                 ".aiqt/core/gates/manifest.toml"),
+                 ".aiqt/core/hooks/preview.toml", ".aiqt/core/gates/manifest.toml"),
      "regenerate": "python3 tools/gen_enforceability.py"},
 )
 
@@ -189,6 +195,62 @@ def load_gates_manifest(path, root):
                              "control)".format(where, "/".join(sorted(CLASSES))))
         _req_str(gate, "residue", where)  # required, never empty: the gate's honest residue gap
     return gates
+
+
+def load_preview_manifest(path, root, plugin_ids):
+    """Parse and validate the preview-channel hooks manifest; return its [[hook]] tables. An ABSENT file is
+    an empty list (retiring the channel needs no edit here); an unreadable or malformed one raises
+    (ValueError/OSError -> exit 2). Each id must be unique here and absent from the plugin hooks manifest,
+    and each file must be an existing .preview/<name>.py."""
+    if not _exists(path):
+        return []
+    data = load_toml(path)
+    extra = set(data) - {"hook"}
+    if extra:
+        raise ValueError("{}: unknown top-level key(s): {}".format(path.name, ", ".join(sorted(extra))))
+    hooks = data.get("hook")
+    if not isinstance(hooks, list):
+        raise ValueError("{}: [[hook]] entries are required".format(path.name))
+    seen = set()
+    for hook in hooks:
+        if not isinstance(hook, dict):
+            raise ValueError("{}: every [[hook]] must be a table".format(path.name))
+        unknown = set(hook) - PREVIEW_KEYS
+        if unknown:
+            raise ValueError("{}: [[hook]] unknown key(s): {}".format(path.name, ", ".join(sorted(unknown))))
+        hid = _req_str(hook, "id", "{}: [[hook]]".format(path.name))
+        where = "{}: [[hook]] {}".format(path.name, hid)
+        if not ID_RE.match(hid):
+            raise ValueError("{}: id must match ^[a-z][a-z0-9-]*$ (a kebab-case control id)".format(where))
+        if hid in seen or hid in plugin_ids:
+            raise ValueError("{}: duplicate hook id (unique across both hooks manifests)".format(where))
+        seen.add(hid)
+        rel = _req_str(hook, "file", where)
+        if not PREVIEW_FILE_RE.match(rel) or not _exists(root / rel):
+            raise ValueError("{}: file must name an existing .preview/<name>.py".format(where))
+        rules = hook.get("rules")
+        if not isinstance(rules, list) or not rules or not all(isinstance(r, str) and CID_RE.match(r)
+                                                                for r in rules):
+            raise ValueError("{}: rules must be a non-empty list of corpus-id strings".format(where))
+        if _req_str(hook, "platform", where) != "claude-code":
+            raise ValueError("{}: platform must be claude-code".format(where))
+        event = _req_str(hook, "event", where)
+        if event not in PREVIEW_EVENTS:
+            raise ValueError("{}: event '{}' is not a known hook event".format(where, event))
+        if event in PREVIEW_TOOL_EVENTS:
+            matcher = _req_str(hook, "matcher", where)
+            try:
+                re.compile(matcher)
+            except re.error as exc:
+                raise ValueError("{}: matcher is not a valid regex: {}".format(where, exc))
+        elif "matcher" in hook:
+            raise ValueError("{}: matcher is forbidden on the non-tool event {}".format(where, event))
+        if _req_str(hook, "default", where) not in ("block", "warn"):
+            raise ValueError("{}: default must be block or warn".format(where))
+        if _req_str(hook, "class", where) not in ("b", "c"):
+            raise ValueError("{}: class must be b or c (a is the gate axis; d is never authored)".format(where))
+        _req_str(hook, "residue", where)  # required, never empty
+    return hooks
 
 
 def roster_scripts(root):
@@ -270,6 +332,9 @@ def _hook_row(hook):
     residue, carried verbatim from the manifest so the ledger cannot fork from its single edit point."""
     row = {"id": hook["id"], "event": hook["event"], "platform": hook["platform"],
            "default": hook["default"], "class": hook["class"], "residue": hook["residue"]}
+    if "file" in hook:  # a preview-channel hook (preview.toml): name the channel and its shipped file
+        row["channel"] = "preview"
+        row["file"] = hook["file"]
     if "matcher" in hook:
         row["matcher"] = hook["matcher"]
     return row
@@ -293,6 +358,7 @@ def build_ledger(root):
     corpus = load_corpus(rules_dir)
     corpus_ids = {str(fm["corpus-id"]) for _src, fm, _rel in corpus}
     _plugin, hooks = load_manifest(root / HOOKS_MANIFEST_REL)
+    hooks = list(hooks) + load_preview_manifest(root / PREVIEW_MANIFEST_REL, root, {h["id"] for h in hooks})
     gates = load_gates_manifest(root / GATES_MANIFEST_REL, root)
     roster_union, per_file = roster_scripts(root)
     cross_checks(gates, hooks, corpus_ids, roster_union, per_file)
@@ -724,6 +790,36 @@ def self_test_main():
         if run_quiet(pinl, check=True) != 2:
             failures.append("a manifest script named only in a roster inline comment must not enumerate "
                             "(F-148 strip); expected exit 2 (a linkage claim with no roster step)")
+
+        # (q) The preview-channel manifest: a conformant preview hook links its rule as a hook row that
+        #     carries "channel": "preview" and its file (rule dd turns hook-linked); a preview file that
+        #     is absent, an id that duplicates a plugin hook id, an unknown corpus-id, a class d, and an
+        #     unknown entry key each fail closed (exit 2).
+        def preview_tree(name, hid="pv-hook", rule="ruledd", cls="b", extra="", make_file=True):
+            t = _build(tmp / name)
+            (t / ".preview").mkdir()
+            if make_file:
+                (t / ".preview" / "pv-hook.py").write_text("# self-test preview hook\n", encoding="utf-8")
+            (t / PREVIEW_MANIFEST_REL).write_text(
+                '[[hook]]\nid = "{}"\nfile = ".preview/pv-hook.py"\nrules = ["{}"]\nplatform = "claude-code"\n'
+                'event = "Stop"\ndefault = "block"\nclass = "{}"\n{}residue = "A self-test preview hook."\n'
+                .format(hid, rule, cls, extra), encoding="utf-8")
+            return t
+        qgood = preview_tree("preview-good")
+        if run_quiet(qgood, check=False) != 0:
+            failures.append("preview: a conformant preview manifest expected exit 0")
+        else:
+            entry = {e["corpus-id"]: e for e in json.loads((qgood / LEDGER_REL).read_text(
+                encoding="utf-8"))["rules"]}.get("ruledd", {})
+            rows = entry.get("hooks", [])
+            if entry.get("status") != "hook-linked" or len(rows) != 1 or rows[0].get("channel") != "preview" \
+                    or rows[0].get("file") != ".preview/pv-hook.py":
+                failures.append("preview: the preview hook must link ruledd as a preview-channel hook row")
+        for name, kwargs in (("preview-no-file", dict(make_file=False)), ("preview-dup-id", dict(hid="hook-rule1")),
+                             ("preview-orphan", dict(rule="nosuch9")), ("preview-class-d", dict(cls="d")),
+                             ("preview-unknown-key", dict(extra="bogus = 1\n"))):
+            if run_quiet(preview_tree(name, **kwargs), check=False) != 2:
+                failures.append("preview: case {} expected exit 2 (fail-closed)".format(name))
     finally:
         if unread_manifest is not None:
             os.chmod(unread_manifest, 0o644)  # restore even on an unexpected early exit
@@ -745,7 +841,9 @@ def self_test_main():
           "gates manifest, a duplicate gate id, a duplicate gate script, an absent gates manifest, an "
           "absent roster file, a roster with zero scripts, an unknown corpus-id in the hooks manifest, an "
           "unknown gates-manifest top-level key, an unknown [[gate]] entry key, and a manifest script "
-          "named only inside a roster inline comment all fail closed (exit 2)" + note)
+          "named only inside a roster inline comment all fail closed (exit 2); a preview-channel hook links "
+          "its rule as a preview row, and a preview hook with an absent file, a duplicate id, an unknown "
+          "corpus-id, class d, or an unknown key fails closed (exit 2)" + note)
     return 0
 
 

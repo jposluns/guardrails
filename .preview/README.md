@@ -5,7 +5,7 @@ Each hook is one self-contained Python file that you can download, check, test, 
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
 
-Six hooks are published here, each listed with its checksum and link in the integrity table below.
+Eight hooks are published here, each listed with its checksum and link in the integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
 
 One document linked from this page is not a hook: [the OPF implementation prompt](../opf/spec/OPF-IMPLEMENTATION-PROMPT.md)
@@ -17,7 +17,12 @@ not apply to it.
 
 The three clock hooks, `clock-inject.py`, `stamp-truth-stop.py`, and `future-stamp-write.py`, back the
 rule that a current timestamp is read from the clock, never recalled or guessed
-([the rule text](../.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md)). The other hooks guard completion
+([the rule text](../.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md)). `constraint-reread.py` backs the
+rule that a standing constraint persists across context loss
+([the rule text](../.claude/rules/aiqt/10-TRUST-standing-constraints-persist.md)), and `rerun-pass-check.py`
+backs the rule that a rerun pass does not erase an earlier failure
+([the rule text](../.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md)); both are linked in the
+[enforcement register](../ENFORCEMENT.md). The other hooks guard completion
 records, background polling loops, and existing working-record files. Each one is a discipline
 guard against accidental drift, not a security boundary, and each one fails open: if the hook hits an
 error or input it cannot evaluate, it gets out of the way rather than blocking your work. Each file states
@@ -61,6 +66,20 @@ the authority, and the summary further down this page only points to it.
   removal), truncating redirections, plain two-operand `cp` and `mv` onto a file, `truncate -s 0`,
   and `tee` without options. It also checks helper-session calls.
   Event: `PreToolUse`, matcher `Bash`.
+- **`constraint-reread.py`** keeps standing constraints in force after a context compaction. When Claude
+  Code reports a compaction, it records the time and reminds the assistant of the constraints your durable
+  record lists, on every prompt, until the record holds a `Constraints-reread:` entry dated after the
+  compaction; meanwhile it refuses each turn end, at most three times in a row before it allows the stop
+  with a warning. It detects a compaction by the platform's own markers: the `SessionStart` input field
+  `source` with the value `compact`, and the `PreCompact` event, both described in the
+  [Claude Code hooks reference](https://code.claude.com/docs/en/hooks). Events: `SessionStart`,
+  `PreCompact` (optional), `UserPromptSubmit`, and `Stop`.
+- **`rerun-pass-check.py`** keeps an earlier failure in view after a rerun passes. After a CI rerun
+  (`gh run rerun`, `glab ci retry`), or a test or check command that failed and then passed with the same
+  command text and no recorded change between, it adds a note to the assistant's context; at turn end it
+  refuses, at most twice in a row, a final message that calls a pass conclusive without naming the earlier
+  failure. Events: `PostToolUse` and `PostToolUseFailure` (matcher `Bash|Write|Edit|MultiEdit|NotebookEdit`),
+  and `Stop`.
 
 ## Integrity
 
@@ -72,8 +91,10 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `clock-inject.py` | `65fe1cae733f72d2f82b884b9bb710310b0b6ad0dcccd8c874c5f2bdd2e25386` | [clock-inject.py](clock-inject.py) |
+| `constraint-reread.py` | `c64902ee55f0be0978e9d09117eee9a29b8f29e9002143d622fc35de2e1bea3f` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `77d4f32496bde3593845aba73f84dc1498c2ece83c380d491e642885f211c5e9` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
+| `rerun-pass-check.py` | `9730f856db56238d80499157ae1db4de7dd73e4412766c6de8b075ebaf18f354` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `92ad7d0b93ddb1a5eefa57b1534ac8cc405ebb0df8f4b892b3754403d2b55e4d` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
@@ -137,7 +158,7 @@ fails and report it; do not work around a failed check.
    array; do not add a second key with the same event name. Register each hook once: if a later version
    of the pack's plugin provides the same hook, remove this entry so it does not run twice.
 
-   Use this launch line for each of the six hooks:
+   Use this launch line for each of the eight hooks:
 
    ```sh
    /bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B "/ABSOLUTE/PATH/TO/<file>"'
@@ -150,30 +171,47 @@ fails and report it; do not work around a failed check.
    - For `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`, use this guard in place
      of their docstrings' `REGISTRATION` line, which tests only stdin. This guard has a stricter launch
      condition: it also skips directory stdout or stderr. When none of the streams is a directory, it
-     runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks do not define
-     a `REGISTRATION` constant; use this same guard for them.
+     runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks,
+     `constraint-reread.py`, and `rerun-pass-check.py` do not define a `REGISTRATION` constant; use this
+     same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
      on the `PATH` that Claude Code runs hook commands with.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
-   This combined example shows the six hooks. Copy only entries for hooks you have downloaded,
+   This combined example shows the eight hooks. Copy only entries for hooks you have downloaded,
    checked, and tested. `clock-inject.py` needs both `PostToolUse` and `PostToolUseFailure`, with no
    matcher (all tools); `stamp-truth-stop.py` uses `Stop`, with no matcher. On `PreToolUse`,
    `future-stamp-write.py` matches file writes and shell commands, and the other three match `Bash`.
+   `constraint-reread.py` uses `SessionStart` (matcher `compact`), `PreCompact`, `UserPromptSubmit`, and
+   `Stop`; `rerun-pass-check.py` uses `PostToolUse` and `PostToolUseFailure` (matcher
+   `Bash|Write|Edit|MultiEdit|NotebookEdit`) and `Stop`.
 
    ```json
    {
      "hooks": {
        "PostToolUse": [
-         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] }
+         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] },
+         { "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
        ],
        "PostToolUseFailure": [
-         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] }
+         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] },
+         { "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
+       ],
+       "SessionStart": [
+         { "matcher": "compact", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] }
+       ],
+       "PreCompact": [
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] }
+       ],
+       "UserPromptSubmit": [
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] }
        ],
        "Stop": [
-         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/stamp-truth-stop.py\"'" } ] }
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/stamp-truth-stop.py\"'" } ] },
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/constraint-reread.py\"'" } ] },
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/rerun-pass-check.py\"'" } ] }
        ],
        "PreToolUse": [
          { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/future-stamp-write.py\"'" } ] },
@@ -196,12 +234,12 @@ fails and report it; do not work around a failed check.
 
 6. Smoke-test the live hook. For `clock-inject.py`, run any command in the new session (for example
    `true`) and confirm a `CLOCK (read by hook, authoritative):` line reaches the assistant's context. For
-   the other five, a passing self-test in step 3 is the check; they stay silent until they see something
+   the other seven, a passing self-test in step 3 is the check; they stay silent until they see something
    to flag.
 
 ### A note on hooks that record authority
 
-Some hooks, though none of the six above, need a line in a durable record to switch on or to grant an
+Some hooks, though none of the eight above, need a line in a durable record to switch on or to grant an
 exception, for example an entry saying that you, the maintainer, approved something. Expect your assistant
 to decline to write such a line itself, even when your permission settings would allow the write: a record
 of your own authority is not something it should author on your behalf, and permission allow rules have
@@ -243,6 +281,8 @@ command. Their reasons are optional; text inside quotes does not opt out.
 |---|---|
 | `AIQT_STORE_ROOT` | The folder or folders holding your working records, as absolute paths joined with `:`. The future-date and record-removal checks only look at files under these folders. |
 | `AIQT_LEASE_FILE` | The absolute path to a small text file that marks when the current working session started. When it is set and valid, the hooks report and check how long the session has been running. |
+| `AIQT_CONSTRAINT_RECORD` | The absolute path to the project's durable record of standing constraints, for `constraint-reread.py`; unset, empty, or relative, that hook does nothing. It reads `Constraint: <text>` lines as the constraints to name, and `Constraints-reread: <UTC time>` lines (written by the assistant from `date -u +%Y-%m-%dT%H:%M:%SZ` after re-reading) as re-read entries. |
+| `AIQT_HOOK_STATE_DIR` | The absolute path to a folder for the per-session state of `constraint-reread.py` and `rerun-pass-check.py`. If unset, they use `$XDG_STATE_HOME/aiqt-guardrails`, else `$HOME/.local/state/aiqt-guardrails`. |
 | `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the hooks out of that output. Do not set it for a helper session started inside your own session: `future-stamp-write.py` deliberately still checks the record writes such a helper makes, and `clock-inject.py` still gives it the clock. |
 | `G_REF_DIR` | Self-tests only: the folder containing reference hooks for the byte-identity checks in `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`. If unset or empty, they look beside the hook itself. Each missing reference makes its check report `SKIPPED`. |
 
@@ -293,6 +333,17 @@ section of its opening docstring. Read that section before relying on a hook; in
   misses sleeps run through unlisted launchers, such as `flock`, `xargs`, or `ssh`. A counter or clock
   marker is enough to allow a loop even if it never limits the wait. It does not verify that a
   foreground process ends when the tool's timeout expires.
+- **`constraint-reread.py`** proves only that a re-read entry was written after the compaction, not that
+  the record was read or a constraint honoured, and it names only the constraints written in the record.
+  It sees a compaction only through the platform markers named above, so a context lost without one (a
+  new session, a host without those events, a hook not registered for them) is not seen. Without a state
+  folder or a session id it reminds once and then forgets. Its turn-end refusal is capped, so a model that
+  ignores it is allowed to stop after three refusals with a warning.
+- **`rerun-pass-check.py`** sees only the listed CI rerun commands and recognized check commands run
+  through the shell tool, with identical command text. A rerun through a web page, a runner's own retry
+  option, or a change made outside the tool calls it sees is missed or misread. Its turn-end check reads
+  only the final message against fixed phrase lists, and any disclosure word such as `flaky` or `rerun`
+  clears it; it does not record or investigate the failure itself.
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
   absent or empty files and files within a store's `.git` directory, though removing that directory
   whole is checked. It misses editor tools, scripts, nested shell strings, `find`, `rsync`, git

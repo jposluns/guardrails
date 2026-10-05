@@ -113,8 +113,8 @@ mechanisms = ["hook:diff-source", "hook:diff-wall-stop"]
 
 [[rule]]
 corpus-id = "cnstpr"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:constraint-reread"]
 
 [[rule]]
 corpus-id = "cntdef"
@@ -313,8 +313,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "rerunf"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["hook:rerun-pass-check"]
 
 [[rule]]
 corpus-id = "rmvpth"
