@@ -14853,13 +14853,14 @@ def _cli_self_test():
                 # The stage driver end to end over a decision-complete fixture (a retire source and a
                 # kept file at a NOT-ADOPTED root), planned through the wired `plan`: approve -> 0 with
                 # the approval binding the plan's two digests on stdout, writing nothing; apply -> 2
-                # naming the unlanded ops (the fixture plan's init-store and retire ops, and the driver's
-                # receipt stage, are not landed in this build), writing nothing, no journal and
-                # no bundle (the wiring discriminator: an unwired apply refuses with the not-yet-available
-                # message instead). Flips: an approval for a fresh plan of the same tree -> apply 2 on the
-                # binding; a source edited after planning -> approve 2 into a fresh plan; an open
-                # adoption-journal transaction -> plan 2 directing to reconcile (the planner itself never
-                # reads that journal, so without the gate it reports the worksheet's digest mismatch).
+                # naming the unlanded ops (the fixture plan's init-store, install-pack, register-unmanaged
+                # and retire-file ops, and the driver's receipt stage, are not landed in this build),
+                # writing nothing, no journal and no bundle (the wiring discriminator: an unwired apply
+                # refuses with the not-yet-available message instead). Flips: an approval for a fresh plan
+                # of the same tree -> apply 2 on the binding; a source edited after planning -> approve 2
+                # into a fresh plan; an open adoption-journal transaction -> plan 2 directing to reconcile
+                # (the planner itself never reads that journal, so without the gate it reports the
+                # worksheet's digest mismatch).
                 import hashlib
                 import _opf_adopt
                 import _opf_init

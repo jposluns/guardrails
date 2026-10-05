@@ -2538,6 +2538,14 @@ def run_apply(product_root, plan_bytes, approval_bytes, worksheet):
         with _composing():
             ops.create(plan_rel(run_id), plan_bytes)
             ops.create(approval_rel(run_id), approval_bytes)
+            # KNOWN GAP, unreachable in this build: the finish ops read context keys this driver does not
+            # supply yet: plant-governance reads `pack` (the release manifest, root.txt and members it
+            # verifies), render-views reads `observations` (the inert git observations it renders from),
+            # and record-adoption reads `receipt` and `now`. The receipt-stage gate above refuses every plan
+            # before this compose runs, so none of them is reached. The slice that lands the receipt stage
+            # must also gather and pass those four keys here; until then (read from the code, not run) an
+            # absent pack or receipt refuses, and absent observations leave the store checks that need them
+            # cannot-evaluate.
             context = dict(ops=ops, plan=plan_doc, approval=approval, product_root=product_root,
                            stage=APPLY_STAGE)
             for i, row in enumerate(rows):
@@ -5357,18 +5365,19 @@ def _finish_ops_self_test(check):
                     raise AdoptApplyError("; ".join(verdict.findings))
         return compose
 
-    def bundle_plan():
-        """(bytes, digest): the run's bundle plan, sealed as the planner seals it, so the sealed inventory's
-        spec 4.2 [adoption] identity names a plan digest the bundle verifier proves."""
-        body = dict(format="opf.adoption.plan/v2", run_id=rid)
-        digest = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
-        return emit_checked(dict(body, plan_digest=digest)).encode("utf-8"), digest
+    def seal(plan_doc):
+        """`plan_doc` sealed as the planner seals it: its plan_digest is the digest of the canonical emission
+        of the plan without that key, so frozen_plan re-proves it from its own bytes."""
+        body = dict((k, plan_doc[k]) for k in plan_doc if k != "plan_digest")
+        return dict(body, plan_digest="sha256:" + _sha256(emit_checked(body).encode("utf-8")))
 
-    def run(root, rows, phase=None, **context):
+    def run(root, rows, phase=None, staged=None, **context):
         """(transaction name, None) or (None, refusal text): one adoption transaction over `rows`. A base
-        transaction stages the run's bundle plan first, as apply stages the approved plan, and every
-        transaction carries that plan's digest."""
-        plan_bytes, digest = bundle_plan()
+        transaction stages the context's own plan first, as apply stages the approved plan the handlers
+        read, and every transaction carries that plan's digest; `staged` (bytes, digest) stages another
+        plan instead, for the mismatched-plan vector only."""
+        plan_bytes, digest = staged or (emit_checked(context["plan"]).encode("utf-8"),
+                                        context["plan"]["plan_digest"])
         compose = composer(rows, **context)
         if phase is None:
             rows_compose = compose
@@ -5398,24 +5407,47 @@ def _finish_ops_self_test(check):
         return ("\n".join(lines) + "\n").encode("utf-8")
 
     def release(manifest, plan=None, anchor=None):
-        """(plan, pack) agreeing on the ROOT of `manifest` unless `anchor` names another one."""
+        """(sealed plan, pack) agreeing on the ROOT of `manifest` unless `anchor` names another one."""
         agreed = "sha256:" + pack_manifest.compute_root(manifest)
         plan = dict(plan or base_plan)
         plan["release"] = dict(plan["release"], manifest_sha256=agreed, anchor_sha256=anchor or agreed)
         pack = dict(manifest=manifest, root=(agreed + "\n").encode("ascii"), members=dict([(source, member)]))
-        return plan, pack
+        return seal(plan), pack
 
     base_plan = schema.canonical_plan()
     manifest = manifest_bytes(member)
     plan, pack = release(manifest)
     plant = dict(op="plant-governance", path="AGENTS.md", content_digest="sha256:" + _sha256(member),
                  source_member=source)
+    # ONE approved plan throughout: the sealed plan the handlers read is the plan the base transaction
+    # stages in the bundle and whose digest the inventory's [adoption] identity names, and the receipt core
+    # and its embedded approval bind that same digest.
     receipt = schema.canonical_receipt_core()
     receipt["release"] = dict(receipt["release"], manifest_sha256=plan["release"]["manifest_sha256"])
+    receipt["plan_digest"] = plan["plan_digest"]
+    receipt["approval"] = dict(receipt["approval"], plan_digest=plan["plan_digest"])
     core, event = adoption_record(rid, plan, receipt, now)
     record = minted_record_row(rid, core)
     ctx = dict(plan=plan, pack=pack, receipt=receipt, now=now)
     check("finish-fixture-pack-manifest-valid", pack_manifest.parse_manifest(manifest)[1].status == valid)
+    check("finish-fixture-plan-sealed", frozen_plan(emit_checked(plan).encode("utf-8")) == plan
+          and plan["plan_digest"] != base_plan["plan_digest"])
+
+    def bound_digests(tree):
+        """The plan digests a committed bundle names: the staged plan.toml's own, the inventory's [adoption]
+        identity, the receipt core's and its embedded approval's (None where a piece is absent)."""
+        def doc(rel):
+            return tomllib.loads(tree[rel].decode("utf-8")) if rel in tree else dict()
+        rc = doc(receipt_rel(rid))
+        return (doc(plan_rel(rid)).get("plan_digest"), doc(inventory_rel(rid)).get("adoption", {}).get("plan_digest"),
+                rc.get("plan_digest"), rc.get("approval", {}).get("plan_digest"))
+
+    def one_plan(tree, plan_doc):
+        """True when the bundle stages exactly `plan_doc` and plan.toml, inventory, receipt and approval all
+        name its digest: the identity the bundle verifier alone does not compare (it proves the inventory
+        against plan.toml, never the receipt; the doctor owns the approval binding)."""
+        return (tree.get(plan_rel(rid)) == emit_checked(plan_doc).encode("utf-8")
+                and bound_digests(tree) == (plan_doc["plan_digest"],) * 4)
     check("finish-fixture-rows-validate", plan["run_id"] == rid and schema.validate_op(plant).status == valid
           and schema.validate_op(record).status == valid)
     check("finish-receipt-in-own-bundle", receipt_rel(rid) == evidence_home_rel(rid) + "/receipt.toml"
@@ -5467,6 +5499,7 @@ def _finish_ops_self_test(check):
             listed = [r["path"] for r in tomllib.loads(after[inventory_rel(rid)].decode("utf-8"))["file"]]
         check("record-adoption-bundle-verifies", verify_bundle(root, rid).status == valid
               and receipt_rel(rid) in listed and genesis_event_rel(rid) in listed)
+        check("record-adoption-one-approved-plan", one_plan(after, plan))
         disk_core, disk_event = after.get(receipt_rel(rid), b""), after.get(genesis_event_rel(rid), b"x=")
         check("record-adoption-reparsed-core-and-chain-valid",
               schema.validate_receipt_core(tomllib.loads(disk_core.decode("utf-8"))).status == valid
@@ -5477,6 +5510,20 @@ def _finish_ops_self_test(check):
         txn, why = run(root, [record], phase="completion", **ctx)
         check("record-adoption-second-genesis-later-phase-refused",
               txn is None and "occupied" in (why or "") and snapshot(root) == before)
+    # the mismatched-plan vector: a bundle staging ANOTHER sealed plan (its inventory naming that plan) while
+    # the receipt and approval bind the context plan still verifies, so only the one-plan equality catches it
+    # (red if that equality is dropped or weakened to the verifier's verdict).
+    stray_plan = seal(dict(format=PLAN_V2_FORMAT, run_id=rid))
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-finish-") as temp:
+        root = Path(temp).resolve()
+        txn, why = run(root, [plant, record], staged=(emit_checked(stray_plan).encode("utf-8"),
+                                                      stray_plan["plan_digest"]), **ctx)
+        after = snapshot(root)
+        digests = bound_digests(after)
+        check("record-adoption-mismatched-plan-detected",
+              txn == rid and why is None and verify_bundle(root, rid).status == valid
+              and digests[:2] == (stray_plan["plan_digest"],) * 2 and digests[2:] == (plan["plan_digest"],) * 2
+              and not one_plan(after, plan) and not one_plan(after, stray_plan))
     # both destinations are observed before either is composed: an occupied genesis event beside an absent
     # receipt refuses with NOTHING composed, not with the receipt create already appended.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-finish-") as temp:
