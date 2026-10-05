@@ -3643,8 +3643,10 @@ def _runtime_wait_audit(source, owners=None):
     outer bound on every registered unit, each run as its OWN `--self-test-unit` subprocess whose
     whole process group _run_unit_subprocess SIGKILLs at its _UNIT_OUTER_BOUNDS budget (proved live
     by _unit_bound_self_test), so a wait this audit misses is still killed at its
-    unit's budget; the audit stays as defence-in-depth that names a new unbounded wait at review time
-    rather than at its kill. Disclosed residuals: an alias (`w = os.waitpid`,
+    unit's budget (a guarantee against ACCIDENTAL unit faults, D-385-ACCIDENTAL-UNIT: a unit that
+    deliberately stops its runner is a sabotage residual _UNIT_OUTER_BOUNDS discloses); the audit
+    stays as defence-in-depth that names a new unbounded wait at review time rather than at its
+    kill. Disclosed residuals: an alias (`w = os.waitpid`,
     `import os as o`, `from subprocess import run`), getattr, functools.partial, an unbound method call
     (`Popen.wait(proc)`), a timeout held in a variable that is None at run time, a settimeout(None)
     after the settimeout it counts, a rebinding through `global`/`nonlocal` or after the call in a
@@ -22076,7 +22078,14 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 
 # D-385-SUBPROCESS-RUNNER (the QA26 hard outer bound, re-grounded after rounds 26 and 27 each broke
 # the in-process forked runner's machinery: its relay pipes, its SIGCHLD holding, its pre-fork bound
-# derivation). The GUARANTEE that `opf.py --self-test` cannot hang is BY CONSTRUCTION, not by audit:
+# derivation). THREAT MODEL (D-385-ACCIDENTAL-UNIT): the runner defends against ACCIDENTAL unit
+# faults -- a crash, a hang, an early exit, stray or excess output, leftover children, a stale or
+# missing completion record. Deliberate SABOTAGE by a unit is outside that contract and is
+# disclosed below as residuals S1 to S5: units are the repository's own reviewed code, running as
+# the same user as the runner, and a same-user process can reach the runner in ways no check inside
+# the runner closes. Every guarantee stated here holds against that model, not against a unit
+# written to defeat it. Against accidental faults, the GUARANTEE that `opf.py --self-test` cannot
+# hang is BY CONSTRUCTION, not by audit:
 # run_self_tests runs every registered unit as its OWN `python3 -I -B opf.py --self-test-unit
 # <label>` subprocess (_run_unit_subprocess) in its OWN session and process group, with stdout and
 # stderr on temporary FILES (never a pipe this parent must drain) and stdin on the null device; the
@@ -22093,13 +22102,17 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 # was doing, and each unit child also starts under RLIMIT_FSIZE (_UNIT_FSIZE_LIMIT: capture
 # growth is bounded at the source, a write past it failing the unit closed by name) and, on Linux,
 # PR_SET_PDEATHSIG (a killed parent takes the leader with it).
-# An early exit cannot pass either: the unit's verdict is its exit code AND the one-line completion
-# record `<label> <code> <pid>` its child entry writes LAST (_cmd_self_test_unit), pid-BOUND to the
-# leader; a missing, mismatched or wrong-pid record fails closed, and the record and capture files
-# are re-opened O_NOFOLLOW|O_NONBLOCK, required regular by fstat on the opened descriptor -- each
-# capture also required to still be the very file the runner created, by device and inode against
-# the descriptor it opened at launch (QA30: a substituted regular file is a named failure, never a
-# laundered pass) -- every read bounded (a planted FIFO is a named failure, never a hang); a
+# An accidental early exit cannot pass either: the unit's verdict is its exit code AND the one-line
+# completion record `<label> <code> <pid>` its child entry writes LAST (_cmd_self_test_unit),
+# pid-BOUND to the leader; a missing, mismatched or wrong-pid record fails closed (a deliberately
+# forged record is residual S2). The record and capture files are read back by RE-OPENING THEIR
+# PATHS after the leader ends: the runner's launch descriptors on the captures are closed as soon
+# as the child has started, and nothing is read through them. Each re-open is
+# O_NOFOLLOW|O_NONBLOCK, required regular by fstat on the newly opened descriptor -- each capture
+# also required to still be the very file the runner created, by device and inode against the
+# fstat the runner took of its launch descriptor (QA30: a substituted regular file is a named
+# failure, never a laundered pass) -- and every read is bounded (a planted FIFO is a named failure,
+# never a hang); the path lookup itself is not bounded (the FUSE residual, S5); a
 # platform lacking O_NOFOLLOW or O_NONBLOCK is refused by name, fail closed, never an unguarded
 # name-based open (QA30 gemini). What the kill reaches, exactly:
 # everything the unit runs in-process or forks WITHOUT leaving its process group dies with the
@@ -22107,10 +22120,25 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 # _FixtureProcess guardian (its os.setpgid(0, 0)) and its subject (its os.setsid()), every
 # start_new_session=True launch (the runtime-probe supervisors and the run_shell checks), the escape
 # probe's setsid writers -- and none of those is ever signalled (the disclosed escaped-writer
-# residual). What such an escapee can NEVER do: hold the suite's stdout or stderr, or block this
-# parent -- it holds at most the unit's output FILES, which the parent copies bounded and capped
-# (_UNIT_OUTPUT_CAP; past the cap the copy is truncated with a note, the disclosed truncation
-# residual). Each budget sits ABOVE the unit's own end-to-end internal budget (the kill-timeout
+# residual). Through the descriptors the runner gives the unit, an escapee holds at most the
+# unit's output FILES, which the parent copies bounded and capped (_UNIT_OUTPUT_CAP; past the cap
+# the copy is truncated with a note, the disclosed truncation residual), so an ACCIDENTAL escapee
+# neither holds the suite's stdout or stderr nor blocks this parent. A unit that sets out to do
+# either can (S3, S5). The SABOTAGE residuals (D-385-ACCIDENTAL-UNIT; QA31 codex reproduced S1 to
+# S3), each out of contract and none defended: (S1) a unit can SIGSTOP or SIGKILL its runner --
+# its own session and process group do not stop a same-user kill() such as
+# os.kill(os.getppid(), signal.SIGSTOP); a stopped runner enforces no deadline until something
+# resumes it, and a killed one ends the suite by that signal, never with a pass; (S2) a unit can
+# FORGE its completion record -- the record authenticates TEXT, not its writer, so any process
+# holding the result path and the leader pid (a fork of the leader inherits both) can write the
+# matching line, after which the leader's os._exit(0) passes; (S3) a unit can open the runner's
+# own stdout or stderr through /proc/<runner-pid>/fd (same user, so the access check passes) and
+# hand it to an escapee, which then holds the suite's real stream open past the runner's exit (a
+# reader waiting for EOF waits on it) or writes into it; (S4) a unit can rewrite or truncate a
+# capture through its own still-open descriptor before it exits; (S5) an escapee can mount a
+# filesystem it controls (FUSE, where host policy lets the unit's user mount) over the capture
+# directory and park the by-path read-backs (S1 to S5 are _run_unit_subprocess's residuals (g)
+# to (k)). Each budget sits ABOVE the unit's own end-to-end internal budget (the kill-timeout
 # rule), stated per row from the unit's committed timeouts, windows and worker counts; the
 # aggregator's internal budget is ENFORCED inside the bounded child itself
 # (_AGGREGATOR_INTERNAL_BUDGET), and NOTHING -- no derivation, no source scan -- runs in the parent
@@ -22347,14 +22375,16 @@ def _unit_copy_capped(stream, path, label, kind, ident):
     """Copy a unit's captured output file to a caller stream: at most _UNIT_OUTPUT_CAP bytes, the
     rest dropped with the named truncation note, delivered through _unit_deliver's bounded,
     thread-free writer. The capture path lives in the runner's private box, but the unit held it
-    open as its own descriptor and can reach it through /proc, so it is re-opened
-    O_NOFOLLOW|O_NONBLOCK and required BY FSTAT ON THE OPENED DESCRIPTOR to still be a regular file
-    (QA28 codex B2: a FIFO planted there made the old open block past every bound) AND to still be
-    the very file this runner created: `ident` is the runner's own fstat of the descriptor it
-    opened at launch, and a device/inode mismatch is a NAMED failure (QA30 codex MAJOR / claude
-    MINOR 1: a unit that unlinked its capture and planted a fresh regular file at the same path
-    laundered a tainted error stream into a pass; `replaced` now includes a planted REGULAR file,
-    not only a symlink or FIFO). Where the platform lacks O_NOFOLLOW or O_NONBLOCK the read-back
+    open as its own descriptor and can reach it through /proc. The runner closed its own launch
+    descriptor on the capture once the child started, so the read-back RE-OPENS THE PATH,
+    O_NOFOLLOW|O_NONBLOCK, and requires BY FSTAT ON THE NEWLY OPENED DESCRIPTOR that it still be a
+    regular file (QA28 codex B2: a FIFO planted there made the old open block past every bound) AND
+    still be the very file this runner created: `ident` is the fstat the runner took of its launch
+    descriptor before closing it, and a device/inode mismatch is a NAMED failure (QA30 codex
+    MAJOR / claude MINOR 1: a unit that unlinked its capture and planted a fresh regular file at
+    the same path laundered a tainted error stream into a pass; `replaced` now includes a planted
+    REGULAR file, not only a symlink or FIFO).
+    Where the platform lacks O_NOFOLLOW or O_NONBLOCK the read-back
     fails closed by name instead of opening unguarded (QA30 gemini; _unit_guard_flags), and the
     read is bounded by the cap. Returns (anomaly, tainted): `anomaly` is None, or the NAMED reason
     this capture cannot stand -- replaced by a symlink, a non-regular file or a different file at
@@ -22367,6 +22397,8 @@ def _unit_copy_capped(stream, path, label, kind, ident):
     as is a unit that rewrites or truncates the stream through its OWN still-open descriptor
     before exiting: while it lives the capture is the unit's own output, indistinguishable from
     output never written, so the identity check defends the READ-BACK, not the unit's own pen).
+    The path lookup behind the re-open is not bounded: a filesystem a unit's escapee mounted over
+    the box can park it (the disclosed FUSE residual, _run_unit_subprocess (k)).
     A write failure of the copy itself is still swallowed (the exit code, the completion record and
     the readable captures, never the delivered text, are the unit's verdict)."""
     import errno
@@ -22417,9 +22449,12 @@ def _unit_write_record(label, code):
     result file the runner named in OPF_SELF_TEST_RESULT (absent when the unit entry is run by hand:
     then there is nothing to write). The pid is this writer's own, and the parent requires label,
     code AND pid to match its direct child's exit and pid exactly (QA28: the record is BOUND to the
-    leader), so nothing that ends the child early -- an os._exit(0) inside a unit included -- and no
-    record written by any process but the leader -- a forked twin outliving an early-exiting leader
-    included -- can pass. A write failure is left to the parent's missing-record check (fail
+    leader), so an ACCIDENTAL early end of the child -- an os._exit(0) inside a unit included --
+    cannot pass, and neither can a stale record or one carrying another process's pid. The record
+    authenticates its TEXT, not its writer: a unit that deliberately writes the leader's matching
+    line from any process -- a fork of the leader knows the path and the pid -- and then exits 0
+    early passes (the disclosed forged-record sabotage residual, D-385-ACCIDENTAL-UNIT, QA31 codex;
+    _run_unit_subprocess (h)). A write failure is left to the parent's missing-record check (fail
     closed)."""
     path = os.environ.get("OPF_SELF_TEST_RESULT")
     if not path:
@@ -22468,8 +22503,12 @@ def _unit_internal_watchdog(label, budget):
     touched: a caller's armed timer and handlers are left exactly as they were, and a unit that
     re-arms SIGALRM cannot mute the helper. Best effort by design: a helper that cannot start is a
     NAMED stderr note, and the OUTER _UNIT_OUTER_BOUNDS row, which sits ABOVE this enforced budget
-    (the kill-timeout rule, by construction), is the hard stop either way. Proved live by
-    _unit_bound_self_test's watchdog vectors."""
+    (the kill-timeout rule, by construction), is the hard stop either way. Under the runner the
+    leader's SIGKILL is itself the durable verdict: the runner observes the death and SIGKILLs the
+    whole group, this helper included, which can cut the helper off before its report or its record
+    (QA31 codex MEDIUM), so a runner-driven expiry is guaranteed to show the runner's own named
+    `killed by signal 9` failure, not this helper's text. Proved live by _unit_bound_self_test's
+    watchdog vectors, the named text by a direct launch nothing else kills."""
     import subprocess
     unit_pid = os.getpid()
     pgid = os.getpgrp()
@@ -22617,7 +22656,12 @@ def _cmd_self_test_unit(label):
 def _run_unit_subprocess(label, bound, argv=None):
     """Run ONE registered self-test unit as its OWN `python3 -I -B opf.py --self-test-unit <label>`
     subprocess under the hard outer deadline `bound` seconds (D-385-SUBPROCESS-RUNNER, replacing the
-    QA26/QA27 in-process forked runner): the child starts with start_new_session=True (it leads its
+    QA26/QA27 in-process forked runner). THREAT MODEL (D-385-ACCIDENTAL-UNIT): this runner defends
+    against ACCIDENTAL unit faults -- a crash, a hang, an early exit, stray or excess output,
+    leftover children, a stale or missing completion record; deliberate sabotage by a unit is a
+    disclosed residual, (g) to (k) below, because units are the repository's own reviewed code
+    running as the same user, and every guarantee stated here holds against that model only. The
+    child starts with start_new_session=True (it leads its
     own session and process group, so its pgid equals its pid), stdin from the null device, stdout
     and stderr to temporary FILES this parent creates (never a pipe this parent must drain), a
     scrubbed explicit environment (_unit_scrubbed_env) carrying the one result-file path the child's
@@ -22651,15 +22695,20 @@ def _run_unit_subprocess(label, bound, argv=None):
     claude MEDIUM 2). The unit's verdict is its exit code AND the one-line completion record
     `<label> <code> <pid>` the child writes LAST (_cmd_self_test_unit), the pid BINDING the record
     to the leader (QA28 claude MINOR 2): a missing, mismatched or wrong-pid record fails closed
-    (exit 2). The result and capture files are re-opened O_NOFOLLOW|O_NONBLOCK and must still be
-    regular files by fstat on the opened descriptor, every read bounded (QA28 codex B2: a FIFO or
+    (exit 2); the binding checks the record's TEXT, not its writer (a forged record is residual
+    (h)). After the leader ends, the result and capture files are read back by RE-OPENING THEIR
+    PATHS (the launch descriptors on the captures are closed as soon as the child has started, and
+    nothing is read through them), O_NOFOLLOW|O_NONBLOCK; each must still be a regular file by
+    fstat on the newly opened descriptor, every read bounded (QA28 codex B2: a FIFO or
     symlink planted at a child-reachable path is a NAMED exit-2 failure, never a hang); where the
     platform lacks O_NOFOLLOW or O_NONBLOCK the runner REFUSES to run at all, by name, rather
     than fall back to unguarded name-based opens (QA30 gemini; _unit_guard_flags). Afterwards
     the unit's output files are copied to the caller's streams through _unit_copy_capped's bounded,
     capped, thread-free writer, and the verdict REQUIRES those captures (QA29 codex MAJOR 5): a
     capture that is unreadable, replaced or non-regular is a named exit-2 failure -- `replaced`
-    judged by DEVICE AND INODE against the descriptors this runner itself opened at launch, so a
+    judged by DEVICE AND INODE against the fstat this runner took of its own launch descriptors
+    before closing them (a by-path re-open plus that identity check, never a read through the
+    launch descriptors), so a
     fresh regular file planted at a capture's path is rejected too (QA30 codex MAJOR / claude
     MINOR 1: a unit that unlinked its stderr capture and planted an empty regular file there
     laundered a tainted stream into a pass) -- and a unit
@@ -22669,8 +22718,8 @@ def _run_unit_subprocess(label, bound, argv=None):
     legitimately print fixture diagnostics to stderr on a pass). An ordinary write failure of the
     copy itself cannot change the unit's verdict.
     Disclosed residuals, each named with why it sits outside this runner's contract
-    (D-385-RESCOPE: the runner defends against a misbehaving UNIT; a hostile or instrumented
-    CALLER is that process's own business):
+    (D-385-RESCOPE: a hostile or instrumented CALLER is that process's own business, (a) to (f);
+    D-385-ACCIDENTAL-UNIT: a unit that sabotages its runner on purpose, (g) to (k)):
     (a) an in-process competing reaper (QA29 codex B1's second half): caller code -- a thread, a
     library, an interposed os.waitid -- that reaps this runner's child between the WNOWAIT
     observation and this runner's kill and reap unpins the leader's pid, so the group kill can
@@ -22698,15 +22747,30 @@ def _run_unit_subprocess(label, bound, argv=None):
     (exit 2, never a wrong pass), and an expiry-path group kill racing that automatic reap has
     the same pid-wrap-only exposure as (a); caller-side because the disposition and the thread
     are both the caller's own.
+    (g) a unit can SIGSTOP or SIGKILL this runner (QA31 codex BLOCKER, reproduced): its own
+    session and process group do not stop a same-user kill() such as
+    os.kill(os.getppid(), signal.SIGSTOP); a stopped runner enforces no deadline until something
+    resumes it (the no-hang guarantee does not hold), and a killed one ends the suite by that
+    signal, never with a pass.
+    (h) a unit can FORGE its completion record (QA31 codex MAJOR, reproduced): the comparison
+    authenticates the record's text, not its writer, so any process holding the result path and
+    the leader pid -- a fork of the leader inherits both -- can write the matching
+    `<label> 0 <pid>` line, and the leader's early os._exit(0) then passes; the binding rejects
+    an accidental stale, missing or foreign-pid record only.
+    (i) a unit can hold or write the SUITE's own streams (QA31 codex MAJOR, reproduced): it can
+    open this runner's stdout or stderr through /proc/<runner-pid>/fd (same user, so the access
+    check passes) and hand it to an escapee, which keeps the stream open past this runner's exit
+    (a reader waiting for EOF waits on it) or writes into it, past every bound and cap here.
+    (j) a unit can rewrite or truncate a capture through its own still-open descriptor before it
+    exits; while it lives the capture is its own output (_unit_copy_capped).
+    (k) an escapee that MOUNTS a filesystem it controls over the runner's capture directory (FUSE,
+    where host policy lets the unit's uid mount at all) can park the post-completion result and
+    capture read-backs, which re-open PATHS under that directory after the outer bound:
+    O_NOFOLLOW|O_NONBLOCK bounds neither a FUSE path lookup nor the open behind it (QA30 claude
+    MINOR 5, not reproduced -- the probing host refused the mount).
     Further disclosed: a descendant that LEAVES the unit's process group (its own setpgid or
     setsid, or a start_new_session launch) is not killed and never signalled (the escaped-writer
-    design) -- and such an escapee that MOUNTS a filesystem it controls over the runner's capture
-    directory (FUSE, where host policy lets the unit's uid mount at all) can park the
-    post-completion result and capture read-backs, which resolve NAMES under that directory after
-    the outer bound: O_NOFOLLOW|O_NONBLOCK bounds neither a FUSE path lookup nor the open behind
-    it (QA30 claude MINOR 5, not reproduced -- the probing host refused the mount -- and needing
-    a deliberately hostile unit plus permissive host policy; the suite's own streams are never
-    held either way); copied output past _UNIT_OUTPUT_CAP is truncated with a note; _UNIT_FSIZE_LIMIT
+    design); copied output past _UNIT_OUTPUT_CAP is truncated with a note; _UNIT_FSIZE_LIMIT
     bounds each file, not the aggregate; and where os.waitid is unavailable the wait falls back to
     REAP-FIRST (the WNOWAIT observation needs waitid) and, the leader reaped, no group kill
     follows (a reaped pid licences nothing), so a descendant that stayed in the group survives
@@ -22925,7 +22989,7 @@ def _run_unit_subprocess(label, bound, argv=None):
                 failure = ("opf self-test: {} ended (exit {}) without a matching completion record "
                            "bound to its leader pid {} (got {!r}); a unit whose child exits before "
                            "its record is written -- an early os._exit(0) included -- and a record "
-                           "written by any process but the leader fail closed".format(
+                           "carrying any pid but the leader's fail closed".format(
                                label, status, child.pid, (record or "")[:80]))
         copy_anomaly, _out_tainted = _unit_copy_capped(sys.stdout, out_path, label, "stdout",
                                                        out_ident)
@@ -22966,15 +23030,20 @@ def _unit_bound_self_test():
     not only the code); (7) every registered unit has its own _UNIT_OUTER_BOUNDS row (a float), and
     run_self_tests refuses a label without one by name, exit 2, without running it; (8) the
     internal watchdog (_unit_internal_watchdog, the aggregator's enforced budget) armed at 1 s in a
-    sleeping unit process writes its NAMED internal-budget failure and SIGKILLs the unit's own
-    group well before the outer bound. The QA28 vectors: (9) under an inherited SIGCHLD=SIG_IGN the
-    mismatched record still fails closed (the runner holds SIG_DFL); (10) a descendant that stays
-    in the unit's group dies on a clean completion (the every-path group kill before the reap);
+    sleeping unit process SIGKILLs the unit well before the outer bound, the runner's named
+    `killed by signal 9` failure (QA31 codex MEDIUM: the runner's group kill on the leader's death
+    can take the helper before its own report, so a runner-driven vector asserts the diagnostic the
+    runner itself always produces), and, launched directly where nothing kills the helper, it
+    writes its NAMED internal-budget text before its record. The QA28 vectors: (9) under an
+    inherited SIGCHLD=SIG_IGN the mismatched record still fails closed (the runner holds
+    SIG_DFL); (10) a descendant that stays in the unit's group dies on a clean completion (the
+    every-path group kill before the reap);
     (11) a FIFO planted at the result path and (12) one replacing the stdout capture are quick
     NAMED failures, never hangs; (13) delivery into a full unread pipe is bounded, thread-free and
     restores the descriptor's blocking mode; (14) a unit writing past _UNIT_FSIZE_LIMIT is stopped at
     the source and fails closed by name, with the capture bounded; (15) the watchdog
-    neither disturbs a caller's armed real timer, nor is muted by a unit re-arming SIGALRM, nor --
+    neither disturbs a caller's armed real timer, nor is muted by a unit re-arming SIGALRM (the
+    runner's `killed by signal 9` failure, never the unit's own record and exit 0), nor --
     run inside a launcher's group -- kills anything but the unit; (16) a SIGINTed driver kills and
     reaps its running unit, and a SIGKILLed driver's unit leader dies with it (PDEATHSIG). The
     QA29 vectors: (17) a competing reaper right after the WNOWAIT observation cannot launder a
@@ -22982,7 +23051,8 @@ def _unit_bound_self_test():
     leader reaped before the runner observed it -- issues NO group kill and is the named
     reaped-outside exit 2; (19) the no-waitid fallback reaps first and then kills no group: an
     in-group descendant survives there, the disclosed fallback residual; (20) a FIFO planted at
-    the result path cannot park the internal watchdog, which kills FIRST and reports
+    the result path cannot park the internal watchdog, which kills FIRST (the runner's
+    `killed by signal 9` failure, within the budget) and reports
     non-blocking, regular-only; (21) armed under a group leader that is not a session leader, the
     watchdog spares the pipeline sibling sharing the group; (22) delivery never touches the
     shared O_NONBLOCK flag and still delivers; (23) an unreadable stderr capture, and an exit 0
@@ -23145,8 +23215,11 @@ def _unit_bound_self_test():
         faults.append("a unit returning 3 did not yield the named out-of-range failure (code {}, "
                       "stderr tail {!r})".format(code, text[-200:]))
 
-    # (8) the internal watchdog is live: armed at 1 s in a sleeping unit process, it writes the
-    # named internal-budget failure and takes the unit's group down well before the outer bound.
+    # (8) the internal watchdog is live: armed at 1 s in a sleeping unit process, it SIGKILLs the
+    # unit well before the outer bound. Under the runner the diagnostic asserted is the runner's
+    # own `killed by signal 9` failure (QA31 codex MEDIUM): the runner kills the whole group, the
+    # helper included, the moment it observes the leader's death, which can drop the helper's
+    # report, so the helper's text is not something a runner-driven vector can require.
     here = str(Path(__file__).resolve().parent)
     code, took, _out_text, err_text = run_vector("synthetic-watchdog", 15.0, (
         "import sys, time\n"
@@ -23154,12 +23227,61 @@ def _unit_bound_self_test():
         "import opf\n"
         "opf._unit_internal_watchdog('synthetic-watchdog', 1.0)\n"
         "time.sleep(3600)\n"))
-    if code != EXIT_MALFORMED or "INTERNAL budget" not in err_text or "killed by signal" not in err_text:
-        faults.append("the armed internal watchdog did not fail its sleeping unit closed by name "
-                      "(code {}, stderr tail {!r})".format(code, err_text[-240:]))
+    if code != EXIT_MALFORMED or "killed by signal 9" not in err_text:
+        faults.append("the armed internal watchdog did not SIGKILL its sleeping unit into the "
+                      "runner's named signal failure (code {}, stderr tail {!r})".format(
+                          code, err_text[-240:]))
     if took >= 12.0:
         faults.append("the armed internal watchdog did not fire by its 1 s budget ({:.1f} s against "
                       "a 15 s outer bound)".format(took))
+    # (8, direct) the NAMED internal-budget text, where nothing races it: the armed unit runs in its
+    # own session with stderr on a FILE (always writable) and no runner, so nothing kills the
+    # helper, which reports BEFORE it writes its record; once the record is there, the text is too.
+    with tempfile.TemporaryDirectory(prefix="opf-unitbound-") as hold:
+        record_path = os.path.join(hold, "record")
+        named_path = os.path.join(hold, "err")
+        env = dict(os.environ)
+        env["OPF_SELF_TEST_RESULT"] = record_path
+        direct = None
+        try:
+            with open(named_path, "wb") as named_file:
+                direct = subprocess.Popen(
+                    [sys.executable, "-I", "-c", (
+                        "import sys, time\n"
+                        "sys.path.insert(0, " + repr(here) + ")\n"
+                        "import opf\n"
+                        "opf._unit_internal_watchdog('synthetic-named', 0.5)\n"
+                        "time.sleep(30)\n")],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=named_file,
+                    env=env, start_new_session=True)
+            record = None
+            waited = time.monotonic() + 10.0
+            while time.monotonic() < waited:
+                try:
+                    with open(record_path, "r", encoding="utf-8") as handle:
+                        record = handle.read()
+                except OSError:
+                    record = None
+                if record and record.startswith("synthetic-named 2 "):
+                    break
+                time.sleep(0.05)
+            with open(named_path, "rb") as handle:
+                named = handle.read().decode("utf-8", "replace")
+            if (not record or not record.startswith("synthetic-named 2 ")
+                    or "INTERNAL budget" not in named):
+                faults.append("the expiring watchdog, launched where nothing kills it, did not "
+                              "write its named internal-budget text before its record (record "
+                              "{!r}, stderr tail {!r})".format(record, named[-240:]))
+        finally:
+            if direct is not None:
+                try:
+                    direct.kill()
+                except OSError:
+                    pass
+                try:
+                    direct.wait(timeout=10.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
 
     # (7) a label without its own bounds row is refused by name, without running.
     out, err = io.StringIO(), io.StringIO()
@@ -23318,7 +23440,10 @@ def _unit_bound_self_test():
         "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
         "    handle.write('synthetic-rearm 0 ' + str(os.getpid()) + '\\n')\n"
         "os._exit(0)\n"))
-    if code != EXIT_MALFORMED or "INTERNAL budget" not in err_text or took >= 12.0:
+    # The diagnostic asserted is the runner's own `killed by signal 9` (QA31 codex MEDIUM: the
+    # helper's text can be lost to the runner's group kill); a muted watchdog lets the unit reach
+    # its own record and exit 0 instead, a pass this check refuses.
+    if code != EXIT_MALFORMED or "killed by signal 9" not in err_text or took >= 12.0:
         faults.append("a unit re-arming SIGALRM muted the internal watchdog (code {}, {:.1f} s, "
                       "stderr tail {!r})".format(code, took, err_text[-240:]))
     arm_source = (
@@ -23495,10 +23620,11 @@ def _unit_bound_self_test():
         "with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
         "    handle.write('synthetic-fifo-watchdog 0 ' + str(os.getpid()) + '\\n')\n"
         "os._exit(0)\n"))
-    if code != EXIT_MALFORMED or "INTERNAL budget" not in err_text or "killed by signal" not in err_text:
+    if code != EXIT_MALFORMED or "killed by signal 9" not in err_text:
         faults.append("a FIFO at the result path parked the watchdog's report past its budget "
                       "(code {}, stderr tail {!r}): the watchdog must kill before it reports, "
-                      "never blocking".format(code, err_text[-240:]))
+                      "never blocking (the runner's own signal-9 failure is the asserted "
+                      "diagnostic, QA31 codex MEDIUM)".format(code, err_text[-240:]))
     if took >= 3.0:
         faults.append("the FIFO-parked watchdog did not enforce its 0.5 s budget ({:.1f} s)".format(took))
 
@@ -23777,7 +23903,8 @@ def _unit_bound_self_test():
           "escapes the copy cap's note; the flip removing the bound is committed False and proved "
           "live; a unit returning 3 is named by the vocabulary check; every registered unit carries "
           "its own budget row and an unbudgeted label is refused; the armed internal watchdog "
-          "fails a sleeping unit closed by name at its budget; and the QA28 vectors hold: the "
+          "SIGKILLs a sleeping unit at its budget into the runner's named signal failure and, "
+          "where nothing races it, writes its named budget text; and the QA28 vectors hold: the "
           "verdict survives an inherited SIGCHLD=SIG_IGN, a stayed descendant dies on a clean "
           "completion, planted FIFOs are named failures never hangs, delivery is bounded and "
           "thread-free, capture growth is stopped at the source, the watchdog borrows no timer and "
