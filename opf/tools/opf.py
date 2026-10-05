@@ -53,11 +53,13 @@ A contribution's `transition ID sent` from `proposed` takes `--channel S --deliv
 delivery bundle; `transition ID acknowledged` from `sent` takes an optional `--receipt-ref S`.
 `adopt` HAS landed (OPF-ADOPT K9a, the read-only half): `opf adopt plan --inputs FILE [--root DIR]`
 freezes and PRINTS the inert adoption proposal through the adoption planner (_opf_adopt_plan), writing
-nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readiness to apply (the approval
-lives in the run's evidence, a later PR) -- and `opf adopt status [--root DIR]` reports the adoption
-state read-only (the adoption evidence bundles and the adoption journal; with neither present it reports
-that no adoption run exists). The mutating subcommands `approve`, `apply`, `complete`, and `reconcile`
-are recognized and refuse (exit 2) until the mutating adoption engine lands in a later PR.
+nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readiness to apply -- and
+`opf adopt status [--root DIR]` reports the adoption state read-only (the adoption evidence bundles and
+the adoption journal; with neither present it reports that no adoption run exists). The stage driver adds
+`opf adopt approve --inputs FILE --plan FILE --actor NAME`, the one approval, printed and writing nothing,
+and `opf adopt apply --inputs FILE --plan FILE --approval FILE`, which admits only the approved plan and
+refuses before any write while a plan op's slice has not landed. `complete` and `reconcile` are
+recognized and refuse (exit 2) until the completion and recovery stages land in a later PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -122,7 +124,7 @@ def _bootstrap():
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
         import _opf_write_guard  # the in-place writers' shared cleanliness gate and single-writer lease
         import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
-        import _opf_adopt_apply  # OPF-ADOPT U1+U5: the apply shell (the three finish ops execute)
+        import _opf_adopt_apply  # OPF-ADOPT U1+U3+U5: the apply shell (init-store and the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
@@ -13035,28 +13037,18 @@ def _adopt_exit(status):
     return EXIT_MALFORMED   # CANNOT-EVALUATE, or any unexpected value, fails closed
 
 
-def _adopt_read_inputs(path):
-    """Read the `--inputs` adoption planning worksheet (a TOML file) for `opf adopt plan`, fail-closed.
-    The worksheet is CALLER input, not a store artefact, so it may live outside the store and is read
-    directly; a missing, unreadable, or malformed worksheet is a ValueError (the caller maps it to a
-    cannot-evaluate exit 2, never a silent nothing-to-do): an input it cannot read or parse refuses.
-    Shape: `schema = 1`, `product`, `expected_observation_digest`, a `bindings` table, and
-    the optional `sources` / `targets` (arrays of relative path strings) and `decisions` / `ops` (arrays
-    of tables). This reader validates STRUCTURE only, as a closed keyset; the planner and the schema
-    layer own the SEMANTICS (_opf_adopt_plan.plan: the digest grammar and inventory binding, the exact
-    _opf_adopt.PLAN_BINDING_INPUTS bindings keyset, per-row decision and op validation, the frozen-plan
-    validation), never duplicated here. The read is BOUNDED, the planner's own read discipline: a
-    no-follow, nonblocking open (every component is walked from the filesystem root with O_NOFOLLOW, the
-    store root's _opf_store._open_dir_nofollow walk, so a symlinked parent, ancestor or final component
-    refuses; and a FIFO returns at once rather than blocking), a SINGLY-LINKED (st_nlink == 1) regular file
-    only (a hardlinked worksheet is a second name for another inode, refused class-consistent with the
-    engine's own single-link control reads), and the planner's per-file byte bound
-    (_opf_adopt_plan.MAX_FILE_BYTES) checked on the opened fd and again by the journal's capped reader, so
-    a FIFO, device, directory, symlink, multiply-linked or oversized worksheet refuses. Returns the parsed
-    table with the
-    optional keys defaulted."""
-    import tomllib
-    cap = _opf_adopt_plan.MAX_FILE_BYTES
+def _adopt_read_bounded(path, label, cap):
+    """Read ONE caller-named `opf adopt` input file (the planning worksheet, a frozen plan, a captured
+    approval) BOUNDED and fail-closed, returning its raw bytes. Each is CALLER input, not a store artefact,
+    so it may live outside the store and is read directly; a missing or unreadable file is a ValueError
+    naming `label` (the caller maps it to a cannot-evaluate exit 2, never a silent nothing-to-do). The read
+    is the planner's own read discipline: a no-follow, nonblocking open (every component is walked from the
+    filesystem root with O_NOFOLLOW, the store root's _opf_store._open_dir_nofollow walk, so a symlinked
+    parent, ancestor or final component refuses; and a FIFO returns at once rather than blocking), a
+    SINGLY-LINKED (st_nlink == 1) regular file only (a hardlinked input is a second name for another inode,
+    refused class-consistent with the engine's own single-link control reads), and the byte bound `cap`
+    checked on the opened fd and again by the journal's capped reader, so a FIFO, device, directory,
+    symlink, multiply-linked or oversized input refuses."""
     try:
         parent, name = os.path.split(path if os.path.isabs(path) else os.path.join(os.getcwd(), path))
         pfd = _opf_store._open_dir_nofollow(parent)
@@ -13067,35 +13059,53 @@ def _adopt_read_inputs(path):
             try:
                 _opf_store._close_fd_exc_safe(pfd)
             except OSError:
-                # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2)
+                # A failing parent close must not leak the just-opened input fd (round-5 defect 2)
                 # or the parent fd itself (P1, #378): the parent close is _close_fd_exc_safe's single
-                # os.close (#377) and the worksheet close the journal engine's, and close(2) has released
+                # os.close (#377) and the input close the journal engine's, and close(2) has released
                 # the number when it reports the error, so it is never touched again; the propagating
                 # error still fails the read closed below.
                 if fd is not None:
                     _opf_adopt_apply._journal._close_fd_quietly(fd)
                 raise
     except FileNotFoundError:
-        raise ValueError("--inputs worksheet not found: {}".format(path))
-    except (OSError, ValueError) as exc:   # ELOOP/ENOTDIR: a symlinked worksheet or ancestor, never followed
-        raise ValueError("--inputs worksheet unreadable ({}): {}".format(path, exc))
+        raise ValueError("{} not found: {}".format(label, path))
+    except (OSError, ValueError) as exc:   # ELOOP/ENOTDIR: a symlinked input or ancestor, never followed
+        raise ValueError("{} unreadable ({}): {}".format(label, path, exc))
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            raise ValueError("--inputs worksheet is not a regular file (a FIFO, device or directory is "
-                             "refused): {}".format(path))
+            raise ValueError("{} is not a regular file (a FIFO, device or directory is refused): {}".format(
+                label, path))
         if st.st_nlink != 1:
-            raise ValueError("--inputs worksheet has {} hard links; a multiply-linked worksheet (a "
-                             "hardlink whose other name may be an out-of-tree victim) is refused, "
-                             "class-consistent with the engine's singly-linked control reads: "
-                             "{}".format(st.st_nlink, path))
+            raise ValueError("{} has {} hard links; a multiply-linked input (a hardlink whose other name may "
+                             "be an out-of-tree victim) is refused, class-consistent with the engine's "
+                             "singly-linked control reads: {}".format(label, st.st_nlink, path))
         if st.st_size > cap:
-            raise ValueError("--inputs worksheet exceeds the {}-byte bound: {}".format(cap, path))
+            raise ValueError("{} exceeds the {}-byte bound: {}".format(label, cap, path))
         raw = _opf_adopt_apply._journal._read_fd(fd, cap=cap)
     except (OSError, _opf_adopt_apply._journal.JournalError) as exc:
-        raise ValueError("--inputs worksheet unreadable ({}): {}".format(path, exc))
+        raise ValueError("{} unreadable ({}): {}".format(label, path, exc))
     finally:
         _opf_store._close_fd_exc_safe(fd)
+    return raw
+
+
+def _adopt_read_inputs(path):
+    """Read the `--inputs` adoption planning worksheet (a TOML file) for `opf adopt plan`, `approve` and
+    `apply`, fail-closed.
+    The worksheet is CALLER input, not a store artefact, so it may live outside the store and is read
+    directly; a missing, unreadable, or malformed worksheet is a ValueError (the caller maps it to a
+    cannot-evaluate exit 2, never a silent nothing-to-do): an input it cannot read or parse refuses.
+    Shape: `schema = 1`, `product`, `expected_observation_digest`, a `bindings` table, and
+    the optional `sources` / `targets` (arrays of relative path strings) and `decisions` / `ops` (arrays
+    of tables). This reader validates STRUCTURE only, as a closed keyset; the planner and the schema
+    layer own the SEMANTICS (_opf_adopt_plan.plan: the digest grammar and inventory binding, the exact
+    _opf_adopt.PLAN_BINDING_INPUTS bindings keyset, per-row decision and op validation, the frozen-plan
+    validation), never duplicated here. The read is BOUNDED (_adopt_read_bounded) at the planner's per-file
+    byte bound (_opf_adopt_plan.MAX_FILE_BYTES), so a FIFO, device, directory, symlink, multiply-linked or
+    oversized worksheet refuses. Returns the parsed table with the optional keys defaulted."""
+    import tomllib
+    raw = _adopt_read_bounded(path, "--inputs worksheet", _opf_adopt_plan.MAX_FILE_BYTES)
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
     except (ValueError, RecursionError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
@@ -13133,18 +13143,35 @@ def _adopt_read_inputs(path):
 
 def _cmd_adopt(rest):
     """`opf adopt <subcommand> ...` (spec 1, 14; OPF-ADOPT K9a): the adoption verb. The subcommand
-    vocabulary is `plan`, `approve`, `apply`, `complete`, `reconcile` and `status`; K9a ships ONLY the
-    two READ-ONLY subcommands, and every other recognized subcommand refuses fail-closed (exit 2) until
-    the mutating adoption engine lands in a later PR, so a stub can never read as a passing operation.
+    vocabulary is `plan`, `approve`, `apply`, `complete`, `reconcile` and `status`; K9a shipped the two
+    READ-ONLY subcommands, the stage driver adds `approve` and `apply`, and `complete` and `reconcile`
+    refuse fail-closed (exit 2) until the completion and recovery stages land, so a stub can never read as
+    a passing operation. plan, approve and apply each refuse over a non-clean adoption journal (an open
+    transaction or a held lock; _opf_adopt_apply.require_clean_journal) before anything else is read.
 
       plan --inputs FILE [--root DIR] : freeze and PRINT the inert adoption proposal through the
           existing planner (_opf_adopt_plan.plan), writing NOTHING. FILE is the caller planning
           worksheet (see _adopt_read_inputs). `now` is read from the clock (timestamp-from-clock) and
           `run_nonce` from os.urandom, both injected into the planner (the deterministic run id composes
           them). Exit 0: VALID -- the frozen plan TOML on stdout (an inert, digest-bound PROPOSAL, never
-          permission or readiness to apply; the approval lives in the run evidence, a later PR).
+          permission or readiness to apply; `approve` captures the one approval).
           Exit 1: INVALID (a schema-violating decision, op or plan). Exit 2: cannot-evaluate (an
           unreadable worksheet, a changed inventory, an unresolvable root, an unresolved disposition).
+      approve --inputs FILE --plan FILE --actor NAME [--root DIR] : the one approval (spec 14.1), writing
+          NOTHING: re-prove the frozen plan PLAN printed from its own bytes, observe the live revision and
+          re-derive the plan from the worksheet over the live tree (a moved revision, a changed observation
+          or a changed worksheet refuses into a fresh plan), and print the
+          approval on stdout, attributed to NAME at the clock instant, binding the plan's plan_digest and
+          inventory_digest (_opf_adopt_apply.capture_approval). Exit 0: the approval TOML on stdout. Exit
+          2: every refusal or cannot-evaluate.
+      apply --inputs FILE --plan FILE --approval FILE [--root DIR] : the apply stage
+          (_opf_adopt_apply.run_apply): admit only a plan whose approval binds it, re-derive it over the
+          live tree and its observed revision, then in the run's one journaled base transaction persist the
+          plan and the approval in its evidence bundle, dispatch every plan op in the apply stage and compose
+          the mandatory receipt stage; a non-occupying plan source stays frozen in place for the retirement
+          stage. An op or the receipt stage not yet landed refuses the whole apply before anything is
+          written, which in this build is every plan. Exit 0: applied
+          (completion and retirement follow). Exit 2: every refusal or cannot-evaluate; exit 1 is not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
           validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's
@@ -13162,7 +13189,7 @@ def _cmd_adopt(rest):
     option-looking or duplicate value -> exit 2. Every residual escape fails closed to exit 2 (never a
     false 0 or an uncaught exit-1), the same class-width backstop render and doctor carry."""
     subcommands = ("plan", "approve", "apply", "complete", "reconcile", "status")
-    deferred = ("approve", "apply", "complete", "reconcile")
+    deferred = ("complete", "reconcile")
     if not rest:
         print("opf adopt: give a subcommand ({})".format(" / ".join(subcommands)), file=sys.stderr)
         return EXIT_MALFORMED
@@ -13170,8 +13197,8 @@ def _cmd_adopt(rest):
     if sub in deferred:
         # Refused BEFORE any parse or filesystem read, so a deferred subcommand can never write; the
         # message names no command that does not exist (the K9b engine lands these).
-        print("opf adopt {}: not yet available in this build (fail-closed); the mutating adoption engine "
-              "lands in a later PR".format(sub), file=sys.stderr)
+        print("opf adopt {}: not yet available in this build (fail-closed); the completion and recovery "
+              "stages land in a later PR".format(sub), file=sys.stderr)
         return EXIT_MALFORMED
     if sub not in subcommands:
         print("opf adopt: unknown subcommand {!r}; subcommands: {}".format(
@@ -13179,7 +13206,10 @@ def _cmd_adopt(rest):
         return EXIT_MALFORMED
 
     root = None
-    inputs_file = None
+    # The value flags each subcommand takes, each required exactly once (status takes none).
+    takes = dict(plan=("--inputs",), approve=("--inputs", "--plan", "--actor"),
+                 apply=("--inputs", "--plan", "--approval"), status=())[sub]
+    given = dict()
 
     def _need_value(flag, idx):
         if idx + 1 >= len(tail):
@@ -13204,21 +13234,26 @@ def _cmd_adopt(rest):
                 return EXIT_MALFORMED
             root = val
             i += 2
-        elif tok == "--inputs" and sub == "plan":
-            if inputs_file is not None:
-                print("opf adopt plan: --inputs given more than once", file=sys.stderr)
+        elif tok in takes:
+            if tok in given:
+                print("opf adopt {}: {} given more than once".format(sub, tok), file=sys.stderr)
                 return EXIT_MALFORMED
             val = _need_value(tok, i)
             if val is None:
                 return EXIT_MALFORMED
-            inputs_file = val
+            given[tok] = val
             i += 2
         else:
             print("opf adopt {}: unrecognized argument {!r}".format(sub, tok), file=sys.stderr)
             return EXIT_MALFORMED
-    if sub == "plan" and inputs_file is None:
-        print("opf adopt plan: --inputs FILE is required (the planning worksheet)", file=sys.stderr)
-        return EXIT_MALFORMED
+    for flag, need in (("--inputs", "FILE is required (the planning worksheet)"),
+                       ("--plan", "FILE is required (the frozen plan `opf adopt plan` printed)"),
+                       ("--actor", "NAME is required (the attributed approver)"),
+                       ("--approval", "FILE is required (the approval `opf adopt approve` printed)")):
+        if flag in takes and flag not in given:
+            print("opf adopt {}: {} {}".format(sub, flag, need), file=sys.stderr)
+            return EXIT_MALFORMED
+    inputs_file = given.get("--inputs")
     try:
         # The EFFECTIVE root is what the operator's traversal names: the --root value, or the current
         # directory when --root is omitted. Every refusal below names it (never the absent --root value).
@@ -13274,6 +13309,7 @@ def _cmd_adopt(rest):
     if sub == "plan":
         import datetime
         try:
+            _opf_adopt_apply.require_clean_journal(root_abs)
             doc = _adopt_read_inputs(inputs_file)
             now = datetime.datetime.now(datetime.timezone.utc)
             res = _opf_adopt_plan.plan(
@@ -13289,13 +13325,40 @@ def _cmd_adopt(rest):
             for source in res.unresolved:
                 print("opf adopt plan: unresolved source disposition: {}".format(source), file=sys.stderr)
             return _adopt_exit(res.status)
-        except ValueError as exc:
-            # A fail-closed --inputs read error: cannot-evaluate (exit 2), never a silent skip.
+        except (ValueError, _opf_adopt_apply.AdoptApplyError) as exc:
+            # A fail-closed --inputs read error or a non-clean adoption journal: cannot-evaluate (exit 2),
+            # never a silent skip.
             print("opf adopt plan: cannot evaluate: {}".format(exc), file=sys.stderr)
             return EXIT_MALFORMED
         except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
             print("opf adopt plan: cannot evaluate: unexpected error ({!r}); failing closed to exit "
                   "2".format(exc), file=sys.stderr)
+            return EXIT_MALFORMED
+
+    if sub in ("approve", "apply"):
+        import datetime
+        try:
+            _opf_adopt_apply.require_clean_journal(root_abs)
+            doc = _adopt_read_inputs(inputs_file)
+            plan_bytes = _adopt_read_bounded(given["--plan"], "--plan file", _opf_adopt_plan.MAX_ARTIFACT_BYTES)
+            if sub == "approve":
+                approval = _opf_adopt_apply.capture_approval(
+                    root_abs, plan_bytes, doc, given["--actor"], datetime.datetime.now(datetime.timezone.utc))
+                sys.stdout.write(approval.decode("utf-8"))
+                return EXIT_OK
+            approval = _adopt_read_bounded(given["--approval"], "--approval file", _opf_adopt_plan.MAX_FILE_BYTES)
+            txn = _opf_adopt_apply.run_apply(root_abs, plan_bytes, approval, doc)
+            print("opf adopt apply: applied in transaction {}; the plan and its approval are in the evidence "
+                  "bundle at {}; completion, then retirement, follow".format(
+                      txn, _opf_adopt_apply.evidence_home_rel(txn)))
+            return EXIT_OK
+        except (ValueError, _opf_adopt_apply.AdoptApplyError) as exc:
+            # every refusal is a cannot-evaluate (exit 2), the record verb's convention; exit 1 is not used.
+            print("opf adopt {}: cannot evaluate: {}".format(sub, exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
+            print("opf adopt {}: cannot evaluate: unexpected error ({!r}); failing closed to exit "
+                  "2".format(sub, exc), file=sys.stderr)
             return EXIT_MALFORMED
 
     # sub == "status": the read-only state report over the two adoption homes; ZERO writes. Both homes
@@ -13511,11 +13574,27 @@ def _cli_self_test():
         expect(["adopt", "plan", "--inputs"], EXIT_MALFORMED)       # --inputs needs a value
         expect(["adopt", "plan", "--inputs", ""], EXIT_MALFORMED)   # empty inputs refused
         expect(["adopt", "plan", "--inputs", "w.toml", "--inputs", "w.toml"], EXIT_MALFORMED)  # duplicate
-        # The four deferred subcommands are RECOGNIZED and refuse fail-closed (exit 2) BEFORE any parse,
+        # approve and apply (the stage driver) take their value flags exactly once each, refused before
+        # any read: a missing, empty, option-looking or duplicate value, and a flag another subcommand owns.
+        expect(["adopt", "approve"], EXIT_MALFORMED)                                 # no flags at all
+        expect(["adopt", "approve", "--inputs", "w.toml", "--plan", "p.toml"], EXIT_MALFORMED)   # no --actor
+        expect(["adopt", "approve", "--inputs", "w.toml", "--actor", "a"], EXIT_MALFORMED)       # no --plan
+        expect(["adopt", "approve", "--plan", "p.toml", "--actor", "a"], EXIT_MALFORMED)         # no --inputs
+        expect(["adopt", "approve", "--inputs", "w.toml", "--plan", "p.toml", "--actor", "-a"],
+               EXIT_MALFORMED)                                                       # option-looking actor
+        expect(["adopt", "approve", "--inputs", "w.toml", "--plan", "p.toml", "--actor", "a",
+                "--approval", "x.toml"], EXIT_MALFORMED)                             # --approval is apply's
+        expect(["adopt", "apply", "--inputs", "w.toml", "--plan", "p.toml"], EXIT_MALFORMED)     # no approval
+        expect(["adopt", "apply", "--inputs", "w.toml", "--plan", "p.toml", "--approval", "x.toml",
+                "--plan", "p.toml"], EXIT_MALFORMED)                                 # duplicate --plan
+        expect(["adopt", "apply", "--inputs", "w.toml", "--plan", "p.toml", "--approval", "x.toml",
+                "--actor", "a"], EXIT_MALFORMED)                                     # --actor is approve's
+        expect(["adopt", "plan", "--inputs", "w.toml", "--plan", "p.toml"], EXIT_MALFORMED)      # --plan
+        # The two deferred subcommands are RECOGNIZED and refuse fail-closed (exit 2) BEFORE any parse,
         # store resolution or write, each with its own located not-yet-available message (never the
-        # unknown-verb or unknown-subcommand message, and naming no command that does not exist); the K9b
-        # engine lands them.
-        for deferred_sub in ("approve", "apply", "complete", "reconcile"):
+        # unknown-verb or unknown-subcommand message, and naming no command that does not exist); the
+        # completion and recovery stages land them.
+        for deferred_sub in ("complete", "reconcile"):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 rc = main(["adopt", deferred_sub])
@@ -14719,6 +14798,126 @@ def _cli_self_test():
                                     "validate_op finding)".format(rc))
                 if tree_snapshot(clean) != before:
                     failures.append("adopt plan (schema-violating op) mutated the product root")
+
+                # The stage driver end to end over a decision-complete fixture (a retire source and a
+                # kept file at a NOT-ADOPTED root), planned through the wired `plan`: approve -> 0 with
+                # the approval binding the plan's two digests on stdout, writing nothing; apply -> 2
+                # naming the unlanded ops (no op executes in this build), writing nothing, no journal and
+                # no bundle (the wiring discriminator: an unwired apply refuses with the not-yet-available
+                # message instead). Flips: an approval for a fresh plan of the same tree -> apply 2 on the
+                # binding; a source edited after planning -> approve 2 into a fresh plan; an open
+                # adoption-journal transaction -> plan 2 directing to reconcile (the planner itself never
+                # reads that journal, so without the gate it reports the worksheet's digest mismatch).
+                import hashlib
+                import _opf_adopt
+                import _opf_init
+                from _opf_emit import emit_checked
+
+                def run_split(argv):
+                    out, err = io.StringIO(), io.StringIO()
+                    try:
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            return main(list(argv)), out.getvalue(), err.getvalue()
+                    except BaseException as exc:            # a dispatcher crash is itself a failure
+                        return "raised {!r}".format(exc), out.getvalue(), err.getvalue()
+
+                def sha(data):
+                    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+                adoptee = os.path.join(abase, "adoptee")
+                bindings = _opf_adopt.canonical_plan_bindings()   # its revision is the fixture's HEAD, below
+                manifest = _opf_init.build_manifest()
+                views = sorted(v["target"] for v in tomllib.loads(manifest)["views"].values())
+                sheet = dict(schema=1, product="opf", sources=["keep.md", "legacy.md"],
+                             targets=[".opf/hooks/pre-commit"],
+                             decisions=[dict(path="keep.md", disposition="keep", actor="fixture"),
+                                        dict(path="legacy.md", disposition="retire", actor="fixture")],
+                             ops=[dict(op="init-store", store_root=".", members=[dict(
+                                      path=".working/toml/manifest.toml", digest=sha(manifest.encode("utf-8")))]),
+                                  dict(op="render-views", store_root=".",
+                                       members=[dict(path=v, digest=sha(v.encode("utf-8"))) for v in views]),
+                                  _opf_adopt.enforcement_install_op(bindings["enforcement"])],
+                             bindings=bindings)
+                sheet_path, plan_path, plan2_path, approval_path = (
+                    os.path.join(abase, name) for name in ("adopt-sheet.toml", "adopt-plan.toml",
+                                                           "adopt-plan-2.toml", "adopt-approval.toml"))
+                try:
+                    os.mkdir(adoptee)
+                    for name, body in (("keep.md", "kept\n"), ("legacy.md", "legacy rules\n")):
+                        with open(os.path.join(adoptee, name), "w", encoding="utf-8") as fh:
+                            fh.write(body)
+                    # approve and apply observe the live revision, so the fixture is a git repository whose
+                    # HEAD is the revision the worksheet binds.
+                    head = _opf_adopt_apply._selftest_git_commit(adoptee)
+                    if head is None:
+                        raise ValueError("the fixture git repository could not be made")
+                    bindings["revision"] = head
+                    obs = _opf_adopt_plan.investigate(os.path.abspath(adoptee), sources=sheet["sources"],
+                                                      targets=sheet["targets"])
+                    sheet["expected_observation_digest"] = tomllib.loads(
+                        obs.observation.decode("utf-8"))["observation_digest"]
+                    with open(sheet_path, "w", encoding="utf-8") as fh:
+                        fh.write(emit_checked(sheet))
+                except (OSError, AttributeError, KeyError, ValueError) as exc:
+                    print("opf cli self-test: harness error: could not build the adopt stage fixture "
+                          "({})".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+                rc, plan_out, err = run_split(["adopt", "plan", "--inputs", sheet_path, "--root", adoptee])
+                rc2, plan2_out, _err2 = run_split(["adopt", "plan", "--inputs", sheet_path, "--root", adoptee])
+                if rc != EXIT_OK or rc2 != EXIT_OK or plan_out == plan2_out:
+                    failures.append("adopt plan over the stage fixture: rc={!r}/{!r} (expected 0 twice, two "
+                                    "distinct runs; {})".format(rc, rc2, err.strip()))
+                else:
+                    with open(plan_path, "w", encoding="utf-8") as fh:
+                        fh.write(plan_out)
+                    with open(plan2_path, "w", encoding="utf-8") as fh:
+                        fh.write(plan2_out)
+                    plan_doc = tomllib.loads(plan_out)
+                    before = tree_snapshot(adoptee)
+                    rc, approval_out, err = run_split(["adopt", "approve", "--inputs", sheet_path, "--plan",
+                                                       plan_path, "--actor", "adopter", "--root", adoptee])
+                    approval_doc = tomllib.loads(approval_out) if rc == EXIT_OK else dict()
+                    if not (rc == EXIT_OK and approval_doc.get("actor") == "adopter"
+                            and approval_doc.get("plan_digest") == plan_doc["plan_digest"]
+                            and approval_doc.get("inventory_digest") == plan_doc["inventory_digest"]):
+                        failures.append("adopt approve: rc={!r} (expected 0 + the approval binding the plan's "
+                                        "two digests; {})".format(rc, err.strip()))
+                    with open(approval_path, "w", encoding="utf-8") as fh:
+                        fh.write(approval_out)
+                    rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan_path,
+                                               "--approval", approval_path, "--root", adoptee])
+                    if rc != EXIT_MALFORMED or "not yet executable" not in err:
+                        failures.append("adopt apply with no landed op: rc={!r} (expected 2 + the unlanded-op "
+                                        "refusal; {})".format(rc, err.strip()))
+                    rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan2_path,
+                                               "--approval", approval_path, "--root", adoptee])
+                    if rc != EXIT_MALFORMED or "does not bind" not in err:
+                        failures.append("adopt apply with an approval for another plan: rc={!r} (expected 2 + "
+                                        "the binding refusal; {})".format(rc, err.strip()))
+                    if tree_snapshot(adoptee) != before or os.path.exists(os.path.join(adoptee, ".aiqt")):
+                        failures.append("adopt approve/apply mutated the stage fixture (each must write nothing "
+                                        "in this build)")
+                    with open(os.path.join(adoptee, "legacy.md"), "w", encoding="utf-8") as fh:
+                        fh.write("edited after planning\n")
+                    rc, _out, err = run_split(["adopt", "approve", "--inputs", sheet_path, "--plan", plan_path,
+                                               "--actor", "adopter", "--root", adoptee])
+                    if rc != EXIT_MALFORMED or "fresh plan" not in err:
+                        failures.append("adopt approve after a source edit: rc={!r} (expected 2 + the fresh-plan "
+                                        "refusal; {})".format(rc, err.strip()))
+                    with open(os.path.join(adoptee, "legacy.md"), "w", encoding="utf-8") as fh:
+                        fh.write("legacy rules\n")
+                    # a revision-only change (an empty commit, every inventoried byte unchanged) -> approve 2.
+                    moved = _opf_adopt_apply._selftest_git_commit(adoptee)
+                    rc, _out, err = run_split(["adopt", "approve", "--inputs", sheet_path, "--plan", plan_path,
+                                               "--actor", "adopter", "--root", adoptee])
+                    if moved is None or rc != EXIT_MALFORMED or "revision moved" not in err:
+                        failures.append("adopt approve after the revision moved: rc={!r} (expected 2 + the "
+                                        "revision-drift refusal; {})".format(rc, err.strip()))
+                # plan over an open adoption-journal transaction (the debris root) -> 2, reconcile first.
+                rc, _out, err = run_split(["adopt", "plan", "--inputs", stale, "--root", debris])
+                if rc != EXIT_MALFORMED or "must be reconciled" not in err:
+                    failures.append("adopt plan over an interrupted adoption transaction: rc={!r} (expected 2 + "
+                                    "the reconcile-first refusal; {})".format(rc, err.strip()))
             finally:
                 shutil.rmtree(abase, ignore_errors=True)
             return None
@@ -14793,10 +14992,13 @@ def _cli_self_test():
               "through routes the probe does not patch (posix, _io, ctypes, already-open handles, "
               "sockets), or another module patching this one; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
-              "adoption planner -- bare/malformed usage and the deferred approve/apply/complete/reconcile "
+              "adoption planner -- bare/malformed usage and the deferred complete/reconcile "
               "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
               "bundle finding / 2 symlinked, dangling or wrong-type home, plan -> 2 missing, FIFO, oversized "
-              "or symlinked worksheet or stale digest / 1 schema-violating op, each mutating nothing; an "
+              "or symlinked worksheet, stale digest or an interrupted adoption transaction / 1 "
+              "schema-violating op, each mutating nothing; the stage driver's approve -> 0 with the approval "
+              "binding the plan's two digests / 2 after a source edit or a moved revision, and apply -> 2 on "
+              "the unlanded ops or an approval for another plan, each mutating nothing; an "
               "unresolvable cwd -> 2; fixture-setup and fixture-I/O OSError fail closed to exit 2)")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
