@@ -42,7 +42,11 @@ and launch-failure normalization for BOTH steps (a missing or non-executable OPF
 step to 2, and an interpreter that VANISHES after a passing doctor fails the render step's own launch to 2);
 the usage guard (a surplus operand) exits 2 with NO step launched; the recipe run by a RELATIVE
 path under a hostile CDPATH naming a decoy pack still resolves its own directory and returns the true
-verdict; a committed clean store with ONE declared, planner-populated view red-flags end to end once the
+verdict; the recipe run with no dirname on PATH from inside a decoy pack's ci directory exits 2 with no
+step launched (an unchecked dirname resolves to the calling directory and runs the decoy's opf.py); a
+full recipe run with every GIT_TRACE* and GIT_TRACE2* variable naming a file outside the fixtures leaves
+that file unchanged (a regression guard: the recipe runs no git itself and opf.py's git reads drop every
+inherited GIT_ variable); a committed clean store with ONE declared, planner-populated view red-flags end to end once the
 view is edited (render --check 1, doctor 1, recipe 1) while both recipe runs leave the read-only snapshot
 unchanged, covering EXACTLY: every entry under the root with only the TOP-LEVEL .git directory pruned (a
 nested .git directory below the root is walked like any other entry), by lstat kind, mode, content digest
@@ -730,6 +734,37 @@ def _self_test_isolated():
                             cd_log.read_text(encoding="utf-8").splitlines()]
             expect("ci-recipe-relative-path-hostile-cdpath",
                    (rc, [c[0] for c in cd_calls]), (EXIT_OK, ["doctor", "render"]))
+            # The missing-dirname vector: the recipe resolves its own directory with a separately checked
+            # dirname. Folded into the `cd` command substitution, a missing dirname leaves an empty name that
+            # `cd --` accepts as the calling directory, so a recipe launched from inside ANOTHER pack's ci
+            # directory would run that pack's opf.py and return its verdict. Run the shipped recipe by its
+            # absolute path from inside a decoy pack whose opf/tools/opf.py is the recording stub, with a PATH
+            # that holds no dirname (sh and OPF_PYTHON are absolute): the recipe exits 2 before any step, so
+            # the decoy's stub never runs, while the unchecked form runs the decoy and returns its 0.
+            nodir_decoy = base / "no-dirname-decoy"
+            (nodir_decoy / "opf" / "enforcement" / "ci").mkdir(parents=True)
+            (nodir_decoy / "opf" / "tools").mkdir(parents=True)
+            shutil.copyfile(str(stub), str(nodir_decoy / "opf" / "tools" / "opf.py"))
+            nodir_bin = base / "bin-without-dirname"
+            nodir_bin.mkdir()
+            nodir_log = base / "stub-log-no-dirname"
+            rc = _run_ci_recipe(clean, extra_env=dict(OPF_STUB_LOG=str(nodir_log), PATH=str(nodir_bin)),
+                                cwd=nodir_decoy / "opf" / "enforcement" / "ci")
+            expect("ci-recipe-dirname-missing-refused", (rc, nodir_log.exists()), (EXIT_ERROR, False))
+            # Inherited git trace destinations: a CI environment can carry GIT_TRACE* or GIT_TRACE2* naming
+            # any file, and no git process the recipe starts (its own or opf.py's observation gather) may
+            # write there. A file outside every fixture, named by each trace variable, keeps its exact text
+            # through a full recipe run over the clean store, and the verdict stays 0.
+            trace_target = base / "trace-target"
+            trace_target.mkdir()
+            traced = trace_target / "TRACED.md"
+            traced.write_text("traced\n", encoding="utf-8")
+            trace_env = dict((name, str(traced)) for name in (
+                "GIT_TRACE", "GIT_TRACE_SETUP", "GIT_TRACE_PERFORMANCE", "GIT_TRACE_PACKET",
+                "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF"))
+            expect("ci-recipe-git-trace-scrubbed",
+                   (_run_ci_recipe(clean, extra_env=trace_env), traced.read_text(encoding="utf-8")),
+                   (EXIT_OK, "traced\n"))
             # The GitHub Actions template is held to its own stated discipline (a template nothing runs
             # in this repository would otherwise drift as prose) by EXACT TEXT over a BYTE GATE, not a
             # line pattern: the file is read as RAW BYTES and any byte outside printable ASCII
@@ -1092,7 +1127,8 @@ def _self_test_isolated():
               "stopping before render, launch failures -> 2 for BOTH steps (a missing or non-executable "
               "interpreter before doctor, an interpreter vanishing before render), a surplus operand a "
               "usage 2 with no step run, a relative invocation under a hostile CDPATH -> the true "
-              "verdict, a committed drifted view -> 1 end to end (render --check, doctor, "
+              "verdict, no dirname on PATH -> 2 with no step run (never the calling directory's pack), "
+              "inherited GIT_TRACE*/GIT_TRACE2* destinations left unchanged, a committed drifted view -> 1 end to end (render --check, doctor, "
               "recipe), both recipe runs read-only over EXACTLY this snapshot (every entry under the "
               "root with only the top-level .git pruned, nested .git dirs walked, by lstat "
               "kind/mode/content/target; the directory set; the root and .git/hooks directory "
