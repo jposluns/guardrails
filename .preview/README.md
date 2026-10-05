@@ -8,6 +8,11 @@ install a hook for you: every step below is a command it can run, and every chec
 Six hooks are published here, each listed with its checksum and link in the integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
 
+One document linked from this page is not a hook: [the OPF implementation prompt](../opf/spec/OPF-IMPLEMENTATION-PROMPT.md)
+is a prompt you can give to an AI coding assistant so that it implements OPFiles natively in its own
+project, from the specification. It has no row in the integrity table, and the install steps below do
+not apply to it.
+
 ## What these hooks are
 
 The three clock hooks, `clock-inject.py`, `stamp-truth-stop.py`, and `future-stamp-write.py`, back the
