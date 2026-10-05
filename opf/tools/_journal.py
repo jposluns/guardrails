@@ -189,6 +189,58 @@ def _close_fd_propagating(fd):
     os.close(fd)
 
 
+def _in_flight_in(frame):
+    """The exception unwinding through, or being handled in, `frame` (the current exception's traceback
+    head is that frame), else None: an exception a CALLER is handling is not in flight there."""
+    exc, tb = sys.exc_info()[1:]
+    return exc if tb is not None and tb.tb_frame is frame else None
+
+
+def _yield_close_exceptions(inflight, raised):
+    """The rule for every exception a close raised that is not an OSError (`raised`, in order). With none
+    in flight (`inflight` None) the first is raised, each later one noted on it. With one in flight, none
+    replaces it: each is noted on it, and it keeps propagating. The one exception: an interrupt (a
+    BaseException that is not an Exception) never yields to an ERROR in flight (an Exception), so an
+    interrupt is never dropped: the first such interrupt propagates as itself, with that error and every
+    other one noted on it. Nothing is lost without trace."""
+    if not raised:
+        return
+    if inflight is None:
+        first = raised[0]
+        for later in raised[1:]:
+            first.add_note("a later close exception, recorded here and not re-raised: {!r}".format(later))
+        raise first
+    stop = None
+    if isinstance(inflight, Exception):
+        stop = next((exc for exc in raised if not isinstance(exc, Exception)), None)
+    if stop is None:
+        for exc in raised:
+            inflight.add_note("a close raised {!r} while this exception was in flight: recorded here, never "
+                              "raised in its place".format(exc))
+        return
+    stop.add_note("raised by a close while {!r} was in flight: an interrupt never yields to an error, which "
+                  "is recorded here".format(inflight))
+    for exc in raised:
+        if exc is not stop:
+            stop.add_note("another close exception, recorded here and not re-raised: {!r}".format(exc))
+    raise stop
+
+
+def _close_fds_yielding(fds, frame):
+    """Close every descriptor in the list `fds` (a cleanup loop's), in order, each taken out of the list
+    BEFORE its one quiet close (_close_fd_quietly), so a close that raises anything but OSError never
+    abandons the rest; then every such exception yields to the one in flight in `frame`
+    (_yield_close_exceptions), or with none in flight the first is raised."""
+    inflight = _in_flight_in(frame)
+    raised = []
+    while fds:
+        try:
+            _close_fd_quietly(fds.pop(0))
+        except BaseException as exc:    # noqa: BLE001  keep closing; yielded or raised below
+            raised.append(exc)
+    _yield_close_exceptions(inflight, raised)
+
+
 def _close_fd_yielding(fd):
     """Close a descriptor from an `except` handler or a `finally` block without letting a close error
     REPLACE the exception already in flight there (#378): the close error _close_fd_propagating raises would
@@ -200,15 +252,20 @@ def _close_fd_yielding(fd):
     current exception's traceback head is that frame: an exception a CALLER is handling (this code reached
     normally from inside the caller's `except` block) is not in flight here and never quiets the close.
     Residual (disclosed): a `finally` reached NORMALLY while lexically inside an `except` handler of the
-    SAME function would read that handled exception as in flight; no call site is nested that way."""
-    tb = sys.exc_info()[2]
-    if tb is None or tb.tb_frame is not sys._getframe(1):
+    SAME function would read that handled exception as in flight; no call site is nested that way.
+    A close that raises anything but OSError (an interrupt, or an injected exception) while an exception
+    is in flight never replaces it either: it is noted on it (_yield_close_exceptions), except that an
+    interrupt never yields to an error in flight, and then propagates with that error noted on it."""
+    inflight = _in_flight_in(sys._getframe(1))
+    if inflight is None:
         _close_fd_propagating(fd)
         return
     try:
         _close_fd_propagating(fd)
     except OSError:
         pass                                      # the in-flight exception wins; the fd was still released
+    except BaseException as exc:    # noqa: BLE001  yielded to the one in flight (_yield_close_exceptions)
+        _yield_close_exceptions(inflight, [exc])
 
 
 def _open_parent(root_fd, relpath):
@@ -217,10 +274,14 @@ def _open_parent(root_fd, relpath):
     (parent_fd, final_name); the caller closes parent_fd, and root_fd is never closed (the single-
     component case dups it). A MISSING intermediate component raises FileNotFoundError (a clean signal
     the caller reads as absent, since a missing parent means the target is absent); any other error (a
-    non-directory or symlinked intermediate component) raises JournalError."""
+    non-directory or symlinked intermediate component) raises JournalError. The intermediate
+    descriptors are closed through _close_fds_yielding: a close that raises anything but OSError never
+    abandons the rest nor replaces an exception in flight here; one raised with none in flight closes the
+    duplicated parent descriptor too (it is never returned), yielding to that exception."""
     parts = _check_rel(relpath)
     cur = root_fd
     opened = []
+    pfd = None
     try:
         for comp in parts[:-1]:
             try:
@@ -234,8 +295,12 @@ def _open_parent(root_fd, relpath):
             cur = nfd
         pfd = os.dup(cur)
     finally:
-        for fd in opened:
-            _close_fd_quietly(fd)                         # guarded: a raising close never aborts the rest
+        try:
+            _close_fds_yielding(opened, sys._getframe(0))     # a raising close never aborts the rest
+        except BaseException:   # noqa: BLE001  re-raised: the parent descriptor is never returned
+            if pfd is not None:
+                _close_fd_yielding(pfd)
+            raise
     return pfd, parts[-1]
 
 
@@ -765,11 +830,32 @@ def _first(frames, ftype):
 
 def _pid_start(pid):
     """The process start-time field from /proc/<pid>/stat (Linux only; empty string elsewhere). Read
-    from after the last ')' so a program name containing ') ' cannot shift the field split."""
+    from after the last ')' so a program name containing ') ' cannot shift the field split. The file is
+    closed in a `finally` whose close yields to an exception in flight there (_yield_close_exceptions), so
+    a close that raises never replaces an interrupt in the read; a close OSError reads as unknown, as the
+    read's own does."""
     try:
-        with open("/proc/{}/stat".format(pid), "rb") as fh:
-            return fh.read().rsplit(b")", 1)[1].split()[19].decode()
-    except (OSError, IndexError):
+        fh = open("/proc/{}/stat".format(pid), "rb")
+    except OSError:
+        return ""
+    raw = None
+    try:
+        raw = fh.read()
+    except OSError:
+        pass
+    finally:
+        inflight = _in_flight_in(sys._getframe(0))
+        try:
+            fh.close()
+        except OSError:
+            raw = None
+        except BaseException as exc:    # noqa: BLE001  yielded to the one in flight, or raised with none
+            _yield_close_exceptions(inflight, [exc])
+    if raw is None:
+        return ""
+    try:
+        return raw.rsplit(b")", 1)[1].split()[19].decode()
+    except IndexError:
         return ""
 
 
