@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ceb06253d58a7301fe3d8061879e9e5792a11526414ab3ae3c61d1a189c36afc"
+tree-sha256 = "691066cfae3ab8b618f87a492f53a532cc1059b09c3c0dd2e376f8e8351254d1"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2691,8 +2691,8 @@ sha256 = "4da7df5ff925642db47f08d513ec5e8689dfbcf62dd73fda1bf1f1ad45d4e991"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
-bytes = 293601
-sha256 = "a7e6547adb1c32c29e28aa74b25fbef22e67a7f178cf3d0f2c59557c06eefcfa"
+bytes = 295842
+sha256 = "787ae04987d802fcf14650dc1675dfab2cd17f6569f02a184bb0edb3e27c0c42"
 
 [[sources]]
 path = "opf/tools/_opf_worklog.py"
@@ -3216,8 +3216,8 @@ sha256 = "327816f450f48bf7f28b1e949f36a3fa2ecf8605e15746da22192a3f8802a91b"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 26100
-sha256 = "9bca1365b77fd8eddf0f62359daec381e973c5d79050230a4c57661a35610cbf"
+bytes = 28560
+sha256 = "879f94f051cddfc932f877ef7619b1c5a6434a9823d493d036a841c0829d7378"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -3241,8 +3241,8 @@ sha256 = "6be34b5b3fe9f61750b0f006ee4dd01afeb4a45b7dc630ae6183e71d789e3e9e"
 
 [[sources]]
 path = "tools/check_instruction_budget.py"
-bytes = 160895
-sha256 = "59fefa84d25df1fa0353f0ae8e0f90a99f28dec5570a48b79b3631fceb9aa5a4"
+bytes = 162066
+sha256 = "945bcbadfc13d17ec30b7c62a52c8db8ad39a543cf4a61bba6d82829e3fd6b89"
 
 [[sources]]
 path = "tools/check_internal_names.py"
@@ -3591,8 +3591,8 @@ sha256 = "89ade294cd3a91386b46681f0608895a912a56f2583287ade693b2c59e91cfd7"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 37105
-sha256 = "95ab535fbf84fa7a8ed8e10acac96d148b7a3332fbeae1e508939fbae57f9bcf"
+bytes = 37154
+sha256 = "552898f944bbab5c00d9030efaa8b887b2e0b00eb618a63f429fc06483843b2d"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

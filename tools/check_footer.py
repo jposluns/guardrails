@@ -277,27 +277,68 @@ def _close_vectors_guarded(base):
     import, the later calls into it and the reverted body. A process-ending exit or a fault there
     (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception) is reported and returns None,
     which _self_test makes CANNOT-EVALUATE (exit 2), never the vectors' own status. A KeyboardInterrupt
-    propagates unchanged, so an operator's Ctrl-C stops the run. The message never formats the escaping
-    object."""
+    propagates unchanged, so an operator's Ctrl-C stops the run. The message is fixed by the except clause
+    that caught the exception and never inspects or formats the escaping object (no isinstance, attribute,
+    repr or str of it), so a hostile exception (one whose __class__ property raises SystemExit 0, for
+    example) cannot run code from the handler."""
     try:
         return _close_vectors(base)
     except KeyboardInterrupt:
         raise
-    except BaseException as exc:  # noqa: BLE001  a sibling ending the process is cannot-evaluate, never a pass
-        kind = "an exception" if isinstance(exc, Exception) else "a process-ending exception"
-        print("CANNOT-EVALUATE: check_footer self-test: the #378 close vectors (the _close_selftest sibling) "
-              "raised {}; fail-closed".format(kind), file=sys.stderr)
-        return None
+    except Exception:
+        kind = "an exception"
+    except BaseException:  # noqa: BLE001  a sibling ending the process is cannot-evaluate, never a pass
+        kind = "a process-ending exception"
+    print("CANNOT-EVALUATE: check_footer self-test: the #378 close vectors (the _close_selftest sibling) "
+          "raised {}; fail-closed".format(kind), file=sys.stderr)
+    return None
+
+
+# The KeyboardInterrupt a poisoned _close_selftest sibling raises on purpose. Only it is recorded by
+# _poisoned_close_outcome; any other KeyboardInterrupt, such as an operator's real Ctrl-C, propagates.
+CLOSE_POISON_INTERRUPT = "check-footer-self-test-poisoned-close-selftest"
+
+# An exception whose __class__ property raises SystemExit(0): a guard that inspects the caught instance
+# (isinstance included) runs that property and ends the process with status 0 from its own handler.
+CLOSE_DESCRIPTOR_EXIT = ("class _ClassExits(BaseException):\n    @property\n    def __class__(self):\n"
+                         "        raise SystemExit(0)\n\n\n")
+
+
+def _poisoned_close_outcome(base, tag, body):
+    """What _close_vectors_guarded gives with a _close_selftest sibling whose source is `body` (written under
+    `base`): its return value, "KeyboardInterrupt" for CLOSE_POISON_INTERRUPT, or the class name of any other
+    escape. Any other KeyboardInterrupt propagates."""
+    import contextlib
+    import io
+    poison = base / "poisoned-{}".format(tag)
+    poison.mkdir()
+    (poison / "_close_selftest.py").write_text(body, encoding="utf-8")
+    saved = sys.modules.pop("_close_selftest", None)
+    sys.path.insert(0, str(poison))
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            return _close_vectors_guarded(poison)
+    except KeyboardInterrupt as exc:
+        if exc.args != (CLOSE_POISON_INTERRUPT,):
+            raise
+        return "KeyboardInterrupt"
+    except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
+        return type(exc).__name__
+    finally:
+        sys.path.remove(str(poison))
+        sys.modules.pop("_close_selftest", None)
+        if saved is not None:
+            sys.modules["_close_selftest"] = saved
 
 
 def _close_guard_vectors(base):
     """The vectors for _close_vectors_guarded: a _close_selftest sibling that ends the process or faults at
-    import or in a later call returns None (cannot-evaluate), and the sibling's own KeyboardInterrupt
-    propagates. Only that KeyboardInterrupt (carrying `sent`) is recorded; any other, such as an operator's
-    real Ctrl-C landing in this window, propagates. Red if the guard is removed. Returns (failures, cases)."""
-    import contextlib
-    import io
-    sent = "check-footer-self-test-poisoned-close-selftest"
+    import or in a later call returns None (cannot-evaluate), an exception whose __class__ property raises
+    SystemExit(0) included, and the sibling's own KeyboardInterrupt propagates. Only that KeyboardInterrupt
+    (carrying CLOSE_POISON_INTERRUPT) is recorded; any other, such as an operator's real Ctrl-C landing in this
+    window, propagates, at import and in a later call. Red if the guard is removed, red if it inspects the
+    caught instance, and red if the recorder records another KeyboardInterrupt. Returns (failures, cases)."""
+    sent = CLOSE_POISON_INTERRUPT
     later = "class _StSentinel(Exception):\n    pass\n\n\ndef _st_helper_vectors(ns):\n    {}\n"
     cases = (("import SystemExit(0)", "raise SystemExit(0)\n", None),
              ("import SystemExit(None)", "raise SystemExit\n", None),
@@ -309,32 +350,31 @@ def _close_guard_vectors(base):
               None),
              ("import KeyboardInterrupt", "raise KeyboardInterrupt({!r})\n".format(sent), "KeyboardInterrupt"),
              ("later call KeyboardInterrupt", later.format("raise KeyboardInterrupt({!r})".format(sent)),
-              "KeyboardInterrupt"))
+              "KeyboardInterrupt"),
+             ("import exception whose __class__ exits 0", CLOSE_DESCRIPTOR_EXIT + "raise _ClassExits()\n", None),
+             ("later call exception whose __class__ exits 0",
+              CLOSE_DESCRIPTOR_EXIT + later.format("raise _ClassExits()"), None))
     failures = []
     for k, (label, body, want) in enumerate(cases):
-        poison = base / "poisoned-{}".format(k)
-        poison.mkdir()
-        (poison / "_close_selftest.py").write_text(body, encoding="utf-8")
-        saved = sys.modules.pop("_close_selftest", None)
-        sys.path.insert(0, str(poison))
-        try:
-            with contextlib.redirect_stderr(io.StringIO()):
-                got = _close_vectors_guarded(poison)
-        except KeyboardInterrupt as exc:
-            if exc.args != (sent,):
-                raise
-            got = "KeyboardInterrupt"
-        except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
-            got = type(exc).__name__
-        finally:
-            sys.path.remove(str(poison))
-            sys.modules.pop("_close_selftest", None)
-            if saved is not None:
-                sys.modules["_close_selftest"] = saved
+        got = _poisoned_close_outcome(base, k, body)
         if got != want:
             failures.append("a _close_selftest sibling poisoned at {}: got {!r}, want {!r}".format(
                 label, got, want))
-    return failures, len(cases)
+    # Any KeyboardInterrupt but CLOSE_POISON_INTERRUPT (here one carrying another value, standing in for a real
+    # Ctrl-C) propagates out of the recorder, at import and in a later call.
+    other = sent + "-other"
+    other_cases = (("import", "raise KeyboardInterrupt({!r})\n".format(other)),
+                   ("later call", later.format("raise KeyboardInterrupt({!r})".format(other))))
+    for label, body in other_cases:
+        try:
+            got = _poisoned_close_outcome(base, "other-" + label.replace(" ", "-"), body)
+        except KeyboardInterrupt as exc:
+            if exc.args != (other,):
+                raise
+        else:
+            failures.append("another KeyboardInterrupt at {} was recorded as {!r}, not propagated".format(
+                label, got))
+    return failures, len(cases) + len(other_cases)
 
 
 def _self_test():

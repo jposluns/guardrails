@@ -1498,14 +1498,20 @@ def _files(*pairs):
 
 def _blocks(read, fifo):
     """True when `read(fifo, where)` is still blocked after a second; a blocked read is then released by
-    opening the FIFO for writing, so the self-test never hangs."""
+    opening the FIFO for writing, so the self-test never hangs. The read runs in a worker thread, where an
+    exit (a guarded mutant's harness error, exit 2, included) ends only that thread: when anything but an
+    Exception ends the read, _blocks itself exits 2 in the calling thread once the worker is released, as the
+    harness error the read's guard reports, never the self-test's own status."""
     import threading
+    ended = []
 
     def _attempt():
         try:
             read(fifo, "fifo")
         except Exception:  # the mutant module carries its own GateError class
             pass
+        except BaseException:  # noqa: BLE001  ends only this thread; _blocks exits 2 for it
+            ended.append(True)
     worker = threading.Thread(target=_attempt, daemon=True)
     worker.start()
     worker.join(1.0)
@@ -1520,6 +1526,10 @@ def _blocks(read, fifo):
             continue
         worker.join(5)
         os.close(writer)
+    if ended:
+        print("SELF-TEST HARNESS ERROR: a read in _blocks' worker thread ended the process; fail-closed",
+              file=sys.stderr)
+        sys.exit(2)
     return blocked
 
 
@@ -2155,6 +2165,12 @@ def self_test(report_path=None):
                 ("harness/mutant-call-keyboardinterrupt-propagates",
                  "raise KeyboardInterrupt({!r})".format(POISON_INTERRUPT), "KeyboardInterrupt")):
             check(check_id, _mutant_call_exit(tmp, statement), want)
+        # A call into a mutant made in _blocks' worker thread, where the guard's exit 2 ends only the thread,
+        # is exit 2 too. Red if _blocks drops the worker's exit (it then returns False, "not blocked").
+        thread_exit = _mutant(tmp, "\ndef read_text(path, where):\n",
+                              "\ndef read_text(path, where):\n    raise SystemExit(0)\n")
+        check("harness/mutant-call-in-worker-thread-exit-2",
+              _escape_of(_blocks, thread_exit.read_text, tmp / "worker-thread-read"), 2)
         # Any KeyboardInterrupt but POISON_INTERRUPT (here one carrying another value, standing in for a real
         # Ctrl-C) propagates out of the recorder, at load and in a call. Red if the recorder records it.
         other = POISON_INTERRUPT + "-other"

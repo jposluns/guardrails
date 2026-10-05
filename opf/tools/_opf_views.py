@@ -73,20 +73,27 @@ This is a refusal pending the real composition, never a fabricated gate.
 In-process loaders on gate paths, disclosed residual of the class (tracked as HARDEN-GATE-ENTRY-WRAP, which
 closes it by wrapping every gate entry). A process-ending exception (SystemExit 0 or None, GeneratorExit or
 another BaseException) raised in-process by repository code a gate imports lazily or calls is a failure, never
-the gate's own status, ONLY at these guarded sites (cannot-evaluate, exit 2, at each, except that a scan_bytes
-call made directly by this module's self-test ends it with the ViewsError's traceback, exit 1): this module's
-byte-canon authority, its load and every scan_bytes call through it; _opf_emit._backstop (the self_test of
-_opf_emit and of _opf_init); check_opf_init_contract._in_loaded; the self-test backstops of
+the gate's own status, ONLY at these guarded sites (cannot-evaluate, exit 2, at each, except that a load or
+scan_bytes call made directly by this module's self-test ends it with the ViewsError's traceback, exit 1):
+this module's byte-canon authority, its load and every scan_bytes call through it; _opf_emit._backstop (the
+self_test of _opf_emit and of _opf_init); check_opf_init_contract._in_loaded; the self-test backstops of
 check_opf_init_observe and check_opf_prompt_pack; check_opf_init_p0.red_on_revert (load and call);
-tools/check_instruction_budget._mutant (load and every later call into the mutant); and
-tools/check_footer._close_vectors_guarded (the lazy _close_selftest import, its later calls and the reverted
-body). A KeyboardInterrupt propagates at each. No gate entry is wrapped: the `__main__` entry of every script
-that .github/workflows/quality.yml, tools/run_all_checks.sh or opf/tools/run_all_checks.sh launches, those of
-the files named above included, remains unwrapped, so outside the sites above such an exit ends the gate with
-the exception's own status (exit 0 for SystemExit 0 or None). Confirmed unguarded instances: the
-function-local sibling imports in check_opf_drift._self_test_isolated and check_opf_homes.boundary_self_test,
-and the re-execution of a module's own source in check_release_cut (_close_vectors, _self_test_isolated),
-gen_crosswalk (its flipped helper), check_python_floor (_rule_reverts) and pin (_recover_close_vectors). Also
+tools/check_instruction_budget._mutant (load and every later call into the mutant, the one made in _blocks'
+worker thread included); and tools/check_footer._close_vectors_guarded (the lazy _close_selftest import, its
+later calls and the reverted body). A KeyboardInterrupt propagates at each. No guard inspects the caught
+instance to build its diagnostic: each names the family from its except clause or from type(exc) alone, so
+an exception whose __class__ property raises SystemExit 0 is cannot-evaluate there too. No gate entry is
+wrapped: the `__main__` entry of every script that .github/workflows/quality.yml, tools/run_all_checks.sh or
+opf/tools/run_all_checks.sh launches, those of the files named above included, remains unwrapped, so outside
+the sites above such an exit ends the gate with the exception's own status (exit 0 for SystemExit 0 or None).
+The instances below are the ones confirmed and named; the list is not exhaustive, and the sentence above
+covers every other. Confirmed unguarded instances: the function-local sibling imports in
+check_opf_drift._self_test_isolated and check_opf_homes.boundary_self_test; the function-local
+`import _close_selftest` (the import tools/check_footer guards) in check_overclaim._close_vector_self_test,
+check_release_cut (_close_vectors and _self_test_isolated), gen_crosswalk._close_vectors,
+check_gensrc_failclose._close_vectors and import_cwe.self_test; and the re-execution of a module's own source
+in check_release_cut (_close_vectors, _self_test_isolated), gen_crosswalk (its flipped helper),
+check_python_floor (_rule_reverts) and pin (_recover_close_vectors). Also
 outside every guard above: an exit raised while a guarded module's own top-level imports run, before its guard
 is entered, and the opf.py aggregate, which runs each unit in-process until the unit runner of #385 is on main
 (see _opf_emit).
@@ -1646,9 +1653,13 @@ def _render_resolved_store(product_root, res, check, capture=None):
 class _ByteCanonAuthority:
     """The loaded byte-canon authority, exposing its one entry, scan_bytes, under the same guard as its load:
     a call that ends the process or faults (SystemExit 0 or None, GeneratorExit, any other BaseException or
-    Exception) is a ViewsError, which every caller maps to CANNOT-EVALUATE (exit 2), so a drifted store is
-    never read as clean because the authority's call exited. A KeyboardInterrupt propagates unchanged. The
-    message never formats the escaping object."""
+    Exception) is a ViewsError. plan_views' callers (the render and the drift check) map it to CANNOT-EVALUATE
+    (exit 2), so a drifted store is never read as clean because the authority's call exited; a scan_bytes call
+    this module's self-test makes directly ends that self-test with the ViewsError's traceback (exit 1). A
+    KeyboardInterrupt propagates unchanged. The diagnostic is fixed by the except clause that caught the
+    exception and never inspects or formats the escaping object (no isinstance, attribute, repr or str of it),
+    so a hostile exception (one whose __class__ property raises SystemExit 0, for example) cannot run code
+    from the handler."""
 
     __slots__ = ("_module",)
 
@@ -1660,27 +1671,32 @@ class _ByteCanonAuthority:
             return self._module.scan_bytes(data, *args, **kwargs)
         except KeyboardInterrupt:
             raise
-        except BaseException as exc:  # noqa: BLE001  a call that ends the process is cannot-evaluate, never clean
-            kind = "an exception" if isinstance(exc, Exception) else "a process-ending exception"
-            raise ViewsError("the byte-canon authority _byte_canon.scan_bytes raised {}; cannot "
-                             "evaluate".format(kind)) from None
+        except Exception:
+            raise ViewsError("the byte-canon authority _byte_canon.scan_bytes raised an exception; cannot "
+                             "evaluate") from None
+        except BaseException:  # noqa: BLE001  a call that ends the process is cannot-evaluate, never clean
+            raise ViewsError("the byte-canon authority _byte_canon.scan_bytes raised a process-ending "
+                             "exception; cannot evaluate") from None
 
 
 def _byte_canon_authority():
     """The authoritative byte-canon leg (_byte_canon), imported lazily and returned as a _ByteCanonAuthority,
     so every later scan_bytes call is guarded as the load is. A load that ends the process or faults
-    (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception) is a ViewsError, which every
-    caller maps to CANNOT-EVALUATE (exit 2), so a render or drift check never reads a load that exits as
-    clean. A KeyboardInterrupt propagates unchanged, so an operator's Ctrl-C stops the run. The message never
-    formats the escaping object."""
+    (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception) is a ViewsError. plan_views'
+    callers (the render and the drift check) map it to CANNOT-EVALUATE (exit 2), so neither reads a load that
+    exits as clean; a load this module's self-test makes directly ends that self-test with the ViewsError's
+    traceback (exit 1). A KeyboardInterrupt propagates unchanged, so an operator's Ctrl-C stops the run. As in
+    _ByteCanonAuthority, the diagnostic never inspects or formats the escaping object."""
     try:
         import _byte_canon
     except KeyboardInterrupt:
         raise
-    except BaseException as exc:  # noqa: BLE001  a load that ends the process is cannot-evaluate, never clean
-        kind = "an exception" if isinstance(exc, Exception) else "a process-ending exception"
-        raise ViewsError("the byte-canon authority _byte_canon could not be loaded (it raised {}); cannot "
-                         "evaluate".format(kind)) from None
+    except Exception:
+        raise ViewsError("the byte-canon authority _byte_canon could not be loaded (it raised an exception); "
+                         "cannot evaluate") from None
+    except BaseException:  # noqa: BLE001  a load that ends the process is cannot-evaluate, never clean
+        raise ViewsError("the byte-canon authority _byte_canon could not be loaded (it raised a process-ending "
+                         "exception); cannot evaluate") from None
     return _ByteCanonAuthority(_byte_canon)
 
 
@@ -3755,6 +3771,11 @@ def self_test():
         _psent = "opf-views-self-test-poisoned-byte-canon"
         _pother = _psent + "-other"
         _pcall = "def scan_bytes(data, *args, **kwargs):\n    {}\n"
+        # An exception whose __class__ property raises SystemExit(0): a guard that inspects the caught
+        # instance (isinstance included) runs that property and ends the render with status 0 from its own
+        # handler. Red if either guard builds its diagnostic from the instance.
+        _pclass_exits = ("class _ClassExits(BaseException):\n    @property\n    def __class__(self):\n"
+                         "        raise SystemExit(0)\n\n\n")
 
         def _poisoned_render(tag, body):
             _proot = new_root()
@@ -3785,6 +3806,7 @@ def self_test():
                 ("SystemExit(0)", "raise SystemExit(0)\n", EXIT_CANNOT_EVALUATE),
                 ("SystemExit(None)", "raise SystemExit\n", EXIT_CANNOT_EVALUATE),
                 ("GeneratorExit", "raise GeneratorExit\n", EXIT_CANNOT_EVALUATE),
+                ("class-descriptor-exits-0", _pclass_exits + "raise _ClassExits()\n", EXIT_CANNOT_EVALUATE),
                 ("KeyboardInterrupt", "raise KeyboardInterrupt({!r})\n".format(_psent), "KeyboardInterrupt"))):
             check("byte-canon-authority-load-{}-guarded".format(_plabel),
                   _poisoned_render("load-{}".format(_pk), _pbody) == _pwant)
@@ -3797,6 +3819,9 @@ def self_test():
                 ("KeyboardInterrupt", "raise KeyboardInterrupt({!r})".format(_psent), "KeyboardInterrupt"))):
             check("byte-canon-authority-call-{}-guarded".format(_plabel),
                   _poisoned_render("call-{}".format(_pk), _pcall.format(_pstmt)) == _pwant)
+        check("byte-canon-authority-call-class-descriptor-exits-0-guarded",
+              _poisoned_render("call-class-exits", _pclass_exits + _pcall.format("raise _ClassExits()"))
+              == EXIT_CANNOT_EVALUATE)
         # Any KeyboardInterrupt but the poisoned body's own (here one carrying _pother, standing in for a real
         # Ctrl-C) propagates out of the recorder at load and at call. Red if the recorder records it instead.
         for _plabel, _pbody in (("load", "raise KeyboardInterrupt({!r})\n".format(_pother)),
