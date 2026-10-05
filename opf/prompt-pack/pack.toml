@@ -9,9 +9,9 @@
 # render template; its overlay slots and the drift check are specified inside the member) and, once
 # the adoption stage driver lands, by a plan's prompt_pack {version, digest} binding.
 format = "opf.prompt-pack/v1"
-version = "0.2.0"
-digest = "sha256:21da55c2fe7ffa9b0943256e93ad482db3997147819102106048bf57ccb5fdeb"
+version = "0.3.0"
+digest = "sha256:e682d407d27141f2d2911c3ae23ed3bbcc3267f9e26d4d517054e5e87cb60457"
 
 [[members]]
 path = "flow/SKILL.md"
-sha256 = "5cb4292d9fcb94a4726d764ae424702ee2d8703257f6b18183d99253fc315cc3"
+sha256 = "f581bdb234f7f28f9c2773602fa2e3787313d303f272f5b854e76a13ea3ccffb"
