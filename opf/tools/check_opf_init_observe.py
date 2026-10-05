@@ -508,13 +508,17 @@ def shared_tests(module, capture_source, run_source, *, reversals):
 # functions) is reviewed in-repo code; the guard catches an ACCIDENTAL process ending from it (a stray
 # sys.exit, SystemExit, KeyboardInterrupt, GeneratorExit, or any other BaseException that is not an
 # Exception) at load and in every later call. An Exception keeps its existing meaning, a red finding (exit 1).
+# A KeyboardInterrupt (an operator's Ctrl-C and one raised by loaded code are not told apart) is re-raised as
+# a fresh KeyboardInterrupt, so it stops the gate runner instead of reading as this gate's exit 2.
 _PROCESS_ENDING = (BaseException,)
 
 
 def _backstop(run_all, args):
     """Return run_all(args)'s status. An Exception propagates unchanged (a test failure, exit 1). Any other
     BaseException (SystemExit 0, None or a non-int code included) is exit 2 (cannot evaluate) with a fixed
-    message that never formats the exception or anything loaded. Residuals, not covered: os._exit, atexit
+    message that never formats the exception or anything loaded. A KeyboardInterrupt is re-raised, after a
+    fixed message, as a fresh KeyboardInterrupt (its context suppressed), which stops the runner rather than
+    being absorbed as exit 2. Residuals, not covered: os._exit, atexit
     handlers, signal handlers, threads the loaded code starts, interpreter shutdown, mutation of sys or of
     this module's globals by the loaded code, deliberately hostile objects (for example a metaclass or an
     exception class built to defeat this guard), and a process exit raised while this module's own
@@ -523,17 +527,24 @@ def _backstop(run_all, args):
         return run_all(args)
     except Exception:
         raise
+    except KeyboardInterrupt:
+        sys.stderr.write("check_opf_init_observe: self-test interrupted: KeyboardInterrupt re-raised to stop the "
+                         "run; fail-closed\n")
+        raise KeyboardInterrupt from None
     except _PROCESS_ENDING:
         sys.stderr.write("check_opf_init_observe: cannot evaluate: in-process code raised a process-ending "
                          "exception; fail-closed\n")
         return 2
 
 
-# Each case is a candidate loaded through load_candidate: (label, source, call run()).
+# Each case is a candidate loaded through load_candidate: (label, source, call run()). A case whose label names
+# KeyboardInterrupt must re-raise a fresh KeyboardInterrupt (the probe exits 130); every other case must give
+# exit 2.
 _LOADED_EXIT_CASES = (
     ("load SystemExit(0)", "raise SystemExit(0)\n", False),
     ("load SystemExit(None)", "raise SystemExit\n", False),
     ("load KeyboardInterrupt", "raise KeyboardInterrupt\n", False),
+    ("call KeyboardInterrupt", "def run():\n    raise KeyboardInterrupt\n", True),
     ("load GeneratorExit", "raise GeneratorExit\n", False),
     ("load BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n", False),
     ("load SystemExit(code whose repr exits 0)",
@@ -554,14 +565,20 @@ def body(source, *, reversals=False):
     if call == "call":
         module.run()
 gate.run = body
-sys.exit(gate.main(["--self-test"]))
+try:
+    code = gate.main(["--self-test"])
+except KeyboardInterrupt as exc:
+    sys.exit(130 if type(exc) is KeyboardInterrupt and exc.__suppress_context__ else 3)
+sys.exit(code)
 """
 
 
 def loaded_exit_vectors():
     """Each case, at load or in a later call, must give exit 2 with the fixed backstop message through the
     real entry in a child process, so the vector is red if the backstop is reverted (_PROCESS_ENDING
-    emptied) or removed from main()."""
+    emptied) or removed from main(). An interrupt case must instead re-raise a fresh KeyboardInterrupt with
+    the fixed interrupt message (probe exit 130), so the vector is red if the interrupt is absorbed as exit 2
+    (which would let a gate runner run on past an operator's Ctrl-C)."""
     import subprocess
     import tempfile
     tool = str(pathlib.Path(__file__).resolve())
@@ -573,7 +590,12 @@ def loaded_exit_vectors():
             case.write_text(body, encoding="utf-8")
             child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case),
                                     "call" if call else "load"], capture_output=True, text=True, timeout=300)
-            if child.returncode != 2 or "check_opf_init_observe: cannot evaluate" not in child.stderr:
+            if "KeyboardInterrupt" in label:
+                if child.returncode != 130 or "check_opf_init_observe: self-test interrupted: " \
+                        "KeyboardInterrupt re-raised" not in child.stderr:
+                    raise RuntimeError("loaded-exit vector {}: expected a fresh KeyboardInterrupt (130) with "
+                                       "the interrupt message, got {}".format(label, child.returncode))
+            elif child.returncode != 2 or "check_opf_init_observe: cannot evaluate" not in child.stderr:
                 raise RuntimeError("loaded-exit vector {}: expected exit 2 with the backstop message, got {}"
                                    .format(label, child.returncode))
             print("PASS loaded-exit/" + label)

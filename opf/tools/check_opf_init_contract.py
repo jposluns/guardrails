@@ -77,7 +77,9 @@ def _drift(msg):
 
 # Threat model: the validator this gate loads in-process (_opf_init_contract.py) is reviewed in-repo code; the
 # guard catches an ACCIDENTAL process ending from it (a stray sys.exit, SystemExit, KeyboardInterrupt,
-# GeneratorExit, or any other BaseException) at load and in every later call this gate makes into it.
+# GeneratorExit, or any other BaseException) at load and in every later call this gate makes into it. A
+# KeyboardInterrupt (an operator's Ctrl-C and one raised by loaded code are not told apart) is re-raised as a
+# fresh KeyboardInterrupt, so it stops the gate runner instead of reading as this gate's exit 2.
 _PROCESS_ENDING = (BaseException,)
 
 
@@ -96,13 +98,17 @@ def _ending_kind(exc):
 def _in_loaded(what, call, *args):
     """Run `call` (a load of in-repo code in this process, or a call this gate makes into it) so that the
     loaded code can never end the gate with its own status: ANY exception (every BaseException, SystemExit
-    0, None or a non-int code included) becomes CANNOT-EVALUATE (exit 2) with a fixed message naming `what`.
-    Residuals, not covered: os._exit, atexit handlers, signal handlers, threads the loaded code starts,
+    0, None or a non-int code included) becomes CANNOT-EVALUATE (exit 2) with a fixed message naming `what`,
+    except a KeyboardInterrupt, which is re-raised after a fixed message as a fresh KeyboardInterrupt (its
+    context suppressed) so it stops the runner. Residuals, not covered: os._exit, atexit handlers, signal handlers, threads the loaded code starts,
     interpreter shutdown, mutation of sys or of this module's globals by the loaded code, deliberately
     hostile objects (for example a metaclass or an exception class built to defeat this guard), and a
     process exit raised while this module's own top-level imports run, before this guard is entered."""
     try:
         return call(*args)
+    except KeyboardInterrupt:
+        sys.stderr.write("INTERRUPTED: {}: KeyboardInterrupt re-raised to stop the run\n".format(what))
+        raise KeyboardInterrupt from None
     except _PROCESS_ENDING as exc:
         _cant("{} raised {}; fail-closed".format(what, _ending_kind(exc)))
 
@@ -284,7 +290,9 @@ def _self_test_loaded_exit():
     """A loaded validator that ends the process, at load or in a later call the gate makes into it, yields
     this gate's CANNOT-EVALUATE exit 2 through _validator_missing (the function _checks calls), never its
     own status. Any exception escaping is caught here and recorded, so the vector is red if the guard is
-    reverted (_PROCESS_ENDING emptied) or removed from _validator_missing. The CANNOT-EVALUATE line each
+    reverted (_PROCESS_ENDING emptied) or removed from _validator_missing. A case whose label names
+    KeyboardInterrupt must instead re-raise a fresh KeyboardInterrupt with the INTERRUPTED line, so the
+    vector is red if the interrupt is absorbed as exit 2. The CANNOT-EVALUATE line each
     case is expected to write is captured and required, never printed, so a passing self-test shows none."""
     import contextlib
     import io
@@ -294,6 +302,9 @@ def _self_test_loaded_exit():
         ("load SystemExit(0)", "raise SystemExit(0)\n"),
         ("load SystemExit(None)", "raise SystemExit\n"),
         ("load KeyboardInterrupt", "raise KeyboardInterrupt\n"),
+        ("call KeyboardInterrupt in a member __eq__",
+         "class M:\n    def __eq__(self, other):\n        raise KeyboardInterrupt\n    __hash__ = None\n"
+         "_RESERVED = (M(),)\n"),
         ("load GeneratorExit", "raise GeneratorExit\n"),
         ("load BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n"),
         ("load SystemExit(code whose repr exits 0)", repr_exits + "raise SystemExit(R())\n"),
@@ -316,7 +327,12 @@ def _self_test_loaded_exit():
                 with contextlib.redirect_stderr(captured):
                     _validator_missing(str(path), ("a.md",))
             except BaseException as exc:  # noqa: BLE001  any escape is recorded, never the test's own end
-                if not (type(exc) is SystemExit and type(exc.code) is int and exc.code == 2):
+                if "KeyboardInterrupt" in label:
+                    if not (type(exc) is KeyboardInterrupt and exc.__suppress_context__
+                            and captured.getvalue().startswith("INTERRUPTED: ")):
+                        failures.append("{}: expected a fresh KeyboardInterrupt, got {}".format(
+                            label, _ending_kind(exc)))
+                elif not (type(exc) is SystemExit and type(exc.code) is int and exc.code == 2):
                     failures.append("{}: expected exit 2, got {}".format(label, _ending_kind(exc)))
                 elif not captured.getvalue().startswith("CANNOT-EVALUATE: "):
                     failures.append("{}: exit 2 without the CANNOT-EVALUATE line".format(label))

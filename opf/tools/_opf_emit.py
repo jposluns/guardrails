@@ -63,8 +63,9 @@ resident model, and this bounds that output rather than the structure.
 The live leg is folded into `opf/tools/opf.py --self-test` (build plan section 3); this module is a library
 consumed by U7 (import) and `opf init`, with no live/standalone mode beyond the self-test.
 The self-tests require Linux fork/waitid, readable procfs and child-subreaper support.
-The self-test backstop guards only this module's own self_test; a process ending in any other registered
-self-test of the opf.py aggregate is caught by the aggregator's subprocess-per-unit runner (#385), not here.
+The self-test backstop guards only this module's own self_test. A process ending in any other registered
+self-test of the opf.py aggregate is caught by the aggregator's subprocess-per-unit runner only once the unit
+runner of #385 is on main; until then the aggregate runs each unit in-process and nothing here catches it.
 
 Exit convention (matches the repo's gates): 0 clean, 1 a self-test finding, 2 misuse.
 """

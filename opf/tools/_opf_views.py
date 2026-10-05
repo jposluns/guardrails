@@ -1622,6 +1622,23 @@ def _render_resolved_store(product_root, res, check, capture=None):
             _opf_store._close_fd_exc_safe(product_root_fd)
 
 
+def _byte_canon_authority():
+    """The authoritative byte-canon leg (_byte_canon), imported lazily. A load that ends the process or
+    faults (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception) is a ViewsError, which
+    every caller maps to CANNOT-EVALUATE (exit 2), so a render or drift check never reads a load that exits
+    as clean. A KeyboardInterrupt propagates unchanged, so an operator's Ctrl-C stops the run. The message
+    never formats the escaping object."""
+    try:
+        import _byte_canon
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001  a load that ends the process is cannot-evaluate, never clean
+        kind = "an exception" if isinstance(exc, Exception) else "a process-ending exception"
+        raise ViewsError("the byte-canon authority _byte_canon could not be loaded (it raised {}); cannot "
+                         "evaluate".format(kind)) from None
+    return _byte_canon
+
+
 def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported_profiles=None,
                manifest_model=None):
     """Phase 1 of the resolved-store render, extracted as a public READ-ONLY planner (OPF core-tooling U6
@@ -1685,7 +1702,7 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
     # bound to its OWN spec destination; a manifest `target` that does not match is rejected, never silently
     # redirected.
     planned = []   # (view_name, scope, dest_relpath, text)
-    import _byte_canon as check_byte_canon  # authoritative byte-canon leg; pure function over bytes, lazy like self_test
+    check_byte_canon = _byte_canon_authority()  # authoritative byte-canon leg; pure function over bytes, lazy
     for name in sorted(views):
         tbl = views[name]
         kind, required, renderer = _resolve_view(name)
@@ -2960,7 +2977,7 @@ def self_test():
         # scan_bytes over the real body bytes, not a reimplementation; the whole-view CI byte-canon gate
         # is the standing guarantee, this pins it at the unit level. The control body (raw URL, no wrap)
         # is what the oracle WOULD autolink, giving the check teeth.
-        import _byte_canon as check_byte_canon  # authoritative byte-canon leg; pure function over bytes
+        check_byte_canon = _byte_canon_authority()  # authoritative byte-canon leg; pure function over bytes
         url_finding = {"id": "FN-7", "type": "finding", "status": "fixed",
                        "title": "see http://ex.example/a?b=1&c=2 and mail a@ex.example",
                        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
@@ -3660,7 +3677,7 @@ def self_test():
         # whitespace before the byte-canon scan, so the render SUCCEEDS (EXIT_OK) and writes a clean
         # view. Pre round-3 this failed closed at exit 2 over benign trailing whitespace. Modelled on the
         # CLASS B store construction; proves the over-fire fix end to end, not only at a unit level.
-        import _byte_canon as check_byte_canon  # authoritative byte-canon leg; pure function over bytes
+        check_byte_canon = _byte_canon_authority()  # authoritative byte-canon leg; pure function over bytes
         _tsroot = new_root()
         write_toml(_tsroot, "manifest.toml", manifest)
         empty_indexes(_tsroot)
@@ -3681,6 +3698,38 @@ def self_test():
               _tstodo.endswith("\n") and not _tstodo.endswith("\n\n"))
         check("trailing-space-title-byte-canon-clean",
               check_byte_canon.scan_bytes(_tstodo.encode("utf-8")) == [])
+
+        # A byte-canon authority whose load ends the process or faults is CANNOT-EVALUATE (exit 2) through
+        # plan_views on the render path, never a clean render; a KeyboardInterrupt propagates. Red if
+        # plan_views imports _byte_canon unguarded (the drift gate's self-test and `opf render --check` would
+        # then exit 0).
+        import contextlib
+        import io
+        for _pk, (_plabel, _pbody, _pwant) in enumerate((
+                ("SystemExit(0)", "raise SystemExit(0)\n", EXIT_CANNOT_EVALUATE),
+                ("SystemExit(None)", "raise SystemExit\n", EXIT_CANNOT_EVALUATE),
+                ("GeneratorExit", "raise GeneratorExit\n", EXIT_CANNOT_EVALUATE),
+                ("KeyboardInterrupt", "raise KeyboardInterrupt\n", "KeyboardInterrupt"))):
+            _proot = new_root()
+            write_toml(_proot, "manifest.toml", manifest)
+            empty_indexes(_proot)
+            write_toml(_proot, "version.toml", _bc_version)
+            _pdir = base / "poisoned-byte-canon-{}".format(_pk)
+            _pdir.mkdir()
+            (_pdir / "_byte_canon.py").write_text(_pbody, encoding="utf-8")
+            _psaved = sys.modules.pop("_byte_canon", None)
+            sys.path.insert(0, str(_pdir))
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    _pgot = render_write(_proot)
+            except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
+                _pgot = type(exc).__name__
+            finally:
+                sys.path.remove(str(_pdir))
+                sys.modules.pop("_byte_canon", None)
+                if _psaved is not None:
+                    sys.modules["_byte_canon"] = _psaved
+            check("byte-canon-authority-load-{}-guarded".format(_plabel), _pgot == _pwant)
 
         # round-3 (Unicode fix): a title ending in a NON-BREAKING SPACE (U+00A0) is ALSO normalized out
         # by _render_resolved's Unicode str.rstrip() (the SAME predicate check_byte_canon uses), so it

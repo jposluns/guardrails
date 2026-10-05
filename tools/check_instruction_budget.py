@@ -1370,7 +1370,10 @@ def _measured(fn, root):
 def _mutant(tmp, old, new, *more):
     """A module loaded from the production prefix of this file with `old` replaced by `new` exactly once,
     written under the fixture directory `tmp` and loaded with importlib. A boundary or target that does
-    not match exactly once is a harness error (exit 2)."""
+    not match exactly once is a harness error (exit 2), and so is a load that ends the process or faults
+    (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception): the mutant can never end
+    the self-test with its own status. A KeyboardInterrupt propagates, so an operator's Ctrl-C stops the
+    run."""
     import importlib.util
     source = Path(__file__).read_text(encoding="utf-8")
     if source.count(MUTATION_BOUNDARY) != 1:
@@ -1393,9 +1396,28 @@ def _mutant(tmp, old, new, *more):
     saved = list(sys.path)
     try:
         spec.loader.exec_module(mutant)
+    except KeyboardInterrupt:
+        raise
+    except BaseException:  # noqa: BLE001  a mutant ending the process at load is a harness error, never a pass
+        print("SELF-TEST HARNESS ERROR: the mutant ended the process or faulted at load; fail-closed",
+              file=sys.stderr)
+        sys.exit(2)
     finally:
         sys.path[:] = saved
     return mutant
+
+
+def _mutant_load_exit(tmp, body):
+    """The exit status, or the escaping exception's class name, of a _mutant whose production prefix runs
+    `body` at load (inserted at top level, before the RULES_REL constant)."""
+    try:
+        _quiet(_mutant, tmp, '\nRULES_REL = ".claude/rules"\n', '\n' + body + 'RULES_REL = ".claude/rules"\n')
+    except SystemExit as exc:
+        return exc.code
+    except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
+        return type(exc).__name__
+    return "loaded"
+
 
 
 def _off_pairs(*names):
@@ -2054,6 +2076,16 @@ def self_test(report_path=None):
                                    "    except OSError as exc:  # anything but a genuinely absent entry\n"
                                    "        return None\n")
             check("revert/unreadable-import-red", _quiet(lenient_read.run, private), 0)
+        # A mutant that ends the process at load is a harness error (exit 2), never the mutant's own status;
+        # a KeyboardInterrupt propagates as itself.
+        for check_id, body, want in (
+                ("harness/mutant-load-systemexit-0-exit-2", "raise SystemExit(0)\n", 2),
+                ("harness/mutant-load-systemexit-none-exit-2", "raise SystemExit\n", 2),
+                ("harness/mutant-load-generatorexit-exit-2", "raise GeneratorExit\n", 2),
+                ("harness/mutant-load-exception-exit-2", "raise ValueError('mutant')\n", 2),
+                ("harness/mutant-load-keyboardinterrupt-propagates", "raise KeyboardInterrupt\n",
+                 "KeyboardInterrupt")):
+            check(check_id, _mutant_load_exit(tmp, body), want)
         linkclaude = _tree(tmp / "linkclaude", block="\n@big.md\n", extra=_files("docs/big.md", "X" * 1000))
         os.rename(str(linkclaude / CLAUDE_REL), str(linkclaude / "docs" / CLAUDE_REL))
         os.symlink(os.path.join("docs", CLAUDE_REL), str(linkclaude / CLAUDE_REL))

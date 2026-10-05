@@ -11,8 +11,9 @@ Validation here covers individual bootstrap documents, not whole-store or public
 
 The self-test loads the _byte_canon authority in-process, behind _opf_emit's backstop: a load or later call
 that ends the process is exit 2 (cannot evaluate), and a KeyboardInterrupt is re-raised to stop the run.
-That backstop guards only this self-test; a process ending in a self-test the opf.py aggregate runs is
-caught by the aggregator's subprocess-per-unit runner (#385), not here.
+That backstop guards only this self-test. A process ending in another self-test the opf.py aggregate runs
+is caught by the aggregator's subprocess-per-unit runner only once the unit runner of #385 is on main; until
+then the aggregate runs each unit in-process and nothing here catches it.
 
 Run: python3 opf/tools/_opf_init.py --self-test
 """

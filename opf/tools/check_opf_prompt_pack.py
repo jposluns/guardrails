@@ -421,7 +421,9 @@ def _load_sibling(name, path):
 # Threat model: the code this self-test loads in-process (the shared _journal.py close harness) is reviewed
 # in-repo code; the guard catches an ACCIDENTAL process ending from it (a stray sys.exit, SystemExit,
 # KeyboardInterrupt, GeneratorExit, or any other BaseException) at load and in every later call. Every
-# BaseException is caught, so loaded code can never end the self-test with its own status.
+# BaseException is caught, so loaded code can never end the self-test with its own status; a KeyboardInterrupt
+# (an operator's Ctrl-C and one raised by loaded code are not told apart) is re-raised as a fresh
+# KeyboardInterrupt, so it stops the gate runner instead of reading as this gate's exit 2.
 _PROCESS_ENDING = (BaseException,)
 
 
@@ -440,13 +442,18 @@ def _ending_kind(exc):
 def _backstop(run):
     """Return run()'s status, mapping ANY escaping exception to exit 2 (cannot evaluate) with a fixed
     message, never a false 0 and never the loaded code's own status (SystemExit 0, None or a non-int code
-    included). Residuals, not covered: os._exit, atexit handlers, signal handlers, threads the loaded code
-    starts, interpreter shutdown, mutation of sys or of this module's globals by the loaded code,
+    included). A KeyboardInterrupt is the one exception: after a fixed message it is re-raised as a fresh
+    KeyboardInterrupt (its context suppressed, so no loaded object is formatted), which stops the runner.
+    Residuals, not covered: os._exit, atexit handlers, signal handlers, threads the loaded code starts, interpreter shutdown, mutation of sys or of this module's globals by the loaded code,
     deliberately hostile objects (for example a metaclass or an exception class built to defeat this
     guard), and a process exit raised while this module's own top-level imports run, before this guard is
     entered."""
     try:
         return run()
+    except KeyboardInterrupt:
+        print("check_opf_prompt_pack: self-test interrupted: KeyboardInterrupt re-raised to stop the run; "
+              "fail-closed", file=sys.stderr)
+        raise KeyboardInterrupt from None
     except _PROCESS_ENDING as exc:
         print("check_opf_prompt_pack: cannot evaluate: in-process code raised {}; fail-closed".format(
             _ending_kind(exc)), file=sys.stderr)
@@ -454,11 +461,13 @@ def _backstop(run):
 
 
 # Each case is a module loaded through _load_sibling, the self-test's sibling loader: (label, source, call
-# run()).
+# run()). A case whose label names KeyboardInterrupt must re-raise a fresh KeyboardInterrupt (the probe exits
+# 130); every other case must give exit 2.
 _LOADED_EXIT_CASES = (
     ("load SystemExit(0)", "raise SystemExit(0)\n", False),
     ("load SystemExit(None)", "raise SystemExit\n", False),
     ("load KeyboardInterrupt", "raise KeyboardInterrupt\n", False),
+    ("call KeyboardInterrupt", "def run():\n    raise KeyboardInterrupt\n", True),
     ("load GeneratorExit", "raise GeneratorExit\n", False),
     ("load BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n", False),
     ("load SystemExit(code whose repr exits 0)",
@@ -483,14 +492,21 @@ def body():
         module.run()
     return 0
 gate._self_test_vectors = body
-sys.exit(gate.main(["--self-test"]))
+try:
+    code = gate.main(["--self-test"])
+except KeyboardInterrupt as exc:
+    sys.exit(130 if type(exc) is KeyboardInterrupt and exc.__suppress_context__ else 3)
+sys.exit(code)
 """
 
 
 def _loaded_exit_vectors(tmp):
     """Each case, at load or in a later call, must give exit 2 with the fixed backstop message through the
     real `--self-test` entry in a child process, so the vector is red if the backstop is reverted
-    (_PROCESS_ENDING emptied) or removed from self_test. Returns the failures."""
+    (_PROCESS_ENDING emptied) or removed from self_test. An interrupt case must instead re-raise a fresh
+    KeyboardInterrupt with the fixed interrupt message (probe exit 130), so the vector is red if the
+    interrupt is absorbed as exit 2 (which would let a gate runner run on past an operator's Ctrl-C).
+    Returns the failures."""
     import subprocess
     failures = []
     tool = str(Path(__file__).resolve())
@@ -505,7 +521,12 @@ def _loaded_exit_vectors(tmp):
         except (OSError, subprocess.SubprocessError) as exc:
             failures.append("loaded-exit vector {}: probe did not run ({})".format(label, type(exc).__name__))
             continue
-        if child.returncode != 2 or "check_opf_prompt_pack: cannot evaluate: in-process code raised" \
+        if "KeyboardInterrupt" in label:
+            if child.returncode != 130 or "check_opf_prompt_pack: self-test interrupted: KeyboardInterrupt " \
+                    "re-raised" not in child.stderr:
+                failures.append("loaded-exit vector {}: expected a fresh KeyboardInterrupt (130) with the "
+                                "interrupt message, got {}".format(label, child.returncode))
+        elif child.returncode != 2 or "check_opf_prompt_pack: cannot evaluate: in-process code raised" \
                 not in child.stderr:
             failures.append("loaded-exit vector {}: expected exit 2 with the backstop message, got {}".format(
                 label, child.returncode))
@@ -614,7 +635,7 @@ sys.exit(0)
             count += len(_LOADED_EXIT_CASES)
             print("{} loaded-exit-vectors: {}".format(
                 "FAIL" if loaded_failures else "PASS",
-                "; ".join(loaded_failures) or "{} exit 2 through the entry".format(len(_LOADED_EXIT_CASES))))
+                "; ".join(loaded_failures) or "{} exit 2 or interrupt through the entry".format(len(_LOADED_EXIT_CASES))))
             failures.extend(loaded_failures)
         count += 1
         if compute_digest("1.0.0", []) != "sha256:" + _sha(b"opf.prompt-pack/v1\nversion 1.0.0\n"):

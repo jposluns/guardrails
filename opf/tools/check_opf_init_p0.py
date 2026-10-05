@@ -296,16 +296,50 @@ def red_on_revert(source, f):
         check(source.count(old) == 1, "revert/" + guard + "/unique-source")
         module = types.ModuleType("_opf_init_p0_reverted")
         module.__file__ = p0.__file__
-        exec(compile(source.replace(old, new), module.__file__, "exec"), module.__dict__)
+        # The reverted source is loaded and called in this process: a process ending from it (SystemExit 0
+        # or None, GeneratorExit, any other BaseException) is a harness failure, CANNOT-EVALUATE (exit 2) in
+        # main, never this gate's status; a KeyboardInterrupt propagates so an operator's Ctrl-C stops the run.
+        try:
+            exec(compile(source.replace(old, new), module.__file__, "exec"), module.__dict__)
+        except (Exception, KeyboardInterrupt):
+            raise
+        except BaseException:  # noqa: BLE001  a process ending at load is cannot-evaluate, never a pass
+            raise RuntimeError("revert/" + guard + ": the reverted source ended the process at load; "
+                               "fail-closed") from None
         before = fingerprint(f)
         try:
             run_case(module, cases[identity], f)
         except AssertionError as exc:
             check(str(exc) == identity, "revert/" + guard + "/wrong-assertion")
+        except (Exception, KeyboardInterrupt):
+            raise
+        except BaseException:  # noqa: BLE001  a process ending in a call is cannot-evaluate, never a pass
+            raise RuntimeError("revert/" + guard + ": the reverted source ended the process in a call; "
+                               "fail-closed") from None
         else:
             raise AssertionError("revert/" + guard + "/not-red")
         check(fingerprint(f) == before, "revert/" + guard + "/fixture-changed")
         print("RED {} -> {}".format(guard, identity))
+
+
+def red_on_revert_loaded_exit(source, f):
+    """A reverted source that ends the process at load is a harness failure through red_on_revert (the
+    RuntimeError main reports as CANNOT-EVALUATE, exit 2), never an early exit with the loaded code's status;
+    a KeyboardInterrupt propagates as itself. Red if the load guard in red_on_revert is removed."""
+    for label, body, want in (("SystemExit(0)", "raise SystemExit(0)\n", RuntimeError),
+                              ("SystemExit(None)", "raise SystemExit\n", RuntimeError),
+                              ("GeneratorExit", "raise GeneratorExit\n", RuntimeError),
+                              ("BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n",
+                               RuntimeError),
+                              ("KeyboardInterrupt", "raise KeyboardInterrupt\n", KeyboardInterrupt)):
+        try:
+            red_on_revert(source + "\n" + body, f)
+        except BaseException as exc:  # noqa: BLE001  any escape is recorded, never this test's own end
+            got = type(exc)
+        else:
+            got = None
+        check(got is want, "revert/loaded-exit/" + label)
+        print("PASS revert/loaded-exit/" + label)
 
 
 # Prefixed to the runner text in place of a python3 shell function. A
@@ -1013,6 +1047,7 @@ def main():
         ids = run_vectors(p0, f)
         if not args.vectors_only:
             if args.red_on_revert:
+                red_on_revert_loaded_exit(Path(p0.__file__).read_text(encoding="utf-8"), f)
                 red_on_revert(Path(p0.__file__).read_text(encoding="utf-8"), f)
             runner_check(ids)
             print("PASS runner/declared-test-executes")
