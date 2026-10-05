@@ -438,7 +438,7 @@ def _rdp_cases(tmp):
         "orch-dispatch --brief " + good + " < " + good,
         "orch-dispatch",
         "orch-dispatch --brief " + good + " --brief=" + good)],
-        ["deny"] * 6)
+        ["unverifiable", "unverifiable", "deny", "unverifiable", "deny", "deny"])
     # A file literally named $BRIEF exists, so only the expansion check stops the literal read of it.
     (f.root / "$BRIEF").write_text("Review-target: working-tree\n", encoding="utf-8")
     check("rdp/opaque-brief-arg-unverifiable", _rdp_kind(f.run("orch-dispatch --brief $BRIEF")), "unverifiable")
@@ -449,7 +449,7 @@ def _rdp_cases(tmp):
           _rdp_kind(f.run("cd " + str(f.root) + " && orch-dispatch --brief " + rel)), "unverifiable")
     check("rdp/wrapper-prefixed-dispatch-recognized", [_rdp_kind(f.run(c + branch_only)) for c in (
         "env FOO=1 nice -n 5 orch-dispatch --brief ", "command /usr/local/bin/orch-dispatch --brief=",
-        "true && nohup orch-dispatch --brief ")], ["deny", "deny", "deny"])
+        "true && nohup orch-dispatch --brief ")], ["unverifiable", "unverifiable", "unverifiable"])
     import signal as _signal
 
     class _Blocked(BaseException):
@@ -609,45 +609,30 @@ def _rdp_cases(tmp):
     (ec.root / "brief.txt").write_text(open(ec.good(), encoding="utf-8").read(), encoding="utf-8")
     (ec.root / "src" / "brief.txt").write_text("Review-target: revision\nReview-branch: main\n",
                                                 encoding="utf-8")
-    check("rdp/env-chdir-followed", [_rdp_kind(ec.run(c)) for c in (
+    # Only a provably plain dispatch is checked: every wrapper (env and its -C and -S forms, as GNU env and
+    # other env builds read them, timeout, nohup, sudo, xargs, setsid, ionice) is withheld, so no wrapper
+    # grammar decides which brief is read or where.
+    check("rdp/wrapped-dispatch-unverifiable", [_rdp_kind(ec.run(c)) for c in (
         "orch-dispatch --brief brief.txt", "env -C src orch-dispatch --brief brief.txt",
-        "env --chdir=src orch-dispatch --brief brief.txt", "env -iCsrc FOO=1 orch-dispatch --brief brief.txt",
-        "env --ch src orch-dispatch --brief brief.txt", "env -C src orch-dispatch --brief ../brief.txt",
-        "env -C " + str(ec.briefs) + " orch-dispatch --brief " + ec.good(),
-        "env -S '-C src' orch-dispatch --brief brief.txt")],
-        ["allow", "deny", "deny", "deny", "deny", "allow", "unverifiable", "deny"])
-    # src/brief.txt pins nothing: a dispatch of it that is followed is a plain deny (no pin), while one the
-    # hook could not follow would be UNVERIFIABLE, and brief.txt is the reconciled brief (allow).
-    check("rdp/env-split-string-followed", [_rdp_kind(ec.run(c)) for c in (
-        "env -Sorch-dispatch --brief src/brief.txt", "env -S 'orch-dispatch --brief src/brief.txt'",
-        "env --split-string='orch-dispatch --brief src/brief.txt'",
-        "env --split-string 'orch-dispatch --brief src/brief.txt'",
-        "env -iS'orch-dispatch --brief src/brief.txt'", "env --sp='-C src orch-dispatch --brief brief.txt'",
-        "env -S'env -Sorch-dispatch' --brief src/brief.txt", "env -S \"orch-dispatch '--brief' src/brief.txt\"",
-        "env -Sorch-dispatch --brief brief.txt", "env -S 'orch-dispatch --brief brief.txt'")],
-        ["deny"] * 8 + ["allow", "allow"])
-    check("rdp/env-form-not-read-exactly-unverifiable", [_rdp_kind(ec.run(c)) for c in (
-        "env -S'orch-dispatch --brief brief.txt #'", "env -S'orch-dispatch --brief ${B}'",
-        "env -S'orch-dispatch --brief \"brief.txt'", "env -S'orch-dispatch\\_--brief brief.txt'",
-        "env --default-signal orch-dispatch --brief brief.txt", "timeout --frobnicate 5 ls",
-        "sudo env -Sorch-dispatch --brief src/brief.txt", "env -S'ls -l' /tmp")],
-        ["unverifiable"] * 7 + ["allow"])
-    check("rdp/env-dash-and-assignments-exact", [_rdp_kind(ec.run(c)) for c in (
-        "env - FOO=1 orch-dispatch --brief src/brief.txt", "env ./x=y orch-dispatch --brief src/brief.txt",
-        "env -- - orch-dispatch --brief src/brief.txt")], ["deny", "deny", "deny"])
+        "env --chdir=src orch-dispatch --brief brief.txt", "env -C src -C .. orch-dispatch --brief brief.txt",
+        "env -S '-C src' orch-dispatch --brief brief.txt", "env -Sorch-dispatch --brief src/brief.txt",
+        "env A=1 -S'orch-dispatch --brief src/brief.txt'", "env -S'A=1' -S'orch-dispatch --brief src/brief.txt'",
+        "env -S'orch-dispatch --brief brief.txt' -S'--brief src/brief.txt'",
+        "env -S$'orch-dispatch\\t--brief\\tsrc/brief.txt'", "sudo env -Sorch-dispatch --brief src/brief.txt",
+        "timeout 600 orch-dispatch --brief brief.txt", "setsid orch-dispatch --brief brief.txt",
+        "sudo -u me orch-dispatch --brief brief.txt", "xargs orch-dispatch --brief brief.txt",
+        "ionice -c3 orch-dispatch --brief brief.txt", "bash -c 'orch-dispatch --brief src/brief.txt'")],
+        ["allow"] + ["unverifiable"] * 16)
+    check("rdp/command-naming-no-dispatch-allows", [_rdp_kind(ec.run(c)) for c in (
+        "timeout --frobnicate 5 ls", "env -S'ls -l' /tmp", "ls -la && git log --oneline | head -3",
+        "echo $HOME > /dev/null", "other-dispatch --brief src/brief.txt")], ["allow"] * 5)
     check("rdp/cd-then-absolute-brief-unverifiable",
           _rdp_kind(f.run("cd " + str(f.root / "src") + " && orch-dispatch --brief " + f.good())), "unverifiable")
     good = f.good()
-    check("rdp/wrapper-timeout-followed-others-withheld", [_rdp_kind(f.run(c)) for c in (
-        "timeout 600 orch-dispatch --brief " + branch_only,
-        "timeout -k 5 --signal=TERM 60 orch-dispatch --brief " + good,
-        "setsid orch-dispatch --brief " + good, "sudo -u me orch-dispatch --brief " + good,
-        "xargs orch-dispatch --brief " + good, "ionice -c3 orch-dispatch --brief " + good)],
-        ["deny", "allow", "unverifiable", "unverifiable", "unverifiable", "unverifiable"])
     check("rdp/abbreviated-second-brief-denies", [_rdp_kind(f.run("orch-dispatch --brief " + good + c)) for c in (
         " --brie " + branch_only, " --bri=" + branch_only)], ["deny", "deny"])
     check("rdp/unrelated-descriptor-redirect", [_rdp_kind(f.run("orch-dispatch --brief " + good + c)) for c in (
-        " 3</dev/null", " 0<" + good, " <&3")], ["allow", "deny", "deny"])
+        " 3</dev/null", " 0<" + good, " <&3")], ["allow", "unverifiable", "unverifiable"])
 
     ff = RdpFixture(base, "fifos")
     fifo_brief = ff.briefs / "fifo-brief.txt"
@@ -781,6 +766,123 @@ def _rdp_cases(tmp):
     check("rdp/attached-short-second-brief-denies", [_rdp_kind(f.run("orch-dispatch -b " + good + c)) for c in (
         "", " -b" + branch_only)], ["allow", "deny"])
     f.write_registry(f.binding)
+    # ---------- QA round 3: only a provably plain dispatch is checked; everything else naming one withholds ----------
+    check("rdp/second-brief-alias-or-group-denies", [_rdp_kind(f.run(c)) for c in (
+        "orch-dispatch --brief " + good + " -b " + branch_only, "orch-dispatch --brief " + good + " extra",
+        "orch-dispatch -- --brief " + good, "orch-dispatch -b " + branch_only + " --brief " + good)],
+        ["deny", "deny", "deny", "allow"])
+    f.write_registry(dict(f.binding, brief_option="-b"))
+    check("rdp/grouped-short-second-brief-denies", [_rdp_kind(f.run("orch-dispatch -b " + good + c)) for c in (
+        " -xb " + branch_only, " -xb" + branch_only, "")], ["deny", "deny", "allow"])
+    f.write_registry(f.binding)
+    pl = RdpFixture(base, "plain")
+    (pl.root / "brief.txt").write_text(open(pl.good(), encoding="utf-8").read(), encoding="utf-8")
+    (pl.root / "src" / "brief.txt").write_text("Review-target: revision\nReview-branch: main\n", encoding="utf-8")
+    check("rdp/quote-split-or-expanded-name-unverifiable", [_rdp_kind(pl.run(c)) for c in (
+        "cat <<EOF >/dev/null\nx\nEOF\norch-dis''patch --brief src/brief.txt",
+        "diff <(true) /dev/null; orch-dis\\patch --brief src/brief.txt",
+        "{orch-dispatch,} --brief src/brief.txt", "D=orch-dispatch; $D --brief src/brief.txt",
+        "$'\\x6frch-dispatch' --brief src/brief.txt", "$'orch\\x2ddispatch' --brief src/brief.txt",
+        "$\"orch-dispatch\" --brief src/brief.txt", "\\orch-dispatch --brief src/brief.txt",
+        "orch-dispatch --brief brief.txt > out.log", "o{r,}ch-dispatch --brief src/brief.txt")],
+        ["unverifiable"] * 10)
+    check("rdp/shell-control-before-dispatch-unverifiable", [_rdp_kind(pl.run(c)) for c in (
+        "eval cd src; orch-dispatch --brief brief.txt", "pushd src; orch-dispatch --brief brief.txt",
+        "if true; then cd src; fi; orch-dispatch --brief brief.txt", ". ./env.sh; orch-dispatch --brief brief.txt",
+        "PWD=src orch-dispatch --brief brief.txt", "orch-dispatch --brief brief.txt; orch-dispatch --brief brief.txt")],
+        ["unverifiable"] * 6)
+    check("rdp/plain-dispatch-forms-allow", [_rdp_kind(pl.run(c)) for c in (
+        "orch-dispatch --brief brief.txt </dev/null", "orch-dispatch --brief brief.txt 0</dev/null",
+        "orch-dispatch --family x --brief=brief.txt", "'orch-dispatch' \"--brief\" 'brief.txt'",
+        "/usr/local/bin/orch-dispatch --brief brief.txt", "git status && orch-dispatch --brief brief.txt",
+        "orch-dispatch --brief brief.txt | tee /dev/null", "orch-dispatch --brief brief.txt &")], ["allow"] * 8)
+    # A linked worktree, inside the orchestrated tree or beside it, is scoped by the main worktree's registry.
+    lw = RdpFixture(base, "linked")
+    lw_branch = lw.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    _rdp_git(lw.root, "worktree", "add", "-q", "--detach", str(lw.root / ".worktrees" / "rev"), lw.pin)
+    _rdp_git(lw.root, "worktree", "add", "-q", "--detach", str(base / "linked-beside"), lw.pin)
+    check("rdp/linked-worktree-scoped", [_rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(wt), session_id="s1", tool_name="Bash",
+        tool_input=dict(command="orch-dispatch --brief " + lw_branch)))) for wt in (
+            lw.root / ".worktrees" / "rev", base / "linked-beside")], ["deny", "deny"])
+    real_walk = aiqt_hooks._rdp_registry_dir
+    aiqt_hooks._rdp_registry_dir = lambda cwd: ("fail", "the ancestor walk failed")
+    try:
+        walk_fail = [_verdict(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(bare), session_id="s1", tool_name="Bash",
+            tool_input=dict(command="ls", run_in_background=bg)))) for bg in (True, False)]
+    finally:
+        aiqt_hooks._rdp_registry_dir = real_walk
+    check("rdp/ancestor-walk-failure-withholds", walk_fail, ["deny", "warn"])
+    # A submodule's .gitmodules `ignore = all` cannot hide its bump from the changed set, and its checkout is
+    # compared with the pinned gitlink.
+    sb = RdpFixture(base, "submodule")
+    (sb.root / ".gitmodules").write_text('[submodule "lib"]\n\tpath = lib\n\turl = ./lib\n\tignore = all\n',
+                                          encoding="utf-8")
+    _rdp_git(sb.root, "add", ".gitmodules")
+    _rdp_git(sb.root, "update-index", "--add", "--cacheinfo", "160000," + sb.seed + ",lib")
+    _rdp_git(sb.root, "commit", "-q", "-m", "add lib")
+    _rdp_git(sb.root, "update-index", "--cacheinfo", "160000," + sb.pin + ",lib")
+    (sb.root / "src" / "a.py").write_text("a = 4\n", encoding="utf-8")
+    _rdp_git(sb.root, "add", "src/a.py")
+    _rdp_git(sb.root, "commit", "-q", "-m", "bump lib")
+    sb_pin = _rdp_git(sb.root, "rev-parse", "HEAD")
+    sb.authority(sb_pin + "\n")
+    (sb.root / "lib").mkdir()
+    sb_got = [_rdp_kind(sb.dispatch(sb.good(pin=sb_pin, paths=p))) for p in (("src/a.py",), ("lib", "src/a.py"))]
+    _rdp_git(base, "init", "-q", "-b", "main", str(sb.root / "lib"))
+    _rdp_git(sb.root / "lib", "commit", "-q", "--allow-empty", "-m", "other")
+    sb_got.append(_rdp_kind(sb.dispatch(sb.good(pin=sb_pin, paths=("lib", "src/a.py")))))
+    check("rdp/submodule-ignore-config-neutralized", sb_got, ["deny", "allow", "deny"])
+    # A file the pin replaces with a directory is clean when the directory holds the pin's own entries; a
+    # directory where the pin has nothing is not.
+    fd_ = RdpFixture(base, "filetodir")
+    (fd_.root / "seed.txt").unlink()
+    (fd_.root / "seed.txt").mkdir()
+    (fd_.root / "seed.txt" / "inner.txt").write_text("inner\n", encoding="utf-8")
+    _rdp_git(fd_.root, "add", "-A", "--", "seed.txt")
+    _rdp_git(fd_.root, "commit", "-q", "-m", "file to dir")
+    fd_pin = _rdp_git(fd_.root, "rev-parse", "HEAD")
+    fd_.authority(fd_pin + "\n")
+    fd_got = [_rdp_kind(fd_.dispatch(fd_.good(pin=fd_pin, paths=("seed.txt", "seed.txt/inner.txt"))))]
+    dd = RdpFixture(base, "deleteddir")
+    (dd.root / "old.txt").mkdir()
+    (dd.root / "old.txt" / "x").write_text("untracked\n", encoding="utf-8")
+    fd_got.append(_rdp_kind(dd.dispatch(dd.good())))
+    check("rdp/file-replaced-by-directory", fd_got, ["allow", "deny"])
+    # A declared symlink is compared by its target.
+    sl = RdpFixture(base, "symlink")
+    (sl.root / "src" / "l").symlink_to("../seed.txt")
+    _rdp_git(sl.root, "add", "src/l")
+    _rdp_git(sl.root, "commit", "-q", "-m", "link")
+    sl_pin = _rdp_git(sl.root, "rev-parse", "HEAD")
+    sl.authority(sl_pin + "\n")
+    (sl.root / "src" / "l").unlink()
+    (sl.root / "src" / "l").symlink_to("../old.txt")
+    sl_got = [_rdp_kind(sl.dispatch(sl.good(pin=sl_pin, paths=("src/l",))))]
+    (sl.root / "src" / "l").unlink()
+    (sl.root / "src" / "l").symlink_to("../seed.txt")
+    sl_got.append(_rdp_kind(sl.dispatch(sl.good(pin=sl_pin, paths=("src/l",)))))
+    check("rdp/symlink-target-compared", sl_got, ["deny", "allow"])
+    # A read that blocks in the kernel (a hung filesystem; here a sleep that never checks the deadline) cannot
+    # hold the hook past its budget.
+    real_blob = aiqt_hooks._rdp_blob_id
+
+    def _hung_blob(fmt, header_size, fd):
+        aiqt_hooks.time.sleep(3)
+        return real_blob(fmt, header_size, fd)
+    saved_budget = aiqt_hooks._RDP_BUDGET
+    aiqt_hooks._RDP_BUDGET = 1.0
+    aiqt_hooks._rdp_blob_id = _hung_blob
+    started = aiqt_hooks.time.monotonic()
+    try:
+        hung_kind = _rdp_kind(f.dispatch(f.good()))
+    finally:
+        aiqt_hooks._rdp_blob_id = real_blob
+        aiqt_hooks._RDP_BUDGET = saved_budget
+    check("rdp/hung-read-bounded-by-deadline", (hung_kind, aiqt_hooks.time.monotonic() - started < 2.0),
+          ("unverifiable", True))
+    aiqt_hooks.time.sleep(2.5)   # the abandoned worker finishes before the next vector uses f
     mf = RdpFixture(base, "mutants")
     check("rdp/duplicate-repo-or-branch-unverifiable", [_rdp_kind(mf.dispatch(mf.good(extra=[
         lab + " " + v, lab + " " + v]))) for lab, v in (("Review-repo:", str(mf.root)), ("Review-branch:", "main"))],
