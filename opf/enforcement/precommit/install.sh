@@ -46,11 +46,14 @@
 # there just after (a directory or a link to one that arrives in between would have ln link into it).
 # When a step fails (a write that stops partway on a full disk, say, a stub that does not read back as a
 # regular, readable, executable file with the exact stub text, or such an arrival), it removes only what
-# this run created, and the hooks directory if it created it, before it exits 2, and names anything it
-# could not remove.
-# A hangup, interrupt or termination signal runs the same removal and exits 2, at any point: each write
-# is recorded before it is made, and the removal looks at what is there, so a write the signal follows is
-# removed or named, and the refusal says nothing this run wrote is left only when that is so.
+# this run created, and the hooks directory if it created it, before it exits 2. It then looks again and
+# names what is at the hooks directory, the stub path and the private directory, by file type alone
+# (never by a content comparison, which can fail), so the refusal states what it saw, not what it meant
+# to remove.
+# A hangup, interrupt or termination signal runs the same removal and report and exits 2, at any point.
+# A directory counts as this run's only once its mkdir has succeeded, so a mkdir that fails leaves a
+# directory that arrived in its place alone; a signal in the instant between that success and the record
+# can leave one empty directory, which the report names.
 # Exit status: 0 installed or already installed, 2 refused or cannot evaluate.
 #
 # Threat model: the installer runs unprivileged, as the user who owns the clone. It defends against a
@@ -61,8 +64,8 @@
 # them, since each write names the path again; one that swaps the stub path between the symbolic-link
 # check and the same-file check after ln defeats that check; and one that retargets a link that arrived
 # at the stub path makes the removal look at the new target, so a link ln made in the first one is left
-# while the refusal says nothing this run wrote is left. A working tree named only at run time
-# (GIT_WORK_TREE or --work-tree) is not known to this installer either.
+# and the report, which names the link at the stub path, does not name it. A working tree named only at
+# run time (GIT_WORK_TREE or --work-tree) is not known to this installer either.
 #
 # Every inherited GIT_ variable is dropped before the first git call, except the three that name the
 # global and system configuration files (GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM), and
@@ -329,40 +332,66 @@ is_stub() {
 priv=$hooks/.opf-pre-commit-install.$$
 tmp=$priv/.opf-pre-commit-stub.$$
 strayed=$stub/${tmp##*/}
-# Each write is recorded before it is made (made_dir, made_priv, linking), at a path checked to be free
-# just before, and the removal looks at what is there: a signal that lands just after a write (the
-# shell runs the trap once the command it is waiting for returns) finds that write recorded.
+# made_dir and made_priv are set only once their mkdir has succeeded (a mkdir that fails leaves the
+# directory that arrived in its place alone); linking is set just before ln.
 made_dir=
 made_priv=
 linking=
 linked=
+# Add to seen what is at the path $1, by file type alone (-L first, so no link is followed), never by its
+# content: a comparison that cannot read a file must not read as its absence. Nothing is named only when
+# the directory $2 that would hold $1 is one this user can search.
+at() {
+    if [ -L "$1" ]; then
+        what="a symbolic link"
+    elif [ -d "$1" ]; then
+        what="a directory"
+    elif [ -f "$1" ]; then
+        what="a regular file"
+    elif [ -e "$1" ]; then
+        what="a file of another type"
+    elif [ -d "$2" ] && [ -x "$2" ]; then
+        what="nothing"
+    else
+        what="not known (the directory $2 cannot be searched)"
+    fi
+    seen="$seen${seen:+;} $1: $what"
+}
 # Undo what this run created, and nothing else: the stub only while it is still this run's link (the
 # same file as the temporary one, or, once ln is checked and the temporary one removed, the exact stub
 # text), a link ln made inside a directory that arrived at the stub path only while it is the same file
-# as the temporary one, then the private directory and the hooks directory if this run created them and
-# they are there. Anything it cannot remove is named. The signals trapped below are ignored while it runs.
+# as the temporary one, then the private directory and the hooks directory if this run's mkdir made
+# them. It then refuses, naming what is at the hooks directory and, while that is a real directory, at
+# the stub path, the private directory, and the name ln would use inside a directory at the stub path.
+# An rmdir that fails says nothing of its own: the report names what is there. The signals trapped below
+# are ignored while it runs.
 rollback() {
     trap '' HUP INT TERM
-    left=
     if [ -n "$linking" ]; then
         if [ ! -L "$stub" ] && { [ "$stub" -ef "$tmp" ] || { [ -n "$linked" ] && [ ! -e "$tmp" ] && is_stub "$stub"; }; }; then
             rm -f -- "$stub"
-            [ ! -e "$stub" ] && [ ! -L "$stub" ] || left="$left $stub"
         fi
         if [ "$strayed" -ef "$tmp" ]; then
             rm -f -- "$strayed"
-            [ ! "$strayed" -ef "$tmp" ] || left="$left $strayed"
         fi
     fi
-    if [ -n "$made_priv" ] && { [ -e "$priv" ] || [ -L "$priv" ]; }; then
+    if [ -n "$made_priv" ]; then
         rm -f -- "$tmp"
-        rmdir -- "$priv" || left="$left $priv"
+        rmdir -- "$priv" 2> /dev/null
     fi
-    if [ -n "$made_dir" ] && { [ -e "$hooks" ] || [ -L "$hooks" ]; }; then
-        rmdir -- "$hooks" || left="$left $hooks"
+    if [ -n "$made_dir" ]; then
+        rmdir -- "$hooks" 2> /dev/null
     fi
-    [ -z "$left" ] || fail "$1; this run could not remove what it wrote at:$left; remove it by hand"
-    fail "$1; nothing this run wrote is left"
+    seen=
+    at "$hooks" "$common"
+    if [ ! -L "$hooks" ] && [ -d "$hooks" ]; then
+        at "$stub" "$hooks"
+        at "$priv" "$hooks"
+        if [ ! -L "$stub" ] && [ -d "$stub" ]; then
+            at "$strayed" "$stub"
+        fi
+    fi
+    fail "$1; after the removal, what is there:$seen"
 }
 # A hangup, interrupt or termination undoes the same way (the shell runs the trap once the command it
 # is waiting for returns).
@@ -381,16 +410,16 @@ elif [ -e "$hooks" ]; then
         fail "$stub is a pre-commit hook that installing would replace; remove it, or have it run ./$rel/pre-commit, first"
     fi
 else
-    made_dir=1
     mkdir -- "$hooks" || rollback "could not create the hooks directory $hooks"
+    made_dir=1
 fi
 # The stub is written and checked in a private directory this run creates (mkdir never takes an
 # existing name, so everything in it is this run's), then linked into place: ln never replaces a file, so
 # a hook that appeared since the check above is kept, and git never runs a part-written stub.
 [ ! -e "$priv" ] && [ ! -L "$priv" ] || \
     rollback "the private directory $priv is already there (an earlier run left it; remove it)"
-made_priv=1
 mkdir -m 700 -- "$priv" || rollback "could not create the private directory $priv"
+made_priv=1
 ( set -C; printf '%s\n' "$body" > "$tmp" ) || rollback "could not write the stub as $tmp"
 chmod 755 "$tmp" || rollback "could not make $tmp executable"
 is_stub "$tmp" || rollback "$tmp did not read back as a readable, executable file with the exact stub text"

@@ -102,9 +102,14 @@ main one, and equal to the top level (`gitdir: .`); a git directory outside ever
 holds the git directory, a git directory inside the main worktree's core.worktree from a linked worktree
 (one outside it installs), a registry entry naming a top level of /, a linked worktree at the hooks
 directory, a hand-written .git file naming the git directory, a linked worktree moved by hand, an empty
-core.worktree (a stand-in git answers one), and a termination signal mid-install, which rolls back; a
-signal just after the hooks directory's mkdir, the private directory's mkdir, the ln, or the final rmdir
-leaves nothing and says so. The main worktree's core.worktree is checked with no .git entry at that top
+core.worktree (a stand-in git answers one), and a termination signal mid-install, which rolls back. A
+refusal after rollback names what is at the hooks directory, the stub path and the private directory by
+file type: a signal just after the ln or the final rmdir leaves nothing and says so; one just after the
+hooks directory's or the private directory's mkdir leaves that empty directory and names it; one that
+arrives before the hooks directory's mkdir leaves no hooks directory and names none; a stub the rollback
+cannot read is named, not taken as gone; a hooks directory that cannot be searched leaves the paths in it
+named as not known. A mkdir that fails because a directory arrived first leaves that directory and its
+contents, and a private directory an earlier run left is refused and kept. The main worktree's core.worktree is checked with no .git entry at that top
 level. A core.hooksPath only another linked worktree reads (its config.worktree, or
 an includeIf onbranch: for its branch) is refused, and so is a worktree registry that cannot be read
 (unprivileged user only). The existing stub is compared byte for byte: one more trailing newline, or a
@@ -1692,17 +1697,58 @@ def _self_test_isolated():
             expect("install-signal-rolls-back",
                    (rc, sorted(n for n in os.listdir(str(signalled / ".git" / "hooks"))
                                if n == "pre-commit" or n.startswith(".opf-"))), (EXIT_ERROR, []))
-            # A signal that lands just after a write (the stand-in runs the real command, then sends TERM; the
-            # installer runs the trap as soon as that command returns): after the mkdir of the hooks directory,
-            # the mkdir of the private directory, the ln, and the final rmdir. Each is refused (2), leaves no
-            # hooks directory it created, no stub and no private directory, and says nothing this run wrote is
-            # left (true only then).
+            # A refusal after rollback names what is at the hooks directory and, while that is a directory, at
+            # the stub path and the private directory, by file type. The installer runs from a shell that
+            # records its process id and then execs it (so the private directory's name is known); the last
+            # line of its error output is the refusal.
             real_rmdir = shutil.which("rmdir")
-            if real_rmdir is None:
-                raise OSError("rmdir not found on PATH; the signal vectors cannot be built")
+            real_cmp = shutil.which("cmp")
+            if real_rmdir is None or real_cmp is None:
+                raise OSError("rmdir or cmp not found on PATH; the signal vectors cannot be built")
             sh_path = shutil.which("sh")
             if sh_path is None:
                 raise OSError("sh not found on PATH; the signal vectors cannot be built")
+
+            def _install_seen(root, env, label):
+                err = base / (label + ".err")
+                pid = base / (label + ".pid")
+                rc = _run(["-c", 'printf "%s\\n" "$$" > "$3" && exec "$2" "$0" 2> "$1"', str(root / rel / "install.sh"),
+                           str(err), os.path.abspath(sh_path), str(pid)], base, env)
+                lines = err.read_text(encoding="utf-8", errors="replace").strip().split("\n")
+                return rc, lines, ".opf-pre-commit-install." + pid.read_text(encoding="utf-8").strip()
+
+            def _seen(reason, root, priv, hooks_kind, stub_kind="nothing", priv_kind="nothing"):
+                hooks_dir = root / ".git" / "hooks"
+                text = "opf-pre-commit install: refused: " + reason + "; after the removal, what is there: "
+                text += str(hooks_dir) + ": " + hooks_kind
+                if hooks_kind == "a directory":
+                    text += "; " + str(hooks_dir / "pre-commit") + ": " + stub_kind
+                    text += "; " + str(hooks_dir / priv) + ": " + priv_kind
+                return text
+
+            def _opf_names(root):
+                hooks_dir = root / ".git" / "hooks"
+                if not hooks_dir.is_dir():
+                    return None
+                return sorted((n, sorted(os.listdir(str(hooks_dir / n))) if (hooks_dir / n).is_dir() else "file")
+                              for n in os.listdir(str(hooks_dir)) if n == "pre-commit" or n.startswith(".opf-"))
+
+            def _shimmed(tag, tools):
+                env = _path_without(next(iter(tools)), install_tools, tag)
+                for tool, (real, body) in tools.items():
+                    shim = Path(env["PATH"]) / tool
+                    if shim.exists() or shim.is_symlink():
+                        os.remove(str(shim))
+                    shim.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+                    os.chmod(str(shim), 0o755)
+                    env["OPF_QA_REAL_" + tool.upper()] = os.path.abspath(real)
+                return env
+
+            # A signal that lands just after a write (the stand-in runs the real command, then sends TERM; the
+            # installer runs the trap as soon as that command returns). After the ln or the final rmdir it
+            # leaves no stub and no private directory and names nothing at either. After a mkdir, the trap
+            # runs before the directory is recorded as this run's, so that one empty directory is left and
+            # named (the disclosed instant).
             for label, tool, real, when in (("hooks-mkdir", "mkdir", real_mkdir, '[ "$1" = -- ]'),
                                             ("private-mkdir", "mkdir", real_mkdir, '[ "$1" = -m ]'),
                                             ("ln", "ln", real_ln, ":"),
@@ -1714,21 +1760,104 @@ def _self_test_isolated():
                         shutil.rmtree(str(after_hooks))
                 else:
                     after_hooks.mkdir(exist_ok=True)
-                after_env = _path_without(tool, install_tools, "install-signal-after-" + label)
-                after_shim = Path(after_env["PATH"]) / tool
-                after_shim.write_text('#!/bin/sh\n"$OPF_QA_REAL" "$@" || exit $?\n'
-                                      + when + ' && kill -TERM "$PPID"\nexit 0\n', encoding="utf-8")
-                os.chmod(str(after_shim), 0o755)
-                after_env.update(OPF_QA_REAL=os.path.abspath(real))
-                after_err = base / ("install-signal-after-" + label + ".err")
-                rc = _run(["-c", '"$2" "$0" 2> "$1"', str(after / rel / "install.sh"), str(after_err),
-                           os.path.abspath(sh_path)], base, after_env)
-                left = (after_hooks.exists() if label == "hooks-mkdir" else
-                        sorted(n for n in os.listdir(str(after_hooks)) if n == "pre-commit" or n.startswith(".opf-")))
-                expect("install-signal-after-" + label + "-leaves-nothing",
-                       (rc, left, after_err.read_text(encoding="utf-8", errors="replace").strip()),
-                       (EXIT_ERROR, False if label == "hooks-mkdir" else [],
-                        "opf-pre-commit install: refused: stopped by a signal; nothing this run wrote is left"))
+                after_env = _shimmed("install-signal-after-" + label, {tool: (real, (
+                    '"$OPF_QA_REAL_' + tool.upper() + '" "$@" || exit $?\n' + when
+                    + ' && kill -TERM "$PPID"\nexit 0\n'))})
+                rc, lines, priv = _install_seen(after, after_env, "install-signal-after-" + label)
+                outcome = ("names-the-directory" if label.endswith("mkdir") else "leaves-nothing")
+                expect("install-signal-after-" + label + "-" + outcome,
+                       (rc, _opf_names(after), lines[-1]),
+                       (EXIT_ERROR, [(priv, [])] if label == "private-mkdir" else [],
+                        _seen("stopped by a signal", after, priv, "a directory",
+                              priv_kind="a directory" if label == "private-mkdir" else "nothing")))
+            # A mkdir that fails because a directory arrived after the check (the stand-in makes it, then runs
+            # the real mkdir) leaves that directory and its contents alone and names it: the hooks directory,
+            # and a private directory holding a file at the temporary stub's name.
+            for label, when, arrive in (
+                    ("hooks", '[ "$1" = -- ]', '"$OPF_QA_REAL_MKDIR" -- "$2"'),
+                    ("private", '[ "$1" = -m ]',
+                     '"$OPF_QA_REAL_MKDIR" -- "$4" && printf x > "$4/.opf-pre-commit-stub.${4##*.}"')):
+                arrived = _fixture("install-mkdir-arrival-" + label)
+                arrived_hooks = arrived / ".git" / "hooks"
+                if label == "hooks":
+                    if arrived_hooks.exists():
+                        shutil.rmtree(str(arrived_hooks))
+                else:
+                    arrived_hooks.mkdir(exist_ok=True)
+                arrived_env = _shimmed("install-mkdir-arrival-" + label, {"mkdir": (real_mkdir, (
+                    when + " && { " + arrive + ' || exit 1; }\nexec "$OPF_QA_REAL_MKDIR" "$@"\n'))})
+                rc, lines, priv = _install_seen(arrived, arrived_env, "install-mkdir-arrival-" + label)
+                expect("install-failed-" + label + "-mkdir-keeps-arrived-dir",
+                       (rc, _opf_names(arrived), lines[-1]),
+                       (EXIT_ERROR, [(priv, [".opf-pre-commit-stub." + priv.rsplit(".", 1)[1]])] if label == "private"
+                        else [],
+                        _seen("could not create the " + ("hooks directory " + str(arrived_hooks) if label == "hooks"
+                                                         else "private directory " + str(arrived_hooks / priv)),
+                              arrived, priv, "a directory",
+                              priv_kind="a directory" if label == "private" else "nothing")))
+            # A signal after the final rmdir, with the stub unreadable to the rollback's comparison once the
+            # temporary file is gone (a stand-in cmp fails then): the stub is kept and named as a regular
+            # file, not taken as gone.
+            unread = _fixture("install-signal-unreadable-stub")
+            (unread / ".git" / "hooks").mkdir(exist_ok=True)
+            unread_env = _shimmed("install-signal-unreadable-stub", {
+                "rmdir": (real_rmdir, '"$OPF_QA_REAL_RMDIR" "$@" || exit $?\nkill -TERM "$PPID"\n'),
+                "cmp": (real_cmp, 'case "$4" in\n*/pre-commit)\n'
+                        '    for t in "${4%/*}"/.opf-pre-commit-install.*/.opf-pre-commit-stub.*; do\n'
+                        '        [ -e "$t" ] && exec "$OPF_QA_REAL_CMP" "$@"\n    done\n    exit 2 ;;\nesac\n'
+                        'exec "$OPF_QA_REAL_CMP" "$@"\n')})
+            rc, lines, priv = _install_seen(unread, unread_env, "install-signal-unreadable-stub")
+            expect("install-signal-unreadable-stub-named",
+                   (rc, _opf_names(unread), lines[-1]),
+                   (EXIT_ERROR, [("pre-commit", "file")],
+                    _seen("stopped by a signal", unread, priv, "a directory", stub_kind="a regular file")))
+            # A signal that arrives before the hooks directory's mkdir makes it (the stand-in sends TERM and
+            # fails without making it): no hooks directory, and the refusal, alone on the error output, names
+            # nothing there.
+            before = _fixture("install-signal-before-hooks-mkdir")
+            if (before / ".git" / "hooks").exists():
+                shutil.rmtree(str(before / ".git" / "hooks"))
+            before_env = _shimmed("install-signal-before-hooks-mkdir", {"mkdir": (real_mkdir, (
+                '[ "$1" = -- ] && { kill -TERM "$PPID"; exit 1; }\nexec "$OPF_QA_REAL_MKDIR" "$@"\n'))})
+            rc, lines, priv = _install_seen(before, before_env, "install-signal-before-hooks-mkdir")
+            expect("install-signal-before-hooks-mkdir-names-nothing",
+                   (rc, (before / ".git" / "hooks").exists(), lines),
+                   (EXIT_ERROR, False, [_seen("stopped by a signal", before, priv, "nothing")]))
+            # A private directory an earlier run left at this run's name (the shell that execs the installer
+            # makes it, holding a file) is refused and kept with its contents; no stub is written.
+            stale = _fixture("install-stale-private-dir")
+            stale_hooks = stale / ".git" / "hooks"
+            stale_hooks.mkdir(exist_ok=True)
+            stale_err = base / "install-stale-private-dir.err"
+            rc = _run(["-c", 'd="$3/.opf-pre-commit-install.$$" && "$4" -- "$d" && printf x > "$d/keep" && '
+                       'exec "$2" "$0" 2> "$1"', str(stale / rel / "install.sh"), str(stale_err),
+                       os.path.abspath(sh_path), str(stale_hooks), os.path.abspath(real_mkdir)], base)
+            stale_names = _opf_names(stale)
+            expect("install-refuses-stale-private-dir",
+                   (rc, [(n, k) for n, k in stale_names] if stale_names else stale_names,
+                    "is already there (an earlier run left it; remove it)"
+                    in stale_err.read_text(encoding="utf-8", errors="replace")),
+                   (EXIT_ERROR, [(n, ["keep"]) for n, k in (stale_names or [])
+                                 if n.startswith(".opf-pre-commit-install.")] or ["missing"], True))
+            # A hooks directory that cannot be searched when the rollback runs (the stand-in chmod makes it
+            # so, then sends TERM) leaves the stub path and the private directory named as not known, not
+            # as nothing (unprivileged user only: root searches any directory).
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                blind = _fixture("install-signal-unsearchable-hooks")
+                blind_hooks = blind / ".git" / "hooks"
+                blind_hooks.mkdir(exist_ok=True)
+                blind_env = _shimmed("install-signal-unsearchable-hooks", {"chmod": (real_chmod, (
+                    '"$OPF_QA_REAL_CHMOD" "$@" || exit 1\n"$OPF_QA_REAL_CHMOD" 600 "${2%/*/*}" || exit 1\n'
+                    'kill -TERM "$PPID"\n'))})
+                try:
+                    rc, lines, priv = _install_seen(blind, blind_env, "install-signal-unsearchable-hooks")
+                finally:
+                    os.chmod(str(blind_hooks), 0o755)
+                unknown = "not known (the directory " + str(blind_hooks) + " cannot be searched)"
+                expect("install-signal-unsearchable-hooks-not-known",
+                       (rc, lines[-1]),
+                       (EXIT_ERROR, _seen("stopped by a signal", blind, priv, "a directory", stub_kind=unknown,
+                                          priv_kind=unknown)))
             # A branch cannot add a hook: a post-checkout and a post-merge committed in the pack directory on
             # another branch do not run on checkout or merge, since no tracked directory is a hooks path.
             branchy = _fixture("branch-hooks")
@@ -1993,7 +2122,7 @@ def _self_test_isolated():
               "hooksPath (another linked worktree's included), an existing pre-commit hook (compared byte "
               "for byte, never through a symlink), a symlinked hooks destination, a git directory in any "
               "worktree's top level (from a linked worktree, from the main one, and equal to the top level) "
-              "while a separate git directory installs, a core.worktree top level (linked and main, from a linked worktree, the main one with no .git entry), an empty core.worktree, a top level of /, a worktree at the hooks directory, an unregistered or moved working tree, a signal rolled back (after chmod, either mkdir, ln and the last rmdir, nothing left and said so), an unreadable worktree registry, an "
+              "while a separate git directory installs, a core.worktree top level (linked and main, from a linked worktree, the main one with no .git entry), an empty core.worktree, a top level of /, a worktree at the hooks directory, an unregistered or moved working tree, a signal rolled back with what is left named by file type (after chmod, ln and the last rmdir nothing; after either mkdir that empty directory; before the hooks mkdir no directory; an unreadable stub named; an unsearchable hooks directory named not known), a directory arriving at either mkdir kept, a stale private directory refused and kept, an unreadable worktree registry, an "
               "unreadable pack hook and an ambient GIT_DIR redirect; no dirname, inherited GIT_TRACE*, a "
               "configured trace2 target, read-back rollback, a partial write left nowhere, a link or "
               "directory arriving at the stub path refused and kept with nothing left, a backslash kept in "
