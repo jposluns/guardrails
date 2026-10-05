@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T75)
+  check_opf_record.py --self-test                    the fixture suite (T1-T77)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -359,6 +359,14 @@ Each case runs on its own copy of that template; the root is removed in a finall
       across the recovery path itself; flip, applied inside the children: the examination serialization
       made a no-op, restoring the reviewed head's race, under which B's deferred unlink seizes A's live
       lease and both enter journal recovery)
+  T76 an examination lock failure is diagnosed as what it is: a HELD lock (EWOULDBLOCK/EAGAIN) refuses
+      naming a concurrent reconciliation, and ENOLCK, ENOTSUP, EINVAL or EBADF refuses naming a lock
+      failure, never a concurrent reconciliation; each refuses with every byte untouched (flip: the
+      round-2 broad catch, under which every flock failure reads as a concurrent reconciliation)
+  T77 every failure after the leftover lease's release carries the released-lease report, whatever its
+      type: an EMFILE on the retried O_EXCL claim, a JournalError reopening the lease directory, and an
+      interrupt (the report attached as a note) (flip: the round-2 retry, which appended the report to a
+      WriteGuardError alone)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -375,6 +383,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import contextlib
 import copy
 import datetime
+import errno
 import io
 import json
 import os
@@ -5645,6 +5654,154 @@ def t75_concurrent_recovery(fx):
                 proc.communicate(timeout=60)
 
 
+# --- T76: an examination lock failure is diagnosed as what it is (spec section 17) -----------------------
+
+T76_HELD_LOCK = "concurrently examining"
+T76_LOCK_FAILURE = "could not be taken"
+
+
+def _t76_flock_failing(code):
+    """fcntl.flock raising OSError(code) for the examination lock alone (an exclusive non-blocking lock
+    on a DIRECTORY descriptor); every other flock (the journal and capability locks, on regular files)
+    runs unchanged."""
+    import fcntl
+    real = fcntl.flock
+
+    def failing(fd, operation):
+        if operation == fcntl.LOCK_EX | fcntl.LOCK_NB and stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(code, os.strerror(code))
+        return real(fd, operation)
+    return patch.object(fcntl, "flock", failing)
+
+
+def t76_lock_failure_diagnosed(fx):
+    """The examination lock's failure is diagnosed as what it is: a HELD lock (EWOULDBLOCK/EAGAIN)
+    refuses naming a concurrent reconciliation, and a lock the store's filesystem does not support or
+    refuses (ENOLCK, ENOTSUP, EINVAL, EBADF) refuses naming the lock failure, never a concurrent
+    reconciliation that need not exist; each refuses before any recovery write with every byte untouched."""
+    legs = ((errno.EWOULDBLOCK, T76_HELD_LOCK, T76_LOCK_FAILURE),
+            (errno.ENOLCK, T76_LOCK_FAILURE, T76_HELD_LOCK),
+            (errno.ENOTSUP, T76_LOCK_FAILURE, T76_HELD_LOCK),
+            (errno.EINVAL, T76_LOCK_FAILURE, T76_HELD_LOCK),
+            (errno.EBADF, T76_LOCK_FAILURE, T76_HELD_LOCK))
+    for code, needle, absent in legs:
+        root = _t74_interrupted(fx, "t76-flock-" + errno.errorcode[code].lower())
+        before = snapshot(root)
+        with _t76_flock_failing(code):
+            result = record_cli(fx.env, root, CREATE)
+        refused(result, needle)
+        assert absent not in result[2], ("T76 the refusal names only its own cause", code, result[2][-1200:])
+        assert snapshot(root) == before, ("T76 a lock failure refuses with every byte untouched", code)
+
+
+def flip_t76():
+    """The round-2 broad catch: every flock failure reads as a concurrent reconciliation."""
+    def broad(pfd, lease_rel, verb):
+        import fcntl
+        try:
+            fcntl.flock(pfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise guard.WriteGuardError(
+                "another reconciliation is concurrently examining the {} lease {} ({}); this run refuses "
+                "rather than race it".format(verb, lease_rel, exc)) from exc
+    return patch.object(guard, "_exclusive_examination", broad)
+
+
+# --- T77: every failure after the release carries the released-lease report (spec 5.7) -------------------
+
+T77_REPORT = "leftover single-writer lease"
+
+
+def _t77_released(root):
+    """True once the leftover lease has been released (unlinked): the retried claim's window."""
+    return not os.path.lexists(os.path.join(str(root), LEASE))
+
+
+@contextlib.contextmanager
+def _t77_claim_failing(root, make_exc):
+    """os.open raising make_exc() for the RETRIED exclusive lease create alone (the one after the
+    leftover's release; the first create meets the leftover and refuses EEXIST, unchanged). The stand-in
+    joins every capability set holding the real call (os.supports_dir_fd and its kin), so the store's
+    containment probe still finds it (journal._st_supports)."""
+    real = os.open
+    armed = [True]
+
+    def failing(path, flags, *args, **kwargs):
+        if (armed and flags & os.O_EXCL and os.path.basename(str(path)) == Path(LEASE).name
+                and kwargs.get("dir_fd") is not None and _t77_released(root)):
+            del armed[:]
+            raise make_exc()
+        return real(path, flags, *args, **kwargs)
+    tables = [table for table in journal._st_supports(os) if real in table]
+    for table in tables:
+        table.add(failing)
+    try:
+        with patch.object(os, "open", failing):
+            yield
+    finally:
+        for table in tables:
+            table.discard(failing)
+
+
+def _t77_reopen_failing(root):
+    """journal._open_parent raising JournalError for the retried claim's reopen of the lease directory
+    alone (the first reopen of the lease's parent after the leftover's release)."""
+    real = journal._open_parent
+    armed = [True]
+
+    def failing(root_fd, relpath):
+        if armed and relpath == LEASE and _t77_released(root):
+            del armed[:]
+            raise journal.JournalError("T77 injected: the lease directory cannot be reopened")
+        return real(root_fd, relpath)
+    return patch.object(journal, "_open_parent", failing)
+
+
+def t77_report_every_failure(fx):
+    """Every failure AFTER the leftover lease's release carries the released-lease report, whatever its
+    type: an EMFILE on the retried O_EXCL claim and a JournalError reopening the lease directory each
+    refuse with the report appended (the lease left released, the journal left for the next run), and an
+    interrupt propagates as itself with the report attached as a note."""
+    for name, injected in (("t77-emfile", lambda root: _t77_claim_failing(
+                                root, lambda: OSError(errno.EMFILE, os.strerror(errno.EMFILE)))),
+                           ("t77-journal-error", _t77_reopen_failing)):
+        root = _t74_interrupted(fx, name)
+        with injected(root):
+            result = record_cli(fx.env, root, CREATE)
+        refused(result, "Before that claim,")
+        assert T77_REPORT in result[2], ("T77 the refusal carries the released-lease report", name,
+                                         result[2][-1600:])
+        assert _t77_released(root), ("T77 the leftover lease is released and nothing re-claimed", name)
+        assert any(st == "open" for st in journal_states(root).values()), (
+            "T77 the journal is left for the next run", name)
+    root = _t74_interrupted(fx, "t77-interrupt")
+    notes = None
+    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with _t77_claim_failing(root, KeyboardInterrupt):
+            try:
+                guard.acquire_lease_for_recovery(root_fd, MACH, record.VERB)
+            except KeyboardInterrupt as exc:
+                notes = list(getattr(exc, "__notes__", ()))
+    finally:
+        os.close(root_fd)
+    assert notes is not None, "T77 the interrupt propagates as itself"
+    assert any(T77_REPORT in note for note in notes), (
+        "T77 the interrupt carries the report as a note", notes)
+    assert _t77_released(root), "T77 the interrupted claim left the leftover released"
+
+
+def flip_t77():
+    """The round-2 retry: only a WriteGuardError from the retried claim carries the release report."""
+    def narrow(pfd, root_fd, machine_rel, verb, lease_rel, released):
+        os.fsync(pfd)
+        try:
+            return guard.acquire_lease(root_fd, machine_rel, verb)
+        except guard.WriteGuardError as exc:
+            raise guard.WriteGuardError("{} Before that claim, {}.".format(exc, released)) from exc
+    return patch.object(guard, "_claim_after_release", narrow)
+
+
 TESTS = (
     ("T1-precondition-byte-reproduction", t1_precondition, flip_t1),
     ("T2-round-trip-emit-checked", t2_round_trip, flip_t2),
@@ -5760,6 +5917,8 @@ TESTS = (
                                                              flip_t74_schema, flip_t74_prefix,
                                                              flip_t74_eperm, flip_t74_verb)),
     ("T75-concurrent-recovery-single-writer", t75_concurrent_recovery, None),  # its flip runs inside the children
+    ("T76-examination-lock-failure-diagnosed", t76_lock_failure_diagnosed, flip_t76),
+    ("T77-release-report-every-failure", t77_report_every_failure, flip_t77),
 )
 
 

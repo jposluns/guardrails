@@ -1181,8 +1181,10 @@ guarantees:
    Reconciliation writes the store, so it MUST run only under the single-writer lease that
    publication uses: a lease held by a live or possibly-live holder MUST refuse before any recovery
    write and MUST NOT be seized, and a leftover lease from a confirmed-dead run of the same verb
-   MAY be released through this reconciliation itself, as the section 5.7 live-holder rule grants. An
-   operand changed since the interruption, to bytes that are neither its journaled prestate nor its
+   MAY be released through this reconciliation itself, as the section 5.7 live-holder rule grants.
+   Any other present lease, a confirmed-dead leftover of another verb included, MUST refuse before
+   any recovery write and MUST NOT be released by this reconciliation. An operand changed since the
+   interruption, to bytes that are neither its journaled prestate nor its
    planned poststate nor a write of either torn by the interruption, MUST be reported and refused,
    never overwritten. A reconciled interruption MUST refuse the new operation, so the operator
    inspects it before anything new is written. A fresh-only implementation (section 16.1) performs
@@ -2394,11 +2396,16 @@ The gates in this standard are strong where they are strong and say so where the
   check is the overlapping control that catches that collision after the fact; the two layers
   together, not the lease alone, are the guarantee (section 5.7).
 - The dead-run lease release of sections 5.7 and 8.8 proves holder death by a process probe on the
-  probing host, serialized so concurrent recoveries never race it: a live holder in another PID
-  namespace that shares the store and this hostname can read as dead there and lose its lease, and
-  a dead holder whose pid a live process reused reads as possibly-live and keeps refusing until the
-  operator reconciles. The probe errs toward refusal, and the journal-lock owner model shares the
-  same residual where no process start time is recorded.
+  probing host, serialized by a lock on the lease's directory so concurrent recoveries whose locks
+  one kernel arbitrates never race it: a live holder in another PID namespace that shares the store
+  and this hostname can read as dead there and lose its lease, and a dead holder whose pid a live
+  process reused reads as possibly-live and keeps refusing until the operator reconciles. The probe
+  errs toward refusal, and the journal-lock owner model shares the same residual where no process
+  start time is recorded. That serialization holds only within one kernel: where the store sits on
+  NFS or another filesystem whose flock is local to each client kernel, two hosts that share the
+  store under one hostname can both take the lock and race the release, and where flock is
+  unsupported or fails, every dead-run release refuses, naming the lock failure, and stays the
+  operator's reconciliation step.
 - A host provider's create and auth conveniences call the external API of the host the target
   names. The egress bound is that named host and nothing else; the standard cannot vouch for the
   host's own behaviour beyond that bound.
