@@ -13,20 +13,30 @@ never importing or running the file, and reports:
 
   deserialize  a reference to an unsafe loader (pickle, _pickle, cPickle, dill, cloudpickle
                load/loads/Unpickler and their private _load/_loads/_Unpickler, marshal,
-               shelve and its Unpickler re-export, jsonpickle, the multiprocessing
+               shelve and its Unpickler re-export, jsonpickle decode and its loads alias,
+               the multiprocessing
                ForkingPickler.loads, pandas.read_pickle, joblib.load, torch.load, the yaml
                unsafe and full loader functions, constructors and Loader classes), a
                yaml.load or yaml.load_all whose Loader is not proven a safe or base loader,
                an allow_pickle= keyword that is not literal False, and a numpy.load whose third
                positional argument (allow_pickle) is not literal False or a * spread hides;
-  tls          verify= or verify_ssl= that is False, 0 or not a literal, ssl= that is False or
-               0, a .verify attribute set to anything but a non-false literal, any reference to
+  tls          verify= or verify_ssl= that is not a true-valued literal (False, 0, None and an
+               empty string are false-valued; True and a CA path pass), ssl= that is False or 0,
+               a .verify attribute set to anything but a true-valued literal, any reference to
                _create_unverified_context, _create_stdlib_context, _create_default_https_context,
                CERT_NONE, CERT_OPTIONAL or CLIENT_AUTH, an ssl.SSLContext whose protocol is not
                proven ssl.PROTOCOL_TLS_CLIENT (or referenced uncalled), and a check_hostname or
                verify_mode set to anything but True or a proven ssl.CERT_REQUIRED (assignment,
                any other store such as a for, with or comprehension target, a literal setattr,
-               or a keyword, cert_reqs= included);
+               or a keyword, cert_reqs= included); and a standard-library client whose default
+               context skips certificate checks (each builds ssl._create_stdlib_context, which
+               is CERT_NONE, when given none): smtplib.SMTP_SSL, poplib.POP3_SSL and
+               ftplib.FTP_TLS without a context=, imaplib.IMAP4_SSL without an ssl_context=,
+               ssl.get_server_certificate without ca_certs (keyword or third positional), any
+               method named starttls or stls (smtplib, imaplib, poplib; whatever object it is
+               called on) without a context, each given as literal None or hidden by a spread
+               counting as none, a logging.handlers.SMTPHandler whose secure= (sixth positional)
+               is set or a spread hides, and any of these referenced without a call (an alias);
   shell        a subprocess run/call/check_call/check_output/Popen whose shell is on, or cannot
                be seen (a ** spread that is not a literal dict, a * spread, or a ninth
                positional argument that is not literal False), over a non-literal command;
@@ -103,8 +113,11 @@ a sink function (not module) obtained from such an object or from a call; a meth
 profiler, debugger or trace object (cProfile.Profile().run, bdb.Bdb.run); a shell launched
 through an argv list naming a shell (["sh", "-c", text]), an executable= override, or os.exec*,
 os.spawn* or pty.spawn of a shell; a verify= or ssl= value hidden in a ** spread that is not a
-literal dict (only the subprocess shell switch and the command, Loader and protocol of the
-judged sinks are denied when unseen); TLS verification disabled inside a third-party library's
+literal dict (only the subprocess shell switch and the command, Loader, protocol, context
+and secure= of the judged sinks are denied when unseen); the context given to a
+standard-library client is not traced (any value other than literal None passes, so how it
+was built is judged only where it is built), and a client configured from data
+(logging.config) is not seen; TLS verification disabled inside a third-party library's
 own defaults, through a library option this scan does not name, or through environment
 variables (PYTHONHTTPSVERIFY, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE); a deserializer outside the
 named set; a star import from a module outside STAR_MODULES; literalness is judged, not data
@@ -148,7 +161,7 @@ DESERIALIZE_SINKS = frozenset(
     [mod + "." + fn for mod in _PICKLE_MODULES for fn in _UNSAFE_LOADER_FUNCS]
     + ["yaml." + name for name in _YAML_UNSAFE]
     + ["marshal.load", "marshal.loads", "shelve.open", "shelve.Shelf", "shelve.DbfilenameShelf",
-       "shelve.BsdDbShelf", "shelve.Unpickler", "jsonpickle.decode",
+       "shelve.BsdDbShelf", "shelve.Unpickler", "jsonpickle.decode", "jsonpickle.loads",
        "jsonpickle.unpickler.decode", "multiprocessing.reduction.ForkingPickler.loads",
        "pandas.read_pickle", "joblib.load", "torch.load"])
 YAML_LOAD = frozenset({"yaml.load", "yaml.load_all"})
@@ -159,6 +172,18 @@ TLS_ATTRS = frozenset({"_create_unverified_context", "_create_stdlib_context",
                        "_create_default_https_context", "CERT_NONE", "CERT_OPTIONAL",
                        "CLIENT_AUTH"})
 SSL_CONTEXT = "ssl.SSLContext"
+# Standard-library clients whose default context skips certificate checks: each builds
+# ssl._create_stdlib_context (CERT_NONE, no hostname check) when not given one. The value is
+# (keyword, positional index or None) of the argument that supplies a verifying context.
+STDLIB_UNVERIFIED = {"smtplib.SMTP_SSL": ("context", None), "poplib.POP3_SSL": ("context", None),
+                     "ftplib.FTP_TLS": ("context", None),
+                     "imaplib.IMAP4_SSL": ("ssl_context", None),
+                     "ssl.get_server_certificate": ("ca_certs", 2)}
+# smtplib.SMTP.starttls, imaplib.IMAP4.starttls and poplib.POP3.stls do the same; the receiver
+# is an object the scan cannot name, so the method name alone is judged.
+STARTTLS_METHODS = frozenset({"starttls", "stls"})
+# logging.handlers.SMTPHandler with secure= set runs starttls over ssl._create_stdlib_context.
+SMTP_HANDLER = "logging.handlers.SMTPHandler"
 SUBPROCESS_FUNCS = frozenset("subprocess." + name for name in (
     "run", "call", "check_call", "check_output", "Popen"))
 ALWAYS_SHELL = frozenset({"os.system", "os.popen", "posix.system", "nt.system",
@@ -177,14 +202,16 @@ CODE_SINKS = frozenset({"eval", "exec", "builtins.eval", "builtins.exec", "types
 LOADER_METHODS = frozenset({"exec_module", "load_module"})
 # The callables whose call site is judged (shell switch, command, Loader, protocol): any other
 # reference to them is an alias the call-site check cannot follow, so it is a finding.
-CALL_JUDGED = YAML_LOAD | SUBPROCESS_FUNCS | ALWAYS_SHELL | {SSL_CONTEXT}
+CALL_JUDGED = (YAML_LOAD | SUBPROCESS_FUNCS | ALWAYS_SHELL | {SSL_CONTEXT, SMTP_HANDLER}
+               | frozenset(STDLIB_UNVERIFIED))
 # A star import from a sink module makes its sinks bare names; the same module object, bound
 # to another name or passed to getattr with a non-literal name, is an alias it cannot follow.
 STAR_MODULES = {"pickle": "deserialize", "_pickle": "deserialize", "cPickle": "deserialize",
                 "dill": "deserialize", "cloudpickle": "deserialize", "marshal": "deserialize",
                 "shelve": "deserialize", "jsonpickle": "deserialize", "yaml": "deserialize",
                 "pandas": "deserialize", "joblib": "deserialize",
-                "ssl": "tls", "os": "shell", "posix": "shell", "nt": "shell",
+                "ssl": "tls", "smtplib": "tls", "imaplib": "tls", "poplib": "tls",
+                "ftplib": "tls", "os": "shell", "posix": "shell", "nt": "shell",
                 "subprocess": "shell", "asyncio": "shell",
                 "builtins": "code", "types": "code", "runpy": "code", "timeit": "code",
                 "cProfile": "code", "profile": "code", "pdb": "code", "code": "code"}
@@ -378,9 +405,14 @@ def _is_false(node):
     return isinstance(node, ast.Constant) and not node.value
 
 
+def _is_none(node):
+    return isinstance(node, ast.Constant) and node.value is None
+
+
 def _verify_ok(node):
-    """A verify-style value passes only as a literal that is not False or 0 (True, a CA path)."""
-    return isinstance(node, ast.Constant) and node.value is not False and node.value != 0
+    """A verify-style value passes only as a true-valued literal (True, a CA path): requests and
+    its kin read any false value (False, 0, None, an empty string) as verification off."""
+    return isinstance(node, ast.Constant) and bool(node.value)
 
 
 def _effective_keywords(call, builtin_dict):
@@ -685,6 +717,13 @@ class _Scanner(ast.NodeVisitor):
         if isinstance(func, ast.Attribute) and func.attr in LOADER_METHODS \
                 and self.on("code-loader"):
             self.add(node, "code", "code-loader", func.attr + " runs a loaded module's code")
+        if isinstance(func, ast.Attribute) and func.attr in STARTTLS_METHODS \
+                and self.on("tls-context"):
+            context = _first(_kw(pairs, "context"), _kw(pairs, "ssl_context"),
+                             _positional(node, 0))
+            if context is None or _is_none(context):
+                self.add(node, "tls", "tls-context",
+                         func.attr + " without a context (the default skips certificate checks)")
         if isinstance(func, ast.Attribute) and func.attr == "subprocess_shell" \
                 and self.on("shell-always"):
             command = _first(_positional(node, 1), _kw(pairs, "cmd"))
@@ -728,6 +767,19 @@ class _Scanner(ast.NodeVisitor):
             if not self.proves(protocol, {"ssl.PROTOCOL_TLS_CLIENT"}):
                 self.add(node, "tls", "tls-context",
                          "ssl.SSLContext without ssl.PROTOCOL_TLS_CLIENT (no verification)")
+        if name in STDLIB_UNVERIFIED and self.on("tls-context"):
+            key, index = STDLIB_UNVERIFIED[name]
+            context = _first(_kw(pairs, key), None if index is None else _positional(node, index))
+            if context is None or _is_none(context):
+                self.add(node, "tls", "tls-context",
+                         name + " without " + key + "= (the default skips certificate checks)")
+        if name == SMTP_HANDLER and self.on("tls-context"):
+            secure = _first(_kw(pairs, "secure"), _positional(node, 5))
+            unseen = (any(key is None for key, _value in pairs)
+                      or any(isinstance(arg, ast.Starred) for arg in node.args))
+            if (secure is not None and not _is_none(secure)) or (secure is None and unseen):
+                self.add(node, "tls", "tls-context",
+                         name + " with secure= set (starttls over an unverified context)")
         if name in _HASATTR and _positional(node, 0) is not None:
             # hasattr returns a bool, so its target never escapes, whatever the name.
             self.based.add(id(_positional(node, 0)))
@@ -753,7 +805,8 @@ class _Scanner(ast.NodeVisitor):
             for key in ("verify", "verify_ssl"):
                 value = _kw(pairs, key)
                 if value is not None and not _verify_ok(value):
-                    self.add(node, "tls", "tls-verify", key + "= is False, 0 or not a literal")
+                    self.add(node, "tls", "tls-verify",
+                             key + "= is not a true-valued literal (verification off or unseen)")
             value = _kw(pairs, "ssl")
             if isinstance(value, ast.Constant) and (value.value is False or value.value == 0):
                 self.add(node, "tls", "tls-verify", "ssl= is False or 0")
@@ -781,7 +834,8 @@ class _Scanner(ast.NodeVisitor):
                      "verify_mode set to a value other than ssl.CERT_REQUIRED")
         if attr == "verify" and attribute and self.on("tls-verify") \
                 and (value is None or not _verify_ok(value)):
-            self.add(node, "tls", "tls-verify", ".verify set to False, 0 or not a literal")
+            self.add(node, "tls", "tls-verify",
+                     ".verify set to anything but a true-valued literal")
         if attr in TLS_ATTRS and attribute and self.on("tls-ref"):
             self.add(node, "tls", "tls-ref", "assignment to " + attr)
 
@@ -870,7 +924,7 @@ class _Scanner(ast.NodeVisitor):
             return
         if name in YAML_LOAD:
             kind, check = "deserialize", "dsz-yaml"
-        elif name == SSL_CONTEXT:
+        elif name == SSL_CONTEXT or name == SMTP_HANDLER or name in STDLIB_UNVERIFIED:
             kind, check = "tls", "tls-context"
         elif name in SUBPROCESS_FUNCS:
             kind, check = "shell", "shell-subprocess"
@@ -1118,6 +1172,7 @@ POSITIVE_VECTORS = (
     ("import numpy\nnumpy.load(path, allow_pickle=True)\n", ("dsz-numpy",)),
     ("import numpy as np\nnp.load(path, None, True)\n", ("dsz-numpy",)),
     ("import numpy\nnumpy.load(path, *rest)\n", ("dsz-numpy",)),
+    ("import numpy\nnumpy.load(path, None, *rest)\n", ("dsz-numpy",)),
     ("import requests\nrequests.get(url, verify=False)\n", ("tls-verify",)),
     ("import requests\nrequests.get(url, verify=0)\n", ("tls-verify",)),
     ("import requests\nrequests.get(url, verify=flag)\n", ("tls-verify",)),
@@ -1125,6 +1180,11 @@ POSITIVE_VECTORS = (
     ("import requests\nrequests.get(url, **dict(verify=False))\n", ("tls-verify",)),
     ("import requests\nrequests.get(url, **{'verify': True, 'verify': False})\n", ("tls-verify",)),
     ("session.verify = False\n", ("tls-verify",)),
+    # requests reads any false value as verification off, so None and "" are not proof.
+    ("import requests\nrequests.get(url, verify='')\n", ("tls-verify",)),
+    ("import httpx\nhttpx.Client(verify=None)\n", ("tls-verify",)),
+    ("import requests\nsession = requests.Session()\nsession.verify = None\n", ("tls-verify",)),
+    ("session.verify = b''\n", ("tls-verify",)),
     ("client.get(url, verify_ssl=False)\n", ("tls-verify",)),
     ("connect(host, ssl=False)\n", ("tls-verify",)),
     ("connect(host, ssl=0)\n", ("tls-verify",)),
@@ -1147,6 +1207,26 @@ POSITIVE_VECTORS = (
     ("def f(ctx):\n    from ssl import CERT_REQUIRED as mode\n    mode = 0\n"
      "    ctx.verify_mode = mode\n", ("tls-verify-mode",)),
     ("import http.client\nhttp.client.ssl.SSLContext()\n", ("chain", "tls-context")),
+    # Standard-library clients whose default context is ssl._create_stdlib_context (CERT_NONE).
+    ("import smtplib\nserver = smtplib.SMTP_SSL(host)\n", ("tls-context",)),
+    ("import smtplib\nsmtplib.SMTP_SSL(host, context=None)\n", ("tls-context",)),
+    ("import imaplib\nimaplib.IMAP4_SSL(host)\n", ("tls-context",)),
+    ("import imaplib\nimaplib.IMAP4_SSL(host, context=ctx)\n", ("tls-context",)),
+    ("import poplib\npoplib.POP3_SSL(host, **opts)\n", ("tls-context",)),
+    ("from ftplib import FTP_TLS\nFTP_TLS(host).login()\n", ("alias", "tls-context")),
+    ("import smtplib\nserver = smtplib.SMTP(host)\nserver.starttls()\n", ("tls-context",)),
+    ("imap.starttls(ssl_context=None)\n", ("tls-context",)),
+    ("pop.stls(*args)\n", ("tls-context",)),
+    ("import ssl\npem = ssl.get_server_certificate((host, 443))\n", ("tls-context",)),
+    ("import ssl\nssl.get_server_certificate(addr, ssl.PROTOCOL_TLS_CLIENT, None)\n",
+     ("tls-context",)),
+    ("import logging.handlers\nlogging.handlers.SMTPHandler(host, a, b, s, creds, ())\n",
+     ("tls-context",)),
+    ("from logging.handlers import SMTPHandler\nSMTPHandler(host, a, b, s, secure=())\n",
+     ("alias", "tls-context")),
+    ("from logging.handlers import SMTPHandler\nSMTPHandler(host, a, b, s, **opts)\n",
+     ("tls-context",)),
+    ("from logging.handlers import SMTPHandler\nSMTPHandler(host, *rest)\n", ("tls-context",)),
     ("ctx.check_hostname = False\n", ("tls-hostname",)),
     ("ctx.check_hostname, other = False, 0\n", ("tls-hostname",)),
     ("for ctx.check_hostname in [False]:\n    pass\n", ("tls-hostname",)),
@@ -1276,6 +1356,15 @@ NEGATIVE_VECTORS = (
     # An unbound name that is not a builtin names nothing, so no chain is read through it.
     "ok = any(item.code == 'x' for item in items)\n",
     "import http.client\nctx = http.client.ssl.SSLContext(http.client.ssl.PROTOCOL_TLS_CLIENT)\n",
+    "import ftplib, imaplib, poplib, smtplib, ssl\nctx = ssl.create_default_context()\n"
+    "smtplib.SMTP_SSL(host, context=ctx)\nimaplib.IMAP4_SSL(host, ssl_context=ctx)\n"
+    "poplib.POP3_SSL(host, context=ctx)\nftplib.FTP_TLS(host, context=ctx)\n"
+    "server = smtplib.SMTP(host)\nserver.starttls(context=ctx)\nimap.starttls(ssl_context=ctx)\n"
+    "pop.stls(ctx)\nssl.get_server_certificate(addr, ca_certs='/ca.pem')\n"
+    "ssl.get_server_certificate(addr, ssl.PROTOCOL_TLS_CLIENT, '/ca.pem')\nftplib.FTP(host)\n",
+    "import logging.handlers\nlogging.handlers.SMTPHandler(host, a, b, s)\n"
+    "logging.handlers.SMTPHandler(host, a, b, s, creds, None)\n"
+    "logging.handlers.SMTPHandler(host, a, b, s, secure=None)\n",
 )
 
 
@@ -1289,7 +1378,8 @@ _ROSTER = (
         "cPickle.load cPickle.loads cloudpickle.Unpickler cloudpickle._Unpickler "
         "cloudpickle._load cloudpickle._loads cloudpickle.load cloudpickle.loads dill.Unpickler "
         "dill._Unpickler dill._load dill._loads dill.load dill.loads joblib.load "
-        "jsonpickle.decode jsonpickle.unpickler.decode marshal.load marshal.loads "
+        "jsonpickle.decode jsonpickle.loads jsonpickle.unpickler.decode marshal.load "
+        "marshal.loads "
         "pandas.read_pickle pickle.Unpickler pickle._Unpickler pickle._load pickle._loads "
         "multiprocessing.reduction.ForkingPickler.loads "
         "pickle.load pickle.loads shelve.BsdDbShelf shelve.DbfilenameShelf shelve.Shelf "
@@ -1314,14 +1404,15 @@ _ROSTER = (
     ("dsz-yaml", (
         "yaml.load yaml.load_all").split()),
     ("tls-context", (
-        "ssl.SSLContext").split()),
+        "ftplib.FTP_TLS imaplib.IMAP4_SSL logging.handlers.SMTPHandler poplib.POP3_SSL "
+        "smtplib.SMTP_SSL ssl.SSLContext ssl.get_server_certificate").split()),
     ("tls-ref", (
         "ssl.CERT_NONE ssl.CERT_OPTIONAL ssl.CLIENT_AUTH ssl._create_default_https_context "
         "ssl._create_stdlib_context ssl._create_unverified_context").split()),
     ("star-import", (
-        "_pickle asyncio builtins cPickle cProfile cloudpickle code dill joblib jsonpickle "
-        "marshal nt os pandas pdb pickle posix profile runpy shelve ssl subprocess timeit "
-        "types yaml").split()),
+        "_pickle asyncio builtins cPickle cProfile cloudpickle code dill ftplib imaplib joblib "
+        "jsonpickle marshal nt os pandas pdb pickle poplib posix profile runpy shelve smtplib ssl "
+        "subprocess timeit types yaml").split()),
 )
 
 
@@ -1344,7 +1435,7 @@ def _roster_drift():
     """The sets that no longer equal their pinned roster line."""
     sets = {"dsz-ref": DESERIALIZE_SINKS, "code-ref": CODE_SINKS, "shell-always": ALWAYS_SHELL,
             "shell-subprocess": SUBPROCESS_FUNCS, "dsz-yaml": YAML_LOAD,
-            "tls-context": frozenset([SSL_CONTEXT]),
+            "tls-context": frozenset([SSL_CONTEXT, SMTP_HANDLER]) | frozenset(STDLIB_UNVERIFIED),
             "tls-ref": frozenset("ssl." + attr for attr in TLS_ATTRS),
             "star-import": frozenset(STAR_MODULES)}
     return sorted(check for check, names in _ROSTER if frozenset(names) != frozenset(sets[check]))
