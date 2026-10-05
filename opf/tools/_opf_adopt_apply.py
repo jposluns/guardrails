@@ -121,13 +121,20 @@ more such home), so the stage driver refuses plan, approve and apply over a non-
 (require_clean_journal); the shipped `retire-file` vocabulary row is a single `remove`, while spec 1.3.0
 preserves the retirement preimage at apply and removes only after the green check, a vocabulary split for
 the op slices; interruption is exercised in-process through the journal's kill-point seam, and
-subprocess kill-injection arrives with the file ops. Named residual (asynchronous interrupt): the
-transaction's descriptors are owned by a list from their binding on and closed pop-before-close, so no
-number is ever closed twice, but no signal mask is used, so an asynchronous interrupt (SIGINT or
-SIGTERM, delivered through any thread) can leave a descriptor open in the interrupted process until it
-exits: one landing between a C call's return and the binding of the descriptor it returned, inside a
-close-out, or inside a _journal helper (acquire_lock's lock descriptor among them). Leak-freedom under
-interrupt is NOT claimed. The finish ops add their own: all three finish ops
+subprocess kill-injection arrives with the file ops. Named residual (an exception in a descriptor
+handoff or close-out): the transaction's descriptors are owned by a list from their binding on and
+closed pop-before-close, so no number is ever closed twice, but no signal mask is used, so an
+asynchronous interrupt (SIGINT or SIGTERM, delivered through any thread), or any other exception raised
+at the same point (an injected one included), can leave a descriptor open in the process until it
+exits: one landing between a C call's return and the binding of the descriptor it returned; between a
+helper's return and the handoff of the descriptors it returned to the owning list (journal_state's
+transaction directory descriptors, bound to txns before held.extend has taken them all); between a
+descriptor's pop and its close inside a close-out (_close_held still closes the rest of its list and
+_close_held_chain the lists after it, re-raising the first exception, so only that popped descriptor
+stays open), or at a close-out's own loop boundary, outside its per-descriptor handler (what that loop
+has not reached stays open); or inside a _journal helper (acquire_lock's lock descriptor among them).
+Leak-freedom under interrupt, or under an exception raised in those windows, is NOT claimed. The
+finish ops add their own: all three finish ops
 compose into this shell's transactions, which refuse a resolved store (no lease join), so once init-store
 has run, a real adoption's plant, render and receipt transactions refuse until the lease join lands;
 render-views composes create-only view publications through this journal (an occupied view destination
@@ -814,6 +821,9 @@ def journal_state(root_fd, journal_root):
             # interrupted transaction renamed aside and replaced by an empty decoy) is still classified
             # from the enumerated directory's own frames, never reopened by name and read as clean.
             txns = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True, hold=True)
+            # the handoff: an exception landing here, before extend has taken every descriptor in txns
+            # (an interrupt at the generator's start or a resume), leaves the ones not yet taken open
+            # until the process exits (the disclosed residual, module docstring)
             held.extend(tfd for _t, tfd in txns)
             opened = sorted(t.name for t, tfd in txns
                             if _journal.classify_state(jr_fd, t, txn_fd=tfd) == "open")
@@ -1347,12 +1357,36 @@ def _lock_identity(jr_fd, keep=None):
 def _close_held(fds):
     """Close every descriptor a caller HOLDS in the list `fds` (each a bare fd or a (rel, fd) pair),
     emptying it. Each is taken out of the list BEFORE its one close, so a later pass over the same list
-    (an outer finally) never closes a number again: an interrupt between the two can at worst leave that
-    one descriptor open until the process exits (a disclosed residual, module docstring), never closed
-    twice (a second close can shut another thread's reused number, man 2 close)."""
+    (an outer finally) never closes a number again: an exception raised between the two (an interrupt or
+    an injected exception) can at worst leave that one descriptor open until the process exits (a
+    disclosed residual, module docstring), never closed twice (a second close can shut another thread's
+    reused number, man 2 close). Such an exception never abandons the rest: every descriptor still in
+    the list is closed, and the FIRST exception is re-raised once the list is empty."""
+    first = None
     while fds:
-        item = fds.pop()
-        _journal._close_fd_quietly(item[1] if isinstance(item, tuple) else item)
+        try:
+            item = fds.pop()
+            _journal._close_fd_quietly(item[1] if isinstance(item, tuple) else item)
+        except BaseException as exc:    # noqa: BLE001  keep closing; the first is re-raised below
+            if first is None:
+                first = exc
+    if first is not None:
+        raise first
+
+
+def _close_held_chain(*lists):
+    """Run _close_held over EACH list in order, every later call even when an earlier one raised (an
+    interrupt or an injected exception), so one failing close-out never abandons the lists after it; the
+    FIRST exception is the one re-raised, a later one never replacing it."""
+    first = None
+    for fds in lists:
+        try:
+            _close_held(fds)
+        except BaseException as exc:    # noqa: BLE001  keep closing; the first is re-raised below
+            if first is None:
+                first = exc
+    if first is not None:
+        raise first
 
 
 def _release_outcome(jr_fd, journal_root, mine):
@@ -1524,9 +1558,11 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     interrupted read-back included, the descriptor stays held, so the closing comparison never reads a
     peer's lock on a reused inode as this run's own. Every descriptor this run holds is owned by a list
     from its binding on (the append is the handoff) and closed pop-before-close, so no number is closed
-    twice; an asynchronous interrupt (SIGINT, SIGTERM, delivered through any thread) can still leave a
-    descriptor open until the process exits, here or inside a _journal helper, a disclosed residual
-    (module docstring), so no leak-freedom under interrupt is claimed. A leftover only the
+    twice; an asynchronous interrupt (SIGINT, SIGTERM, delivered through any thread), or any exception
+    raised between a descriptor's pop and its close, can still leave a descriptor open until the process
+    exits, here or inside a _journal helper, a disclosed residual (module docstring), so no leak-freedom
+    under interrupt is claimed; the final close-out is chained, so one such exception never abandons the
+    descriptors after it. A leftover only the
     reconcile-first discipline clears is left to it rather than to hand removal, and one no sanctioned
     path clears is named as such. The lock release is read back by identity (the inode and content this
     run's acquire wrote, _lock_identity), never by process identity; at the end of a committed transaction
@@ -1725,11 +1761,13 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             # held_components and (on any outcome but a confirmed-gone lock) mine_held, both HELD through
             # the closing comparison, and anchors, whose jr_fd is held through the closing observation so
             # its identity stays this run's, then root_fd. Each list is emptied pop-before-close, so no
-            # number is closed twice; an asynchronous interrupt landing inside this close-out can leave
-            # what it has not reached open until the process exits (the disclosed residual)
-            _close_held(held_components)
-            _close_held(mine_held)      # any still held: a stay, a retained lock, or no release reached
-            _close_held(anchors)
+            # number is closed twice. The three are CHAINED: an exception raised between a pop and its
+            # close (an interrupt or an injected exception) leaves that one descriptor open until the
+            # process exits, never the rest of its list or the lists after it, and the first exception is
+            # the one that propagates; an interrupt at a close-out's own loop boundary can still leave
+            # what that loop has not reached open (the disclosed residual, module docstring). mine_held:
+            # any still held, a stay, a retained lock, or no release reached
+            _close_held_chain(held_components, mine_held, anchors)
         if failure is not None and (not isinstance(failure, Exception) or failure is interrupted):
             # an interrupt still propagates as itself, with the transaction state and the outcome named
             if failure is interrupted or observed:
@@ -3564,19 +3602,25 @@ def _self_test_checks():
     # note says, and is removed between runs), the listing leg the run's first listing over a journal of
     # three components. Scope: the injection here is a SYNCHRONOUS raise, so these legs prove the
     # pop-before-close and append-is-handoff ownership discipline, nothing more. NAMED RESIDUAL, not
-    # tested and not claimed: an ASYNCHRONOUS interrupt (SIGINT or SIGTERM, delivered through any thread)
-    # can leave a descriptor open in the interrupted process until it exits, at the boundary between a C
-    # call's return and the binding of the descriptor it returned (skipped here), inside a close-out of a
-    # caller (a finally that is already closing), or inside a _journal helper (acquire_lock's own lock
-    # descriptor among them); no signal mask is used, so these legs establish no leak-freedom under
-    # interrupt
+    # tested and not claimed: an ASYNCHRONOUS interrupt (SIGINT or SIGTERM, delivered through any thread),
+    # or any other exception raised at the same point, can leave a descriptor open in the process until it
+    # exits, at the boundary between a C call's return and the binding of the descriptor it returned
+    # (skipped here), between a helper's return and the handoff of its descriptors to the owning list
+    # (journal_state's transaction directories before held.extend has taken them all), between a
+    # descriptor's pop and its close inside a close-out of a caller (that one descriptor, 6a'''b3c), at a
+    # close-out's own loop boundary, or inside a _journal helper (acquire_lock's own lock descriptor
+    # among them); no signal mask is used, so these legs establish no leak-freedom under interrupt
     # (red against an ownership flag set after the append: two closes; and against a transfer inside the
     # finally: a leak).
     handoff_legs = (("descriptor-handoff-interrupt-lock-identity", _lock_identity, False),
                     ("descriptor-handoff-interrupt-failed-lock-state", _lock_identity, True),
                     ("descriptor-handoff-interrupt-journal-listing", _journal_listing, False))
+    final_close_legs = (("final-close-out-injected-fault-closes-the-rest", ("held_components",)),
+                        ("final-close-out-two-faults-first-propagates", ("held_components", "anchors")))
     if not census:
         for name, _target, _failing in handoff_legs:
+            skipped.append((name, no_census))
+        for name, _targets in final_close_legs:
             skipped.append((name, no_census))
     else:
         import dis
@@ -3707,6 +3751,77 @@ def _self_test_checks():
                       and control[0] == "refused" and not control[1] and not control[2],
                       observed="boundaries={} control={!r} failed (boundary, line, outcome, closed twice, "
                                "leaked, lock stays)={!r}".format(boundary - 1, control, bad[:6]))
+        # 6a'''b3c: the run's final close-out is chained. An exception injected between a descriptor's
+        # pop and its close (the patched close-out raises instead of closing) at the FIRST close of
+        # held_components, the journal path components the first listing holds, leaves exactly that
+        # popped descriptor open: every OTHER descriptor the run holds (the rest of held_components,
+        # mine_held, and anchors' jr_fd and root_fd) is still closed, and the injected exception
+        # propagates. With a second injection at the first close of anchors, exactly the two popped
+        # descriptors stay open and the FIRST exception is the one that propagates. A refusal with no
+        # injection is the control (red against sequential close-outs or a _close_held that stops at its
+        # first failure: every descriptor after the injection leaks; and against a later exception
+        # replacing the first).
+        class _InjectedCloseFault(RuntimeError):
+            pass
+        held_code, txn_code = _close_held.__code__, run_adopt_transaction.__code__
+
+        def _final_close_run(root, targets):
+            """One refused transaction whose final close-out is injected at the first close of each list
+            named in `targets`: (exception, popped descriptors, descriptors closed after the first
+            injection, descriptors leaked)."""
+            real_quiet = _journal._close_fd_quietly
+            armed, popped, after = list(targets), [], []
+
+            def faulting_quiet(fd):
+                caller = sys._getframe(1)
+                if caller.f_code is held_code:
+                    fds, up = caller.f_locals.get("fds"), caller.f_back
+                    while up is not None and up.f_code is not txn_code and up.f_code.co_name.startswith(
+                            "_close_held"):
+                        up = up.f_back
+                    if up is not None and up.f_code is txn_code:
+                        for list_name in armed:
+                            if fds is up.f_locals.get(list_name):
+                                armed.remove(list_name)
+                                popped.append(fd)
+                                raise _InjectedCloseFault(list_name)
+                        if popped:
+                            after.append(fd)
+                return real_quiet(fd)
+            raised = None
+            baseline = _fds_open()
+            try:
+                with mock.patch.object(_journal, "_close_fd_quietly", faulting_quiet):
+                    try:
+                        run_adopt_transaction(root, rid, compose_refused_here)
+                    except (AdoptApplyError, _InjectedCloseFault) as exc:
+                        raised = exc
+                leaked = _fds_open() - baseline
+            finally:
+                for fd in popped:
+                    _journal._close_fd_quietly(fd)
+            return raised, popped, after, sorted(leaked)
+        for name, targets in final_close_legs:
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                saved_umask = os.umask(0o022)
+                control = got = None
+                try:
+                    root, files = fixture(temp)
+                    os.makedirs(root / JOURNAL_REL)
+                    control = _final_close_run(root, ())
+                    got = _final_close_run(root, targets)
+                finally:
+                    os.umask(saved_umask)
+                raised, popped, after, leaked = got if got is not None else (None, [], [], [])
+                check(name, control is not None and isinstance(control[0], AdoptApplyError)
+                      and not control[1] and not control[3]
+                      and isinstance(raised, _InjectedCloseFault) and str(raised) == targets[0]
+                      and len(popped) == len(targets) and leaked == sorted(popped)
+                      and len(after) >= 2 + len(targets) - 1,
+                      observed="control (exception, leaked)={!r} exception={!r} popped={!r} closed after "
+                               "the first injection={!r} leaked={!r}".format(
+                                   None if control is None else (control[0], control[3]), raised, popped,
+                                   after, leaked))
     # 6a'''b4: an NFS product root, modelled: a file unlinked while this process still holds it open is
     # renamed to .nfsXXXX (the client's silly-rename) and removed at its last close. The run closes the
     # lock descriptor it holds right after the release's read-back, before the cleanup and the closing
