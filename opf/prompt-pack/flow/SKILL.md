@@ -11,7 +11,7 @@ description: The OPF operating loop for an AI development assistant. Read the ad
   verification is never shortened for speed.
 ---
 
-<!-- OPF-FLOW: release=0.3.0 template-sha256=26ca14780a1bb62187921ec46ec600e2e05f15cf61c0d02c12f7412b36f51644 -->
+<!-- OPF-FLOW: release=0.3.0 template-sha256=35063e2003b335669e6a0ccf668f2d8c81bfe672f6699b13020adb4a558005da -->
 
 # /flow: the OPF operating loop
 
@@ -530,12 +530,16 @@ no clean round to converge on, so its `merge` entry carries `lane=merge` instead
 `verify`, `result=` is `clean`, `findings`, or `failed`, and `rev=` names the reviewed revision;
 every `verdict` entry carries all three. A failed or timed-out round, an UNVERIFIABLE one
 included (section 7), writes its own `verdict` entry (`result=failed`) before any re-issue, so
-the store holds every round the unit ran, in `WL` order. The ancestor walk, which the section 7
+the store holds every round the unit ran, in `WL` order. A round in which one leg returns
+findings confirmed at source and another leg fails writes one `verdict` entry, `result=findings`
+with status `fixing` (the table below), never a second `failed` entry, and names the failed leg
+on the lines after its two fixed lines; the next DISCOVERY round, a fresh full panel on the
+fixed revision, re-issues that leg's family. The ancestor walk, which the section 7
 standing-rule limit reads, starts at the unit's own item (one unit, one item, section 1, step 2)
-and follows each `follows` link from an
-item it reads to that link's target, the earlier unit whose scope the item carries (section 1,
-step 2), transitively and in that direction only: it never steps from an item to one that links
-`follows` to it, so a sibling cut from the same unit, or a unit cut from this one, adds nothing.
+and follows each `follows` link from an item it reads to that link's target, the earlier unit
+whose scope the item carries (section 1, step 2), transitively and in that direction only: it
+never steps from an item to one that links `follows` to it, so a sibling cut from the same unit,
+or a unit cut from this one, adds nothing.
 From each target it reads only what was recorded before the item linking to it was created, that
 target's cut: the records whose own `create` worklog entry has a `WL` number below that of the
 worklog entry the writer appended when it created the linking item (the entry opening
@@ -666,9 +670,10 @@ argument.
 
 **Light units** take at least two independent reviewer families (`review_families_light`) and
 the mechanical gates. A light unit's panel, every family in `review_families_light`, is its
-DISCOVERY panel, recorded with `phase=discovery`, and the convergence, verification-rule, and
-reliability bullets below apply to it with that roster, so a clean, complete, non-degraded light
-panel writes the `converge` entry that takes the unit to `lane=merge`.
+DISCOVERY panel, recorded with `phase=discovery`, and the finding, convergence,
+verification-rule, and reliability bullets below apply to it with that roster, its fixes
+committed before its next panel since it runs no VERIFY, so a clean, complete, non-degraded
+light panel writes the `converge` entry that takes the unit to `lane=merge`.
 
 **Substantive and sensitive units** take the discovery/verify cycle:
 
@@ -681,8 +686,9 @@ panel writes the `converge` entry that takes the unit to `lane=merge`.
   failure is recorded.
 - **Convergence** is declared only on a clean, complete, non-degraded DISCOVERY panel: every
   required family returns a real, non-empty, non-timed-out verdict reporting zero findings on
-  the same pinned revision. An empty or timed-out verdict makes the round failed, never clean. A
-  clean VERIFY never declares convergence and never replaces the next discovery panel.
+  the same pinned revision. An empty or timed-out verdict makes the round failed, never clean,
+  unless another leg's confirmed findings make it a `findings` round (section 5). A clean VERIFY
+  never declares convergence and never replaces the next discovery panel.
 - **The verification rule**: whether a unit's DISCOVERY rounds are converging or stalled is
   decided by the project's own verification discipline, the rule bound through the
   `verification_convergence_rule` slot (section 10; default: continue while each round makes
@@ -705,20 +711,24 @@ panel writes the `converge` entry that takes the unit to `lane=merge`.
   declares; this skill adds no exclusion or basis of its own, and a stall it declares is handled
   by the at-stall path below, a park or a governing standing rescope once along the unit's
   lineage, whatever rounds its basis rests on, failed ones included.
-- **Reviewer reliability**: a reviewer silent past `stall_minutes` (default 45) is re-issued;
-  an absent family is re-issued, never waived; the first valid delivery per leg is authoritative
+- **Reviewer reliability**: a reviewer silent past `stall_minutes` (default 45) is re-issued; an
+  absent family is re-issued, never waived; the first valid delivery per leg is authoritative
   and a late valid delivery is read as a cross-reference; an invalid delivery never satisfies
   the family requirement; no missing-family or otherwise degraded panel converges. Whether a
   reviewer delivery that is degraded, failed, or UNVERIFIABLE counts is judged as the AIQT
   Guardrails pack's `verifier-delivery-completeness` rule says, which also sets when a required
   family is unavailable (genuinely unreachable, never merely unbudgeted): a degraded or failed
-  delivery is no verdict and is re-dispatched, and an UNVERIFIABLE outcome is terminal,
-  "treated as not-passed and resolved by fixing the input", never re-sent unchanged. Where a
-  required family is unavailable on that rule's terms, where a reachable family's delivery fails
-  again after that re-dispatch, or where an UNVERIFIABLE input is one the run cannot fix, the
-  run parks the unit on a `pending_decision` naming the reliability failures, through the park
-  path of the next bullet, never through a rescope, and never drops the family or reduces the
-  panel in place of that park.
+  delivery is no verdict and is re-dispatched, and an UNVERIFIABLE outcome is terminal, "treated
+  as not-passed and resolved by fixing the input", never re-sent unchanged. Where a required
+  family is unavailable on that rule's terms, where a reachable family's delivery fails again
+  after that re-dispatch, degraded included, or where an UNVERIFIABLE input is one the run
+  cannot fix, the run parks the unit on a `pending_decision` naming the reliability failures,
+  through the park path of the next bullet, never through a rescope, and never drops the family
+  or reduces the panel in place of that park. Where a failed `verdict` entry both meets one of
+  these park conditions and is part of a stall the verification rule declares, this reliability
+  park applies first, to fix the input or the reviewer, and no standing rule acts on that stall
+  meanwhile; the stall is evaluated after, the rule applied again before the unit's next
+  DISCOVERY round, and a stall it then declares takes the at-stall path below.
 - **At a stall the verification rule declares**: first apply a governing standing rule (the
   standing-rules bullet), whose rescope is recorded as an `autonomous_decision`, never a
   `pending_decision`; where no `rescope` rule governs, a `none` rule included, park the unit,
@@ -838,11 +848,14 @@ convergence rule.
   Within those limits, merging itself, what an `accept` allows to merge and which revision
   merges included, follows the adopter's own merge gate, the rule bound through the `merge_gate`
   slot (section 10; default: the AIQT Guardrails pack's `branch-and-merge-on-green` and
-  `gate-discipline` rules), under the one revision rule this skill adds, which no binding
-  lifts: merges are strictly serial and pinned to the reviewed head. Under the default binding,
-  a unit merging within those limits, one under an `accept` included, meets that gate. Before
-  waiting on CI, confirm the change is actually mergeable; a conflicting change never starts
-  CI, and waiting on it is idle time.
+  `gate-discipline` rules), under the one revision rule this skill adds, which no binding lifts:
+  merges are strictly serial and pinned to the reviewed head, which after a refresh onto the
+  integration branch is the refreshed head once the merge-delta verification and full suite
+  below pass on it. A unit merging within those limits, one under an `accept` included, is still
+  held to every requirement of the bound gate, the default binding's included, and staying
+  within those limits never by itself shows that gate met. Before waiting on CI, confirm the
+  change is actually mergeable; a conflicting change never starts CI, and waiting on it is idle
+  time.
 - After a refresh onto the integration branch, run merge-delta verification and the full suite,
   not only the conflicted files' tests: a clean three-way merge can still violate a newer
   cross-file rule.
@@ -885,8 +898,9 @@ convergence rule.
   recorded only as its `pending_decision` and `park` entry,
   with no block written or proposed, and attended it is also surfaced at once; a section 1, step
   2 gap decision, which parks only a parent's close and writes no `park` entry, is likewise
-  never blocking; where a section 7 `rescope` standing rule governs the stall, the run
-  records that rule's `autonomous_decision` and carries out its rescope instead, with no
+  never blocking; where a section 7 `rescope` standing rule governs the stall and no reliability
+  park applies first (section 7), the run records that rule's `autonomous_decision` and carries
+  out its rescope instead, with no
   `pending_decision`, `park` entry, or block. Only when the section 1, step 8 enumeration shows
   no item with any step that can proceed, every remaining `open` or `active` item accounted for
   by a ratified block that scopes it, by steps parked on recorded triggers, or, for a parent
@@ -1052,7 +1066,7 @@ configuration naming the slot (the Bindings rule below).
 | `gate_cmds` | `flow-gate-cmds` | (required) the gate and suite commands of the gated apply chain |
 | `merge_check_cmd` | `flow-merge-check-cmd` | (required) how CI status on the exact pushed revision is read |
 | `merge_authority` | `flow-merge-authority` | (required) who merges, and under which standing grant |
-| `merge_gate` | `flow-merge-gate` | the project's merge gate: what may merge, under an `accept` included, and which revision merges (section 7) |
+| `merge_gate` | `flow-merge-gate` | the project's merge gate: what may merge, under an `accept` included, and which revision merges, within the reviewed-head pin no binding lifts (section 7) |
 | `mode_source` | `flow-mode-source` | (required) the committed or operator-owned mode record (section 8) |
 | `flow_rate_source` | `flow-flow-rate-source` | where the current flow rate is read (section 2) |
 | `verification_floor` | `flow-verification-floor` | the merge verification floor (section 7) |
