@@ -429,7 +429,7 @@ def self_test():
 
 
 def main():
-    if sys.argv[1:] in (["--self-test"], ["--selftest"]):
+    if sys.argv[1:] == ["--self-test"]:
         return self_test()
     print("usage: _opf_init.py --self-test (a library module; no live mode)", file=sys.stderr)
     return 2

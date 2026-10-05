@@ -53,7 +53,7 @@ run_gate "opf-init-substrate-selftest" python3 -I -B "$here/_opf_init_substrate.
 run_gate "opf-init-builders-selftest"  python3 -I -B "$here/_opf_init.py" --self-test
 run_gate "opf-init-operation-selftest" python3 -I -B "$here/_opf_init_operation.py" --self-test
 run_gate "opf-init-p0-selftest"        python3 -I -B "$here/check_opf_init_p0.py" --self-test --red-on-revert
-run_gate "commonmark-headings-selftest" python3 -I -B "$here/selftest_commonmark_headings.py"
+run_gate "commonmark-headings-selftest" python3 -I -B "$here/selftest_commonmark_headings.py" --self-test
 run_gate "commonmark-conformance"      python3 -I -B "$here/selftest_commonmark_conformance.py"
 
 if [ "$failed" -ne 0 ]; then
