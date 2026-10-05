@@ -97,7 +97,9 @@ Legs, in order:
                  EXCLUDED_TREES with a module-level `if __name__ == "__main__":`, must be listed in
                  guarded-surfaces.
   documentation  ON (documentation-check = true, held by the switch leg): each DECLARATION_FILES entry
-                 must contain "Python <floor> or newer".
+                 must contain "Python <floor> or newer" as many times as DECLARATION_COPIES says
+                 (once by default), and each "Python <floor> or|and <word>" in it must be that phrase,
+                 so changing or removing one of two copies is a finding.
   claims         ON with the documentation leg: no DECLARATION_FILES entry may name a Python version
                  below the floor (OLDER_CLAIM_RE below), so an older claim beside the floor statement
                  is a finding, naming file and line.
@@ -145,12 +147,18 @@ setup-python step; and a remote action, a remote reusable workflow
 and is not read, so a setup-python step inside one is not seen. The leg scans only the files named
 above. The documentation leg matches the exact phrase, not its meaning: a sentence that negates it
 ("do not require Python 3.14 or newer") passes, and the phrase reflowed across a line break is a
-finding. The claims leg reads only the forms OLDER_CLAIM_RE names: the word Python or CPython (then
-optionally "version" or "versions") or the interpreter name pythonM.N, followed by the version, and a
-bare 3.N followed by a plus sign or by "or newer", "or later", "or above", "or higher", "and newer",
-"and later" or "and up". It does not read a version spelled in words, one separated from the word
-Python by markup other than whitespace and a no-break space, or the later end of a range ("Python 3.11
-to 3.13" is a finding for 3.11 only). It judges every older version it reads, whatever the sentence
+finding. A floor statement worded another way ("Python 3.14+", "at least 3.14") is caught only
+through the copy count, so it passes when it is added beside the declared copies. The claims leg
+reads only the forms OLDER_CLAIM_RE names: the word Python, CPython or Py (Py not after a dot, slash
+or hyphen; each optionally followed by "version" or "versions" and by an operator such as >=, the
+sign U+2265 or their HTML forms) or the interpreter name pythonM.N, followed by a version M.N, or
+followed by at least one space and a major version alone ("Python 3", read as 3.0); an operator
+followed by 3.N; and a bare 3.N followed by a plus sign, by "or" or "and" and then "newer", "later",
+"above", "higher", "greater" or "up", or by "onward" or "onwards". It does not read a version spelled
+in words, one separated from the word by markup other than whitespace and a no-break space, a bare
+3.N with none of those after it ("runs on 3.12"), the name python3 with no minor version, a bare
+version with a major other than 3, or the later end of a range ("Python 3.11 to 3.13" is a finding
+for 3.11 only). It judges every older version it reads, whatever the sentence
 says about it, so a sentence that names an older version only to say it is refused is also a finding,
 a disclosed over-rejection: state the floor without naming older versions.
 
@@ -254,14 +262,28 @@ SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install.html",
                      "opf/site/adopt.md", "opf/site/adopt.html", "opf/spec/OPF-QUICKSTART.md",
                      ".preview/README.md")
-# A Python version a declaration file names (the claims leg): the word Python or CPython, optionally
-# "version" or "versions", then the version, whitespace and no-break spaces allowed between; the
-# interpreter name pythonM.N; or a bare 3.N followed by a plus sign or an "or newer" style phrase.
+# How many times a declaration file states the floor phrase, where that is more than once: each copy is
+# counted, so changing or removing one of them is a finding.
+DECLARATION_COPIES = {"opf/site/adopt.html": 2}
+# A separator the claims leg reads between words: whitespace, or a no-break space and its HTML forms.
+CLAIM_SEP = r"(?:\s|&nbsp;|&#160;)"
+# A version operator: >=, =>, ~=, ==, >, the sign U+2265, and their HTML forms.
+CLAIM_OP = r"(?:>=|=>|~=|==|>|\u2265|&gt;=|&gt;|&ge;|&#8805;|&#x2265;)"
+# The word before a version: Python or CPython, or Py when no dot, slash or hyphen precedes it (so a
+# file name such as x.py is not read), then optionally "version" or "versions" and an operator.
+CLAIM_WORD = (r"(?:(?<![A-Za-z0-9_])c?python|(?<![A-Za-z0-9_./-])py)(?:{0}*versions?)?{0}*(?:{1}{0}*)?v?"
+              .format(CLAIM_SEP, CLAIM_OP))
+# A Python version a declaration file names (the claims leg): the word, then a version M.N (the
+# interpreter name pythonM.N included); the word, at least one separator, then a major version alone
+# ("Python 3"); an operator then 3.N; or a bare 3.N followed by a plus sign, an "or newer" style
+# phrase or "onward".
 OLDER_CLAIM_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])c?python(?:\s|&nbsp;|&#160;)*"
-    r"(?:versions?(?:\s|&nbsp;|&#160;)+)?v?(?P<major>[0-9]+)\.(?P<minor>[0-9]+)"
-    r"|(?<![0-9.])(?P<bare>3)\.(?P<bare_minor>[0-9]+)"
-    r"(?=\+|\s+(?:or\s+(?:newer|later|above|higher)|and\s+(?:newer|later|up))\b)")
+    r"(?i)" + CLAIM_WORD + r"(?P<major>[0-9]+)\.(?P<minor>[0-9]+)"
+    r"|(?:(?<![A-Za-z0-9_])c?python|(?<![A-Za-z0-9_./-])py)(?:" + CLAIM_SEP + r"+versions?)?"
+    + CLAIM_SEP + r"+(?:" + CLAIM_OP + CLAIM_SEP + r"*)?v?(?P<only>[0-9]+)(?![0-9]|\.[0-9])"
+    r"|" + CLAIM_OP + CLAIM_SEP + r"*v?(?P<op>3)\.(?P<op_minor>[0-9]+)"
+    r"|(?<![0-9.])(?P<bare>3)\.(?P<bare_minor>[0-9]+)(?=\+|" + CLAIM_SEP + r"+(?:(?:or|and)" + CLAIM_SEP
+    + r"+(?:newer|later|above|higher|greater|up)|onwards?)\b)")
 SURFACE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
 FLOOR_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)")
 FLAG_SETS = ((), ("-O",), ("-OO",))
@@ -1017,9 +1039,25 @@ def completeness_findings(root, surfaces):
 
 
 def documentation_findings(root, floor):
+    """Each declaration file must state the floor phrase as many times as DECLARATION_COPIES says (once
+    by default), and every statement of the floor in the form "Python <floor> or|and <word>" must be
+    exactly the phrase."""
     phrase = "Python %d.%d or newer" % floor
-    return ["{}: does not state {!r}".format(rel, phrase) for rel in DECLARATION_FILES
-            if phrase not in _read_text(root / rel)]
+    variant_re = re.compile(r"(?i)(?<![A-Za-z0-9_])c?python{0}+{1}(?![0-9]|\.[0-9]){0}+(?:or|and){0}+"
+                            r"[A-Za-z]+".format(CLAIM_SEP, re.escape("%d.%d" % floor)))
+    found = []
+    for rel in DECLARATION_FILES:
+        text = _read_text(root / rel)
+        count, want = text.count(phrase), DECLARATION_COPIES.get(rel, 1)
+        if not count:
+            found.append("{}: does not state {!r}".format(rel, phrase))
+        elif count != want:
+            found.append("{}: states {!r} {} time(s), not the {} in DECLARATION_COPIES".format(
+                rel, phrase, count, want))
+        found.extend("{}:{}: states the floor as {!r}, not as {!r}".format(
+            rel, text.count("\n", 0, match.start()) + 1, match.group(0), phrase)
+            for match in variant_re.finditer(text) if match.group(0) != phrase)
+    return found
 
 
 def documentation_claim_findings(root, floor):
@@ -1028,16 +1066,18 @@ def documentation_claim_findings(root, floor):
     for rel in DECLARATION_FILES:
         text = _read_text(root / rel)
         for match in OLDER_CLAIM_RE.finditer(text):
-            major, minor = (match.group("major", "minor") if match.group("major") is not None
-                            else match.group("bare", "bare_minor"))
+            parts = next(match.group(*pair) for pair in (("major", "minor"), ("only", "only"),
+                                                         ("op", "op_minor"), ("bare", "bare_minor"))
+                         if match.group(pair[0]) is not None)
             try:
-                version = (int(major), int(minor))
+                version = (int(parts[0]), 0 if match.group("only") is not None else int(parts[1]))
             except ValueError as exc:
                 raise CannotEvaluate("{}: a version too long to read: {}".format(rel, exc))
             if version < floor:
-                found.append("{}:{}: names Python {}.{}, below the floor {}.{}; a declaration may "
+                named = parts[0] if match.group("only") is not None else "{}.{}".format(*parts)
+                found.append("{}:{}: names Python {}, below the floor {}.{}; a declaration may "
                              "not state an older version".format(
-                                 rel, text.count("\n", 0, match.start()) + 1, *version, *floor))
+                                 rel, text.count("\n", 0, match.start()) + 1, named, *floor))
     return found
 
 
@@ -1112,8 +1152,9 @@ def _write(root, rel, text):
 
 
 def _declared(floor_text="3.14"):
-    """Every declaration file, stating the floor."""
-    return dict.fromkeys(DECLARATION_FILES, "Requires Python {} or newer.\n".format(floor_text))
+    """Every declaration file, stating the floor as many times as DECLARATION_COPIES says."""
+    return {rel: "Requires Python {} or newer.\n".format(floor_text) * DECLARATION_COPIES.get(rel, 1)
+            for rel in DECLARATION_FILES}
 
 
 def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'",
@@ -1583,6 +1624,37 @@ def _self_test_cases(base):
         "AIQT 2.7+; 13.1+.\n"}))[0], 0)
     check("claims/oversized-version-cannot-evaluate", evaluate(_fixture(base, files={
         DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 3." + "1" * 5000 + "\n"}))[0], 2)
+    # A file holding two copies of the phrase: one copy changed, or removed, is a finding.
+    adopt = "opf/site/adopt.html"
+    code, lines = evaluate(_fixture(base, files={
+        adopt: "<p>Requires Python 3.14 or newer.</p>\n<p>Requires Python 3.14 or later.</p>\n"}))
+    check("documentation/copies-one-changed-finding", (code, lines),
+          (1, ["FAIL: {}: states 'Python 3.14 or newer' 1 time(s), not the 2 in DECLARATION_COPIES"
+               .format(adopt), "FAIL: {}:2: states the floor as 'Python 3.14 or later', not as "
+               "'Python 3.14 or newer'".format(adopt)]))
+    code, lines = evaluate(_fixture(base, files={adopt: "<p>Requires Python 3.14 or newer.</p>\n"}))
+    check("documentation/copies-one-removed-finding", (code, lines),
+          (1, ["FAIL: {}: states 'Python 3.14 or newer' 1 time(s), not the 2 in DECLARATION_COPIES"
+               .format(adopt)]))
+    code, lines = evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nThe hooks need python 3.14 and later.\n"}))
+    check("documentation/variant-wording-finding", (code, lines),
+          (1, ["FAIL: README.md:2: states the floor as 'python 3.14 and later', not as "
+               "'Python 3.14 or newer'"]))
+    forms = ("Requires Python 3.14 or newer.\nSupports Python >= 3.10.\nNeeds Python \u2265 3.10.\n"
+             "Python &gt;= 3.9\nCPython &ge; 3.12\nRuns on 3.12 and above.\nRuns on 3.12 or greater.\n"
+             "Tested on Py 3.12.\nPython 3 or newer\nRequires >=3.11.\n3.11 onwards.\nPython 2\n")
+    code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[0]: forms}))
+    check("claims/operator-major-and-phrase-findings",
+          (code, [line.split(": names ")[0] + " " + line.split(" ")[4] for line in lines
+                  if "names Python" in line]),
+          (1, ["FAIL: README.md:2 3.10,", "FAIL: README.md:3 3.10,", "FAIL: README.md:4 3.9,",
+               "FAIL: README.md:5 3.12,", "FAIL: README.md:6 3.12,", "FAIL: README.md:7 3.12,",
+               "FAIL: README.md:8 3.12,", "FAIL: README.md:9 3,", "FAIL: README.md:10 3.11,",
+               "FAIL: README.md:11 3.11,", "FAIL: README.md:12 2,"]))
+    check("claims/operator-major-near-misses-pass", evaluate(_fixture(base, files={
+        DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 4 or newer; Python >= 3.14; "
+        "run check.py 3 times; py3 wheels; python3 tools/x.py 2; Python 3.14.4; spec >= 1.2.0.\n"}))[0], 0)
 
     _red_on_revert(base, good)
     _rule_reverts(base)
