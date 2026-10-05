@@ -39,14 +39,14 @@ store can be built by hand from those sections.
 ## Read the specification first
 
 Read these files in full before you write any code, at the pinned commit
-`93ef8d2e2f34a5668518df1617da646ad919ba6c` of `jposluns/guardrails`. Read them from the pinned URLs,
+`5d38a1aedf8db9461db100ab494a52dc362bd27a` of `jposluns/guardrails`. Read them from the pinned URLs,
 not from a branch, so the text cannot change under you. After downloading each file, compute its
 SHA-256 and compare it with the value given here; if any value differs, or a file cannot be fetched,
 stop and report it. Do not work from memory or from a summary, this one included.
 
 | File | Role | SHA-256 at the pinned commit |
 |---|---|---|
-| `opf/spec/OPF-SPEC.md` | The authoritative specification | `1bedc2372a7b9c040e627aa005b76724ac2d826ad07c41ac83d410327fafac2e` |
+| `opf/spec/OPF-SPEC.md` | The authoritative specification | `448a28194bdf4c075419f48397e283b0ae0d2bcedb195000f0cb8d659cbb298b` |
 | `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `8c4f5385c4388701ec1d8fdce88c0b13cba104ae75e9d32219b1af0843033e50` |
 | `opf/spec/OPF-INIT-D2B.md` | The coupled initialization contract | `4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec` |
 | `opf/spec/OPF-INIT-D2B-REVIEW.md` | The review register for that contract | `5b29499173ed8ad47607d3d604bb77e59cd47a639f35046fb4815e241a794ffa` |
@@ -57,11 +57,11 @@ stop and report it. Do not work from memory or from a summary, this one included
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
 ```text
-https://raw.githubusercontent.com/jposluns/guardrails/93ef8d2e2f34a5668518df1617da646ad919ba6c/<path>
+https://raw.githubusercontent.com/jposluns/guardrails/5d38a1aedf8db9461db100ab494a52dc362bd27a/<path>
 ```
 
 For example, the specification itself is at
-`https://raw.githubusercontent.com/jposluns/guardrails/93ef8d2e2f34a5668518df1617da646ad919ba6c/opf/spec/OPF-SPEC.md`.
+`https://raw.githubusercontent.com/jposluns/guardrails/5d38a1aedf8db9461db100ab494a52dc362bd27a/opf/spec/OPF-SPEC.md`.
 
 Facts about these sources that shape the work:
 
