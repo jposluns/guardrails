@@ -50,24 +50,31 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
   R4 declared-view writes. Each machine-store manifest's views targets are declared view destinations;
      a target equal to one is denied (views change only through `opf render`; spec 5.8, 14.1).
   R5 Bash writes the matcher CAN see. A Bash command whose text references a protected token is denied
-     unless the whole command is one of the three pristine allowances below. The protected tokens are
-     the `.working` store tree (any substring spelling, and any session cwd that itself sits inside a
-     `.working` tree, where every relative spelling lands in the store), and the frozen (R3) and
-     declared-view (R4) paths, matched with path boundaries (a longer word such as PYTHON_VERSION does
-     not trip a VERSION view; an absolute spelling of the same file does). The rosters are resolved
-     from the product roots above the session cwd AND above every absolute path spelled in the command,
-     so an absolute protected spelling is judged even when the session sits outside the product tree.
-     Reference, not proven mutation, is the trigger: a lexical hook cannot prove a referencing command
-     read-only (sed -i, tee, cp, mv, truncate, dd, install, ln, rm, shell functions, aliases), so it
-     fails closed and names the allowed routes.
+     unless the WHOLE command is a single plain invocation of the sanctioned writer (allowance A1
+     below); there is no other allowance. The protected tokens are the `.working` store tree (any
+     substring spelling, and any session cwd that itself sits inside a `.working` tree, where every
+     relative spelling lands in the store), and the frozen (R3) and declared-view (R4) paths, matched
+     with path boundaries (a longer word such as PYTHON_VERSION does not trip a VERSION view; an
+     absolute spelling of the same file does), over the raw command string AND, when the command lexes
+     pristine, over its dequoted tokens (so a quote-split spelling such as VER''SION still references
+     the view). The rosters are resolved from the product roots above the session cwd, above every
+     absolute path spelled in the command, and above every dequoted absolute token (a quoted root with
+     spaces binds through its whole operand, not only its space-free prefix); a command that spells
+     more absolute paths than the discovery budget DENIES (cannot-evaluate) rather than truncating the
+     scan. Reference, not proven mutation, is the trigger: a lexical hook cannot prove a referencing
+     command read-only (sed -i, tee, cp, mv, truncate, dd, install, ln, rm, shell functions, aliases,
+     and equally cat, grep, ls or git, whose environment assignments and options can make them write),
+     so it fails closed and names the allowed route.
   R6 unreadable inputs fail closed. A missing or non-string target field, a control character in a
      target, a relative target with no readable session cwd, and every unreadable roster input DENY
      (the roster that would prove the operation safe cannot be computed), naming the unreadable input:
      an unreadable evidence home or store tree, a present-but-unreadable, dangling-symlink,
      NON-REGULAR (FIFO, device, socket), oversized, undecodable, unparseable or wrong-format plan.toml
-     or manifest.toml, a plan without its [[sources]] rows, a source row without a string path, a
-     disposition outside the planner vocabulary keep/retire/move/migrate, and an ambiguous
-     (multi-manifest) machine store. Roster files are opened without blocking (O_NONBLOCK where the
+     or manifest.toml (a manifest that parses without declaring the OPF standard, [opf]
+     standard = "opf", fails validation the same way: never an empty view roster), a plan without its
+     [[sources]] rows, a source row whose path is missing, non-string, empty or
+     control-character-bearing, a disposition outside the planner vocabulary keep/retire/move/migrate,
+     and an ambiguous (multi-manifest) machine store. Roster files are opened without blocking (O_NONBLOCK where the
      platform has it) after a regular-file check, re-checked on the open descriptor, and read through
      a bounded loop, so a FIFO or other trap input yields a prompt structured deny, never a stall and
      never an empty protection set. A payload unreadable at the envelope level exits 2 (blocking
@@ -75,33 +82,34 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
   R7 tools this hook cannot prove read-only. The named rules above cover the write-capable built-ins;
      every OTHER tool name (an MCP server's write tool, a shell tool other than Bash, a future
      built-in) is denied when any string in its payload references a protected token (the same tokens
-     and rosters as R5), because the hook cannot prove such a tool read-only. The known read-only
+     and rosters as R5) or RESOLVES, judged exactly as a file-tool target would be (cwd-joined, tilde
+     expanded, realpathed), to the store, a frozen path or a declared view, and is denied
+     cannot-evaluate when the payload exceeds the string-scan budget (the hook never judges a partial
+     scan), because the hook cannot prove such a tool read-only. The known read-only
      built-ins (Read, Glob, Grep and the other names in READONLY_TOOLS) are allowed outright; tools
      that only launch further hooked tool calls (Task, Skill) are treated as read-only here because
      the launched calls are judged on their own.
 
-PRISTINE ALLOWANCES for a Bash command that references a protected token. Each requires the command to
-be PRISTINE under a quote-aware scan of the raw string: outside quotes no metacharacter may appear (no
-semicolon, ampersand, pipe, angle bracket, backquote, dollar sign, parenthesis, brace, backslash,
+THE SINGLE PRISTINE ALLOWANCE for a Bash command that references a protected token (the allowance
+machinery is itself attack surface, so the read-only command words and read-only git forms earlier
+revisions allowed are REMOVED rather than patched; the over-refusal is disclosed below). The command
+must be PRISTINE under a quote-aware scan of the raw string: outside quotes no metacharacter may appear
+(no semicolon, ampersand, pipe, angle bracket, backquote, dollar sign, parenthesis, brace, backslash,
 carriage return or newline), a single-quoted span is wholly literal argument data, a double-quoted span
 may carry no dollar sign, backquote or backslash (those expansions stay live inside double quotes), and
 every quote must be terminated. So no second command, redirection, substitution or expansion can ride
 along, while a sanctioned invocation may still QUOTE prose or a path that names a protected token (an
-`opf record` title, an `opf render --root` operand with spaces or parentheses). Leading VAR=value
-assignments are skipped.
-  A1 the sanctioned writer: opf itself, or a python3 launcher (interpreter flags allowed) running a path
-     whose basename is opf.py, with any verb; opf's own write guard, lease and journal govern what it
-     may do. This allowance also holds under an R6 roster failure, so the in-session repair path stays
-     open.
-  A2 a read-only command word: cat, head, tail, wc, grep, diff, cmp, ls, stat, readlink, du, sha256sum
-     or md5sum (flag-insensitive file readers; none takes a write-capable flag; `file` is NOT here, its
-     -C flag compiles a .mgc beside the source).
-  A3 a read-only git form: git whose subcommand token is status, log, show, diff, blame, grep,
-     rev-parse, ls-files, add or commit (add and commit write only the repository metadata under .git/,
-     never the protected file's bytes), and with NO option token after the subcommand: git's own
-     --output and pager/editor flags make otherwise read-only verbs write arbitrary files, and the hook
-     cannot prove an option read-only, so any dash-leading token after the subcommand takes the deny
-     (an over-refusal, disclosed below; plain path operands are fine).
+`opf record` title, an `opf render --root` operand with spaces or parentheses). A leading VAR=value
+assignment is NOT skipped: an environment assignment changes what a program does (GIT_EXTERNAL_DIFF and
+GIT_CONFIG_* make `git diff` execute an arbitrary writer), so an assignment-bearing command is never
+the allowance.
+  A1 the sanctioned writer, as a whole single plain invocation: `opf record ...` or `opf render ...`
+     (the installed entry point as a bare word), or a bare python3 word (allowlisted interpreter flags
+     only) running THE repository's own opf/tools/opf.py with verb record or render. The launched
+     script is identified by realpath EQUALITY against the writer this hook ships beside (resolved
+     from the hook's own installed location), never by a filename: a same-named opf.py anywhere else
+     is not the writer. opf's own write guard, lease and journal govern what the writer may do. This
+     allowance also holds under an R6 roster failure, so the in-session repair path stays open.
 
 RESIDUALS (spec 14.1 requires each disclosed; the pack's residual register (slice (d)) and the plan's
 per-platform residual coverage carry the same list):
@@ -112,10 +120,11 @@ per-platform residual coverage carry the same list):
   - A relative protected spelling judged from outside the product tree: when the session cwd sits
     outside every product root, only the ABSOLUTE spellings in the command can bind the rosters; a
     relative spelling of a frozen or view path resolves to no roster and passes the token scan.
-  - A tool outside the named rules whose payload does NOT textually name a protected token: R7 is the
-    same lexical floor as R5, so an MCP or other in-platform tool that reaches a protected path
-    through an indirect spelling is not caught; so is a read-only-listed tool that is in fact
-    write-capable on some server. Edits made outside Claude Code entirely (any other editor, shell or
+  - A tool outside the named rules whose payload neither names a protected token nor resolves to one:
+    R7's path pass judges every payload string as a resolvable target, so a relative or tilde
+    spelling that RESOLVES to a protected path is caught, but a spelling the hook cannot resolve
+    lexically (a server-side variable, an encoded path) is not; so is a read-only-listed tool that is
+    in fact write-capable on some server. Edits made outside Claude Code entirely (any other editor, shell or
     tool) bypass this hook as before; the pre-commit and CI floor members are the overlapping controls.
   - Case-insensitive or normalizing filesystems (default APFS, NTFS): the `.working` component and the
     roster paths are compared byte-exactly, so a differently cased spelling (`.Working`) that aliases
@@ -124,21 +133,31 @@ per-platform residual coverage carry the same list):
   - A relocated store (spec 4.1/4.3): the hook finds product roots only through a `.working` entry and
     reads no `.opf.toml` pointer, so after a relocation the product-root paths bind no rosters here;
     the floor members that read the pointer carry that topology.
+  - The bare `opf` entry point of A1 resolves through PATH outside the hook's sight: a same-named
+    program planted earlier on PATH runs instead of the writer (same-user tampering, as with the
+    registration itself); the python3 launcher form carries no such residual, its script being
+    realpath-bound to the repository's writer.
   - Per-clone installation and bypass: the settings.json registration is local configuration; a clone
     that never registered the hook runs no hook, and the same user can deregister or edit it
     (same-user tampering, canonical hand edits).
   - Platform hook-startup failures may fall through to the platform's normal permission flow.
   - Shell or interpreter wrapping of the platform itself is outside the hook's reach.
-  - Over-approximation is the accepted cost of the fail-closed posture: R5/R7 deny some read-only
-    commands and tool calls (reads go through the platform's Read tool, A2 or opf), A3 denies
-    option-bearing read-only git forms (git log -1, git commit -m) that name a protected token, R6
+  - Over-approximation is the accepted cost of the fail-closed posture: R5/R7 deny EVERY
+    protected-token-referencing command and tool call outside A1, read-only forms included, for
+    example `cat .working/toml/counters.toml`, `grep -n x .working/toml/counters.toml`,
+    `git diff .working/toml/counters.toml`, `git add TODO.md` for a declared view TODO.md, `git log
+    LEGACY.md` for a plan-frozen LEGACY.md, and `opf doctor --root .working/..` (only the record and
+    render verbs are the writer; reads go through the platform's Read tool). A command spelling more
+    absolute paths than the discovery budget and an unknown-tool payload over the string-scan budget
+    deny as cannot-evaluate even when reference-free. R6
     denies every write under a root whose roster carries ANY unreadable or malformed entry (a stray
     non-directory run entry included), R3 keeps denying a frozen path even after its retirement is
     recorded and the live file is gone (re-creating it directly stays denied; a fresh plan is the
     sanctioned route), and a `.working` or boundary-matched protected token inside prose (a commit
     message, say) still trips R5.
   - The IMPORTED record series is NOT yet protected here: the leaves `worklog.imported.toml` and
-    `<type>.imported.index.toml` inside the machine store are exempt from R1 by name, because
+    `<type>.imported.index.toml` DIRECTLY inside the machine store directory (exactly
+    `.working/<machine>/<leaf>`, no other depth) are exempt from R1 by name, because
     enforcement MUST NOT ship before the writer can perform every operation it forces (spec 14.1) and
     the import writer (`opf record import --batch`, spec 8.8) has not shipped. The imported-series
     protection slice lands with or after that writer and removes this exemption.
@@ -171,12 +190,20 @@ MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
 # The roster-file bound (R6): a plan or manifest is a few KiB; a larger file is not a roster this hook
 # can honestly evaluate, so it fails closed rather than reading unbounded bytes on the hot path.
 MAX_ROSTER_BYTES = 1024 * 1024
+# The scan budgets (R5/R7): a command or payload past either bound cannot be fully examined, and a
+# partial scan must never be judged, so exceeding a budget DENIES (cannot-evaluate), never truncates.
+MAX_ABS_PATHS = 64
+MAX_PAYLOAD_STRINGS = 4096
 
 WORKING = ".working"                      # the fixed store-tree name at a product root (spec 4.4)
 ADOPTION_ARCHIVE = ("archive", "adoption")  # .working/archive/adoption/<run-id>/ (spec 14.1, 14.2)
 ADOPTION_EVIDENCE = ("imported", "adoption")  # .working/imported/adoption/<run-id>/ (spec 14.2)
 PLAN_FILENAME = "plan.toml"
 PLAN_FORMAT = "opf.adoption.plan/v2"      # the bound plan format marker (spec 14.1)
+# The machine-store discovery marker (spec 4.5, mirrored from _opf_store.STANDARD_TOKEN): a
+# .working/<name>/manifest.toml is a machine store only when its [opf] table declares this standard;
+# one that parses WITHOUT declaring it fails validation and denies, never an empty view roster.
+MANIFEST_STANDARD = "opf"
 # The planner's closed disposition vocabulary (_opf_adopt_plan._decisions); any other value is a
 # malformed plan and R6 fails closed on it rather than silently skipping the row.
 VALID_DISPOSITIONS = frozenset(("keep", "move", "migrate", "retire"))
@@ -197,7 +224,7 @@ READONLY_TOOLS = frozenset(("Read", "Glob", "Grep", "LS", "NotebookRead", "WebFe
                             "BashOutput", "TaskOutput", "KillShell", "KillBash", "SlashCommand",
                             "Skill"))
 
-# R5/A1-A3 vocabularies. METACHARS is the UNQUOTED-dangerous set for the quote-aware pristine scan:
+# R5/A1 vocabularies. METACHARS is the UNQUOTED-dangerous set for the quote-aware pristine scan:
 # semicolon, ampersand, pipe, the two angle brackets, backquote, dollar sign, the two parentheses, the
 # two braces, backslash, carriage return and newline, each built from its code point so none appears
 # literally here. DQ_LIVE is the subset that stays live INSIDE double quotes (dollar, backquote,
@@ -205,16 +232,16 @@ READONLY_TOOLS = frozenset(("Read", "Glob", "Grep", "LS", "NotebookRead", "WebFe
 METACHARS = frozenset(chr(c) for c in (59, 38, 124, 60, 62, 96, 36, 40, 41, 123, 125, 92, 13, 10))
 DQ_LIVE = frozenset(chr(c) for c in (36, 96, 92))
 QUOTES = frozenset(chr(c) for c in (39, 34))
-READONLY_WORDS = frozenset(("cat", "head", "tail", "wc", "grep", "diff", "cmp", "ls", "stat",
-                            "readlink", "du", "sha256sum", "md5sum"))
-GIT_SAFE_SUBCOMMANDS = frozenset(("status", "log", "show", "diff", "blame", "grep", "rev-parse",
-                                  "ls-files", "add", "commit"))
+# The writer verbs A1 accepts (module docstring): a single plain `opf record ...` or `opf render ...`
+# invocation is the WHOLE allowance surface; every other opf verb, wrapper or launcher takes the deny.
+WRITER_VERBS = frozenset(("record", "render"))
 # The path-word characters for the boundary-matched roster-token scan (R5/R7): a roster path embedded
 # in a longer run of these on its left, or of these or a separator on its right, is a DIFFERENT path
 # (PYTHON_VERSION vs the view VERSION); a left slash still matches (an absolute spelling of the file).
 WORD_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
 # Absolute POSIX-path spellings inside a command or payload string (used to BIND rosters, never to
-# allow): best-effort, so a path with spaces binds through its prefix directories only.
+# allow): best-effort over the raw text (a path with spaces binds its whole operand only through the
+# dequoted-token and payload-string passes); more matches than MAX_ABS_PATHS denies, never truncates.
 ABS_PATH_RE = re.compile(r"/[A-Za-z0-9_./@%+,=~^-]+")
 _ASSIGNMENT_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*=")
 _PYTHON_RE = re.compile(r"\Apython(3(\.\d+)?)?\Z")
@@ -267,7 +294,10 @@ def _candidates(target, cwd):
     ORIGINAL spelling. Resolving the original spelling first is load-bearing: in a spelling such as
     `link/../x`, the filesystem resolves the symlink BEFORE `..` climbs out of its destination, so a
     lexical collapse first (normpath dropping `link/..`) would judge a different file than the one the
-    write reaches. normpath is applied only to the already-resolved result and to the lexical twin."""
+    write reaches. normpath is applied only to the already-resolved result and to the lexical twin.
+    A tilde spelling expands FIRST (the launched tool expands it too, so the hook must judge the
+    expanded path, never a cwd-joined literal `~`)."""
+    target = os.path.expanduser(target)
     if not os.path.isabs(target):
         if not isinstance(cwd, str) or not os.path.isabs(cwd):
             return None
@@ -290,8 +320,8 @@ def _store_rule(candidate):
     if len(after) >= 2 and (after[0], after[1]) == ADOPTION_ARCHIVE:
         return ("writes under %s/archive/adoption/<run-id>/ are denied: the adoption archive holds "
                 "digest-bound preserved originals (spec 14.1). %s." % (WORKING, SANCTIONED))
-    if after and after[0] not in CONTROL_SUBDIRS and IMPORTED_LEAF_RE.match(after[-1]):
-        return None  # the imported-series leaves stay writer-less until the import writer ships
+    if (len(after) == 2 and after[0] not in CONTROL_SUBDIRS and IMPORTED_LEAF_RE.match(after[1])):
+        return None  # the imported-series machine-store leaves stay writer-less until the import writer ships
     if after and after[0] == "imported":
         return ("direct writes under %s/imported/ are denied: adoption and import evidence is written "
                 "only by the opf writers and verified by the completion checks (spec 14.1, 14.2). "
@@ -394,7 +424,8 @@ def _frozen_paths(root):
             return None, ("the adoption plan %s carries no [[sources]] list (a plan whose rows "
                           "cannot be read freezes nothing it should)" % (plan,))
         for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            if not isinstance(row, dict) or not isinstance(row.get("path"), str) \
+                    or not row["path"] or any(ord(c) < 0x20 for c in row["path"]):
                 return None, "the adoption plan %s carries a malformed source row" % (plan,)
             disposition = row.get("disposition")
             if disposition not in VALID_DISPOSITIONS:
@@ -435,7 +466,13 @@ def _view_targets(root):
             return None, reason
         if doc is None:
             continue  # a store subdir without a manifest entry is not a machine store
-        found.append((os.path.join(sub, "manifest.toml"), doc))
+        mpath = os.path.join(sub, "manifest.toml")
+        base = doc.get(MANIFEST_STANDARD)
+        if not isinstance(base, dict) or base.get("standard") != MANIFEST_STANDARD:
+            return None, ("the manifest %s parses but does not declare the OPF standard ([%s] "
+                          "standard = %r, spec 4.5); a manifest that fails validation yields no "
+                          "roster" % (mpath, MANIFEST_STANDARD, MANIFEST_STANDARD))
+        found.append((mpath, doc))
     if not found:
         return set(), None
     if len(found) > 1:
@@ -448,7 +485,8 @@ def _view_targets(root):
     targets = set()
     for name, tbl in views.items():
         tgt = tbl.get("target") if isinstance(tbl, dict) else None
-        if not isinstance(tgt, str) or not tgt or os.path.isabs(tgt) or ".." in _components(tgt):
+        if (not isinstance(tgt, str) or not tgt or os.path.isabs(tgt) or ".." in _components(tgt)
+                or any(ord(c) < 0x20 for c in tgt)):
             return None, "the manifest %s view %r has no contained relative target" % (manifest, name)
         targets.add(os.path.normpath(tgt))
     return targets, None
@@ -511,9 +549,10 @@ def _file_tool_rule(tool_name, tool_input, cwd):
 def _pristine_tokens(command):
     """The shell-aware tokens of a PRISTINE command (module docstring: no unquoted metacharacter or
     control character, single-quoted spans wholly literal, double-quoted spans with no live dollar
-    sign, backquote or backslash, every quote terminated), with leading VAR=value assignments
-    dropped; or None when the command is not pristine. Quoted spans tokenize as argument DATA, so a
-    sanctioned invocation may quote prose that names a protected token."""
+    sign, backquote or backslash, every quote terminated); or None when the command is not pristine.
+    Leading VAR=value assignments are KEPT: an assignment changes what a program does, so an
+    assignment-bearing command is never the sanctioned writer. Quoted spans tokenize as argument
+    DATA, so a sanctioned invocation may quote prose that names a protected token."""
     tokens, cur, has_cur, mode = [], [], False, ""
     for ch in command:
         if mode == chr(39):
@@ -546,22 +585,48 @@ def _pristine_tokens(command):
         return None  # an unterminated quote is not a command this hook can read
     if has_cur:
         tokens.append("".join(cur))
-    while tokens and _ASSIGNMENT_RE.match(tokens[0]):
-        tokens = tokens[1:]
     return tokens or None
 
 
-def _is_sanctioned_opf(tokens):
-    """A1: opf itself, or a python launcher (interpreter flags allowed) running a <...>/opf.py."""
-    word = os.path.basename(tokens[0])
+def _sanctioned_writer():
+    """The sanctioned writer's resolved identity: the opf CLI of the repository THIS hook ships in
+    (opf/tools/opf.py, resolved relative to the hook's own realpathed location). A1 compares a
+    launched script by realpath EQUALITY against this path, never by a basename, so a same-named
+    opf.py anywhere else is not the writer."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    return os.path.realpath(os.path.join(here, os.pardir, os.pardir, "tools", "opf.py"))
+
+
+def _is_sanctioned_opf(tokens, cwd):
+    """A1 (module docstring): the whole command is a single plain invocation of the sanctioned
+    writer. `opf record ...` or `opf render ...` with the entry point as a BARE word, or a bare
+    python3 word (allowlisted interpreter flags only) running the repository's own opf/tools/opf.py
+    (realpath equality against the writer the hook ships beside) with verb record or render. A
+    leading VAR=value assignment, a slash-bearing launcher word, another script or another verb is
+    NOT the writer."""
+    word = tokens[0]
+    if _ASSIGNMENT_RE.match(word) or os.sep in word:
+        return False
     if word == "opf":
-        return True
+        return len(tokens) >= 2 and tokens[1] in WRITER_VERBS
     if not _PYTHON_RE.match(word):
         return False
     rest = tokens[1:]
     while rest and _PYFLAGS_RE.match(rest[0]):
         rest = rest[1:]
-    return bool(rest) and os.path.basename(rest[0]) == "opf.py"
+    if len(rest) < 2 or rest[1] not in WRITER_VERBS:
+        return False
+    script = os.path.expanduser(rest[0])
+    if not os.path.isabs(script):
+        if not isinstance(cwd, str) or not os.path.isabs(cwd):
+            return False
+        script = os.path.join(cwd, script)
+    try:
+        resolved = os.path.realpath(script)
+    except OSError:
+        return False
+    writer = _sanctioned_writer()
+    return resolved == writer and os.path.isfile(writer)
 
 
 def _mentions_rel(rel, text):
@@ -583,16 +648,31 @@ def _mentions_rel(rel, text):
         start = i + 1
 
 
-def _bound_roots(text, cwd):
-    """The product roots the rosters are resolved from (R5/R7): every root at or above the session
-    cwd (when there is one), plus every root at or above an absolute path spelled in `text`, so an
-    absolute protected spelling is judged even when the session sits outside its product tree."""
+def _bound_roots(text, cwd, extras=()):
+    """The product roots the rosters are resolved from (R5/R7): (roots, None) or (None, reason) when
+    the absolute-path discovery budget is exceeded (a truncated scan could silently drop the one
+    protected spelling, so the hook denies instead). Roots are taken at or above the session cwd
+    (when there is one), above every absolute path spelled in `text`, and above every `extras` entry
+    (a dequoted Bash token or payload string, tilde-expanded) that is absolute, so an absolute
+    protected spelling is judged even when the session sits outside its product tree and a quoted
+    root with spaces binds through its whole operand."""
     roots = list(_roots_above(cwd)) if isinstance(cwd, str) and os.path.isabs(cwd) else []
-    for match in ABS_PATH_RE.findall(text)[:64]:
-        for root in _roots_above(os.path.normpath(match)):
+    matches = ABS_PATH_RE.findall(text)
+    if len(matches) > MAX_ABS_PATHS:
+        return None, ("the command or payload spells %d absolute paths, over the %d-path roster "
+                      "discovery budget, and this hook will not judge a truncated scan"
+                      % (len(matches), MAX_ABS_PATHS))
+    cands = set(matches)
+    for extra in extras:
+        if isinstance(extra, str) and extra:
+            expanded = os.path.expanduser(extra)
+            if os.path.isabs(expanded):
+                cands.add(expanded)
+    for cand in sorted(cands):
+        for root in _roots_above(os.path.normpath(cand)):
             if root not in roots:
                 roots.append(root)
-    return roots
+    return roots, None
 
 
 def _reference_kind(text, cwd, rosters_text=None):
@@ -622,34 +702,30 @@ def _bash_rule(tool_input, cwd):
         return ("the Bash payload carries no absolute session cwd, so the protected rosters cannot "
                 "be resolved; failing closed (R6)")
     tokens = _pristine_tokens(command)
-    if tokens and _is_sanctioned_opf(tokens):
+    if tokens and _is_sanctioned_opf(tokens, cwd):
         return None  # A1 holds even under a roster failure: the sanctioned repair path stays open
-    frozen, views, reason = _rosters(_bound_roots(command, cwd))
+    scan = command if tokens is None else command + chr(10) + chr(10).join(tokens)
+    roots, reason = _bound_roots(command, cwd, tokens or ())
     if reason is not None:
         return reason + "; failing closed (R6)"
-    kind = _reference_kind(command, cwd, ((frozen[0], frozen[1]), (views[0], views[1])))
+    frozen, views, reason = _rosters(roots)
+    if reason is not None:
+        return reason + "; failing closed (R6)"
+    kind = _reference_kind(scan, cwd, ((frozen[0], frozen[1]), (views[0], views[1])))
     if kind is None:
         return None
-    if tokens:
-        word = os.path.basename(tokens[0])
-        if word in READONLY_WORDS:
-            return None  # A2
-        if (word == "git" and len(tokens) >= 2 and tokens[1] in GIT_SAFE_SUBCOMMANDS
-                and not any(t.startswith("-") for t in tokens[2:])):
-            # A3. The option bar is load-bearing: git's own --output and pager/editor options make
-            # otherwise read-only verbs (diff, log, show, grep) write arbitrary files, and a lexical
-            # hook cannot prove an option read-only, so any dash-leading token takes the deny.
-            return None
-    return ("this Bash command references %s and is not a pristine opf invocation, read-only command "
-            "or option-free read-only git form, so it is denied fail-closed: a lexical hook cannot "
-            "prove it read-only (R5). %s; read files through the platform Read tool or a pristine "
-            "read-only command." % (kind, SANCTIONED))
+    return ("this Bash command references %s and is not a single plain invocation of the sanctioned "
+            "writer (opf record or opf render): a lexical hook cannot prove any other referencing "
+            "command read-only, so it is denied fail-closed (R5). %s; read protected files through "
+            "the platform Read tool." % (kind, SANCTIONED))
 
 
 def _payload_strings(value):
-    """Every string in a JSON payload value (keys included), depth-first, bounded."""
+    """Every string in a JSON payload value (keys included), depth-first: (strings, False), or
+    (partial strings, True) when the MAX_PAYLOAD_STRINGS budget is exceeded, in which case the
+    caller DENIES (a truncated scan could have dropped the one protected spelling)."""
     out, stack = [], [value]
-    while stack and len(out) < 4096:
+    while stack:
         v = stack.pop()
         if isinstance(v, str):
             out.append(v)
@@ -660,23 +736,53 @@ def _payload_strings(value):
                 stack.append(sub)
         elif isinstance(v, (list, tuple)):
             stack.extend(v)
-    return out
+        if len(out) > MAX_PAYLOAD_STRINGS:
+            return out, True
+    return out, False
 
 
 def _other_tool_rule(tool_name, tool_input, cwd):
-    """R7 for every tool outside the named rules: the hook cannot prove such a tool read-only, so a
-    payload that textually references a protected token is denied the same way R5 denies a
-    referencing Bash command; a reference-free payload is allowed (the disclosed lexical floor).
-    The known read-only built-ins are allowed outright."""
+    """R7 for every tool outside the named rules: the hook cannot prove such a tool read-only, so
+    its call is denied when any payload string references a protected token textually (the same scan
+    as R5) OR resolves, judged exactly as a file-tool target would be (cwd-joined, tilde expanded,
+    realpathed), to the store, a frozen path or a declared view; and denied cannot-evaluate when the
+    string-scan budget is exceeded (the hook never judges a partial scan). A payload with neither a
+    textual nor a resolvable protected reference is allowed (the disclosed residual). The known
+    read-only built-ins are allowed outright."""
     if tool_name in READONLY_TOOLS:
         return None
-    text = chr(10).join(_payload_strings(tool_input))
+    strings, truncated = _payload_strings(tool_input)
+    if truncated:
+        return ("the tool %r is not one this hook knows to be read-only and its payload exceeds the "
+                "%d-string scan budget, so it cannot be fully examined; failing closed (R6, R7)"
+                % (tool_name, MAX_PAYLOAD_STRINGS))
+    text = chr(10).join(strings)
     if not text:
         return None
-    frozen, views, reason = _rosters(_bound_roots(text, cwd))
+    paths = []
+    for s in strings:
+        if 0 < len(s) <= 4096 and not any(ord(c) < 0x20 for c in s):
+            cands = _candidates(s, cwd)
+            if cands:
+                paths.extend(cands)
+    roots, reason = _bound_roots(text, cwd, paths)
+    if reason is not None:
+        return reason + "; failing closed (R6)"
+    frozen, views, reason = _rosters(roots)
     if reason is not None:
         return reason + "; failing closed (R6)"
     kind = _reference_kind(text, cwd, ((frozen[0], frozen[1]), (views[0], views[1])))
+    if kind is None:
+        for cand in paths:
+            if _store_rule(cand) is not None:
+                kind = "the %s store tree (a payload string resolves into it)" % (WORKING,)
+                break
+            if cand in frozen[0]:
+                kind = "a plan-frozen old file (a payload string resolves to it)"
+                break
+            if cand in views[0]:
+                kind = "a declared view (a payload string resolves to it)"
+                break
     if kind is None:
         return None
     return ("the tool %r is not one this hook knows to be read-only and its payload references %s, "

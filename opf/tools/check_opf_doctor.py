@@ -1141,12 +1141,16 @@ def _claude_hook_self_test():
     the doc-confirmed PreToolUse contract: deny = exit 0 plus a hookSpecificOutput permissionDecision
     "deny"; allow = exit 0 silent; exit 2 = blocking error) over throwaway live-tree fixtures, so every
     vector FAILS WITHOUT THE HOOK: a missing, inert or allow-everything hook yields no deny decision and
-    reds the suite. The matrix pins the round-1 security fixes by construction: option-bearing git and
-    the other write-capable command words deny on a protected mention, a symlink-then-dotdot spelling
-    is classified after full resolution, every unreadable, malformed, non-regular (FIFO) or oversized
-    roster input denies promptly (never an empty protection set), the CLI-verified `opf record create`
-    and `opf render --write` syntax stays allowed with protected mentions in quoted argument data, and
-    a tool outside the named rules denies on a protected payload reference (R7).
+    reds the suite. The matrix pins the round-2 security fixes BEHAVIORALLY (each vector flips when its
+    fix alone is reverted): the allowance surface is a single plain sanctioned-writer invocation, so
+    every other referencing command denies, environment-assignment-prefixed git included; the writer is
+    realpath-bound (a same-named opf.py elsewhere denies) and verb-bound (record/render only); every
+    scan budget (absolute-path discovery, R7 payload strings) denies when exceeded instead of
+    truncating; a manifest or plan that parses but fails validation denies (wrong standard, wrong
+    format, empty source path, migrate rows frozen, ambiguous two-manifest store, truly oversized
+    valid-prefix plan), never an empty roster; tilde targets expand before classification; an unknown
+    tool denies when a payload string RESOLVES to a protected path, not only on a textual token; and a
+    symlink-then-dotdot spelling is classified after full resolution.
     git-independent (the hook reads only the live tree; nothing is committed), offline,
     hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
@@ -1167,13 +1171,18 @@ def _claude_hook_self_test():
         if got != want:
             failures.append("claude-hook " + label + ": got " + repr(got) + ", expected " + repr(want))
 
-    def run_hook(payload=None, raw=None):
+    def run_hook(payload=None, raw=None, env=None):
         """One hook child. Returns (exit status, decision, reason, stderr text): decision is None for a
         silent allow (no stdout), the permissionDecision string for a structured decision, or the label
-        "malformed-output" for stdout that is not the documented decision shape."""
+        "malformed-output" for stdout that is not the documented decision shape. `env` overlays the
+        child environment (the tilde vectors pin expanduser against a fixture HOME)."""
         data = raw if raw is not None else json.dumps(payload).encode("utf-8")
+        child_env = None
+        if env is not None:
+            child_env = dict(os.environ)
+            child_env.update(env)
         try:
-            proc = subprocess.run([sys.executable, "-I", str(hook)], input=data,
+            proc = subprocess.run([sys.executable, "-I", str(hook)], input=data, env=child_env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise OSError("could not run the deny hook " + str(hook) + " (" + repr(exc) + ")")
@@ -1194,15 +1203,15 @@ def _claude_hook_self_test():
     def payload(tool, tool_input, cwd):
         return dict(hook_event_name="PreToolUse", tool_name=tool, tool_input=tool_input, cwd=cwd)
 
-    def deny(label, p, needle):
-        rc, decision, reason, _err = run_hook(p)
+    def deny(label, p, needle, env=None):
+        rc, decision, reason, _err = run_hook(p, env=env)
         expect(label, (rc, decision), (0, "deny"))
         if decision == "deny" and needle not in reason:
             failures.append("claude-hook " + label + ": the deny reason does not name " + repr(needle)
                             + " (got " + repr(reason) + ")")
 
-    def allow(label, p):
-        rc, decision, _reason, _err = run_hook(p)
+    def allow(label, p, env=None):
+        rc, decision, _reason, _err = run_hook(p, env=env)
         expect(label, (rc, decision), (0, None))
 
     RUN_ID = "adopt-20260101T000000Z-0123456789abcdef"
@@ -1214,9 +1223,12 @@ def _claude_hook_self_test():
             archive = os.path.join(root, _opf_store.WORKING_DIRNAME, "archive", "adoption", RUN_ID)
             for d in (machine, evidence, archive, os.path.join(root, "docs")):
                 os.makedirs(d)
-            manifest_text = ('[views.todo]\nkind = "deterministic"\nsources = ["worklog"]\n'
+            manifest_text = ('[opf]\nstandard = "opf"\n\n'
+                             '[views.todo]\nkind = "deterministic"\nsources = ["worklog"]\n'
                              'target = "TODO.md"\n\n[views.version]\nkind = "deterministic"\n'
-                             'sources = ["worklog"]\ntarget = "VERSION"\n')
+                             'sources = ["worklog"]\ntarget = "VERSION"\n\n'
+                             '[views.status]\nkind = "deterministic"\nsources = ["worklog"]\n'
+                             'target = "docs/STATUS.md"\n')
             with open(os.path.join(machine, "manifest.toml"), "w", encoding="utf-8") as fh:
                 fh.write(manifest_text)
             with open(os.path.join(machine, "counters.toml"), "w", encoding="utf-8") as fh:
@@ -1226,7 +1238,7 @@ def _claude_hook_self_test():
                          'occupying = false\n')
             with open(os.path.join(evidence, "plan.toml"), "w", encoding="utf-8") as fh:
                 fh.write(plan_text)
-            for rel in ("LEGACY.md", "TODO.md"):
+            for rel in ("LEGACY.md", "TODO.md", "VERSION", os.path.join("docs", "STATUS.md")):
                 with open(os.path.join(root, rel), "w", encoding="utf-8") as fh:
                     fh.write("fixture\n")
 
@@ -1250,6 +1262,12 @@ def _claude_hook_self_test():
             deny("write-view-denied",
                  payload("Write", dict(file_path=os.path.join(root, "TODO.md"), content="x"), root),
                  "opf render")
+            # R1 via MultiEdit: the needle is R1's own sentence, so a MultiEdit dropped from
+            # FILE_TOOL_TARGET (falling to R7's different reason) reds this vector.
+            deny("multiedit-store-denied",
+                 payload("MultiEdit", dict(file_path=counters,
+                                           edits=[dict(old_string="a", new_string="b")]), root),
+                 "direct edits under")
             # R1 via NotebookEdit's own target field.
             deny("notebook-store-denied",
                  payload("NotebookEdit", dict(notebook_path=os.path.join(
@@ -1273,6 +1291,19 @@ def _claude_hook_self_test():
                                        content="x"), root), "sanctioned writer")
             # R6: a missing target field fails closed as a structured deny.
             deny("missing-target-denied", payload("Write", dict(), root), "failing closed")
+            # R6: a control character in a target and a relative target with no session cwd each
+            # fail closed (neither can be honestly classified).
+            deny("control-char-target-denied",
+                 payload("Write", dict(file_path="docs/bad\u0001name.md", content="x"), root),
+                 "failing closed")
+            deny("relative-target-no-cwd-denied",
+                 payload("Write", dict(file_path="x.md", content="x"), None), "failing closed")
+            # R1 via a tilde spelling: ~ expands against the hook child's HOME BEFORE classification
+            # (the launched tool expands it too), so a frozen path under the fixture HOME denies even
+            # with the session cwd outside the product tree.
+            deny("tilde-frozen-denied",
+                 payload("Write", dict(file_path=os.path.join("~", "LEGACY.md"), content="x"),
+                         basestr), "frozen", env=dict(HOME=root))
             # An unrelated write under the same root allows silently.
             allow("write-unrelated-allowed",
                   payload("Write", dict(file_path=os.path.join(root, "docs", "notes.md"),
@@ -1290,6 +1321,17 @@ def _claude_hook_self_test():
             deny("mcp-frozen-abs-outside-root-denied",
                  payload("mcp__filesystem__write_file",
                          dict(path=os.path.join(root, "LEGACY.md")), basestr), "R7")
+            # R7's string-scan budget DENIES when exceeded: the padded edit list used to exhaust the
+            # traversal before it reached `path`, and a truncated scan was judged as complete.
+            deny("mcp-string-budget-denied",
+                 payload("mcp__filesystem__edit_file",
+                         dict(path=counters, edits=[dict(oldText="a", newText="b")] * 1100), root),
+                 "budget")
+            # R7's path pass: a payload string with NO textual protected token still denies when it
+            # RESOLVES (cwd-joined, as a file-tool target would) to a declared view.
+            deny("mcp-relative-resolves-to-view-denied",
+                 payload("mcp__filesystem__write_file", dict(path="STATUS.md", content="x"),
+                         os.path.join(root, "docs")), "R7")
             allow("mcp-unrelated-allowed",
                   payload("mcp__filesystem__write_file",
                           dict(path=os.path.join(root, "docs", "notes.md"), content="x"), root))
@@ -1301,19 +1343,65 @@ def _claude_hook_self_test():
             allow("imported-index-allowed",
                   payload("Write", dict(file_path=os.path.join(
                       machine, "backlog_item.imported.index.toml"), content="x"), root))
+            # ... but ONLY directly inside the machine store: a same-named leaf at the store top
+            # level or at any deeper path is ordinary store content and denies.
+            deny("imported-leaf-top-level-denied",
+                 payload("Write", dict(file_path=os.path.join(
+                     root, ".working", "evil.imported.index.toml"), content="x"), root),
+                 "sanctioned writer")
+            deny("imported-leaf-deep-denied",
+                 payload("Write", dict(file_path=os.path.join(
+                     machine, "a", "b", "worklog.imported.toml"), content="x"), root),
+                 "sanctioned writer")
             # A1: the sanctioned writer allows on the CLI's REAL syntax, protected mention
             # included, with the mention inside QUOTED argument data (the quote-aware pristine scan;
             # the exact record create and render --write invocations here run 0 against the CLI).
+            # The python3 launcher form is REALPATH-BOUND: it allows only when the launched script
+            # resolves to THE repository's own opf/tools/opf.py (relative against the session cwd,
+            # or absolute), never by its basename.
+            writer = Path(__file__).resolve().parent / "opf.py"
+            repo_root = Path(__file__).resolve().parent.parent.parent
             allow("bash-opf-record-create-real-allowed",
                   payload("Bash", dict(command="python3 -I -B opf/tools/opf.py record create "
                                                "--type backlog_item "
                                                "--title 'Repair .working (counter)' "
-                                               "--actor maintainer --root ."), root))
+                                               "--actor maintainer --root " + root),
+                          str(repo_root)))
+            allow("bash-opf-writer-abs-render-allowed",
+                  payload("Bash", dict(command="python3 -I '" + str(writer)
+                                               + "' render --write --root ."), root))
             allow("bash-opf-render-write-real-allowed",
                   payload("Bash", dict(command="opf render --write --root '" + basestr
                                                + "/product .working (x)'"), root))
-            allow("bash-opf-store-arg-allowed",
-                  payload("Bash", dict(command="opf doctor --root .working/.."), root))
+            # Only the record and render verbs are the writer: any other opf verb that references a
+            # protected token denies (over-refusal, disclosed).
+            deny("bash-opf-other-verb-denied",
+                 payload("Bash", dict(command="opf doctor --root .working/.."), root),
+                 "lexical hook")
+            # The writer identity is its RESOLVED path, never a filename: a same-named opf.py
+            # outside the repository is not the writer, and a non-allowlisted interpreter flag is
+            # not a plain invocation.
+            with open(os.path.join(basestr, "opf.py"), "w", encoding="utf-8") as fh:
+                fh.write("x = 1\n")
+            deny("bash-opf-impersonator-denied",
+                 payload("Bash", dict(command="python3 -I " + os.path.join(basestr, "opf.py")
+                                              + " record .working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-opf-unlisted-pyflag-denied",
+                 payload("Bash", dict(command="python3 -O '" + str(writer)
+                                              + "' record --root .working/.."), root),
+                 "lexical hook")
+            # A leading VAR=value assignment is never the writer: environment assignments change
+            # what a program does (GIT_EXTERNAL_DIFF / GIT_CONFIG_* make git diff run an arbitrary
+            # writer), so an assignment-bearing command that references a protected token denies.
+            deny("bash-env-git-external-diff-denied",
+                 payload("Bash", dict(command="GIT_EXTERNAL_DIFF='sed -i s/1/2/' git diff "
+                                              ".working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-env-git-config-frozen-denied",
+                 payload("Bash", dict(command="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external "
+                                              "GIT_CONFIG_VALUE_0=true git diff LEGACY.md"), root),
+                 "LEGACY.md")
             # ... but the pristine scan still bars a second command or a live expansion riding on an
             # opf spelling: an unquoted metacharacter or a dollar inside double quotes takes the deny.
             deny("bash-opf-semicolon-denied",
@@ -1322,15 +1410,17 @@ def _claude_hook_self_test():
             deny("bash-opf-dollar-quoted-denied",
                  payload("Bash", dict(command='opf record create --title "a $(rm .working/x)"'),
                          root), "lexical hook")
-            # A2 / A3: read-only and option-free store-safe git references allow.
-            allow("bash-grep-store-allowed",
-                  payload("Bash", dict(command="grep -n x .working/toml/counters.toml"), root))
-            allow("bash-git-add-view-allowed", payload("Bash", dict(command="git add TODO.md"), root))
-            allow("bash-git-diff-path-allowed",
-                  payload("Bash", dict(command="git diff .working/toml/counters.toml"), root))
-            # A3's option bar: git's own write-capable options (--output and friends) make otherwise
-            # read-only verbs write arbitrary files, so ANY dash-leading token after the subcommand
-            # takes the deny; `file -C` compiles a .mgc beside its operand, so it left A2.
+            # The read-only-word and read-only-git allowances are REMOVED (the allowance machinery
+            # is attack surface): every referencing non-writer command denies, read-only forms
+            # included, as disclosed over-refusal.
+            deny("bash-grep-store-denied",
+                 payload("Bash", dict(command="grep -n x .working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-git-add-view-denied", payload("Bash", dict(command="git add TODO.md"), root),
+                 "TODO.md")
+            deny("bash-git-diff-path-denied",
+                 payload("Bash", dict(command="git diff .working/toml/counters.toml"), root),
+                 "lexical hook")
             deny("bash-git-diff-output-denied",
                  payload("Bash", dict(command="git diff --no-index "
                                               "--output=.working/toml/counters.toml /dev/null x"),
@@ -1365,6 +1455,16 @@ def _claude_hook_self_test():
             deny("bash-dd-store-denied",
                  payload("Bash", dict(command="dd if=/dev/zero of=.working/toml/counters.toml"),
                          root), "lexical hook")
+            # The token scan also covers the DEQUOTED tokens of a pristine command, so a
+            # quote-split spelling of a view still references it.
+            deny("bash-quote-split-view-denied",
+                 payload("Bash", dict(command="touch VER''SION"), root), "VERSION")
+            # The absolute-path discovery budget DENIES when exceeded: 64 filler paths used to
+            # evict the protected operand from a truncated scan.
+            deny("bash-abs-path-budget-denied",
+                 payload("Bash", dict(command="printf %s" + (" /dev/null" * 64) + " "
+                                              + os.path.join(root, "VERSION")), basestr),
+                 "budget")
             # Roster tokens are matched with path boundaries: a longer word is a DIFFERENT path and
             # does not trip the view, while the view's own spellings still deny.
             allow("bash-version-word-boundary-allowed",
@@ -1381,13 +1481,27 @@ def _claude_hook_self_test():
             allow("bash-abs-unprotected-outside-root-allowed",
                   payload("Bash", dict(command="tee " + os.path.join(basestr, "notes.txt")),
                           basestr))
+            # A QUOTED absolute operand with spaces binds its WHOLE product root (the raw-text
+            # discovery alone would bind only the space-free prefix and miss the roster).
+            spaced_root = os.path.join(basestr, "with space")
+            spaced_machine = os.path.join(spaced_root, ".working", "toml")
+            os.makedirs(spaced_machine)
+            with open(os.path.join(spaced_machine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]\nstandard = "opf"\n\n[views.version]\nkind = "deterministic"\n'
+                         'sources = ["worklog"]\ntarget = "VERSION"\n')
+            with open(os.path.join(spaced_root, "VERSION"), "w", encoding="utf-8") as fh:
+                fh.write("fixture\n")
+            deny("bash-quoted-spaced-root-view-denied",
+                 payload("Bash", dict(command="truncate -s 0 '"
+                                              + os.path.join(spaced_root, "VERSION") + "'"),
+                         basestr), "VERSION")
             # A session cwd INSIDE the store makes every relative spelling land in the store, so a
             # non-allowance command denies there even with no textual `.working` token.
             deny("bash-cwd-inside-store-denied",
                  payload("Bash", dict(command="sed -i s/1/2/ counters.toml"), machine),
                  "store tree")
-            allow("bash-cwd-inside-store-ls-allowed",
-                  payload("Bash", dict(command="ls counters.toml"), machine))
+            deny("bash-cwd-inside-store-ls-denied",
+                 payload("Bash", dict(command="ls counters.toml"), machine), "store tree")
             deny("bash-git-checkout-frozen-denied",
                  payload("Bash", dict(command="git checkout -- LEGACY.md"), root), "LEGACY.md")
             # A Bash command with no protected reference allows.
@@ -1416,7 +1530,7 @@ def _claude_hook_self_test():
                  payload("Bash", dict(command="touch docs/notes.md LEGACY.md"), root),
                  "failing closed")
             allow("unreadable-plan-opf-still-allowed",
-                  payload("Bash", dict(command="python3 -I opf/tools/opf.py adopt status"), root))
+                  payload("Bash", dict(command="opf render --write --root ."), root))
             with open(os.path.join(evidence, "plan.toml"), "w", encoding="utf-8") as fh:
                 fh.write(plan_text)
             # R6 manifest fail-closed: an unparseable machine-store manifest denies writes under the
@@ -1461,15 +1575,67 @@ def _claude_hook_self_test():
                         lambda: write_plan(plan_text.replace('"retire"', '"Retire"')))
             mutate_plan("plan-missing-sources-fails-closed",
                         lambda: write_plan(plan_text.replace("[[sources]]", "[[source]]")))
-            mutate_plan("oversized-plan-fails-closed",
-                        lambda: open(plan_path, "wb").write(b"#" * (1024 * 1024 + 1)))
+            mutate_plan("plan-empty-source-path-fails-closed",
+                        lambda: write_plan(plan_text.replace('"LEGACY.md"', '""')))
+
+            unrelated_write = payload("Write", dict(
+                file_path=os.path.join(root, "docs", "notes.md"), content="x"), root)
+
+            def mutate_plan_unrelated(label, build):
+                """Like mutate_plan, but probes an UNRELATED write: these plans still carry the
+                frozen row (or a valid prefix), so only an R6 denial of the WHOLE root proves the
+                checked validation ran (the frozen probe would deny through the row anyway)."""
+                os.remove(plan_path)
+                build()
+                deny(label, unrelated_write, "failing closed")
+                os.remove(plan_path)
+                with open(plan_path, "w", encoding="utf-8") as fh:
+                    fh.write(plan_text)
+
+            # The oversized plan carries a VALID format and sources prefix before its padding, so
+            # this vector pins the size bound ITSELF (an all-comment file would fail the format
+            # check first and mask a lifted bound).
+            mutate_plan_unrelated("oversized-plan-fails-closed",
+                                  lambda: write_plan(plan_text + "#" * (1024 * 1024 + 1) + "\n"))
+            mutate_plan_unrelated("plan-wrong-format-fails-closed",
+                                  lambda: write_plan(plan_text.replace("plan/v2", "plan/v9")))
+            # A migrate disposition freezes in place exactly like retire.
+            os.remove(plan_path)
+            write_plan(plan_text.replace('"LEGACY.md"', '"OLD.md"').replace('"retire"',
+                                                                            '"migrate"'))
+            deny("migrate-disposed-frozen-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "OLD.md"), content="x"), root),
+                 "frozen")
+            os.remove(plan_path)
+            write_plan(plan_text)
             if hasattr(os, "geteuid") and os.geteuid() != 0:
                 # A run directory whose mode forbids the search makes the plan entry unreadable
                 # (present but unprovable), which must deny, not read as an absent plan.
                 os.chmod(evidence, 0o600)
                 deny("unsearchable-run-dir-fails-closed", frozen_write, "failing closed")
                 os.chmod(evidence, 0o755)
+            # R6 manifest validation: a manifest that PARSES but does not declare the OPF
+            # standard ([opf] standard = "opf", spec 4.5) fails validation and denies every write
+            # under the root, never an empty view roster.
             manifest_path = os.path.join(machine, "manifest.toml")
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                fh.write("garbage = 1\n")
+            deny("invalid-manifest-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root, "TODO.md"), content="x"),
+                         root), "failing closed")
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                fh.write('[opf]\nstandard = "devprocess"\n')
+            deny("wrong-standard-manifest-fails-closed", unrelated_write, "failing closed")
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                fh.write(manifest_text)
+            # R6 ambiguity: a SECOND machine-store manifest denies every write under the root.
+            second = os.path.join(root, _opf_store.WORKING_DIRNAME, "toml2")
+            os.makedirs(second)
+            with open(os.path.join(second, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]\nstandard = "opf"\n')
+            deny("two-manifest-store-fails-closed", unrelated_write, "failing closed")
+            os.remove(os.path.join(second, "manifest.toml"))
+            os.rmdir(second)
             os.remove(manifest_path)
             os.symlink(os.path.join(machine, "nowhere.toml"), manifest_path)
             deny("dangling-manifest-symlink-fails-closed",
@@ -1485,23 +1651,32 @@ def _claude_hook_self_test():
     print("check_opf_doctor claude-hook self-test: PASS (the shipped PreToolUse deny hook, launched "
           "python -I on the doc-confirmed stdin/stdout contract, denies a direct store Write, an "
           "adoption-archive write, an evidence-home write, a plan-frozen old-file Edit, a "
-          "declared-view Write, a NotebookEdit store target, a traversal-relative, a symlinked AND a "
-          "symlink-then-dotdot spelling (realpath of the original spelling), a missing target field, "
-          "the visible Bash store/frozen/view references boundary-matched (PYTHON_VERSION and "
-          "__VERSION__ pass, VERSION denies), the brief's write-capable words (tee, cp, truncate, "
-          "dd, sed -i), option-bearing git forms (--output, --open-files-in-pager) and file -C, an "
-          "absolute frozen spelling with the session cwd outside every product root, a relative "
-          "spelling with the cwd inside the store, and (R7) an MCP write tool or another shell whose "
-          "payload references the store; allows the CLI-verified opf record create and render "
-          "--write syntax with quoted protected mentions and the other pristine opf invocations "
-          "(under a broken roster too; an unquoted metacharacter or a live double-quoted dollar "
-          "still denies), read-only and option-free store-safe git references, known read-only and "
-          "reference-free other tools, an unrelated write, a reference-free Bash command, and the "
-          "still-writerless imported-series leaves; exits 2 blocking on a malformed payload and a "
-          "mis-wired event; and fails closed, never an empty roster, on an unparseable, "
-          "dangling-symlink, FIFO (prompt, O_NONBLOCK), out-of-vocabulary-disposition, "
-          "sources-less, oversized or unsearchable adoption plan and on an unparseable or "
-          "dangling-symlink machine-store manifest, for every write under that root)")
+          "declared-view Write, a MultiEdit and NotebookEdit store target, a traversal-relative, a "
+          "symlinked AND a symlink-then-dotdot spelling (realpath of the original spelling), a tilde "
+          "spelling expanded before classification, a control-character target, a relative target "
+          "with no session cwd, a missing target field, the visible Bash store/frozen/view "
+          "references boundary-matched over the raw string AND the dequoted tokens (PYTHON_VERSION "
+          "and __VERSION__ pass; VERSION and a quote-split VER''SION deny), every referencing "
+          "non-writer command including read-only words, git forms and assignment-prefixed git "
+          "(GIT_EXTERNAL_DIFF, GIT_CONFIG_*), a same-named opf.py outside the repository (the "
+          "writer is realpath-bound), a non-writer opf verb, a non-allowlisted interpreter flag, an "
+          "absolute frozen spelling with the session cwd outside every product root, a QUOTED "
+          "spaced product root bound whole, a relative spelling with the cwd inside the store, an "
+          "over-budget absolute-path scan and an over-budget R7 string scan (deny, never truncate), "
+          "and (R7) an MCP write tool or another shell whose payload names a protected token or "
+          "RESOLVES to one; allows ONLY the single plain sanctioned-writer invocations (opf "
+          "record/render as a bare word, and the repository's own opf/tools/opf.py under a bare "
+          "python3 with allowlisted flags, relative or absolute, under a broken roster too; an "
+          "unquoted metacharacter or a live double-quoted dollar still denies), known read-only "
+          "tools, reference-free commands and payloads, an unrelated write, and the "
+          "still-writerless imported-series leaves directly inside the machine store (top-level and "
+          "deeper same-named leaves deny); exits 2 blocking on a malformed payload and a mis-wired "
+          "event; and fails closed, never an empty roster, on an unparseable, dangling-symlink, "
+          "FIFO (prompt, O_NONBLOCK), out-of-vocabulary-disposition, sources-less, "
+          "empty-source-path, wrong-format, truly-oversized (valid prefix), migrate-row or "
+          "unsearchable adoption plan, and on an unparseable, dangling-symlink, undeclared- or "
+          "wrong-standard or ambiguous two-manifest machine store, for every write under that "
+          "root)")
     return EXIT_OK
 
 
