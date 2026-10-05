@@ -2,15 +2,16 @@
 name: flow
 description: The OPF operating loop for an AI development assistant. Read the adopter's OPF
   store (the backlog, pipeline, and TODO views and the records beneath them) to decide what to
-  work on, and keep the store updated for everything being worked. As /flow N, run N advancement
-  workstreams plus an always-present hardening lane and an always-present serial merge lane,
-  after advising the maintainer how many advancement streams are viable; an attended /flow N
-  records that rate in the store. A bare /flow is a check, an advice, and a reminder to keep
-  working at the recorded rate. Parallelism lives in drafting and review; authority, record
-  writes, and merges stay serial; verification is never shortened for speed.
+  work on, and keep the store updated for everything being worked. As /flow N, run advancement
+  workstreams at the recorded flow rate plus an always-present hardening lane and an
+  always-present serial merge lane, after advising the maintainer how many advancement streams
+  are viable; an attended /flow N under the default store binding first records N as that rate.
+  A bare /flow is a check, an advice, and a reminder to keep working at the recorded rate.
+  Parallelism lives in drafting and review; authority, record writes, and merges stay serial;
+  verification is never shortened for speed.
 ---
 
-<!-- OPF-FLOW: release=0.3.0 template-sha256=83816dce77ee973b6615db78477a947da75c4ac0bd81d1b6c6ec56ba24554b6d -->
+<!-- OPF-FLOW: release=0.3.0 template-sha256=b0137d3d9f376f7fc77fb6d05c1204a27f5de9df9480e256cfc59acd38e94d53 -->
 
 # /flow: the OPF operating loop
 
@@ -80,11 +81,26 @@ Three rules govern everything else:
    `active`, not scoped by a clean, unqualified `active` block authored by a non-importer actor
    (the actionability join, section 8.5). Imported history is never selected as work (section
    8.6). Order within the actionable set is the adopter's recorded priority order where one
-   exists, else ascending ID order. Selection takes the first step that can proceed: a step
-   parked awaiting a recorded trigger (step 8) is skipped until that trigger resolves, so the
-   next pick moves on rather than re-taking it; this is a selection rule over steps, never a
-   block, and the item stays actionable. A unit being structurally ready (a verified plan
-   exists) is never by itself authorization to implement it.
+   exists, else ascending ID order. A unit is exactly one backlog item: work tracked on its own
+   (its own branch, scope, tier, rounds, park, or completion) is its own item, so every flow
+   fact stays keyed by the one item it concerns (section 5). Where an item holds independent
+   units, each unit is created as a new backlog item (`opf record create`, section 8.8) linking
+   `derives_from` to that parent item, the relation OPF-SPEC.md section 8.6 defines:
+   "`derives_from`: the source record was derived from the linked record; directional, usable by
+   any type." A parent item that has a clean derived backlog item, authored by a non-importer
+   actor, in state `open` or `active` is worked through those units: selection never starts a
+   new stream on the parent itself, though a stream it already carries runs to its end as one
+   unit, and the parent closes (step 6) only once every unit derived from it has reached `done`
+   or `dropped` (a `/proposed` landing reported awaiting ratification, as step 6 defines) and
+   the parent's own completion evidence holds. Selection takes the first step that can proceed:
+   a step parked awaiting a recorded trigger (step 8) is skipped until that trigger resolves, so
+   the next pick moves on rather than re-taking it; this is a selection rule over steps, never a
+   block, and the item stays actionable. A trigger resolves on a declared record state, never on
+   prose: a `pending_decision` trigger once that decision, read among clean records authored by
+   non-importer actors, stands at unqualified `decided` or `withdrawn` (a `/proposed` landing of
+   either is a proposal and resolves nothing); a backlog item trigger once the overlapping
+   stream merges, finishes, or parks (section 3, step 5). A unit being structurally ready (a
+   verified plan exists) is never by itself authorization to implement it.
 3. **ACTIVATE.** Move the item `open` to `active` through `opf record transition` (section 8.8).
    `active` is an ungated working state, so an assistant lands it unqualified (section 8.4). The
    transition appends its own worklog entry and re-renders the declared views in the same act
@@ -110,32 +126,32 @@ Three rules govern everything else:
    merge and at every resume; it is a nudge to plan ahead, never a stop, and work is never
    manufactured merely to make readiness markers appear.
 8. **NOTHING CAN PROCEED.** Before any turn ends on "blocked", "stopping", "nothing actionable",
-   or "nothing can proceed", enumerate every open item with its blocker basis and each of its
-   parked steps with its trigger, and include the enumeration in the report. An item counts as
-   blocked only through OPF's own block records: a clean, unqualified `active` block authored by
-   a non-importer actor that scopes it, exactly the actionability join step 2 selects on
-   (sections 8.4 and 8.5), so blocked and unselectable are the same fact and no other surface,
-   row, or prose grants a stop. A maintainer's block is unqualified `active` from creation; an
-   assistant-created block lands `active/proposed` and is a proposal, not a grant, and never
-   counts until a maintainer ratifies it. Blocked-ness is never a stored state: it is derived
-   from active blocks at view time (section 8.5), so releasing or expiring the block is itself
-   the clearing act. A proposed block, an in-flight wait, absent authorization, or partial
-   evidence never counts. Any item failing the test is worked, not reported blocked. Parking is
-   not blocking, and a pending decision parks a step, never an item: a unit parked at the
-   section 7 round cap, a delivery parked by the section 3 overlap guard, or any step awaiting a
-   `pending_decision` holds a recorded trigger (the `trigger=` field of its `park` entry,
-   section 5), is reported as parked awaiting that record, exactly as an unratified completion
-   is reported awaiting ratification, and frees its stream. The item stays actionable in the
-   section 8.5 sense, because OPF actionability is the block join alone; parking answers a
-   different question, whether one step can proceed now. Every step that does not depend on a
-   parked one keeps advancing as far as standing authority allows: the item's independent units,
-   its plan production, the hardening lane, and every other actionable item. A ratified block
-   answers whether an item may be selected; the section 7 round cap answers whether one unit may
-   consume more discovery rounds, a floor only a maintainer raises; neither substitutes for the
-   other, and no proposal is read as ratified on either path. Prefer advancing plan production
-   for upcoming items over idling. The run reaches the section 8 closing handoff only when this
-   enumeration shows no item with any step that can proceed, and it carries the enumeration
-   there; a turn never ends on a bare stop.
+   or "nothing can proceed", enumerate every `open` or `active` item with its blocker basis and
+   each of its parked steps with its trigger, and include the enumeration in the report. An item
+   counts as blocked only through OPF's own block records: a clean, unqualified `active` block
+   authored by a non-importer actor that scopes it, exactly the actionability join step 2
+   selects on (sections 8.4 and 8.5), so blocked and unselectable are the same fact and no other
+   surface, row, or prose grants a stop. A maintainer's block is unqualified `active` from
+   creation; an assistant-created block lands `active/proposed` and is a proposal, not a grant,
+   and never counts until a maintainer ratifies it. Blocked-ness is never a stored state: it is
+   derived from active blocks at view time (section 8.5), so releasing or expiring the block is
+   itself the clearing act. A proposed block, an in-flight wait, absent authorization, or
+   partial evidence never counts. Any item failing the test is worked, not reported blocked.
+   Parking is not blocking, and a pending decision parks a step, never an item: a unit parked at
+   the section 7 round cap, a delivery parked by the section 3 overlap guard, or any step
+   awaiting a `pending_decision` holds a recorded trigger (the `trigger=` field of its `park`
+   entry, section 5), is reported as parked awaiting that record, exactly as an unratified
+   completion is reported awaiting ratification, and frees its stream. The item stays actionable
+   in the section 8.5 sense, because OPF actionability is the block join alone; parking answers
+   a different question, whether one step can proceed now. Every step that does not depend on a
+   parked one keeps advancing as far as standing authority allows: the other units of the same
+   parent item (each its own derived item, step 2), its plan production, the hardening lane, and
+   every other actionable item. A ratified block answers whether an item may be selected; the
+   section 7 round cap answers whether one unit may consume more discovery rounds, a floor only
+   a maintainer raises; neither substitutes for the other, and no proposal is read as ratified
+   on either path. Prefer advancing plan production for upcoming items over idling. The run
+   reaches the section 8 closing handoff only when this enumeration shows no item with any step
+   that can proceed, and it carries the enumeration there; a turn never ends on a bare stop.
 
 Turn discipline, at every step: never end a turn "waiting" while any stream or the plan buffer
 can advance; and never end a turn on a stated intention ("reviews are running, I will collect
@@ -145,17 +161,19 @@ signal and a store record is a prohibited shape, because it reliably produces no
 
 ## 2. /flow N: parallel workstreams
 
-`/flow N` runs N **advancement** workstreams, plus, at every N, one hardening lane and one merge
-lane: `/flow 1` runs three lanes, `/flow 2` runs four. A workstream is one unit of work on one
-branch in one isolated worktree, bound to one `active` backlog item. An attended `/flow N`
-under the default store binding also sets the flow-rate record (below): the durable count of
-concurrent advancement workstreams the store's runs work at. A bare `/flow` never sets it; it
-is a check, an advice, and a reminder to keep working at the recorded rate (the bare `/flow`
-check, below).
+`/flow N` runs **advancement** workstreams at the recorded flow rate, plus, at every rate, one
+hardening lane and one merge lane: at rate 1 three lanes run, at rate 2 four. Attended and under
+the default store binding, `/flow N` first sets the flow-rate record (below), the durable count
+of concurrent advancement workstreams the store's runs work at, to N, so it runs N; unattended,
+or under a committed-configuration binding, `/flow N` sets nothing and the run works at the
+recorded rate (below). A workstream is one unit of work, one backlog item (section 1, step 2),
+on one branch in one isolated worktree, bound to that `active` item. A bare `/flow` never sets
+the rate; it is a check, an advice, and a reminder to keep working at the recorded rate (the
+bare `/flow` check, below).
 
 | Lane | Count | What it holds |
 |---|---|---|
-| Advancement 1..N | N | the umbrellas: bodies of forward work with pairwise-disjoint file scopes; a second stream lands on the deeper umbrella only while scopes stay disjoint |
+| Advancement 1..N | N | the umbrellas: bodies of forward work with pairwise-disjoint file scopes; a second stream lands on the deeper umbrella, as its own derived unit item (section 1, step 2), only while scopes stay disjoint |
 | Hardening | always 1 more | filed minors, residual findings, small backlog items; its capacity backs plan production when its queue is empty |
 | Merge | always 1 more | refresh onto the integration branch, suites, push, CI, merge-delta verification, the serial merge |
 
@@ -337,6 +355,11 @@ viability advice above. Then, by mode:
    append a `rescope` flow entry re-declaring the stream's scope (section 5) and proceed;
    overlapping, park as above. An expanded scope holds its paths against other streams exactly
    as a declared one does, and the hold is released when its stream merges, finishes, or parks.
+   Before any `unpark`, the run re-runs the pairwise check (step 3) on the parked stream's
+   declared scope together with every path its branch already changes, against every live
+   stream's scope: disjoint, the stream unparks; overlapping, it stays parked, through a new
+   `park` entry whose `trigger=` names the overlapping stream's item ID, so no unpark ever
+   brings two live streams onto one file.
 
 ## 4. Store writes under parallel streams
 
@@ -381,10 +404,10 @@ worklog-append` (section 8.8) with change kind `infra`, one of the section 6.2 c
 These entries record run bookkeeping, not product changes; the changelog is machine-drafted from
 the worklog entries in range and human-curated (section 6.3), and the `infra` kind marks these
 entries as bookkeeping, which the curator may set aside; the specification leaves that choice to
-curation. The entry links its backlog item with a `relates` link and carries any pull request or
-run locator as a `url` ref (the section 8.6 ref kinds are `path`, `url`, and `doc`; a branch
-name is none of them, so the branch rides the grammar line). Its `detail` opens with exactly two
-fixed lines:
+curation. The entry links its backlog item, the unit's own item (section 1, step 2) and no other
+item, with a `relates` link and carries any pull request or run locator as a `url` ref (the
+section 8.6 ref kinds are `path`, `url`, and `doc`; a branch name is none of them, so the branch
+rides the grammar line). Its `detail` opens with exactly two fixed lines:
 
 ```
 flow <event> <item-id> status=<status> [branch=<name>] [lane=<lane>] [scope=<p1,p2,...>]
@@ -411,9 +434,10 @@ every `verdict` entry carries all three, and a `phase=discovery` entry also carr
 the unit's DISCOVERY round number counted from 1 over the unit's whole life, failed and
 timed-out rounds included. A failed or timed-out round writes its own `verdict` entry
 (`result=failed`) before the re-issue, so a resumed unit's round count is the highest `round=`
-among its flow entries, never an inference from prose. `trigger=` is the record ID a park waits
-on: the `pending_decision`'s ID, or the overlapping stream's backlog item ID; every `park` entry
-carries it, and every sweep matches on it.
+among its own item's flow entries (one unit, one item, section 1, step 2), never an inference
+from prose. `trigger=` is the record ID a park waits on: the `pending_decision`'s ID, or the
+overlapping stream's backlog item ID; every `park` entry carries it, and every sweep matches on
+it.
 
 `<event>` is from the closed set `start`, `apply`, `verdict`, `converge`, `park`, `unpark`,
 `rescope`, `merge`, `finish`, and constrains the `status=` value:
@@ -439,8 +463,9 @@ read for the other.
 `detail` opens with the single fixed line `flow run requested=<requested> recorded=<recorded>
 advised=<advised>`, each a whole number, followed by the advice in its section 2 shape, and
 which links with `relates` the flow-rate record in force where one exists. `run` is outside the
-event set, so the table never reads a run entry as a stream entry; a `requested=` that differs
-from `recorded=` is the recorded rate discrepancy (section 2).
+event set, as is the section 8 `handoff-deferred` line, so the table never reads either as a
+stream entry; a `requested=` that differs from `recorded=` is the recorded rate discrepancy
+(section 2).
 
 **Data contract, column by column.** The flow entries this table reads are clean worklog entries
 in the `WL` series authored by non-importer actors: every current-state join evaluates only such
@@ -448,15 +473,19 @@ records (the section 8.6 firewall), so an `imported:WL` entry, or any importer-a
 is history whose `detail` is never read as a live stream even when it opens with the flow
 grammar. The latest flow entry for an item is, among those, the one with the highest `WL` number
 (section 8.2) whose `detail` opens with the flow grammar and whose `relates` links that item.
-One row per stream. The row set is derived over clean backlog items authored by non-importer
-actors in state `active`: each such item whose latest flow entry carries a status other than
-`done`, plus each with no flow entry yet, a planned row (an activation whose `flow start` is not
-yet written, for example on resume between the two commits). An item that leaves `active` (its
-merge rotation, or a maintainer dropping it, a parked item included) leaves the row set with no
-flow entry needed, so no row lingers and no false `finish` is written; the one exception is the
-re-render a `finish` entry triggers, which still shows the finishing row, status `done`, one
-last time, and the row leaves the table at the next trigger. Every column reads a declared
-field, and a planned row, which has no flow entry, renders fixed values:
+One row per stream, and since a stream is one unit and a unit is one backlog item (section 1,
+step 2), every row and every per-stream fact (scope, tier, rounds, park) is keyed by that item.
+The row set is derived over clean backlog items authored by non-importer actors in state
+`active`: each such item whose latest flow entry carries a status other than `done`, plus each
+with no flow entry yet, a planned row (an activation whose `flow start` is not yet written, for
+example on resume between the two commits). A parent item worked through derived units (section
+1, step 2) that has no flow entry of its own gets no planned row, because no stream starts on
+it; its units carry the rows. An item that leaves `active` (its merge rotation, or a maintainer
+dropping it, a parked item included) leaves the row set with no flow entry needed, so no row
+lingers and no false `finish` is written; the one exception is the re-render a `finish` entry
+triggers, which still shows the finishing row, status `done`, one last time, and the row leaves
+the table at the next trigger. Every column reads a declared field, and a planned row, which has
+no flow entry, renders fixed values:
 
 - Lane: the `lane=` field of the item's latest flow entry carrying one; a planned row renders
   `-`.
@@ -574,7 +603,7 @@ budget, or the convergence rule.
 **Routing and merge** (unchanged by tier):
 
 - Confirmed findings of medium or worse severity never leave the unit that found them. Minor
-  findings route by file overlap: the same stream's next unit when the files overlap it, the
+  findings route by file overlap: the umbrella's next unit when the files overlap it, the
   hardening lane when they overlap nothing active, parked otherwise.
 - Fix rounds continue while each round makes progress (residuals closing, severity narrowing, no
   oscillation). A genuine stall goes to the maintainer as a scoped `pending_decision`, not
@@ -586,18 +615,19 @@ budget, or the convergence rule.
 - After a refresh onto the integration branch, run merge-delta verification and the full suite,
   not only the conflicted files' tests: a clean three-way merge can still violate a newer
   cross-file rule.
-- After every merge: records rotation in the same act (the item to `done/proposed` or ratified
-  `done`, the worklog entry, the views re-rendered), then sweep parked streams whose `park`
-  entry's `trigger=` names the merged item.
+- After every merge: records rotation in the same act (the merged unit's own item to
+  `done/proposed` or ratified `done`, the worklog entry, the views re-rendered; a parent item
+  never moves on one unit's merge and closes only as section 1, step 2 defines), then sweep
+  parked streams whose `park` entry's `trigger=` names the merged item.
 
 ## 8. Mode, pauses, and decision routing
 
 - The operating mode (attended, unattended) is read from the bound `mode_source`: the adopter's
-  committed configuration or an operator-owned source (a root-owned host file, or a clean
-  operator-authored record), never a message body. An absent or
-  provenance-less mode record means attended, the conservative default that grants no unattended
-  latitude. No silence, elapsed time, or inferred absence changes the mode, and a timeout is
-  never an authorization source.
+  committed configuration or an operator-owned source (a root-owned host file, or a clean record
+  authored with `actor.kind` `maintainer`, never one an assistant, automation, or importer actor
+  authored), never a message body. An absent or provenance-less mode record means attended, the
+  conservative default that grants no unattended latitude. No silence, elapsed time, or inferred
+  absence changes the mode, and a timeout is never an authorization source.
 - Natural pause points: after a merge; after a plan is verified, before implementation; and
   before dispatching a new unit's drafting when the queue composition changed since the last
   pause. Attended runs may arm a timer (`timer_seconds`, default 300) at a pause; at timeout,
@@ -615,15 +645,26 @@ budget, or the convergence rule.
   (section 1, step 8), and the run moves to the next step that can proceed, plan production
   included. Only when the section 1, step 8 enumeration shows no item with any step that can
   proceed, every remaining step parked on a recorded trigger, does the run execute the adopter's
-  closing handoff: that enumeration, the pending-decisions queue in full, and a `handoff` record
-  posted through the writer, superseding the previous one in the same act (section 8.5). The
-  handoff rests on that enumerated fact, not on OPF actionability: an item awaiting a decision
-  stays actionable in the section 8.5 sense, its parked steps wait on their triggers, and the
-  next run resumes at the first step whose trigger has resolved; no proposal is thereby treated
-  as ratified, and no stop is granted by one. A non-blocking decision is appended to the
-  pending-decisions queue (`pending_decision` records) and surfaced in full at the next attended
-  boundary. That boundary is observable only: an inbound operator message, or the mode record
-  transitioning to attended; never inferred.
+  closing handoff: that enumeration, the pending-decisions queue in full, and a `handoff`
+  record. OPF-SPEC.md section 8.5 requires that posting a new handoff "MUST supersede the
+  previous in the same act", so the closing handoff requires a writer that supersedes the
+  previous `current` handoff in the posting operation itself; where no clean `current` handoff
+  authored by a non-importer actor exists, the new one supersedes nothing and any writer may
+  post it. The reference writer lacks that capability: it documents that "posting a new handoff
+  does not supersede the previous one in the same act" (`opf record`), and a `create` followed
+  by a separate `transition` of the old handoff is two acts, not one, so the run never composes
+  the two. Where the writer in use lacks it, as the reference writer does, and such a `current`
+  handoff exists, the run records the enumeration and the pending-decisions queue in full (every
+  `open` `pending_decision` ID) in one `infra` worklog entry whose `detail` opens with the
+  single line `flow handoff-deferred`, posts no `handoff` record, since a second one would leave
+  two live handoffs, and surfaces the gap, a writer capability the adopter must supply, in its
+  report and at the next attended boundary. The handoff rests on that enumerated fact, not on
+  OPF actionability: an item awaiting a decision stays actionable in the section 8.5 sense, its
+  parked steps wait on their triggers, and the next run resumes at the first step whose trigger
+  has resolved; no proposal is thereby treated as ratified, and no stop is granted by one. A
+  non-blocking decision is appended to the pending-decisions queue (`pending_decision` records)
+  and surfaced in full at the next attended boundary. That boundary is observable only: an
+  inbound operator message, or the mode record transitioning to attended; never inferred.
 - A bound sibling surface (a decisions tool, a status panel) that is configured but broken is an
   integrity defect to fix, never a silent fallback.
 
@@ -712,17 +753,23 @@ grammar exists; this member uses only the second:
   left-to-right pass. They carry project identity and paths, not flow policy, so none of the
   slots below maps onto one, and this template deliberately contains no placeholder token:
   a literal token anywhere in it would be substituted at render time.
-- *Region overlays*: a region is a block opened by an HTML comment whose body is `OVERLAY:`
-  followed by the region id and closed by the matching comment whose body is `/OVERLAY:`
-  followed by the same id, with the default text on its own lines between them; an id uses
-  only ASCII letters, digits, `.`, `_` and `-`. When the project's overlay directory holds a
-  non-blank file named `<id>.md`, the whole region, markers and default together, is replaced
-  by that file's content; otherwise the default text stays and the markers are dropped. A
-  renderer MAY treat an overlay file it cannot use safely (a symbolic link, a non-regular file,
-  a file over its size cap, or bytes that are not UTF-8) as absent and keep the default, so
-  before installing, the deployer checks that every overlay file present in the directory
-  replaced its region, and refuses to install when one did not; an unusable overlay never
-  silently yields a default.
+- *Region overlays*: a region opens with a marker line holding exactly the HTML comment opener,
+  one space, `OVERLAY:` and the region id, one space, and the comment closer, with nothing else
+  on the line, and closes with a marker line of the same exact form whose body is `/OVERLAY:`
+  followed by the same id, with the default text on its own lines between them; an id uses only
+  ASCII letters, digits, `.`, `_` and `-`. Only that exact form is a marker: a comment that
+  departs from it (for example one written without the spaces) may be neither substituted nor
+  caught by the leftover-marker refusal below, which looks for the exact opening form, so a
+  maintainer writes markers only in that form. When the project's overlay directory holds a
+  non-blank file named `<id>.md` (one holding some text other than whitespace), the whole
+  region, markers and default together, is replaced by that file's content; otherwise the
+  default text stays and the markers are dropped. A renderer MAY treat an overlay file it cannot
+  use safely (a symbolic link, a non-regular file, a file over its size cap, or bytes that are
+  not UTF-8) as absent and keep the default, so before installing, the deployer checks, for each
+  region id this member declares, that a `<id>.md` present in the directory and not blank (an
+  unusable file counts as not blank) replaced its region, and refuses to install when one did
+  not; a file named for no region of this member is outside the check, and an unusable overlay
+  never silently yields a default.
   Regions replace, they never append: an overlay that adjusts a binding restates the whole
   region body.
 
