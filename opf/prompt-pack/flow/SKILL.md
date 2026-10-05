@@ -11,7 +11,7 @@ description: The OPF operating loop for an AI development assistant. Read the ad
   verification is never shortened for speed.
 ---
 
-<!-- OPF-FLOW: release=0.3.0 template-sha256=031b90f11e85f9772a243c9e2c6ba7185004919ad890adb692549b654f984b4e -->
+<!-- OPF-FLOW: release=0.3.0 template-sha256=aad21ad5dea585f748ab003fd2a6ed805c7d80bbdb4490ec970830920c8724c9 -->
 
 # /flow: the OPF operating loop
 
@@ -66,8 +66,8 @@ Three rules govern everything else:
 5. Read the operating mode from the bound mode source (section 8). An unattended run freezes its
    authorization set at entry: the grants it will act under are the ones recorded before entry,
    and nothing that arrives mid-run widens them; a record that only narrows them, such as a
-   superseding `flow rule <situation> none` (section 7), applies from the first read that finds
-   it, at an anchor or when a situation surfaces.
+   superseding `flow rule stall none` (section 7), applies from the first read that finds it,
+   at an anchor or when a stall surfaces.
 
 ## 1. The cycle (repeat continuously)
 
@@ -137,11 +137,10 @@ Three rules govern everything else:
    `recreate`. A parent whose units are all closed and whose gap has no granting answer is
    enumerated (step 8) as awaiting the maintainer on the gap's decision. A further derived unit
    that carries the scope of an earlier unit, whatever that unit's state, a section 7 rescope's
-   split-off unit included, MUST link `follows` to that unit when it is created, so its
-   DISCOVERY round count and round cap continue from that unit's entries recorded before the new
-   item was created, and a section 7 standing rule that already acted on that unit bars it too,
-   all read through the section 5 ancestor walk; moving work to a new item never refreshes a
-   round budget (section 7). Selection takes the first step that can proceed: a step parked
+   split-off unit included, MUST link `follows` to that unit when it is created, so a section 7
+   standing rule that already acted on that unit bars it too, read through the section 5
+   ancestor walk; moving work to a new item never renews a spent standing rule (section 7).
+   Selection takes the first step that can proceed: a step parked
    awaiting a recorded trigger (step 8) is skipped until that trigger resolves, so the next pick
    moves on rather than re-taking it; this is a selection rule over steps, never a block, and
    the item stays actionable. A trigger resolves on a declared record state, never on prose: a
@@ -157,25 +156,34 @@ Three rules govern everything else:
    the member at unqualified `decided` that no other member supersedes, the chain's one current
    effective resolution (OPF-SPEC.md section 8.5: "exactly one current effective resolution MUST
    exist per chain"); it grants only when the first line of its `decision` is exactly one its
-   kind of decision defines in its fixed grammar (above for a gap, section 7 for a round-cap,
-   stall, or round-count decision). The chain is read over the active store and its
-   record-rotation archive together (OPF-SPEC.md section 12: rotation is "relocation, never
-   deletion"), so a member rotated there still counts. Every lasting effect of an answer, a
-   gap's `waive`, a unit's round cap or round count (section 7), the option chosen, is read from
-   that one place afresh each time the run needs it, never from a copy, so a maintainer changes
-   it by superseding the answer; an act the run already carried out on an earlier answer and
-   recorded (an `unpark` or `rescope` entry, a filed unit) stays done and is never repeated. The
-   run never re-asks on its own: a decision landed at `withdrawn`, an answer the run cannot
-   read, or a first line outside that grammar grants nothing, and the step stays parked on that
-   decision and is reported so (step 8), naming what the run found. Only a new maintainer
-   decision moves it: a `pending_decision` that supersedes the non-granting answer through the
-   specification's ordinary `supersedes` link (a maintainer's landing at unqualified `decided`,
-   OPF-SPEC.md section 8.8) and so becomes the chain's latest, or, for a withdrawn decision,
-   which nothing may supersede since only a `decided` chain head is superseded (section 8.8), a
-   new `pending_decision` authored with `actor.kind` `maintainer` that links `follows` to it
-   (OPF-SPEC.md section 8.4: a revived concern "MUST be a new record linking the old one"),
-   which the wait then reads in its place, by this same rule. A unit being structurally ready (a
-   verified plan exists) is never by itself authorization to implement it.
+   kind of decision defines in its fixed grammar (above for a gap, section 7 for a stall
+   decision). The chain is read over the active store and its record-rotation archive together
+   (OPF-SPEC.md section 12: rotation is "relocation, never deletion"), so a member rotated there
+   still counts. The run reads an answer through this one path each time it needs it, never
+   from a copy. Two effects of an answer last, each read afresh at every use, so a maintainer
+   changes it by superseding the answer: a gap's `waive`, read at every parent close check, and
+   the residuals an `accept` names, read at the section 7 merge gate, which carries out in the
+   `accept`'s place any other option a superseding answer names. Every other act the run
+   carries out on an answer and records (an `unpark` or `rescope` entry, a filed unit) is done
+   once and stays done, never repeated or undone, and beyond those two effects an answer that
+   supersedes one the run already acted on grants nothing further. The run never re-asks on its
+   own: a decision landed at `withdrawn`, an answer the run cannot read, or a first line outside
+   that grammar grants nothing, and the step stays parked on that decision and is reported so
+   (step 8), naming what the run found. Only a new maintainer decision moves it: a
+   `pending_decision` that supersedes the non-granting answer through the specification's
+   ordinary `supersedes` link (a maintainer's landing at unqualified `decided`, OPF-SPEC.md
+   section 8.8) and so becomes the chain's latest; for an answer the validator flags (section 0,
+   step 3), which nothing may supersede since section 8.8 requires the superseded record to be
+   schema-valid, the maintainer's integrity repair of that record, after which this rule reads
+   it afresh; or, for a withdrawn decision, which nothing may supersede since only a `decided`
+   chain head is superseded (section 8.8), a new `pending_decision` authored with `actor.kind`
+   `maintainer` that links `follows` to it (OPF-SPEC.md section 8.4: a revived concern "MUST be
+   a new record linking the old one"). The wait then moves to the maintainer decision that links
+   `follows` to its withdrawn trigger, the lowest ID where several do, whose own `supersedes`
+   chain this same rule reads, and moves on the same way should that decision be withdrawn in
+   turn; the move writes no new `park` entry, and every sweep that reads the withdrawn trigger
+   reads it so. A unit being structurally ready (a verified plan exists) is never by itself
+   authorization to implement it.
 3. **ACTIVATE.** Move the item `open` to `active` through `opf record transition` (section 8.8).
    `active` is an ungated working state, so an assistant lands it unqualified (section 8.4). The
    transition appends its own worklog entry and re-renders the declared views in the same act
@@ -217,8 +225,8 @@ Three rules govern everything else:
    from active blocks at view time (section 8.5), so releasing or expiring the block is itself
    the clearing act. A proposed block, an in-flight wait, absent authorization, or partial
    evidence never counts. Any item failing the test is worked, not reported blocked. Parking is
-   not blocking, and a pending decision parks a step, never an item: a unit parked at the
-   section 7 round cap, a delivery parked by the section 3 overlap guard, or any step awaiting a
+   not blocking, and a pending decision parks a step, never an item: a unit parked at a section
+   7 stall, a delivery parked by the section 3 overlap guard, or any step awaiting a
    `pending_decision` holds a recorded trigger (the `trigger=` field of its `park` entry,
    section 5), is reported as parked awaiting that record, exactly as an unratified completion
    is reported awaiting ratification, and frees its stream. The item stays actionable in the
@@ -226,9 +234,10 @@ Three rules govern everything else:
    different question, whether one step can proceed now. Every step that does not depend on a
    parked one keeps advancing as far as standing authority allows: the other units of the same
    parent item (each its own derived item, step 2), its plan production, the hardening lane, and
-   every other actionable item. A ratified block answers whether an item may be selected; the
-   section 7 round cap answers whether one unit may consume more discovery rounds, a floor only
-   a maintainer raises; neither substitutes for the other, and no proposal is read as ratified
+   every other actionable item. A ratified block answers whether an item may be selected; a
+   section 7 stall park answers whether one unit may run more discovery rounds, which only the
+   maintainer's answer or a standing rule's rescope resumes; neither substitutes for the other,
+   and no proposal is read as ratified
    on either path. Prefer advancing plan production for upcoming items over idling. The run
    reaches the section 8 closing handoff only when this enumeration shows no item with any step
    that can proceed, every remaining `open` or `active` item accounted for by a ratified block
@@ -515,31 +524,31 @@ lane the stream then sits in.
 `tier=` is `light`, `substantive`, or `sensitive` (section 7). `phase=` is `discovery` or
 `verify`, `result=` is `clean`, `findings`, or `failed`, and `rev=` names the reviewed revision;
 every `verdict` entry carries all three, and a `phase=discovery` entry also carries `round=<k>`,
-the unit's DISCOVERY round number counted from 1 over the unit's whole life, failed and
+the unit's DISCOVERY round number counted from 1 over its own item's whole life, failed and
 timed-out rounds included. A failed or timed-out round writes its own `verdict` entry
-(`result=failed`) before the re-issue, so a resumed unit's round count is the highest `round=`
-its ancestor walk reads, never an inference from prose. The ancestor walk starts at the unit's
-own item (one unit, one item, section 1, step 2), reading every flow entry of it, and follows
-each `follows` link from an item it reads to that link's target, the earlier unit whose scope
+(`result=failed`) before the re-issue, so a resumed unit's next round number is one more than
+the highest well-formed `round=` among its own item's flow entries, never an inference from
+prose; a `round=` that is not a whole number from 1 upward is malformed, and the section 7
+progress rule reads the round it marks as one without progress. The ancestor walk, which the
+section 7 standing-rule limit reads, starts at the unit's own item (one unit, one item, section
+1, step 2) and follows each `follows` link from an item it reads to that link's target, the
+earlier unit whose scope
 the item carries (section 1, step 2), transitively and in that direction only: it never steps
 from an item to one that links `follows` to it, so a sibling cut from the same unit, or a unit
 cut from this one, adds nothing. From each target it reads only what was recorded before the
-item linking to it was created, that target's cut: the flow entries whose `WL` number is below
-that of the worklog entry the writer appended when it created the linking item (the entry
-opening `opf-record create <ID>`, OPF-SPEC.md section 8.8), since the one store writer (section
-4) allocates `WL` numbers in the order it writes, so an earlier unit's rounds after the split
-never reach a unit already cut from it. The walk, like every chain read (section 1, step 2),
-reads the active store and its record-rotation archive together (OPF-SPEC.md section 12), so an
-item, its `create` entry, or a flow entry in a released worklog span rotated there is read where
-it moved, never missed. The walk never re-enters an item already on its path, so a cycle ends
-it. A `follows` target that cannot carry flow entries, any record other than a clean backlog
-item authored by a non-importer actor (imported history included, section 8.6), adds nothing,
-and the walk goes no further along that link. The walk refuses, rather than skipping, only a
-`follows` target it cannot read, a linking item whose `create` entry it cannot find, or a
-`round=` on an entry it reads that is not a whole number from 1 upward: the unit then runs no
-further DISCOVERY round and parks on a `pending_decision` that names the broken link or entry
-and links `relates` to the unit's item, which only a maintainer's `flow choice count <n>` answer
-(section 7) resolves. The section 7 standing-rule limit reads this same walk. `trigger=` is the
+item linking to it was created, that target's cut: the records whose own `create` worklog entry
+has a `WL` number below that of the worklog entry the writer appended when it created the
+linking item (the entry opening `opf-record create <ID>`, OPF-SPEC.md section 8.8), since the
+one store writer (section 4) allocates `WL` numbers in the order it writes, so what an earlier
+unit records after the split never reaches a unit already cut from it. The walk, like every
+chain read (section 1, step 2), reads the active store and its record-rotation archive together
+(OPF-SPEC.md section 12), so an item or a `create` entry in a released worklog span rotated
+there is read where it moved, never missed. The walk never re-enters an item already on its
+path, so a cycle ends it. A `follows` target other than a clean backlog item authored by a
+non-importer actor (imported history included, section 8.6) adds nothing, and the walk goes no
+further along that link. The walk refuses, rather than skipping, only a `follows` target it
+cannot read or a linking item whose `create` entry it cannot find, and a walk that refuses lets
+no standing rule act on the unit (section 7). `trigger=` is the
 record ID a park waits on: the `pending_decision`'s ID, or the overlapping stream's backlog item
 ID; every `park` entry carries it, and every sweep matches on it.
 
@@ -560,7 +569,7 @@ ID; every `park` entry carries it, and every sweep matches on it.
 
 The grammar deliberately cannot collide with the writer's own lifecycle lines, which open with
 `opf-record` (section 8.8), and the section 2 rate line `flow rate <n>` and the section 7 lines
-`flow rule <situation> <action>` and `flow choice <option>` live in the `decision` field of a
+`flow rule stall <action>` and `flow choice <option>` live in the `decision` field of a
 `maintainer_decision` or a `pending_decision`, or open the `classification` field of an
 `autonomous_decision`, different record types, so no grammar is ever read for another.
 
@@ -669,64 +678,57 @@ the mechanical gates.
   required family returns a real, non-empty, non-timed-out verdict reporting zero findings on
   the same pinned revision. An empty or timed-out verdict makes the round failed, never clean. A
   clean VERIFY never declares convergence and never replaces the next discovery panel.
-- **The round budget**: at most `discovery_round_cap` (default 9) DISCOVERY rounds per unit.
-  VERIFY rounds never count toward it. A failed round consumes budget; re-issue, resumption,
-  tier escalation, and moving scope to a new item never erase a failure or reset the count. The
-  count, phase, outcome, and reviewed revision ride the declared `round=`, `phase=`, `result=`,
-  and `rev=` fields of the unit's flow entries (section 5), the findings are `finding` records,
-  and the per-family verdicts, fixes, and re-issues are recorded on the lines after those
-  entries' two fixed lines, so a resumed unit keeps its count: the highest `round=` its section
-  5 ancestor walk reads. A walk that refuses (section 5) parks the unit on its
-  `pending_decision`, which only the maintainer resolves, by an answer whose first line is
-  exactly `flow choice count <n>`, `<n>` a whole number from 0 upward in decimal digits with no
-  sign or leading zero, and the run then unparks it through an `unpark` flow entry after the
-  section 3, step 5 re-check, a count at the cap parking it again at once through the path
-  below. A unit's round count and round cap are read afresh at every use, through section 1,
-  step 2's decision rule, from the decisions its `park` entries name in `trigger=`. While its
-  walk refuses, its count is the larger of <n> and the highest well-formed `round=` among its
-  own item's flow entries, <n> from the latest decision named by its own item's `park` entries
-  that is answered `flow choice count <n>`, for that unit alone (another unit whose walk meets
-  the same break parks on its own decision). Its cap is `discovery_round_cap` unless a `park`
-  entry its ancestor walk reads names a decision answered with `rounds=<k>` (the cap bullet
-  below); then the latest such entry, by `WL` number, sets it to <k> more than the unit's count
-  as it stood when that answer landed: the count read among entries whose `WL` number is below
-  that of the worklog entry the writer appended when it landed the answer at unqualified
-  `decided` (its `opf-record transition <ID>` lifecycle line, OPF-SPEC.md section 8.8). A cap is
-  so fixed by its answer, never by the moment it is read, and a resumed run reads the same cap;
-  a unit cut from another inherits the cap that unit's `park` entries below the cut (section 5)
-  set, until its own `park` entries set another.
+- **The progress rule**: DISCOVERY rounds continue while each round makes progress, with no
+  fixed number of rounds per unit; VERIFY rounds are not judged by it. A DISCOVERY round makes
+  progress when, against the unit's previous DISCOVERY round, all three signals hold: at least
+  one of the unit's `finding` records (those linking its item) that stood `open` after the
+  previous round has since left `open` (OPF-SPEC.md section 8.5: `fixed`, `routed`, `refuted`,
+  or `accepted`), so a finding is closed or the residual narrowed; no `finding` the round
+  confirms links to one of the unit's findings already `fixed`, a reopened item (a revived
+  concern is "a new record linking the old one", OPF-SPEC.md section 8.4); and the unit's
+  findings standing `open` after the round number no more than after the previous round, so the
+  round brings no net new regression. A unit's first DISCOVERY round has nothing to compare and
+  counts as progress, a clean round converges (above), and a failed round, or one whose entry
+  carries a malformed `round=` (section 5), shows no progress. A genuine stall is two
+  consecutive DISCOVERY rounds without progress, both recorded after the later of the unit's
+  latest `unpark` entry that ends a park whose `trigger=` names a `pending_decision` and the
+  `create` entry of the latest standing-rule `autonomous_decision` linking `relates` to its item
+  (standing rules, below), so each maintainer answer and each rule's rescope starts the test
+  afresh. Every signal is read from records, never inferred from prose: the round number, phase,
+  outcome, and reviewed revision ride the declared `round=`, `phase=`, `result=`, and `rev=`
+  fields of the unit's flow entries (section 5), the findings are `finding` records, and the
+  per-family verdicts, fixes, and re-issues are recorded on the lines after those entries' two
+  fixed lines, so a resumed unit resumes the same test.
 - **Reviewer reliability**: a reviewer silent past `stall_minutes` (default 45) is re-issued; an
   absent family is re-issued, never waived; the first valid delivery per leg is authoritative
   and a late valid delivery is read as a cross-reference; an invalid delivery never satisfies
   the family requirement; no missing-family or otherwise degraded panel converges.
-- **At the cap without convergence**: first apply a governing standing rule (the next bullet),
+- **At a genuine stall**: first apply a governing standing rule (the next bullet),
   whose rescope is recorded as an `autonomous_decision`, never a `pending_decision`; where no
   `rescope` rule governs, a `none` rule included, park the unit, the documented park-and-surface
   path: record the unresolved findings or reliability failures as a `pending_decision`, append
   the `park` flow entry whose `trigger=` names that decision (section 5), and surface a
-  recommendation with the options: continue discovery (more rounds, or higher review effort);
+  recommendation with the options: continue discovery (further rounds, or higher review effort);
   rescope the unit; accept a recorded residual and merge with a filed hardening item; or another
   adjustment. Acceptance is recorded as acceptance, never as clean convergence, and no option
   silently lowers the tier. Only the maintainer chooses, by landing that `pending_decision` at
   unqualified `decided`, which resolves the trigger (section 1, step 2), with a `decision` whose
-  first line is exactly one of `flow choice continue rounds=<k>`, `flow choice rescope
-  [rounds=<k>]`, `flow choice accept`, or `flow choice other`, `<k>` a whole number from 1
-  upward in decimal digits with no sign or leading zero, the chosen option's detail and
-  rationale on the lines after it, where an `accept` names each residual it accepts by its
+  first line is exactly one of `flow choice continue`, `flow choice rescope`, `flow choice
+  accept`, or `flow choice other`, the chosen option's detail and rationale on the lines after
+  it, where an `accept` names each residual it accepts by its
   `finding` ID. Attended, the maintainer lands it through the writer under their own actor, or
   ratifies a `decided/proposed` landing in which the session recorded their console answer; the
   section 2 scribe rule is confined to the flow-rate record and never extends to this
   transition, so an answer the session records resolves nothing until that ratification. The run
   then unparks the unit through an `unpark` flow entry, after the section 3, step 5 re-check,
-  and carries out that option: `rounds=<k>` sets this unit's cap to exactly <k> more than its
-  DISCOVERY round count when that answer landed (the round budget, above) and resets no count,
-  so at a stall it may raise or lower the cap, the maintainer's grant being the unit's whole
-  remaining budget; reaching that cap parks the unit again through this same path, and a choice
-  without it leaves the cap unchanged; only `accept` accepts a residual, and only those it names
-  (the merge gate below); `other` carries out only what its lines state that the run's standing
-  authority already permits, granting no round, accepting no residual, and lowering no tier, so
-  a unit it leaves at the cap, or a step it states beyond that authority, parks again on a fresh
-  `pending_decision` naming what remains. The answer is the one section 1, step 2's decision
+  and carries out that option: `continue` resumes DISCOVERY rounds under the progress rule,
+  whose test starts afresh at that `unpark` (above), so a further stall parks the unit again
+  through this same path; `rescope` narrows the unit as the next bullet defines; only `accept`
+  accepts a residual, and only those it names (the merge gate below); `other` carries out only
+  what its lines state that the run's standing authority already permits, resuming no round,
+  accepting no residual, and lowering no tier, so a unit it leaves stalled, or a step it states
+  beyond that authority, parks again on a fresh `pending_decision` naming what remains. The
+  answer is the one section 1, step 2's decision
   rule reads; one whose first line is none of these grants nothing, exactly as a landing at
   `withdrawn`, and the unit stays parked, and reported, until a new maintainer decision moves it
   (the decision rule). No timer, recorded rationale, standing grant, or standing rule resolves a
@@ -735,67 +737,64 @@ the mechanical gates.
   the run never selects among these options for a parked unit. Until the maintainer decides, the
   unit stays parked, the run moves to the next step that can proceed, plan production included,
   and the park is reported as section 1, step 8 defines: parked awaiting its recorded decision,
-  never blocked, because the cap is a floor on discovery rounds (section 10), not a block
-  record, and no block record is written or implied here.
-- **Standing rules**: the maintainer MAY authorize one act in advance, a rescope, at the round
-  cap or on a genuine stall (routing, below), through a standing rule: a clean
-  `maintainer_decision` authored with `actor.kind` `maintainer`, never written, scribed, or
-  proposed by the session (an importer-authored one never counts), whose `decision` opens with
-  exactly the fixed line `flow rule cap rescope` or `flow rule stall rescope`, or, to revoke,
-  `flow rule cap none` or `flow rule stall none`. A rule never grants a round, never accepts a
-  residual, and never takes the `other` option: those stay the maintainer's choices on the
-  `pending_decision` path above, and a first line in any other form, such as one carrying
-  `rounds=` or naming `continue` or `accept`, is no rule and grants nothing. The run reads the
-  rules afresh at each anchor (section 1, step 1) and again when a situation surfaces, and the
-  governing rule per situation is the one such record for it that no other such record for it
-  links `supersedes` to (OPF-SPEC.md sections 8.5 and 8.6). A rule is revoked or narrowed only
-  by a newer rule that supersedes it, `flow rule <situation> none` included, which governs from
-  the first read that finds it, at an anchor or when a situation surfaces, since it only
-  narrows; a `rescope` rule counts only when recorded before the run's entry (section 0, step
-  5), so one recorded mid-run is set aside until the next run: it is left out of the
-  governing-rule reading entirely, so the rule it supersedes still governs and it is never one
-  of the unsuperseded records counted next. Two or more such records for one situation that
-  nothing supersedes, or a `supersedes` link the run cannot read, mean no rule governs it, so
-  the situation parks as above. Executing a standing rule is not resolving a decision: when its
-  situation surfaces, before any `pending_decision` for it exists, and a `rescope` rule governs,
+  never blocked, because a stall park is not a block record, and no block record is written or
+  implied here.
+- **Standing rules**: the maintainer MAY authorize one act in advance, a rescope, on a genuine
+  stall (the progress rule, above), through a standing rule: a clean `maintainer_decision`
+  authored with `actor.kind` `maintainer`, never written, scribed, or proposed by the session
+  (an importer-authored one never counts), whose `decision` opens with exactly the fixed line
+  `flow rule stall rescope`, or, to revoke, `flow rule stall none`. A rule never resumes a
+  stalled unit's rounds, never accepts a residual, and never takes the `other` option: those
+  stay the maintainer's choices on the `pending_decision` path above, and a first line in any
+  other form, such as one naming `continue` or `accept`, is no rule and grants nothing. The run
+  reads the rules afresh at each anchor (section 1, step 1) and again when a stall surfaces,
+  and the governing rule is the one such record that no other such record links `supersedes` to
+  (OPF-SPEC.md sections 8.5 and 8.6). A rule is revoked or narrowed only by a newer rule that
+  supersedes it, `flow rule stall none` included, which governs from the first read that finds
+  it, at an anchor or when a stall surfaces, since it only narrows; a `rescope` rule counts only
+  when recorded before the run's entry (section 0, step 5), so one recorded mid-run is set aside
+  until the next run: it is left out of the governing-rule reading entirely, so the rule it
+  supersedes still governs and it is never one of the unsuperseded records counted next. Two or
+  more such records that nothing supersedes, or a `supersedes` link the run cannot read, mean no
+  rule governs, so the stall parks as above. Executing a standing rule is not resolving a
+  decision: when a stall surfaces, before any `pending_decision` for it exists, and a `rescope`
+  rule governs,
   the run records an `autonomous_decision` (OPF-SPEC.md section 8.5) whose `classification`
   field opens with the rule's line and names the rule's ID and whose `action` field states the
   rescope (OPF-SPEC.md section 8.5 gives that type "the classification basis, the action,
   links", and `classification` and `action` are the reference schema's names for the first two),
   and which links `relates` to the rule and to the unit's item, then carries out that rescope. A
-  standing rule acts at most once per situation along any chain of units cut one from another,
-  read through the unit's section 5 ancestor walk and that walk alone: where an
-  `autonomous_decision` whose `classification` opens with that situation's rule line links
+  standing rule acts at most once along any chain of units cut one from another, read through
+  the unit's section 5 ancestor walk and that walk alone: where an `autonomous_decision` whose
+  `classification` opens with the rule's line links
   `relates` to an item the walk reads, the unit's own item whenever it was recorded and an
   earlier unit's only when the worklog entry that decision's `create` appended lies below that
-  unit's cut (section 5), or the walk refuses, the situation goes to the maintainer as a
+  unit's cut (section 5), or the walk refuses, the stall goes to the maintainer as a
   `pending_decision` through the path above. A rule's execution on a unit so bars that unit and
-  every unit later cut from it, never the unit it was cut from or a sibling, and a `cap`
-  execution never spends the `stall` rule, nor the reverse. A rule never lands, ratifies, or
-  answers a `pending_decision`, which stays the maintainer's alone, and a situation no governing
-  `rescope` rule covers, one a `none` rule governs included, parks exactly as above. A rescope,
-  under a rule or a maintainer's choice, narrows the unit's scope through a `rescope` flow entry
+  every unit later cut from it, never the unit it was cut from or a sibling. A rule never lands,
+  ratifies, or answers a `pending_decision`, which stays the maintainer's alone, and a stall no
+  governing `rescope` rule covers, one a `none` rule governs included, parks exactly as above. A
+  rescope, under a rule or a maintainer's choice, narrows the unit's scope through a `rescope`
+  flow entry
   (section 5), keeps the unit's confirmed findings with it (routing, below), never lowers the
   tier, and files the scope it removes as a further derived unit (section 1, step 2), of the
   unit's parent item or, where it has none, of its own item, which MUST link `follows` to the
-  unit when it is created, so its round count and round cap start from the unit's at the split
-  and a rule already executed on the unit bars it too, all through the section 5 ancestor walk,
-  while the unit's later rounds, caps, and rule executions never reach it. At the cap, a rescope
-  without `rounds=`, every rule's rescope included, leaves the narrowed unit and its split-off
-  unit no DISCOVERY round, so each parks on its own `pending_decision` when it next needs one; a
-  rule's rescope at the cap only splits the scope ahead of the maintainer's choice.
+  unit when it is created, so a rule already executed on the unit bars it too, through the
+  section 5 ancestor walk, while the unit's later rule executions never reach it. The narrowed
+  unit's rounds then go on under the progress rule, its test started afresh (above), and the
+  split-off unit's rounds count from 1 on its own item.
 
 **The effort schedule.** The review effort each phase runs at, by tier, is bound by the
 `flow-effort-schedule` region here, beside the cycle it governs (section 10 gives the region
 grammar and lists the slot). A project overlay replaces the generic default below with its own
 per-tier schedule; no schedule, bound or default, weakens the panel composition, the convergence
-rule, the round budget, or any other floor above.
+rule, the progress rule, or any other floor above.
 
 <!-- OVERLAY:flow-effort-schedule -->
 Effort schedule (generic default): every DISCOVERY panel and every VERIFY pass runs each
 reviewer family at its standard review effort for the unit's tier, the heavier tier always at
-least as hard as the lighter one; effort choices never change the panel composition, the round
-budget, or the convergence rule.
+least as hard as the lighter one; effort choices never change the panel composition, the
+progress rule, or the convergence rule.
 <!-- /OVERLAY:flow-effort-schedule -->
 
 **Routing and merge** (unchanged by tier):
@@ -803,18 +802,21 @@ budget, or the convergence rule.
 - Confirmed findings of medium or worse severity never leave the unit that found them. Minor
   findings route by file overlap: the umbrella's next unit when the files overlap it, the
   hardening lane when they overlap nothing active, parked otherwise.
-- Fix rounds continue while each round makes progress (residuals closing, severity narrowing, no
-  oscillation). A genuine stall goes to the maintainer as a scoped `pending_decision`, not
-  another round, and parks the unit on it, resolved exactly as at the cap, unless a governing
-  `flow rule stall rescope` standing rule (above) applies, which the run executes as that bullet
-  defines.
+- Fix rounds continue while each round makes progress (the progress rule, above). A genuine
+  stall goes to the maintainer as a scoped `pending_decision`, not another round, and parks the
+  unit on it through the at-stall path above, unless a governing `flow rule stall rescope`
+  standing rule (above) applies, which the run executes as that bullet defines.
 - A unit merges only when verification is clean at the declared floor and CI is green on the
   exact pushed revision (`merge_check_cmd`). An acceptance, only ever a maintainer's `flow
   choice accept` since no standing rule accepts, stands in for clean convergence only for the
   residuals it names by `finding` ID, each kept as its `finding` with its filed hardening item;
   it never waives the rest of the declared floor (the panel composition, the mechanical gates)
   or CI, and a confirmed residual it does not name keeps the unit unmerged and parks it again on
-  a fresh `pending_decision` naming that residual. Merges are strictly serial and pinned to the
+  a fresh `pending_decision` naming that residual. The gate reads each acceptance afresh,
+  through section 1, step 2's decision rule, from the decisions the unit's own `park` entries
+  name: where a maintainer has since superseded an `accept` with another option, the gate
+  carries out that option in the `accept`'s place, as at an `unpark`, rather than asking again.
+  Merges are strictly serial and pinned to the
   reviewed head. Before waiting on CI, confirm the change is actually mergeable; a conflicting
   change never starts CI, and waiting on it is idle time.
 - After a refresh onto the integration branch, run merge-delta verification and the full suite,
@@ -854,12 +856,12 @@ budget, or the convergence rule.
   `active/proposed` block where the assistant proposes a stop, a proposal that grants nothing
   until ratified (section 8.4). The decision parks the step that needs it, never the item
   (section 1, step 8), and the run moves to the next step that can proceed, plan production
-  included. A section 7 round-cap or stall decision and a section 5 round-count decision are
-  never blocking decisions under this routing, attended or unattended: each parks one unit's
-  step and frees its stream, so it is recorded only as its `pending_decision` and `park` entry,
+  included. A section 7 stall decision is never a blocking decision under this routing,
+  attended or unattended: it parks one unit's step and frees its stream, so it is recorded only
+  as its `pending_decision` and `park` entry,
   with no block written or proposed, and attended it is also surfaced at once; a section 1, step
   2 gap decision, which parks only a parent's close and writes no `park` entry, is likewise
-  never blocking; where a section 7 `rescope` standing rule governs the situation, the run
+  never blocking; where a section 7 `rescope` standing rule governs the stall, the run
   records that rule's `autonomous_decision` and carries out its rescope instead, with no
   `pending_decision`, `park` entry, or block. Only when the section 1, step 8 enumeration shows
   no item with any step that can proceed, every remaining `open` or `active` item accounted for
@@ -1018,7 +1020,6 @@ configuration naming the slot (the Bindings rule below).
 | `review_families_light` | `flow-review-families-light` | the reviewer families for light units |
 | `effort_schedule` | `flow-effort-schedule` | the per-tier review effort schedule; its region sits in section 7, beside the cycle it governs |
 | `local_rules` | `flow-local-rules` | additive project requirements that map onto no slot; its region sits beside the adoption rule above, and its body is prose |
-| `discovery_round_cap` | `flow-discovery-round-cap` | the DISCOVERY round budget per unit; an overlay may bind a lower value, never a higher one (the park-and-surface gate is a floor) |
 | `stall_minutes` | `flow-stall-minutes` | the reviewer re-issue timeout (section 7) |
 | `plan_buffer_min` | `flow-plan-buffer-min` | the plan-ahead buffer target (section 1, step 7) |
 | `timer_seconds` | `flow-timer-seconds` | the attended pause timer (section 8) |
@@ -1052,10 +1053,6 @@ review_families = (required; unbound)
 <!-- OVERLAY:flow-review-families-light -->
 review_families_light = any two of review_families
 <!-- /OVERLAY:flow-review-families-light -->
-
-<!-- OVERLAY:flow-discovery-round-cap -->
-discovery_round_cap = 9
-<!-- /OVERLAY:flow-discovery-round-cap -->
 
 <!-- OVERLAY:flow-stall-minutes -->
 stall_minutes = 45
