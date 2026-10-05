@@ -1086,3 +1086,21 @@ expected-check-ids = [
   "revert/completeness-leg",
   "revert/documentation-leg",
 ]
+
+[[suite]]
+id = "entry-guard-selftest"
+runner = "tools/check_entry_guard.py"
+expected-check-ids = [
+  "vector/every-vector-holds",
+  "run/intact-reaches-checks",
+  "run/splice-silent-green",
+  "run/guard-def-silent-green",
+  "run/raise-nested-silent-green",
+  "run/main-literal-silent-green",
+  "own-entry/guard-loss-silent-green",
+  "own-entry/guard-loss-caught-by-execution-gate",
+  "mutant/every-mutant-caught",
+  "mutant/every-vector-discriminates",
+  "live/real-tree-passes",
+  "live/direct-launch-passes",
+]
