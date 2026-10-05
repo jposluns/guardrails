@@ -50,15 +50,24 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      (spec 14.1). A move- or keep-disposed source is adopter content and is not frozen.
   R4 declared-view writes. Each machine-store manifest's views targets are declared view destinations;
      a target equal to one is denied (views change only through `opf render`; spec 5.8, 14.1).
-  R5 Bash writes. EVERY Bash command is first classified PROVABLY PLAIN or not (D-DISCARD-SOUND-RULE,
-     QA round 6). A command is provably plain when the WHOLE command lexes into plain words with
-     simple whole-word quotes only (single quotes, or double quotes carrying no dollar sign,
-     backquote or backslash) and carries NO command or process substitution, NO parameter or
-     arithmetic expansion, NO eval, NO line continuation, NO ANSI-C or locale quoting, NO unquoted
-     here-document, and NO shell or interpreter invocation with inline code (a QUOTED here-document
-     fed to a program that is not a shell or interpreter, such as a commit message, stays plain
-     data). Every round 2..6 bypass was a shell form a sound lexer read differently than bash does;
-     an allowlist of provably plain commands cannot be fooled that way. A PROVABLY PLAIN command
+  R5 Bash writes. EVERY Bash command is first classified PROVABLY PLAIN or not by ONE strict
+     classifier (D-DISCARD-SOUND-RULE; the shared plain-command specification, QA round 7), decided
+     on the RAW command string before any lexing: (1) every character is printable ASCII (no tab,
+     newline, carriage return, NUL or non-ASCII character, so no Unicode digit, homoglyph or
+     invisible character); (2) no dollar sign, backquote, backslash, semicolon, ampersand, pipe,
+     angle bracket, parenthesis, brace, square bracket, star, question mark, exclamation mark, hash
+     or tilde appears outside a single-quoted span, and no assignment precedes the command word;
+     (3) a single-quoted span is literal and a double-quoted span carries none of those characters,
+     every quote terminated; (4) words are separated by spaces only, and the command word is a bare
+     unquoted name or path that is not a shell, an interpreter, eval, exec, source, ".", env,
+     command, builtin, xargs, nohup, timeout, sudo or any other wrapper or program on the explicit
+     deny list (PLAIN_DENIED_COMMANDS). So no redirection, here-document, sequencing, substitution,
+     expansion, glob, escape, line continuation or leading wrapper can sit in a plain command, and
+     the hook's own lexer never has to read one. A plain command that still names a command to run
+     on its own command line (an argument word that is a shell or interpreter name, or that carries
+     a shell or interpreter command string or a leading exclamation mark, a git configuration
+     override, a code-running git subcommand or a command-naming git option: _plain_runs_code) is
+     judged as not plain. A PROVABLY PLAIN command
      takes the EXACT path check: the raw string and every dequoted word are scanned for the
      protected tokens (the .working store tree by any substring spelling, a session cwd inside a
      .working tree, and the frozen (R3) and declared-view (R4) paths matched with path boundaries),
@@ -115,26 +124,24 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      directory or the writer's opf/tools/ directory, both resolved from the hook's own installed
      location) or on a bound product root's `.claude/settings.json` or `.claude/settings.local.json`
      (the hook registration) is denied: the gated tools must not be able to rewrite the gate, the
-     writer or the registration in one call. A plain pristine `python3 <script in the pack tree>`
-     invocation stays allowed (the pack's own tools must remain runnable; A1 alone governs the
-     writer verbs). What R8 CANNOT protect is disclosed under RESIDUALS.
+     writer or the registration in one call. A `python3 <script in the pack tree>` launch whose
+     words pass rules 1 to 3 of the plain classifier stays allowed from outside every product root
+     (the coarse rule exempts its launched script operand from R8: the pack's own tools must remain
+     runnable; A1 alone governs the writer verbs). What R8 CANNOT protect is disclosed under
+     RESIDUALS.
 
 THE SINGLE PRISTINE ALLOWANCE for a Bash command that references a protected token (the allowance
 machinery is itself attack surface, so the read-only command words and read-only git forms earlier
 revisions allowed are REMOVED rather than patched; the over-refusal is disclosed below). The command
-must be PRISTINE under a quote-aware scan of the raw string: outside quotes no metacharacter may appear
-(no semicolon, ampersand, pipe, angle bracket, backquote, dollar sign, parenthesis, brace, backslash,
-carriage return or newline), a single-quoted span is wholly literal argument data, a double-quoted span
-may carry no dollar sign, backquote or backslash (those expansions stay live inside double quotes), no
-quoted span, single-quoted spans included, may carry a control character other than tab (a writer
-title with a literal newline takes the deny, a disclosed over-refusal: spell writer arguments
-without control characters), and
-every quote must be terminated. So no second command, redirection, substitution or expansion can ride
-along, while a sanctioned invocation may still QUOTE prose or a path that names a protected token (an
-`opf record` title, an `opf render --root` operand with spaces or parentheses). A leading VAR=value
-assignment is NOT skipped: an environment assignment changes what a program does (GIT_EXTERNAL_DIFF and
-GIT_CONFIG_* make `git diff` execute an arbitrary writer), so an assignment-bearing command is never
-the allowance.
+must pass rules 1 to 3 of the same provably plain classifier, with a bare command word (rule 4's word
+split, without its deny list, so the python3 launcher form below can be read): printable ASCII only,
+no metacharacter outside a single-quoted span, double-quoted spans free of them, every quote
+terminated. So no second command, redirection, substitution or expansion can ride along, while a
+sanctioned invocation may still QUOTE prose or a path that names a protected token (an `opf record`
+title, an `opf render --root` operand with spaces or parentheses, single-quoted). A leading
+VAR=value assignment is never a bare command word: an environment assignment changes what a program
+does (GIT_EXTERNAL_DIFF and GIT_CONFIG_* make `git diff` execute an arbitrary writer), so an
+assignment-bearing command is never the allowance.
   A1 the sanctioned writer, as a whole single plain invocation: `opf record ...` or `opf render ...`
      (the installed entry point as a bare word), or a bare python3 word (allowlisted interpreter flags
      only) running THE repository's own opf/tools/opf.py with verb record or render. The launched
@@ -149,6 +156,18 @@ per-platform residual coverage carry the same list):
     variable, glob, alias, function, cd-relative spelling that drops the token, command or process
     substitution, an interpreter one-liner, or any other spelling in which no protected token appears
     textually in the command string. R5 is a lexical floor, not a sandbox.
+  - A plain command whose program runs code the command line does not name: a script or binary the
+    session prepared earlier (./tool.py), a build, package or test runner not on the deny list
+    reading its own recipe file, a git hook, alias, pager, filter or diff driver taken from
+    repository or user configuration, a program configured through an environment variable the
+    session inherited, an exported shell function shadowing the command word, and a program outside
+    PLAIN_DENIED_COMMANDS that runs a command named in its own options. The deny list and the plain
+    semantic check exclude the inline forms only; the configuration and the prepared file are
+    same-user preparation.
+  - A plain command whose operand CONTAINS the store rather than lying in it: the exact check judges
+    words that resolve INTO a protected path, so an operand naming a product root or an ancestor of
+    one (a recursive remove of the root, git clean from the root) reaches the store with no
+    protected token.
   - A relative protected spelling judged from outside the product tree: when the session cwd sits
     outside every product root, only the ABSOLUTE spellings (raw or dequoted) bind the rosters; a
     relative spelling of a frozen or view path that climbs into an unbound product tree resolves to
@@ -208,9 +227,14 @@ per-platform residual coverage carry the same list):
     LEGACY.md). A command that is NOT provably plain denies whenever the session working directory,
     or any literal path word, lies inside a product root, even when it touches nothing protected: so
     from a cwd inside a product root a parameter expansion (echo $HOME), a command substitution
-    (gh pr create --body "$(...)"), an interpreter or build tool (python3 script.py, make test,
-    bash -c ...), an eval, a line continuation, an ANSI-C or locale quote, and an unquoted
-    here-document all deny; run them from outside the product tree or outside a hooked session, read
+    (gh pr create --body "$(...)"), an interpreter, wrapper or build tool (python3 script.py, make
+    test, bash -c ..., env, sed, find, tar), an eval, a line continuation, an ANSI-C or locale
+    quote, a glob, a redirection, any here-document (a quoted commit-message here-document
+    included), a tab or non-ASCII character, a double-quoted dollar sign (opf record task "costs
+    $5"; single-quote it), a git configuration override or config subcommand, an argument word that
+    names a shell or interpreter (grep -rn python src; use the Grep tool), and an argument word
+    carrying a shell or interpreter command string (a commit message beginning "sh -c" or "!")
+    all deny; run them from outside the product tree or outside a hooked session, read
     protected files through the Read tool, and change the store through the opf CLI. R8 denies
     rewriting the pack own files and the per-product registration through the gated tools, and the
     word-resolution pass of a plain command denies a command that merely names a protected or
@@ -303,14 +327,6 @@ READONLY_TOOLS = frozenset(("Read", "Glob", "Grep", "LS", "NotebookRead", "WebFe
                             "Task", "Agent", "ExitPlanMode", "AskUserQuestion",
                             "BashOutput", "TaskOutput", "KillShell", "KillBash"))
 
-# R5/A1 vocabularies. METACHARS is the UNQUOTED-dangerous set for the quote-aware pristine scan:
-# semicolon, ampersand, pipe, the two angle brackets, backquote, dollar sign, the two parentheses, the
-# two braces, backslash, carriage return and newline, each built from its code point so none appears
-# literally here. DQ_LIVE is the subset that stays live INSIDE double quotes (dollar, backquote,
-# backslash: expansion and substitution still run there).
-METACHARS = frozenset(chr(c) for c in (59, 38, 124, 60, 62, 96, 36, 40, 41, 123, 125, 92, 13, 10))
-DQ_LIVE = frozenset(chr(c) for c in (36, 96, 92))
-QUOTES = frozenset(chr(c) for c in (39, 34))
 # The loose-lexer word separators (R5): ONLY the shell's own unquoted operator characters end a
 # word (semicolon, ampersand, pipe, the two angle brackets, the two parentheses, backquote; space,
 # tab and newline are handled in the lexer itself), so a quoted operand beside a redirection stays
@@ -321,10 +337,6 @@ WORD_SEPARATORS = frozenset(chr(c) for c in (59, 38, 124, 60, 62, 40, 41, 96))
 # The backslash-escapable set INSIDE double quotes (dollar, backquote, double quote, backslash,
 # newline); before any other character a double-quoted backslash stays literal, as in the shell.
 DQ_ESCAPABLE = frozenset(chr(c) for c in (36, 96, 34, 92, 10))
-# The single-character ANSI-C escapes of a dollar-quoted span, each decoded to its exact character.
-ANSI_SIMPLE = dict((("a", chr(7)), ("b", chr(8)), ("e", chr(27)), ("E", chr(27)), ("f", chr(12)),
-                    ("n", chr(10)), ("r", chr(13)), ("t", chr(9)), ("v", chr(11)),
-                    (chr(92), chr(92)), (chr(39), chr(39)), (chr(34), chr(34)), ("?", "?")))
 # The hook-registration leaves R8 protects directly under a bound product root's .claude/ entry.
 REGISTRATION_LEAVES = frozenset(("settings.json", "settings.local.json"))
 # The writer verbs A1 accepts (module docstring): a single plain `opf record ...` or `opf render ...`
@@ -344,27 +356,70 @@ ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9])/[A-Za-z0-9_./@%+,=~^-]+")
 _ASSIGNMENT_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*=")
 _PYTHON_RE = re.compile(r"\Apython(3(\.\d+)?)?\Z")
 _PYFLAGS_RE = re.compile(r"\A-[IBEsuPb]+\Z")
-# The programs that run their input or arguments as code (R5): a shell, eval or source, an
-# interpreter, or a program that hands its input or arguments to one (xargs and parallel run
-# commands built from stdin, make runs recipes through a shell, watch and su run a shell string).
-# Matched on a word's basename with an optional version suffix (python3.12, ksh93). `.` (source)
-# counts only in command position (SHELL_PREFIX_WORDS keep that position).
-_CODE_RUNNER_RE = re.compile(
-    r"\A(?:sh|bash|rbash|dash|ash|zsh|ksh|mksh|pdksh|oksh|yash|posh|csh|tcsh|fish|busybox|toybox"
-    r"|eval|source|xargs|parallel|make|gmake|bmake|watch|su|awk|gawk|mawk|nawk|python|pypy|perl"
-    r"|ruby|irb|node|nodejs|deno|bun|php|lua|luajit|tclsh|wish|expect|Rscript|osascript|pwsh"
-    r"|powershell)[0-9.]*\Z")
-# The words after which the next word still sits in command position (R5's `.` detection).
-SHELL_PREFIX_WORDS = frozenset(("!", "if", "then", "else", "elif", "do", "while", "until", "time",
-                                chr(123), "exec", "command", "builtin", "nohup", "env", "sudo"))
-# A word holding any of these characters could carry further shell syntax when a program runs it
-# as code (blanks, quotes, backslash, dollar, backquote, comment, braces, operators, newline).
-_NESTED_SYNTAX = frozenset(" " + chr(9) + chr(10) + chr(13) + chr(39) + chr(34) + chr(92) + chr(36)
-                           + chr(96) + "#" + chr(123) + chr(125) + ";&|<>()")
-_NESTED_REASON = ("a here-document body, here-string or word this command could run as code "
-                  "cannot itself be read as a command")
-# The recursion bound for code read as a command inside code (here-document bodies, -c strings).
-MAX_NESTING = 8
+# THE PROVABLY PLAIN CLASSIFIER (R5): the shared plain-command specification, decided on the raw
+# command string before any lexing. Rule 1: every character is printable ASCII (0x20 to 0x7E; no tab,
+# newline, carriage return, NUL or non-ASCII character, so no Unicode digit, homoglyph or invisible
+# character). Rule 2: PLAIN_FORBIDDEN never appears outside a single-quoted span: dollar sign,
+# backquote, backslash, semicolon, ampersand, pipe, the two angle brackets, the two parentheses, the
+# two braces, the two square brackets, star, question mark, exclamation mark, hash and tilde, each
+# built from its code point so none appears literally here. Rule 3: a single-quoted span is literal; a
+# double-quoted span may carry no PLAIN_FORBIDDEN character; an unterminated quote is not plain.
+# Rule 4: words are separated by spaces only; the command word is bare (PLAIN_COMMAND_RE, so no
+# quote and no leading assignment) and is not on PLAIN_DENIED_COMMANDS.
+PLAIN_FORBIDDEN = frozenset(chr(c) for c in (36, 96, 92, 59, 38, 124, 60, 62, 40, 41, 123, 125,
+                                             91, 93, 42, 63, 33, 35, 126))
+PLAIN_COMMAND_RE = re.compile(r"\A[A-Za-z0-9_./-]+\Z")
+# Rule 4's explicit deny list (acceptable because rules 1 and 2 already exclude every expansion
+# form): a command word naming a shell, an interpreter, a shell builtin or keyword that runs, loads
+# or defers code, a wrapper that runs another command, or a program that runs a command or code
+# named in its own arguments or options. Matched case-insensitively on the word's basename (a
+# case-insensitive filesystem launches PYTHON3 as python3), exactly or with a version or variant
+# suffix that starts with a digit, dot, underscore or dash (python3.12, perl5.36, node-18).
+PLAIN_DENIED_COMMANDS = frozenset((
+    "sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", "mksh", "pdksh", "oksh", "yash", "posh",
+    "csh", "tcsh", "fish", "nu", "elvish", "xonsh", "busybox", "toybox",
+    ".", "eval", "exec", "source", "command", "builtin", "enable", "trap", "alias", "fc", "bind",
+    "coproc", "time", "r",
+    "env", "xargs", "nohup", "timeout", "sudo", "doas", "su", "sg", "newgrp", "runuser", "pkexec",
+    "chroot", "nice", "ionice", "chrt", "taskset", "numactl", "prlimit", "setpriv", "capsh",
+    "cgexec", "chpst", "setsid", "stdbuf", "unbuffer", "script", "flock", "watch", "parallel",
+    "nsenter", "unshare", "firejail", "bwrap", "proot", "faketime", "strace", "ltrace", "gdb",
+    "lldb", "valgrind", "catchsegv", "hyperfine", "entr", "nodemon", "systemd-run", "caffeinate",
+    "daemonize", "start-stop-daemon", "dbus-launch", "dbus-run-session", "xvfb-run", "ssh-agent",
+    "at", "batch", "crontab", "screen", "tmux", "docker", "podman",
+    "find", "make", "gmake", "bmake", "ninja", "sed", "gsed", "awk", "gawk", "mawk", "nawk", "tar",
+    "gtar", "bsdtar", "rsync", "zip", "ssh", "scp", "sftp", "vi", "vim", "nvim", "view", "ex", "ed",
+    "emacs", "less", "more", "man",
+    "python", "pythonw", "pypy", "perl", "ruby", "irb", "node", "nodejs", "deno", "bun", "php",
+    "lua", "luajit", "tclsh", "wish", "expect", "rscript", "osascript", "pwsh", "powershell",
+    "java", "jshell", "groovy", "julia", "guile", "racket", "sbcl", "ocaml", "swift", "npm", "npx",
+    "yarn", "pnpm", "uv", "uvx", "pipx", "dotnet", "cargo", "go"))
+_DENIED_STEM_RE = re.compile(r"\A([a-z]+)[0-9._-]")
+# An argument word's runner spelling: a name with at most a version suffix (python3, python3.12),
+# never a longer identifier (PYTHON_VERSION, sh-notes).
+_RUNNER_WORD_RE = re.compile(r"\A([a-z]+)[0-9.]*\Z")
+# The subset of the deny list that, at the head of a command string carried INSIDE a plain
+# argument word (git -c alias.x=!cmd, --to-command=cmd), marks inline code: a plain command carrying
+# such a word takes the coarse rule, never the exact one (the plain semantic check).
+INLINE_RUNNERS = frozenset(("sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", "mksh", "pdksh",
+                            "oksh", "yash", "posh", "csh", "tcsh", "fish", "busybox", "toybox",
+                            "eval", "exec", "source", "env", "xargs", "sudo", "su", "nohup",
+                            "timeout", "command", "builtin", "python", "pythonw", "pypy", "perl",
+                            "ruby", "node", "nodejs", "deno", "bun", "php", "lua", "luajit",
+                            "tclsh", "expect", "osascript", "pwsh", "powershell", "awk", "gawk",
+                            "mawk", "nawk"))
+# The git forms that run a command or code named on the command line (the plain semantic check): a
+# global configuration override before the subcommand (-c, --config-env: alias.x=!cmd, core.pager,
+# core.sshCommand, core.hooksPath), --exec-path, a subcommand that writes code-running configuration
+# or runs a command string, and the options that name a command to run (rebase -x and clone -u are
+# matched on their own subcommands).
+GIT_VALUE_GLOBALS = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                               "--super-prefix", "--config-env"))
+GIT_CODE_SUBCOMMANDS = frozenset(("config", "filter-branch", "bisect", "submodule", "difftool",
+                                  "mergetool", "daemon", "instaweb", "send-email", "credential",
+                                  "svn", "p4", "cvsimport", "archimport", "help", "web--browse"))
+GIT_CODE_OPTIONS = ("--exec", "--upload-pack", "--receive-pack", "--extcmd", "--tool",
+                    "--open-files-in-pager", "-O")
 
 SANCTIONED = ("OPF content changes only through the sanctioned writer: run the opf CLI (opf record, "
               "opf render, and the other opf verbs), or make the change outside the store's scope")
@@ -768,49 +823,119 @@ def _file_tool_rule(tool_name, tool_input, cwd):
     return None
 
 
-def _pristine_tokens(command):
-    """The shell-aware tokens of a PRISTINE command (module docstring: no unquoted metacharacter or
-    control character, no control character other than tab in ANY quoted span, single-quoted spans
-    otherwise wholly literal, double-quoted spans with no live dollar
-    sign, backquote or backslash, every quote terminated); or None when the command is not pristine.
-    Leading VAR=value assignments are KEPT: an assignment changes what a program does, so an
-    assignment-bearing command is never the sanctioned writer. Quoted spans tokenize as argument
-    DATA, so a sanctioned invocation may quote prose that names a protected token."""
-    tokens, cur, has_cur, mode = [], [], False, ""
-    for ch in command:
-        if mode == chr(39):
-            if ch == chr(39):
-                mode = ""
-            elif ord(ch) < 0x20 and ch != "\t":
+def _command_names(word):
+    """The names a command word is matched under (rule 4): its basename, lowercased, and the stem
+    before a version or variant suffix (python3.12 -> python)."""
+    base = os.path.basename(word).lower()
+    stem = _DENIED_STEM_RE.match(base)
+    return frozenset((base, stem.group(1))) if stem else frozenset((base,))
+
+
+def _denied_command(word):
+    """Rule 4's deny list over one command word (PLAIN_DENIED_COMMANDS): True when its basename names
+    a shell, an interpreter, a code-running builtin or a wrapper, exactly or with a version or
+    variant suffix, compared case-insensitively."""
+    return bool(_command_names(word) & PLAIN_DENIED_COMMANDS)
+
+
+def _plain_words(command):
+    """Rules 1 to 3 of the provably plain specification and rule 4's word split, decided on the raw
+    string before any lexing: the dequoted words when every character is printable ASCII, no
+    PLAIN_FORBIDDEN character appears outside a single-quoted span (a double-quoted span carries none
+    either), every quote is terminated, words are separated by spaces only and the command word is a
+    bare unquoted PLAIN_COMMAND_RE name or path; else None. The deny list is NOT applied here: the
+    sanctioned-writer allowance (A1) reads its python3 launcher form through these same words."""
+    if any(not 0x20 <= ord(ch) <= 0x7E for ch in command):
+        return None
+    head = command.lstrip(" ").split(" ", 1)[0]
+    if not PLAIN_COMMAND_RE.match(head):
+        return None
+    words, cur, has = [], [], False
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if ch in (chr(39), chr(34)):
+            end = command.find(ch, i + 1)
+            if end < 0:
                 return None
-            else:
-                cur.append(ch)
-            continue
-        if mode == chr(34):
-            if ch == chr(34):
-                mode = ""
-            elif ch in DQ_LIVE or (ord(ch) < 0x20 and ch != "\t"):
+            span = command[i + 1:end]
+            if ch == chr(34) and any(c in PLAIN_FORBIDDEN for c in span):
                 return None
-            else:
-                cur.append(ch)
+            cur.append(span)
+            has, i = True, end + 1
             continue
-        if ch in METACHARS or (ord(ch) < 0x20 and ch != "\t"):
+        if ch in PLAIN_FORBIDDEN:
             return None
-        if ch in QUOTES:
-            mode, has_cur = ch, True
-            continue
-        if ch in (" ", "\t"):
-            if has_cur:
-                tokens.append("".join(cur))
-                cur, has_cur = [], False
+        if ch == " ":
+            if has:
+                words.append("".join(cur))
+                cur, has = [], False
+            i += 1
             continue
         cur.append(ch)
-        has_cur = True
-    if mode:
-        return None  # an unterminated quote is not a command this hook can read
-    if has_cur:
-        tokens.append("".join(cur))
-    return tokens or None
+        has, i = True, i + 1
+    if has:
+        words.append("".join(cur))
+    return words
+
+
+def _provably_plain(command):
+    """R5's PROVABLY PLAIN classifier (the shared specification, all four rules): the dequoted words
+    of a provably plain command, or None when the command is not plain. Every command this returns
+    None for is judged by _exotic_bash_rule, the coarse product-root check."""
+    words = _plain_words(command)
+    if not words or _denied_command(words[0]):
+        return None
+    return words
+
+
+def _names_runner(word):
+    """True when `word`, as a basename with at most a version suffix, is an INLINE_RUNNERS name."""
+    spelled = _RUNNER_WORD_RE.match(os.path.basename(word).lower())
+    return bool(spelled) and spelled.group(1) in INLINE_RUNNERS
+
+
+def _plain_runs_code(words):
+    """The plain semantic check (R5): a phrase naming why a provably plain command still runs a
+    command or code it names on its own command line, or None. Such a command takes the coarse rule.
+    An argument word that IS an INLINE_RUNNERS name (a wrapper outside the deny list, such as
+    eatmydata python3 -c ..., runs it), and a word carrying a command string headed by such a name
+    or by a leading exclamation mark (git alias.x=!cmd, --to-command=python3 -c ...), are inline
+    code; so are git's configuration overrides, its code-running subcommands and its
+    command-naming options."""
+    for word in words[1:]:
+        if _names_runner(word):
+            return "an argument word names a shell or interpreter another program may run"
+        for piece in word.split("="):
+            piece = piece.lstrip(" ")
+            if piece.startswith(chr(33)) and piece.strip(chr(33) + " "):
+                return "an argument word carries a shell-escape command string"
+            head = piece.split(" ")
+            if len(head) > 1 and _names_runner(head[0]):
+                return "an argument word carries a shell or interpreter command string"
+    if "git" not in _command_names(words[0]):
+        return None
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        opt = words[i]
+        if (opt == "-c" or (opt.startswith("-c") and not opt.startswith("--"))
+                or opt.startswith("--config-env") or opt.startswith("--exec-path")):
+            return "a git configuration override or exec-path option can run a command"
+        i += 2 if opt in GIT_VALUE_GLOBALS else 1
+    if i >= len(words):
+        return None
+    sub, rest = words[i], words[i + 1:]
+    if sub in GIT_CODE_SUBCOMMANDS:
+        return "the git subcommand %r runs or configures a command" % (sub,)
+    for word in rest:
+        if word.startswith(GIT_CODE_OPTIONS):
+            return "the git option %r names a command to run" % (word,)
+        short = word.startswith("-") and not word.startswith("--")
+        if sub == "rebase" and short and "x" in word[1:]:
+            return "git rebase -x runs a command"
+        if sub == "clone" and short and "u" in word[1:]:
+            return "git clone -u runs a command"
+    return None
 
 
 def _guarded_prefixes():
@@ -907,65 +1032,6 @@ def _is_sanctioned_opf(tokens, cwd):
     return resolved == writer and os.path.isfile(writer)
 
 
-def _read_plain_delim(command, i):
-    """Read one here-document delimiter word for the provably-plain lexer, starting at i (past
-    the operator and any blanks): (delimiter, quoted, index past the word), or (None, None, None)
-    for a form this hook does not read exactly (a dollar sign, backquote or backslash, an
-    unterminated quote, no word). ANY quoting marks the delimiter quoted, so its body takes no
-    expansion and stays inert data."""
-    n = len(command)
-    out, quoted, start = [], False, i
-    while i < n:
-        c = command[i]
-        if c in (chr(32), chr(9), chr(10)) or c in WORD_SEPARATORS:
-            break
-        if c in (chr(36), chr(96), chr(92)):
-            return None, None, None
-        if c == chr(39):
-            end = command.find(chr(39), i + 1)
-            if end < 0:
-                return None, None, None
-            out.append(command[i + 1:end])
-            quoted = True
-            i = end + 1
-            continue
-        if c == chr(34):
-            i += 1
-            while i < n and command[i] != chr(34):
-                if command[i] in (chr(36), chr(96), chr(92)):
-                    return None, None, None
-                out.append(command[i])
-                i += 1
-            if i >= n:
-                return None, None, None
-            quoted = True
-            i += 1
-            continue
-        out.append(c)
-        i += 1
-    if i == start:
-        return None, None, None
-    return "".join(out), quoted, i
-
-
-def _skip_plain_heredoc_body(command, i, delim, strip_tabs):
-    """Skip one QUOTED here-document body (inert data fed to a non-code-runner) from line i:
-    the index past the delimiter line, or None when the delimiter line never appears. A quoted body
-    takes no backslash-newline splicing, so each physical line is compared as-is after the leading
-    tab strip of a dash operator."""
-    n = len(command)
-    while i <= n:
-        j = command.find(chr(10), i)
-        if j < 0:
-            line = command[i:]
-            return n if (line.lstrip(chr(9)) if strip_tabs else line) == delim else None
-        line = command[i:j]
-        i = j + 1
-        if (line.lstrip(chr(9)) if strip_tabs else line) == delim:
-            return i
-    return None
-
-
 def _mentions_rel(rel, text):
     """True when the root-relative roster path `rel` appears in `text` bounded as a path: embedded in
     a longer word on the left (PYTHON_VERSION vs the view VERSION) or continued by a word char or a
@@ -983,143 +1049,6 @@ def _mentions_rel(rel, text):
                 after == "" or (after not in WORD_CHARS and after != "/")):
             return True
         start = i + 1
-
-
-def _plain_lex(command):
-    """R5 PROVABLY-PLAIN test and dequote. Returns (words, True) when the WHOLE command lexes
-    into plain words with simple whole-word quotes only, else (None, False). A command is NOT
-    provably plain when it carries a dollar sign (parameter, command, arithmetic, ANSI-C or locale
-    expansion), a backquote (command substitution), a backslash (line continuation or an escape), a
-    parenthesis (a subshell or process substitution), an expandable unquoted brace, a NUL, an
-    unterminated or non-simple quote, an UNQUOTED here-document, or a code runner (a shell or
-    interpreter) in command position (which may carry inline code). A QUOTED here-document fed to a
-    program that is not a code runner stays plain: its body is inert data, skipped here, so a
-    commit-message here-document still lexes. words are the command-line words (here-document body
-    lines are data, not words); they feed the exact token scan, root binding and word-resolution
-    pass of _plain_bash_rule. Every other command is judged by _exotic_bash_rule, the coarse
-    product-root check, never this exact pass (D-DISCARD-SOUND-RULE: every round 2..6 bypass was a
-    shell form a sound lexer read differently than bash does; an allowlist of provably plain
-    commands cannot be fooled that way)."""
-    if chr(0) in command:
-        return None, False
-    words, cur, has = [], [], False
-    pending = []
-    braces = []
-    prev = None
-    at_head = True
-    cmd_runner = False
-
-    def flush():
-        nonlocal at_head, cmd_runner
-        if has:
-            word = "".join(cur)
-            words.append(word)
-            if at_head:
-                if _runs_code(word) or word == ".":
-                    cmd_runner = True
-                at_head = bool(_ASSIGNMENT_RE.match(word)) or word in SHELL_PREFIX_WORDS
-
-    i, n = 0, len(command)
-    while i < n:
-        ch = command[i]
-        if ch in (chr(36), chr(96), chr(92), "(", ")"):
-            return None, False
-        if ch == chr(39):
-            end = command.find(chr(39), i + 1)
-            if end < 0:
-                return None, False
-            cur.append(command[i + 1:end])
-            has, prev, i = True, None, end + 1
-            continue
-        if ch == chr(34):
-            i += 1
-            while i < n and command[i] != chr(34):
-                if command[i] in (chr(36), chr(96), chr(92)):
-                    return None, False
-                cur.append(command[i])
-                i += 1
-            if i >= n:
-                return None, False
-            has, prev, i = True, None, i + 1
-            continue
-        if ch == chr(10):
-            flush()
-            if cmd_runner:
-                return None, False
-            cur, has, braces, prev = [], False, [], None
-            at_head = True
-            i += 1
-            for delim, strip_tabs in pending:
-                i = _skip_plain_heredoc_body(command, i, delim, strip_tabs)
-                if i is None:
-                    return None, False
-            pending = []
-            continue
-        if command[i:i + 3] == "<<<":
-            flush()
-            if cmd_runner:
-                return None, False
-            cur, has, braces, prev = [], False, [], None
-            at_head = False
-            i += 3
-            continue
-        if command[i:i + 2] == "<<":
-            flush()
-            if cmd_runner:
-                return None, False
-            cur, has, braces, prev = [], False, [], None
-            i += 2
-            strip_tabs = command[i:i + 1] == "-"
-            if strip_tabs:
-                i += 1
-            while i < n and command[i] in (chr(32), chr(9)):
-                i += 1
-            delim, quoted, j = _read_plain_delim(command, i)
-            if delim is None or not quoted:
-                return None, False
-            pending.append((delim, strip_tabs))
-            at_head, i = False, j
-            continue
-        if ch in WORD_SEPARATORS or ch in (chr(32), chr(9)):
-            flush()
-            cur, has, braces, prev = [], False, [], None
-            if ch in ("<", ">"):
-                at_head = False
-            elif ch not in (chr(32), chr(9)):
-                if cmd_runner:
-                    return None, False
-                at_head, cmd_runner = True, False
-            i += 1
-            continue
-        if ch == chr(35) and not has:
-            end = command.find(chr(10), i)
-            if end < 0:
-                break
-            i = end
-            continue
-        if ch == chr(123):
-            braces.append([False])
-        elif ch == chr(125):
-            if braces and braces.pop()[0]:
-                return None, False
-        elif ch == ",":
-            if braces:
-                braces[-1][0] = True
-        elif ch == "." and prev == "." and braces:
-            braces[-1][0] = True
-        cur.append(ch)
-        has, prev, i = True, ch, i + 1
-    flush()
-    if cmd_runner or pending:
-        return None, False
-    return words, True
-
-
-def _runs_code(word):
-    """True when `word` names a program that runs its input or arguments as code (a shell, eval,
-    source, an interpreter such as python, perl or node, or a program that hands its input to one:
-    xargs, make, watch, su), matched on the word's basename with an optional version suffix."""
-    return bool(_CODE_RUNNER_RE.match(os.path.basename(word)))
 
 
 def _literal_words(command):
@@ -1253,6 +1182,7 @@ def _reference_kind(text, cwd, rosters_text=None):
 
 def _bash_rule(tool_input, cwd):
     """R5, R6 and R8 for Bash. The sanctioned writer (A1) allows first; a PROVABLY PLAIN command
+    (_provably_plain) that runs no command or code named on its own command line (_plain_runs_code)
     takes the exact path check (_plain_bash_rule); every other command takes the coarse product-root
     check (_exotic_bash_rule)."""
     if not isinstance(tool_input, dict) or not isinstance(tool_input.get("command"), str):
@@ -1261,13 +1191,13 @@ def _bash_rule(tool_input, cwd):
     if not isinstance(cwd, str) or not os.path.isabs(cwd):
         return ("the Bash payload carries no absolute session cwd, so the protected rosters cannot "
                 "be resolved; failing closed (R6)")
-    tokens = _pristine_tokens(command)
+    tokens = _plain_words(command)
     if tokens and _is_sanctioned_opf(tokens, cwd):
         return None
-    words, plain = _plain_lex(command)
-    if not plain:
+    words = _provably_plain(command)
+    if words is None or _plain_runs_code(words) is not None:
         return _exotic_bash_rule(command, cwd, tokens)
-    return _plain_bash_rule(command, words, cwd, tokens)
+    return _plain_bash_rule(command, words, cwd)
 
 
 def _cwd_product_roots(cwd):
@@ -1340,7 +1270,7 @@ def _exotic_bash_rule(command, cwd, tokens):
     return None
 
 
-def _plain_bash_rule(command, words, cwd, tokens):
+def _plain_bash_rule(command, words, cwd):
     """R5, R6 and R8 for a PROVABLY PLAIN Bash command: the exact path check. The raw string and
     every dequoted word are scanned for the protected tokens (boundary-matched), the rosters bind
     from the product roots above the cwd and every absolute operand, and every dequoted word is

@@ -1164,8 +1164,8 @@ def _claude_hook_self_test():
     and the boundary-anchored discovery budget no longer counts prose slashes. The round-4 fixes
     are pinned the same way: the loose lexer keeps the shell's own word boundaries (braces and
     control characters are literal pathname characters; an expandable brace pattern is refused,
-    literal brace operands stay words), each dollar-quote and double-quote escape decoder is
-    pinned by a protected operand whose detection depends on its exact decode, root discovery
+    literal brace operands stay words), an escaped operand under the product root denies by the
+    coarse rule, root discovery
     realpaths each spelled location before climbing, the file-tool rosters bind above the session
     cwd too (a view or frozen file behind a symlink pointing outside the product denies by its
     real path), a symlinked store tree fails closed, the registration is protected at its real
@@ -1181,11 +1181,20 @@ def _claude_hook_self_test():
     here-document substitution, a commented parenthesis truncating a command substitution, and a
     line continuation before ANSI-C quoting) each deny as not provably plain from a product cwd, and
     each FAILS on the predecessor pin. Skill and SlashCommand now take R7 (claude n2), and the
-    provably-plain word-resolution budget cliff is disclosed (claude n1).
+    provably-plain word-resolution budget cliff is disclosed (claude n1). The round-7 change
+    replaces the hook's own provably-plain lexer with ONE strict classifier, the shared
+    plain-command specification decided on the raw string before any lexing (printable ASCII only,
+    no metacharacter outside single quotes, a bare command word off an explicit wrapper and
+    interpreter deny list); the specification's vector table is carried as rows over the hook's
+    own classifier, the four codex prefix reproductions (a leading redirection, command -p, env -i,
+    exec -a before an inline-code interpreter) and a git alias override each deny from a product
+    cwd and each FAIL on the predecessor pin, and the coarse double-quote escape decoder is pinned
+    by a vector that fails when that decoding is disabled.
     git-independent (the hook reads only the live tree; nothing is committed), offline,
     hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
     cannot be launched)."""
+    import importlib.util
     import json
     import tempfile
 
@@ -1437,7 +1446,7 @@ def _claude_hook_self_test():
             deny("bash-env-git-config-frozen-denied",
                  payload("Bash", dict(command="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external "
                                               "GIT_CONFIG_VALUE_0=true git diff LEGACY.md"), root),
-                 "LEGACY.md")
+                 "lexical hook")
             # ... but the pristine scan still bars a second command or a live expansion riding on an
             # opf spelling: an unquoted metacharacter or a dollar inside double quotes takes the deny.
             deny("bash-opf-semicolon-denied",
@@ -1465,7 +1474,7 @@ def _claude_hook_self_test():
                  payload("Bash", dict(command="git log -1 --output=LEGACY.md"), root), "LEGACY.md")
             deny("bash-git-grep-pager-view-denied",
                  payload("Bash", dict(command="git grep --open-files-in-pager=rm -e x -- TODO.md"),
-                         root), "TODO.md")
+                         root), "lexical hook")
             deny("bash-file-magic-store-denied",
                  payload("Bash", dict(command="file -C -m .working/toml/counters.toml"), root),
                  "lexical hook")
@@ -1479,7 +1488,7 @@ def _claude_hook_self_test():
             deny("bash-touch-frozen-denied", payload("Bash", dict(command="touch LEGACY.md"), root),
                  "LEGACY.md")
             deny("bash-view-append-denied", payload("Bash", dict(command="echo x >> TODO.md"), root),
-                 "TODO.md")
+                 "product root")
             # The brief's write-capable command words each take the deny on a protected mention.
             deny("bash-tee-store-denied",
                  payload("Bash", dict(command="tee .working/toml/counters.toml"), root),
@@ -1516,7 +1525,7 @@ def _claude_hook_self_test():
             # Roster tokens are matched with path boundaries: a longer word is a DIFFERENT path and
             # does not trip the view, while the view's own spellings still deny.
             allow("bash-version-word-boundary-allowed",
-                  payload("Bash", dict(command="env PYTHON_VERSION=3 grep -rn x src"), root))
+                  payload("Bash", dict(command="grep -rn PYTHON_VERSION src"), root))
             allow("bash-version-dunder-allowed",
                   payload("Bash", dict(command="grep -rn __VERSION__ src"), root))
             deny("bash-touch-version-denied", payload("Bash", dict(command="touch VERSION"), root),
@@ -1685,10 +1694,10 @@ def _claude_hook_self_test():
             allow("bash-param-brace-allowed",
                   payload("Bash", dict(command="echo $" + chr(123) + "HOME" + chr(125)),
                           basestr))
-            # Each escape decoder is pinned by an operand whose PROTECTED detection depends on
-            # its exact decode: a simple escape (tab), a hex and an octal escape and a
-            # double-quoted escaped quote each spell a symlink alias or a view; a decoder that
-            # mis-decodes any of them resolves a DIFFERENT, unprotected path and would allow.
+            # Not provably plain, so each takes the coarse rule: a literal word under the product
+            # root denies whatever its escapes decode to (these pin the coarse denial of an
+            # escaped operand, NOT the decoders; the coarse pass does not decode dollar-quotes at
+            # all, and the double-quote decoder is pinned by its own discriminating vector below).
             tab_alias = os.path.join(root, "a" + chr(9) + "b")
             os.symlink(counters, tab_alias)
             deny("bash-dollarquote-tab-alias-denied",
@@ -1720,11 +1729,11 @@ def _claude_hook_self_test():
                 fh.write("fixture" + chr(10))
             os.symlink(os.path.join(root7, "sub"), os.path.join(basestr, "jump7"))
             deny("bash-symlink-dotdot-root-discovery-denied",
-                 payload("Bash", dict(command="printf overwritten > "
+                 payload("Bash", dict(command="touch "
                                               + os.path.join(basestr, "jump7", "..", "VERSION")),
                          basestr), "VERSION")
             allow("bash-symlink-dotdot-unprotected-allowed",
-                  payload("Bash", dict(command="printf x > "
+                  payload("Bash", dict(command="touch "
                                                + os.path.join(basestr, "jump7", "..",
                                                               "notes.txt")), basestr))
             # A view or frozen file whose symlinked directory points OUTSIDE the product root
@@ -2054,7 +2063,7 @@ def _claude_hook_self_test():
             # allows (the exact check); the same exotic forms from OUTSIDE every product allow too
             # (nothing protected is in reach): the over-refusal is bounded to product trees.
             allow("bash-plain-unprotected-in-product-allowed",
-                  payload("Bash", dict(command="echo building && ls docs"), root))
+                  payload("Bash", dict(command="ls -la docs"), root))
             allow("bash-exotic-outside-product-allowed",
                   payload("Bash", dict(command="python3 -c " + chr(39) + "print(42)" + chr(39)),
                           basestr))
@@ -2073,17 +2082,69 @@ def _claude_hook_self_test():
                  payload("Bash", dict(command="eval echo hi"), root), "product root")
             deny("bash-obsolete-arith-in-product-denied",
                  payload("Bash", dict(command="echo $[1 << 2]"), root), "product root")
-            # A QUOTED here-document fed to a non-interpreter stays allowed as data even from a
-            # product cwd when the command-line words touch nothing protected (a commit message is
-            # the motivating case): its body is inert, so a mention only in the body is not a path.
-            allow("bash-quoted-heredoc-data-in-product-allowed",
-                  payload("Bash", dict(command="cat > notes.txt <<" + chr(39) + "EOF" + chr(39)
-                                               + chr(10) + "a commit message" + chr(10) + "EOF"
-                                               + chr(10)), root))
+            # ROUND 7: a here-document of ANY kind (a quoted one fed to a non-interpreter included)
+            # carries an angle bracket and a newline, so it is not provably plain and denies from a
+            # product cwd (the disclosed over-refusal; it stays allowed outside every product).
+            deny("bash-quoted-heredoc-in-product-denied",
+                 payload("Bash", dict(command="cat > notes.txt <<" + chr(39) + "EOF" + chr(39)
+                                              + chr(10) + "a commit message" + chr(10) + "EOF"
+                                              + chr(10)), root), "product root")
             # The coarse branch still protects the pack own tree (R8) even outside a product.
             deny("bash-exotic-guard-pack-denied",
                  payload("Bash", dict(command="sh -c " + chr(39) + "true" + chr(39) + " "
                                               + str(hook)), basestr), "R8")
+            # ROUND 7 (QA round 7): ONE strict classifier, the shared plain-command specification,
+            # decides PROVABLY PLAIN on the raw string before any lexing. Its vector table is carried
+            # verbatim as rows (each asserts plain or not plain on the hook's own classifier), then
+            # the codex reproductions run end to end: a leading redirection and the command -p,
+            # env -i and exec -a prefixes each hid an interpreter from the old command-position
+            # tracking, so each was judged plain and ALLOWED on the predecessor pin; each now denies
+            # from a product cwd. A wrapper outside the deny list (eatmydata) and a git alias
+            # override running inline code (each plain by the lexical rules alone) take the coarse
+            # rule through the plain semantic check.
+            hook_spec = importlib.util.spec_from_file_location("_opf_claude_hook_classifier", hook)
+            hook_mod = importlib.util.module_from_spec(hook_spec)
+            hook_spec.loader.exec_module(hook_mod)
+            for cmd, want in (("git status", True),
+                              ("git commit -m " + chr(39) + "fix: a; b" + chr(39), True),
+                              ("ls -la docs/x.md", True),
+                              ("opf record --type finding", True),
+                              ("git log --output=f", True),
+                              ("git status; rm x", False),
+                              ("git $" + chr(39) + "re" + chr(92) + "x00set" + chr(39), False),
+                              ("git $" + chr(39) + "re" + chr(0) + "set" + chr(39), False),
+                              ("git commit -m " + chr(34) + "$(id)" + chr(34), False),
+                              ("python3 -c " + chr(39) + "print(1)" + chr(39), False),
+                              ("env GIT_DIR=x git log", False),
+                              ("GIT_DIR=x git log", False),
+                              ("git st*", False),
+                              ("git log " + chr(92) + chr(10), False),
+                              ("git log -" + chr(0x661), False),
+                              ("bash -c " + chr(39) + "x" + chr(39), False),
+                              ("xargs git reset", False)):
+                got = hook_mod._provably_plain(cmd) is not None
+                expect("spec-vector " + ascii(cmd), got, want)
+            for prefix in ("</dev/null", "command -p", "env -i", "exec -a harmless", "eatmydata"):
+                deny("bash-interp-prefix-" + prefix.split(" ")[0].strip("<").replace("/", "")
+                     + "-in-product-denied",
+                     payload("Bash", dict(command=prefix + " python3 -c " + chr(39) + "open("
+                                          + chr(34) + ".wor" + chr(34) + "+" + chr(34)
+                                          + "king/toml/counters.toml" + chr(34) + "," + chr(34)
+                                          + "w" + chr(34) + ")" + chr(39)), root),
+                     "product root")
+            deny("bash-git-alias-inline-code-in-product-denied",
+                 payload("Bash", dict(command="git -c " + chr(39) + "alias.x=!python3 -c "
+                                      + chr(34) + "open(1)" + chr(34) + chr(39) + " x"), root),
+                 "product root")
+            # The double-quote escape decoder of the coarse pass, pinned DISCRIMINATINGLY: the
+            # product root's own directory name carries a double quote, so only the decoded word
+            # (an escaped quote inside a double-quoted span) lies under it; a pass that keeps the
+            # backslash or ends the span early names a path under no product root and allows.
+            dq_root = os.path.join(basestr, "pq" + chr(34) + "r")
+            os.makedirs(os.path.join(dq_root, _opf_store.WORKING_DIRNAME))
+            deny("bash-dq-escaped-quote-root-denied",
+                 payload("Bash", dict(command="printf x > " + chr(34) + basestr + "/pq" + chr(92)
+                                      + chr(34) + "r/f" + chr(34)), basestr), "product root")
             # claude n2: Skill and SlashCommand are no longer read-only-listed (their expansion
             # may run shell lines the platform does not route back through PreToolUse), so each
             # takes R7: a protected reference denies, a free one allows. Both FAIL on the pin.
@@ -2162,8 +2223,8 @@ def _claude_hook_self_test():
           "alias both deny) and refuses a brace pattern the shell would expand while literal "
           "brace operands (find's empty-brace operand, a quoted awk program, a parameter "
           "expansion) stay allowed, each dollar-quote and double-quote escape decoder is pinned "
-          "by a protected operand whose detection depends on its exact decode (a tab alias, hex "
-          "and octal view spellings, an escaped-quote alias), root discovery realpaths each "
+          "by an escaped operand under the product root (coarse denial, not a decode pin), root "
+          "discovery realpaths each "
           "spelled location before climbing (a link/../VERSION spelling binds the jumped-into "
           "product), the file-tool rosters bind above the session cwd too (a view or frozen "
           "file behind a directory symlink pointing OUTSIDE the product denies by its real "
@@ -2180,9 +2241,14 @@ def _claude_hook_self_test():
           "round-6 reproductions), a plain command touching nothing protected and "
           "every exotic command outside all products allow, a variable, an "
           "interpreter with inline code, an eval and the obsolete arithmetic form "
-          "deny from a product cwd, a quoted here-document fed to a non-interpreter "
-          "stays allowed as data, the pack own tree stays protected (R8), and Skill "
-          "and SlashCommand take R7 while a free slash command allows)")
+          "deny from a product cwd, the pack own tree stays protected (R8), and Skill "
+          "and SlashCommand take R7 while a free slash command allows. ROUND 7: one strict "
+          "classifier (the shared plain-command specification, decided on the raw string "
+          "before any lexing) carries the specification's vector table as rows; a leading "
+          "redirection, the command -p, env -i and exec -a prefixes and an unlisted wrapper "
+          "before an interpreter each deny from a product cwd; a git alias override carrying inline "
+          "code takes the coarse rule; any here-document denies from a product cwd; and the "
+          "coarse double-quote escape decoder is pinned by a quote-named product root)")
     return EXIT_OK
 
 
