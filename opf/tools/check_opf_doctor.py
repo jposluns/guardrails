@@ -43,12 +43,15 @@ step to 2, and an interpreter that VANISHES after a passing doctor fails the ren
 the usage guard (a surplus operand) exits 2 with NO step launched; the recipe run by a RELATIVE
 path under a hostile CDPATH naming a decoy pack still resolves its own directory and returns the true
 verdict; the recipe run from inside a decoy pack's ci directory with a dirname that is missing, fails
-(printing .) or prints nothing exits 2 with no step launched and the refusing guard's own message, under
-any sh (the failing one is held by the status check alone, the empty one by the non-empty check alone); a
-full recipe run with every GIT_TRACE* and GIT_TRACE2* variable naming a file outside the fixtures leaves
-that file unchanged (a regression guard: the recipe runs no git itself and opf.py's git reads drop every
-inherited GIT_ variable); a committed clean store with ONE declared, planner-populated view red-flags
-end to end once the
+(printing .) or prints nothing exits 2 with no step launched and the refusing guard's own message, with
+dash or bash as sh, the shells these vectors are run under (the failing one is held by the status check
+alone, the empty one by the non-empty check alone; busybox sh resolves dirname with its own built-in, so
+the PATH stubs do not reach it and these vectors do not apply there); a full recipe run with seven trace
+variables (GIT_TRACE, GIT_TRACE_SETUP, GIT_TRACE_PERFORMANCE, GIT_TRACE_PACKET, GIT_TRACE2,
+GIT_TRACE2_EVENT and GIT_TRACE2_PERF) naming a file outside the fixtures leaves that file unchanged (a
+regression guard over those seven alone, the vector setting no other trace variable such as
+GIT_TRACE_REFS: the recipe runs no git itself and opf.py's git reads drop every inherited GIT_ variable);
+a committed clean store with ONE declared, planner-populated view red-flags end to end once the
 view is edited (render --check 1, doctor 1, recipe 1) while both recipe runs leave the read-only snapshot
 unchanged, covering EXACTLY: every entry under the root with only the TOP-LEVEL .git directory pruned (a
 nested .git directory below the root is walked like any other entry), by lstat kind, mode, content digest
@@ -782,8 +785,9 @@ def _self_test_isolated():
                        (rc, _absent(nodir_log), refusal in nodir_err[0]), (EXIT_ERROR, True, True))
             # Inherited git trace destinations: a CI environment can carry GIT_TRACE* or GIT_TRACE2* naming
             # any file, and no git process the recipe starts (its own or opf.py's observation gather) may
-            # write there. A file outside every fixture, named by each trace variable, keeps its exact text
-            # through a full recipe run over the clean store, and the verdict stays 0.
+            # write there. A file outside every fixture, named by each of the seven trace variables below
+            # (no other, GIT_TRACE_REFS for one), keeps its exact text through a full recipe run over the
+            # clean store, and the verdict stays 0.
             trace_target = base / "trace-target"
             trace_target.mkdir()
             traced = trace_target / "TRACED.md"
@@ -1157,7 +1161,7 @@ def _self_test_isolated():
               "interpreter before doctor, an interpreter vanishing before render), a surplus operand a "
               "usage 2 with no step run, a relative invocation under a hostile CDPATH -> the true "
               "verdict, a missing, failing or empty dirname -> 2 with no step run and the refusing "
-              "guard named, inherited GIT_TRACE*/GIT_TRACE2* destinations left unchanged, a "
+              "guard named, seven inherited GIT_TRACE*/GIT_TRACE2* destinations left unchanged, a "
               "committed drifted view -> 1 end to end (render --check, doctor, "
               "recipe), both recipe runs read-only over EXACTLY this snapshot (every entry under the "
               "root with only the top-level .git pruned, nested .git dirs walked, by lstat "

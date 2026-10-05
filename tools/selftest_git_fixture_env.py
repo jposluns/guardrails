@@ -870,7 +870,7 @@ def _roster_checks():
         return
     binding = ('dir=$(dirname -- "$0") || exit 2\n'
                '[ -n "$dir" ] || exit 2\n'
-               'here="$(cd -- "$dir/." && pwd)" || exit 2')
+               'here="$(CDPATH= cd -- "$dir/." && pwd)" || exit 2')
     # The valid failure-state initializers, so an empty-roster fixture reaches
     # its own guard rather than the missing-initializer diagnostic.
     state = 'failed=0\nfailed_names=""\n'

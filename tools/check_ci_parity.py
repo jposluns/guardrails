@@ -928,15 +928,17 @@ def _text_format_diagnostic(text, source):
 STANDALONE_SOURCE = "opf/tools/run_all_checks.sh"
 # The checked directory binding: dirname's status, then a non-empty name, then
 # the cd; each guard exits 2 before any gate (vector 30 runs each guard red).
+# The cd runs with CDPATH cleared, so a relative start under a hostile CDPATH
+# never resolves into the CDPATH entry (vector 31 runs the bare cd red).
 STANDALONE_BINDING_LINES = (
     'dir=$(dirname -- "$0") || exit 2',
     '[ -n "$dir" ] || exit 2',
-    'here="$(cd -- "$dir/." && pwd)" || exit 2',
+    'here="$(CDPATH= cd -- "$dir/." && pwd)" || exit 2',
 )
 LOCAL_BINDING_LINES = (
     'dir=$(dirname -- "$0") || exit 2',
     '[ -n "$dir" ] || exit 2',
-    'cd -- "$dir/.." || exit 2',
+    'CDPATH= cd -- "$dir/.." || exit 2',
 )
 
 
@@ -2561,6 +2563,77 @@ def dirname_guard_problems(text, relative):
     return problems
 
 
+# The python3 shell function for cdpath_problems: it also records the working
+# directory each gate launches from, so a moved root shows in the log.
+_STUB_PYTHON3_PWD_FUNCTION = """python3() {
+  printf '%s\\n' "$PWD python3 $*" >> "$stub_log" || return 2
+  return 0
+}
+"""
+
+
+def _cdpath_outcome(text, relative):
+    """Run a runner text by its RELATIVE path from its scratch tree's root
+    under a CDPATH naming a decoy tree that holds the same relative directory;
+    return (tree, decoy, logged gate lines).
+
+    dirname prints the relative directory, as the real one does for a relative
+    $0. Every stub is written before the one launch, from this thread.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError("bash not found")
+    with tempfile.TemporaryDirectory(prefix="ci-parity-cdpath-") as tmp:
+        root = Path(tmp)
+        bin_dir, _functions = _prepare_stubs(root)
+        functions = root / "stubs-pwd.bash"
+        functions.write_text(_STUB_PYTHON3_PWD_FUNCTION, encoding="utf-8")
+        functions.chmod(0o400)
+        tree = root / "tree"
+        runner = tree / relative
+        runner.parent.mkdir(parents=True)
+        runner.write_text(text, encoding="utf-8")
+        decoy = root / "decoy"
+        (decoy / relative).parent.mkdir(parents=True)
+        dirname_dir = root / "dirname-bin"
+        dirname_dir.mkdir()
+        stub = dirname_dir / "dirname"
+        stub.write_text(_STUB_DIRNAME, encoding="utf-8")
+        stub.chmod(0o500)
+        log = root / "calls.log"
+        env = dict(PATH=os.pathsep.join([str(dirname_dir), str(bin_dir)]),
+                   BASH_ENV=str(functions), HOME=tmp, LC_ALL="C",
+                   CDPATH=str(decoy), stub_log=str(log),
+                   stub_fail_command="", stub_gitleaks_rc="0",
+                   stub_dirname_out=str(Path(relative).parent), stub_dirname_rc="0")
+        subprocess.run(
+            [bash, "--noprofile", "--norc", relative],
+            cwd=str(tree), env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=600)
+        calls = ([] if _path_absent(log)
+                 else log.read_text(encoding="utf-8").splitlines())
+        return str(tree), str(decoy), calls
+
+
+def cdpath_problems(text, relative):
+    """What a relative start under a hostile CDPATH does wrong: "no-gate" when
+    no gate launches from the true tree, "moved" when any logged gate line
+    names the decoy (a moved root, or a printed CDPATH match in a captured
+    directory)."""
+    tree, decoy, calls = _cdpath_outcome(text, relative)
+    problems = []
+    if not any(call.startswith(tree + " python3 ") for call in calls):
+        problems.append("no-gate")
+    if any(decoy in call for call in calls):
+        problems.append("moved")
+    return problems
+
+
 def _naming_scenarios(text):
     """Build the runtime scenarios; the module docstring discloses residual masks."""
     registered = []
@@ -3933,7 +4006,7 @@ def self_test():
             ("loop keyword outside the grammar",
              mutate((gitleaks, "done\n" + gitleaks))),
             ("directory rebinding below the first gate",
-             mutate((gitleaks, 'cd -- "$dir/.." || exit 2\n' + gitleaks))),
+             mutate((gitleaks, 'CDPATH= cd -- "$dir/.." || exit 2\n' + gitleaks))),
         )
         for name, mutant in allowlist_fixtures:
             if mutant is None:
@@ -4497,6 +4570,9 @@ def self_test():
         return sites
     allowed_read_sites = {
         "tools/check_ci_parity.py": {
+            # The stub call log vector 31 writes, never a runner or workflow.
+            ("_cdpath_outcome", "read_text"): 1,
+            ("_cdpath_outcome", "splitlines"): 1,
             ("_naming_scenarios", "splitlines"): 1,
             ("_run_runner_copy", "read_text"): 1,
             ("_run_runner_copy", "splitlines"): 2,
@@ -4570,6 +4646,34 @@ def self_test():
             if got != expected:
                 failures.append("30 {} mutant ({}) gave {}, expected {}".format(
                     relative, label, got, expected))
+
+    # 31. Each runner's cd runs with CDPATH cleared, RUN under bash: started by
+    # its relative path from its tree's root under a CDPATH naming a decoy tree
+    # that holds the same relative directory, every gate still launches from the
+    # true tree and nothing names the decoy. The pinned line without its CDPATH=
+    # prefix is held red: the bare cd resolves through the decoy, moving the
+    # top-level runner's root there and printing the decoy into the standalone
+    # runner's captured directory.
+    count += 1
+    for relative, binding in (("tools/run_all_checks.sh", LOCAL_BINDING_LINES),
+                              (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
+        runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
+        if runner_diagnostic is not None:
+            failures.append("31 cannot read {}: {!r}".format(relative, runner_diagnostic))
+            continue
+        problems = cdpath_problems(runner_text, relative)
+        if problems:
+            failures.append("31 {} CDPATH binding failed: {}".format(relative, problems))
+        line = binding[2]
+        if runner_text.count(line + "\n") != 1 or line.count("CDPATH= cd -- ") != 1:
+            failures.append("31 {} binding drift: {}".format(relative, line))
+            continue
+        mutant = runner_text.replace(
+            line + "\n", line.replace("CDPATH= cd -- ", "cd -- ") + "\n", 1)
+        got = cdpath_problems(mutant, relative)
+        if "moved" not in got:
+            failures.append("31 {} mutant (CDPATH= removed) gave {}, expected moved".format(
+                relative, got))
 
     if failures:
         print("SELF-TEST FAIL:")
