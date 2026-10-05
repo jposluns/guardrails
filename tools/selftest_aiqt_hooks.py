@@ -26,8 +26,8 @@ guard with THREE outcomes (allow/ask/deny); under the key above its former ASK i
 (recoverable) or deny (unrecoverable/unclassifiable). This suite distinguishes those outcomes. The rule: for a recognized lossy
 verb, ASK unless the command is a PRISTINE SINGLE BARE `git <verb>` invocation (no shell metacharacter
 anywhere even quoted, no reserved word, no wrapper/redirect/compound, and a command word literally `git`)
-AND either its form is genuinely non-destructive, the whole tree is PROVABLY CLEAN, or the leading opt-out is
-set, in which case ALLOW; a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
+AND either its form is genuinely non-destructive or the whole tree is PROVABLY CLEAN, in which case ALLOW (no
+in-band override exists: a leading GUARDRAIL_ALLOW_DISCARD, the removed override, changes no decision); a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
 --force) on a confirmed-dirty tree DENIES. This suite proves the EN-6 pristine gate: every shell-grammar and
 wrapper form that hides a real `git reset --hard` while the raw scan still sees a contiguous git+verb keyword
 (an `if`/`for`, a backtick or `$()` substitution, a `|&`, a leading or interspersed redirect, and the
@@ -1561,13 +1561,12 @@ def _main_isolated(monitor):
         # === boundary: the true fail-open boundary ALLOWS ====================================
         expect("(bound-a) non-git command allows", "ls -la {}".format(rp), "allow")
         # An UNPARSEABLE command (unbalanced quote) is not a free ALLOW: a raw scan finds git AND a lossy
-        # verb (checkout) it cannot prove safe -> ASK (F-60.1); a non-lossy unparseable stays ALLOW. Round-15
-        # STRUCTURAL fix: the opt-out is NOT consulted on the unparseable path (the guard cannot parse the
-        # command, so it cannot soundly trust an opt-out-looking prefix inside it), so an opt-out-prefixed
-        # unparseable in-scope command ALSO ASKS (see the r15-raw-* battery below).
+        # verb (checkout) it cannot prove safe -> ASK (F-60.1); a non-lossy unparseable stays ALLOW. No
+        # override exists on any path, so a command carrying the removed GUARDRAIL_ALLOW_DISCARD prefix gets
+        # the same outcome as the bare one (tombstones of the retired opt-out: bound-b3, the r15-raw-* battery).
         expect("(bound-b) unparseable + lossy verb allows", 'git checkout -- "unbalanced', "allow", cwd=rp)
         expect("(bound-b2) unparseable non-lossy command allows", 'ls -la "unbalanced', "allow")
-        expect("(bound-b3) unparseable + lossy + opt-out prefix still ALLOWS (round-15: opt-out not honoured on unparseable)",
+        expect("(bound-b3) unparseable + lossy + removed-override prefix allows like the bare form (no override exists)",
                'GUARDRAIL_ALLOW_DISCARD=1 git reset --hard "unbalanced', "allow", cwd=rp)
         # (bound-b4) a relative -C redirect with no session cwd is "opaque" (unresolvable); on a
         # NON-destructive form (checkout -b creates a branch, discards nothing) git_discard allows with a
@@ -1592,8 +1591,10 @@ def _main_isolated(monitor):
         # A worktree-scoped discard on a not-provably-clean tree ASKS (it no longer DENIES per-path, and it
         # no longer proves a disjoint clean path safe - both removed fast paths).
         expect("(co-a) checkout -- dirty allows with a note", "git checkout -- file.txt", "allow-note", cwd=rp)
-        expect("(co-b) checkout -- with optout allows",
-               "GUARDRAIL_ALLOW_DISCARD=1 git checkout -- file.txt", "allow", cwd=rp)
+        # Tombstone of the retired opt-out (it used to ALLOW here with NO snapshot): the removed prefix is an
+        # ordinary assignment, so this is snapshot-then-allow exactly like (co-a).
+        expect("(co-b) checkout -- with the removed-override prefix allows with a note, like co-a",
+               "GUARDRAIL_ALLOW_DISCARD=1 git checkout -- file.txt", "allow-note", cwd=rp)
         expect("(co-c) checkout . dirty allows with a note", "git checkout .", "allow-note", cwd=rp)
         expect("(co-d) checkout <branch> on dirty tree allows with a note", "git checkout other", "allow-note", cwd=rp)
         # Removed path-disjoint fast path: a discard of a CLEAN tracked path on a dirty tree now ASKS (it
@@ -1854,31 +1855,29 @@ def _main_isolated(monitor):
         expect("(dir-h) GIT_DIR= env not-certain allows with a note (F-62.3/F-66.4)", "GIT_DIR=.git git reset --hard",
                "allow-note", cwd=rp)
 
-        # === the opt-out is a LEADING assignment on the git command only (F-65.F3, blocker 4) =
-        # The same string buried in an argument (echo) does NOT disable the guard; the command is compound,
-        # so the trailing reset --hard ASKS (a compound cannot be probed clean, blocker 2) rather than allow.
-        expect("(opt-a) buried GUARDRAIL_ALLOW_DISCARD in an arg does not opt out (F-65.F3)",
+        # === tombstones of the retired GUARDRAIL_ALLOW_DISCARD opt-out (F-65.F3, blocker 4) ==============
+        # The override is removed; each vector below keeps its input and now asserts the outcome of the same
+        # command without the prefix. Buried in an argument (echo): the command is compound, so the trailing
+        # reset --hard ASKS (a compound cannot be probed clean, blocker 2), exactly as before.
+        expect("(opt-a) buried GUARDRAIL_ALLOW_DISCARD in an arg changes nothing (F-65.F3)",
                "echo GUARDRAIL_ALLOW_DISCARD=1 ; git reset --hard", "allow-note", cwd=rp)
-        # Blocker 4: an opt-out LEADING a non-git segment does not opt out the later git command; the
-        # command is compound, so the reset --hard ASKS, never a silent allow.
-        expect("(opt-a2) opt-out leading a non-git segment does not opt out the reset (blocker 4)",
+        # Blocker 4: the removed prefix LEADING a non-git segment changes nothing; the command is compound, so
+        # the reset --hard ASKS, never a silent allow.
+        expect("(opt-a2) removed prefix leading a non-git segment changes nothing (blocker 4)",
                "GUARDRAIL_ALLOW_DISCARD=1 true ; git reset --hard", "allow-note", cwd=rp)
-        # A genuine leading opt-out prefix on the git command itself still ALLOWs the same reset.
-        expect("(opt-b) leading GUARDRAIL_ALLOW_DISCARD prefix opts out",
-               "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "allow", cwd=rp)
+        # FLIPPED (was "allow"): the leading prefix on the git command itself no longer overrides, so the
+        # dirty whole-tree clobber DENIES like (rs-a).
+        expect("(opt-b) leading GUARDRAIL_ALLOW_DISCARD prefix no longer overrides: dirty clobber denies",
+               "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "deny", cwd=rp)
 
-        # === EN-6 round-13: opt-out is case-sensitive and last-wins; redirects ASK all forms ==
-        # Fix 1: bash env-var names are case-sensitive, so a LOWERCASE guardrail_allow_discard=1 is NOT the
-        # opt-out. On an unparseable heredoc discard the raw fallback must NOT honour it -> ASK. Round-15
-        # STRUCTURAL fix: the opt-out is no longer consulted on the unparseable path at all, so even the
-        # UPPERCASE form on the same unparseable command now ASKS too (see the r15-raw-* battery below).
-        expect("(r13-1) lowercase optout on unparseable heredoc discard does not opt out -> ALLOW WITH A NOTE",
+        # === EN-6 round-13: redirects ASK all forms (plus tombstones of the retired opt-out) =========
+        # Fix 1 tombstone: a LOWERCASE guardrail_allow_discard=1 on an unparseable heredoc discard is an
+        # ordinary assignment, as every spelling of the removed prefix now is -> ASK like the bare form.
+        expect("(r13-1) lowercase removed prefix on unparseable heredoc discard -> ALLOW WITH A NOTE",
                "guardrail_allow_discard=1 git reset --hard <<'EOF'\n'\nEOF", "allow-note", cwd=rp)
-        # Fix 2: bash last-wins on a duplicate leading assignment - =1 then =0 evaluates to 0 (NOT truthy),
-        # so it does NOT opt out (the buggy first-wins saw =1 and ALLOWed). With no resolvable cwd the
-        # un-opted-out reset --hard ASKS ("cannot resolve to the session directory"); had it opted out it
-        # would have short-circuited to ALLOW before the resolvability check.
-        expect("(r13-2) =1 =0 last-wins evaluates 0, does not opt out -> DENY",
+        # Fix 2 tombstone (last-wins =1 then =0): no override exists, so with no resolvable cwd the reset
+        # --hard DENIES ("cannot resolve to the session directory"), the outcome of the bare command.
+        expect("(r13-2) =1 =0 duplicate removed prefix: same as the bare command -> DENY",
                "GUARDRAIL_ALLOW_DISCARD=1 GUARDRAIL_ALLOW_DISCARD=0 git reset --hard", "deny")
         # Fix 3: a command-local redirect (-C/--git-dir/--work-tree/inline GIT_DIR=) means the repository
         # view cannot be proven to be the session cwd, so the early view-uncertainty gate ASKS for ALL forms
@@ -1896,44 +1895,156 @@ def _main_isolated(monitor):
         # allow that lost the redirected index). Same-repo --git-dir still allows (dir-e/dir-f below).
         expect("(r13-3c-f5) --git-dir to a DIFFERENT repo on reset --hard now DENIES (finding 5)",
                "git --git-dir=/x reset --hard", "deny", cwd=rp)
-        # No regression: a plain non-destructive form with NO redirect and NO opt-out still ALLOWs on a dirty
+        # No regression: a plain non-destructive form with NO redirect still ALLOWs on a dirty
         # tree (recovery-snapshot-backed), exactly as before Fix 3.
         expect("(r13-4a) plain reset --soft with no redirect still allows", "git reset --soft", "allow",
                cwd=rp)
         expect("(r13-4b) plain switch with no redirect still allows", "git switch other", "allow", cwd=rp)
 
-        # === EN-6 round-15: end the opt-out silent-allow class (Fix 1 structural + Fix 2 empty value) =====
-        # Fix 2 (parseable path): the opt-out value capture now matches an EMPTY value, so an empty FINAL
-        # leading assignment is evaluated by bash last-wins as falsy and does NOT opt out. With no resolvable
-        # cwd the un-opted-out reset --hard ASKS ("cannot resolve to the session directory"); had the empty
-        # value been ignored (the old (.+) capture) the earlier =1 would have wrongly opted out to ALLOW.
-        expect("(r15-empty) empty final opt-out assignment is falsy (last-wins), does not opt out -> DENY",
+        # === EN-6 round-15 tombstones: the opt-out silent-allow class, now closed by removal ============
+        # Fix 2 tombstone (empty final assignment): no override exists, so with no resolvable cwd the reset
+        # --hard DENIES ("cannot resolve to the session directory"), the outcome of the bare command.
+        expect("(r15-empty) empty final removed-prefix assignment: same as the bare command -> DENY",
                "GUARDRAIL_ALLOW_DISCARD=1 GUARDRAIL_ALLOW_DISCARD= git reset --hard", "deny")
-        # Fix 1 (STRUCTURAL): the opt-out is no longer consulted on the UNPARSEABLE (raw-fallback) path at
-        # all - a regex cannot soundly parse an opt-out out of a command the shell lexer could not parse - so
-        # every opt-out-looking prefix on an unparseable in-scope discard now ASKS. The five raw variants that
-        # previously wrung a silent ALLOW out of the raw scan (quoted-falsy that reads truthy raw, an
-        # interspersed other assignment, an opt-out leading a DIFFERENT command, a `0;` captured truthy, and a
-        # quoted "false"), each on an unparseable heredoc discard (the lone quote makes the tokenizer raise), must ASK.
+        # Fix 1 tombstones (UNPARSEABLE raw-fallback path): no override exists on any path, so each removed-
+        # prefix spelling that once wrung a silent ALLOW out of the raw scan (quoted-falsy that reads truthy
+        # raw, an interspersed other assignment, the prefix leading a DIFFERENT command, a `0;` captured
+        # truthy, and a quoted "false"), each on an unparseable heredoc discard (the lone quote makes the
+        # tokenizer raise), ASKS like the bare form.
         _hd = " <<'EOF'\n'\nEOF"  # Bash-valid heredoc whose lone ' makes the tokenizer raise -> raw fallback
-        expect("(r15-raw-quotedfalsy) quoted-falsy opt-out on unparseable discard -> ALLOW WITH A NOTE",
+        expect("(r15-raw-quotedfalsy) quoted-falsy removed prefix on unparseable discard -> ALLOW WITH A NOTE",
                'GUARDRAIL_ALLOW_DISCARD="0" git reset --hard' + _hd, "allow-note", cwd=rp)
         expect("(r15-raw-interspersed) interspersed other assignment on unparseable discard -> ALLOW WITH A NOTE",
                "GUARDRAIL_ALLOW_DISCARD=1 OTHER=x git reset --hard" + _hd, "allow-note", cwd=rp)
-        expect("(r15-raw-othercmd) opt-out leading a DIFFERENT command on unparseable discard -> ALLOW WITH A NOTE",
+        expect("(r15-raw-othercmd) removed prefix leading a DIFFERENT command on unparseable discard -> ALLOW WITH A NOTE",
                "GUARDRAIL_ALLOW_DISCARD=1 true; git reset --hard" + _hd, "allow-note", cwd=rp)
-        expect("(r15-raw-semicolon) `0;` captured-truthy opt-out on unparseable discard -> ALLOW WITH A NOTE",
+        expect("(r15-raw-semicolon) `0;` captured-truthy removed prefix on unparseable discard -> ALLOW WITH A NOTE",
                "GUARDRAIL_ALLOW_DISCARD=0; git reset --hard" + _hd, "allow-note", cwd=rp)
-        expect("(r15-raw-quotedfalse) quoted \"false\" opt-out on unparseable discard -> ALLOW WITH A NOTE",
+        expect("(r15-raw-quotedfalse) quoted \"false\" removed prefix on unparseable discard -> ALLOW WITH A NOTE",
                'GUARDRAIL_ALLOW_DISCARD="false" git reset --hard' + _hd, "allow-note", cwd=rp)
-        # Fix 3 (documented override semantics): a leading PARSEABLE opt-out on a pristine bare command is an
-        # explicit operator override, evaluated FIRST, so it short-circuits the command-local-redirect (-C)
-        # view-uncertainty gate too -> ALLOW (the manifest now qualifies that gate "unless the leading opt-out
-        # is set"). Contrast (clean-d): the same -C form WITHOUT the opt-out ASKS.
-        expect("(r15-optout-redirect) leading opt-out short-circuits the -C redirect gate -> ALLOW",
-               "GUARDRAIL_ALLOW_DISCARD=1 git -C /tmp reset --hard", "allow", cwd=rp)
-        # No regression (opt-b, co-a, rs-a above): a plain parseable opt-out still ALLOWs; a plain lossy form
-        # with no opt-out still ASKS (co-a) and a dirty whole-tree clobber still DENIES (rs-a).
+        # Fix 3 tombstone, FLIPPED (was "allow"): the removed prefix no longer short-circuits the command-local
+        # redirect (-C) gate, so the command gets the outcome of the bare 'git -C /tmp reset --hard'.
+        expect("(r15-optout-redirect) removed prefix no longer bypasses the -C redirect gate -> DENY",
+               "GUARDRAIL_ALLOW_DISCARD=1 git -C /tmp reset --hard", "deny", cwd=rp)
+        expect("(r15-optout-redirect-bare) the same -C form without the prefix -> DENY",
+               "git -C /tmp reset --hard", "deny", cwd=rp)
+
+        # === REMOVED OVERRIDE: the GUARDRAIL_ALLOW_DISCARD prefix (vectors rmo-1 to rmo-5) ================
+        # The prefix was writable by the guarded actor and skipped the recovery snapshot, so it is removed; a
+        # leading assignment of it is an ordinary env assignment with the decision of the unprefixed command.
+        _rmo = "GUARDRAIL_ALLOW_DISCARD=1 "
+        _rmo_note = (getattr(aiqt_hooks, "_REMOVED_DISCARD_PREFIX_NOTE", None)
+                     or "(the removed-prefix migration note is missing)").strip()
+        _rmo_clean = str(_init_repo(tmp / "repo-removed-override"))
+
+        def _rmo_text(command, cwd=None):
+            """(reduced decision, every reason and banner the handler emitted) for one Bash command."""
+            data = dict(hook_event_name="PreToolUse", tool_name="Bash", tool_input=dict(command=command))
+            if cwd is not None:
+                data["cwd"] = cwd
+            code, stdout_obj, _stderr = handler(data)
+            texts = []
+            if isinstance(stdout_obj, dict):
+                texts.append(str(stdout_obj.get("systemMessage", "")))
+                hso = stdout_obj.get("hookSpecificOutput")
+                if isinstance(hso, dict):
+                    texts.append(str(hso.get("permissionDecisionReason", "")))
+            return _reduce_result(code, stdout_obj), " ".join(texts)
+
+        # (rmo-1) Equivalence battery: per in-scope form class the prefixed command gets the decision of the
+        # bare command, both pinned so neither drifts. (rmo-2) No advertisement: no bare-command reason or
+        # banner names the prefix, and a prefixed one names it only inside the migration sentence.
+        _rmo_battery = (
+            ("pristine-clean", "git reset --hard", _rmo_clean, None, "allow"),
+            ("pristine-dirty-clobber", "git reset --hard", rp, None, "deny"),
+            ("pristine-dirty-scoped", "git checkout -- file.txt", rp, None, "allow-note"),
+            ("c-redirect", "git -C {} reset --hard".format(rp), rp, None, "allow-note"),
+            ("ambient-git-var", "git reset --hard", rp, "GIT_NAMESPACE", "allow-note"),
+            ("compound", "git reset --hard ; true", rp, None, "allow-note"),
+            ("unparseable-heredoc", "git reset --hard" + _hd, rp, None, "allow-note"),
+        )
+        for _case, _cmd, _cwd, _env, _want in _rmo_battery:
+            if _env is not None:
+                os.environ[_env] = "removed-override-selftest"
+            try:
+                _bare, _bare_text = _rmo_text(_cmd, _cwd)
+                _pref, _pref_text = _rmo_text(_rmo + _cmd, _cwd)
+            finally:
+                if _env is not None:
+                    os.environ.pop(_env, None)
+            if _bare != _want or _pref != _want:
+                failures.append("(rmo-1-{}) the bare and the prefixed command must both be {}, got {} and {}"
+                                .format(_case, _want, _bare, _pref))
+            if ("GUARDRAIL_ALLOW_DISCARD" in _bare_text
+                    or "GUARDRAIL_ALLOW_DISCARD" in _pref_text.replace(_rmo_note, "")):
+                failures.append("(rmo-2-{}) a reason or banner names the removed prefix outside the migration "
+                                "sentence: {!r} / {!r}".format(_case, _bare_text, _pref_text))
+        # (rmo-2) the deny paths the battery does not reach: both snapshot-failure denies (forced) and the
+        # no-session-cwd unparseable deny, which once told the actor the prefix "then opts out".
+        _orig_rmo_rec = aiqt_hooks._record_recovery
+        aiqt_hooks._record_recovery = lambda repo, verb: ("fail", "forced failure (self-test)")
+        try:
+            _rmo_denies = [_rmo_text("git reset --hard", rp), _rmo_text("git checkout -- file.txt", rp)]
+        finally:
+            aiqt_hooks._record_recovery = _orig_rmo_rec
+        _rmo_denies.append(_rmo_text('git reset --hard "unbalanced'))
+        for _i, (_dec, _text) in enumerate(_rmo_denies):
+            if _dec != "deny" or "GUARDRAIL_ALLOW_DISCARD" in _text:
+                failures.append("(rmo-2-deny-{}) expected a deny that does not name the removed prefix, got {} "
+                                "{!r}".format(_i, _dec, _text))
+        # (rmo-2) structural: no string constant in the hook module (reason, banner or docstring) spells the
+        # prefix with a value, the form every retired advertisement used.
+        _rmo_tree = ast.parse(Path(aiqt_hooks.__file__).read_text(encoding="utf-8"))
+        _rmo_adv = sorted(set(n.lineno for n in ast.walk(_rmo_tree) if isinstance(n, ast.Constant)
+                              and isinstance(n.value, str) and "GUARDRAIL_ALLOW_DISCARD=1" in n.value))
+        if _rmo_adv:
+            failures.append("(rmo-2-source) aiqt_hooks.py string constants still advertise "
+                            "GUARDRAIL_ALLOW_DISCARD=1 at lines {}".format(_rmo_adv))
+        # (rmo-3) Pristine classification unchanged: the prefix (truthy or falsy) stays an ordinary leading
+        # assignment that redirects nothing, so the prefixed pristine form on a clean tree reaches the probe
+        # and ALLOWs (on the dirty tree the same command denies, rmo-1, so the probe decided).
+        for _v in ("1", "0"):
+            _toks = ["GUARDRAIL_ALLOW_DISCARD=" + _v, "git", "reset", "--hard"]
+            if (not aiqt_hooks._segment_dir_simple(_toks)
+                    or _decision(handler, " ".join(_toks), cwd=_rmo_clean) != "allow"):
+                failures.append("(rmo-3-{}) a leading GUARDRAIL_ALLOW_DISCARD={} must stay a benign leading "
+                                "assignment that reaches the clean probe and allows".format(_v, _v))
+        # (rmo-4) MIGRATION, this release only (the next release deletes this vector and keeps rmo-2): a
+        # truthy prefix adds the removal sentence, naming 'git stash' as the route, to the reason of the
+        # decision the bare command gets; a falsy prefix adds nothing.
+        _dec, _text = _rmo_text(_rmo + "git reset --hard", rp)
+        if _dec != "deny" or _rmo_note not in _text or "git stash" not in _rmo_note:
+            failures.append("(rmo-4) the prefixed dirty clobber must deny with the migration sentence, got {} "
+                            "{!r}".format(_dec, _text))
+        _dec, _text = _rmo_text(_rmo + "git checkout -- file.txt", rp)
+        if _dec != "allow-note" or _rmo_note not in _text:
+            failures.append("(rmo-4-note) the prefixed scoped discard must allow with a note carrying the "
+                            "migration sentence, got {} {!r}".format(_dec, _text))
+        _dec, _text = _rmo_text("GUARDRAIL_ALLOW_DISCARD=0 git reset --hard", rp)
+        if _dec != "deny" or _rmo_note in _text:
+            failures.append("(rmo-4-falsy) a falsy prefix must deny without the migration sentence, got {} "
+                            "{!r}".format(_dec, _text))
+        # (rmo-5) Dead code: the retired opt-out names are bound in neither script copy (the source module
+        # live, and both files by their top-level bindings), so no future caller resurrects the path.
+        _rmo_dead = ("_DISCARD_OPTOUT_RE", "_DISCARD_FALSY", "_segment_has_optout", "_OPTOUT_PRISTINE",
+                     "_OPTOUT_REISSUE")
+        _rmo_copies = (Path(aiqt_hooks.__file__),
+                       repo_root() / "plugin" / "aiqt-guardrails-hooks" / "hooks" / "scripts" / "aiqt_hooks.py")
+        for _copy in _rmo_copies:
+            _bound = set()
+            for _node in ast.parse(_copy.read_text(encoding="utf-8")).body:
+                if isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    _bound.add(_node.name)
+                elif isinstance(_node, (ast.Assign, ast.AnnAssign)):
+                    for _t in (_node.targets if isinstance(_node, ast.Assign) else [_node.target]):
+                        if isinstance(_t, ast.Name):
+                            _bound.add(_t.id)
+            _live = [n for n in _rmo_dead if n in _bound]
+            if _live:
+                failures.append("(rmo-5) {} still binds the retired opt-out names {}".format(_copy.name, _live))
+        _live = [n for n in _rmo_dead if hasattr(aiqt_hooks, n)]
+        if _live:
+            failures.append("(rmo-5-live) the loaded hook module still carries {}".format(_live))
 
         # === ROUND-2 FINDING 4: a command-local worktree redirect (-C/--work-tree/GIT_WORK_TREE) on a
         # === DESTRUCTIVE discard snapshots the ACTUAL TARGET repo, not the session cwd; when the target
@@ -3993,7 +4104,7 @@ def _main_isolated(monitor):
                 ("repeated-same-C", "git -C {F} -C {F} commit"),
                 ("attached-C", "git -C{F} commit"),
                 ("relative-C", "git -C . commit"),
-                ("discard-opt-out", "GUARDRAIL_ALLOW_DISCARD=1 git -C {F} commit"),
+                ("removed-discard-prefix", "GUARDRAIL_ALLOW_DISCARD=1 git -C {F} commit"),
                 ("cd-config", "cd {M} && git -c core.worktree={M} -C {F} commit"),
                 ("cd-config-env", "cd {M} && git --config-env=core.worktree=WT -C {F} commit"),
                 ("cd-assignment", "cd {M} && FOO=bar git -C {F} commit"),
