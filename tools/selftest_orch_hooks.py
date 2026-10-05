@@ -313,7 +313,7 @@ class RdpFixture:
             commands=["orch-dispatch"], brief_option="--brief",
             labels=dict(target="Review-target:", revision="Reviewed-revision:", path="Review-path:",
                         repo="Review-repo:", branch="Review-branch:"),
-            authority=dict(argv=[sys.executable, "-I", "-B", str(self.stub), str(self.ctl)], timeout=30),
+            authority=dict(argv=[sys.executable, "-I", "-B", str(self.stub), str(self.ctl)], timeout=5),
             max_brief_bytes=4096)
         (self.root / ".aiqt").mkdir()
         self.write_registry(self.binding if binding else None)
@@ -523,8 +523,9 @@ def _rdp_cases(tmp):
     argv, env = seen[0] if seen else ([], {})
     check("rdp/git-env-neutralized", (
         env.get("GIT_OPTIONAL_LOCKS"), env.get("GIT_NO_REPLACE_OBJECTS"), env.get("GIT_GRAFT_FILE"),
-        env.get("GIT_LITERAL_PATHSPECS"), argv[:5]),
-        ("0", "1", os.devnull, "1", ["git", "-C", str(f.root), "-c", "core.commitGraph=false"]))
+        env.get("GIT_LITERAL_PATHSPECS"), argv[:9]),
+        ("0", "1", os.devnull, "1", ["git", "-C", str(f.root), "-c", "core.commitGraph=false",
+                                     "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"]))
 
     ps = RdpFixture(base, "pathspec")
     for name in ("*", ":(glob)*.py"):
@@ -552,6 +553,168 @@ def _rdp_cases(tmp):
     (mb.root / ".aiqt" / "orchestration.local.json").write_text("{not json", encoding="utf-8")
     check("rdp/bad-registry-denies-background", [
         _rdp_kind(mb.run("ls", background=True)), _rdp_kind(mb.run("ls"))], ["unverifiable", "warn"])
+
+    # ---------- QA round 1: fail-closed discovery, workdir, descriptors, content, isolation ----------
+    dc = RdpFixture(base, "discovery")
+    good_dc = dc.good()
+    with open(str(dc.root / ".git" / "config"), "a", encoding="utf-8") as fh:
+        fh.write("[broken\n")
+    gone = dc.root / "gone"
+
+    def _why(result):
+        return (_rdp_kind(result), "cannot resolve the session repository" in result[1]["hookSpecificOutput"].get(
+            "permissionDecisionReason", "") if result[1] else False)
+    check("rdp/discovery-failure-unverifiable", [
+        _why(dc.dispatch(good_dc)), _why(aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(gone), tool_name="Bash",
+            tool_input=dict(command="orch-dispatch --brief " + good_dc)))),
+        _rdp_kind(dc.run("ls"))], [("unverifiable", True), ("unverifiable", True), "allow"])
+    ec = RdpFixture(base, "envchdir")
+    (ec.root / "brief.txt").write_text(open(ec.good(), encoding="utf-8").read(), encoding="utf-8")
+    (ec.root / "src" / "brief.txt").write_text("Review-target: revision\nReview-branch: main\n",
+                                                encoding="utf-8")
+    check("rdp/env-chdir-followed", [_rdp_kind(ec.run(c)) for c in (
+        "orch-dispatch --brief brief.txt", "env -C src orch-dispatch --brief brief.txt",
+        "env --chdir=src orch-dispatch --brief brief.txt", "env -iCsrc FOO=1 orch-dispatch --brief brief.txt",
+        "env --ch src orch-dispatch --brief brief.txt", "env -C src orch-dispatch --brief ../brief.txt",
+        "env -C " + str(ec.briefs) + " orch-dispatch --brief " + ec.good(),
+        "env -S 'orch-dispatch --brief brief.txt' orch-dispatch")],
+        ["allow", "deny", "deny", "deny", "deny", "allow", "unverifiable", "unverifiable"])
+    check("rdp/cd-then-absolute-brief-unverifiable",
+          _rdp_kind(f.run("cd " + str(f.root / "src") + " && orch-dispatch --brief " + f.good())), "unverifiable")
+    good = f.good()
+    check("rdp/wrapper-timeout-followed-others-withheld", [_rdp_kind(f.run(c)) for c in (
+        "timeout 600 orch-dispatch --brief " + branch_only,
+        "timeout -k 5 --signal=TERM 60 orch-dispatch --brief " + good,
+        "setsid orch-dispatch --brief " + good, "sudo -u me orch-dispatch --brief " + good,
+        "xargs orch-dispatch --brief " + good, "ionice -c3 orch-dispatch --brief " + good)],
+        ["deny", "allow", "unverifiable", "unverifiable", "unverifiable", "unverifiable"])
+    check("rdp/abbreviated-second-brief-denies", [_rdp_kind(f.run("orch-dispatch --brief " + good + c)) for c in (
+        " --brie " + branch_only, " --bri=" + branch_only)], ["deny", "deny"])
+    check("rdp/unrelated-descriptor-redirect", [_rdp_kind(f.run("orch-dispatch --brief " + good + c)) for c in (
+        " 3</dev/null", " 0<" + good, " <&3")], ["allow", "deny", "deny"])
+
+    import signal as _signal
+
+    class _Blocked(BaseException):
+        """Raised by the alarm; not an OSError, so no handler under test can swallow it."""
+
+    def _alarm(_sig, _frame):
+        raise _Blocked()
+
+    def _bounded(fn):
+        old = _signal.signal(_signal.SIGALRM, _alarm)
+        _signal.alarm(5)
+        try:
+            return fn()
+        except _Blocked:
+            return "blocked"
+        finally:
+            _signal.alarm(0)
+            _signal.signal(_signal.SIGALRM, old)
+    ff = RdpFixture(base, "fifos")
+    fifo_brief = ff.briefs / "fifo-brief.txt"
+    os.mkfifo(str(fifo_brief))
+    link_brief = ff.briefs / "link-brief.txt"
+    link_brief.symlink_to(ff.good())
+    check("rdp/fifo-or-symlink-brief-unverifiable-without-blocking", [
+        _bounded(lambda: _rdp_kind(ff.dispatch(str(fifo_brief)))),
+        _bounded(lambda: _rdp_kind(ff.dispatch(str(link_brief))))], ["unverifiable", "unverifiable"])
+    reg = ff.root / ".aiqt" / "orchestration.local.json"
+    reg_text = reg.read_text(encoding="utf-8")
+    reg.unlink()
+    os.mkfifo(str(reg))
+    fifo_reg = _bounded(lambda: _rdp_kind(ff.dispatch(ff.good(), background=True)))
+    reg.unlink()
+    (ff.briefs / "registry.json").write_text(reg_text, encoding="utf-8")
+    reg.symlink_to(ff.briefs / "registry.json")
+    check("rdp/fifo-or-symlink-registry-unverifiable-without-blocking", [
+        fifo_reg, _bounded(lambda: _rdp_kind(ff.dispatch(ff.good(), background=True)))],
+        ["unverifiable", "unverifiable"])
+    ix = RdpFixture(base, "indexflags")
+    (ix.root / "src" / "a.py").write_text("a = 3  # uncommitted\n", encoding="utf-8")
+    _rdp_git(ix.root, "update-index", "--assume-unchanged", "src/a.py")
+    got = [_rdp_kind(ix.dispatch(ix.good()))]
+    _rdp_git(ix.root, "update-index", "--no-assume-unchanged", "src/a.py")
+    _rdp_git(ix.root, "checkout", "-q", "--", "src/a.py")
+    (ix.root / "src" / "b.py").write_text("b = 9\n", encoding="utf-8")
+    _rdp_git(ix.root, "update-index", "--skip-worktree", "src/b.py")
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    _rdp_git(ix.root, "update-index", "--no-skip-worktree", "src/b.py")
+    _rdp_git(ix.root, "checkout", "-q", "--", "src/b.py")
+    _rdp_git(ix.root, "config", "core.ignoreStat", "true")
+    _rdp_git(ix.root, "update-index", "--really-refresh")
+    (ix.root / "src" / "a.py").write_text("a = 777\n", encoding="utf-8")
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    _rdp_git(ix.root, "checkout", "-q", "--", "src/a.py")
+    _rdp_git(ix.root, "config", "--unset", "core.ignoreStat")
+    (ix.root / "src" / "a.py").chmod(0o755)
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    (ix.root / "src" / "a.py").chmod(0o644)
+    got.append(_rdp_kind(ix.dispatch(ix.good())))
+    check("rdp/index-flags-cannot-hide-worktree-edit", got, ["deny", "deny", "deny", "deny", "allow"])
+
+    hostile = {"GIT_DIR": str(bare / ".git"), "GIT_WORK_TREE": str(bare), "GIT_INDEX_FILE": str(bare / "nope")}
+    saved_env = {k: os.environ.get(k) for k in hostile}
+    os.environ.update(hostile)
+    try:
+        hostile_kind = _rdp_kind(f.dispatch(f.good()))
+        graft_parent = aiqt_hooks._review_git(str(gf.root), "rev-parse", "--verify", gf.pin + "^")
+        replace_parent = aiqt_hooks._review_git(str(rp.root), "rev-parse", "--verify", rp.pin + "^")
+    finally:
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    check("rdp/hostile-git-env-scrubbed", hostile_kind, "allow")
+    check("rdp/grafts-and-replace-probe-real-parents", [
+        (p.returncode, p.stdout.decode().strip()) if p is not None else None
+        for p in (graft_parent, replace_parent)], [(0, gf.seed), (0, rp.seed)])
+    fm = RdpFixture(base, "fsmonitor")
+    marker = fm.briefs / "fsmonitor-ran"
+    hook = fm.briefs / "fsmonitor.sh"
+    hook.write_text("#!/bin/sh\ntouch '" + str(marker) + "'\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _rdp_git(fm.root, "config", "core.fsmonitor", str(hook))
+    fm_kind = _rdp_kind(fm.dispatch(fm.good()))
+    aiqt_hooks._review_git(str(fm.root), "status", "--porcelain")
+    check("rdp/fsmonitor-never-runs", (fm_kind, marker.exists()), ("allow", False))
+    saved_budget = aiqt_hooks._RDP_BUDGET
+    f.authority(f.pin + "\n", sleep=3)
+    aiqt_hooks._RDP_BUDGET = 1.0
+    started = aiqt_hooks.time.monotonic()
+    try:
+        budget_kind = _rdp_kind(f.dispatch(f.good()))
+    finally:
+        aiqt_hooks._RDP_BUDGET = saved_budget
+        f.authority(f.pin + "\n")
+    check("rdp/deadline-bounds-the-decision", (budget_kind, aiqt_hooks.time.monotonic() - started < 2.5),
+          ("unverifiable", True))
+    mf = RdpFixture(base, "mutants")
+    check("rdp/duplicate-repo-or-branch-unverifiable", [_rdp_kind(mf.dispatch(mf.good(extra=[
+        lab + " " + v, lab + " " + v]))) for lab, v in (("Review-repo:", str(mf.root)), ("Review-branch:", "main"))],
+        ["unverifiable", "unverifiable"])
+    check("rdp/unparseable-dispatch-unverifiable", _rdp_kind(mf.run("orch-dispatch --brief 'open")),
+          "unverifiable")
+    check("rdp/empty-path-value-unverifiable", _rdp_kind(mf.dispatch(mf.good(extra=["Review-path: "]))),
+          "unverifiable")
+    mf.write_registry(dict(mf.binding, surplus=1))
+    check("rdp/malformed-binding-without-tool-input-unverifiable", _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(mf.root), tool_name="Bash", tool_input="ls"))), "unverifiable")
+    mf.write_registry(mf.binding)
+    real_review_git = aiqt_hooks._review_git
+
+    failed_probe = []
+    for verb in ("diff-index", "ls-tree"):
+        def _fail_one(repo, *args, stdin=None, _verb=verb):
+            return None if args[:1] == (_verb,) else real_review_git(repo, *args, stdin=stdin)
+        aiqt_hooks._review_git = _fail_one
+        try:
+            failed_probe.append(_rdp_kind(mf.dispatch(mf.good())))
+        finally:
+            aiqt_hooks._review_git = real_review_git
+    check("rdp/failed-state-probe-unverifiable", failed_probe, ["unverifiable", "unverifiable"])
 
     import contextlib
     import io

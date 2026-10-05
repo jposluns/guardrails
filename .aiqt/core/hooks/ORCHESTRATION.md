@@ -29,7 +29,7 @@ keys except `version` are optional; an undeclared surface simply removes the pro
                       "labels": {"target": "Review-target:", "revision": "Reviewed-revision:",
                                  "path": "Review-path:", "repo": "Review-repo:",
                                  "branch": "Review-branch:"},
-                      "authority": {"argv": ["python3", "tools/task_revision.py"], "timeout": 30},
+                      "authority": {"argv": ["python3", "tools/task_revision.py"], "timeout": 5},
                       "max_brief_bytes": 1048576},
   "mistakes_register": "path",
   "attestations": "path",
@@ -170,14 +170,26 @@ malformed.
 - `labels` names the five brief labels. They must be distinct.
 - `authority.argv` is a fixed argv, never a shell string. The hook runs it from the repository root
   with the brief's absolute path appended, and it must print exactly one full commit id: the
-  authoritative task revision. `authority.timeout` is in seconds (default 30).
+  authoritative task revision. `authority.timeout` is in seconds, from 1 to 8 (default 5). The whole
+  check, git reads and authority included, runs within 8 seconds, under the 10-second hook timeout;
+  when that budget runs out the dispatch is withheld as `UNVERIFIABLE:`.
 - `max_brief_bytes` caps the brief size (default 1048576).
 
 The hook sees a Bash call when the command word, after leading modifier wrappers (`command`, `env`,
-`nohup`, `nice`, `stdbuf`, `time`, `exec`, `builtin`), is one of `commands`. The brief must be one
-file argument. A brief read from standard input, a pipe, a heredoc, a here-string or a process
-substitution is refused. A relative brief path resolves against the session cwd. If a `cd`, `pushd`
-or `popd` comes earlier in the same command, the path cannot be located and the dispatch is withheld.
+`nohup`, `nice`, `stdbuf`, `time`, `timeout`, `exec`, `builtin`), is one of `commands`. `env` and
+`timeout` are read with their exact option grammar. An `env -C DIR` or `env --chdir=DIR` directory is
+followed: the dispatch runs there, a relative brief path resolves there, and the default repository
+is the one git resolves there. An `env` or `timeout` option the hook does not model (such as
+`env -S`) withholds the dispatch. So does a segment whose command is not a declared one but which
+names a declared command as a word of its own (`setsid`, `sudo`, `xargs` or `ionice` before it, but
+also `grep orch-dispatch`, a disclosed false refusal). The brief must be one file argument, given
+as `--brief PATH`, `--brief=PATH` or an abbreviation such as `--brie PATH`. A second brief in any
+of these forms is refused. A brief read from standard input (a pipe, a heredoc, a here-string, a
+process substitution, or a redirect of descriptor 0) is refused; a redirect of another descriptor
+is not. A relative brief path resolves against the session cwd. If a `cd`, `pushd` or `popd` comes
+earlier in the same command, the directory the dispatch runs in cannot be resolved and the dispatch
+is withheld. The brief is opened once, without blocking and without following a symlink, and must
+be a regular file.
 
 The hook reads labels only from the brief, only at column 0, and only as the exact label followed by
 one space. The value is the rest of that line. The brief must be UTF-8 with no NUL and no line
@@ -201,17 +213,25 @@ For a `revision` target, the hook checks the following in order. The first failu
 3. Every parent named in the raw commit is present.
 4. The commit's changed set equals the declared paths. The base is the sole parent, the first parent
    of a merge, or the empty tree for a root commit.
-5. No declared path is staged against the pin, modified in the working tree, or untracked or
-   ignored there.
+5. No declared path is staged against the pin, and the working tree matches the pin at every
+   declared path. The working tree is compared by content: the hook hashes each declared file, or
+   reads each symlink target, and compares the result and the file mode with the pin's tree entry.
+   An assume-unchanged or skip-worktree flag, `core.ignoreStat`, the stat cache, an fsmonitor answer
+   or a configured filter therefore cannot report a changed file as clean. A path the pin deletes
+   must be absent. A checked-out submodule must be at the pinned commit.
 
-Every git read disables replacement refs, grafts, pathspec magic and the commit-graph cache, and
-takes no optional locks.
+Every git read disables replacement refs, grafts, pathspec magic, the commit-graph cache, the
+fsmonitor and the untracked cache, and takes no optional locks.
 
 The hook refuses with a deny that names the reason. When it cannot evaluate, it denies with the
 reason prefixed `UNVERIFIABLE:`, so that outcome stays distinct. Cannot-evaluate cases include a
-duplicate label, an unreadable brief, a failed or timed-out git probe, and an authority that fails
-or prints anything other than one commit id. A malformed binding, or a registry that cannot be read,
-withholds every background Bash call. A foreground call is then allowed with a note.
+duplicate label, an unreadable brief, a failed or timed-out git probe, an exhausted time budget, and
+an authority that fails or prints anything other than one commit id. When git cannot resolve the
+session repository (a broken configuration, a refused ownership check, a deleted cwd), the hook
+looks for the registry on the cwd's ancestors; if it finds a binding there, every dispatch is
+withheld as `UNVERIFIABLE:`. A malformed binding, a registry that cannot be read (including a FIFO,
+a device or a symlink in its place), or an ancestor search that cannot be made withholds every
+background Bash call. A foreground call is then allowed with a note.
 
 Limits:
 
@@ -223,6 +243,10 @@ Limits:
 - A misdeclared target bypasses the check.
 - The authority's own correctness is the adopter's concern.
 - Delivery acceptance is not checked.
+- Some commands are refused although they dispatch nothing. These include a command whose heredoc,
+  here-string or process substitution merely mentions a declared command name, and a command that
+  names a declared command as an argument word. A declared file whose checkout was converted (line
+  endings or a filter) differs by content from the pin and is refused.
 
 ## Platforms without hooks
 
