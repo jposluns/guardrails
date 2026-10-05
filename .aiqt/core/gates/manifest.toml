@@ -942,7 +942,7 @@ residue = "A consistency gate over the public .preview/ channel, NOT APPLICABLE 
 [[gate]]
 id = "hook-scripts"
 script = "tools/check_hook_scripts.py"
-rules = []
+rules = ["tstamp", "seccet"]
 platform = "ci"
 default = "block"
 class = "c"

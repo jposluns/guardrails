@@ -32,7 +32,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Read before characterizing | `rdbchr` | None | Enforcement has not been built yet. |
 | Capture the reference when the claim is made | `refcap` | None | Enforcement has not been built yet. |
 | Reproduce a defect before fixing it | `reprod` | None | Enforcement has not been built yet. |
-| A current timestamp is read from the clock | `tstamp` | Enforced | `hook:clock-inject`, class c; `hook:future-stamp-write`, class c; `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
+| A current timestamp is read from the clock | `tstamp` | Enforced | `gate:hook-scripts`, class c; `hook:clock-inject`, class c; `hook:future-stamp-write`, class c; `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
 | Validate an inferred premise before acting | `valinf` | None | Enforcement has not been built yet. |
 | Verify a fix is in its commit | `vfxcmt` | None | Enforcement has not been built yet. |
 | Anything wrong is fixed first | `actbef` | None | Enforcement has not been built yet. |
@@ -108,7 +108,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Rotate a leaked secret | `secrot` | None | Enforcement has not been built yet. |
 | Strong authentication | `secau1` | None | Enforcement has not been built yet. |
 | Least-privilege authorization | `secazn` | None | Enforcement has not been built yet. |
-| Configuration that executes on load is treated as code | `seccet` | Enforced | `gate:python-launcher-isolation`, class c |
+| Configuration that executes on load is treated as code | `seccet` | Enforced | `gate:hook-scripts`, class c; `gate:python-launcher-isolation`, class c |
 | Sound cryptography | `seccry` | None | Enforcement has not been built yet. |
 | Trusted, pinned dependency provenance | `secsup` | None | Enforcement has not been built yet. |
 | Fail closed in security-relevant paths | `secfcl` | None | Enforcement has not been built yet. |
@@ -350,6 +350,19 @@ Technical limits (from the enforcement ledger):
 
 ```
 A byte-identity drift gate over the artefact tools/gen_gensrc.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.
+```
+
+### `gate:hook-scripts`
+
+- Platform: `ci`
+- Default: `block`
+- Entry point: `tools/check_hook_scripts.py`
+- Class: `c`
+
+Technical limits (from the enforcement ledger):
+
+```
+A behaviour gate over the pack's standalone hook scripts (the hooks-manifest rows with a script key: clock-inject.py and future-stamp-write.py). It runs each script's own --self-test isolated (python -I -S -B, a fresh temporary working directory, AIQT_, ORCH_ and CLAUDE_ variables and CDPATH removed, TZ=UTC); requires the rendered hooks.json entry to be the isolated launcher; runs the plugin copy on a fixed set of fixtures and requires exit 0 with no decision, permissionDecision, continue or stopReason key, a record-hook warning of one line of at most 100 characters, and the expected silent, warn or context class; reruns the fixtures with the named worker markers set and requires the same reduced outcome; flags a script name present in .preview/ too; and compares the listed shared functions, regexes and constants with .preview/stamp-truth-stop.py and the shared _cfg between the two pack copies. Class c, partial: the fixtures are a fixed sample, so a deny reached only by another input is not seen, and the output shape is judged, not whether a warning is correct; a self-test is judged by its exit status only; only the named variables are tried for inertness; only the listed shared names are compared; and the scripts run under the gate's own interpreter, not the host's python3 lookup. A missing input, an unloadable parity file, a timeout, or a script without a fixture set is a cannot-evaluate (exit 2). Its linkage to a single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement.
 ```
 
 ### `gate:hooks-drift`

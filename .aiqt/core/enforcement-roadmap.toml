@@ -359,7 +359,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "seccet"
 status = "enforced"
-mechanisms = ["gate:python-launcher-isolation"]
+mechanisms = ["gate:hook-scripts", "gate:python-launcher-isolation"]
 
 [[rule]]
 corpus-id = "seccfg"
@@ -634,7 +634,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "tstamp"
 status = "enforced"
-mechanisms = ["hook:clock-inject", "hook:future-stamp-write", "hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
+mechanisms = ["gate:hook-scripts", "hook:clock-inject", "hook:future-stamp-write", "hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
 
 [[rule]]
 corpus-id = "tsthrm"

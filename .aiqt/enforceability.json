@@ -1132,6 +1132,14 @@
         {
           "class": "c",
           "default": "block",
+          "id": "hook-scripts",
+          "platform": "ci",
+          "residue": "A behaviour gate over the pack's standalone hook scripts (the hooks-manifest rows with a script key: clock-inject.py and future-stamp-write.py). It runs each script's own --self-test isolated (python -I -S -B, a fresh temporary working directory, AIQT_, ORCH_ and CLAUDE_ variables and CDPATH removed, TZ=UTC); requires the rendered hooks.json entry to be the isolated launcher; runs the plugin copy on a fixed set of fixtures and requires exit 0 with no decision, permissionDecision, continue or stopReason key, a record-hook warning of one line of at most 100 characters, and the expected silent, warn or context class; reruns the fixtures with the named worker markers set and requires the same reduced outcome; flags a script name present in .preview/ too; and compares the listed shared functions, regexes and constants with .preview/stamp-truth-stop.py and the shared _cfg between the two pack copies. Class c, partial: the fixtures are a fixed sample, so a deny reached only by another input is not seen, and the output shape is judged, not whether a warning is correct; a self-test is judged by its exit status only; only the named variables are tried for inertness; only the listed shared names are compared; and the scripts run under the gate's own interpreter, not the host's python3 lookup. A missing input, an unloadable parity file, a timeout, or a script without a fixture set is a cannot-evaluate (exit 2). Its linkage to a single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement.",
+          "script": "tools/check_hook_scripts.py"
+        },
+        {
+          "class": "c",
+          "default": "block",
           "id": "python-launcher-isolation",
           "platform": "ci",
           "residue": "A deterministic scan over a RECOGNIZABLE SUBSET of the repo's Python launcher configuration: the generated plugin hooks.json, tools/run_all_checks.sh, every regular *.yml/*.yaml under .github/workflows/, and the optional .claude/settings.json files. A direct python3 launcher there is FAILed unless it runs isolated (-I, or the full -P -E -s), so a tool-written sibling cannot shadow a stdlib import and neuter the control; the gate itself refuses to run non-isolated (exit 2) so a sibling cannot neuter the gate first, and it fails closed (exit 2) on a missing, unreadable, non-regular, or malformed input rather than passing it as clean. It does NOT catch: wrapper or indirect launchers (a bash -c string, a .sh re-launcher), $PYTHON or shell aliases and functions, a dynamically assembled argv, the programmatic subprocess children in the tools and the regenerate strings in .aiqt/gensrc.json (a separate follow-up), a script that mutates its own sys.path at runtime (which -I cannot prevent), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces, YAML or shell constructs beyond the supported line grammar, and the PATH provenance of python3 itself; a python3 token embedded in a quoted argument or a heredoc may be miscounted.",
@@ -1704,7 +1712,16 @@
     {
       "corpus-id": "tstamp",
       "family": "aiqt",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "block",
+          "id": "hook-scripts",
+          "platform": "ci",
+          "residue": "A behaviour gate over the pack's standalone hook scripts (the hooks-manifest rows with a script key: clock-inject.py and future-stamp-write.py). It runs each script's own --self-test isolated (python -I -S -B, a fresh temporary working directory, AIQT_, ORCH_ and CLAUDE_ variables and CDPATH removed, TZ=UTC); requires the rendered hooks.json entry to be the isolated launcher; runs the plugin copy on a fixed set of fixtures and requires exit 0 with no decision, permissionDecision, continue or stopReason key, a record-hook warning of one line of at most 100 characters, and the expected silent, warn or context class; reruns the fixtures with the named worker markers set and requires the same reduced outcome; flags a script name present in .preview/ too; and compares the listed shared functions, regexes and constants with .preview/stamp-truth-stop.py and the shared _cfg between the two pack copies. Class c, partial: the fixtures are a fixed sample, so a deny reached only by another input is not seen, and the output shape is judged, not whether a warning is correct; a self-test is judged by its exit status only; only the named variables are tried for inertness; only the listed shared names are compared; and the scripts run under the gate's own interpreter, not the host's python3 lookup. A missing input, an unloadable parity file, a timeout, or a script without a fixture set is a cannot-evaluate (exit 2). Its linkage to a single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement.",
+          "script": "tools/check_hook_scripts.py"
+        }
+      ],
       "hooks": [
         {
           "class": "c",
@@ -1743,7 +1760,7 @@
         }
       ],
       "source": ".aiqt/core/rules/accur-timestamp-from-clock.md",
-      "status": "hook-linked"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "tsthrm",

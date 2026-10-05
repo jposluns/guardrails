@@ -94,7 +94,7 @@
             <tr id="rule-rdbchr"><td>Read before characterizing</td><td><code>rdbchr</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-refcap"><td>Capture the reference when the claim is made</td><td><code>refcap</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-reprod"><td>Reproduce a defect before fixing it</td><td><code>reprod</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
-            <tr id="rule-tstamp"><td>A current timestamp is read from the clock</td><td><code>tstamp</code></td><td>Enforced</td><td><a href="#mechanism-hook-clock-inject"><code>hook:clock-inject</code></a>, class c; <a href="#mechanism-hook-future-stamp-write"><code>hook:future-stamp-write</code></a>, class c; <a href="#mechanism-hook-orch-prompt-stamp"><code>hook:orch-prompt-stamp</code></a>, class c; <a href="#mechanism-hook-orch-yield-tool-guard"><code>hook:orch-yield-tool-guard</code></a>, class b</td></tr>
+            <tr id="rule-tstamp"><td>A current timestamp is read from the clock</td><td><code>tstamp</code></td><td>Enforced</td><td><a href="#mechanism-gate-hook-scripts"><code>gate:hook-scripts</code></a>, class c; <a href="#mechanism-hook-clock-inject"><code>hook:clock-inject</code></a>, class c; <a href="#mechanism-hook-future-stamp-write"><code>hook:future-stamp-write</code></a>, class c; <a href="#mechanism-hook-orch-prompt-stamp"><code>hook:orch-prompt-stamp</code></a>, class c; <a href="#mechanism-hook-orch-yield-tool-guard"><code>hook:orch-yield-tool-guard</code></a>, class b</td></tr>
             <tr id="rule-valinf"><td>Validate an inferred premise before acting</td><td><code>valinf</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-vfxcmt"><td>Verify a fix is in its commit</td><td><code>vfxcmt</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-actbef"><td>Anything wrong is fixed first</td><td><code>actbef</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
@@ -170,7 +170,7 @@
             <tr id="rule-secrot"><td>Rotate a leaked secret</td><td><code>secrot</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secau1"><td>Strong authentication</td><td><code>secau1</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secazn"><td>Least-privilege authorization</td><td><code>secazn</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
-            <tr id="rule-seccet"><td>Configuration that executes on load is treated as code</td><td><code>seccet</code></td><td>Enforced</td><td><a href="#mechanism-gate-python-launcher-isolation"><code>gate:python-launcher-isolation</code></a>, class c</td></tr>
+            <tr id="rule-seccet"><td>Configuration that executes on load is treated as code</td><td><code>seccet</code></td><td>Enforced</td><td><a href="#mechanism-gate-hook-scripts"><code>gate:hook-scripts</code></a>, class c; <a href="#mechanism-gate-python-launcher-isolation"><code>gate:python-launcher-isolation</code></a>, class c</td></tr>
             <tr id="rule-seccry"><td>Sound cryptography</td><td><code>seccry</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secsup"><td>Trusted, pinned dependency provenance</td><td><code>secsup</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secfcl"><td>Fail closed in security-relevant paths</td><td><code>secfcl</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
@@ -412,6 +412,19 @@
             </ul>
             <p class="ledger-residual-label">Technical limits (from the enforcement ledger)</p>
             <blockquote class="ledger-residual" data-mech="gate:gensrc-registry-drift">A byte-identity drift gate over the artefact tools/gen_gensrc.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.</blockquote>
+          </div>
+        </details>
+        <details class="more" id="mechanism-gate-hook-scripts">
+          <summary><code>gate:hook-scripts</code></summary>
+          <div class="inner">
+            <ul>
+              <li>Platform: <code>ci</code></li>
+              <li>Default: <code>block</code></li>
+              <li>Entry point: <code>tools/check_hook_scripts.py</code></li>
+              <li>Class: <code>c</code></li>
+            </ul>
+            <p class="ledger-residual-label">Technical limits (from the enforcement ledger)</p>
+            <blockquote class="ledger-residual" data-mech="gate:hook-scripts">A behaviour gate over the pack's standalone hook scripts (the hooks-manifest rows with a script key: clock-inject.py and future-stamp-write.py). It runs each script's own --self-test isolated (python -I -S -B, a fresh temporary working directory, AIQT_, ORCH_ and CLAUDE_ variables and CDPATH removed, TZ=UTC); requires the rendered hooks.json entry to be the isolated launcher; runs the plugin copy on a fixed set of fixtures and requires exit 0 with no decision, permissionDecision, continue or stopReason key, a record-hook warning of one line of at most 100 characters, and the expected silent, warn or context class; reruns the fixtures with the named worker markers set and requires the same reduced outcome; flags a script name present in .preview/ too; and compares the listed shared functions, regexes and constants with .preview/stamp-truth-stop.py and the shared _cfg between the two pack copies. Class c, partial: the fixtures are a fixed sample, so a deny reached only by another input is not seen, and the output shape is judged, not whether a warning is correct; a self-test is judged by its exit status only; only the named variables are tried for inertness; only the listed shared names are compared; and the scripts run under the gate's own interpreter, not the host's python3 lookup. A missing input, an unloadable parity file, a timeout, or a script without a fixture set is a cannot-evaluate (exit 2). Its linkage to a single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement.</blockquote>
           </div>
         </details>
         <details class="more" id="mechanism-gate-hooks-drift">
