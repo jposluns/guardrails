@@ -33,6 +33,15 @@ pack ships this file under ``tools/``, so a consumer puts that directory on
 
 from __future__ import annotations
 
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: aiqt_corpus.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import datetime
 import re
 import subprocess

@@ -106,6 +106,15 @@ floor synthesized in-tree, removed in the finally.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: selftest_aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import ast
 import collections
 import contextlib
@@ -117,7 +126,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -1485,10 +1493,6 @@ def main():
 
 
 def _main_with_recorder():
-    if sys.version_info < (3, 12):
-        print("SELF-TEST ERROR: the note-site coverage monitor needs sys.monitoring, which requires Python "
-              "3.12 or later; this interpreter is {}.{}".format(*sys.version_info[:2]), file=sys.stderr)
-        return 2
     monitor = _NoteSiteMonitor()
     monitor.start()
     try:

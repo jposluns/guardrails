@@ -1,15 +1,18 @@
 """Shared helpers for the single-source generators (roadmap, changelog). Stdlib only.
 
-Requires Python 3.11+ for tomllib; CI pins 3.14. The hooks self-test (tools/selftest_aiqt_hooks.py)
-needs 3.12+ for sys.monitoring. run_all_checks.sh runs these locally.
+Requires Python 3.14 or newer, the floor in .aiqt/core/python-floor.toml, which CI pins.
+run_all_checks.sh runs these locally.
 """
 import os
 import sys
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: the roadmap/changelog generators require Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: the roadmap/changelog generators cannot import tomllib, part of the Python "
+        "standard library; this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 from pathlib import Path
 from urllib.parse import urlparse

@@ -14,8 +14,16 @@ violation line is `<relpath>: <code>: <detail>` per section 6.2. The adopter .co
 the not-yet-built adopter cleanup workflow and are deferred (recorded as GD-9); this gate runs fail-closed
 on the built-in aiqt/security/external families and accepts both pack- and adopter-origin rules.
 """
-import re
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_rule_placement.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
+import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

@@ -141,6 +141,15 @@ above. The documentation leg matches the exact phrase, not its meaning.
 
 Run this gate isolated: python3 -I -B tools/check_python_floor.py
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_python_floor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import ast
 import importlib.util
 import json
@@ -148,7 +157,6 @@ import os
 import re
 import stat
 import subprocess
-import sys
 import tempfile
 import tomllib
 from pathlib import Path
