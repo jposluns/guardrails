@@ -592,6 +592,34 @@ _RAW_READ_SUITE_MANIFEST = "tools/selftest_checks.toml"
 _RAW_READ_HOOKS_MANIFEST = ".aiqt/core/hooks/manifest.toml"
 _RAW_READ_HOOK_SCRIPT_DIRS = (".aiqt/core/hooks/scripts", "plugin/aiqt-guardrails-hooks/hooks/scripts")
 _RAW_READ_HOOK_SCRIPT_RE = re.compile(r"[a-z0-9][a-z0-9-]*\.py")
+# OPTIONAL third-party imports: module -> the importers allowed to name it. An import of one of
+# these resolves only when it is (1) made by a listed importer and (2) a direct statement of a
+# try body whose handler catches ImportError or ModuleNotFoundError, so the importer runs without
+# the module; any other spelling (unguarded, another importer, another module) still fails the
+# lint by name. gen_rules imports PyYAML only inside its --self-test cross-check
+# (_yaml_agreement, _yaml_adopter_agreement), which returns None and skips the comparison when
+# PyYAML is absent; no gate, generator run or workflow step installs or requires it.
+_RAW_READ_OPTIONAL_IMPORTS = {"yaml": ("tools/gen_rules.py",)}
+_RAW_READ_IMPORT_ERRORS = ("ImportError", "ModuleNotFoundError")
+
+
+def _raw_read_guarded_imports(tree):
+    """ids of the Import / ImportFrom nodes that are direct statements of a try body whose
+    handlers include one naming ImportError or ModuleNotFoundError (alone or in a tuple)."""
+    guarded = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        caught = False
+        for handler in node.handlers:
+            kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+            if any(isinstance(kind, ast.Name) and kind.id in _RAW_READ_IMPORT_ERRORS
+                   for kind in kinds):
+                caught = True
+        if caught:
+            guarded.update(id(stmt) for stmt in node.body
+                           if isinstance(stmt, (ast.Import, ast.ImportFrom)))
+    return guarded
 
 
 def _raw_read_entry_modules(root):
@@ -709,6 +737,7 @@ def _raw_read_modules(root):
             continue
         seen[rel] = tree
         here = rel.rsplit("/", 1)[0]
+        guarded = _raw_read_guarded_imports(tree)
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
@@ -755,6 +784,11 @@ def _raw_read_modules(root):
                     # scripts directory on sys.path: resolution only; the committed copies are
                     # themselves DECLARED entry modules, so a deleted or special-file copy
                     # already fails the declare() check by name
+                    continue
+                if rel in _RAW_READ_OPTIONAL_IMPORTS.get(base, ()) and id(node) in guarded:
+                    # a declared OPTIONAL third-party import, guarded by an ImportError
+                    # handler in a listed importer (_RAW_READ_OPTIONAL_IMPORTS): no in-tree
+                    # module to enumerate, and the importer runs without it
                     continue
                 # QA round 8 (codex 3): the import resolves to NO in-tree file and no stdlib
                 # module; a deleted or renamed local module must fail this lint, never shrink
@@ -1050,7 +1084,7 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/_optlevel.py::source_docstring::open", 1),
     ("opf/tools/check_opf_doctor.py::_doctor_suite::os.open", 1),
     ("opf/tools/check_opf_doctor.py::_doctor_suite::read_bytes", 1),
-    ("opf/tools/check_opf_doctor.py::_doctor_suite::read_text", 3),
+    ("opf/tools/check_opf_doctor.py::_doctor_suite::read_text", 4),
     ("opf/tools/check_opf_doctor.py::_install_seen::read_text", 2),
     ("opf/tools/check_opf_doctor.py::_lstat_entry::open", 1),
     ("opf/tools/check_opf_doctor.py::_precommit_suite::read_text", 12),
@@ -1065,10 +1099,10 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/check_opf_init.py::valid_sources::read_text", 2),
     ("opf/tools/check_opf_init.py::walk::read_bytes", 1),
     ("opf/tools/check_opf_init_contract.py::_read::read_text", 1),
-    ("opf/tools/check_opf_init_observe.py::<module>::read_text", 2),
+    ("opf/tools/check_opf_init_observe.py::_self_test::read_text", 2),
     ("opf/tools/check_opf_init_p0.py::_runner_non_readable_fd_checks::os.open", 1),
+    ("opf/tools/check_opf_init_p0.py::_self_test::read_text", 2),
     ("opf/tools/check_opf_init_p0.py::check_competing_log::read_bytes", 1),
-    ("opf/tools/check_opf_init_p0.py::main::read_text", 2),
     ("opf/tools/check_opf_init_p0.py::runner_check::read_bytes", 1),
     ("opf/tools/check_opf_init_p0.py::runner_check::read_text", 2),
     ("opf/tools/check_opf_init_p0.py::runner_red_checks::read_text", 2),
@@ -1099,27 +1133,48 @@ RAW_READ_ALLOWLIST = dict((
     ("opf/tools/check_opf_upgrade.py::cnt_of::read_text", 1),
     ("opf/tools/check_opf_upgrade.py::man_of::read_text", 1),
     ("opf/tools/opf.py::_adopt_leg::os.open", 2),
+    ("opf/tools/opf.py::_dispatch_runner_forms::read_text", 1),
     ("opf/tools/opf.py::_import_leg::open", 1),
     ("opf/tools/opf.py::_init_inventory::os.open", 1),
+    ("opf/tools/opf.py::_live_not_zombie::read_bytes", 1),
+    ("opf/tools/opf.py::_pidfd_handoff_recv::read_text", 1),
     ("opf/tools/opf.py::_retained_close_offpath_self_test::os.open", 5),
+    ("opf/tools/opf.py::_runtime_escape_cases::read_bytes", 1),
+    ("opf/tools/opf.py::_runtime_late_wait::os.open", 1),
+    ("opf/tools/opf.py::_runtime_probe_runs::read_bytes", 1),
+    ("opf/tools/opf.py::_runtime_snapshot::os.open", 1),
+    ("opf/tools/opf.py::_runtime_wait_traversal_faults::read_text", 3),
+    ("opf/tools/opf.py::_self_test_dispatch_escape_probe::read_text", 1),
+    ("opf/tools/opf.py::_self_test_dispatch_probe::read_bytes", 1),
     ("opf/tools/opf.py::_self_test_entry_gaps::open", 1),
+    ("opf/tools/opf.py::_self_test_runtime_report_channel::read_bytes", 1),
+    ("opf/tools/opf.py::_self_test_runtime_supervisor_unit::read_bytes", 2),
+    ("opf/tools/opf.py::_self_test_runtime_wait_unit::os.open", 1),
+    ("opf/tools/opf.py::_self_test_runtime_wait_unit::read_text", 1),
+    ("opf/tools/opf.py::_unit_bound_self_test::open", 4),
+    ("opf/tools/opf.py::_unit_copy_capped::os.open", 1),
+    ("opf/tools/opf.py::_unit_remove_box::os.open", 2),
+    ("opf/tools/opf.py::_unit_run_in_box::os.open", 1),
     ("opf/tools/opf.py::_watchdog_completion_case::os.open", 1),
-    ("opf/tools/opf.py::_watchdog_completion_case::read_bytes", 1),
-    ("opf/tools/opf.py::_watchdog_completion_case::read_text", 10),
+    ("opf/tools/opf.py::_watchdog_completion_case::read_bytes", 3),
+    ("opf/tools/opf.py::_watchdog_completion_case::read_text", 14),
     ("opf/tools/opf.py::_watchdog_safety_case::os.open", 1),
     ("opf/tools/opf.py::await_subject::read_text", 1),
     ("opf/tools/opf.py::call::os.open", 1),
     ("opf/tools/opf.py::children_of::read_bytes", 1),
+    ("opf/tools/opf.py::edited::read_text", 1),
+    ("opf/tools/opf.py::ended::open", 1),
     ("opf/tools/opf.py::exercise::read_text", 4),
-    ("opf/tools/opf.py::frozen_pair::read_text", 1),
-    ("opf/tools/opf.py::frozen_tree::read_text", 2),
+    ("opf/tools/opf.py::frozen_tree::read_text", 1),
     ("opf/tools/opf.py::launch_held::read_text", 1),
-    ("opf/tools/opf.py::launch_killed::read_text", 4),
+    ("opf/tools/opf.py::launch_killed::read_text", 3),
     ("opf/tools/opf.py::launch_wedged::read_text", 4),
+    ("opf/tools/opf.py::load::read_text", 1),
     ("opf/tools/opf.py::observe::read_text", 1),
     ("opf/tools/opf.py::old_census::read_text", 1),
     ("opf/tools/opf.py::outer::os.open", 1),
-    ("opf/tools/opf.py::state::read_bytes", 13),
+    ("opf/tools/opf.py::reopens::os.open", 1),
+    ("opf/tools/opf.py::state::read_bytes", 14),
     ("opf/tools/opf.py::tree_snapshot::open", 2),
     ("opf/tools/opf.py::walk::os.open", 1),
     ("opf/tools/selftest_commonmark_conformance.py::_load_examples::open", 1),
@@ -1168,9 +1223,11 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_byte_canon.py::run::read_bytes", 1),
     ("tools/check_byte_canon.py::validate_allowances::read_bytes", 1),
     ("tools/check_byte_canon.py::validate_hardbreak::read_bytes", 1),
+    ("tools/check_ci_parity.py::_cdpath_outcome::read_text", 1),
     ("tools/check_ci_parity.py::_run_runner_copy::read_text", 1),
     ("tools/check_ci_parity.py::self_test::read_bytes", 1),
-    ("tools/check_clauses.py::self_test_main::read_text", 2),
+    ("tools/check_clauses.py::_load_reverted::read_text", 1),
+    ("tools/check_clauses.py::self_test_main::read_text", 3),
     ("tools/check_crosswalk.py::_load_toml::open", 1),
     ("tools/check_crosswalk.py::_open_archive_dir::os.open", 2),
     ("tools/check_crosswalk.py::_read_archive_payload::os.open", 2),
@@ -1178,6 +1235,12 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_gensrc_failclose.py::_read_bytes_safe::os.open", 1),
     ("tools/check_gensrc_failclose.py::_tree_manifest::open", 1),
     ("tools/check_git_option_table.py::run::read_text", 1),
+    ("tools/check_hook_scripts.py::_add_rendered::open", 1),
+    ("tools/check_hook_scripts.py::_patch::open", 1),
+    ("tools/check_hook_scripts.py::_patch_rendered::open", 1),
+    ("tools/check_hook_scripts.py::_still_readable::open", 1),
+    ("tools/check_hook_scripts.py::leg_parity::open", 1),
+    ("tools/check_hook_scripts.py::rendered_entries::open", 1),
     ("tools/check_hooks_preview.py::_read_required::read_bytes", 1),
     ("tools/check_hooks_preview.py::leg_integrity::read_bytes", 1),
     ("tools/check_hooks_preview.py::self_test_main::read_text", 4),
@@ -1213,10 +1276,19 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/check_release_cut.py::_self_test_isolated::read_bytes", 1),
     ("tools/check_release_cut.py::_self_test_isolated::read_text", 3),
     ("tools/check_release_cut.py::working_blob::os.open", 2),
+    ("tools/check_release_delta.py::_append::read_text", 1),
+    ("tools/check_release_delta.py::_assert_gate_code_matches_head::read_bytes", 1),
+    ("tools/check_release_delta.py::_drift_entry_state::os.open", 2),
     ("tools/check_release_delta.py::_edit_clause_consistently::read_text", 2),
     ("tools/check_release_delta.py::_extract::attr.open", 1),
+    ("tools/check_release_delta.py::_forge_one::read_bytes", 1),
     ("tools/check_release_delta.py::_mut_idhist_topkey::read_text", 1),
+    ("tools/check_release_delta.py::_post_release_e2e::read_bytes", 7),
+    ("tools/check_release_delta.py::_post_release_e2e::read_text", 6),
+    ("tools/check_release_delta.py::_post_smudge::read_bytes", 1),
+    ("tools/check_release_delta.py::_post_staged::read_bytes", 1),
     ("tools/check_release_delta.py::_real_pack_e2e::read_text", 18),
+    ("tools/check_release_delta.py::_self_test_main_isolated::read_text", 2),
     ("tools/check_release_delta.py::run::read_bytes", 1),
     ("tools/check_selftest_execution.py::_manifest_suites::open", 1),
     ("tools/check_selftest_execution.py::_read_report::open", 1),
@@ -1256,19 +1328,23 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/gen_crosswalk.py::self_test::read_text", 4),
     ("tools/gen_cursor.py::run::read_text", 1),
     ("tools/gen_disclosure.py::main::read_text", 1),
+    ("tools/gen_enforceability.py::_preview_docstring::read_bytes", 1),
     ("tools/gen_enforceability.py::replace_in::read_text", 1),
     ("tools/gen_enforceability.py::roster_scripts::read_text", 1),
-    ("tools/gen_enforceability.py::self_test_main::read_text", 8),
+    ("tools/gen_enforceability.py::self_test_main::read_text", 9),
     ("tools/gen_enforcement_register.py::compose_page::read_text", 1),
     ("tools/gen_enforcement_register.py::load_ledger::read_text", 1),
     ("tools/gen_enforcement_register.py::replace_in::read_text", 1),
-    ("tools/gen_enforcement_register.py::self_test_main::read_text", 10),
+    ("tools/gen_enforcement_register.py::self_test_main::read_text", 13),
     ("tools/gen_gensrc.py::_read_declaration::read_text", 1),
     ("tools/gen_gensrc.py::self_test_main::read_text", 1),
     ("tools/gen_hooks.py::_mutate::read_text", 1),
+    ("tools/gen_hooks.py::_script_tree::read_text", 1),
+    ("tools/gen_hooks.py::build_desired::read_bytes", 1),
     ("tools/gen_hooks.py::build_desired::read_text", 1),
-    ("tools/gen_hooks.py::run::read_text", 1),
-    ("tools/gen_hooks.py::self_test_main::read_text", 4),
+    ("tools/gen_hooks.py::run::read_bytes", 1),
+    ("tools/gen_hooks.py::self_test_main::read_bytes", 2),
+    ("tools/gen_hooks.py::self_test_main::read_text", 5),
     ("tools/gen_install.py::run_gen::read_text", 1),
     ("tools/gen_install.py::self_test_main::read_text", 2),
     ("tools/gen_manifest.py::_self_test_main_isolated::read_text", 5),
@@ -1278,6 +1354,10 @@ RAW_READ_ALLOWLIST = dict((
     ("tools/gen_renderers.py::_parse_module::read_bytes", 1),
     ("tools/gen_renderers.py::framed_code_digest::read_bytes", 1),
     ("tools/gen_renderers.py::self_test_main::read_text", 5),
+    ("tools/gen_rules.py::_load_reverted::read_text", 1),
+    ("tools/gen_rules.py::_yaml_adopter_agreement::read_bytes", 1),
+    ("tools/gen_rules.py::agree::read_text", 1),
+    ("tools/gen_rules.py::self_test_main::read_bytes", 2),
     ("tools/gen_secret_patterns.py::run::read_text", 1),
     ("tools/gen_site.py::_read::read_text", 1),
     ("tools/gen_skill.py::_open_dir_fd::os.open", 2),
@@ -1450,6 +1530,23 @@ _RAW_READ_HOOK_MIXED = ("one read is of the hook script's own committed file (__
                         "self-test wrote under its own tempfile.mkdtemp scratch; "
                         + _RAW_READ_HOOK_TAIL)
 
+_RAW_READ_SITE_FIXTURE = ("(a) reads a temporary fixture the same test created under its own tempfile "
+                          "scratch, never the repository tree")
+_RAW_READ_SITE_PROC = ("(b) reads a /proc kernel interface (a process stat, cmdline, fdinfo or task "
+                       "children file), whose open and read never block")
+_RAW_READ_SITE_GUARD = ("(c) the site opens with O_RDONLY plus the O_NOFOLLOW | O_NONBLOCK guard "
+                        "_unit_guard_flags returns (the caller fails closed when the platform lacks "
+                        "either), so a planted FIFO cannot block the open and a planted symlink is not "
+                        "followed")
+_RAW_READ_SITE_OPF_OWN = ("reads a committed opf/tools source file (the module's own __file__, a sibling "
+                          "module the self-test audits, or the committed runner), an in-root path the "
+                          "D-400 precheck walk certifies; this standalone opf module cannot import the "
+                          "tools/ shared readers, so conversion to a local non-blocking reader is "
+                          "pending and tracked by this pin")
+_RAW_READ_SITE_TOOLS_OWN = ("reads a committed tools/ source file (the module's own __file__ or a module "
+                            "it imports), an in-root path the D-400 precheck walk certifies; conversion "
+                            "to read_text_nonblocking is pending and tracked by this pin")
+
 # QA round 6 (codex B1 family, claude m2): PER-SITE reasons from a closed vocabulary -- (a) a
 # temporary fixture the same test created; (b) /proc or another kernel interface; (c) the site
 # itself already opens O_NONBLOCK / O_DIRECTORY or checks S_ISREG on what it opens; or a
@@ -1458,6 +1555,122 @@ _RAW_READ_HOOK_MIXED = ("one read is of the hook script's own committed file (__
 # manifest runners, the .preview modules, the hook scripts, the manifest's standalone hook
 # scripts) is covered per site.
 RAW_READ_SITE_REASONS = dict((
+    ("opf/tools/check_opf_doctor.py::_doctor_suite::read_text",
+     _RAW_READ_SITE_FIXTURE),
+    ("opf/tools/check_opf_init_observe.py::_self_test::read_text",
+     _RAW_READ_SITE_OPF_OWN),
+    ("opf/tools/check_opf_init_p0.py::_self_test::read_text",
+     _RAW_READ_SITE_OPF_OWN),
+    ("opf/tools/opf.py::_dispatch_runner_forms::read_text",
+     "reads the committed opf/tools/run_all_checks.sh and each root runner the audit first requires is_file(), in-root paths the D-400 precheck walk certifies; this standalone opf module cannot import the tools/ shared readers, so conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("opf/tools/opf.py::_live_not_zombie::read_bytes",
+     _RAW_READ_SITE_PROC),
+    ("opf/tools/opf.py::_pidfd_handoff_recv::read_text",
+     _RAW_READ_SITE_PROC),
+    ("opf/tools/opf.py::_runtime_escape_cases::read_bytes",
+     _RAW_READ_SITE_FIXTURE),
+    ("opf/tools/opf.py::_runtime_late_wait::os.open",
+     "(a) opens only the LIVE- lock files the same self-test's own children created (O_CREAT with O_EXCL) in the late directory it made under its own tempfile scratch, to probe their locks; no content is read through it"),
+    ("opf/tools/opf.py::_runtime_probe_runs::read_bytes",
+     "reads each .py module of the directory the dispatch audit is pointed at: the committed opf/tools directory, in-root and certified by the D-400 precheck walk, or (a) a copy the same self-test made under its own tempfile scratch; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("opf/tools/opf.py::_runtime_snapshot::os.open",
+     _RAW_READ_SITE_GUARD),
+    ("opf/tools/opf.py::_runtime_wait_traversal_faults::read_text",
+     _RAW_READ_SITE_OPF_OWN),
+    ("opf/tools/opf.py::_self_test_dispatch_escape_probe::read_text",
+     _RAW_READ_SITE_OPF_OWN),
+    ("opf/tools/opf.py::_self_test_dispatch_probe::read_bytes",
+     "reads each .py module of the directory the dispatch audit is pointed at: the committed opf/tools directory, in-root and certified by the D-400 precheck walk, or (a) a copy the same self-test made under its own tempfile scratch; conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("opf/tools/opf.py::_self_test_runtime_report_channel::read_bytes",
+     _RAW_READ_SITE_PROC),
+    ("opf/tools/opf.py::_self_test_runtime_supervisor_unit::read_bytes",
+     _RAW_READ_SITE_OPF_OWN),
+    ("opf/tools/opf.py::_self_test_runtime_wait_unit::os.open",
+     "(b) opens os.devnull, a character device whose open never blocks, only to obtain a descriptor number that is closed at once; no content is read through it"),
+    ("opf/tools/opf.py::_self_test_runtime_wait_unit::read_text",
+     _RAW_READ_SITE_OPF_OWN),
+    ("opf/tools/opf.py::_unit_bound_self_test::open",
+     _RAW_READ_SITE_FIXTURE),
+    ("opf/tools/opf.py::_unit_copy_capped::os.open",
+     _RAW_READ_SITE_GUARD),
+    ("opf/tools/opf.py::_unit_remove_box::os.open",
+     "(c) the flags are O_RDONLY | O_DIRECTORY plus the O_NOFOLLOW | O_NONBLOCK guard of _unit_guard_flags, so the open of anything but a directory fails at once, a planted symlink is not followed and no open can block; the opened directory is checked against the identity the runner recorded; no file content is read through it"),
+    ("opf/tools/opf.py::_unit_run_in_box::os.open",
+     _RAW_READ_SITE_GUARD),
+    ("opf/tools/opf.py::_watchdog_completion_case::read_bytes",
+     "(b) two sites read /proc/<pid>/stat, a kernel interface that never blocks; the third reads the module's own committed file (__file__), an in-root path the D-400 precheck walk certifies, whose conversion to a local non-blocking reader is pending and tracked by this pin"),
+    ("opf/tools/opf.py::_watchdog_completion_case::read_text",
+     "(a) eight sites read fixture files (a budget log and guardian, descendant, grandchild and forked pid files) the same test wrote inside a tempfile.TemporaryDirectory it created; (b) the other six read /proc task children files, a kernel interface that never blocks"),
+    ("opf/tools/opf.py::edited::read_text",
+     _RAW_READ_SITE_OPF_OWN),
+    ("opf/tools/opf.py::ended::open",
+     _RAW_READ_SITE_PROC),
+    ("opf/tools/opf.py::load::read_text",
+     _RAW_READ_SITE_OPF_OWN),
+    ("opf/tools/opf.py::reopens::os.open",
+     "(b) reopens a /proc/self/fd entry of a pipe descriptor the same self-test created, to prove the reopen is refused or allowed; a reopened descriptor is closed at once and no content is read through it"),
+    ("opf/tools/opf.py::state::read_bytes",
+     _RAW_READ_SITE_PROC),
+    ("tools/check_ci_parity.py::_cdpath_outcome::read_text",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/check_clauses.py::_load_reverted::read_text",
+     _RAW_READ_SITE_TOOLS_OWN),
+    ("tools/check_clauses.py::self_test_main::read_text",
+     "(a) two sites read an id-history fixture the same test created under its own tempfile scratch; the third reads the committed sibling tools/gen_rules.py, an in-root path the D-400 precheck walk certifies, whose conversion to read_text_nonblocking is pending and tracked by this pin"),
+    ("tools/check_hook_scripts.py::_add_rendered::open",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/check_hook_scripts.py::_patch::open",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/check_hook_scripts.py::_patch_rendered::open",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/check_hook_scripts.py::_still_readable::open",
+     "(a) opens only the mode-0 probe file the same self-test wrote under its own tempfile scratch, to learn whether this user is refused it; nothing is read"),
+    ("tools/check_hook_scripts.py::leg_parity::open",
+     "reads the two committed source hook scripts under .aiqt/core/hooks/scripts (in the self-test, (a) their copies under its own tempfile scratch), in-root paths the D-400 precheck walk certifies; conversion to read_text_nonblocking is pending and tracked by this pin"),
+    ("tools/check_hook_scripts.py::rendered_entries::open",
+     "reads the committed generated plugin hooks.json (in the self-test, (a) its copy under its own tempfile scratch), an in-root path the D-400 precheck walk certifies; conversion to read_text_nonblocking is pending and tracked by this pin"),
+    ("tools/check_release_delta.py::_append::read_text",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/check_release_delta.py::_assert_gate_code_matches_head::read_bytes",
+     "reads one of the gate's own code files after requiring it to be committed in HEAD's tree, an in-root path the D-400 precheck walk certifies, to compare it with the committed blob; conversion to read_source_bytes is pending and tracked by this pin"),
+    ("tools/check_release_delta.py::_drift_entry_state::os.open",
+     "(c) both sites open with os.O_DIRECTORY (the components below the root also O_NOFOLLOW), so the open of anything but a directory fails at once and a directory open cannot block; the final entry is opened O_NONBLOCK | O_NOFOLLOW and is not counted; no file content is read through these two"),
+    ("tools/check_release_delta.py::_forge_one::read_bytes",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/check_release_delta.py::_post_release_e2e::read_bytes",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/check_release_delta.py::_post_release_e2e::read_text",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/check_release_delta.py::_post_smudge::read_bytes",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/check_release_delta.py::_post_staged::read_bytes",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/check_release_delta.py::_self_test_main_isolated::read_text",
+     _RAW_READ_SITE_TOOLS_OWN),
+    ("tools/gen_enforceability.py::_preview_docstring::read_bytes",
+     "the site lstat()s the in-root path first and refuses anything but a regular file (S_ISREG) before the read; the D-400 precheck walk certifies the tree; conversion to read_source_bytes is pending and tracked by this pin"),
+    ("tools/gen_enforceability.py::self_test_main::read_text",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/gen_enforcement_register.py::self_test_main::read_text",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/gen_hooks.py::_script_tree::read_text",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/gen_hooks.py::build_desired::read_bytes",
+     "reads each standalone hook script a manifest script row names from the committed .aiqt/core/hooks/scripts directory (a fixture tree in the self-test), an in-root path the D-400 precheck walk certifies; conversion to read_source_bytes is pending and tracked by this pin"),
+    ("tools/gen_hooks.py::run::read_bytes",
+     "reads the current in-root copy of a generated file, after an existence check, to compare it with the rendered content; the D-400 precheck walk certifies the tree; conversion to read_source_bytes is pending and tracked by this pin"),
+    ("tools/gen_hooks.py::self_test_main::read_bytes",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/gen_hooks.py::self_test_main::read_text",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/gen_rules.py::_load_reverted::read_text",
+     _RAW_READ_SITE_TOOLS_OWN),
+    ("tools/gen_rules.py::_yaml_adopter_agreement::read_bytes",
+     _RAW_READ_SITE_FIXTURE),
+    ("tools/gen_rules.py::agree::read_text",
+     "reads each committed rule source under .aiqt/core/rules (an in-root path the D-400 precheck walk certifies) and (a) each fuzz file the same self-test wrote under its own tempfile scratch; conversion to read_text_nonblocking is pending and tracked by this pin"),
+    ("tools/gen_rules.py::self_test_main::read_bytes",
+     _RAW_READ_SITE_FIXTURE),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_load_gensrc_registry::open",
      "(a) gate-reachable only through the hook self-tests and preview self-test runs, which point it at fixture state they created under tempfile scratch; a live interactive-session hook run is outside the registered gate roster; conversion to a local non-blocking reader is pending and tracked by this pin"),
     (".aiqt/core/hooks/scripts/aiqt_hooks.py::_orch_attestation_refs::open",
@@ -3622,6 +3835,35 @@ def _self_test_isolated(red_on_revert):
                 check("raw-read-lint-special-transitive-module-fails",
                       any("entry_b" in failure and "not a regular file" in failure
                           for failure in failures_special))
+            # An OPTIONAL third-party import resolves only when a listed importer guards it with
+            # an ImportError handler; unguarded, from another importer, under a handler that does
+            # not catch ImportError, or of an unlisted module, it still fails by name.
+            (lint_root / "tools" / "run_all_checks.sh").write_text(
+                "python3 -I -B tools/gen_rules.py\npython3 -I -B tools/entry_c.py\n",
+                encoding="utf-8")
+            manifest_path.write_text("", encoding="utf-8")
+            optional_cases = (
+                ("guarded", "def f():\n    try:\n        import yaml\n"
+                 "    except ImportError:\n        return None\n", "x = 1\n", ()),
+                ("guarded-tuple", "try:\n    import yaml\n"
+                 "except (OSError, ModuleNotFoundError):\n    yaml = None\n", "x = 1\n", ()),
+                ("unguarded", "import yaml\n", "x = 1\n", ("'yaml'",)),
+                ("wrong-handler", "try:\n    import yaml\nexcept ValueError:\n    pass\n",
+                 "x = 1\n", ("'yaml'",)),
+                ("unlisted-module", "try:\n    import tomlkit\nexcept ImportError:\n    pass\n",
+                 "x = 1\n", ("'tomlkit'",)),
+                ("unlisted-importer", "x = 1\n",
+                 "try:\n    import yaml\nexcept ImportError:\n    pass\n",
+                 ("'yaml' (imported by tools/entry_c.py)",)))
+            for label, rules_text, other_text, wanted in optional_cases:
+                (lint_root / "tools" / "gen_rules.py").write_text(rules_text, encoding="utf-8")
+                (lint_root / "tools" / "entry_c.py").write_text(other_text, encoding="utf-8")
+                _modules, failures_optional = _raw_read_modules(lint_root)
+                imports = [failure for failure in failures_optional
+                           if "neither a stdlib module" in failure]
+                check("raw-read-lint-optional-import-" + label,
+                      len(imports) == len(wanted)
+                      and all(any(text in failure for failure in imports) for text in wanted))
         lint_failures, lint_stats = _raw_read_lint(script.parents[1])
         for failure in lint_failures[:25]:
             print("FAIL " + failure, file=sys.stderr)
