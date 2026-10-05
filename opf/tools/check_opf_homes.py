@@ -32,16 +32,43 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
+import io
+import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_store as store  # noqa: E402
+import _containment  # noqa: E402  precheck_special_files (D-400-SPECIAL-FILE-PRECHECK)
 
 SPEC = Path(__file__).resolve().parents[1] / "spec" / "OPF-SPEC.md"
 QUICKSTART = SPEC.parent / "OPF-QUICKSTART.md"
 DISCLOSURE = SPEC.parents[1] / "site" / "disclosure.html"
+
+
+def _spec_text(path):
+    """SPEC (and each _SURFACE file) read through ONE O_NONBLOCK descriptor, fstat-checked S_ISREG:
+    defence in depth behind the D-400 special-file precheck, so a special file reached at such a path (for example through a
+    directory link the walk's git-ignored exemptions leave uncertified) is the named OSError refusal
+    (main() maps it to exit 2), never a blocking read. On a regular file the bytes and strict-UTF-8
+    universal-newline decode equal path.read_text(encoding="utf-8")."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+                 | getattr(os, "O_BINARY", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("{}: refused, not a regular file (a FIFO, device, socket, or directory); a "
+                          "plain read of it could block forever".format(path))
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return io.TextIOWrapper(io.BytesIO(b"".join(chunks)), encoding="utf-8").read()
 
 
 class _Descriptive(str):
@@ -901,7 +928,7 @@ def _surface_text(text):
 
 
 def surface_findings(texts=None):
-    texts = {path: path.read_text(encoding="utf-8") for path in _SURFACE} if texts is None else texts
+    texts = {path: _spec_text(path) for path in _SURFACE} if texts is None else texts
     findings = []
     for path, fragments in _SURFACE.items():
         body = _surface_text(texts[path])
@@ -2723,10 +2750,10 @@ def _self_test_vectors():
     check("inert-import", lambda: doctor.IMPORTS_REL == ".working/imports"
           and doctor._is_import_run_id("imp" + suffix) and not doctor._is_import_run_id("adopt" + suffix))
     check("inert-root-exclusions", lambda: store.STORE_ROOT_CONTROL_DIRS == (".git", ".aiqt"))
-    source = Path(store.__file__).read_text(encoding="utf-8")
+    source = _spec_text(Path(store.__file__))
     check("transitional-comment", lambda: "In homes 2, .aiqt is AIQT-only" in source
           and "Until homes 2 is activated, legacy import state still" in source)
-    text = SPEC.read_text(encoding="utf-8")
+    text = _spec_text(SPEC)
     check("spec-contract", lambda: not contract_findings(text))
     # The journal-only record kind is spec-pinned through the kind loop: deleting `record` from the
     # section 4.2 vocabulary sentence turns the gate red with the kind's own finding.
@@ -2785,7 +2812,7 @@ def _self_test_vectors():
                   nb.count(frag) == 1 and f in contract_findings(m))
     # Surface pins: the live files are green, each pin occurs exactly once in its normalized
     # text, and deleting that occurrence turns the gate red with the pin's own finding.
-    surfaces = {path: path.read_text(encoding="utf-8") for path in _SURFACE}
+    surfaces = {path: _spec_text(path) for path in _SURFACE}
     check("surface-contract", lambda: not surface_findings(surfaces))
     for path, fragments in _SURFACE.items():
         normalized = _surface_text(surfaces[path])
@@ -2848,6 +2875,61 @@ def _self_test_vectors():
                   not any(f.startswith("spec " + s + " missing contract") for f in contract_findings(m)))
         check("keyword-revert-spec-" + section + "-" + old, lambda p=pin, m=mutated, s=section:
               len(p) == 1 and "spec {} missing contract: {}".format(s, p[0]) in contract_findings(m))
+    # D-400-SPECIAL-FILE-PRECHECK: a copy of the opf/ subtree whose spec is a FIFO with no writer makes the
+    # default entry exit 2 naming it, bounded by the subprocess timeout (the alarm on a child). MUTATION:
+    # dropping the _containment.precheck_special_files call leaves SPEC.read_text blocked until the timeout.
+    if hasattr(os, "mkfifo"):
+        import shutil
+        import subprocess
+
+        def fifo_spec_refused():
+            with tempfile.TemporaryDirectory() as scratch:
+                tree = Path(scratch) / "opf"
+                shutil.copytree(SPEC.parents[1], tree, symlinks=True,
+                                ignore=shutil.ignore_patterns("__pycache__"))
+                spec = tree / SPEC.relative_to(SPEC.parents[1])
+                spec.unlink()
+                os.mkfifo(spec)
+                try:
+                    proc = subprocess.run([sys.executable, "-I", "-B", str(tree / "tools" / "check_opf_homes.py")],
+                                          cwd=scratch, capture_output=True, text=True, timeout=30)
+                except subprocess.TimeoutExpired:
+                    return False
+                return proc.returncode == 2 and str(spec) in proc.stderr
+        check("special-file-precheck-fifo-spec", fifo_spec_refused)
+
+        # The reader itself (defence in depth behind the precheck): _spec_text on a FIFO must be the
+        # named OSError refusal within the alarm, never a blocking read. MUTATION: reverting main()'s
+        # read (or this helper) to a plain read_text blocks; the alarm records the hang.
+        import signal
+
+        def fifo_spec_read_refused():
+            if not hasattr(signal, "SIGALRM"):
+                return True
+
+            class _Hang(Exception):
+                pass
+
+            def _on_alarm(_signum, _frame):
+                raise _Hang()
+
+            with tempfile.TemporaryDirectory() as scratch:
+                fifo = Path(scratch) / "spec.md"
+                os.mkfifo(fifo)
+                previous = signal.signal(signal.SIGALRM, _on_alarm)
+                signal.alarm(10)
+                try:
+                    try:
+                        _spec_text(fifo)
+                        return False
+                    except OSError as exc:
+                        return "not a regular file" in str(exc)
+                    except _Hang:
+                        return False
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous)
+        check("special-file-nonblocking-spec-read", fifo_spec_read_refused)
     for failure in failures:
         print("FAIL: " + failure)
     print("OPF-HOMES SELF-TEST: {} ({} checks)".format("FAILED" if failures else "OK", checked))
@@ -2862,8 +2944,8 @@ def main(argv=None):
         if args:
             print("check_opf_homes: unexpected arguments", file=sys.stderr)
             return 2
-        findings = (contract_findings(SPEC.read_text(encoding="utf-8")) + keyword_findings()
-                    + surface_findings())
+        _containment.precheck_special_files(SPEC.parents[1])
+        findings = contract_findings(_spec_text(SPEC)) + keyword_findings() + surface_findings()
         for finding in findings:
             print("check_opf_homes: " + finding)
         return 1 if findings else 0
@@ -2873,6 +2955,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # QA r5: self_test() itself maps an OSError out of a self-test read (for example the non-blocking
+    # SPEC reader refusing a FIFO reached through an accepted directory link) to the NAMED
+    # cannot-evaluate exit 2, never a raw traceback or a blocking read, as main() does.
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
     sys.exit(main())

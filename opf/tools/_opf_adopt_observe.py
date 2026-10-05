@@ -2362,8 +2362,9 @@ def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False):
     # this check too.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$observe_log" || exit 2
-if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
-    && [ "$3" = "$observe_test" ] && [ "$4" = "--self-test" ]; then
+if [ "$#" -eq 6 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
+    && [ "$3" = "-X" ] && [ "$4" = "pycache_prefix=/dev/null/aiqt-pycache" ] \
+    && [ "$5" = "$observe_test" ] && [ "$6" = "--self-test" ]; then
   if [ "$observe_scratch_only" -eq 1 ]; then
     printf '%s\n' "$observe_expected_output"
     exit "$observe_fail_own"
@@ -2491,7 +2492,8 @@ exit 0
         if any(basename in arg for arg in argv):
             own.append(argv)
     own_argv = tuple(os.fsencode(arg) for arg in (
-        "-I", "-B", env["observe_test"], "--self-test"))
+        "-I", "-B", "-X", "pycache_prefix=/dev/null/aiqt-pycache",
+        env["observe_test"], "--self-test"))
     if own and own != [own_argv]:
         raise AssertionError(identity + "/own-argv")
 

@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import repo_root, read_source_text, reconcile  # noqa: E402
 from gen_rules import parse_source, load_corpus, CID_RE, SLUG_RE  # noqa: E402
 
 SOURCE_REL = ".aiqt/core/profiles/worker-pack.md"
@@ -74,7 +74,7 @@ def render(root):
         raise ValueError("{}: restates corpus-id(s) {} no longer resolve in .aiqt/core/rules/; "
                          "retiring or renaming a restated rule id forces a pack review".format(
                              src.name, ", ".join(missing)))
-    text = src.read_text(encoding="utf-8")
+    text = read_source_text(src)
     body = text[text.find("\n---\n", 4) + 5:].lstrip("\n")
     if not body.startswith("# "):
         raise ValueError("{}: pack body has no '# ' H1 title".format(src.name))

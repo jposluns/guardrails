@@ -29,7 +29,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _walk import walk_files, read_text_nonblocking  # noqa: E402  fail-closed tree walk and non-blocking read
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 EN, EM = "–", "—"
 # Site host from AIQT_SITE_HOST (default, and empty-value fallback, aiqt.ai; lowercased), so a
@@ -358,7 +359,7 @@ def run(root):
 
 
 def main():
-    return run(Path(__file__).resolve().parents[1])
+    return run(precheck_special_files(Path(__file__).resolve().parents[1]))
 
 
 def _scan_root(root, subdir):
@@ -375,7 +376,8 @@ def _scan_root(root, subdir):
     for f in html_files:
         rel = f.relative_to(root)
         try:
-            text = f.read_text(encoding="utf-8")
+            # non-blocking: a special file in the walked directory must refuse, never block.
+            text = read_text_nonblocking(f)
         except UnicodeDecodeError:
             findings.append("{}: could not read as UTF-8".format(rel))
             continue

@@ -719,7 +719,9 @@ def main():
         return 2
     if "--self-test" in argv:
         return self_test_main()
-    return run(_repo_root())
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+    return run(precheck_special_files(_repo_root()))
 
 
 if __name__ == "__main__":

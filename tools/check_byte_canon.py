@@ -27,7 +27,9 @@ Exit convention (matches the repo's gates):
      supported-platform claim), fail-closed
 """
 import base64
+import contextlib
 import hashlib
+import io
 import re
 import subprocess
 import sys
@@ -590,11 +592,14 @@ def self_test_main():
     class _Proc:
         def __init__(self, stdout):
             self.returncode, self.stdout, self.stderr = 0, stdout, b""
+    # The root is derived BEFORE the fakes go in: repo_root() asks git rev-parse to confirm it, and a
+    # fake meant for check-attr must not answer that query (it would test the root leg, not this one).
+    attr_root = repo_root()
     saved_run = subprocess.run
     try:
         subprocess.run = _boom
         try:
-            effective_attributes(repo_root(), {"README.md"})
+            effective_attributes(attr_root, {"README.md"})
             failures.append("a check-attr launch failure did not fail closed")
         except GateError:
             pass
@@ -602,12 +607,33 @@ def self_test_main():
             failures.append("check-attr launch failure raised {!r} not GateError".format(exc))
         subprocess.run = lambda *a, **k: _Proc(b"README.md\x00text\x00set\x00")  # too few fields
         try:
-            effective_attributes(repo_root(), {"README.md"})
+            effective_attributes(attr_root, {"README.md"})
             failures.append("a malformed check-attr response did not fail closed")
         except GateError:
             pass
         except Exception as exc:
             failures.append("malformed check-attr response raised {!r} not GateError".format(exc))
+        # The root leg, in both precheck copies: a rev-parse answer that is not one NUL-free absolute
+        # path (an embedded NUL, two lines, a relative path) is cannot-evaluate, exit 2, by name; never
+        # a raw ValueError out of os.path.realpath (the pre-fix escape) and never read as git-absent (a
+        # skipped confirmation).
+        legs = (("repo_root", repo_root),
+                ("_containment._git_toplevel", lambda: _containment._git_toplevel(attr_root)))
+        for bad in (b"README.md\x00text\x00set\x00", str(attr_root).encode() + b"\x00x\n",
+                    str(attr_root).encode() + b"\n/elsewhere\n", b"relative/root\n"):
+            subprocess.run = lambda *a, _bad=bad, **k: _Proc(_bad)
+            for leg, call in legs:
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        call()
+                    failures.append("{}: a malformed rev-parse root {!r} did not fail closed".format(leg, bad))
+                except SystemExit as exc:
+                    if exc.code != 2:
+                        failures.append("{}: a malformed rev-parse root {!r} exited {!r}, not 2".format(
+                            leg, bad, exc.code))
+                except Exception as exc:
+                    failures.append("{}: a malformed rev-parse root {!r} raised {!r}, not exit 2".format(
+                        leg, bad, exc))
     finally:
         subprocess.run = saved_run
     # _load_vectors strict rows (FIX 6): a malformed row and a missing required class each fail closed.

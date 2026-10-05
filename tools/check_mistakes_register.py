@@ -37,6 +37,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
+from _walk import read_text_nonblocking  # noqa: E402  QA r5: a declared register, registry or
+# anchor path can be ignored or planted content; the shared O_NONBLOCK fstat-checked reader
+# refuses a special file there by name (exit 2 through the OSError arms) instead of blocking.
 
 REGISTRY_FILES = (".aiqt/orchestration.local.json", ".aiqt/orchestration.json")
 STATUSES = ("proposed", "accepted", "landed", "declined", "superseded")
@@ -152,7 +155,7 @@ def verify_append_only(root, path, lines, allow_missing_anchor=False):
                              "establish the baseline (an absent authority is not a clean result)")
     if anchor.exists():
         try:
-            a = json.loads(anchor.read_text(encoding="utf-8"))
+            a = json.loads(read_text_nonblocking(anchor))
             n, digest = int(a["seq"]), str(a["digest"])
         except (OSError, ValueError, KeyError, TypeError):
             return ["the anchor file is unreadable or malformed (fail-closed)"]
@@ -176,7 +179,7 @@ def run(root, update=False):
         p = Path(root) / rel
         if p.exists():
             try:
-                reg = json.loads(p.read_text(encoding="utf-8"))
+                reg = json.loads(read_text_nonblocking(p))
             except (OSError, ValueError) as exc:
                 print("error: cannot read the orchestration registry: {}".format(exc))
                 return 2
@@ -194,7 +197,7 @@ def run(root, update=False):
     for key, prefix, declared in surfaces:
         path = Path(declared) if os.path.isabs(declared) else Path(root) / declared
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = read_text_nonblocking(path).splitlines()
         except OSError as exc:
             print("error: the DECLARED {} is unreadable ({}); fail-closed".format(key, exc))
             return 2

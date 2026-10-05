@@ -24,6 +24,11 @@ import re
 import runpy
 from pathlib import Path
 
+# Import the sibling containment module WITHOUT placing this script's own directory ahead of the stdlib
+# on sys.path (the house append idiom keeps stdlib precedence under `python3 -I`).
+sys.path.append(str(Path(__file__).resolve().parent))
+import _containment  # noqa: E402  precheck_special_files (D-400-SPECIAL-FILE-PRECHECK)
+
 ROOT = Path(__file__).resolve().parents[2]
 
 ACTOR_LINE = 'ACTOR_KINDS = ("maintainer", "assistant", "automation", "importer")'
@@ -268,4 +273,7 @@ def _self_test():
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         _self_test()
+    # D-400-SPECIAL-FILE-PRECHECK before the live leg reads any repository file (runpy on the validator
+    # source above all), so this gate can never block on a plain read of a FIFO planted in the tree.
+    _containment.precheck_special_files(ROOT)
     _checks()

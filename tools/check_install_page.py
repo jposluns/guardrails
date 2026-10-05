@@ -635,7 +635,9 @@ def _self_test():
 def main():
     if "--self-test" in sys.argv[1:]:
         return _self_test()
-    return run(Path(__file__).resolve().parents[1])
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _gen_common import precheck_special_files  # D-400-SPECIAL-FILE-PRECHECK: refuse a special file first
+    return run(precheck_special_files(Path(__file__).resolve().parents[1]))
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: check_manifest.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml  # noqa: E402
+from _gen_common import repo_root, load_toml, read_source_bytes, reconcile, precheck_special_files  # noqa: E402
 import gen_manifest  # noqa: E402  reuse the validated loader/expansion; recompute, never trust output
 
 _OPF_TOOLS = str(Path(__file__).resolve().parent.parent / "opf" / "tools")
@@ -102,8 +102,7 @@ def load_manifest(root):
     from _opf_adopt import VALID
 
     try:
-        with (root / gen_manifest.MANIFEST_REL).open("rb") as stream:
-            raw = stream.read(MAX_FILE_BYTES + 1)
+        raw = read_source_bytes(root / gen_manifest.MANIFEST_REL, MAX_FILE_BYTES + 1)
     except (OSError, ValueError) as exc:
         raise gen_manifest.GateError(
             "cannot read the manifest ({})".format(exc)
@@ -268,7 +267,7 @@ def run(root, anchored=False):
             if row["path"] not in classes:
                 continue  # already a finding above
             try:
-                data = (root / row["path"]).read_bytes()
+                data = read_source_bytes(root / row["path"])  # a FIFO is refused, never blocks
             except OSError as exc:
                 raise gen_manifest.GateError("cannot read SOURCES member {} ({})".format(row["path"], exc))
             if len(data) != row["bytes"] or hashlib.sha256(data).hexdigest() != row["sha256"]:
@@ -295,9 +294,9 @@ def run(root, anchored=False):
         if tree != manifest["tree-sha256"]:
             findings.append("tree-sha256 does not recompute from the SOURCES rows")
         try:
-            manifest_raw = (root / gen_manifest.MANIFEST_REL).read_bytes()
-            root_disk = (root / gen_manifest.ROOT_REL).read_bytes()
-            snippet_disk = (root / gen_manifest.SNIPPET_REL).read_bytes()
+            manifest_raw = read_source_bytes(root / gen_manifest.MANIFEST_REL)
+            root_disk = read_source_bytes(root / gen_manifest.ROOT_REL)
+            snippet_disk = read_source_bytes(root / gen_manifest.SNIPPET_REL)
         except OSError as exc:
             raise gen_manifest.GateError("cannot read a derived release artifact ({})".format(exc))
         root_hex = hashlib.sha256(manifest_raw).hexdigest()
@@ -342,7 +341,7 @@ def main():
         if i + 1 >= len(args):
             print("usage: check_manifest.py [--root DIR] [--anchored] | --self-test", file=sys.stderr)
             return 2
-        root = Path(args[i + 1]).resolve()
+        root = precheck_special_files(Path(args[i + 1]).resolve())
     return run(root, anchored="--anchored" in args)
 
 
@@ -359,6 +358,35 @@ def main():
 #       change with an unchanged block still passes (exit 0);
 #   (h) an order record disagreeing with the operative constants -> exit 1.
 
+def _copy_live_tree(src, dst):
+    """Copy a checked tree for a self-test fixture, leaving out .git, __pycache__ and every symlink
+    that resolves to a directory OUTSIDE src (QA round 6, claude M5): the live precheck already
+    certified src, so a surviving out-of-root directory link is an ACCEPTED ignored non-shadowing
+    one (a developer's .venv); copying it (or resolving it) into a fixture that loses the source's
+    git ignore status would make the fixture's precheck refuse a layout the live precheck accepts.
+    Every other symlink is copied as a link (symlinks=True), never resolved."""
+    import shutil
+    src_real = os.path.realpath(src)
+
+    def _skip(dirpath, names):
+        skipped = set(name for name in names if name in (".git", "__pycache__"))
+        for name in names:
+            path = os.path.join(dirpath, name)
+            if name in skipped or not os.path.islink(path):
+                continue
+            try:
+                if not os.path.isdir(path):
+                    continue
+            except OSError:
+                continue
+            real = os.path.realpath(path)
+            if real != src_real and not real.startswith(src_real + os.sep):
+                skipped.add(name)
+        return skipped
+
+    shutil.copytree(src, dst, symlinks=True, ignore=_skip)
+
+
 def self_test_main():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from _git_fixture_env import fixture_git_lifecycle
@@ -366,9 +394,139 @@ def self_test_main():
         return _self_test_main_isolated()
 
 
+def _precheck_copies_problems(gen_text, opf_text):
+    """D-400-SPECIAL-FILE-PRECHECK: the precheck section of tools/_gen_common.py and its copy in
+    opf/tools/_containment.py (the standalone OPF pack may not import tools/) must stay in step. The
+    COMPARED SURFACE is the whole section: the helpers and the function (_git_lines, _git_toplevel,
+    _ignored_paths, _derive_precheck_root, precheck_special_files; docstrings set aside), the module
+    tables (_PRECHECKED_ROOTS, _SPECIAL_KINDS), and the __main__ entry block, each equal between the
+    two modules as parsed trees. Beyond equality, each MODULE is held to shape rules that keep the
+    compared definitions the OPERATIVE ones at import and at --precheck time: each compared name is
+    bound exactly once anywhere in the module (a later `precheck_special_files = lambda root: root`
+    would silently replace the compared function); no statement stores to or deletes an ATTRIBUTE
+    anywhere (an `os.walk = ...` swap); no call anywhere to globals, vars, locals, exec, eval, setattr
+    or delattr (a `globals()["precheck_special_files"] = ...` rebinding); no star import; exactly one
+    `if __name__ == "__main__"` block, which must be the LAST top-level statement; and no OTHER
+    top-level statement that executes at import may reference a compared name (a top-level
+    `_PRECHECKED_ROOTS.add(...)` that pre-fills the cache and turns the walk into a no-op), where a
+    function definition executes only its decorators and argument defaults and a class body executes
+    whole. These rules catch the NAMED mutation classes, not every conceivable one: top-level code
+    that touches neither a compared name nor a banned call (an unconditional sys.exit before the
+    __main__ block) is outside them, and is caught, if at all, by the self-test vectors that run each
+    --precheck entry point as a subprocess against hostile trees. Returns the problems, empty when
+    the two copies are in step."""
+    import ast
+
+    guarded = ("precheck_special_files", "_PRECHECKED_ROOTS", "_SPECIAL_KINDS", "_git_lines",
+               "_git_toplevel", "_ignored_paths", "_derive_precheck_root")
+    tables = ("_PRECHECKED_ROOTS", "_SPECIAL_KINDS")
+    banned_calls = ("globals", "vars", "locals", "exec", "eval", "setattr", "delattr")
+
+    def is_main_guard(node):
+        return (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name) and node.test.left.id == "__name__"
+                and len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.Eq)
+                and len(node.test.comparators) == 1
+                and isinstance(node.test.comparators[0], ast.Constant)
+                and node.test.comparators[0].value == "__main__")
+
+    def guarded_reference(nodes):
+        for node in nodes:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Name) and sub.id in guarded:
+                    return sub.id
+        return None
+
+    def shape_problems(text, label, problems):
+        tree = ast.parse(text)
+        bindings = dict.fromkeys(guarded, 0)
+        for sub in ast.walk(tree):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)) \
+                    and sub.id in bindings:
+                bindings[sub.id] += 1
+            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                    and sub.name in bindings:
+                bindings[sub.name] += 1
+            elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                for alias in sub.names:
+                    if alias.name == "*":
+                        problems.append("{} uses a star import, which can rebind any compared name "
+                                        "invisibly".format(label))
+                    if (alias.asname or alias.name) in bindings:
+                        bindings[alias.asname or alias.name] += 1
+            elif isinstance(sub, ast.Attribute) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+                problems.append("{} stores to or deletes an attribute ({}.{}), which can rebind a "
+                                "dependency (an os.walk swap) out from under the compared function".format(
+                                    label, getattr(sub.value, "id", "<expr>"), sub.attr))
+            elif isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) \
+                    and sub.func.id in banned_calls:
+                problems.append("{} calls {}(), which can rebind or replace a compared definition out "
+                                "of band".format(label, sub.func.id))
+        for name, count in bindings.items():
+            if count > 1:
+                problems.append("{} binds {} {} times; a later rebinding would silently replace the "
+                                "compared definition".format(label, name, count))
+        mains = [node for node in tree.body if is_main_guard(node)]
+        if len(mains) != 1:
+            problems.append("{} must hold exactly one __main__ entry block, found {}".format(
+                label, len(mains)))
+        elif tree.body[-1] is not mains[0]:
+            problems.append("{}: the __main__ entry block must be the LAST top-level statement; "
+                            "top-level code after it still executes".format(label))
+        for node in tree.body:
+            if mains and node is mains[0]:
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                surface = (list(node.decorator_list) + list(node.args.defaults)
+                           + [default for default in node.args.kw_defaults if default is not None])
+                hit = guarded_reference(surface)
+            elif isinstance(node, ast.ClassDef):
+                hit = guarded_reference([node])
+            elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id in guarded):
+                hit = guarded_reference([node.value])
+            else:
+                hit = guarded_reference([node])
+            if hit:
+                problems.append("{} references {} in top-level code outside the compared definitions "
+                                "and the __main__ block; that code executes at import and can "
+                                "pre-fill or bypass the compared state".format(label, hit))
+
+    def parts(text):
+        found = {}
+        for node in ast.parse(text).body:
+            if isinstance(node, ast.FunctionDef) and node.name in guarded:
+                body = node.body
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    body = body[1:]
+                found[node.name] = ast.dump(node.args) + ast.dump(ast.Module(body=body, type_ignores=[])) \
+                    + "".join(ast.dump(d) for d in node.decorator_list)
+            elif isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name) \
+                    and node.targets[0].id in tables:
+                found[node.targets[0].id] = ast.dump(node.value)
+            elif is_main_guard(node):
+                found["__main__"] = ast.dump(node)
+        return found
+
+    problems = []
+    shape_problems(gen_text, "_gen_common", problems)
+    shape_problems(opf_text, "_containment", problems)
+    gen, opf = parts(gen_text), parts(opf_text)
+    for name in guarded + ("__main__",):
+        if name not in gen or name not in opf:
+            problems.append("{} missing from {}".format(
+                name, " and ".join(w for w, p in (("_gen_common", gen), ("_containment", opf)) if name not in p)))
+        elif gen[name] != opf[name]:
+            problems.append("{} differs".format(name))
+    return problems
+
 def _self_test_main_isolated():
     import io
     import shutil
+    import signal
     import tempfile
     from contextlib import redirect_stdout, redirect_stderr
 
@@ -418,6 +576,30 @@ def _self_test_main_isolated():
     def gen_quiet(root):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return gm.run(root, check=False)
+
+    class _Hang(Exception):
+        pass
+
+    def _on_alarm(_signum, _frame):
+        raise _Hang()
+
+    def check_bounded(root, seconds=10):
+        """run(root) under a SIGALRM bound: (exit code, captured stderr), or ("hung", ...) when a read
+        blocked past the bound (the F-CORPUS-FIFO-HANG regression)."""
+        err = io.StringIO()
+        previous = signal.signal(signal.SIGALRM, _on_alarm)
+        signal.alarm(seconds)
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = run(root)
+        except _Hang:
+            rc = "hung"
+        except SystemExit as exc:
+            rc = "raised SystemExit({!r})".format(exc.code)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        return rc, err.getvalue()
 
     def _fresh(name, **kw):
         base = gm._build_fixture(Path(tmp) / name, **kw)
@@ -633,6 +815,949 @@ def _self_test_main_isolated():
         if check_quiet(cmmode) != 2:
             failures.append("F-236: check_manifest independently rejects an output at index mode 100755 "
                             "(exit 2)")
+
+        # (l) F-CORPUS-FIFO-HANG: a FIFO (no writer) at a SOURCES member and at a TOML record the gate
+        #     loads must be the named refusal (exit 2, "not a regular file") inside a bounded alarm, never a
+        #     blocking read. MUTATION: reverting _gen_common.read_source_bytes to a plain open/read blocks
+        #     here and the alarm records the hang. POSIX only (os.mkfifo, SIGALRM).
+        if hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"):
+            for label, rel in (("a SOURCES member", "src.txt"),
+                               ("a TOML record", ".aiqt/core/order.toml")):
+                ff = _fresh("fifo-" + rel.replace("/", "-"))
+                os.unlink(ff / rel)
+                os.mkfifo(ff / rel)
+                rc, err = check_bounded(ff)
+                if rc != 2 or "not a regular file" not in err:
+                    failures.append("F-CORPUS-FIFO-HANG: a FIFO at {} expected the named refusal (exit 2, "
+                                    "'not a regular file') within the alarm, got {!r}".format(label, rc))
+            # (m) The TOML-record case above is refused at the SOURCES read before load_toml opens it, so it
+            #     cannot guard load_toml: call load_toml on a FIFO directly. MUTATION: reverting load_toml
+            #     alone to open(path, "rb") blocks here and the alarm records the hang.
+            (tmp / "load-toml-fifo").mkdir()
+            os.mkfifo(tmp / "load-toml-fifo" / "record.toml")
+            previous = signal.signal(signal.SIGALRM, _on_alarm)
+            signal.alarm(10)
+            try:
+                load_toml(tmp / "load-toml-fifo" / "record.toml")
+                outcome = "loaded"
+            except _Hang:
+                outcome = "hung"
+            except OSError as exc:
+                outcome = "refused" if "not a regular file" in str(exc) else "OSError {}".format(exc)
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, previous)
+            if outcome != "refused":
+                failures.append("F-CORPUS-FIFO-HANG: load_toml on a FIFO expected the named refusal ('not a "
+                                "regular file') within the alarm, got {!r}".format(outcome))
+
+        # (n) D-400-SPECIAL-FILE-PRECHECK item 4: _gen_common.reconcile refuses a target that is a symlink (even
+        #     to identical bytes) or not a regular file, exit 2, in check and write mode; write mode never
+        #     writes through the link. MUTATION: restoring the path.exists()/read_text read passes the symlink.
+        rdir = tmp / "reconcile-targets"
+        rdir.mkdir()
+        (rdir / "real.toml").write_text("same\n", encoding="utf-8")
+        (rdir / "link.toml").symlink_to(rdir / "real.toml")
+        (rdir / "dir.toml").mkdir()
+        for label, target, check in (("a symlinked target (check)", rdir / "link.toml", True),
+                                     ("a symlinked target (write)", rdir / "link.toml", False),
+                                     ("a directory target (check)", rdir / "dir.toml", True)):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                try:
+                    got = "returned {!r}".format(reconcile(target, "changed\n" if not check else "same\n", check))
+                except SystemExit as exc:
+                    got = exc.code
+            if got != 2:
+                failures.append("reconcile on {} expected exit 2 (refused), got {!r}".format(label, got))
+        if (rdir / "real.toml").read_text(encoding="utf-8") != "same\n":
+            failures.append("reconcile wrote through a symlinked target")
+
+        # (o) D-400-SPECIAL-FILE-PRECHECK item 6: with a FIFO (no writer) at any path of the tree, each of these
+        #     tools exits 2 naming that path at the shared repo_root() precheck, bounded by a timeout. The
+        #     tree is a copy of this repository, git-init'd so the copied tools' fixed-location root
+        #     derivation is CONFIRMED by rev-parse on the copy itself (repo_root() never trusts a .git
+        #     marker). MUTATION: making precheck_special_files a no-op leaves
+        #     check_versions/check_byte_canon/gen_manifest/conformance hanging or passing on these paths.
+        if hasattr(os, "mkfifo"):
+            import subprocess
+            tree = tmp / "precheck-tree"
+            try:
+                _copy_live_tree(repo_root(), tree)
+            except (shutil.Error, OSError) as exc:
+                # claude m1 (QA r5): a special or unreadable entry the live precheck allowed (for
+                # example a socket created in an ignored directory after the walk ran) must be the
+                # NAMED fail-closed exit, never a raw shutil.Error traceback.
+                print("error: cannot copy the live tree for the precheck fixture ({}); "
+                      "fail-closed by design: a special or unreadable entry the live walk could "
+                      "not refuse (for example one created after it ran) stops this self-test; "
+                      "remove it or make it readable".format(exc), file=sys.stderr)
+                raise SystemExit(2)
+            if gm._git(tree, "init", "-q").returncode != 0:
+                failures.append("D-400-SPECIAL-FILE-PRECHECK: cannot git-init the precheck tree copy")
+            tools = (["check_manifest.py"], ["gen_manifest.py", "--check"], ["gen_rules.py", "--check"],
+                     ["conformance.py"], ["check_versions.py"], ["check_byte_canon.py"])
+            for rel in ("tools/gen_agents.py", ".claude/rules/aiqt/00-project-integrity.md", "CLAUDE.md",
+                        ".aiqt/manifest.toml", ".aiqt/standards/atlas.toml", "VERSION"):
+                saved = (tree / rel).read_bytes()
+                (tree / rel).unlink()
+                os.mkfifo(tree / rel)
+                try:
+                    for cmd in tools:
+                        try:
+                            proc = subprocess.run([sys.executable, "-I", "-B", str(tree / "tools" / cmd[0]),
+                                                   *cmd[1:]], cwd=tree, capture_output=True, text=True,
+                                                  timeout=10)
+                            got, err = proc.returncode, proc.stderr
+                        except subprocess.TimeoutExpired:
+                            got, err = "hung", ""
+                        if got != 2 or str(tree / rel) not in err:
+                            failures.append("D-400-SPECIAL-FILE-PRECHECK: a FIFO at {} expected {} to exit 2 "
+                                            "naming it, got {!r}".format(rel, " ".join(cmd), got))
+                finally:
+                    (tree / rel).unlink()
+                    (tree / rel).write_bytes(saved)
+            # (p) D-400-SPECIAL-FILE-PRECHECK follow-up: the gates that find their root on their own run the
+            #     same precheck on that root. One stray FIFO that no tool reads makes each exit 2 naming it;
+            #     each run is bounded by the subprocess timeout, the alarm on a child. MUTATION: making
+            #     precheck_special_files a no-op, or dropping its call from one of these gates, lets that
+            #     gate run on (another exit, or no mention of the FIFO).
+            stray = tree / ".aiqt" / "stray-precheck.fifo"
+            os.mkfifo(stray)
+            try:
+                for cmd in (["check_ci_parity.py"], ["check_msg_leaks.py"], ["check_python_floor.py"],
+                            ["check_portability.py"], ["check_selftest_execution.py", "--suite", "demo"],
+                            ["check_hooks_preview.py"], ["check_python_launcher_isolation.py"],
+                            ["check_git_option_table.py"], ["check_record_sections.py"]):
+                    try:
+                        proc = subprocess.run([sys.executable, "-I", "-B", str(tree / "tools" / cmd[0]),
+                                               *cmd[1:]], cwd=tree, capture_output=True, text=True, timeout=30)
+                        got, err = proc.returncode, proc.stderr
+                    except subprocess.TimeoutExpired:
+                        got, err = "hung", ""
+                    if got != 2 or str(stray) not in err:
+                        failures.append("D-400-SPECIAL-FILE-PRECHECK: a stray FIFO in the tree expected {} to "
+                                        "exit 2 naming it, got {!r}".format(" ".join(cmd), got))
+            finally:
+                stray.unlink()
+
+        # (q) The OPF copy of the precheck (opf/tools/_containment.py) stays identical to _gen_common's, and a
+        #     one-token change to the copy is caught.
+        here = Path(__file__).resolve().parents[1]
+        gen_text = (here / "tools" / "_gen_common.py").read_text(encoding="utf-8")
+        opf_text = (here / "opf" / "tools" / "_containment.py").read_text(encoding="utf-8")
+        problems = _precheck_copies_problems(gen_text, opf_text)
+        if problems:
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: the two precheck copies differ: {}".format(
+                "; ".join(problems)))
+        if not _precheck_copies_problems(gen_text, opf_text.replace("raise SystemExit(2)", "raise SystemExit(1)", 1)):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a changed exit code in the OPF precheck copy was not "
+                            "caught by the copy comparison")
+        rebound = opf_text + "\n\nprecheck_special_files = lambda root: root\n"
+        if not _precheck_copies_problems(gen_text, rebound):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a later rebinding of the OPF precheck copy (an "
+                            "appended lambda) was not caught by the copy comparison")
+        swapped = opf_text + "\n\nos.walk = precheck_special_files\n"
+        if not _precheck_copies_problems(gen_text, swapped):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a module-level attribute rebinding (an os.walk "
+                            "swap) in the OPF precheck copy was not caught by the copy comparison")
+        rebound_globals = opf_text + "\n\nglobals()[\"precheck_special_files\"] = lambda root: root\n"
+        if not _precheck_copies_problems(gen_text, rebound_globals):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a globals() rebinding appended to the OPF "
+                            "precheck copy was not caught by the copy comparison")
+        prefilled = opf_text + ("\n\n_PRECHECKED_ROOTS.add(os.path.abspath("
+                                "Path(__file__).resolve().parents[2]))\n")
+        if not _precheck_copies_problems(gen_text, prefilled):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a top-level _PRECHECKED_ROOTS.add() that "
+                            "pre-fills the cache was not caught by the copy comparison")
+        diverged_main = opf_text.replace("    precheck_special_files(_root)\n", "    pass\n", 1)
+        if opf_text.count("    precheck_special_files(_root)\n") != 1 \
+                or not _precheck_copies_problems(gen_text, diverged_main):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a neutered __main__ block in the OPF precheck "
+                            "copy was not caught by the copy comparison")
+
+        # codex round-4 findings 4 and 5, both precheck copies: a rev-parse answer with more than one
+        # trailing newline is MALFORMED (exit 2, not exactly one line), never silently accepted as a
+        # root, while exactly one trailing newline stays accepted; and a root no path call accepts (an
+        # embedded NUL) is git-cannot-answer (None), never a raw ValueError out of _git_lines.
+        import _gen_common as _gc
+        import _containment as _ct
+        for _label, _mod in (("_gen_common", _gc), ("_containment", _ct)):
+            with patch.object(_mod, "_git_lines", lambda root, args: b"/tmp\n\n"):
+                try:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        got = _mod._git_toplevel(".")
+                except SystemExit as exc:
+                    got = exc.code
+                if got != 2:
+                    failures.append("{}: a two-newline rev-parse answer expected exit 2, got {!r}"
+                                    .format(_label, got))
+            with patch.object(_mod, "_git_lines", lambda root, args: b"/tmp\n"):
+                if _mod._git_toplevel(".") != os.path.realpath("/tmp"):
+                    failures.append("{}: a one-trailing-newline rev-parse answer must stay "
+                                    "accepted".format(_label))
+            try:
+                got = _mod._git_toplevel("/tmp/a\x00b")
+                got_ignored = _mod._ignored_paths("/tmp/a\x00b")
+            except ValueError as exc:
+                got = got_ignored = "raised {!r}".format(exc)
+            if got is not None or got_ignored is not None:
+                failures.append("{}: a NUL root must be git-cannot-answer (None), got {!r} and {!r}"
+                                .format(_label, got, got_ignored))
+
+        # D-400 fixture env, QA round 2 (MINOR-3), both precheck copies: the ownership branch of
+        # _git_lines, driven directly with subprocess.run patched to record the child environment.
+        # OWNED (a scratch root this user owns): the caller's global and system configuration are
+        # pinned away (HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM at os.devnull,
+        # GIT_CONFIG_NOSYSTEM=1). NOT OWNED (os.geteuid patched to another uid): the caller's HOME
+        # stands and no config pin is added, the disclosed residual. A git refusal reported as
+        # dubious ownership is exit 2 on the owned root and None (git-absent) on the not-owned one.
+        # MUTATIONS: dropping the pin fails the owned vector; pinning unconditionally fails the
+        # not-owned vector; reading the owned dubious-ownership refusal as None fails the refusal
+        # vector; refusing it on a not-owned root fails the not-owned refusal vector.
+        import subprocess
+        _pins = dict(HOME=os.devnull, XDG_CONFIG_HOME=os.devnull, GIT_CONFIG_GLOBAL=os.devnull,
+                     GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        _caller = dict(HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg")
+        _dubious = b"fatal: detected dubious ownership in repository at '/x'\n"
+        with tempfile.TemporaryDirectory(prefix="aiqt-git-owner-") as _owned_root:
+            _own_uid = os.stat(_owned_root).st_uid
+            for _label, _mod in (("_gen_common", _gc), ("_containment", _ct)):
+                for _branch, _euid in (("owned", _own_uid), ("not-owned", _own_uid + 1)):
+                    for _rc, _err in ((0, b""), (128, _dubious)):
+                        _seen = []
+
+                        def _fake_run(argv, **kwargs):
+                            _seen.append(kwargs.get("env"))
+                            return subprocess.CompletedProcess(argv, _rc, b"answer\n", _err)
+                        _errs = io.StringIO()
+                        try:
+                            with patch.dict(os.environ, _caller), patch.object(subprocess, "run", _fake_run), \
+                                    patch.object(os, "geteuid", lambda: _euid), \
+                                    redirect_stdout(io.StringIO()), redirect_stderr(_errs):
+                                got = _mod._git_lines(_owned_root, ["rev-parse", "--show-toplevel"])
+                        except SystemExit as exc:
+                            got = "exit " + repr(exc.code)
+                        env = _seen[0] if len(_seen) == 1 and isinstance(_seen[0], dict) else dict()
+                        shown = dict((key, env.get(key)) for key in _pins)
+                        pinned = all(env.get(key) == value for key, value in _pins.items())
+                        kept = (env.get("HOME") == "/caller-home"
+                                and not any(key.startswith("GIT_CONFIG") for key in env))
+                        want = (b"answer\n" if _rc == 0
+                                else ("exit 2" if _branch == "owned" else None))
+                        if _branch == "owned" and not pinned:
+                            failures.append("D-400 fixture env, {}: on an owned root the caller's "
+                                            "global and system git configuration must be pinned "
+                                            "away, got env {}".format(_label, shown))
+                        if _branch == "not-owned" and not kept:
+                            failures.append("D-400 fixture env, {}: on a root another uid owns the "
+                                            "caller's git configuration must stand unpinned, got "
+                                            "env {}".format(_label, shown))
+                        if got != want:
+                            failures.append("D-400 fixture env, {}: {} root, git rc {}: expected {!r}, "
+                                            "got {!r}".format(_label, _branch, _rc, want, got))
+                        if got == "exit 2" and "dubious ownership" not in _errs.getvalue():
+                            failures.append("D-400 fixture env, {}: the owned-root dubious-ownership "
+                                            "refusal must name its cause, got {!r} on stderr"
+                                            .format(_label, _errs.getvalue()))
+
+        # (r) D-400-SPECIAL-FILE-PRECHECK rulings 1, 2 and 5: each --precheck ENTRY POINT, run as a
+        #     SUBPROCESS against hostile trees built around the real module files, asserting the exit
+        #     code and the named path. The trees are git-init'd so the fixed-location root derivation
+        #     is confirmed by rev-parse on the tree itself and the ignore filter is live; the planted
+        #     nested .git case proves a marker cannot narrow the root; the venv-like and dangling-link
+        #     cases prove the hazard-scoped rules do not over-refuse. The final two trees run a
+        #     MUTATED module (a neutered __main__ call; refusals turned into returns) and must then
+        #     PASS the FIFO tree, proving these subprocess vectors discriminate on exactly the rules
+        #     they pin. POSIX only (os.mkfifo).
+        if hasattr(os, "mkfifo"):
+            _entry_src = dict(
+                gen=(here / "tools" / "_gen_common.py").read_bytes(),
+                opf=(here / "opf" / "tools" / "_containment.py").read_bytes())
+
+            def _mini_tree(name):
+                base = tmp / ("precheck-entry-" + name)
+                (base / "tools").mkdir(parents=True)
+                (base / "tools" / "_gen_common.py").write_bytes(_entry_src["gen"])
+                (base / "opf" / "tools").mkdir(parents=True)
+                (base / "opf" / "tools" / "_containment.py").write_bytes(_entry_src["opf"])
+                (base / "README.md").write_text("mini\n", encoding="utf-8")
+                if gm._git(base, "init", "-q").returncode != 0:
+                    return None
+                return base
+
+            def _entry_run(base, which, extra_env=None):
+                script = base / ("tools/_gen_common.py" if which == "gen"
+                                 else "opf/tools/_containment.py")
+                env = None
+                if extra_env is not None:
+                    env = dict(os.environ)
+                    env.update(extra_env)
+                try:
+                    proc = subprocess.run([sys.executable, "-I", "-B", str(script), "--precheck"],
+                                   capture_output=True, text=True, timeout=30, env=env)
+                    return proc.returncode, proc.stdout + proc.stderr
+                except subprocess.TimeoutExpired:
+                    return "hung", ""
+
+            def _entry_expect(label, base, which, want_rc, named=None, extra_env=None):
+                if base is None:
+                    failures.append("(r) cannot git-init the {} tree".format(label))
+                    return
+                got_rc, got_out = _entry_run(base, which, extra_env)
+                if got_rc != want_rc or (named is not None and str(named) not in got_out):
+                    failures.append("(r) {} expected the {} --precheck entry to exit {}{}, got {!r}"
+                                    .format(label, which, want_rc,
+                                            " naming " + str(named) if named is not None else "",
+                                            got_rc))
+
+            fifo_tree = _mini_tree("fifo")
+            if fifo_tree is not None:
+                os.mkfifo(fifo_tree / "evil.fifo")
+            _entry_expect("a FIFO", fifo_tree, "gen", 2, fifo_tree / "evil.fifo" if fifo_tree else None)
+            _entry_expect("a FIFO", fifo_tree, "opf", 2, fifo_tree / "evil.fifo" if fifo_tree else None)
+
+            link_tree = _mini_tree("linkfifo")
+            if link_tree is not None:
+                os.mkfifo(link_tree / "real.fifo")
+                (link_tree / "link-to-fifo").symlink_to(link_tree / "real.fifo")
+            _entry_expect("a symlink to a FIFO", link_tree, "gen", 2,
+                          link_tree / "link-to-fifo" if link_tree else None)
+
+            plant_tree = _mini_tree("plant")
+            if plant_tree is not None:
+                (plant_tree / "tools" / ".git").mkdir()
+                (plant_tree / "opf" / "tools" / ".git").mkdir()
+                os.mkfifo(plant_tree / "evil.fifo")
+            _entry_expect("a planted nested .git beside a FIFO", plant_tree, "gen", 2,
+                          plant_tree / "evil.fifo" if plant_tree else None)
+            _entry_expect("a planted nested .git beside a FIFO", plant_tree, "opf", 2,
+                          plant_tree / "evil.fifo" if plant_tree else None)
+
+            extdir_tree = _mini_tree("extdir")
+            if extdir_tree is not None:
+                (extdir_tree / "outside-dir").symlink_to(tmp)
+            _entry_expect("an outside-root directory symlink", extdir_tree, "gen", 2,
+                          extdir_tree / "outside-dir" if extdir_tree else None)
+
+            clean_tree = _mini_tree("hazardless")
+            if clean_tree is not None:
+                (clean_tree / ".#README.md").symlink_to("missing-lock-target")
+                venv = clean_tree / ".venv"
+                (venv / "lib").mkdir(parents=True)
+                (venv / "bin").mkdir()
+                (venv / ".gitignore").write_text("*\n", encoding="utf-8")
+                (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+                (venv / "lib64").symlink_to("lib")
+                (venv / "bin" / "python3").symlink_to(sys.executable)
+            _entry_expect("a dangling link plus a venv-like ignored tree", clean_tree, "gen", 0)
+            _entry_expect("a dangling link plus a venv-like ignored tree", clean_tree, "opf", 0)
+
+            dirlink_tree = _mini_tree("dirlink")
+            if dirlink_tree is not None:
+                (dirlink_tree / "data").mkdir()
+                os.mkfifo(dirlink_tree / "data" / "deep.fifo")
+                (dirlink_tree / "alias").symlink_to(dirlink_tree / "data")
+            _entry_expect("an in-root directory symlink over a FIFO", dirlink_tree, "gen", 2,
+                          "deep.fifo")
+
+            gen_src = _entry_src["gen"].decode("utf-8")
+            mutant_tree = _mini_tree("neutered-main")
+            if gen_src.count("    precheck_special_files(_root)\n") != 1 or mutant_tree is None:
+                failures.append("(r) cannot build the neutered __main__ mutant")
+            else:
+                (mutant_tree / "tools" / "_gen_common.py").write_text(
+                    gen_src.replace("    precheck_special_files(_root)\n", "    pass\n", 1),
+                    encoding="utf-8")
+                os.mkfifo(mutant_tree / "evil.fifo")
+                _entry_expect("the neutered __main__ mutant (vector sensitivity)",
+                              mutant_tree, "gen", 0)
+            refusal = ('    def _refuse(path, why):\n        print("error: {}: refused, {}; remove it;'
+                       ' fail-closed".format(path, why), file=sys.stderr)\n        raise SystemExit(2)\n')
+            mutant2_tree = _mini_tree("neutered-refuse")
+            if gen_src.count(refusal) != 1 or mutant2_tree is None:
+                failures.append("(r) cannot build the neutered-refusal mutant")
+            else:
+                (mutant2_tree / "tools" / "_gen_common.py").write_text(
+                    gen_src.replace(refusal, refusal.replace("raise SystemExit(2)", "return"), 1),
+                    encoding="utf-8")
+                os.mkfifo(mutant2_tree / "evil.fifo")
+                _entry_expect("the neutered-refusal mutant (vector sensitivity)",
+                              mutant2_tree, "gen", 0)
+
+            # (s) QA round 4: hazard-scoped ignore handling and root-redirect refusal, each --precheck
+            # entry point as a subprocess against hostile trees.
+            # (s1) an ignored SYMLINK to a FIFO is classified by its target and refused by name (the
+            # ignore exemption must never skip a link a gate would follow).
+            iglink_tree = _mini_tree("ignored-link-fifo")
+            if iglink_tree is not None:
+                (iglink_tree / ".gitignore").write_text("zz-local.toml\n", encoding="utf-8")
+                os.mkfifo(tmp / "outside-target.fifo")
+                (iglink_tree / "zz-local.toml").symlink_to(tmp / "outside-target.fifo")
+            _entry_expect("an ignored symlink to a FIFO", iglink_tree, "gen", 2,
+                          iglink_tree / "zz-local.toml" if iglink_tree else None)
+            _entry_expect("an ignored symlink to a FIFO", iglink_tree, "opf", 2,
+                          iglink_tree / "zz-local.toml" if iglink_tree else None)
+            # (s2) the target subtree of an in-root directory link is walked even when IGNORED (a
+            # gate reads through the link's own certified path).
+            iglinkdir_tree = _mini_tree("ignored-dirlink")
+            if iglinkdir_tree is not None:
+                (iglinkdir_tree / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+                (iglinkdir_tree / "__pycache__" / "spec").mkdir(parents=True)
+                os.mkfifo(iglinkdir_tree / "__pycache__" / "spec" / "SPEC.fifo")
+                (iglinkdir_tree / "specalias").symlink_to(iglinkdir_tree / "__pycache__" / "spec")
+            _entry_expect("an in-root directory link into an ignored directory", iglinkdir_tree,
+                          "gen", 2, "SPEC.fifo")
+            _entry_expect("an in-root directory link into an ignored directory", iglinkdir_tree,
+                          "opf", 2, "SPEC.fifo")
+            # (s3) a GIT-IGNORED out-of-root directory link stays accepted un-walked (the ruling's
+            # developer .venv exemption; its contents are a disclosed residual).
+            igext_tree = _mini_tree("ignored-ext-dirlink")
+            if igext_tree is not None:
+                (tmp / "ext-venv-target").mkdir(exist_ok=True)
+                (tmp / "ext-venv-target" / "ok.txt").write_text("x\n", encoding="utf-8")
+                (igext_tree / ".gitignore").write_text(".venvx\n", encoding="utf-8")
+                (igext_tree / ".venvx").symlink_to(tmp / "ext-venv-target")
+            _entry_expect("an ignored out-of-root directory link", igext_tree, "gen", 0)
+            _entry_expect("an ignored out-of-root directory link", igext_tree, "opf", 0)
+            # (s5) QA round 5: the walk DESCENDS into ignored directories, so a FIFO inside one
+            # (the committed __pycache__/ rule is enough to plant one in a live tree) is refused by
+            # name. Fails without the descent (the round-4 walk skipped ignored directories, exit 0).
+            igfifo_tree = _mini_tree("ignored-dir-fifo")
+            if igfifo_tree is not None:
+                (igfifo_tree / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+                (igfifo_tree / "__pycache__").mkdir()
+                os.mkfifo(igfifo_tree / "__pycache__" / "x.fifo")
+            _entry_expect("a FIFO inside an ignored directory", igfifo_tree, "gen", 2, "x.fifo")
+            _entry_expect("a FIFO inside an ignored directory", igfifo_tree, "opf", 2, "x.fifo")
+            # (s6) QA round 5 (claude M2): an ignored out-of-root directory link that SHADOWS
+            # tracked content (git ls-files under the link's path is non-empty) is refused by name;
+            # only a link shadowing nothing (s3 above) stays accepted. Fails without the shadow test.
+            shadow_tree = _mini_tree("ignored-shadow-dirlink")
+            if shadow_tree is not None:
+                (shadow_tree / "docs").mkdir()
+                (shadow_tree / "docs" / "page.md").write_text("x\n", encoding="utf-8")
+                if gm._git(shadow_tree, "add", "-A").returncode != 0:
+                    shadow_tree = None
+            if shadow_tree is not None:
+                shutil.rmtree(shadow_tree / "docs")
+                (tmp / "ext-shadow-target").mkdir(exist_ok=True)
+                (shadow_tree / "docs").symlink_to(tmp / "ext-shadow-target")
+                (shadow_tree / ".gitignore").write_text("docs\n", encoding="utf-8")
+            _entry_expect("an ignored out-of-root directory link shadowing tracked content",
+                          shadow_tree, "gen", 2, "shadows tracked content")
+            _entry_expect("an ignored out-of-root directory link shadowing tracked content",
+                          shadow_tree, "opf", 2, "shadows tracked content")
+            # (s4) a tools/ (or opf/) directory REPLACED BY A SYMLINK must not move the root out of
+            # the invoked tree: the invoked and resolved derivations disagree, refused by name, so
+            # the precheck can never certify a tree the runner's gates do not read.
+            for which, moved in (("gen", "tools"), ("opf", "opf")):
+                redirect_tree = _mini_tree("redirect-" + which)
+                named_root = None
+                if redirect_tree is not None:
+                    ext_home = tmp / ("ext-home-" + which)
+                    ext_home.mkdir()
+                    shutil.move(str(redirect_tree / moved), str(ext_home / moved))
+                    (redirect_tree / moved).symlink_to(ext_home / moved)
+                    os.mkfifo(redirect_tree / "evil.fifo")
+                    # the resolved module file derives its fixed-location root inside ext_home: the
+                    # parent of the moved tools/ for the gen entry, the standalone opf/ tree for the
+                    # opf entry (no tools/_gen_common.py sentinel beside it there)
+                    named_root = os.path.realpath(ext_home if which == "gen" else ext_home / "opf")
+                _entry_expect("a symlinked {}/ directory".format(moved), redirect_tree, which, 2,
+                              named_root)
+            # (s7) QA round 6 (claude B1): the walk prunes ONLY the repository's own git dir, so a
+            # FIFO inside a NESTED .git directory (tools/qa/.git/x.py, invisible to git status) is
+            # refused by name. Fails without the own-git-dir narrowing (the round-5 walk pruned
+            # every entry named .git, exit 0).
+            nested_tree = _mini_tree("nested-git-fifo")
+            if nested_tree is not None:
+                (nested_tree / "tools" / "qa" / ".git").mkdir(parents=True)
+                os.mkfifo(nested_tree / "tools" / "qa" / ".git" / "x.py")
+            _entry_expect("a FIFO inside a nested .git directory", nested_tree, "gen", 2, "x.py")
+            _entry_expect("a FIFO inside a nested .git directory", nested_tree, "opf", 2, "x.py")
+            # (s8) QA round 6 (claude M3): shadowing counts HEAD as well as the index, so a STAGED
+            # REMOVAL (git rm --cached) cannot hide a shadowing out-of-root link. Fails without the
+            # HEAD union (asking only the index accepts this tree, exit 0).
+            staged_tree = _mini_tree("staged-removal-shadow")
+            if staged_tree is not None:
+                (staged_tree / "docs").mkdir()
+                (staged_tree / "docs" / "page.md").write_text("x\n", encoding="utf-8")
+                if (gm._git(staged_tree, "add", "-A").returncode != 0
+                        or gm._git(staged_tree, "-c", "user.name=t", "-c",
+                                   "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                                   "commit", "-q", "-m", "seed").returncode != 0
+                        or gm._git(staged_tree, "rm", "-r", "-q", "--cached",
+                                   "docs").returncode != 0):
+                    staged_tree = None
+            if staged_tree is not None:
+                shutil.rmtree(staged_tree / "docs")
+                (tmp / "ext-staged-target").mkdir(exist_ok=True)
+                (staged_tree / "docs").symlink_to(tmp / "ext-staged-target")
+                (staged_tree / ".gitignore").write_text("docs\n", encoding="utf-8")
+            _entry_expect("a staged-removal shadowing out-of-root link", staged_tree, "gen", 2,
+                          "shadows tracked content")
+            _entry_expect("a staged-removal shadowing out-of-root link", staged_tree, "opf", 2,
+                          "shadows tracked content")
+            # (s9) QA round 6 (claude M5): the live-tree fixture copy (_copy_live_tree) leaves out
+            # an ACCEPTED ignored out-of-root directory link (a developer's .venv ignored via
+            # info/exclude, whose ignore status the copy loses), so the copy neither fails nor
+            # refuses a layout the live precheck accepts. Fails without the copy filter (the
+            # copy's precheck exits 2 naming .venv).
+            venvlink_tree = _mini_tree("venv-link")
+            if venvlink_tree is not None:
+                (tmp / "ext-venv-dir").mkdir(exist_ok=True)
+                (tmp / "ext-venv-dir" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+                (venvlink_tree / ".venv").symlink_to(tmp / "ext-venv-dir")
+                exclude = venvlink_tree / ".git" / "info" / "exclude"
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                exclude.write_text(".venv\n", encoding="utf-8")
+                copy_dst = tmp / "venv-link-copy"
+                try:
+                    _copy_live_tree(venvlink_tree, copy_dst)
+                except (shutil.Error, OSError) as exc:
+                    failures.append("(s9) the fixture copy failed on an accepted ignored "
+                                    "out-of-root link: {}".format(exc))
+                else:
+                    if os.path.lexists(copy_dst / ".venv"):
+                        failures.append("(s9) the fixture copy kept the out-of-root link")
+                    if gm._git(copy_dst, "init", "-q").returncode != 0:
+                        failures.append("(s9) cannot git-init the venv-link copy")
+                    else:
+                        got_rc, got_out = _entry_run(copy_dst, "gen")
+                        if got_rc != 0:
+                            failures.append("(s9) the copy of a tree with an accepted ignored "
+                                            "out-of-root link must pass the precheck, got {!r} "
+                                            "{!r}".format(got_rc, got_out[-300:]))
+            # (s10) QA round 7 (claude B1): a SYMLINK named __pycache__ is refused BY NAME even
+            # when it is ignored, out-of-root and shadows nothing: the interpreter itself opens
+            # __pycache__/*.pyc with a plain blocking read when a gate imports an in-tree module,
+            # outside every gate reader. Fails without the name refusal (the round-6 walk
+            # accepted this link un-walked, exit 0, and the first gate import then hung).
+            pyclink_tree = _mini_tree("pycache-link")
+            if pyclink_tree is not None:
+                (tmp / "ext-pyc-dir").mkdir(exist_ok=True)
+                os.mkfifo(tmp / "ext-pyc-dir" / "_gen_common.cpython-314.pyc")
+                (pyclink_tree / "tools" / "__pycache__").symlink_to(tmp / "ext-pyc-dir")
+                exclude = pyclink_tree / ".git" / "info" / "exclude"
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                exclude.write_text("tools/__pycache__\n", encoding="utf-8")
+            _entry_expect("an ignored out-of-root __pycache__ symlink", pyclink_tree, "gen", 2,
+                          "__pycache__")
+            _entry_expect("an ignored out-of-root __pycache__ symlink", pyclink_tree, "opf", 2,
+                          "__pycache__")
+            # (s11) QA round 7 (codex M4 = claude M2): an inherited GIT_DIR (with GIT_WORK_TREE)
+            # naming a real nested repository must not designate that directory as the exempt own
+            # git dir: every GIT_* variable is scrubbed from the precheck's git queries. Fails
+            # without the scrub (the redirected identity exits 0 and the nested FIFO goes
+            # unrefused).
+            gitdirred_tree = _mini_tree("gitdir-redirect")
+            if gitdirred_tree is not None:
+                nested = gitdirred_tree / "tools" / "qa2"
+                nested.mkdir(parents=True)
+                if gm._git(nested, "init", "-q").returncode != 0:
+                    gitdirred_tree = None
+                else:
+                    os.mkfifo(nested / ".git" / "x.py")
+            for which in ("gen", "opf"):
+                _entry_expect("an inherited GIT_DIR naming a nested repository", gitdirred_tree,
+                              which, 2, "x.py",
+                              extra_env=(None if gitdirred_tree is None else dict(
+                                  GIT_DIR=str(gitdirred_tree / "tools" / "qa2" / ".git"),
+                                  GIT_WORK_TREE=str(gitdirred_tree))))
+            # (s12) QA round 7 (codex M4 = claude M2): a decoy GIT_DIR (an empty repository whose
+            # exclude file ignores the planted link) must not blind the tracked-content shadow
+            # test; the scrub keeps the walk on the tree's own repository. Fails without the
+            # scrub (the decoy's empty index and unborn HEAD shadow nothing, exit 0).
+            decoyshadow_tree = _mini_tree("decoy-gitdir-shadow")
+            if decoyshadow_tree is not None:
+                (decoyshadow_tree / "docs").mkdir()
+                (decoyshadow_tree / "docs" / "page.md").write_text("x\n", encoding="utf-8")
+                if (gm._git(decoyshadow_tree, "add", "-A").returncode != 0
+                        or gm._git(decoyshadow_tree, "-c", "user.name=t", "-c",
+                                   "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                                   "commit", "-q", "-m", "seed").returncode != 0):
+                    decoyshadow_tree = None
+            decoy_repo = tmp / "decoy-gitdir-repo"
+            if decoyshadow_tree is not None:
+                shutil.rmtree(decoyshadow_tree / "docs")
+                (tmp / "ext-decoy-target").mkdir(exist_ok=True)
+                (decoyshadow_tree / "docs").symlink_to(tmp / "ext-decoy-target")
+                exclude = decoyshadow_tree / ".git" / "info" / "exclude"
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                exclude.write_text("/docs\n", encoding="utf-8")
+                decoy_repo.mkdir(exist_ok=True)
+                if gm._git(decoy_repo, "init", "-q").returncode != 0:
+                    decoyshadow_tree = None
+                else:
+                    dexclude = decoy_repo / ".git" / "info" / "exclude"
+                    dexclude.parent.mkdir(parents=True, exist_ok=True)
+                    dexclude.write_text("/docs\n", encoding="utf-8")
+            for which in ("gen", "opf"):
+                _entry_expect("a decoy GIT_DIR blinding the shadow test", decoyshadow_tree,
+                              which, 2, "shadows tracked content",
+                              extra_env=(None if decoyshadow_tree is None else dict(
+                                  GIT_DIR=str(decoy_repo / ".git"))))
+            # (s13) QA round 7 (claude m-b): a root .git FILE (gitfile) pointing at an IN-TREE
+            # directory must not exempt that directory from the walk: the own-git-dir exemption
+            # applies only at the repository root, so the nested target is descended and a
+            # special file inside it is refused by name. Fails without the root-position rule
+            # (the round-6 walk exempted any path whose realpath matched the gitfile target,
+            # exit 0).
+            gitfile_tree = _mini_tree("gitfile-intree")
+            if gitfile_tree is not None:
+                (gitfile_tree / "tools" / "qa").mkdir(parents=True)
+                shutil.move(str(gitfile_tree / ".git"), str(gitfile_tree / "tools" / "qa" / ".git"))
+                (gitfile_tree / ".git").write_text("gitdir: tools/qa/.git\n", encoding="utf-8")
+                os.mkfifo(gitfile_tree / "tools" / "qa" / ".git" / "x.py")
+            _entry_expect("a root gitfile naming an in-tree git dir", gitfile_tree, "gen", 2,
+                          "x.py")
+            _entry_expect("a root gitfile naming an in-tree git dir", gitfile_tree, "opf", 2,
+                          "x.py")
+            # (s14) QA round 9 (claude MD1): the walk classifies a directory by ITS OWN path,
+            # never by the ignore status of a link that led there. An IGNORED in-root link whose
+            # name sorts AFTER its tracked target directory used to enter that directory FIRST
+            # (the stack is LIFO) under the ignored-only leniencies, and the visited set then
+            # skipped the non-ignored walk, so a NON-ignored out-of-root directory link inside
+            # the target was accepted instead of refused. Fails without the round-9
+            # path-classified walk (exit 0).
+            orderlink_tree = _mini_tree("ignored-link-order")
+            if orderlink_tree is not None:
+                (orderlink_tree / "aaa").mkdir()
+                (orderlink_tree / "aaa" / "f.txt").write_text("x\n", encoding="utf-8")
+                (tmp / "ext-order-target").mkdir(exist_ok=True)
+                (orderlink_tree / "aaa" / "ext").symlink_to(tmp / "ext-order-target")
+                (orderlink_tree / ".gitignore").write_text("/zlink\n", encoding="utf-8")
+                (orderlink_tree / "zlink").symlink_to(orderlink_tree / "aaa")
+                if gm._git(orderlink_tree, "add", "--", "aaa/f.txt").returncode != 0:
+                    orderlink_tree = None
+            _entry_expect("an ignored link, sorting after its tracked target directory, over a "
+                          "non-ignored out-of-root link", orderlink_tree, "gen", 2,
+                          "outside the repository root")
+            _entry_expect("an ignored link, sorting after its tracked target directory, over a "
+                          "non-ignored out-of-root link", orderlink_tree, "opf", 2,
+                          "outside the repository root")
+            # (s15) QA round 10 (claude MD2): the CONVERSE of s14. A NON-ignored (here
+            # tracked) link into an IGNORED directory must walk that directory STRICTLY: its
+            # contents are reachable under the link's own non-ignored path, so the ignored-only
+            # leniencies (an out-of-root directory link above all) must not apply there. The
+            # ignore classification of a link-walked subtree follows the paths themselves in
+            # BOTH directions: lenient only when both the link path and the target path are
+            # ignored. Fails without the round-10 rule (exit 0 in every walk order).
+            md2link_tree = _mini_tree("tracked-link-ignored")
+            if md2link_tree is not None:
+                (md2link_tree / "build").mkdir()
+                (tmp / "ext-md2-target").mkdir(exist_ok=True)
+                (md2link_tree / "build" / "ext").symlink_to(tmp / "ext-md2-target")
+                (md2link_tree / ".gitignore").write_text("/build/\n", encoding="utf-8")
+                (md2link_tree / "docs").mkdir()
+                (md2link_tree / "docs" / "link").symlink_to(md2link_tree / "build")
+                if gm._git(md2link_tree, "add", "--", "docs/link",
+                           ".gitignore").returncode != 0:
+                    md2link_tree = None
+            _entry_expect("a tracked link into an ignored directory over an out-of-root link",
+                          md2link_tree, "gen", 2, "outside the repository root")
+            _entry_expect("a tracked link into an ignored directory over an out-of-root link",
+                          md2link_tree, "opf", 2, "outside the repository root")
+            # (s16) QA round 11 (codex MAJOR): a tracked path that resolves to a FIFO through
+            # TWO chained directory links. The round-10 walk replaced a walked link's logical
+            # path with its target's spelling, so the second link regained ignored status (the
+            # ignore list names only /build/ext) and the shadow test saw only that spelling:
+            # both entries certified a tree whose tracked docs/link/ext/f.md is an external
+            # FIFO. Fails without the round-11 logical-path walk and tracked-path resolution
+            # (exit 0).
+            twolink_tree = _mini_tree("tracked-two-link")
+            if twolink_tree is not None:
+                (twolink_tree / "build").mkdir()
+                (twolink_tree / "build" / ".keep").write_text("", encoding="utf-8")
+                (twolink_tree / "docs" / "link" / "ext").mkdir(parents=True)
+                (twolink_tree / "docs" / "link" / "ext" / "f.md").write_text(
+                    "x\n", encoding="utf-8")
+                (twolink_tree / ".gitignore").write_text("/build/ext\n", encoding="utf-8")
+                (tmp / "ext-twolink-target").mkdir(exist_ok=True)
+                os.mkfifo(tmp / "ext-twolink-target" / "f.md")
+                if gm._git(twolink_tree, "add", "--", ".gitignore", "build/.keep",
+                           "docs/link/ext/f.md").returncode != 0:
+                    twolink_tree = None
+            if twolink_tree is not None:
+                shutil.rmtree(twolink_tree / "docs" / "link")
+                (twolink_tree / "docs" / "link").symlink_to("../build")
+                (twolink_tree / "build" / "ext").symlink_to(tmp / "ext-twolink-target")
+            _entry_expect("a tracked path to a FIFO through two directory links", twolink_tree,
+                          "gen", 2,
+                          twolink_tree / "docs" / "link" / "ext" if twolink_tree else None)
+            _entry_expect("a tracked path to a FIFO through two directory links", twolink_tree,
+                          "opf", 2,
+                          twolink_tree / "docs" / "link" / "ext" if twolink_tree else None)
+            # (s17) the MIRROR walk order of s16 (the physical target directory sorts last, so
+            # it pops first and its ignored out-of-root link is accepted leniently before the
+            # alias spelling is ever seen): the logical-path walk must refuse under the alias
+            # spelling whichever side pops first, and the tracked-path resolution refuses
+            # independently of walk order. Fails without the round-11 change (exit 0: the
+            # round-10 target-identity dedup dropped whichever spelling came second).
+            mirror_tree = _mini_tree("tracked-two-link-mirror")
+            if mirror_tree is not None:
+                (mirror_tree / "zbuild").mkdir()
+                (mirror_tree / "zbuild" / ".keep").write_text("", encoding="utf-8")
+                (mirror_tree / "alink" / "link" / "ext").mkdir(parents=True)
+                (mirror_tree / "alink" / "link" / "ext" / "f.md").write_text(
+                    "x\n", encoding="utf-8")
+                (mirror_tree / ".gitignore").write_text("/zbuild/ext\n", encoding="utf-8")
+                (tmp / "ext-mirror-target").mkdir(exist_ok=True)
+                os.mkfifo(tmp / "ext-mirror-target" / "f.md")
+                if gm._git(mirror_tree, "add", "--", ".gitignore", "zbuild/.keep",
+                           "alink/link/ext/f.md").returncode != 0:
+                    mirror_tree = None
+            if mirror_tree is not None:
+                shutil.rmtree(mirror_tree / "alink" / "link")
+                (mirror_tree / "alink" / "link").symlink_to("../zbuild")
+                (mirror_tree / "zbuild" / "ext").symlink_to(tmp / "ext-mirror-target")
+            _entry_expect("the mirror ordering of the two-link tracked FIFO", mirror_tree,
+                          "gen", 2,
+                          mirror_tree / "alink" / "link" / "ext" if mirror_tree else None)
+            _entry_expect("the mirror ordering of the two-link tracked FIFO", mirror_tree,
+                          "opf", 2,
+                          mirror_tree / "alink" / "link" / "ext" if mirror_tree else None)
+            # (s18) a THREE-link chain: a/l1 -> b, b/l2 -> c, c/l3 -> an external FIFO
+            # directory, with tracked a/l1/l2/l3/f.md and each hop ignored only under its
+            # physical spelling. Fails without the round-11 change (exit 0).
+            chain_tree = _mini_tree("tracked-three-link")
+            if chain_tree is not None:
+                (chain_tree / "a" / "l1" / "l2" / "l3").mkdir(parents=True)
+                (chain_tree / "a" / "l1" / "l2" / "l3" / "f.md").write_text(
+                    "x\n", encoding="utf-8")
+                (chain_tree / "b").mkdir()
+                (chain_tree / "b" / ".keep").write_text("", encoding="utf-8")
+                (chain_tree / "c").mkdir()
+                (chain_tree / "c" / ".keep").write_text("", encoding="utf-8")
+                (chain_tree / ".gitignore").write_text("/b/l2\n/c/l3\n", encoding="utf-8")
+                (tmp / "ext-chain-target").mkdir(exist_ok=True)
+                os.mkfifo(tmp / "ext-chain-target" / "f.md")
+                if gm._git(chain_tree, "add", "--", ".gitignore", "b/.keep", "c/.keep",
+                           "a/l1/l2/l3/f.md").returncode != 0:
+                    chain_tree = None
+            if chain_tree is not None:
+                shutil.rmtree(chain_tree / "a" / "l1")
+                (chain_tree / "a" / "l1").symlink_to("../b")
+                (chain_tree / "b" / "l2").symlink_to("../c")
+                (chain_tree / "c" / "l3").symlink_to(tmp / "ext-chain-target")
+            _entry_expect("a tracked path to a FIFO through three chained links", chain_tree,
+                          "gen", 2,
+                          chain_tree / "a" / "l1" / "l2" / "l3" if chain_tree else None)
+            _entry_expect("a tracked path to a FIFO through three chained links", chain_tree,
+                          "opf", 2,
+                          chain_tree / "a" / "l1" / "l2" / "l3" if chain_tree else None)
+            # (s19) a tracked path through a LINK LOOP, both links ignored: the walk accepts an
+            # ignored unresolvable link (every open of it fails at once), so only the
+            # tracked-path resolution can classify what tracked l1/f.md resolves through, and
+            # it must refuse the loop by the logical path. Fails without the round-11
+            # tracked-path resolution (exit 0).
+            loop_tree = _mini_tree("tracked-link-loop")
+            if loop_tree is not None:
+                (loop_tree / "l1").mkdir()
+                (loop_tree / "l1" / "f.md").write_text("x\n", encoding="utf-8")
+                (loop_tree / ".gitignore").write_text("/l1\n/l2\n", encoding="utf-8")
+                if (gm._git(loop_tree, "add", "--", ".gitignore").returncode != 0
+                        or gm._git(loop_tree, "add", "-f", "--",
+                                   "l1/f.md").returncode != 0):
+                    loop_tree = None
+            if loop_tree is not None:
+                shutil.rmtree(loop_tree / "l1")
+                (loop_tree / "l1").symlink_to("l2")
+                (loop_tree / "l2").symlink_to("l1")
+            _entry_expect("a tracked path through an ignored link loop", loop_tree, "gen", 2,
+                          loop_tree / "l1" / "f.md" if loop_tree else None)
+            _entry_expect("a tracked path through an ignored link loop", loop_tree, "opf", 2,
+                          loop_tree / "l1" / "f.md" if loop_tree else None)
+            # (s20) QA round 11 (claude m2): a FIFO planted at a NESTED .git/HEAD is screened
+            # BEFORE the ignore query: git's ls-files probe opens that HEAD with a plain
+            # blocking read while deciding whether docs/sub is a nested repository, so without
+            # the screen the refusal came only after the probe's 60-second bound expired.
+            # Fails without the round-11 screen (the 30-second subprocess bound reports a
+            # hang).
+            nestedhead_tree = _mini_tree("nested-git-head-fifo")
+            if nestedhead_tree is not None:
+                (nestedhead_tree / "docs" / "sub" / ".git").mkdir(parents=True)
+                os.mkfifo(nestedhead_tree / "docs" / "sub" / ".git" / "HEAD")
+            _entry_expect("a FIFO at a nested .git HEAD", nestedhead_tree, "gen", 2,
+                          nestedhead_tree / "docs" / "sub" / ".git" / "HEAD"
+                          if nestedhead_tree else None)
+            _entry_expect("a FIFO at a nested .git HEAD", nestedhead_tree, "opf", 2,
+                          nestedhead_tree / "docs" / "sub" / ".git" / "HEAD"
+                          if nestedhead_tree else None)
+
+            # (s21) QA round 12 (codex MINOR = claude m2): a nested GITFILE naming a git dir
+            # OUTSIDE the tree, whose HEAD is a FIFO. git's ignore query follows the gitfile and
+            # opens that HEAD with a plain blocking read, so the round-11 screen (which classified
+            # only the gitfile itself) stalled 60 seconds and then PASSED. The gitfile is now
+            # read without blocking and an out-of-tree target is refused by name. Fails without
+            # the round-12 screen (the 30-second subprocess bound reports a hang).
+            gitfile_ext_tree = _mini_tree("nested-gitfile-external")
+            if gitfile_ext_tree is not None:
+                ext_gitdir = tmp / "ext-nested-gitdir"
+                (ext_gitdir / "objects").mkdir(parents=True)
+                (ext_gitdir / "refs").mkdir()
+                os.mkfifo(ext_gitdir / "HEAD")
+                (gitfile_ext_tree / "docs" / "sub").mkdir(parents=True)
+                (gitfile_ext_tree / "docs" / "sub" / ".git").write_text(
+                    "gitdir: {}\n".format(ext_gitdir), encoding="utf-8")
+            for which in ("gen", "opf"):
+                _entry_expect("a nested gitfile naming an out-of-tree git dir", gitfile_ext_tree,
+                              which, 2, gitfile_ext_tree / "docs" / "sub" / ".git"
+                              if gitfile_ext_tree else None)
+            # (s22) the in-tree twin: a nested gitfile naming an in-tree git dir whose HEAD is a
+            # FIFO, and (s23) a nested .git DIRECTORY with a valid HEAD whose commondir is a FIFO
+            # (git reads commondir only once HEAD validates). Both are refused by name before the
+            # ignore query. Each fails without the round-12 screen (a hang).
+            gitfile_in_tree = _mini_tree("nested-gitfile-intree")
+            if gitfile_in_tree is not None:
+                (gitfile_in_tree / "gd" / "objects").mkdir(parents=True)
+                (gitfile_in_tree / "gd" / "refs").mkdir()
+                os.mkfifo(gitfile_in_tree / "gd" / "HEAD")
+                (gitfile_in_tree / "docs" / "sub").mkdir(parents=True)
+                (gitfile_in_tree / "docs" / "sub" / ".git").write_text(
+                    "gitdir: ../../gd\n", encoding="utf-8")
+            commondir_tree = _mini_tree("nested-git-commondir-fifo")
+            if commondir_tree is not None:
+                nested_git = commondir_tree / "docs" / "sub" / ".git"
+                (nested_git / "objects").mkdir(parents=True)
+                (nested_git / "refs").mkdir()
+                (nested_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+                os.mkfifo(nested_git / "commondir")
+            for which in ("gen", "opf"):
+                _entry_expect("a nested gitfile naming an in-tree git dir with a FIFO HEAD",
+                              gitfile_in_tree, which, 2,
+                              gitfile_in_tree / "gd" / "HEAD" if gitfile_in_tree else None)
+                _entry_expect("a FIFO at a nested .git commondir", commondir_tree, which, 2,
+                              commondir_tree / "docs" / "sub" / ".git" / "commondir"
+                              if commondir_tree else None)
+            # (s24) controls: a nested gitfile naming a well-formed in-tree git dir, and one that
+            # git would not follow (no 'gitdir: ' prefix), both pass.
+            gitfile_ok_tree = _mini_tree("nested-gitfile-ok")
+            if gitfile_ok_tree is not None:
+                (gitfile_ok_tree / "gd" / "objects").mkdir(parents=True)
+                (gitfile_ok_tree / "gd" / "refs").mkdir()
+                (gitfile_ok_tree / "gd" / "HEAD").write_text("ref: refs/heads/main\n",
+                                                             encoding="utf-8")
+                (gitfile_ok_tree / "docs" / "sub").mkdir(parents=True)
+                (gitfile_ok_tree / "docs" / "sub" / ".git").write_text(
+                    "gitdir: ../../gd\n", encoding="utf-8")
+                (gitfile_ok_tree / "docs" / "other").mkdir()
+                (gitfile_ok_tree / "docs" / "other" / ".git").write_text(
+                    "not a gitfile\n", encoding="utf-8")
+            for which in ("gen", "opf"):
+                _entry_expect("a nested gitfile naming a well-formed in-tree git dir",
+                              gitfile_ok_tree, which, 0)
+            # (s25) QA round 12 (claude m3): 70 in-root directory links inside an IGNORED
+            # directory (a pnpm-style node_modules) pass: an in-root directory link at an ignored
+            # logical path is not walked under that path, so it does not count toward the bound
+            # of 64. The same 70 links at a NON-ignored path stay refused by the bound. The first
+            # fails without the round-12 rule (exit 2 at the bound).
+            for label, ignore_rule, want_rc in (("ignored", "/nm/\n", 0),
+                                                ("non-ignored", "/other/\n", 2)):
+                links_tree = _mini_tree("many-links-" + label)
+                if links_tree is not None:
+                    (links_tree / ".gitignore").write_text(ignore_rule, encoding="utf-8")
+                    for index in range(70):
+                        (links_tree / "nm" / "store" / "p{}".format(index)).mkdir(parents=True)
+                        (links_tree / "nm" / "l{}".format(index)).symlink_to(
+                            "store/p{}".format(index))
+                for which in ("gen", "opf"):
+                    _entry_expect("70 in-root directory links at an {} path".format(label),
+                                  links_tree, which, want_rc,
+                                  "bound of 64" if want_rc else None)
+            # (s26) QA round 13 (claude MEDIUM 1): the round-12 skip of an ignored in-root
+            # directory link leans on the tracked-path layer, which does not run when git cannot
+            # list HEAD's tree. Here HEAD's root tree object is missing (ls-tree fails while
+            # rev-parse, ls-files and the ignore query answer), the tracked directory docs/ is
+            # replaced by an ignored link into the repository's own .git, and a FIFO sits at
+            # .git/x.md, which the tracked path docs/x.md reaches. Fails without the round-13
+            # condition on the skip (exit 0: the physical walk prunes .git and the tracked-path
+            # layer is skipped).
+            notree_tree = _mini_tree("ignored-link-into-git-no-head-tree")
+            if notree_tree is not None:
+                (notree_tree / "docs").mkdir()
+                (notree_tree / "docs" / "x.md").write_text("x\n", encoding="utf-8")
+                if (gm._git(notree_tree, "add", "--", "docs/x.md").returncode != 0
+                        or gm._git(notree_tree, "commit", "-q", "-m", "seed").returncode != 0):
+                    notree_tree = None
+            if notree_tree is not None:
+                root_tree = gm._git(notree_tree, "rev-parse", "HEAD^{tree}")
+                tree_hex = root_tree.stdout.decode("ascii", "replace").strip()
+                loose = notree_tree / ".git" / "objects" / tree_hex[:2] / tree_hex[2:]
+                if root_tree.returncode != 0 or not loose.is_file():
+                    notree_tree = None
+                else:
+                    loose.unlink()
+                    shutil.rmtree(notree_tree / "docs")
+                    (notree_tree / "docs").symlink_to(".git")
+                    (notree_tree / ".gitignore").write_text("/docs\n", encoding="utf-8")
+                    os.mkfifo(notree_tree / ".git" / "x.md")
+                    if (gm._git(notree_tree, "ls-tree", "-r", "HEAD").returncode == 0
+                            or gm._git(notree_tree, "rev-parse", "--verify", "--quiet",
+                                       "HEAD").returncode != 0):
+                        notree_tree = None
+            if notree_tree is None:
+                failures.append("(r) cannot build the missing-HEAD-tree fixture (a commit whose "
+                                "root tree is a loose object; ls-tree must then fail while "
+                                "rev-parse --verify succeeds)")
+            else:
+                for which in ("gen", "opf"):
+                    _entry_expect("an ignored in-root link over a tracked directory into .git, "
+                                  "with HEAD's tree missing", notree_tree, which, 2,
+                                  notree_tree / "docs" / "x.md")
+            # (s27) QA round 14 (codex MEDIUM 1 and 2), both copies in process: the s26 layout (an
+            # ignored link docs -> .git, a FIFO at .git/x.md) with _git_lines answering the ignore
+            # and own-git-dir queries and each case's tracked-list answers. A HEAD-query failure
+            # (every HEAD query None, or for-each-ref None) is not an unborn HEAD, a branch ref
+            # for-each-ref still lists is a HEAD with a commit, and an unterminated, empty-record,
+            # absolute or '..' record is malformed: each leaves no tracked list, so the link is
+            # walked and the FIFO refused (exit 2). The two controls (a PROVEN unborn HEAD; a
+            # well-formed list) keep the skip, exit 0. The failure and malformed cases fail
+            # without the round-14 rules (exit 0: the skip applies and .git is pruned).
+            _ok_ref = b"refs/heads/main\n"
+            for case_no, (label, index_out, tree_out, sym_out, each_out, want) in enumerate((
+                    ("every HEAD query fails", b"", None, None, None, 2),
+                    ("for-each-ref fails", b"", None, _ok_ref, None, 2),
+                    ("the HEAD branch ref still exists", b"", None, _ok_ref, _ok_ref, 2),
+                    ("a detached HEAD", b"", None, None, b"", 2),
+                    ("an unterminated index answer", b"docs/x.", b"", _ok_ref, b"", 2),
+                    ("an unterminated HEAD answer", b"", b"docs/x.", _ok_ref, b"", 2),
+                    ("an empty index record", b"README.md\0\0", b"", _ok_ref, b"", 2),
+                    ("an absolute HEAD record", b"", b"/etc/x\0", _ok_ref, b"", 2),
+                    ("a '..' index record", b"a/../b\0", b"", _ok_ref, b"", 2),
+                    ("a proven unborn HEAD (control)", b"", None, _ok_ref, b"", 0),
+                    ("a well-formed list (control)", b"README.md\0", b"README.md\0", _ok_ref,
+                     b"", 0))):
+                for _label, _mod in (("_gen_common", _gc), ("_containment", _ct)):
+                    case = tmp / "inproc-s27-{}-{}".format(case_no, _label)
+                    (case / ".git").mkdir(parents=True)
+                    os.mkfifo(case / ".git" / "x.md")
+                    (case / "docs").symlink_to(".git")
+                    answers = {("rev-parse", "--absolute-git-dir"):
+                                   os.fsencode(os.path.realpath(case / ".git")) + b"\n",
+                               ("ls-files", "-z", "--others"): b"docs\0",
+                               ("ls-files", "-z"): index_out,
+                               ("ls-tree", "-r", "-z"): tree_out,
+                               ("symbolic-ref", "-q", "HEAD"): sym_out,
+                               ("for-each-ref", "--format=%(refname)"): each_out}
+
+                    def _fake(root, args, answers=answers):
+                        for size in (3, 2):
+                            if tuple(args[:size]) in answers:
+                                return answers[tuple(args[:size])]
+                        return None
+                    err = io.StringIO()
+                    try:
+                        with patch.object(_mod, "_git_lines", _fake), \
+                                redirect_stdout(io.StringIO()), redirect_stderr(err):
+                            _mod.precheck_special_files(case)
+                        got = 0
+                    except SystemExit as exc:
+                        got = exc.code
+                    named = want == 0 or str(case / "docs" / "x.md") in err.getvalue()
+                    if got != want or not named:
+                        failures.append("(s27) {} ({}): expected exit {}{}, got {!r}".format(
+                            label, _label, want, " naming docs/x.md" if want else "", got))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -648,7 +1773,20 @@ def _self_test_main_isolated():
           "surroundings-only change is clean; an order record disagreeing with the operative "
           "gen_rules constants is exit 1; an unknown top-level key in the order, references, or "
           "dispositions record and an unsatisfiable quorum each fail closed (exit 2, F-237); and "
-          "check_manifest independently rejects an output at git index mode 100755 (exit 2, F-236)")
+          "check_manifest independently rejects an output at git index mode 100755 (exit 2, F-236); a "
+          "FIFO at a SOURCES member, a TOML record, or load_toml is refused (exit 2) inside an alarm, never a "
+          "hang; reconcile refuses a symlinked or directory target (exit 2); and a FIFO at any of six tree "
+          "paths makes six gates exit 2 by name at the repo_root() special-file precheck; a stray FIFO makes the "
+          "nine gates that find their root on their own exit 2 by name; the OPF copy of the precheck "
+          "matches _gen_common's (a changed copy, a globals() rebinding, a cache pre-fill and a "
+          "diverged __main__ block are each caught); and each --precheck entry point, run as a "
+          "subprocess, refuses a FIFO, a link to a FIFO, a FIFO behind a planted nested .git or an "
+          "in-root directory link, an outside-root directory link, a git-ignored link to a FIFO, a "
+          "FIFO behind an in-root link into an ignored directory, and a symlinked tools/ or opf/ "
+          "directory that would redirect the root, by name, classifies a walked directory by its own path even when an ignored link reaches it first (round 9), walks a tracked link into an ignored directory strictly in both directions (round 10), resolves every tracked logical path component by component so a FIFO behind two or three chained directory links, in either walk order, and a tracked path through an ignored link loop are refused by the logical path, and screens a nested .git and its HEAD before the ignore query (round 11), follows a nested gitfile without blocking, refusing an out-of-tree target and screening each nested git dir's HEAD and commondir, and passes 70 in-root directory links inside an ignored directory while the same links at a non-ignored path stay bounded (round 12), refuses a FIFO in .git reached by a tracked path through an ignored link when HEAD's tree cannot be listed (round 13) or a HEAD query fails or a tracked-list answer is malformed (round 14), while a dangling link, a venv-like "
+          "ignored tree and a git-ignored outside-root directory link pass; a multi-newline "
+          "rev-parse answer fails closed, one trailing newline stays accepted, and a NUL root is "
+          "git-cannot-answer in both copies, with mutants proving the vectors discriminate")
     return 0
 
 

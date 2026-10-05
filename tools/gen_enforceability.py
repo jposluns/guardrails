@@ -93,7 +93,11 @@ SCRIPT_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_]+\.py$")  # opf/ accepted t
 # lexical scan of trusted, controlled roster files, so a `python3 -I -B tools/*.py` token embedded in a
 # quoted argument, a heredoc, or an eval string may still be miscounted. The authoritative single-source
 # of the roster (generating both runners from this manifest) is deferred.
-ROSTER_RE = re.compile(r"python3 -I -B ((?:opf/)?tools/[A-Za-z0-9_]+\.py)")  # opf/ accepted toward OPF-SELF-CONTAIN; inert until an opf/tools path exists
+ROSTER_RE = re.compile(
+    r"python3 -I -B (?:-X pycache_prefix=/dev/null/aiqt-pycache )?"
+    r"((?:opf/)?tools/[A-Za-z0-9_]+\.py)")  # opf/ accepted toward OPF-SELF-CONTAIN; the
+# optional -X pair is the reviewed QA round-7 bytecode-read redirection every gate launch
+# carries (see tools/run_all_checks.sh); inert until an opf/tools path exists
 
 # The BOUNDARY string carried at the ledger top level: the honest half of the artefact, in the file.
 BOUNDARY = (

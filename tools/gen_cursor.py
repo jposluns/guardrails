@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import repo_root, read_source_text  # noqa: E402
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -52,7 +52,7 @@ def render_rule(path):
     (source frontmatter stripped, H1 kept; do NOT reuse gen_agents.body_of, which demotes the H1 for
     the single-document concatenations). conformance.py imports this so the checker and the generator
     can never disagree on the shape."""
-    text = path.read_text(encoding="utf-8")
+    text = read_source_text(path)
     end = text.find("\n---\n", 4)
     body = text[end + 5:].strip()
     return FRONTMATTER + body + "\n"

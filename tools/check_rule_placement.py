@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules  # noqa: E402  for MAP_KEYS/SEQ_KEYS rebind under --root
 from gen_rules import parse_source, derive  # noqa: E402
 from _standards import dir_present, map_keys  # noqa: E402
+from _gen_common import precheck_special_files  # D-400-SPECIAL-FILE-PRECHECK  # noqa: E402
 
 METADATA = {"PROVENANCE.md", "README.md"}
 BUILTIN_FAMILIES = {"aiqt", "security", "external"}
@@ -99,7 +100,7 @@ def main():
         else:
             print("usage: check_rule_placement.py [--root DIR]", file=sys.stderr)
             return 2
-    root = (root or repo_root_default()).resolve()
+    root = precheck_special_files((root or repo_root_default()).resolve())
     # gen_rules binds MAP_KEYS/SEQ_KEYS at import from ITS OWN repo_root(); derive() (called by
     # check_drift) validates a rule's map-* keys against them. Under --root against an adopter tree with
     # its own .aiqt/standards/, rebind from that root so their map-keys are judged against their

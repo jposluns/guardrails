@@ -81,6 +81,7 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_leaks import _tokens, ngram_forms  # noqa: E402  reuse the leak gate's n-gram normalization
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 
 class GateError(Exception):
@@ -1554,7 +1555,7 @@ def main():
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
-    return run(root)
+    return run(precheck_special_files(root))
 
 
 if __name__ == "__main__":

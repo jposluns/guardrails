@@ -467,7 +467,8 @@ def run_suite(root, suite_id):
         except OSError as exc:
             _cannot("cannot create the neutral child home directory: {}".format(exc))
             return 2
-        command = [sys.executable, "-I", "-B", str(runner), "--execution-report", report_path]
+        command = [sys.executable, "-I", "-B", "-X", "pycache_prefix=/dev/null/aiqt-pycache",
+                   str(runner), "--execution-report", report_path]
         # Git-neutral, interpreter-neutral child environment. The git side has two layers. Layer
         # one, GIT_*: drop every ambient GIT_*
         # variable, then pin the global and system config surfaces to os.devnull, so a hostile
@@ -997,7 +998,9 @@ def main(argv=None):
         if not (root / ".git").exists():
             _cannot("cannot confirm the gate's own repo root (no .git at {})".format(root))
             return 2
-        return run_suite(root, argv[1])
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+        return run_suite(precheck_special_files(root), argv[1])
     print("usage: check_selftest_execution.py --suite <id> | --self-test", file=sys.stderr)
     return 2
 
