@@ -22080,8 +22080,9 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 # the in-process forked runner's machinery: its relay pipes, its SIGCHLD holding, its pre-fork bound
 # derivation). THREAT MODEL (D-385-ACCIDENTAL-UNIT): the runner defends against ACCIDENTAL unit
 # faults -- a crash, a hang, an early exit, stray or excess output, leftover children, a stale or
-# missing completion record. Deliberate SABOTAGE by a unit is outside that contract and is
-# disclosed below as residuals S1 to S6: units are the repository's own reviewed code, running as
+# missing completion record, a box left full. Deliberate SABOTAGE by a unit is outside that contract
+# and is disclosed below as residuals S1 to S6 (S6 only for a DELIBERATE escape: the accidental
+# reach S6 names is bounded, see there): units are the repository's own reviewed code, running as
 # the same user as the runner, and a same-user process can reach the runner in ways no check inside
 # the runner closes. Every guarantee stated here holds against that model, not against a unit
 # written to defeat it. Against accidental faults, the GUARANTEE that `opf.py --self-test` cannot
@@ -22137,7 +22138,8 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 # hand it to an escapee, which then holds the suite's real stream open past the runner's exit (a
 # reader waiting for EOF waits on it) or writes into it; (S4) a unit can rewrite or truncate a
 # capture through its own still-open descriptor before it exits, and, the launch descriptors
-# being closed, a unit that unlinks a capture frees its inode, so a file it plants at that path
+# being closed, a unit that unlinks a capture and closes every descriptor still open on it (its
+# own and every descendant's) frees its inode, so a file it plants at that path
 # can receive the SAME device and inode numbers on a filesystem that reuses them (ext4 and xfs
 # can) and pass the identity check (not reproduced: the probing hosts' tmpfs and btrfs allocated
 # increasing numbers); (S5) the by-path read-backs can be parked or redirected: an escapee can
@@ -22146,10 +22148,15 @@ _AGGREGATOR_INTERNAL_BUDGET = 3600.0
 # and leave a symlink at its name -- O_NOFOLLOW guards only the last path component, so every
 # re-open then resolves through that symlink (QA31 claude MINOR 3; reproduced in QA32: the runner
 # read back through it and returned 0, both names left behind), and a target slow to resolve
-# (an automount, a FUSE path) parks the lookup (not reproduced); (S6) the box's recursive removal
-# runs AFTER the verdict and outside every bound, its memory roughly quadratic in the depth of a
-# directory chain the unit leaves there, and an escaped descendant, never killed, keeps writing
-# after it (S1 to S6 are _run_unit_subprocess's residuals (g) to (l)).
+# (an automount, a FUSE path) parks the lookup (not reproduced); the box's removal no longer
+# follows that symlink or passes it: a box path that no longer opens as the directory the runner
+# made is the named cannot-evaluate (QA33); (S6) a descendant that LEFT the unit's group is never
+# killed: the box's removal itself is BOUNDED (_unit_remove_box: depth, entry and time caps, after
+# the group kill; a box it cannot clear is the named cannot-evaluate, its remnant left in place),
+# which covers what an ACCIDENTAL fault reaches -- a chain or flood left in the box, an escapee
+# still writing there -- but an escapee's writes ELSEWHERE, and its CPU and memory, stay
+# unbounded until it ends, out of this runner's reach without OS isolation (S1 to S6 are
+# _run_unit_subprocess's residuals (g) to (l)).
 # Each budget sits ABOVE the unit's own end-to-end internal budget (the kill-timeout
 # rule), stated per row from the unit's committed timeouts, windows and worker counts; the
 # aggregator's internal budget is ENFORCED inside the bounded child itself
@@ -22254,10 +22261,12 @@ _UNIT_OUTPUT_CAP = 4 << 20
 # record failure), and a unit that CATCHES its own EFBIG and still exits 0 with its record intact
 # passes -- bounded, not failed.
 # _UNIT_OUTPUT_CAP still caps the copy. Residuals, disclosed: the bound is PER FILE, not aggregate,
-# and storage is NOT bounded: many files can consume it within the outer bound, and an escaped
-# descendant -- never killed, at the outer bound or after -- can keep writing new files for as
-# long as it runs, past the runner's return and the box's removal (residual (l) of
-# _run_unit_subprocess); a unit legitimately needing a larger single file fails here, for review.
+# and aggregate storage is NOT bounded while the unit runs: many files can consume it within the
+# outer bound (a box left holding more than _UNIT_BOX_ENTRY_CAP entries is then the named
+# cannot-evaluate, QA33), and an escaped descendant -- never killed, at the outer bound or after --
+# can keep writing new files OUTSIDE the box for as long as it runs, past the runner's return
+# (residual (l) of _run_unit_subprocess); a unit legitimately needing a larger single file fails
+# here, for review.
 _UNIT_FSIZE_LIMIT = 256 << 20
 
 # The environment a unit subprocess starts from: ONLY these caller variables pass through (where to
@@ -22676,13 +22685,88 @@ def _cmd_self_test_unit(label):
     return code
 
 
+# The bounded box removal (QA33 codex MAJOR / gemini, residual (l) of _run_unit_subprocess): the box
+# a unit ran in is removed by _unit_remove_box's iterative walk, never by an unbounded recursive
+# cleanup, and the walk stops at the FIRST of these bounds, leaving the remnant in place and failing
+# the unit cannot-evaluate by name: at most this many directory levels (one descriptor held per
+# level, so the depth also bounds the descriptors), at most this many entries listed in all (each
+# name at most NAME_MAX bytes, so the entries bound the memory), and at most this many seconds. A
+# box holds three files when a unit leaves it alone (its stdout and stderr captures and its
+# completion record).
+_UNIT_BOX_DEPTH_CAP = 64
+_UNIT_BOX_ENTRY_CAP = 20000
+_UNIT_BOX_REMOVAL_BOUND = 30.0
+
+
+def _unit_remove_box(box, ident):
+    """Remove a unit's box, BOUNDED (QA33): an iterative walk relative to directory descriptors that
+    never follows a symlink (every open is O_NOFOLLOW|O_DIRECTORY|O_NONBLOCK, every unlink and
+    rmdir is relative to its parent's descriptor), holding one descriptor per level plus one
+    listing at a time, and stopping -- the remnant left where it is -- at the first of
+    _UNIT_BOX_DEPTH_CAP levels, _UNIT_BOX_ENTRY_CAP entries listed in all, or
+    _UNIT_BOX_REMOVAL_BOUND seconds, the deadline checked before every entry. `ident` is the
+    box's (st_dev, st_ino) when it was made: a box path that no longer opens as that very
+    directory (renamed away, a symlink left at its name) is not walked at all. An entry that
+    appears while the walk runs (a descendant that left the unit's group writing on) makes the
+    final rmdir fail, which is reported too. Returns None once the box is gone, else the reason
+    the removal stopped. A single filesystem call that itself blocks (a FUSE mount over the box)
+    is not bounded by the deadline (residual (k))."""
+    import time
+    deadline = time.monotonic() + _UNIT_BOX_REMOVAL_BOUND
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | (_unit_guard_flags() or 0)
+    stack = []   # one [descriptor, names left to remove or None, name in the parent] per level
+    listed = 0
+    try:
+        try:
+            stack.append([os.open(box, flags), None, None])
+        except OSError as exc:
+            return "it no longer opens as a directory ({})".format(exc)
+        info = os.fstat(stack[0][0])
+        if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != ident:
+            return "its path no longer names the directory the runner made"
+        while stack:
+            if time.monotonic() >= deadline:
+                return "the removal reached its {} s bound".format(_UNIT_BOX_REMOVAL_BOUND)
+            frame = stack[-1]
+            if frame[1] is None:
+                names = []
+                with os.scandir(frame[0]) as listing:
+                    for entry in listing:
+                        listed += 1
+                        if listed > _UNIT_BOX_ENTRY_CAP:
+                            return "it holds more than {} entries".format(_UNIT_BOX_ENTRY_CAP)
+                        names.append((entry.name, entry.is_dir(follow_symlinks=False)))
+                frame[1] = names
+            if frame[1]:
+                name, is_dir = frame[1].pop()
+                if not is_dir:
+                    os.unlink(name, dir_fd=frame[0])
+                elif len(stack) >= _UNIT_BOX_DEPTH_CAP:
+                    return "it nests directories deeper than {} levels".format(_UNIT_BOX_DEPTH_CAP)
+                else:
+                    stack.append([os.open(name, flags, dir_fd=frame[0]), None, name])
+                continue
+            done = stack.pop()
+            os.close(done[0])
+            if stack:
+                os.rmdir(done[2], dir_fd=stack[-1][0])
+        os.rmdir(box)
+        return None
+    except OSError as exc:
+        return "the removal failed ({})".format(exc)
+    finally:
+        for frame in stack:
+            os.close(frame[0])
+
+
 def _run_unit_subprocess(label, bound, argv=None):
     """Run ONE registered self-test unit as its OWN `python3 -I -B opf.py --self-test-unit <label>`
     subprocess under the hard outer deadline `bound` seconds (D-385-SUBPROCESS-RUNNER, replacing the
     QA26/QA27 in-process forked runner). THREAT MODEL (D-385-ACCIDENTAL-UNIT): this runner defends
     against ACCIDENTAL unit faults -- a crash, a hang, an early exit, stray or excess output,
-    leftover children, a stale or missing completion record; deliberate sabotage by a unit is a
-    disclosed residual, (g) to (l) below, because units are the repository's own reviewed code
+    leftover children, a stale or missing completion record, a box left full; deliberate sabotage
+    by a unit is a disclosed residual, (g) to (l) below ((l) only for a DELIBERATE escape: its
+    accidental reach is bounded), because units are the repository's own reviewed code
     running as the same user, and every guarantee stated here holds against that model only. The
     child starts with start_new_session=True (it leads its
     own session and process group, so its pgid equals its pid), stdin from the null device, stdout
@@ -22719,7 +22803,13 @@ def _run_unit_subprocess(label, bound, argv=None):
     `<label> <code> <pid>` the child writes LAST (_cmd_self_test_unit), the pid BINDING the record
     to the leader (QA28 claude MINOR 2): a missing, mismatched or wrong-pid record fails closed
     (exit 2); the binding checks the record's TEXT, not its writer (a forged record is residual
-    (h)). After the leader ends, the result and capture files are read back by RE-OPENING THEIR
+    (h)). A box removed from OUTSIDE while the unit runs -- another process sweeping the caller's
+    TMPDIR -- leaves the unit writing into unlinked captures and failing its record open
+    silently, so a passing unit ends exit 0 with no record and no output: the record failure,
+    which then also names the unreadable capture and the box the removal no longer finds
+    (QA33 claude MEDIUM 1: that signature was reproduced by removing a running unit's box; it
+    fails closed, never a pass).
+    After the leader ends, the result and capture files are read back by RE-OPENING THEIR
     PATHS (the launch descriptors on the captures are closed as soon as the child has started, and
     nothing is read through them), O_NOFOLLOW|O_NONBLOCK; each must still be a regular file by
     fstat on the newly opened descriptor, every read bounded (QA28 codex B2: a FIFO or
@@ -22743,7 +22833,8 @@ def _run_unit_subprocess(label, bound, argv=None):
     copy itself cannot change the unit's verdict.
     Disclosed residuals, each named with why it sits outside this runner's contract
     (D-385-RESCOPE: a hostile or instrumented CALLER is that process's own business, (a) to (f);
-    D-385-ACCIDENTAL-UNIT: a unit that sabotages its runner on purpose, (g) to (l)):
+    D-385-ACCIDENTAL-UNIT: a unit that sabotages its runner on purpose, (g) to (k), and (l)'s
+    deliberate escape, whose accidental reach the bounded box removal covers):
     (a) an in-process competing reaper (QA29 codex B1's second half): caller code -- a thread, a
     library, an interposed os.waitid -- that reaps this runner's child between the WNOWAIT
     observation and this runner's kill and reap unpins the leader's pid, so the group kill can
@@ -22788,7 +22879,9 @@ def _run_unit_subprocess(label, bound, argv=None):
     (j) a unit can rewrite or truncate a capture through its own still-open descriptor before it
     exits; while it lives the capture is its own output (_unit_copy_capped). And because this
     runner's launch descriptors are closed once the child starts, a unit that unlinks a capture
-    frees its inode, so a file it then plants at that path can receive the SAME device and inode
+    and closes every descriptor still open on it -- its own inherited one and every descendant's
+    (QA33 codex MINOR: an unlink alone, the descriptor kept, left the inode allocated) -- frees
+    its inode, so a file it then plants at that path can receive the SAME device and inode
     numbers on a filesystem that reuses them (ext4 and xfs can) and pass the identity check: the
     `never a laundered pass` of a planted file holds only where the number is not reused (QA31
     claude MINOR 2, not reproduced -- the probing hosts' tmpfs and btrfs allocated increasing
@@ -22802,21 +22895,34 @@ def _run_unit_subprocess(label, bound, argv=None):
     the LAST path component: every re-open then resolves through that symlink to wherever it
     points (QA31 claude MINOR 3; reproduced in QA32: the leader renamed the box to `<box>.real`
     and symlinked the box name to it, the runner read back through it and returned 0, and both
-    names were left behind, the box removal not following the symlink), and a target slow to
-    resolve (an automount, a FUSE path) parks the lookup the same way (not reproduced).
-    (l) the box's removal is NOT BOUNDED: TemporaryDirectory's recursive cleanup runs when this
-    runner returns, AFTER the verdict and outside every deadline here, its time and memory growing
-    with whatever the unit left in the box -- a directory chain N deep costs memory roughly
-    QUADRATIC in N (QA32 claude: about 23, 36 and 86 MB peak runner RSS at 2,000, 4,000 and 8,000
-    deep; QA31 claude: a MemoryError past a 10 s bound at 90,000 deep, and a host OOM kill with no
-    memory cap); an exception raised there fails that unit closed through run_self_tests (exit
-    2, never a pass), but an OOM kill can take the runner or any other process on the host; a
-    removal error is ignored (ignore_cleanup_errors) and leaves the remnant behind (QA32 codex: a
-    16,001-deep chain was left behind); and an escaped descendant is never killed, at the outer
-    bound or after, so it can keep writing into the box, or anywhere else, after the removal,
-    consuming storage without bound (the escaped-writer design reaches this by accident, not only
-    by sabotage). The removal is not bounded here (no depth or entry cap abandons the box with a
-    named cannot-evaluate).
+    names were left behind, the box removal not following the symlink; since QA33 the bounded
+    removal refuses a box path that no longer opens as the directory this runner made, so that
+    case is the named cannot-evaluate, both names left in place, never a pass, though the
+    read-backs still resolve through the symlink first), and a target slow to resolve (an
+    automount, a FUSE path) parks the lookup the same way (not reproduced).
+    (l) the box's removal is BOUNDED (QA33 codex MAJOR / gemini; it was an unbounded recursive
+    cleanup through QA32): after the verdict, with every in-group process already SIGKILLed
+    (except on the lost path and the no-waitid fallback, which licence no group kill),
+    _unit_remove_box walks the box iteratively, never following a symlink, and stops at the
+    first of _UNIT_BOX_DEPTH_CAP levels, _UNIT_BOX_ENTRY_CAP entries or _UNIT_BOX_REMOVAL_BOUND
+    seconds; a box it cannot clear -- a chain or a flood left there, an entry added while it ran,
+    a removal error, a box path that no longer names the directory made -- turns ANY verdict
+    into the named cannot-evaluate (exit 2, never a pass), naming the remnant, which stays in
+    place. That covers what an ACCIDENTAL fault reaches in the box, an accidental escapee still
+    writing there included (QA31 claude: a 90,000-deep chain had cost a MemoryError past a 10 s
+    bound, and a host OOM kill with no memory cap). What stays out of reach is a descendant that
+    LEFT the unit's process group (its own setsid or setpgid, a start_new_session launch): the
+    group kill addresses the group alone, this runner never learns the escapee's pid, and once
+    its parent dies the kernel reparents it to init or a subreaper, so nothing short of OS
+    isolation the CALLER owns (a cgroup to kill, a PID namespace, a subreaper) can find and end
+    it. Until it ends by itself it can run on, use CPU and memory, write new files anywhere its
+    user may write (each under RLIMIT_FSIZE), keep an unlinked capture's storage while it holds
+    a descriptor on it, and signal or reach this runner as (g) and (i) say; once the box is gone
+    it cannot recreate it under the same name. The repository's own escaping launches -- the
+    _FixtureProcess guardian and subject, the runtime-probe supervisors, the run_shell checks,
+    the escape probe's writers -- are ended by their own units' code, not by this runner; a
+    fault that leaves one running is disclosed here, and a DELIBERATE escape is sabotage
+    (D-385-ACCIDENTAL-UNIT).
     Further disclosed: a descendant that LEAVES the unit's process group (its own setpgid or
     setsid, or a start_new_session launch) is not killed and never signalled (the escaped-writer
     design); copied output past _UNIT_OUTPUT_CAP is truncated with a note; _UNIT_FSIZE_LIMIT
@@ -22827,12 +22933,7 @@ def _run_unit_subprocess(label, bound, argv=None):
     _UNIT_BOUND_DISABLED is the test-only flip (the wait audit's disclosed variable-timeout
     residual, deliberate here) that removes the deadline; _unit_bound_self_test proves it committed
     False and live."""
-    import errno
-    import resource
-    import signal
-    import subprocess
     import tempfile
-    import time
     if _unit_guard_flags() is None:
         _unit_deliver(sys.stderr, "opf self-test: {} cannot run on this platform, which lacks "
                       "O_NOFOLLOW or O_NONBLOCK: the record and capture read-backs would fall "
@@ -22840,223 +22941,256 @@ def _run_unit_subprocess(label, bound, argv=None):
                       "on a planted FIFO, so the runner fails closed by name instead (QA30 "
                       "gemini)\n".format(label).encode("utf-8", "replace"), 10.0)
         return EXIT_MALFORMED
-    with tempfile.TemporaryDirectory(prefix="opf-unit-", ignore_cleanup_errors=True) as box:
-        out_path = os.path.join(box, "out")
-        err_path = os.path.join(box, "err")
-        result_path = os.path.join(box, "result")
-        env = _unit_scrubbed_env()
-        env["OPF_SELF_TEST_RESULT"] = result_path
-        if argv is None:
-            argv = [sys.executable, "-I", "-B", str(Path(__file__).resolve()),
-                    "--self-test-unit", label]
-        fsize = _UNIT_FSIZE_LIMIT
-        hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
-        if hard != resource.RLIM_INFINITY:
-            fsize = min(fsize, hard)
-        libc = None
-        if sys.platform.startswith("linux"):
-            try:
-                import ctypes
-                libc = ctypes.CDLL(None, use_errno=True)
-            except Exception:
-                libc = None
-        parent_pid = os.getpid()
+    # The box is made here and removed here, BOUNDED (residual (l), QA33): the verdict is settled
+    # inside it first, and a box the bounded removal cannot clear turns any verdict into the named
+    # cannot-evaluate, the remnant left in place. On an interrupt the removal still runs, bounded,
+    # and the interruption propagates.
+    box = tempfile.mkdtemp(prefix="opf-unit-")
+    made = os.lstat(box)
+    code = EXIT_MALFORMED
+    try:
+        code = _unit_run_in_box(label, bound, argv, box)
+    finally:
+        stopped = _unit_remove_box(box, (made.st_dev, made.st_ino))
+        if stopped is not None:
+            _unit_deliver(sys.stderr, "opf self-test: {} box {} was not removed: {}; whatever "
+                          "remains stays in place and the unit cannot be evaluated (exit 2, never "
+                          "a pass; the bounded removal, residual (l))\n".format(label, box, stopped)
+                          .encode("utf-8", "replace"), 10.0)
+            code = EXIT_MALFORMED
+    return code
 
-        def child_setup():
-            # Runs in the forked child, before the exec: the at-source capture bound. SIGXFSZ
-            # is restored to default and unblocked first so a non-Python descendant inheriting the
-            # limit dies at it (the exec'd Python re-ignores SIGXFSZ for itself, so a Python unit
-            # sees EFBIG and fails closed instead); then (Linux) the parent-death tether, with the
-            # re-check closing the already-dead-parent race.
-            signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
-            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGXFSZ})
-            resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
-            if libc is not None:
-                libc.prctl(1, int(signal.SIGKILL), 0, 0, 0)   # PR_SET_PDEATHSIG
-                if os.getppid() != parent_pid:
-                    os._exit(EXIT_MALFORMED)
 
-        previous_chld = None
+def _unit_run_in_box(label, bound, argv, box):
+    """The launch, wait, group kill, reap and verdict of _run_unit_subprocess, whose docstring
+    states the contract, inside the box it made; its caller then removes the box, bounded
+    (_unit_remove_box), so every in-group process is already SIGKILLed when the removal starts
+    (except on the lost path and the no-waitid fallback, which licence no group kill)."""
+    import errno
+    import resource
+    import signal
+    import subprocess
+    import time
+    out_path = os.path.join(box, "out")
+    err_path = os.path.join(box, "err")
+    result_path = os.path.join(box, "result")
+    env = _unit_scrubbed_env()
+    env["OPF_SELF_TEST_RESULT"] = result_path
+    if argv is None:
+        argv = [sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                "--self-test-unit", label]
+    fsize = _UNIT_FSIZE_LIMIT
+    hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
+    if hard != resource.RLIM_INFINITY:
+        fsize = min(fsize, hard)
+    libc = None
+    if sys.platform.startswith("linux"):
         try:
-            previous_chld = signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-        except (OSError, RuntimeError, ValueError):
-            previous_chld = None   # not displaceable here (a non-main thread): the inherited
-            #                        disposition stands, and under an inherited SIG_IGN the kernel
-            #                        auto-reaps the leader, so the waitid poll observes NOTHING and
-            #                        the unit fails closed on the named lost path (residual (f))
-        try:
-            try:
-                with open(out_path, "wb") as out_file, open(err_path, "wb") as err_file:
-                    # The captures' identity at launch (QA30 codex MAJOR): the read-back later
-                    # requires the SAME device and inode, so a unit that unlinks a capture and
-                    # plants another file at its path is a named failure, unless the planted
-                    # file received the freed inode's number (residual (j)).
-                    out_ident = os.fstat(out_file.fileno())
-                    err_ident = os.fstat(err_file.fileno())
-                    child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out_file,
-                                             stderr=err_file, env=env, start_new_session=True,
-                                             preexec_fn=child_setup)
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                _unit_deliver(sys.stderr, "opf self-test: {} could not start its unit process ({}); "
-                              "failing closed\n".format(label, exc).encode("utf-8", "replace"), 10.0)
-                return EXIT_MALFORMED
-            failure = None
-            status = None
-            settled = False
-            observed = None
-            lost = False
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+        except Exception:
+            libc = None
+    parent_pid = os.getpid()
 
-            def leader_pinned():
-                # The killpg licence, DERIVED at the instant of use (QA30 claude MINOR 2): an
-                # un-reaped leader pins pgid == pid (QA29). Popen records a reap inside wait()
-                # itself, so an interrupt surfacing after a reap can never leave a stale True
-                # behind the way the retired flag -- assigned a line after the call -- could.
-                return not lost and child.returncode is None
-            try:
-                deadline = None if _UNIT_BOUND_DISABLED else time.monotonic() + bound
-                outcome = "exited"
-                if getattr(os, "waitid", None) is None:
-                    # No WNOWAIT observation on this platform: the disclosed REAP-FIRST fallback.
-                    # The reap unpins the leader's pid, so no group kill may follow it (QA29).
+    def child_setup():
+        # Runs in the forked child, before the exec: the at-source capture bound. SIGXFSZ
+        # is restored to default and unblocked first so a non-Python descendant inheriting the
+        # limit dies at it (the exec'd Python re-ignores SIGXFSZ for itself, so a Python unit
+        # sees EFBIG and fails closed instead); then (Linux) the parent-death tether, with the
+        # re-check closing the already-dead-parent race.
+        signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGXFSZ})
+        resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
+        if libc is not None:
+            libc.prctl(1, int(signal.SIGKILL), 0, 0, 0)   # PR_SET_PDEATHSIG
+            if os.getppid() != parent_pid:
+                os._exit(EXIT_MALFORMED)
+
+    previous_chld = None
+    try:
+        previous_chld = signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    except (OSError, RuntimeError, ValueError):
+        previous_chld = None   # not displaceable here (a non-main thread): the inherited
+        #                        disposition stands, and under an inherited SIG_IGN the kernel
+        #                        auto-reaps the leader, so the waitid poll observes NOTHING and
+        #                        the unit fails closed on the named lost path (residual (f))
+    try:
+        try:
+            with open(out_path, "wb") as out_file, open(err_path, "wb") as err_file:
+                # The captures' identity at launch (QA30 codex MAJOR): the read-back later
+                # requires the SAME device and inode, so a unit that unlinks a capture and
+                # plants another file at its path is a named failure, unless the planted
+                # file received the freed inode's number (residual (j)).
+                out_ident = os.fstat(out_file.fileno())
+                err_ident = os.fstat(err_file.fileno())
+                child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out_file,
+                                         stderr=err_file, env=env, start_new_session=True,
+                                         preexec_fn=child_setup)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            _unit_deliver(sys.stderr, "opf self-test: {} could not start its unit process ({}); "
+                          "failing closed\n".format(label, exc).encode("utf-8", "replace"), 10.0)
+            return EXIT_MALFORMED
+        failure = None
+        status = None
+        settled = False
+        observed = None
+        lost = False
+
+        def leader_pinned():
+            # The killpg licence, DERIVED at the instant of use (QA30 claude MINOR 2): an
+            # un-reaped leader pins pgid == pid (QA29). Popen records a reap inside wait()
+            # itself, so an interrupt surfacing after a reap can never leave a stale True
+            # behind the way the retired flag -- assigned a line after the call -- could.
+            return not lost and child.returncode is None
+        try:
+            deadline = None if _UNIT_BOUND_DISABLED else time.monotonic() + bound
+            outcome = "exited"
+            if getattr(os, "waitid", None) is None:
+                # No WNOWAIT observation on this platform: the disclosed REAP-FIRST fallback.
+                # The reap unpins the leader's pid, so no group kill may follow it (QA29).
+                try:
+                    status = child.wait(timeout=(None if deadline is None else bound))
+                except subprocess.TimeoutExpired:
+                    outcome = "timeout"
+            else:
+                while True:
                     try:
-                        status = child.wait(timeout=(None if deadline is None else bound))
-                    except subprocess.TimeoutExpired:
+                        observed = os.waitid(os.P_PID, child.pid,
+                                             os.WEXITED | os.WNOWAIT | os.WNOHANG)
+                    except OSError:
+                        outcome = "lost"
+                        lost = True   # reaped outside this runner: the pid licences nothing
+                        break
+                    if observed is not None:
+                        break
+                    if deadline is not None and time.monotonic() >= deadline:
                         outcome = "timeout"
-                else:
-                    while True:
-                        try:
-                            observed = os.waitid(os.P_PID, child.pid,
-                                                 os.WEXITED | os.WNOWAIT | os.WNOHANG)
-                        except OSError:
-                            outcome = "lost"
-                            lost = True   # reaped outside this runner: the pid licences nothing
-                            break
-                        if observed is not None:
-                            break
-                        if deadline is not None and time.monotonic() >= deadline:
-                            outcome = "timeout"
-                            break
-                        time.sleep(0.01)
-                # The group, on every completion path WHILE the un-reaped leader still pins
-                # pgid == pid (WNOWAIT observed it, or a timed-out wait reaped nothing): the
-                # numeric killpg licence. Never on the lost path and never after any reap (QA29
-                # claude MINOR 2 / gemini: a reaped leader's pid may already name an unrelated
-                # group). A descendant that stayed in the group dies here even after a clean exit.
+                        break
+                    time.sleep(0.01)
+            # The group, on every completion path WHILE the un-reaped leader still pins
+            # pgid == pid (WNOWAIT observed it, or a timed-out wait reaped nothing): the
+            # numeric killpg licence. Never on the lost path and never after any reap (QA29
+            # claude MINOR 2 / gemini: a reaped leader's pid may already name an unrelated
+            # group). A descendant that stayed in the group dies here even after a clean exit.
+            if leader_pinned():
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            if outcome == "exited" and status is None:
+                # The exit status is the WNOWAIT observation's OWN (QA29 codex B1): a competing
+                # in-process reap between observation and this reap can no longer launder the
+                # real status into Popen.wait's ECHILD fallback of 0.
+                status = (observed.si_status if observed.si_code == os.CLD_EXITED
+                          else -observed.si_status)
+                try:
+                    child.wait(timeout=5.0)   # clear the zombie; the verdict keeps the observed status
+                except subprocess.TimeoutExpired:
+                    failure = ("opf self-test: {} was observed exited but its leader could not "
+                               "be reaped within 5.0 s; failing closed".format(label))
+            elif outcome == "timeout":
+                reaped = True
+                try:
+                    child.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    reaped = False
+                failure = ("opf self-test: {} exceeded its {} s outer bound; its process group "
+                           "was SIGKILLed (D-385-SUBPROCESS-RUNNER hard outer bound{})".format(
+                               label, bound,
+                               "" if reaped else "; its leader was not reaped within 5.0 s"))
+            elif outcome == "lost":
+                try:
+                    child.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    pass
+                failure = ("opf self-test: {} leader was reaped outside this runner (an "
+                           "inherited SIGCHLD reaper this parent could not displace, or an "
+                           "in-process wait); its real exit status is lost, failing closed"
+                           .format(label))
+            settled = True
+        finally:
+            if not settled:
+                # An interrupted parent (QA28 claude MEDIUM 2): kill the unit's whole group --
+                # only while the un-reaped leader still pins it (QA29) -- and reap the leader
+                # on the way out, then let the interruption propagate.
                 if leader_pinned():
                     try:
                         os.killpg(child.pid, signal.SIGKILL)
                     except OSError:
                         pass
-                if outcome == "exited" and status is None:
-                    # The exit status is the WNOWAIT observation's OWN (QA29 codex B1): a competing
-                    # in-process reap between observation and this reap can no longer launder the
-                    # real status into Popen.wait's ECHILD fallback of 0.
-                    status = (observed.si_status if observed.si_code == os.CLD_EXITED
-                              else -observed.si_status)
-                    try:
-                        child.wait(timeout=5.0)   # clear the zombie; the verdict keeps the observed status
-                    except subprocess.TimeoutExpired:
-                        failure = ("opf self-test: {} was observed exited but its leader could not "
-                                   "be reaped within 5.0 s; failing closed".format(label))
-                elif outcome == "timeout":
-                    reaped = True
-                    try:
-                        child.wait(timeout=5.0)
-                    except subprocess.TimeoutExpired:
-                        reaped = False
-                    failure = ("opf self-test: {} exceeded its {} s outer bound; its process group "
-                               "was SIGKILLed (D-385-SUBPROCESS-RUNNER hard outer bound{})".format(
-                                   label, bound,
-                                   "" if reaped else "; its leader was not reaped within 5.0 s"))
-                elif outcome == "lost":
-                    try:
-                        child.wait(timeout=5.0)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    failure = ("opf self-test: {} leader was reaped outside this runner (an "
-                               "inherited SIGCHLD reaper this parent could not displace, or an "
-                               "in-process wait); its real exit status is lost, failing closed"
-                               .format(label))
-                settled = True
-            finally:
-                if not settled:
-                    # An interrupted parent (QA28 claude MEDIUM 2): kill the unit's whole group --
-                    # only while the un-reaped leader still pins it (QA29) -- and reap the leader
-                    # on the way out, then let the interruption propagate.
-                    if leader_pinned():
-                        try:
-                            os.killpg(child.pid, signal.SIGKILL)
-                        except OSError:
-                            pass
-                    try:
-                        child.wait(timeout=5.0)
-                    except (OSError, subprocess.TimeoutExpired):
-                        pass
-        finally:
-            if previous_chld is not None:
                 try:
-                    signal.signal(signal.SIGCHLD, previous_chld)
-                except (OSError, RuntimeError, ValueError):
+                    child.wait(timeout=5.0)
+                except (OSError, subprocess.TimeoutExpired):
                     pass
-        if failure is None:
-            record = None
-            anomaly = None
-            fd = None
-            guard = _unit_guard_flags()
-            if guard is None:
-                # Unreachable past the entry refusal above unless a flag vanished mid-run; the
-                # same fail-closed stance either way (QA30 gemini).
-                anomaly = ("its completion record cannot be read back on this platform, which "
-                           "lacks O_NOFOLLOW or O_NONBLOCK; failing closed rather than an "
-                           "unguarded name-based open (QA30 gemini)")
-            else:
+    finally:
+        if previous_chld is not None:
+            try:
+                signal.signal(signal.SIGCHLD, previous_chld)
+            except (OSError, RuntimeError, ValueError):
+                pass
+    if failure is None:
+        record = None
+        anomaly = None
+        fd = None
+        guard = _unit_guard_flags()
+        if guard is None:
+            # Unreachable past the entry refusal above unless a flag vanished mid-run; the
+            # same fail-closed stance either way (QA30 gemini).
+            anomaly = ("its completion record cannot be read back on this platform, which "
+                       "lacks O_NOFOLLOW or O_NONBLOCK; failing closed rather than an "
+                       "unguarded name-based open (QA30 gemini)")
+        else:
+            try:
+                fd = os.open(result_path, os.O_RDONLY | guard)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    anomaly = "its result path was replaced by a symlink (not followed)"
+        if fd is not None:
+            with os.fdopen(fd, "rb") as handle:
                 try:
-                    fd = os.open(result_path, os.O_RDONLY | guard)
-                except OSError as exc:
-                    if exc.errno == errno.ELOOP:
-                        anomaly = "its result path was replaced by a symlink (not followed)"
-            if fd is not None:
-                with os.fdopen(fd, "rb") as handle:
-                    try:
-                        info = os.fstat(handle.fileno())
-                        if stat.S_ISREG(info.st_mode):
-                            record = handle.read(256).decode("utf-8", "replace")
-                        else:
-                            anomaly = ("its result path is no longer a regular file (mode {:o}); a "
-                                       "FIFO there is never opened blocking".format(info.st_mode))
-                    except OSError:
-                        record = None
-            if status < 0:
-                failure = ("opf self-test: {} unit process was killed by signal {}; failing closed"
-                           .format(label, -status))
-            elif status not in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED):
-                failure = ("opf self-test: {} unit process exited {}; failing closed"
-                           .format(label, status))
-            elif anomaly is not None:
-                failure = ("opf self-test: {} {}; failing closed, never a hang (QA28)"
-                           .format(label, anomaly))
-            elif record != "{} {} {}\n".format(label, status, child.pid):
-                failure = ("opf self-test: {} ended (exit {}) without a matching completion record "
-                           "bound to its leader pid {} (got {!r}); a unit whose child exits before "
-                           "its record is written -- an early os._exit(0) included -- and a record "
-                           "carrying any pid but the leader's fail closed".format(
-                               label, status, child.pid, (record or "")[:80]))
-        copy_anomaly, _out_tainted = _unit_copy_capped(sys.stdout, out_path, label, "stdout",
-                                                       out_ident)
-        err_anomaly, err_tainted = _unit_copy_capped(sys.stderr, err_path, label, "stderr",
-                                                     err_ident)
-        copy_anomaly = err_anomaly or copy_anomaly
-        if failure is None and copy_anomaly is not None:
+                    info = os.fstat(handle.fileno())
+                    if stat.S_ISREG(info.st_mode):
+                        record = handle.read(256).decode("utf-8", "replace")
+                    else:
+                        anomaly = ("its result path is no longer a regular file (mode {:o}); a "
+                                   "FIFO there is never opened blocking".format(info.st_mode))
+                except OSError:
+                    record = None
+        if status < 0:
+            failure = ("opf self-test: {} unit process was killed by signal {}; failing closed"
+                       .format(label, -status))
+        elif status not in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED):
+            failure = ("opf self-test: {} unit process exited {}; failing closed"
+                       .format(label, status))
+        elif anomaly is not None:
             failure = ("opf self-test: {} {}; failing closed, never a hang (QA28)"
-                       .format(label, copy_anomaly))
-        if failure is None and status == EXIT_OK and err_tainted:
-            failure = ("opf self-test: {} exited 0 but its error stream carries an "
-                       "uncaught-exception traceback; a passing verdict requires an empty or clean "
-                       "error stream (QA29 codex MAJOR 5), failing closed".format(label))
-        if failure is not None:
-            _unit_deliver(sys.stderr, (failure + "\n").encode("utf-8", "replace"), 10.0)
-            return EXIT_MALFORMED
-        return status
+                       .format(label, anomaly))
+        elif record != "{} {} {}\n".format(label, status, child.pid):
+            failure = ("opf self-test: {} ended (exit {}) without a matching completion record "
+                       "bound to its leader pid {} (got {!r}); a unit whose child exits before "
+                       "its record is written -- an early os._exit(0) included -- and a record "
+                       "carrying any pid but the leader's fail closed".format(
+                           label, status, child.pid, (record or "")[:80]))
+    copy_anomaly, _out_tainted = _unit_copy_capped(sys.stdout, out_path, label, "stdout",
+                                                   out_ident)
+    err_anomaly, err_tainted = _unit_copy_capped(sys.stderr, err_path, label, "stderr",
+                                                 err_ident)
+    copy_anomaly = err_anomaly or copy_anomaly
+    if failure is None and copy_anomaly is not None:
+        failure = ("opf self-test: {} {}; failing closed, never a hang (QA28)"
+                   .format(label, copy_anomaly))
+    elif failure is not None and copy_anomaly is not None:
+        # QA33 claude MEDIUM 1: a missing record over an exit 0 whose captures are gone too is a box
+        # removed from OUTSIDE while the unit ran; naming the capture state says so.
+        failure = "{}; and {}".format(failure, copy_anomaly)
+    if failure is None and status == EXIT_OK and err_tainted:
+        failure = ("opf self-test: {} exited 0 but its error stream carries an "
+                   "uncaught-exception traceback; a passing verdict requires an empty or clean "
+                   "error stream (QA29 codex MAJOR 5), failing closed".format(label))
+    if failure is not None:
+        _unit_deliver(sys.stderr, (failure + "\n").encode("utf-8", "replace"), 10.0)
+        return EXIT_MALFORMED
+    return status
 
 
 def _unit_bound_self_test():
@@ -23115,8 +23249,11 @@ def _unit_bound_self_test():
     runner refuses by name, fail closed, instead of opening unguarded, and the watchdog helper's
     source carries the same fail-closed gate; (27) a KeyboardInterrupt surfacing inside the
     post-observation reap licences no second group kill (the licence is derived from the
-    recorded reap state, never from a flag assigned after the call). Returns
-    0 clean, 1 on a failure."""
+    recorded reap state, never from a flag assigned after the call). The QA33 vector: (28) the
+    box's removal is bounded -- a box left alone is removed and passes, a box past the depth,
+    entry or time bound or swapped for a symlink is the named cannot-evaluate with its remnant in
+    place, and a box removed while its unit runs is the named record failure that also names the
+    capture and the box. Returns 0 clean, 1 on a failure."""
     import contextlib
     import inspect
     import io
@@ -23533,9 +23670,13 @@ def _unit_bound_self_test():
                 "opf._run_unit_subprocess('synthetic-interrupt', 30.0,\n"
                 "                         argv=[sys.executable, '-I', '-c', "
                 + repr(unit_source) + "])\n")
+            # The driver makes its box under `hold` (QA33 claude MINOR 3): a SIGKILLed driver runs
+            # no removal, so its box would otherwise stay in the caller's TMPDIR; here `hold`'s own
+            # cleanup takes it once the unit is gone.
             driver = subprocess.Popen([sys.executable, "-I", "-c", driver_source],
                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                      stderr=subprocess.DEVNULL, start_new_session=True)
+                                      stderr=subprocess.DEVNULL, start_new_session=True,
+                                      env=dict(os.environ, TMPDIR=hold))
             unit_pid = None
             waited = time.monotonic() + 15.0
             while time.monotonic() < waited:
@@ -23945,6 +24086,79 @@ def _unit_bound_self_test():
                       "leader's pid licences nothing (QA30 claude MINOR 2)".format(
                           len(reap_window_kills)))
 
+    # (28) QA33 codex MAJOR / gemini: the box's removal is BOUNDED. Each case runs with the box
+    # made under `hold` (tempfile.tempdir, restored in a finally), so a remnant is observable and
+    # `hold`'s cleanup takes it: (a) a unit that leaves its box alone passes and its box is gone;
+    # (b) a directory chain deeper than _UNIT_BOX_DEPTH_CAP, (c) more entries than the entry cap
+    # (run under a 40-entry test cap) and (d) a removal past its deadline (run under a 0 s test
+    # bound) each turn a clean exit and a matching record into the named cannot-evaluate, the
+    # remnant left in place; (e) a box renamed away with a symlink left at its name is never
+    # walked through and is the same named exit 2; (f) a box removed while its unit runs (here by
+    # the unit itself, standing in for an outside TMPDIR sweep) is the named record failure that
+    # also names the unreadable capture and the box the removal no longer finds (QA33 claude
+    # MEDIUM 1).
+    record_line = ("with open(os.environ['OPF_SELF_TEST_RESULT'], 'w') as handle:\n"
+                   "    handle.write('synthetic-box 0 ' + str(os.getpid()) + '\\n')\n")
+    in_box = "import os\nbox = os.path.dirname(os.environ['OPF_SELF_TEST_RESULT'])\n"
+    box_cases = (
+        ("(a) a box left alone", None, EXIT_OK, "import os\n" + record_line),
+        ("(b) a chain deeper than the depth cap", None, EXIT_MALFORMED,
+         in_box + "os.chdir(box)\nfor _ in range(" + str(_UNIT_BOX_DEPTH_CAP + 8) + "):\n"
+         "    os.mkdir('d')\n    os.chdir('d')\n" + record_line),
+        ("(c) more entries than the entry cap", ("_UNIT_BOX_ENTRY_CAP", 40), EXIT_MALFORMED,
+         in_box + "for index in range(60):\n"
+         "    open(os.path.join(box, 'f{}'.format(index)), 'wb').close()\n" + record_line),
+        ("(d) a removal past its deadline", ("_UNIT_BOX_REMOVAL_BOUND", 0.0), EXIT_MALFORMED,
+         "import os\n" + record_line),
+        ("(e) a box swapped for a symlink", None, EXIT_MALFORMED,
+         in_box + record_line + "os.rename(box, box + '.real')\nos.symlink(box + '.real', box)\n"),
+    )
+    for case, flip, expected, script in box_cases:
+        with tempfile.TemporaryDirectory(prefix="opf-unitbound-") as hold:
+            saved_tempdir = tempfile.tempdir
+            saved_flip = None if flip is None else globals()[flip[0]]
+            try:
+                tempfile.tempdir = hold
+                if flip is not None:
+                    globals()[flip[0]] = flip[1]
+                code, took, _out_text, err_text = run_vector("synthetic-box", 10.0, script)
+            finally:
+                tempfile.tempdir = saved_tempdir
+                if flip is not None:
+                    globals()[flip[0]] = saved_flip
+            left = sorted(os.listdir(hold))
+        if code != expected:
+            faults.append("the bounded box removal, {}: code {} instead of {} (stderr tail {!r})"
+                          .format(case, code, expected, err_text[-240:]))
+        elif expected == EXIT_OK and left:
+            faults.append("the bounded box removal, {}: the box was not removed ({})".format(
+                case, left))
+        elif expected == EXIT_MALFORMED and (
+                not left or "was not removed" not in err_text
+                or not any(os.path.join(hold, name) in err_text for name in left)):
+            faults.append("the bounded box removal, {}: the cannot-evaluate does not name a "
+                          "remnant left in place (left {}, stderr tail {!r})".format(
+                              case, left, err_text[-240:]))
+        if took >= 12.0:
+            faults.append("the bounded box removal, {}: took {:.1f} s".format(case, took))
+    with tempfile.TemporaryDirectory(prefix="opf-unitbound-") as hold:
+        saved_tempdir = tempfile.tempdir
+        try:
+            tempfile.tempdir = hold
+            code, _took, out_text, err_text = run_vector("synthetic-box", 10.0, (
+                in_box + "import shutil\nprint('BEFORE-SWEEP', flush=True)\n"
+                "shutil.rmtree(box)\n"
+                "try:\n" + "".join("    " + line + "\n" for line in record_line.splitlines())
+                + "except OSError:\n    pass\n"))
+        finally:
+            tempfile.tempdir = saved_tempdir
+    if (code != EXIT_MALFORMED or "completion record" not in err_text
+            or "capture could not be opened" not in err_text
+            or "was not removed" not in err_text):
+        faults.append("the bounded box removal, (f) a box removed while its unit ran: not the "
+                      "named record failure naming the capture and the box (code {}, stderr "
+                      "tail {!r})".format(code, err_text[-300:]))
+
     if faults:
         print("opf unit-bound self-test: FAIL ({})".format("; ".join(faults)[:2000]), file=sys.stderr)
         return EXIT_FINDING
@@ -23968,7 +24182,10 @@ def _unit_bound_self_test():
           "device and inode, the watchdog's stderr report never blocks its lifetime on a full "
           "pipe nobody reads, a platform "
           "without O_NOFOLLOW or O_NONBLOCK is refused by name, and an interrupt inside the reap "
-          "licences no second group kill)")
+          "licences no second group kill; and the QA33 vector holds: a box left alone is removed, "
+          "and a box past the removal's depth, entry or time bound, or swapped for a symlink, is "
+          "the named cannot-evaluate with its remnant left in place, and a box removed while its "
+          "unit ran is the named record failure naming the capture and the box)")
     return EXIT_OK
 
 
