@@ -252,6 +252,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import types
 import unicodedata
 from pathlib import Path
 
@@ -1345,8 +1346,15 @@ def _hdr(*rels):
 
 
 def _quiet(fn, *args):
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        return fn(*args)
+    """`fn(*args)` with its output discarded; when anything escapes it (a harness error's exit 2 included),
+    what it wrote to stderr is passed on first, so the reason for the escape is never hidden."""
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            return fn(*args)
+    except BaseException:
+        sys.stderr.write(err.getvalue())
+        raise
 
 
 def _stderr_of(fn, *args):
@@ -1367,13 +1375,39 @@ def _measured(fn, root):
         raise
 
 
+class _GuardedMutant:
+    """A loaded _mutant whose every function is called under a guard: a call that ends the process
+    (SystemExit 0 or None, GeneratorExit, any other BaseException) is a harness error (exit 2), never the
+    mutant's own status. An Exception propagates as itself, since callers read the mutant's own GateError,
+    and so does a KeyboardInterrupt. Any other attribute is the mutant's own."""
+
+    def __init__(self, module):
+        self._module = module
+
+    def __getattr__(self, name):
+        value = getattr(self._module, name)
+        if not isinstance(value, types.FunctionType):
+            return value
+
+        def guarded(*args, **kwargs):
+            try:
+                return value(*args, **kwargs)
+            except (Exception, KeyboardInterrupt):
+                raise
+            except BaseException:  # noqa: BLE001  a mutant ending the process in a call is a harness error
+                print("SELF-TEST HARNESS ERROR: a call into the mutant ({}) ended the process; "
+                      "fail-closed".format(name), file=sys.stderr)
+                sys.exit(2)
+        return guarded
+
+
 def _mutant(tmp, old, new, *more):
     """A module loaded from the production prefix of this file with `old` replaced by `new` exactly once,
-    written under the fixture directory `tmp` and loaded with importlib. A boundary or target that does
-    not match exactly once is a harness error (exit 2), and so is a load that ends the process or faults
-    (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception): the mutant can never end
-    the self-test with its own status. A KeyboardInterrupt propagates, so an operator's Ctrl-C stops the
-    run."""
+    written under the fixture directory `tmp`, loaded with importlib and returned as a _GuardedMutant. A
+    boundary or target that does not match exactly once is a harness error (exit 2), and so is a load that
+    ends the process or faults (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception)
+    or a later call into the mutant that ends the process: the mutant can never end the self-test with its
+    own status. A KeyboardInterrupt propagates, so an operator's Ctrl-C stops the run."""
     import importlib.util
     source = Path(__file__).read_text(encoding="utf-8")
     if source.count(MUTATION_BOUNDARY) != 1:
@@ -1404,19 +1438,42 @@ def _mutant(tmp, old, new, *more):
         sys.exit(2)
     finally:
         sys.path[:] = saved
-    return mutant
+    return _GuardedMutant(mutant)
+
+
+# The KeyboardInterrupt a poisoned mutant raises on purpose. Only it is recorded by the vectors below; any
+# other KeyboardInterrupt, such as an operator's real Ctrl-C landing in a vector's window, propagates.
+POISON_INTERRUPT = "instruction-budget-self-test-poisoned-mutant"
+
+
+def _escape_of(fn, *args):
+    """The exit status of `fn(*args)`, or the escaping exception's class name, with every output discarded;
+    "returned" when it returns. Only POISON_INTERRUPT is recorded as "KeyboardInterrupt"."""
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            _quiet(fn, *args)
+    except SystemExit as exc:
+        return exc.code
+    except KeyboardInterrupt as exc:
+        if exc.args != (POISON_INTERRUPT,):
+            raise
+        return "KeyboardInterrupt"
+    except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
+        return type(exc).__name__
+    return "returned"
 
 
 def _mutant_load_exit(tmp, body):
     """The exit status, or the escaping exception's class name, of a _mutant whose production prefix runs
-    `body` at load (inserted at top level, before the RULES_REL constant)."""
-    try:
-        _quiet(_mutant, tmp, '\nRULES_REL = ".claude/rules"\n', '\n' + body + 'RULES_REL = ".claude/rules"\n')
-    except SystemExit as exc:
-        return exc.code
-    except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
-        return type(exc).__name__
-    return "loaded"
+    `body` at load (inserted at top level, before the RULES_REL constant); "returned" when it loads."""
+    return _escape_of(_mutant, tmp, '\nRULES_REL = ".claude/rules"\n',
+                      '\n' + body + 'RULES_REL = ".claude/rules"\n')
+
+
+def _mutant_call_exit(tmp, statement):
+    """The exit status, or the escaping exception's class name, of a later call into a loaded _mutant whose
+    run begins with `statement`; "returned" when the call returns."""
+    return _escape_of(_mutant(tmp, "\ndef run(root):\n", "\ndef run(root):\n    " + statement + "\n").run, tmp)
 
 
 
@@ -2083,9 +2140,38 @@ def self_test(report_path=None):
                 ("harness/mutant-load-systemexit-none-exit-2", "raise SystemExit\n", 2),
                 ("harness/mutant-load-generatorexit-exit-2", "raise GeneratorExit\n", 2),
                 ("harness/mutant-load-exception-exit-2", "raise ValueError('mutant')\n", 2),
-                ("harness/mutant-load-keyboardinterrupt-propagates", "raise KeyboardInterrupt\n",
-                 "KeyboardInterrupt")):
+                ("harness/mutant-load-keyboardinterrupt-propagates",
+                 "raise KeyboardInterrupt({!r})\n".format(POISON_INTERRUPT), "KeyboardInterrupt")):
             check(check_id, _mutant_load_exit(tmp, body), want)
+        # A later call into a loaded mutant that ends the process is a harness error (exit 2) too, never the
+        # mutant's own status; an Exception and a KeyboardInterrupt propagate as themselves.
+        for check_id, statement, want in (
+                ("harness/mutant-call-systemexit-0-exit-2", "raise SystemExit(0)", 2),
+                ("harness/mutant-call-systemexit-none-exit-2", "raise SystemExit", 2),
+                ("harness/mutant-call-generatorexit-exit-2", "raise GeneratorExit", 2),
+                ("harness/mutant-call-baseexception-subclass-exit-2",
+                 "raise type('B', (BaseException,), {})()", 2),
+                ("harness/mutant-call-exception-propagates", "raise ValueError('mutant')", "ValueError"),
+                ("harness/mutant-call-keyboardinterrupt-propagates",
+                 "raise KeyboardInterrupt({!r})".format(POISON_INTERRUPT), "KeyboardInterrupt")):
+            check(check_id, _mutant_call_exit(tmp, statement), want)
+        # Any KeyboardInterrupt but POISON_INTERRUPT (here one carrying another value, standing in for a real
+        # Ctrl-C) propagates out of the recorder, at load and in a call. Red if the recorder records it.
+        other = POISON_INTERRUPT + "-other"
+        for check_id, run_vector in (
+                ("harness/mutant-load-other-interrupt-not-recorded",
+                 lambda: _mutant_load_exit(tmp, "raise KeyboardInterrupt({!r})\n".format(other))),
+                ("harness/mutant-call-other-interrupt-not-recorded",
+                 lambda: _mutant_call_exit(tmp, "raise KeyboardInterrupt({!r})".format(other)))):
+            try:
+                run_vector()
+            except KeyboardInterrupt as exc:
+                if exc.args != (other,):
+                    raise
+                propagated = True
+            else:
+                propagated = False
+            check(check_id, propagated, True)
         linkclaude = _tree(tmp / "linkclaude", block="\n@big.md\n", extra=_files("docs/big.md", "X" * 1000))
         os.rename(str(linkclaude / CLAUDE_REL), str(linkclaude / "docs" / CLAUDE_REL))
         os.symlink(os.path.join("docs", CLAUDE_REL), str(linkclaude / CLAUDE_REL))

@@ -322,24 +322,52 @@ def red_on_revert(source, f):
         print("RED {} -> {}".format(guard, identity))
 
 
+# The KeyboardInterrupt a poisoned reverted source raises on purpose. Only it is recorded by
+# red_on_revert_loaded_exit; any other KeyboardInterrupt, such as an operator's real Ctrl-C landing in the
+# vector's window, propagates.
+LOADED_EXIT_INTERRUPT = "opf-init-p0-self-test-poisoned-revert"
+
+
+def _loaded_exit_outcome(source, body, f):
+    """The class of what escapes red_on_revert over `source` with `body` appended, or None. Only
+    LOADED_EXIT_INTERRUPT is recorded as KeyboardInterrupt; any other KeyboardInterrupt propagates."""
+    try:
+        red_on_revert(source + "\n" + body, f)
+    except KeyboardInterrupt as exc:
+        if exc.args != (LOADED_EXIT_INTERRUPT,):
+            raise
+        return KeyboardInterrupt
+    except BaseException as exc:  # noqa: BLE001  any other escape is recorded, never this test's own end
+        return type(exc)
+    return None
+
+
 def red_on_revert_loaded_exit(source, f):
     """A reverted source that ends the process at load is a harness failure through red_on_revert (the
     RuntimeError main reports as CANNOT-EVALUATE, exit 2), never an early exit with the loaded code's status;
-    a KeyboardInterrupt propagates as itself. Red if the load guard in red_on_revert is removed."""
+    a KeyboardInterrupt propagates as itself. Red if the load guard in red_on_revert is removed, and red if
+    the recorder records a KeyboardInterrupt other than the poisoned source's own."""
     for label, body, want in (("SystemExit(0)", "raise SystemExit(0)\n", RuntimeError),
                               ("SystemExit(None)", "raise SystemExit\n", RuntimeError),
                               ("GeneratorExit", "raise GeneratorExit\n", RuntimeError),
                               ("BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n",
                                RuntimeError),
-                              ("KeyboardInterrupt", "raise KeyboardInterrupt\n", KeyboardInterrupt)):
-        try:
-            red_on_revert(source + "\n" + body, f)
-        except BaseException as exc:  # noqa: BLE001  any escape is recorded, never this test's own end
-            got = type(exc)
-        else:
-            got = None
-        check(got is want, "revert/loaded-exit/" + label)
+                              ("KeyboardInterrupt", "raise KeyboardInterrupt({!r})\n".format(LOADED_EXIT_INTERRUPT),
+                               KeyboardInterrupt)):
+        check(_loaded_exit_outcome(source, body, f) is want, "revert/loaded-exit/" + label)
         print("PASS revert/loaded-exit/" + label)
+    # Any other KeyboardInterrupt (here one carrying another value, standing in for a real Ctrl-C) propagates.
+    other = LOADED_EXIT_INTERRUPT + "-other"
+    try:
+        _loaded_exit_outcome(source, "raise KeyboardInterrupt({!r})\n".format(other), f)
+    except KeyboardInterrupt as exc:
+        if exc.args != (other,):
+            raise
+        propagated = True
+    else:
+        propagated = False
+    check(propagated, "revert/loaded-exit/other-interrupt-not-recorded")
+    print("PASS revert/loaded-exit/other-interrupt-not-recorded")
 
 
 # Prefixed to the runner text in place of a python3 shell function. A

@@ -272,6 +272,71 @@ def _close_vectors(base):
     return failures, runs
 
 
+def _close_vectors_guarded(base):
+    """`_close_vectors(base)` with everything it runs in this process guarded: the lazy _close_selftest
+    import, the later calls into it and the reverted body. A process-ending exit or a fault there
+    (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception) is reported and returns None,
+    which _self_test makes CANNOT-EVALUATE (exit 2), never the vectors' own status. A KeyboardInterrupt
+    propagates unchanged, so an operator's Ctrl-C stops the run. The message never formats the escaping
+    object."""
+    try:
+        return _close_vectors(base)
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001  a sibling ending the process is cannot-evaluate, never a pass
+        kind = "an exception" if isinstance(exc, Exception) else "a process-ending exception"
+        print("CANNOT-EVALUATE: check_footer self-test: the #378 close vectors (the _close_selftest sibling) "
+              "raised {}; fail-closed".format(kind), file=sys.stderr)
+        return None
+
+
+def _close_guard_vectors(base):
+    """The vectors for _close_vectors_guarded: a _close_selftest sibling that ends the process or faults at
+    import or in a later call returns None (cannot-evaluate), and the sibling's own KeyboardInterrupt
+    propagates. Only that KeyboardInterrupt (carrying `sent`) is recorded; any other, such as an operator's
+    real Ctrl-C landing in this window, propagates. Red if the guard is removed. Returns (failures, cases)."""
+    import contextlib
+    import io
+    sent = "check-footer-self-test-poisoned-close-selftest"
+    later = "class _StSentinel(Exception):\n    pass\n\n\ndef _st_helper_vectors(ns):\n    {}\n"
+    cases = (("import SystemExit(0)", "raise SystemExit(0)\n", None),
+             ("import SystemExit(None)", "raise SystemExit\n", None),
+             ("import GeneratorExit", "raise GeneratorExit\n", None),
+             ("import ValueError", "raise ValueError('poisoned')\n", None),
+             ("later call SystemExit(0)", later.format("raise SystemExit(0)"), None),
+             ("later call SystemExit(None)", later.format("raise SystemExit"), None),
+             ("later call BaseException subclass", later.format("raise type('B', (BaseException,), {})()"),
+              None),
+             ("import KeyboardInterrupt", "raise KeyboardInterrupt({!r})\n".format(sent), "KeyboardInterrupt"),
+             ("later call KeyboardInterrupt", later.format("raise KeyboardInterrupt({!r})".format(sent)),
+              "KeyboardInterrupt"))
+    failures = []
+    for k, (label, body, want) in enumerate(cases):
+        poison = base / "poisoned-{}".format(k)
+        poison.mkdir()
+        (poison / "_close_selftest.py").write_text(body, encoding="utf-8")
+        saved = sys.modules.pop("_close_selftest", None)
+        sys.path.insert(0, str(poison))
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                got = _close_vectors_guarded(poison)
+        except KeyboardInterrupt as exc:
+            if exc.args != (sent,):
+                raise
+            got = "KeyboardInterrupt"
+        except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
+            got = type(exc).__name__
+        finally:
+            sys.path.remove(str(poison))
+            sys.modules.pop("_close_selftest", None)
+            if saved is not None:
+                sys.modules["_close_selftest"] = saved
+        if got != want:
+            failures.append("a _close_selftest sibling poisoned at {}: got {!r}, want {!r}".format(
+                label, got, want))
+    return failures, len(cases)
+
+
 def _self_test():
     import tempfile
     nav = '<nav><a href="/disclosure">Disclosure</a></nav>'
@@ -376,15 +441,21 @@ def _self_test():
         if quiet_run(root4) != 1:
             failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
     with tempfile.TemporaryDirectory() as d5:
-        close_failures, close_runs = _close_vectors(Path(d5))
+        closed = _close_vectors_guarded(Path(d5))
+    if closed is None:
+        return 2
+    close_failures, close_runs = closed
     failures.extend(close_failures)
+    with tempfile.TemporaryDirectory() as d6:
+        guard_failures, guard_cases = _close_guard_vectors(Path(d6))
+    failures.extend(guard_failures)
     if failures:
         print("FAIL: check_footer self-test")
         for f in failures:
             print("  " + f)
         return 1
     print("PASS: check_footer self-test ({} check_pages cases + run() exit-code legs + {} #378 close-vector "
-          "runs)".format(len(cases), close_runs))
+          "runs + {} close-vector guard cases)".format(len(cases), close_runs, guard_cases))
     return 0
 
 
