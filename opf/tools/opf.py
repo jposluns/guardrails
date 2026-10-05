@@ -58,8 +58,9 @@ nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readines
 the adoption journal; with neither present it reports that no adoption run exists). The stage driver adds
 `opf adopt approve --inputs FILE --plan FILE --actor NAME`, the one approval, printed and writing nothing,
 and `opf adopt apply --inputs FILE --plan FILE --approval FILE`, which admits only the approved plan and
-refuses before any write while a plan op's slice has not landed. `complete` and `reconcile` are
-recognized and refuse (exit 2) until the completion and recovery stages land in a later PR.
+refuses before any write while a plan op's slice, or the driver's receipt stage, has not landed. `complete`
+and `reconcile` are recognized and refuse (exit 2) until the completion and recovery stages land in a later
+PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -125,7 +126,7 @@ def _bootstrap():
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
         import _opf_write_guard  # the in-place writers' shared cleanliness gate and single-writer lease
         import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
-        import _opf_adopt_apply  # OPF-ADOPT U1: the apply shell (zero executable ops)
+        import _opf_adopt_apply  # OPF-ADOPT U1+U5: the apply shell (the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
         import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
     except ImportError as exc:
@@ -14852,7 +14853,8 @@ def _cli_self_test():
                 # The stage driver end to end over a decision-complete fixture (a retire source and a
                 # kept file at a NOT-ADOPTED root), planned through the wired `plan`: approve -> 0 with
                 # the approval binding the plan's two digests on stdout, writing nothing; apply -> 2
-                # naming the unlanded ops (no op executes in this build), writing nothing, no journal and
+                # naming the unlanded ops (the fixture plan's init-store and retire ops, and the driver's
+                # receipt stage, are not landed in this build), writing nothing, no journal and
                 # no bundle (the wiring discriminator: an unwired apply refuses with the not-yet-available
                 # message instead). Flips: an approval for a fresh plan of the same tree -> apply 2 on the
                 # binding; a source edited after planning -> approve 2 into a fresh plan; an open
@@ -14937,7 +14939,7 @@ def _cli_self_test():
                     rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan_path,
                                                "--approval", approval_path, "--root", adoptee])
                     if rc != EXIT_MALFORMED or "not yet executable" not in err:
-                        failures.append("adopt apply with no landed op: rc={!r} (expected 2 + the unlanded-op "
+                        failures.append("adopt apply with unlanded ops: rc={!r} (expected 2 + the unlanded-op "
                                         "refusal; {})".format(rc, err.strip()))
                     rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan2_path,
                                                "--approval", approval_path, "--root", adoptee])
