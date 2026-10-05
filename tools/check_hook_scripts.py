@@ -49,7 +49,11 @@ reviewed edit here. Six legs:
       (pattern, flags) for compiled regexes, equality for constants. Each pair is compared in one child
       [sys.executable, "-I", "-S", "-B", <this file>, "--parity-child", ...] that loads both files with
       importlib. The child writes its structured result at interpreter shutdown, AFTER the loaded
-      files' own cleanup (non-daemon threads joined, their atexit hooks run), and the parent accepts
+      files' own cleanup (non-daemon threads joined, their atexit hooks run, pending cyclic-garbage
+      finalizers collected), and then ends ITSELF with os._exit, so no interpreter finalization
+      runs after the result (merge train 2 QA r3); a fault the loaded code reports into a replaced
+      or silenced reporting machinery is seen by an audit hook and makes the child exit 2, and
+      reporting machinery left replaced is put back and refused the same way. The parent accepts
       a verdict only with the zero exit, the complete result ending in its terminator line, and
       NOTHING on the child's error stream: the loaded files write nothing to stderr at load time,
       so any bytes there -- an uncaught-exception traceback, a frameless `Exception ignored` line
@@ -84,10 +88,14 @@ DISCLOSED RESIDUALS (what this gate does not catch):
     result line and the terminator to the child's stdout, keeps its error stream empty and exits 0
     passes; secfcl exempts exactly this channel for reviewed, pinned loaded code, disclosed here as
     a residual (merge train 2 QA r2, claude MINOR).
-  - Leg (p): interpreter finalization after the exit handlers is not covered by the terminator: a
-    finalizer that ends the child SILENTLY (no stderr bytes, exit 0) after the shutdown-written
-    result still passes; a finalizer that writes or raises is refused by the empty-error-stream
-    check (merge train 2 QA r2, codex MEDIUM).
+  - Leg (p): the r2 finalization residual is closed (merge train 2 QA r3: pending finalizers run
+    before the result and the child ends with os._exit at it, so a finalizer that ends the child
+    silently leaves no result). What remains: a THREAD's uncaught exception reaches
+    threading.excepthook with no audit event before it, so a thread fault reported through
+    sys.stderr or threading.excepthook that loaded code replaced and then put back before the
+    result is written is not seen (a replacement still in place then is refused); and an object
+    still reachable at the result is never finalized (os._exit), so its finalizer neither runs
+    nor faults.
   - The scripts run under this gate's interpreter (sys.executable), not the host's `python3` lookup.
     Not exercised: a python3 too old to accept -I (before 3.4), which exits 2 with a usage error before
     the launcher runs; a python3 that cannot be found or started (the outcome is the host's); and a
@@ -643,16 +651,61 @@ def parity_child(spec):
     that writes or raises is caught, and only one that ends the child silently over the
     already-complete result remains, disclosed in DISCLOSED RESIDUALS above, as is the channel by
     which loaded code replaces this reporting machinery outright (a forged result plus terminator
-    on a clean exit). Exit 2 if a file cannot be loaded."""
+    on a clean exit). Merge train 2 QA r3 closes that finalizer: emit collects the cyclic garbage
+    BEFORE the result, so pending finalizers run first, and then ends the child ITSELF with
+    os._exit(0), so no interpreter finalization runs after the result (codex MEDIUM). The
+    reporting machinery is guarded (claude MINOR 2): an audit hook armed before either file loads
+    sees every `sys.unraisablehook` and `sys.excepthook` event (CPython raises them before it
+    calls whatever hook is installed), and sys.stderr, sys.excepthook, sys.unraisablehook and
+    threading.excepthook are checked against the objects this child started with, and put back,
+    once the comparison is done and again around the collection; any such event, replacement or a
+    closed sys.stderr writes a named fault line to fd 2 and exits 2 with no result. Exit 2 if a
+    file cannot be loaded, or if another exit handler was registered before emit (its os._exit
+    would skip that one)."""
+    import gc
+    import threading
     path_a, path_b, funcs, regexes, consts = json.loads(spec)
     outcome = []
+    faults = []
+    machinery = [(owner, name, getattr(owner, name)) for owner, name in (
+        (sys, "stderr"), (sys, "excepthook"), (sys, "unraisablehook"), (threading, "excepthook"))]
+
+    def restore():
+        for owner, name, original in machinery:
+            if getattr(owner, name, None) is not original:
+                faults.append("%s.%s replaced" % (owner.__name__, name))
+                setattr(owner, name, original)
+        if getattr(machinery[0][2], "closed", True):
+            faults.append("sys.stderr closed")
+
+    def audit(event, _args):
+        if event in ("sys.unraisablehook", "sys.excepthook"):
+            faults.append("a fault reached %s" % event)
 
     def emit():
-        if outcome:
-            sys.stdout.write(json.dumps(outcome[0]) + "\n" + PARITY_COMPLETE + "\n")
-            sys.stdout.flush()
+        if not outcome:
+            return
+        restore()
+        gc.collect()
+        restore()
+        if faults:
+            try:
+                os.write(2, ("parity child: a fault in loaded code's cleanup or its reporting "
+                             "machinery: %s; no result (secfcl)\n"
+                             % "; ".join(sorted(set(faults)))[:1000]).encode("utf-8", "replace"))
+            except OSError:
+                pass
+            os._exit(2)
+        sys.stdout.write(json.dumps(outcome[0]) + "\n" + PARITY_COMPLETE + "\n")
+        sys.stdout.flush()
+        os._exit(0)
 
     atexit.register(emit)
+    if getattr(atexit, "_ncallbacks", lambda: 1)() != 1:
+        atexit.unregister(emit)
+        print("another exit handler was registered before the result's; refusing")
+        return 2
+    sys.addaudithook(audit)
     mods = []
     for i, path in enumerate((path_a, path_b)):
         try:
@@ -1071,7 +1124,7 @@ def self_test_main():
                 ("cleanup-builtin-fault", "\n\nimport atexit as _seeded_atexit\n"
                  "import os as _seeded_os\n"
                  "_seeded_atexit.register(_seeded_os.remove, '/nonexistent-aiqt-parity-selftest')\n",
-                 "fault on the comparison child's error stream"),
+                 "parity child: a fault in loaded code's cleanup"),
                 ("finalizer-exit", "\n\nimport atexit as _seeded_atexit\nimport os as _seeded_os\n"
                  "\n\nclass _SeededFinalizer:\n"
                  "    def __init__(self):\n"
@@ -1087,6 +1140,32 @@ def self_test_main():
                  "print('[]')\nprint('done')\n"
                  "_seeded_atexit.register(_seeded_os._exit, 0)\n",
                  "no complete structured result after the child's cleanup"),
+                # Merge train 2 QA r3: a finalizer that ends the child SILENTLY now runs before
+                # the result (codex MEDIUM), and a cleanup fault under a replaced sys.stderr, a
+                # silenced sys.unraisablehook or a replaced sys.excepthook is refused (claude
+                # MINOR 2); each was a clean pass before.
+                ("finalizer-silent-exit", "\n\nimport atexit as _seeded_atexit\nimport os as _seeded_os\n"
+                 "\n\nclass _SeededSilentFinalizer:\n"
+                 "    def __init__(self):\n"
+                 "        self.cycle = self\n"
+                 "        self.exit = _seeded_os._exit\n"
+                 "\n    def __del__(self):\n"
+                 "        self.exit(0)\n"
+                 "\n\n_seeded_atexit.register(_SeededSilentFinalizer)\n",
+                 "no complete structured result after the child's cleanup"),
+                ("stderr-replaced-fault", "\n\nimport atexit as _seeded_atexit\nimport io as _seeded_io\n"
+                 "import os as _seeded_os\nimport sys as _seeded_sys\n"
+                 "_seeded_sys.stderr = _seeded_io.StringIO()\n"
+                 "_seeded_atexit.register(_seeded_os.remove, '/nonexistent-aiqt-parity-selftest')\n",
+                 "parity child: a fault in loaded code's cleanup"),
+                ("unraisablehook-silenced-fault", "\n\nimport atexit as _seeded_atexit\n"
+                 "import os as _seeded_os\nimport sys as _seeded_sys\n"
+                 "_seeded_sys.unraisablehook = lambda unraisable: None\n"
+                 "_seeded_atexit.register(_seeded_os.remove, '/nonexistent-aiqt-parity-selftest')\n",
+                 "parity child: a fault in loaded code's cleanup"),
+                ("excepthook-replaced", "\n\nimport sys as _seeded_sys\n"
+                 "_seeded_sys.excepthook = lambda *args: None\n",
+                 "parity child: a fault in loaded code's cleanup"),
         ):
             root = fresh("p-" + name)
             _patch(root / STOP_REL, "", "", append)
@@ -1116,7 +1195,9 @@ def self_test_main():
           "thread fault on the parity child's error stream, a seeded builtin cleanup fault (a "
           "frameless 'Exception ignored' over a zero exit), a seeded shutdown finalizer that "
           "writes and exits after the emitted result, a seeded forged two-line stdout cut off by "
-          "a cleanup exit, and a seeded cleanup exit that cuts "
+          "a cleanup exit, a seeded finalizer that ends the child silently, a seeded cleanup "
+          "fault under a replaced sys.stderr or a silenced sys.unraisablehook, a seeded replaced "
+          "sys.excepthook, and a seeded cleanup exit that cuts "
           "off its shutdown-written result are cannot-evaluate (secfcl)")
     return 0
 
