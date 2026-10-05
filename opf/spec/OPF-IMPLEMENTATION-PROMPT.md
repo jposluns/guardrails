@@ -728,13 +728,13 @@ conformance claim (checklist item 19) until the maintainer rules.
     `done`", and does not say whether that also satisfies the receipt obligation. This prompt's
     reading: it does not, so the upgrade keeps refusing on that item; ask the maintainer to rule.
 27. **Manifest registration of the imported leaves.** Section 4.2 says the imported files are
-    "registered managed leaves beside the clean-series files, using the same enabled-type roster"
-    and that "Their manifest, emitter, upgrade and containment registrations MUST agree", and the
-    section 9.2 delta includes "registration". Neither the section 9 example nor any other section
-    shows a manifest key for that registration. This prompt's reading: the manifest registration is
-    the enabled type's `[types.<name>]` row itself, so neither step 3 nor the upgrade writes a
-    further key for it. If the maintainer rules that a key is needed, add it to the step 3 manifest,
-    to init, and to the step 8 allowed delta.
+    "registered managed leaves beside the clean-series files, using the same enabled-type roster
+    except `legacy_fragment`" and that "Their manifest, emitter, upgrade and containment
+    registrations MUST agree", and the section 9.2 delta includes "registration". Neither the
+    section 9 example nor any other section shows a manifest key for that registration. This
+    prompt's reading: the manifest registration is the enabled type's `[types.<name>]` row itself,
+    so neither step 3 nor the upgrade writes a further key for it. If the maintainer rules that a
+    key is needed, add it to the step 3 manifest, to init, and to the step 8 allowed delta.
 28. **Which withdrawals leave the post-upgrade validator below VALID, and their remedies.** Section
     9.2 says the upgrade MUST refuse "Where a withdrawn authority would leave the post-upgrade
     doctor below VALID", and names one case, the receipt-stripped `done` item, and one general
@@ -1183,8 +1183,8 @@ record).
   clean namespace (for example `BI`) and a quoted key per imported namespace (for example
   `"imported:BI"`). A genuinely first adoption MAY start at zero; counters are never reset, IDs are
   never reused, and rotation, index rewrites and relocation never touch the file (section 8.2).
-  Section 9.2 shows imported counter rows added at zero during the 1.3.0 upgrade; write them at
-  zero at initialization so each series has its own value.
+  Section 4.2 says "A 1.3.0 `opf init` MUST write at zero the imported counter row of each type
+  that has an imported leaf", so write them at zero at initialization.
 - **version.toml.** `schema = 1`, then append-only, immutable `[[release]]` rows (`version`, the
   SemVer version string, unique in the ledger; `date`; `worklog_span`; `coverage_digest`; and the
   optional `imported` flag, which a fresh store never sets) and `[[summary]]` rows (`covers`,
@@ -1419,11 +1419,13 @@ containment.
 - Counter monotonicity is two checks, each run per series and per namespace (section 8.2). The
   bounds check: every ID lies within its counter (section 5.7 says doctor "checks store-wide ID
   uniqueness and that every ID lies within its counter"), and `counters.toml` holds a row for every
-  clean and imported namespace of every enabled type, the imported rows only where the store is
-  graded at 1.3.0 (open point 21); a missing row is a finding naming its series and namespace, even
-  when that namespace holds no ID. That presence check is this prompt's reading of section 8.2,
-  which says `counters.toml` "MUST hold independent monotonic high-water values per series and
-  namespace", and it needs no prior snapshot. The monotonicity check: section 8.2 says
+  clean namespace of every enabled type and, only where the store is graded at 1.3.0 (open point
+  21), for every imported namespace of every enabled type except `legacy_fragment`, which section
+  4.2 says "has no imported leaf and no imported counter row"; a missing row is a finding naming its
+  series and namespace, even when that namespace holds no ID, and so is an `"imported:LF"` row.
+  That presence check is this prompt's reading of section 8.2, which says `counters.toml` "MUST
+  hold independent monotonic high-water values per series and namespace", and it needs no prior
+  snapshot. The monotonicity check: section 8.2 says
   `counters.toml` "MUST hold independent monotonic high-water values per series and namespace" and
   "Counters MUST NOT be reset", which no single snapshot can show, since a lowered counter can still
   lie above every ID. So the validator also compares each counter with its value in the prior
@@ -1445,8 +1447,10 @@ containment.
   throwaway stores, the step 8 fixtures included. A throwaway store at 1.3.0 whose imported series
   must grade valid uses `import_status = "none"` and a preserved original for each imported record
   whose `source_sha256` matches, under the reading step 10 labels for its check (a) of re-sends that
-  supersede immutable history. Treat a missing imported leaf as a finding: section 4.2 requires init
-  to create every one (this is a reading of that rule, not a check the specification names).
+  supersede immutable history. Treat a missing imported leaf of an enabled type other than
+  `legacy_fragment` as a finding, and an imported leaf for `legacy_fragment` as one too: section 4.2
+  requires init and the upgrade to create the imported leaves "for every enabled type except
+  `legacy_fragment`" (this is a reading of that rule, not a check the specification names).
 - The section 8.6 authority firewall covers "every record whose `actor.kind` is `importer`, in the
   imported series or written into the clean series by the pre-1.3.0 legacy importer", and
   C-IMPORTED-SEGREGATION enforces it over importer-authored records in both series (section 8.6);
@@ -1681,8 +1685,9 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
   creates each missing empty index, as section 9.2 states in full. The 1.1.0 to 1.2.0 delta is "the
   `spec_version` bump alone", and "the upgrade MUST NOT create provenance for an existing store".
   The 1.2.0 to 1.3.0 delta is "the version bump, registration and create-only initialization of
-  missing imported managed leaves for enabled types, and addition of missing imported counter rows
-  at zero only where no imported ancestry exists" (registration is open point 27). Preserve
+  missing imported managed leaves for enabled types other than `legacy_fragment`, and addition of
+  missing imported counter rows at zero only where no imported ancestry exists, never an
+  `"imported:LF"` row" (registration is open point 27). Preserve
   existing records, evidence, clean counters and imported high-water values; refuse on "a
   populated collision, missing ancestral counter or unprovable prestate". Never create historical
   records, adoption approval or provenance (no `init.toml` for an upgraded store), never change
@@ -1863,6 +1868,11 @@ Acceptance checks, over synthetic fixtures the test builds:
   and the validator reports valid, its tracked-store check accepting those leaves under open point
   20. After the test commits the change, the validator still reports valid.
 - A 1.2.0 fixture with synthetic clean records keeps every record byte and every clean counter.
+- A 1.2.0 fixture whose manifest declares the `legacy_fragment` type, with no LF record, upgrades to
+  1.3.0 with the imported leaves and imported counter rows of its other enabled types only: no
+  `legacy_fragment.imported.index.toml` and no `"imported:LF"` row is created (sections 4.2 and
+  9.2), and the validator reports valid. A store at 1.3.0 that holds either one, or that lacks the
+  imported leaf or imported counter row of another enabled type, gets a finding from step 6.
 - Each 1.0.0 origin-family fixture and the 1.1.0 fixture upgrade to 1.3.0 with exactly the
   composed allowed delta: the 1.0.0 fixtures carry `[opf]` and `standard = "opf"` afterwards, the
   retired `decision_support` key is gone, a governance-enabled fixture keeps its
