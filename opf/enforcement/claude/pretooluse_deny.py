@@ -36,44 +36,72 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      component is a direct store edit: records, counters, the machine store's ledgers and indexes,
      journals, staging, and the evidence homes under `.working/imported/` (spec 4.2, 14.2) all live
      there. Denied; OPF content changes only through the sanctioned writer (`opf record` and the other
-     opf verbs, which run under their own write guard). Both the lexically normalized target and its
-     os.path.realpath resolution are checked, so an existing symlink into the store does not evade R1.
+     opf verbs, which run under their own write guard). Both the lexically normalized target and the
+     realpath resolution OF THE ORIGINAL SPELLING are checked (symlinks resolve before any `..`
+     collapses), so neither an existing symlink nor a symlink-then-dotdot spelling evades R1.
   R2 adoption-archive writes. A target under `.working/archive/adoption/` is denied with the spec's own
      sentence: writes under `.working/archive/adoption/<run-id>/` are denied outright (spec 14.1).
      (R2 is a subset of R1; it exists so the archive denial is named, probed and reported on its own.)
   R3 frozen plan-enumerated old files. For every product root above the target (a directory holding a
-     `.working/` entry), each `plan.toml` under `.working/imported/adoption/<run-id>/` whose format is
+     `.working` entry), each `plan.toml` under `.working/imported/adoption/<run-id>/` whose format is
      opf.adoption.plan/v2 contributes its retire- and migrate-disposed source paths; a target equal to
      one of them is denied: the file stays frozen, byte-identical, until its retirement is recorded
      (spec 14.1). A move- or keep-disposed source is adopter content and is not frozen.
   R4 declared-view writes. Each machine-store manifest's views targets are declared view destinations;
      a target equal to one is denied (views change only through `opf render`; spec 5.8, 14.1).
-  R5 Bash writes the matcher CAN see. A Bash command whose text references a protected token (the
-     `.working` store tree, a frozen path from R3, or a declared-view target from R4, with the rosters
-     resolved from the product roots above the session cwd) is denied unless the whole command is one of
-     the three pristine allowances below. Reference, not proven mutation, is the trigger: a lexical hook
-     cannot prove a referencing command read-only (sed -i, shell functions, aliases), so it fails closed
-     and names the allowed routes.
+  R5 Bash writes the matcher CAN see. A Bash command whose text references a protected token is denied
+     unless the whole command is one of the three pristine allowances below. The protected tokens are
+     the `.working` store tree (any substring spelling, and any session cwd that itself sits inside a
+     `.working` tree, where every relative spelling lands in the store), and the frozen (R3) and
+     declared-view (R4) paths, matched with path boundaries (a longer word such as PYTHON_VERSION does
+     not trip a VERSION view; an absolute spelling of the same file does). The rosters are resolved
+     from the product roots above the session cwd AND above every absolute path spelled in the command,
+     so an absolute protected spelling is judged even when the session sits outside the product tree.
+     Reference, not proven mutation, is the trigger: a lexical hook cannot prove a referencing command
+     read-only (sed -i, tee, cp, mv, truncate, dd, install, ln, rm, shell functions, aliases), so it
+     fails closed and names the allowed routes.
   R6 unreadable inputs fail closed. A missing or non-string target field, a control character in a
-     target, a relative target with no readable session cwd, an unreadable or ambiguous machine-store
-     manifest, and an unreadable, unparseable or wrong-format plan.toml each DENY (the roster that would
-     prove the operation safe cannot be computed), naming the unreadable input. A payload unreadable at
-     the envelope level exits 2 (blocking error), as above.
+     target, a relative target with no readable session cwd, and every unreadable roster input DENY
+     (the roster that would prove the operation safe cannot be computed), naming the unreadable input:
+     an unreadable evidence home or store tree, a present-but-unreadable, dangling-symlink,
+     NON-REGULAR (FIFO, device, socket), oversized, undecodable, unparseable or wrong-format plan.toml
+     or manifest.toml, a plan without its [[sources]] rows, a source row without a string path, a
+     disposition outside the planner vocabulary keep/retire/move/migrate, and an ambiguous
+     (multi-manifest) machine store. Roster files are opened without blocking (O_NONBLOCK where the
+     platform has it) after a regular-file check, re-checked on the open descriptor, and read through
+     a bounded loop, so a FIFO or other trap input yields a prompt structured deny, never a stall and
+     never an empty protection set. A payload unreadable at the envelope level exits 2 (blocking
+     error), as above.
+  R7 tools this hook cannot prove read-only. The named rules above cover the write-capable built-ins;
+     every OTHER tool name (an MCP server's write tool, a shell tool other than Bash, a future
+     built-in) is denied when any string in its payload references a protected token (the same tokens
+     and rosters as R5), because the hook cannot prove such a tool read-only. The known read-only
+     built-ins (Read, Glob, Grep and the other names in READONLY_TOOLS) are allowed outright; tools
+     that only launch further hooked tool calls (Task, Skill) are treated as read-only here because
+     the launched calls are judged on their own.
 
-PRISTINE ALLOWANCES for a Bash command that references a protected token (each requires the RAW command
-string to be metacharacter-free: no semicolon, ampersand, pipe, angle bracket, backquote, dollar sign,
-parenthesis, brace, backslash or newline anywhere, even quoted, so no second command, redirection,
-substitution or expansion can ride along; leading VAR=value assignments are skipped):
+PRISTINE ALLOWANCES for a Bash command that references a protected token. Each requires the command to
+be PRISTINE under a quote-aware scan of the raw string: outside quotes no metacharacter may appear (no
+semicolon, ampersand, pipe, angle bracket, backquote, dollar sign, parenthesis, brace, backslash,
+carriage return or newline), a single-quoted span is wholly literal argument data, a double-quoted span
+may carry no dollar sign, backquote or backslash (those expansions stay live inside double quotes), and
+every quote must be terminated. So no second command, redirection, substitution or expansion can ride
+along, while a sanctioned invocation may still QUOTE prose or a path that names a protected token (an
+`opf record` title, an `opf render --root` operand with spaces or parentheses). Leading VAR=value
+assignments are skipped.
   A1 the sanctioned writer: opf itself, or a python3 launcher (interpreter flags allowed) running a path
      whose basename is opf.py, with any verb; opf's own write guard, lease and journal govern what it
      may do. This allowance also holds under an R6 roster failure, so the in-session repair path stays
      open.
-  A2 a read-only command word: cat, head, tail, wc, grep, diff, cmp, ls, stat, file, readlink, du,
-     sha256sum or md5sum (flag-insensitive file readers; none takes a write-capable flag).
-  A3 a read-only-or-store-safe git form: git whose subcommand token is status, log, show, diff, blame,
-     grep, rev-parse, ls-files, add or commit (add and commit write only the repository metadata under
-     .git/, never the protected file's bytes; a working-tree-writing git verb such as checkout, restore
-     or stash takes the deny).
+  A2 a read-only command word: cat, head, tail, wc, grep, diff, cmp, ls, stat, readlink, du, sha256sum
+     or md5sum (flag-insensitive file readers; none takes a write-capable flag; `file` is NOT here, its
+     -C flag compiles a .mgc beside the source).
+  A3 a read-only git form: git whose subcommand token is status, log, show, diff, blame, grep,
+     rev-parse, ls-files, add or commit (add and commit write only the repository metadata under .git/,
+     never the protected file's bytes), and with NO option token after the subcommand: git's own
+     --output and pager/editor flags make otherwise read-only verbs write arbitrary files, and the hook
+     cannot prove an option read-only, so any dash-leading token after the subcommand takes the deny
+     (an over-refusal, disclosed below; plain path operands are fine).
 
 RESIDUALS (spec 14.1 requires each disclosed; the pack's residual register (slice (d)) and the plan's
 per-platform residual coverage carry the same list):
@@ -81,25 +109,41 @@ per-platform residual coverage carry the same list):
     variable, glob, alias, function, cd-relative spelling that drops the token, command or process
     substitution, an interpreter one-liner, or any other spelling in which no protected token appears
     textually in the command string. R5 is a lexical floor, not a sandbox.
-  - Edits made outside Claude Code: any other editor, shell or tool bypasses this hook entirely; the
-    pre-commit and CI floor members are the overlapping controls there.
+  - A relative protected spelling judged from outside the product tree: when the session cwd sits
+    outside every product root, only the ABSOLUTE spellings in the command can bind the rosters; a
+    relative spelling of a frozen or view path resolves to no roster and passes the token scan.
+  - A tool outside the named rules whose payload does NOT textually name a protected token: R7 is the
+    same lexical floor as R5, so an MCP or other in-platform tool that reaches a protected path
+    through an indirect spelling is not caught; so is a read-only-listed tool that is in fact
+    write-capable on some server. Edits made outside Claude Code entirely (any other editor, shell or
+    tool) bypass this hook as before; the pre-commit and CI floor members are the overlapping controls.
+  - Case-insensitive or normalizing filesystems (default APFS, NTFS): the `.working` component and the
+    roster paths are compared byte-exactly, so a differently cased spelling (`.Working`) that aliases
+    the same directory on such a filesystem is not caught (the spec 4.2 reserved-home aliasing
+    disclosure, restated for this hook).
+  - A relocated store (spec 4.1/4.3): the hook finds product roots only through a `.working` entry and
+    reads no `.opf.toml` pointer, so after a relocation the product-root paths bind no rosters here;
+    the floor members that read the pointer carry that topology.
   - Per-clone installation and bypass: the settings.json registration is local configuration; a clone
     that never registered the hook runs no hook, and the same user can deregister or edit it
     (same-user tampering, canonical hand edits).
   - Platform hook-startup failures may fall through to the platform's normal permission flow.
   - Shell or interpreter wrapping of the platform itself is outside the hook's reach.
-  - Over-approximation is the accepted cost of the fail-closed posture: R5 denies some read-only
-    commands (reads go through the platform's Read tool, A2 or opf), R3 keeps denying a frozen path
-    even after its retirement is recorded and the live file is gone (re-creating it directly stays
-    denied; a fresh plan is the sanctioned route), and a `.working` or frozen-path token inside prose
-    (a commit message, say) still trips R5.
+  - Over-approximation is the accepted cost of the fail-closed posture: R5/R7 deny some read-only
+    commands and tool calls (reads go through the platform's Read tool, A2 or opf), A3 denies
+    option-bearing read-only git forms (git log -1, git commit -m) that name a protected token, R6
+    denies every write under a root whose roster carries ANY unreadable or malformed entry (a stray
+    non-directory run entry included), R3 keeps denying a frozen path even after its retirement is
+    recorded and the live file is gone (re-creating it directly stays denied; a fresh plan is the
+    sanctioned route), and a `.working` or boundary-matched protected token inside prose (a commit
+    message, say) still trips R5.
   - The IMPORTED record series is NOT yet protected here: the leaves `worklog.imported.toml` and
     `<type>.imported.index.toml` inside the machine store are exempt from R1 by name, because
     enforcement MUST NOT ship before the writer can perform every operation it forces (spec 14.1) and
     the import writer (`opf record import --batch`, spec 8.8) has not shipped. The imported-series
     protection slice lands with or after that writer and removes this exemption.
 
-Offline, stdlib only (json, tomllib, os, re, sys), no subprocess, no network. Launched isolated
+Offline, stdlib only (json, tomllib, os, re, stat, sys), no subprocess, no network. Launched isolated
 (python3 -I) so a file planted beside it cannot shadow a stdlib import. Exit statuses: 0 (with a deny
 decision or silent allow) and 2 (blocking error) only.
 """
@@ -118,17 +162,24 @@ if tuple(sys.version_info[:2]) < (3, 11):
 import json
 import os
 import re
+import stat
 import tomllib
 
 # The platform payload bound: a PreToolUse payload (a MultiEdit's edit list included) is far below this;
 # anything larger is not a payload this hook can honestly evaluate, so it fails closed at the envelope.
 MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+# The roster-file bound (R6): a plan or manifest is a few KiB; a larger file is not a roster this hook
+# can honestly evaluate, so it fails closed rather than reading unbounded bytes on the hot path.
+MAX_ROSTER_BYTES = 1024 * 1024
 
 WORKING = ".working"                      # the fixed store-tree name at a product root (spec 4.4)
 ADOPTION_ARCHIVE = ("archive", "adoption")  # .working/archive/adoption/<run-id>/ (spec 14.1, 14.2)
 ADOPTION_EVIDENCE = ("imported", "adoption")  # .working/imported/adoption/<run-id>/ (spec 14.2)
 PLAN_FILENAME = "plan.toml"
 PLAN_FORMAT = "opf.adoption.plan/v2"      # the bound plan format marker (spec 14.1)
+# The planner's closed disposition vocabulary (_opf_adopt_plan._decisions); any other value is a
+# malformed plan and R6 fails closed on it rather than silently skipping the row.
+VALID_DISPOSITIONS = frozenset(("keep", "move", "migrate", "retire"))
 FROZEN_DISPOSITIONS = ("migrate", "retire")  # the old-file dispositions that freeze in place (spec 14.1)
 # The store-tree control subdirs (spec 4.2): a first component after .working/ outside this set is a
 # machine-store candidate, where the imported-series leaf exemption below may apply.
@@ -139,15 +190,32 @@ IMPORTED_LEAF_RE = re.compile(r"\A(worklog\.imported\.toml|[A-Za-z0-9_-]+\.impor
 # The write-capable file tools and the payload field naming each one's target.
 FILE_TOOL_TARGET = dict(Write="file_path", Edit="file_path", MultiEdit="file_path",
                         NotebookEdit="notebook_path")
+# The known read-only built-ins (R7): allowed outright. Task and Skill only launch further tool calls,
+# each judged by this hook on its own, so they sit here too. Every OTHER tool name takes R7's scan.
+READONLY_TOOLS = frozenset(("Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch",
+                            "Task", "Agent", "TodoWrite", "ExitPlanMode", "AskUserQuestion",
+                            "BashOutput", "TaskOutput", "KillShell", "KillBash", "SlashCommand",
+                            "Skill"))
 
-# R5/A1-A3 vocabularies. METACHARS is scanned over the RAW command string, quoted spans included:
+# R5/A1-A3 vocabularies. METACHARS is the UNQUOTED-dangerous set for the quote-aware pristine scan:
 # semicolon, ampersand, pipe, the two angle brackets, backquote, dollar sign, the two parentheses, the
-# two braces, backslash and newline, each built from its code point so none appears literally here.
-METACHARS = frozenset(chr(c) for c in (59, 38, 124, 60, 62, 96, 36, 40, 41, 123, 125, 92, 10))
-READONLY_WORDS = frozenset(("cat", "head", "tail", "wc", "grep", "diff", "cmp", "ls", "stat", "file",
+# two braces, backslash, carriage return and newline, each built from its code point so none appears
+# literally here. DQ_LIVE is the subset that stays live INSIDE double quotes (dollar, backquote,
+# backslash: expansion and substitution still run there).
+METACHARS = frozenset(chr(c) for c in (59, 38, 124, 60, 62, 96, 36, 40, 41, 123, 125, 92, 13, 10))
+DQ_LIVE = frozenset(chr(c) for c in (36, 96, 92))
+QUOTES = frozenset(chr(c) for c in (39, 34))
+READONLY_WORDS = frozenset(("cat", "head", "tail", "wc", "grep", "diff", "cmp", "ls", "stat",
                             "readlink", "du", "sha256sum", "md5sum"))
 GIT_SAFE_SUBCOMMANDS = frozenset(("status", "log", "show", "diff", "blame", "grep", "rev-parse",
                                   "ls-files", "add", "commit"))
+# The path-word characters for the boundary-matched roster-token scan (R5/R7): a roster path embedded
+# in a longer run of these on its left, or of these or a separator on its right, is a DIFFERENT path
+# (PYTHON_VERSION vs the view VERSION); a left slash still matches (an absolute spelling of the file).
+WORD_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
+# Absolute POSIX-path spellings inside a command or payload string (used to BIND rosters, never to
+# allow): best-effort, so a path with spaces binds through its prefix directories only.
+ABS_PATH_RE = re.compile(r"/[A-Za-z0-9_./@%+,=~^-]+")
 _ASSIGNMENT_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*=")
 _PYTHON_RE = re.compile(r"\Apython(3(\.\d+)?)?\Z")
 _PYFLAGS_RE = re.compile(r"\A-[IBEsuPb]+\Z")
@@ -195,15 +263,18 @@ def _components(path):
 
 
 def _candidates(target, cwd):
-    """The absolute forms of `target` to judge: the lexically normalized path and its realpath (an
-    existing symlink anywhere on the way resolves, so a link into the store is judged as the store)."""
+    """The absolute forms of `target` to judge: the lexically normalized path and the realpath of the
+    ORIGINAL spelling. Resolving the original spelling first is load-bearing: in a spelling such as
+    `link/../x`, the filesystem resolves the symlink BEFORE `..` climbs out of its destination, so a
+    lexical collapse first (normpath dropping `link/..`) would judge a different file than the one the
+    write reaches. normpath is applied only to the already-resolved result and to the lexical twin."""
     if not os.path.isabs(target):
         if not isinstance(cwd, str) or not os.path.isabs(cwd):
             return None
         target = os.path.join(cwd, target)
     norm = os.path.normpath(target)
     try:
-        real = os.path.realpath(norm)
+        real = os.path.normpath(os.path.realpath(target))
     except OSError:
         real = norm
     return sorted(set((norm, real)))
@@ -242,12 +313,68 @@ def _roots_above(path):
         cur = parent
 
 
+def _read_roster_toml(path, label):
+    """Read one roster file fail-closed (R6): (doc, None) on a readable regular-file TOML document;
+    (None, None) when `path` has no directory entry at all (the caller treats absence as no roster);
+    (None, reason) on EVERYTHING else: a present-but-unreadable entry, a dangling symlink, a
+    non-regular file (FIFO, device, socket), an oversized file, undecodable bytes, or unparseable
+    TOML. The file is opened without blocking (O_NONBLOCK where the platform has it) only after a
+    regular-file lstat/stat check, the open descriptor is re-checked, and the read loop is bounded,
+    so a trap input yields a prompt reason, never a stall and never an empty roster."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return None, "%s %s is unreadable (%r)" % (label, path, exc)
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            st = os.stat(path)
+        except OSError as exc:
+            return None, ("%s %s is a symlink that does not resolve to a readable file (%r)"
+                          % (label, path, exc))
+    if not stat.S_ISREG(st.st_mode):
+        return None, "%s %s is not a regular file" % (label, path)
+    if st.st_size > MAX_ROSTER_BYTES:
+        return None, "%s %s exceeds the %d-byte roster bound" % (label, path, MAX_ROSTER_BYTES)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        return None, "%s %s cannot be opened (%r)" % (label, path, exc)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, "%s %s is not a regular file" % (label, path)
+        chunks, budget = [], MAX_ROSTER_BYTES + 1
+        while budget > 0:
+            try:
+                chunk = os.read(fd, min(65536, budget))
+            except OSError as exc:
+                return None, "%s %s cannot be read without blocking (%r)" % (label, path, exc)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            budget -= len(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > MAX_ROSTER_BYTES:
+        return None, "%s %s exceeds the %d-byte roster bound" % (label, path, MAX_ROSTER_BYTES)
+    try:
+        return tomllib.loads(data.decode("utf-8")), None
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError) as exc:
+        return None, "%s %s is unreadable or unparseable (%s)" % (label, path, exc)
+
+
 def _frozen_paths(root):
     """The plan-enumerated frozen old-file paths of `root` (R3): (set of root-relative paths, None), or
-    (None, reason) when a roster input is unreadable (R6 fails closed on it)."""
+    (None, reason) when a roster input is unreadable or malformed (R6 fails closed on it)."""
     home = os.path.join(root, WORKING, *ADOPTION_EVIDENCE)
-    if not os.path.isdir(home):
-        return set(), None
+    try:
+        os.lstat(home)
+    except FileNotFoundError:
+        return set(), None  # no adoption evidence at this root: nothing is frozen by it
+    except OSError as exc:
+        return None, "the adoption evidence home %s is unreadable (%r)" % (home, exc)
     try:
         runs = sorted(os.listdir(home))
     except OSError as exc:
@@ -255,22 +382,25 @@ def _frozen_paths(root):
     frozen = set()
     for run in runs:
         plan = os.path.join(home, run, PLAN_FILENAME)
-        if not os.path.isdir(os.path.join(home, run)) or not os.path.exists(plan):
-            continue
-        try:
-            with open(plan, "rb") as fh:
-                doc = tomllib.load(fh)
-        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
-            return None, "the adoption plan %s is unreadable or unparseable (%r)" % (plan, exc)
+        doc, reason = _read_roster_toml(plan, "the adoption plan")
+        if reason is not None:
+            return None, reason
+        if doc is None:
+            continue  # this run directory carries no plan entry at all: nothing to freeze from it
         if doc.get("format") != PLAN_FORMAT:
             return None, "the adoption plan %s does not carry format %r" % (plan, PLAN_FORMAT)
-        rows = doc.get("sources", [])
+        rows = doc.get("sources")
         if not isinstance(rows, list):
-            return None, "the adoption plan %s sources table is not a list" % (plan,)
+            return None, ("the adoption plan %s carries no [[sources]] list (a plan whose rows "
+                          "cannot be read freezes nothing it should)" % (plan,))
         for row in rows:
             if not isinstance(row, dict) or not isinstance(row.get("path"), str):
                 return None, "the adoption plan %s carries a malformed source row" % (plan,)
-            if row.get("disposition") in FROZEN_DISPOSITIONS:
+            disposition = row.get("disposition")
+            if disposition not in VALID_DISPOSITIONS:
+                return None, ("the adoption plan %s carries disposition %r outside the planner "
+                              "vocabulary %s" % (plan, disposition, sorted(VALID_DISPOSITIONS)))
+            if disposition in FROZEN_DISPOSITIONS:
                 rel = row["path"]
                 if os.path.isabs(rel) or ".." in _components(rel):
                     return None, "the adoption plan %s enumerates a non-contained path %r" % (plan, rel)
@@ -280,33 +410,46 @@ def _frozen_paths(root):
 
 def _view_targets(root):
     """The declared-view targets of the machine store at `root` (R4): (set of root-relative paths,
-    None), or (None, reason) on an unreadable or ambiguous manifest (R6 fails closed on it)."""
+    None), or (None, reason) on an unreadable, malformed or ambiguous manifest (R6 fails closed)."""
     working = os.path.join(root, WORKING)
     try:
         names = sorted(os.listdir(working))
     except OSError as exc:
         return None, "the store tree %s is unreadable (%r)" % (working, exc)
-    manifests = [os.path.join(working, n, "manifest.toml") for n in names
-                 if n not in CONTROL_SUBDIRS and os.path.isdir(os.path.join(working, n))
-                 and os.path.exists(os.path.join(working, n, "manifest.toml"))]
-    if not manifests:
+    found = []
+    for name in names:
+        if name in CONTROL_SUBDIRS:
+            continue
+        sub = os.path.join(working, name)
+        try:
+            st = os.stat(sub)
+        except FileNotFoundError as exc:
+            return None, "the store entry %s is a symlink that does not resolve (%r)" % (sub, exc)
+        except OSError as exc:
+            return None, "the store entry %s is unreadable (%r)" % (sub, exc)
+        if not stat.S_ISDIR(st.st_mode):
+            continue
+        doc, reason = _read_roster_toml(os.path.join(sub, "manifest.toml"),
+                                        "the machine-store manifest")
+        if reason is not None:
+            return None, reason
+        if doc is None:
+            continue  # a store subdir without a manifest entry is not a machine store
+        found.append((os.path.join(sub, "manifest.toml"), doc))
+    if not found:
         return set(), None
-    if len(manifests) > 1:
+    if len(found) > 1:
         return None, ("multiple machine-store manifests under %s (store resolution fails closed on "
                       "an ambiguous store)" % (working,))
-    try:
-        with open(manifests[0], "rb") as fh:
-            doc = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
-        return None, "the manifest %s is unreadable or unparseable (%r)" % (manifests[0], exc)
+    manifest, doc = found[0]
     views = doc.get("views", dict())
     if not isinstance(views, dict):
-        return None, "the manifest %s views table is not a table" % (manifests[0],)
+        return None, "the manifest %s views table is not a table" % (manifest,)
     targets = set()
     for name, tbl in views.items():
         tgt = tbl.get("target") if isinstance(tbl, dict) else None
         if not isinstance(tgt, str) or not tgt or os.path.isabs(tgt) or ".." in _components(tgt):
-            return None, "the manifest %s view %r has no contained relative target" % (manifests[0], name)
+            return None, "the manifest %s view %r has no contained relative target" % (manifest, name)
         targets.add(os.path.normpath(tgt))
     return targets, None
 
@@ -366,11 +509,43 @@ def _file_tool_rule(tool_name, tool_input, cwd):
 
 
 def _pristine_tokens(command):
-    """The whitespace-split tokens of a METACHARS-free command with leading VAR=value assignments
-    dropped, or None when the command is not pristine (a metacharacter anywhere, even quoted)."""
-    if any(c in METACHARS for c in command):
-        return None
-    tokens = command.split()
+    """The shell-aware tokens of a PRISTINE command (module docstring: no unquoted metacharacter or
+    control character, single-quoted spans wholly literal, double-quoted spans with no live dollar
+    sign, backquote or backslash, every quote terminated), with leading VAR=value assignments
+    dropped; or None when the command is not pristine. Quoted spans tokenize as argument DATA, so a
+    sanctioned invocation may quote prose that names a protected token."""
+    tokens, cur, has_cur, mode = [], [], False, ""
+    for ch in command:
+        if mode == chr(39):
+            if ch == chr(39):
+                mode = ""
+            else:
+                cur.append(ch)
+            continue
+        if mode == chr(34):
+            if ch == chr(34):
+                mode = ""
+            elif ch in DQ_LIVE or (ord(ch) < 0x20 and ch != "\t"):
+                return None
+            else:
+                cur.append(ch)
+            continue
+        if ch in METACHARS or (ord(ch) < 0x20 and ch != "\t"):
+            return None
+        if ch in QUOTES:
+            mode, has_cur = ch, True
+            continue
+        if ch in (" ", "\t"):
+            if has_cur:
+                tokens.append("".join(cur))
+                cur, has_cur = [], False
+            continue
+        cur.append(ch)
+        has_cur = True
+    if mode:
+        return None  # an unterminated quote is not a command this hook can read
+    if has_cur:
+        tokens.append("".join(cur))
     while tokens and _ASSIGNMENT_RE.match(tokens[0]):
         tokens = tokens[1:]
     return tokens or None
@@ -389,6 +564,55 @@ def _is_sanctioned_opf(tokens):
     return bool(rest) and os.path.basename(rest[0]) == "opf.py"
 
 
+def _mentions_rel(rel, text):
+    """True when the root-relative roster path `rel` appears in `text` bounded as a path: embedded in
+    a longer word on the left (PYTHON_VERSION vs the view VERSION) or continued by a word char or a
+    separator on the right (VERSION.bak, VERSION/) it is a DIFFERENT path and does not match; a left
+    slash still matches, because an absolute spelling of the same file cannot be told apart
+    lexically (an over-match is an over-refusal, never a bypass)."""
+    start, n = 0, len(rel)
+    while True:
+        i = text.find(rel, start)
+        if i < 0:
+            return False
+        before = text[i - 1] if i > 0 else ""
+        after = text[i + n] if i + n < len(text) else ""
+        if (before == "" or before not in WORD_CHARS) and (
+                after == "" or (after not in WORD_CHARS and after != "/")):
+            return True
+        start = i + 1
+
+
+def _bound_roots(text, cwd):
+    """The product roots the rosters are resolved from (R5/R7): every root at or above the session
+    cwd (when there is one), plus every root at or above an absolute path spelled in `text`, so an
+    absolute protected spelling is judged even when the session sits outside its product tree."""
+    roots = list(_roots_above(cwd)) if isinstance(cwd, str) and os.path.isabs(cwd) else []
+    for match in ABS_PATH_RE.findall(text)[:64]:
+        for root in _roots_above(os.path.normpath(match)):
+            if root not in roots:
+                roots.append(root)
+    return roots
+
+
+def _reference_kind(text, cwd, rosters_text=None):
+    """The protected token `text` references, as a prose kind, or None. `rosters_text` carries the
+    ((frozen_abs, frozen_rel), (views_abs, views_rel)) pair already resolved by the caller."""
+    if WORKING in text:
+        return "the %s store tree" % (WORKING,)
+    if isinstance(cwd, str) and WORKING in _components(cwd):
+        return ("the %s store tree (the session cwd is inside it, so every relative spelling lands "
+                "there)" % (WORKING,))
+    frozen, views = rosters_text
+    for rel in sorted(frozen[1]):
+        if _mentions_rel(rel, text):
+            return "the plan-frozen old file %r" % (rel,)
+    for rel in sorted(views[1]):
+        if _mentions_rel(rel, text):
+            return "the declared view %r" % (rel,)
+    return None
+
+
 def _bash_rule(tool_input, cwd):
     """R5 and R6 for Bash; returns a deny reason or None (allow)."""
     if not isinstance(tool_input, dict) or not isinstance(tool_input.get("command"), str):
@@ -400,33 +624,64 @@ def _bash_rule(tool_input, cwd):
     tokens = _pristine_tokens(command)
     if tokens and _is_sanctioned_opf(tokens):
         return None  # A1 holds even under a roster failure: the sanctioned repair path stays open
-    mentioned = WORKING if WORKING in command else None
-    frozen, views, reason = _rosters(_roots_above(cwd))
+    frozen, views, reason = _rosters(_bound_roots(command, cwd))
     if reason is not None:
         return reason + "; failing closed (R6)"
-    kind = "the %s store tree" % (WORKING,)
-    if mentioned is None:
-        for rel in sorted(frozen[1]):
-            if rel in command:
-                mentioned, kind = rel, "the plan-frozen old file %r" % (rel,)
-                break
-    if mentioned is None:
-        for rel in sorted(views[1]):
-            if rel in command:
-                mentioned, kind = rel, "the declared view %r" % (rel,)
-                break
-    if mentioned is None:
+    kind = _reference_kind(command, cwd, ((frozen[0], frozen[1]), (views[0], views[1])))
+    if kind is None:
         return None
     if tokens:
         word = os.path.basename(tokens[0])
         if word in READONLY_WORDS:
             return None  # A2
-        if word == "git" and len(tokens) >= 2 and tokens[1] in GIT_SAFE_SUBCOMMANDS:
-            return None  # A3
+        if (word == "git" and len(tokens) >= 2 and tokens[1] in GIT_SAFE_SUBCOMMANDS
+                and not any(t.startswith("-") for t in tokens[2:])):
+            # A3. The option bar is load-bearing: git's own --output and pager/editor options make
+            # otherwise read-only verbs (diff, log, show, grep) write arbitrary files, and a lexical
+            # hook cannot prove an option read-only, so any dash-leading token takes the deny.
+            return None
     return ("this Bash command references %s and is not a pristine opf invocation, read-only command "
-            "or store-safe git form, so it is denied fail-closed: a lexical hook cannot prove it "
-            "read-only (R5). %s; read files through the platform Read tool or a pristine read-only "
-            "command." % (kind, SANCTIONED))
+            "or option-free read-only git form, so it is denied fail-closed: a lexical hook cannot "
+            "prove it read-only (R5). %s; read files through the platform Read tool or a pristine "
+            "read-only command." % (kind, SANCTIONED))
+
+
+def _payload_strings(value):
+    """Every string in a JSON payload value (keys included), depth-first, bounded."""
+    out, stack = [], [value]
+    while stack and len(out) < 4096:
+        v = stack.pop()
+        if isinstance(v, str):
+            out.append(v)
+        elif isinstance(v, dict):
+            for k, sub in v.items():
+                if isinstance(k, str):
+                    out.append(k)
+                stack.append(sub)
+        elif isinstance(v, (list, tuple)):
+            stack.extend(v)
+    return out
+
+
+def _other_tool_rule(tool_name, tool_input, cwd):
+    """R7 for every tool outside the named rules: the hook cannot prove such a tool read-only, so a
+    payload that textually references a protected token is denied the same way R5 denies a
+    referencing Bash command; a reference-free payload is allowed (the disclosed lexical floor).
+    The known read-only built-ins are allowed outright."""
+    if tool_name in READONLY_TOOLS:
+        return None
+    text = chr(10).join(_payload_strings(tool_input))
+    if not text:
+        return None
+    frozen, views, reason = _rosters(_bound_roots(text, cwd))
+    if reason is not None:
+        return reason + "; failing closed (R6)"
+    kind = _reference_kind(text, cwd, ((frozen[0], frozen[1]), (views[0], views[1])))
+    if kind is None:
+        return None
+    return ("the tool %r is not one this hook knows to be read-only and its payload references %s, "
+            "so it is denied fail-closed (R7). %s; use the platform's Write/Edit tools or Bash for "
+            "unprotected paths, and the opf CLI for the store." % (tool_name, kind, SANCTIONED))
 
 
 def main():
@@ -448,7 +703,7 @@ def main():
     elif tool_name == "Bash":
         reason = _bash_rule(tool_input, cwd)
     else:
-        reason = None  # not a write-capable tool this hook covers (match-all registration sees every tool)
+        reason = _other_tool_rule(tool_name, tool_input, cwd)
     if reason is not None:
         return _emit_deny(reason)
     return 0

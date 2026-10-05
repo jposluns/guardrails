@@ -1141,7 +1141,13 @@ def _claude_hook_self_test():
     the doc-confirmed PreToolUse contract: deny = exit 0 plus a hookSpecificOutput permissionDecision
     "deny"; allow = exit 0 silent; exit 2 = blocking error) over throwaway live-tree fixtures, so every
     vector FAILS WITHOUT THE HOOK: a missing, inert or allow-everything hook yields no deny decision and
-    reds the suite. git-independent (the hook reads only the live tree; nothing is committed), offline,
+    reds the suite. The matrix pins the round-1 security fixes by construction: option-bearing git and
+    the other write-capable command words deny on a protected mention, a symlink-then-dotdot spelling
+    is classified after full resolution, every unreadable, malformed, non-regular (FIFO) or oversized
+    roster input denies promptly (never an empty protection set), the CLI-verified `opf record create`
+    and `opf render --write` syntax stays allowed with protected mentions in quoted argument data, and
+    a tool outside the named rules denies on a protected payload reference (R7).
+    git-independent (the hook reads only the live tree; nothing is committed), offline,
     hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
     cannot be launched)."""
@@ -1208,9 +1214,11 @@ def _claude_hook_self_test():
             archive = os.path.join(root, _opf_store.WORKING_DIRNAME, "archive", "adoption", RUN_ID)
             for d in (machine, evidence, archive, os.path.join(root, "docs")):
                 os.makedirs(d)
+            manifest_text = ('[views.todo]\nkind = "deterministic"\nsources = ["worklog"]\n'
+                             'target = "TODO.md"\n\n[views.version]\nkind = "deterministic"\n'
+                             'sources = ["worklog"]\ntarget = "VERSION"\n')
             with open(os.path.join(machine, "manifest.toml"), "w", encoding="utf-8") as fh:
-                fh.write('[views.todo]\nkind = "deterministic"\nsources = ["worklog"]\n'
-                         'target = "TODO.md"\n')
+                fh.write(manifest_text)
             with open(os.path.join(machine, "counters.toml"), "w", encoding="utf-8") as fh:
                 fh.write("schema = 1\n")
             plan_text = ('format = "opf.adoption.plan/v2"\n\n[[sources]]\npath = "LEGACY.md"\n'
@@ -1255,14 +1263,36 @@ def _claude_hook_self_test():
             deny("symlink-store-denied",
                  payload("Write", dict(file_path=os.path.join(root, "alias.md"), content="x"), root),
                  "sanctioned writer")
+            # R1 via a symlink FOLLOWED BY `..`: the filesystem resolves the link before `..` climbs
+            # out of its destination, so the hook must realpath the ORIGINAL spelling (a lexical
+            # collapse first would judge <root>/counters.toml, a different and unprotected file).
+            os.makedirs(os.path.join(machine, "inner"))
+            os.symlink(os.path.join(machine, "inner"), os.path.join(root, "jump"))
+            deny("symlink-dotdot-store-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "jump", "..", "counters.toml"),
+                                       content="x"), root), "sanctioned writer")
             # R6: a missing target field fails closed as a structured deny.
             deny("missing-target-denied", payload("Write", dict(), root), "failing closed")
             # An unrelated write under the same root allows silently.
             allow("write-unrelated-allowed",
                   payload("Write", dict(file_path=os.path.join(root, "docs", "notes.md"),
                                         content="x"), root))
-            # A non-write tool allows silently even over a store path (match-all registration).
+            # A known read-only tool allows silently even over a store path (match-all
+            # registration), while a tool the hook cannot prove read-only (an MCP write tool, another
+            # shell) is denied on a protected payload reference (R7) and allowed when reference-free.
             allow("read-tool-allowed", payload("Read", dict(file_path=counters), root))
+            deny("mcp-write-store-denied",
+                 payload("mcp__filesystem__write_file", dict(path=counters, content="x"), root),
+                 "R7")
+            deny("powershell-store-denied",
+                 payload("PowerShell",
+                         dict(command="Set-Content .working/toml/counters.toml x"), root), "R7")
+            deny("mcp-frozen-abs-outside-root-denied",
+                 payload("mcp__filesystem__write_file",
+                         dict(path=os.path.join(root, "LEGACY.md")), basestr), "R7")
+            allow("mcp-unrelated-allowed",
+                  payload("mcp__filesystem__write_file",
+                          dict(path=os.path.join(root, "docs", "notes.md"), content="x"), root))
             # The imported-series leaves stay writer-less and EXEMPT until the import writer ships
             # (spec 14.1: enforcement must not force an operation the writer cannot perform).
             allow("imported-leaf-allowed",
@@ -1271,16 +1301,48 @@ def _claude_hook_self_test():
             allow("imported-index-allowed",
                   payload("Write", dict(file_path=os.path.join(
                       machine, "backlog_item.imported.index.toml"), content="x"), root))
-            # A1: an opf record call is the sanctioned writer and allows, protected mention included.
-            allow("bash-opf-record-allowed",
-                  payload("Bash", dict(command="python3 -I -B opf/tools/opf.py record backlog_item "
-                                               "--title x"), root))
+            # A1: the sanctioned writer allows on the CLI's REAL syntax, protected mention
+            # included, with the mention inside QUOTED argument data (the quote-aware pristine scan;
+            # the exact record create and render --write invocations here run 0 against the CLI).
+            allow("bash-opf-record-create-real-allowed",
+                  payload("Bash", dict(command="python3 -I -B opf/tools/opf.py record create "
+                                               "--type backlog_item "
+                                               "--title 'Repair .working (counter)' "
+                                               "--actor maintainer --root ."), root))
+            allow("bash-opf-render-write-real-allowed",
+                  payload("Bash", dict(command="opf render --write --root '" + basestr
+                                               + "/product .working (x)'"), root))
             allow("bash-opf-store-arg-allowed",
                   payload("Bash", dict(command="opf doctor --root .working/.."), root))
-            # A2 / A3: read-only and store-safe git references allow.
+            # ... but the pristine scan still bars a second command or a live expansion riding on an
+            # opf spelling: an unquoted metacharacter or a dollar inside double quotes takes the deny.
+            deny("bash-opf-semicolon-denied",
+                 payload("Bash", dict(command="opf record create --title x; rm -rf .working"), root),
+                 "lexical hook")
+            deny("bash-opf-dollar-quoted-denied",
+                 payload("Bash", dict(command='opf record create --title "a $(rm .working/x)"'),
+                         root), "lexical hook")
+            # A2 / A3: read-only and option-free store-safe git references allow.
             allow("bash-grep-store-allowed",
                   payload("Bash", dict(command="grep -n x .working/toml/counters.toml"), root))
             allow("bash-git-add-view-allowed", payload("Bash", dict(command="git add TODO.md"), root))
+            allow("bash-git-diff-path-allowed",
+                  payload("Bash", dict(command="git diff .working/toml/counters.toml"), root))
+            # A3's option bar: git's own write-capable options (--output and friends) make otherwise
+            # read-only verbs write arbitrary files, so ANY dash-leading token after the subcommand
+            # takes the deny; `file -C` compiles a .mgc beside its operand, so it left A2.
+            deny("bash-git-diff-output-denied",
+                 payload("Bash", dict(command="git diff --no-index "
+                                              "--output=.working/toml/counters.toml /dev/null x"),
+                         root), "lexical hook")
+            deny("bash-git-log-output-frozen-denied",
+                 payload("Bash", dict(command="git log -1 --output=LEGACY.md"), root), "LEGACY.md")
+            deny("bash-git-grep-pager-view-denied",
+                 payload("Bash", dict(command="git grep --open-files-in-pager=rm -e x -- TODO.md"),
+                         root), "TODO.md")
+            deny("bash-file-magic-store-denied",
+                 payload("Bash", dict(command="file -C -m .working/toml/counters.toml"), root),
+                 "lexical hook")
             # R5: visible Bash writes and unproven references deny.
             deny("bash-sed-store-denied",
                  payload("Bash", dict(command="sed -i s/a/b/ .working/toml/counters.toml"), root),
@@ -1292,6 +1354,40 @@ def _claude_hook_self_test():
                  "LEGACY.md")
             deny("bash-view-append-denied", payload("Bash", dict(command="echo x >> TODO.md"), root),
                  "TODO.md")
+            # The brief's write-capable command words each take the deny on a protected mention.
+            deny("bash-tee-store-denied",
+                 payload("Bash", dict(command="tee .working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-cp-frozen-denied", payload("Bash", dict(command="cp x LEGACY.md"), root),
+                 "LEGACY.md")
+            deny("bash-truncate-view-denied",
+                 payload("Bash", dict(command="truncate -s 0 TODO.md"), root), "TODO.md")
+            deny("bash-dd-store-denied",
+                 payload("Bash", dict(command="dd if=/dev/zero of=.working/toml/counters.toml"),
+                         root), "lexical hook")
+            # Roster tokens are matched with path boundaries: a longer word is a DIFFERENT path and
+            # does not trip the view, while the view's own spellings still deny.
+            allow("bash-version-word-boundary-allowed",
+                  payload("Bash", dict(command="env PYTHON_VERSION=3 make"), root))
+            allow("bash-version-dunder-allowed",
+                  payload("Bash", dict(command="grep -rn __VERSION__ src"), root))
+            deny("bash-touch-version-denied", payload("Bash", dict(command="touch VERSION"), root),
+                 "VERSION")
+            # An ABSOLUTE frozen spelling is judged even when the session cwd sits OUTSIDE every
+            # product root (the rosters bind through the absolute paths spelled in the command).
+            deny("bash-abs-frozen-outside-root-denied",
+                 payload("Bash", dict(command="tee " + os.path.join(root, "LEGACY.md")), basestr),
+                 "LEGACY.md")
+            allow("bash-abs-unprotected-outside-root-allowed",
+                  payload("Bash", dict(command="tee " + os.path.join(basestr, "notes.txt")),
+                          basestr))
+            # A session cwd INSIDE the store makes every relative spelling land in the store, so a
+            # non-allowance command denies there even with no textual `.working` token.
+            deny("bash-cwd-inside-store-denied",
+                 payload("Bash", dict(command="sed -i s/1/2/ counters.toml"), machine),
+                 "store tree")
+            allow("bash-cwd-inside-store-ls-allowed",
+                  payload("Bash", dict(command="ls counters.toml"), machine))
             deny("bash-git-checkout-frozen-denied",
                  payload("Bash", dict(command="git checkout -- LEGACY.md"), root), "LEGACY.md")
             # A Bash command with no protected reference allows.
@@ -1330,6 +1426,55 @@ def _claude_hook_self_test():
             deny("unreadable-manifest-fails-closed",
                  payload("Write", dict(file_path=os.path.join(root, "docs", "notes.md"),
                                        content="x"), root), "failing closed")
+            with open(os.path.join(machine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write(manifest_text)
+
+            # R6 over every malformed, non-regular or unreadable roster shape the brief names: each
+            # one DENIES (cannot-evaluate), never an EMPTY protection set, and a FIFO yields a prompt
+            # structured deny (the roster opens O_NONBLOCK behind a regular-file check), never a
+            # stall. The probe target is the plan-frozen LEGACY.md: with the roster silently dropped
+            # it would be writable, so each vector fails without the fail-closed read.
+            plan_path = os.path.join(evidence, "plan.toml")
+            frozen_write = payload("Write", dict(file_path=os.path.join(root, "LEGACY.md"),
+                                                 content="x"), root)
+
+            def mutate_plan(label, build):
+                os.remove(plan_path)
+                build()
+                deny(label, frozen_write, "failing closed")
+                os.remove(plan_path)
+                with open(plan_path, "w", encoding="utf-8") as fh:
+                    fh.write(plan_text)
+
+            mutate_plan("dangling-plan-symlink-fails-closed",
+                        lambda: os.symlink(os.path.join(evidence, "nowhere.toml"), plan_path))
+            if hasattr(os, "mkfifo"):
+                mutate_plan("fifo-plan-fails-closed", lambda: os.mkfifo(plan_path))
+
+            def write_plan(text):
+                with open(plan_path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+
+            mutate_plan("plan-nonint-disposition-fails-closed",
+                        lambda: write_plan(plan_text.replace('"retire"', "42")))
+            mutate_plan("plan-cased-disposition-fails-closed",
+                        lambda: write_plan(plan_text.replace('"retire"', '"Retire"')))
+            mutate_plan("plan-missing-sources-fails-closed",
+                        lambda: write_plan(plan_text.replace("[[sources]]", "[[source]]")))
+            mutate_plan("oversized-plan-fails-closed",
+                        lambda: open(plan_path, "wb").write(b"#" * (1024 * 1024 + 1)))
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                # A run directory whose mode forbids the search makes the plan entry unreadable
+                # (present but unprovable), which must deny, not read as an absent plan.
+                os.chmod(evidence, 0o600)
+                deny("unsearchable-run-dir-fails-closed", frozen_write, "failing closed")
+                os.chmod(evidence, 0o755)
+            manifest_path = os.path.join(machine, "manifest.toml")
+            os.remove(manifest_path)
+            os.symlink(os.path.join(machine, "nowhere.toml"), manifest_path)
+            deny("dangling-manifest-symlink-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root, "TODO.md"), content="x"), root),
+                 "failing closed")
     except OSError as exc:
         print("check_opf_doctor claude-hook self-test: harness error: " + str(exc), file=sys.stderr)
         return EXIT_ERROR
@@ -1340,13 +1485,23 @@ def _claude_hook_self_test():
     print("check_opf_doctor claude-hook self-test: PASS (the shipped PreToolUse deny hook, launched "
           "python -I on the doc-confirmed stdin/stdout contract, denies a direct store Write, an "
           "adoption-archive write, an evidence-home write, a plan-frozen old-file Edit, a "
-          "declared-view Write, a NotebookEdit store target, a traversal-relative and a symlinked "
-          "spelling, a missing target field, and the visible Bash store/frozen/view references; "
-          "allows an opf record call and the other pristine opf invocations (under a broken roster "
-          "too), read-only and store-safe git references, a non-write tool, an unrelated write, a "
-          "reference-free Bash command, and the still-writerless imported-series leaves; exits 2 "
-          "blocking on a malformed payload and a mis-wired event; and fails closed on an unparseable "
-          "adoption plan or machine-store manifest for every write under that root)")
+          "declared-view Write, a NotebookEdit store target, a traversal-relative, a symlinked AND a "
+          "symlink-then-dotdot spelling (realpath of the original spelling), a missing target field, "
+          "the visible Bash store/frozen/view references boundary-matched (PYTHON_VERSION and "
+          "__VERSION__ pass, VERSION denies), the brief's write-capable words (tee, cp, truncate, "
+          "dd, sed -i), option-bearing git forms (--output, --open-files-in-pager) and file -C, an "
+          "absolute frozen spelling with the session cwd outside every product root, a relative "
+          "spelling with the cwd inside the store, and (R7) an MCP write tool or another shell whose "
+          "payload references the store; allows the CLI-verified opf record create and render "
+          "--write syntax with quoted protected mentions and the other pristine opf invocations "
+          "(under a broken roster too; an unquoted metacharacter or a live double-quoted dollar "
+          "still denies), read-only and option-free store-safe git references, known read-only and "
+          "reference-free other tools, an unrelated write, a reference-free Bash command, and the "
+          "still-writerless imported-series leaves; exits 2 blocking on a malformed payload and a "
+          "mis-wired event; and fails closed, never an empty roster, on an unparseable, "
+          "dangling-symlink, FIFO (prompt, O_NONBLOCK), out-of-vocabulary-disposition, "
+          "sources-less, oversized or unsearchable adoption plan and on an unparseable or "
+          "dangling-symlink machine-store manifest, for every write under that root)")
     return EXIT_OK
 
 
