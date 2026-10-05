@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1e65bd3c64cfec89e12ad94112fbeb66e2ac3dfc9f7a5a4dcf5953be3ff54aeb"
+tree-sha256 = "84dc34c8116d00848da259969a76fa67c886708eb1f28074716720752af1215b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 247580
-sha256 = "96424bb10d3b7ee4a478d601c4b9d317eeb2b6f7e3d5c497696f22db37269712"
+bytes = 250976
+sha256 = "80aab848d3697b883631accb677ba5e099df5947bd56b33cbdef851cfcd39bf3"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2241,8 +2241,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41348
-sha256 = "9a2460e8b8dcc3a17fabe9fbabbb785a92839037aded1e2f3cd92177d9b82461"
+bytes = 41446
+sha256 = "ba6894708b55299c5405d62f48efe385bc79c279c716e278aedef273416304f2"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2428,6 +2428,16 @@ sha256 = "f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5"
 path = "opf/enforcement/ci/opf-ci.sh"
 bytes = 2178
 sha256 = "0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104"
+
+[[sources]]
+path = "opf/enforcement/precommit/install.sh"
+bytes = 26934
+sha256 = "024c6fd165af23dac55949e05f21d4f7811d9049dd05253c05611863af8ba6b7"
+
+[[sources]]
+path = "opf/enforcement/precommit/pre-commit"
+bytes = 10627
+sha256 = "02f97b775948be98897e6ffb2b28999a37c387ad4170104dc72ea38f5cd8bc64"
 
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
@@ -2871,8 +2881,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 79931
-sha256 = "6856f6c6529f1533b0344fe3c6ff13aef3f9b5c723990c3822a9750e04edb06e"
+bytes = 154604
+sha256 = "c88f844337c0b12d5cc5887f670d7c5a6b606e3ebc84ad02f0606d3ef5f679d4"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"
@@ -3311,8 +3321,8 @@ sha256 = "1b00b20fc3359a8287aac84e2bf674ed81be73913f1a22b34cc624328a76817e"
 
 [[sources]]
 path = "tools/check_portability.py"
-bytes = 91208
-sha256 = "fd722c47bccad8ca19537905a1d7198ea99edef35f359bdebd528fd92be12d11"
+bytes = 92918
+sha256 = "83cf95b293c000625a35643929b82e23eeadb2770ad9dad0ac1604767437597f"
 
 [[sources]]
 path = "tools/check_python_floor.py"

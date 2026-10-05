@@ -238,6 +238,11 @@ OPERATIONAL_TERMS = [
 TEXT_SUFFIXES = {".md", ".mdc", ".py", ".sh", ".yml", ".yaml", ".toml", ".json", ".txt",
                  ".html", ".css", ".js", ".cfg", ".ini", ".conf", ".svg", ".csv"}
 
+# Shipped text files whose NAME is fixed by an outside convention and so carries no text suffix: git runs a
+# hook only under its exact name, so the enforcement pack's pre-commit hook is named pre-commit. Each is an
+# exact path, scanned as text like any TEXT_SUFFIXES file.
+TEXT_PATHS = frozenset(("opf/enforcement/precommit/pre-commit",))
+
 
 # --- pure logic (always run in --self-test) ---------------------------------------------------------
 
@@ -678,7 +683,7 @@ def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open
         except OSError as exc:
             raise GateError("cannot read allow-listed binary {} ({})".format(rel, exc))
         return findings
-    if path.suffix not in TEXT_SUFFIXES:
+    if path.suffix not in TEXT_SUFFIXES and rel not in TEXT_PATHS:
         findings.append("{}: non-portable file class (suffix {!r} is not scannable text and is not on the "
                         "binary allow-list) (portability C3)".format(rel, path.suffix))
         return findings
@@ -1381,6 +1386,24 @@ def _self_test_main_isolated():
                 "# Note\n\nsee the session-handoff before running CI\n", encoding="utf-8")
             if _run_quiet(sroot, entries) != 1:
                 failures.append("e2e: an operational term under opf/enforcement expected exit 1")
+
+            # (d3) the enforcement pack's suffixless pre-commit hook (TEXT_PATHS) is scanned as text: clean
+            # bytes pass (without TEXT_PATHS it is a C3 file-class finding), and an operational term in it
+            # fails, so the allowance is a text scan, never a skip.
+            sroot, entries = _fresh("precommit-hook-clean")
+            (sroot / "opf/enforcement/precommit").mkdir(parents=True, exist_ok=True)
+            entries.append((0o100755, "opf/enforcement/precommit/pre-commit"))
+            (sroot / "opf/enforcement/precommit/pre-commit").write_text(
+                "#!/bin/sh\n# Check the staged snapshot.\nexit 0\n", encoding="utf-8")
+            if _run_quiet(sroot, entries) != 0:
+                failures.append("e2e: the clean suffixless pre-commit hook expected exit 0")
+            sroot, entries = _fresh("precommit-hook-term")
+            (sroot / "opf/enforcement/precommit").mkdir(parents=True, exist_ok=True)
+            entries.append((0o100755, "opf/enforcement/precommit/pre-commit"))
+            (sroot / "opf/enforcement/precommit/pre-commit").write_text(
+                "#!/bin/sh\n# see the session-handoff first\nexit 0\n", encoding="utf-8")
+            if _run_quiet(sroot, entries) != 1:
+                failures.append("e2e: an operational term in the pre-commit hook expected exit 1")
 
             # (e) a pathname operational term fails on the NAME alone, with clean bytes.
             sroot, entries = _fresh("pathname-term")
