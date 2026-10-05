@@ -1955,6 +1955,26 @@ def self_test():
     check("d1-standalone-guard-absent-schema-finding",
           bool(check_frozen_coverage({"release": []}, {})))
 
+    # A duplicate long WL id never crashes the worklog validators under any ambient int-to-str limit: the
+    # clean id parser accepts an id only when its number renders back under that same limit, so the
+    # duplicate-id message is always produced (test-hermeticity; guard-input-soundness). The verdict at
+    # each limit matches the clean-only rule: malformed past the limit, a duplicate within it.
+    _prev_wl_limit = sys.get_int_max_str_digits()
+    try:
+        for _limit in (0, 640, 4300, 271828):
+            sys.set_int_max_str_digits(_limit)
+            _long = dict(entry(1), id="WL-" + "9" * 641)
+            try:
+                _long_v = validate_worklog(dict(schema=1, entry=[_long, dict(_long)]))
+                _long_by = _entries_by_id(dict(entry=[_long, dict(_long)]))
+            except ValueError:
+                _long_v = _long_by = None
+            check("worklog-duplicate-long-id-no-crash-limit-{}".format(_limit),
+                  _long_v is not None and _long_v.status == INVALID and _long_by is not None
+                  and any("duplicate worklog id" in f for f in _long_v.findings) == (_limit != 640))
+    finally:
+        sys.set_int_max_str_digits(_prev_wl_limit)
+
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
         for f in failures:
