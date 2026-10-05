@@ -11,7 +11,7 @@ description: The OPF operating loop for an AI development assistant. Read the ad
   verification is never shortened for speed.
 ---
 
-<!-- OPF-FLOW: release=0.3.0 template-sha256=865bb309683fc76346b2500d5a724afc357b6dd92acc2aa3ad75eb082a2c6869 -->
+<!-- OPF-FLOW: release=0.3.0 template-sha256=26ca14780a1bb62187921ec46ec600e2e05f15cf61c0d02c12f7412b36f51644 -->
 
 # /flow: the OPF operating loop
 
@@ -528,10 +528,11 @@ no clean round to converge on, so its `merge` entry carries `lane=merge` instead
 
 `tier=` is `light`, `substantive`, or `sensitive` (section 7). `phase=` is `discovery` or
 `verify`, `result=` is `clean`, `findings`, or `failed`, and `rev=` names the reviewed revision;
-every `verdict` entry carries all three. A failed or timed-out round writes its own `verdict`
-entry (`result=failed`) before any re-issue, so the store holds every round the unit ran, in
-`WL` order. The ancestor walk, which the section 7 standing-rule limit reads, starts at the
-unit's own item (one unit, one item, section 1, step 2) and follows each `follows` link from an
+every `verdict` entry carries all three. A failed or timed-out round, an UNVERIFIABLE one
+included (section 7), writes its own `verdict` entry (`result=failed`) before any re-issue, so
+the store holds every round the unit ran, in `WL` order. The ancestor walk, which the section 7
+standing-rule limit reads, starts at the unit's own item (one unit, one item, section 1, step 2)
+and follows each `follows` link from an
 item it reads to that link's target, the earlier unit whose scope the item carries (section 1,
 step 2), transitively and in that direction only: it never steps from an item to one that links
 `follows` to it, so a sibling cut from the same unit, or a unit cut from this one, adds nothing.
@@ -664,7 +665,10 @@ needs the maintainer's recorded decision and a recorded factual basis, never a t
 argument.
 
 **Light units** take at least two independent reviewer families (`review_families_light`) and
-the mechanical gates.
+the mechanical gates. A light unit's panel, every family in `review_families_light`, is its
+DISCOVERY panel, recorded with `phase=discovery`, and the convergence, verification-rule, and
+reliability bullets below apply to it with that roster, so a clean, complete, non-degraded light
+panel writes the `converge` entry that takes the unit to `lane=merge`.
 
 **Substantive and sensitive units** take the discovery/verify cycle:
 
@@ -698,19 +702,23 @@ the mechanical gates.
   `verdict` entry, so the rule, and a resumed run, read from the store the unit's rounds, its
   `unpark` entries, and the answer each `unpark` resumed it under (the decision rule). That rule
   alone decides which rounds, a `result=failed` round included, count toward a stall it
-  declares; this skill adds no exclusion or basis of its own.
+  declares; this skill adds no exclusion or basis of its own, and a stall it declares is handled
+  by the at-stall path below, a park or a governing standing rescope once along the unit's
+  lineage, whatever rounds its basis rests on, failed ones included.
 - **Reviewer reliability**: a reviewer silent past `stall_minutes` (default 45) is re-issued;
   an absent family is re-issued, never waived; the first valid delivery per leg is authoritative
   and a late valid delivery is read as a cross-reference; an invalid delivery never satisfies
-  the family requirement; no missing-family or otherwise degraded panel converges. A failed
-  round is a reliability failure, never a stall a standing rule acts on. A reviewer delivery
-  that is degraded, failed, or UNVERIFIABLE is handled exactly as the AIQT Guardrails pack's
-  `verifier-delivery-completeness` rule says, which also sets when a required family is
-  unavailable: a degraded or failed delivery is no verdict and is re-dispatched, and an
-  UNVERIFIABLE outcome is terminal, "treated as not-passed and resolved by fixing the input",
-  never re-sent unchanged. Where a required family is unavailable on that rule's terms, the run
-  parks the unit on a `pending_decision` naming the reliability failures, through the park path
-  of the next bullet, never through a rescope.
+  the family requirement; no missing-family or otherwise degraded panel converges. Whether a
+  reviewer delivery that is degraded, failed, or UNVERIFIABLE counts is judged as the AIQT
+  Guardrails pack's `verifier-delivery-completeness` rule says, which also sets when a required
+  family is unavailable (genuinely unreachable, never merely unbudgeted): a degraded or failed
+  delivery is no verdict and is re-dispatched, and an UNVERIFIABLE outcome is terminal,
+  "treated as not-passed and resolved by fixing the input", never re-sent unchanged. Where a
+  required family is unavailable on that rule's terms, where a reachable family's delivery fails
+  again after that re-dispatch, or where an UNVERIFIABLE input is one the run cannot fix, the
+  run parks the unit on a `pending_decision` naming the reliability failures, through the park
+  path of the next bullet, never through a rescope, and never drops the family or reduces the
+  panel in place of that park.
 - **At a stall the verification rule declares**: first apply a governing standing rule (the
   standing-rules bullet), whose rescope is recorded as an `autonomous_decision`, never a
   `pending_decision`; where no `rescope` rule governs, a `none` rule included, park the unit,
@@ -830,9 +838,11 @@ convergence rule.
   Within those limits, merging itself, what an `accept` allows to merge and which revision
   merges included, follows the adopter's own merge gate, the rule bound through the `merge_gate`
   slot (section 10; default: the AIQT Guardrails pack's `branch-and-merge-on-green` and
-  `gate-discipline` rules); this skill adds no revision rule of its own. Merges are strictly
-  serial and pinned to the reviewed head. Before waiting on CI, confirm the change is actually
-  mergeable; a conflicting change never starts CI, and waiting on it is idle time.
+  `gate-discipline` rules), under the one revision rule this skill adds, which no binding
+  lifts: merges are strictly serial and pinned to the reviewed head. Under the default binding,
+  a unit merging within those limits, one under an `accept` included, meets that gate. Before
+  waiting on CI, confirm the change is actually mergeable; a conflicting change never starts
+  CI, and waiting on it is idle time.
 - After a refresh onto the integration branch, run merge-delta verification and the full suite,
   not only the conflicted files' tests: a clean three-way merge can still violate a newer
   cross-file rule.
