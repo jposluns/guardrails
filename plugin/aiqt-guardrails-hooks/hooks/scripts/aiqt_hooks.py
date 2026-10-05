@@ -220,7 +220,7 @@ NOTE_CONSTRUCTORS = (
     "_allow_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
     "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
-    "_orch_stop_family")
+    "_orch_stop_family", "_snapshot_bases_then_allow", "_possibly_discarding")
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
@@ -4926,6 +4926,325 @@ def _nonpristine_discard_actions(segments, cwd):
             "cd_unfollowed": cd_unfollowed, "saw_subshell_cd": saw_subshell_cd, "unproven": unproven}
 
 
+_PLAIN_GIT_SUBCOMMANDS = frozenset((
+    "status", "log", "show", "diff", "diff-tree", "diff-index", "diff-files", "add", "commit",
+    "commit-tree", "write-tree", "mktree", "mktag", "hash-object", "fetch", "pull", "push", "remote",
+    "config", "rev-parse", "rev-list", "symbolic-ref", "for-each-ref", "show-ref", "cat-file",
+    "ls-files", "ls-tree", "ls-remote", "describe", "shortlog", "blame", "annotate", "grep",
+    "merge-base", "cherry", "reflog", "notes", "help", "version", "init", "clone", "name-rev",
+    "whatchanged", "archive", "bundle", "gc", "fsck", "count-objects", "repack", "prune", "pack-refs",
+    "maintenance", "format-patch", "range-diff", "var", "check-ignore", "check-attr", "check-mailmap",
+    "show-branch", "stripspace", "column", "credential", "interpret-trailers", "rerere", "tag",
+    "fast-export", "verify-commit", "verify-tag", "verify-pack", "pack-objects"))
+"""Explicit allowlist of KNOWN NON-DISCARDING git subcommands. A git segment whose subcommand is in this
+set cannot discard uncommitted working-tree content. The discarding verbs (checkout, switch, restore,
+reset, clean, rm, a stash drop/clear, a branch force delete) and every UNRECOGNISED subcommand (a typo,
+an alias name, checkout-index, read-tree) are DELIBERATELY ABSENT, so each routes to the
+possibly-discarding branch, the safe direction. Also absent, because a form of each can discard
+uncommitted work or run a command string: merge/rebase/cherry-pick/revert (their --abort resets the
+worktree), bisect (bisect run), submodule (foreach, update --force), worktree (remove --force), mv (-f
+overwrites the destination), update-index and update-ref (index entries and refs dropped in place). A
+subcommand not listed is treated conservatively until reviewed and added."""
+
+_NONPLAIN_WORDS = frozenset(_WRAPPER_WORDS) | frozenset((
+    "eval", "source", ".", "python", "python2", "python3", "perl", "ruby", "node", "zsh", "dash",
+    "ksh", "fish", "csh", "tcsh", "find", "awk", "ssh", "su", "setsid", "stdbuf", "doas", "chroot",
+    "unshare", "script", "watch", "flock", "alias", "parallel"))
+"""Command words that make a command NOT provably plain: an eval, a shell/interpreter whose -c/script
+string this guard will not parse, or a wrapper that can hide a git invocation. Any segment led by one of
+these routes the whole command to the possibly-discarding branch."""
+
+
+def _plain_lexical_ok(command):
+    """True when command uses ONLY simple quoting around whole words and none of the disallowed lexical
+    forms: no backslash (so no line continuation and no backslash escape), no dollar sign (so no
+    parameter expansion, no command substitution, no ANSI-C or locale dollar-quoting) and no backtick
+    command substitution. A quote (single or double) is admitted ONLY when it opens at a word boundary
+    (start, whitespace, or a shell separator metacharacter) AND its matching close is followed by a word
+    boundary or end of text, so a quote FRAGMENTING a word (a quote-split verb such as re-set, a
+    quote-split git word such as g-it, or a quote glued to more characters) is rejected. Purely lexical;
+    the caller runs the lexer first, which has already rejected an unbalanced quote, a heredoc, a
+    here-string and a process substitution."""
+    if ("\\" in command or "$" in command or "`" in command
+            or "<<" in command):
+        return False
+    boundary = " \t\n;|&<>()"
+    i = 0
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if c == chr(39) or c == chr(34):
+            if i > 0 and command[i - 1] not in boundary:
+                return False
+            j = command.find(c, i + 1)
+            if j < 0:
+                return False
+            if j + 1 < n and command[j + 1] not in boundary:
+                return False
+            i = j + 1
+        else:
+            i += 1
+    return True
+
+
+_GIT_WORD_SPLIT_RE = re.compile(r"[^\w./+-]+")
+
+
+def _names_git_program(token):
+    """True when a decoded token carries a word naming the git program: split on every character that
+    cannot appear in a program path (whitespace, shell separators, quotes, '='), a word whose last path
+    component is git or git.exe, or starts with git- (a dashed git-reset), in any case. A git option or
+    path that merely contains the letters (--git-dir=T/.git, .gitignore, github.com) does not count;
+    a URL ending in /git or prose naming git does (an accepted over-refusal)."""
+    for word in _GIT_WORD_SPLIT_RE.split(token):
+        base = word.rsplit("/", 1)[-1].lower()
+        if base in ("git", "git.exe") or base.startswith("git-"):
+            return True
+    return False
+
+
+def _lexically_plain_git_subs(command):
+    """The git subcommands of a LEXICALLY PLAIN command, in segment order (None for a git segment with no
+    subcommand), or None when the command is not lexically plain. Lexically plain: the hook lexer parses
+    the ENTIRE text into plain words (no heredoc, here-string, process substitution, unbalanced
+    quote/escape, NUL, or other unsupported construct); quoting is simple single or double quotes around
+    whole words with no backslash, no ANSI-C or locale dollar-quoting, no line continuation and no
+    command/process substitution (_plain_lexical_ok); no segment is opaque (an unquoted
+    expansion/glob/brace/tilde), led by an eval / interpreter / wrapper / alias word (_NONPLAIN_WORDS),
+    or carries an inline alias.NAME= alias; and a word naming the git program (_names_git_program:
+    /usr/bin/git, git-reset, a quoted "git reset" argument) appears ONLY as the command word of a git
+    segment. That
+    last rule keeps a git invocation the segment scan does not see as a git segment (a word after a
+    reserved word such as then/do, an xargs or runner argument, quoted text piped to a shell, an echo of
+    a git command) out of the plain set: each such command routes to the possibly-discarding branch."""
+    try:
+        segs = _lex_command(command)
+    except ValueError:
+        return None
+    if not _plain_lexical_ok(command):
+        return None
+    subs = []
+    for seg in segs:
+        if seg.opaque_shell:
+            return None
+        tokens = seg.argv
+        idx = _command_word_index(tokens)
+        cw = _command_word(tokens)
+        if cw in _NONPLAIN_WORDS:
+            return None
+        if any("alias." in t.lower() for t in tokens):
+            return None
+        is_git = cw == "git"
+        for k, t in enumerate(tokens):
+            if not (is_git and k == idx) and _names_git_program(t):
+                return None
+        if is_git:
+            subs.append(_git_subcommand(tokens))
+    return subs
+
+
+def _provably_plain(command):
+    """Decide whether command is PROVABLY PLAIN, the allowlist condition at the top of git_discard: it is
+    lexically plain (_lexically_plain_git_subs) and every git segment subcommand is in the explicit
+    NON-DISCARDING set (_PLAIN_GIT_SUBCOMMANDS) or absent (a bare 'git --version'). A provably plain
+    command cannot discard uncommitted working-tree content, so it keeps the existing exact handling
+    (which allows it). Anything else is NOT provably plain."""
+    subs = _lexically_plain_git_subs(command)
+    if subs is None:
+        return False
+    return all(sub is None or sub in _PLAIN_GIT_SUBCOMMANDS for sub in subs)
+
+
+def _raw_names_stash_dropclear(command):
+    """True when the raw command text OR its de-quoted rendering names a git stash drop/clear in ANY form
+    (a stash keyword together with a drop or clear keyword). Over-matching only over-preserves (the safe
+    direction): a stash drop/clear is NOT reflog-recoverable, so the possibly-discarding branch must
+    preserve the stash entries first or deny, even when shell quoting/fragmentation hides which segment
+    carries it."""
+    for text in (command, _dequote_render(command)):
+        if re.search(r"(?i)\bstash\b", text) and re.search(r"(?i)\b(?:drop|clear)\b", text):
+            return True
+    return False
+
+
+def _snapshot_bases_then_allow(bases, kind):
+    """Snapshot the session cwd and every resolved target of a possibly-discarding command, then ALLOW
+    with a recovery note. The loop snapshots ONLY REAL repositories (a target whose status probe cannot
+    run, e.g. a non-repository directory, a bare or broken git dir, or an unreadable repo, cannot be
+    snapshotted) and DENIES when a target cannot be snapshotted (a probe that cannot run, or a warranted
+    snapshot that fails), so no allow-note ever rests on a target with no recovery point. A target that
+    probes PROVABLY CLEAN has nothing to lose and is skipped (no snapshot, no deny)."""
+    snap = None
+    for _b in bases:
+        clean = _tree_is_clean(_b)
+        if clean is None:
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} would act on {}, which this guard "
+                "could not read as a git working tree (a non-repository directory, a bare or broken git "
+                "dir, or an unreadable repo), so it cannot snapshot the state the command would discard; "
+                "denied rather than run on a possibly unrecoverable discard. Re-issue it from inside the "
+                "target repository, or commit or stash your work first. {}".format(kind, _b, _DISCARD_ALTS),
+                "AIQT guardrail: denied a possibly-discarding git command whose target this guard could "
+                "not read as a repository to snapshot (rule prsunc); run it from the target repo, or "
+                "commit or stash first.")
+        if clean is not True:
+            _s = _record_recovery(_b, "discard")
+            if _s[0] == "fail":
+                return _deny(
+                    "AIQT rule prsunc (preserve-uncommitted-work): {} would discard from {}, which this "
+                    "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
+                    "than run. Re-issue it from the target repository, or commit or stash your work "
+                    "first. {}".format(kind, _b, _s[1], _DISCARD_ALTS),
+                    "AIQT guardrail: denied an unrecoverable possibly-discarding git command (rule "
+                    "prsunc); run it from the target repo, or commit or stash first.")
+            if snap is None and _s[0] == "ok":
+                snap = _s
+    return _discard_recovery_result(
+        kind, "is not a provably plain git command (it carries shell structure, a wrapped or obfuscated "
+              "form, or a discarding subcommand); a recovery snapshot targets the session directory and "
+              "every worktree this guard resolved before allowing", snap, _OPTOUT_REISSUE)
+
+
+def _possibly_discarding(command, cwd):
+    """The POSSIBLY-DISCARDING branch of the allowlist gate: a command that is NOT provably plain but
+    whose text names git. ALLOWED (snapshot-then-allow) ONLY with a usable session cwd, no non-cosmetic
+    ambient GIT_* override, no env --chdir/-C wrapper override, every target it resolves resolvable, and
+    a successful recovery snapshot of the session cwd AND every resolved target; otherwise it DENIES with
+    a clear reason (when the hook is unsure, it refuses). A stash drop/clear seen in ANY form registers
+    stash preservation first (or denies). The accepted, DISCLOSED over-refusals (every bare discarding
+    verb, every wrapped/obfuscated form, and a command that merely MENTIONS a lossy git verb such as an
+    echo, a heredoc body, or piped grep text denies with no cwd and snapshots-then-allows with one) are
+    pinned by vectors and recorded in the manifest residue."""
+    kind = "a command that is not provably plain and names a git work-losing verb"
+    if _ambient_repo_view_override():
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command is not a provably plain git "
+            "command and the environment carries a non-cosmetic ambient GIT_* variable (e.g. GIT_DIR/"
+            "GIT_WORK_TREE), which can point every git it runs at a DIFFERENT repository than any "
+            "worktree this guard resolves, so no snapshot it takes provably contains the state the "
+            "command would discard; denied rather than run on a possibly unrecoverable discard. Unset the "
+            "GIT_* override, or commit or stash your work first. {}".format(_DISCARD_ALTS),
+            "AIQT guardrail: denied a possibly-discarding git command under an ambient GIT_* "
+            "repository-view override this guard cannot resolve to snapshot (rule prsunc); unset the "
+            "override, or commit or stash first.")
+    base = cwd if isinstance(cwd, str) and cwd else None
+    if base is None:
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command is not a provably plain git "
+            "command and the hook payload carries no session working directory, so this guard has no "
+            "worktree to snapshot for a discard that may act on it; denied rather than allowed with no "
+            "recovery point. Run it from a working directory the hook can see, or commit or stash your "
+            "work first. {}".format(_DISCARD_ALTS),
+            "AIQT guardrail: denied a possibly-discarding git command with no session directory to "
+            "snapshot (rule prsunc); run it from a working directory the hook can see, or commit or stash "
+            "first.")
+    if _RAW_ENV_CHDIR_RE.search(command) or _RAW_ENV_CHDIR_RE.search(_dequote_render(command)):
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command carries an env directory override "
+            "(--chdir in any spelling, or an env -C/-C<dir>) together with a git work-losing verb, which "
+            "runs its command from a directory this guard cannot pin, so no snapshot it takes provably "
+            "contains the state the command would discard; denied rather than run on a possibly "
+            "unrecoverable discard. Re-issue it as a plain git verb command run FROM the target "
+            "repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
+            "AIQT guardrail: denied a possibly-discarding git command carrying an env --chdir/-C directory "
+            "override this guard cannot resolve to snapshot (rule prsunc); run it from the target repo, or "
+            "commit or stash first.")
+    heredoc_lossy = _heredoc_git_discard(command)
+    if heredoc_lossy == "redirect":
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command carries a quoted heredoc whose "
+            "body names a git work-losing verb together with a target redirect (-C/--chdir/--git-dir/"
+            "--work-tree, a GIT_DIR=/GIT_WORK_TREE= assignment, or a cd/pushd) in the body or on the "
+            "consuming command, so the discard inside the heredoc may target a worktree or repository "
+            "this guard cannot resolve and a session snapshot would not capture; denied rather than run "
+            "on a possibly unrecoverable discard. Re-issue the discard as a plain git verb command from "
+            "the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
+            "AIQT guardrail: denied a git discard inside a quoted heredoc carrying a target redirect this "
+            "guard cannot resolve to snapshot (rule prsunc); run it as a plain git command from the target "
+            "repo, or commit or stash first.")
+    try:
+        segments = _segments(command)
+    except ValueError:
+        if _RAW_TARGET_REDIRECT_RE.search(command) or _RAW_TARGET_REDIRECT_RE.search(_dequote_render(command)):
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): this command is not a provably plain git "
+                "command, the shell lexer cannot parse it, and its text carries a target redirect or "
+                "directory change (-C/--chdir/--git-dir/--work-tree, a GIT_DIR=/GIT_WORK_TREE= assignment, "
+                "or a cd/pushd), so this guard cannot resolve which worktree or repository it acts on and a "
+                "snapshot of the session directory would not provably contain the state it would discard; "
+                "denied rather than run on a possibly unrecoverable discard. Re-issue it as a plain git verb "
+                "command from the target repository, or commit or stash your work first. {}".format(
+                    _DISCARD_ALTS),
+                "AIQT guardrail: denied an unparseable git command carrying a target redirect this guard "
+                "cannot resolve to snapshot (rule prsunc); run it as a plain git command from the target "
+                "repo, or commit or stash first.")
+        if _raw_names_stash_dropclear(command):
+            _st = _record_stash_recovery(base)
+            if _st[0] == "fail":
+                return _deny(
+                    "AIQT rule prsunc (preserve-uncommitted-work): this command names a git stash "
+                    "drop/clear (not reflog-recoverable afterwards) which this guard could not preserve "
+                    "first ({}), so the discard would be unrecoverable; denied rather than run. Apply or "
+                    "commit the stash first, then retry. {}".format(_st[1], _DISCARD_ALTS),
+                    "AIQT guardrail: denied an unrecoverable git stash drop/clear this guard could not "
+                    "preserve (rule prsunc); apply or commit the stash first, then retry.")
+        return _snapshot_bases_then_allow([base], kind)
+    actions = _nonpristine_discard_actions(segments, base)
+    if actions["unresolved"] or (heredoc_lossy is not None
+                                 and (actions["cd_unfollowed"] or actions["saw_subshell_cd"])):
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): {} runs in a compound/redirected command whose "
+            "effective target worktree or repository this guard cannot resolve with certainty (an "
+            "unresolvable -C/--work-tree/GIT_WORK_TREE= or --git-dir/GIT_DIR redirect, or a cd/pushd whose "
+            "success does not gate the discard), so it cannot snapshot or preserve the exact target the "
+            "command will discard from; denied rather than run on a possibly unrecoverable discard. "
+            "Re-issue it as a plain git verb command from the target repository, or commit or stash your "
+            "work first. {}".format(kind, _DISCARD_ALTS),
+            "AIQT guardrail: denied a compound/redirected git discard whose target this guard cannot "
+            "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
+    if actions["hidden"]:
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): {} runs inside a subshell whose working "
+            "directory an internal cd moved, or as a wrapped git invocation (env/sudo/... git) or quoted "
+            "git text carrying a -C/--chdir/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE= or cd/pushd "
+            "target redirect, so its effective target worktree or repository is off the session directory "
+            "and this guard cannot resolve or snapshot it with certainty; denied rather than run on a "
+            "possibly unrecoverable discard. Re-issue it as a plain, unwrapped git verb command from the "
+            "target repository, or commit or stash your work first. {}".format(kind, _DISCARD_ALTS),
+            "AIQT guardrail: denied a subshell/wrapped-and-redirected git discard whose target this guard "
+            "cannot resolve to snapshot (rule prsunc); run it unwrapped from the target repo, or commit or "
+            "stash first.")
+    if actions["unproven"]:
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command carries a git segment whose "
+            "resolved subcommand is outside the recognized lossy-verb set (e.g. checkout-index, "
+            "read-tree) riding a repository/worktree redirect, or an inline -c alias.NAME= alias, while "
+            "its raw text names a git work-losing verb; this guard can neither prove it non-destructive "
+            "nor snapshot the repository it would discard from, so it is denied rather than run on a "
+            "possible discard. Re-issue it as a recognized, provable git verb form run from the target "
+            "repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
+            "AIQT guardrail: denied a non-plain git command whose subcommand or inline alias this guard "
+            "cannot prove non-destructive (rule prsunc); commit or stash first, or re-issue in a "
+            "recognized form.")
+    stash_ops = list(actions["stash_ops"])
+    if _raw_names_stash_dropclear(command) and not stash_ops:
+        stash_ops.append((base, "clear"))
+    for _b, _op in stash_ops:
+        _st = _record_stash_recovery(_b)
+        if _st[0] == "fail":
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): git stash {} would discard the saved stash "
+                "entries of {} (not reflog-recoverable afterwards), which this guard could not preserve "
+                "first ({}), so the discard would be unrecoverable; denied rather than run. Apply or "
+                "commit the stash first, then retry. {}".format(_op, _b, _st[1], _DISCARD_ALTS),
+                "AIQT guardrail: denied an unrecoverable git stash drop/clear this guard could not "
+                "preserve (rule prsunc); apply or commit the stash first, then retry.")
+    bases = list(actions["snapshot_bases"])
+    if base not in bases:
+        bases.append(base)
+    return _snapshot_bases_then_allow(bases, kind)
+
+
 def git_discard(data):
     """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. ULTRA-CONSERVATIVE "recover then allow"
     guard (EN-6). NO-ASK posture: every former ASK is resolved WITHOUT prompting - a recoverable-destructive
@@ -5019,87 +5338,53 @@ def git_discard(data):
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
         return _allow()  # boundary: unreadable/malformed command container
-    # ====================== D-DISCARD-SOUND-RULE GATE (round-3 QA fix) ======================
-    # ONE fail-closed gate in front of EVERY path (the lexer fallback, the pristine path, the
-    # non-pristine walk). The raw lossy scan runs over the WHOLE command text AND over a de-quoted
-    # rendering (adjacent quoted fragments joined, backslash escapes removed, so re'set' / re\set /
-    # g''it spell their keyword), and when it hits, the command DENIES unless every soundness
-    # precondition holds: the lexer parses it, no non-cosmetic ambient GIT_* override is present, the
-    # payload carries a usable session cwd, and no env --chdir / env -C wrapper override rides in the
-    # raw or de-quoted text. The SOLE bypass is the documented explicit opt-out LEADING a PARSEABLE
-    # PRISTINE bare git command (the operator takes responsibility; an unparseable command never
-    # honours an opt-out, so the parse check runs first). Round-3 QA closed HERE, by construction, at
-    # one choke point: the lexer-error fallback decided BEFORE the sound rule and allowed ambient-GIT_*
-    # and env --chdir/-C discards with zero snapshots on a clean session (codex blocker; claude major
-    # 3), the pristine no-cwd path allow-noted a forced 'git checkout -B' with no snapshot (claude
-    # blocker 1), and quote/backslash-fragmented verbs (env git re'set' --hard) evaded the raw scan
-    # entirely (claude medium 7). Only after the gate passes do the existing paths run (pristine exact
-    # handling; the walk's snapshots of the session cwd and every resolvable target, which still DENIES
-    # any target it cannot resolve). The over-refusals this accepts (every in-scope command, pristine
-    # included, denies with no session cwd or under an ambient override unless the opt-out leads it;
-    # every unparseable in-scope command denies) are pinned by vectors and DISCLOSED in the residue.
-    raw_lossy = _raw_lossy_anywhere(command)
-    if raw_lossy:
-        try:
-            segments = _segments(command)
-        except ValueError:
+    # ALLOWLIST GATE (D-DISCARD-ALLOWLIST). Recognising a discarding command by its text is incomplete,
+    # so the gate is an allowlist: when the guard is unsure, it refuses. A PROVABLY PLAIN command keeps
+    # the existing exact handling below, which allows it. Every other command whose raw or de-quoted
+    # text names git is possibly discarding. A LEXICALLY plain one whose git subcommands are all
+    # non-discarding or recognized lossy verbs (or whose text the raw scan flags, so an unrecognized
+    # checkout-index/read-tree keeps its F-97 deny) is fully parsed, so after the cwd and ambient GIT_*
+    # preconditions (which the opt-out does not lift) it takes the existing exact handling, keeping its
+    # stricter decisions (the dirty whole-tree clobber deny, the redirect denies, stash preservation).
+    # Anything else (a non-plain shell form, an unflagged unrecognized subcommand such as merge --abort
+    # or worktree remove -f) takes _possibly_discarding.
+    plain_subs = _lexically_plain_git_subs(command)
+    plain = plain_subs is not None and all(
+        _sub is None or _sub in _PLAIN_GIT_SUBCOMMANDS for _sub in plain_subs)
+    if not plain:
+        if not (_RAW_GIT_RE.search(command) or _RAW_GIT_RE.search(_dequote_render(command))):
+            return _allow()  # not provably plain, but no git anywhere: the true boundary
+        if plain_subs is None or not (_raw_lossy_anywhere(command) or all(
+                _sub is None or _sub in _PLAIN_GIT_SUBCOMMANDS or _sub in _RECOGNIZED_VERBS
+                for _sub in plain_subs)):
+            return _possibly_discarding(command, data.get("cwd"))  # not plain, names git
+        if _ambient_repo_view_override():
             return _deny(
-                "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the "
-                "shell lexer and its raw text names a git work-losing verb, so this guard cannot "
-                "resolve what the discard targets or prove a recovery snapshot would contain it; "
-                "denied rather than run on a possibly unrecoverable discard (the sound rule fails "
-                "closed on an unparseable in-scope command; the opt-out is never honoured here). "
-                "Re-issue it as a plain, parseable 'git <verb>' command from the target repository, "
-                "or commit or stash your work first. {}".format(_DISCARD_ALTS),
-                "AIQT guardrail: denied an unparseable git discard (rule prsunc); re-issue it as a "
-                "parseable git command from the target repo, or commit or stash first.")
-        _gate_pristine = _pristine_single_bare_git(command, segments)
-        if _gate_pristine is None or not _segment_has_optout(_gate_pristine):
-            if _ambient_repo_view_override():
-                return _deny(
-                    "AIQT rule prsunc (preserve-uncommitted-work): this command names a git "
-                    "work-losing verb and the environment carries a non-cosmetic ambient GIT_* "
-                    "variable (e.g. GIT_DIR/GIT_WORK_TREE), which can point every git it runs at a "
-                    "DIFFERENT repository than any worktree this guard resolves, so no snapshot it "
-                    "takes provably contains the state the command would discard; denied rather than "
-                    "run on a possibly unrecoverable discard. Unset the GIT_* override, or commit or "
-                    "stash your work first (a leading GUARDRAIL_ALLOW_DISCARD=1 on a pristine bare "
-                    "'git <verb>' command remains the explicit opt-out). {}".format(_DISCARD_ALTS),
-                    "AIQT guardrail: denied an in-scope git discard under an ambient GIT_* "
-                    "repository-view override this guard cannot resolve to snapshot (rule prsunc); "
-                    "unset the override, or commit or stash first.")
-            _gate_cwd = data.get("cwd")
-            if not (isinstance(_gate_cwd, str) and _gate_cwd):
-                return _deny(
-                    "AIQT rule prsunc (preserve-uncommitted-work): this command names a git "
-                    "work-losing verb and the hook payload carries no session working directory, so "
-                    "this guard has no worktree to snapshot for a discard that may act on it; denied "
-                    "rather than allowed with no recovery point (the sound rule fails closed without "
-                    "a usable cwd). Run it from a working directory the hook can see, or commit or "
-                    "stash your work first (a leading GUARDRAIL_ALLOW_DISCARD=1 on a pristine bare "
-                    "'git <verb>' command remains the explicit opt-out). {}".format(_DISCARD_ALTS),
-                    "AIQT guardrail: denied an in-scope git discard with no session directory to "
-                    "snapshot (rule prsunc); run it from a working directory the hook can see, or "
-                    "commit or stash first.")
-            if _RAW_ENV_CHDIR_RE.search(command) or _RAW_ENV_CHDIR_RE.search(_dequote_render(command)):
-                return _deny(
-                    "AIQT rule prsunc (preserve-uncommitted-work): this command names a git "
-                    "work-losing verb together with an env directory override (--chdir in any "
-                    "spelling, or an env -C/-C<dir>), which runs its command from a directory this "
-                    "guard cannot pin, so no snapshot it takes provably contains the state the "
-                    "command would discard; denied rather than run on a possibly unrecoverable "
-                    "discard. Re-issue it as a plain 'git <verb>' command run FROM the target "
-                    "repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
-                    "AIQT guardrail: denied a git discard carrying an env --chdir/-C directory "
-                    "override this guard cannot resolve to snapshot (rule prsunc); run it from the "
-                    "target repo, or commit or stash first.")
-    else:
-        try:
-            segments = _segments(command)
-        except ValueError:
-            # No git + work-losing keyword in the raw OR de-quoted text: the true boundary. The
-            # fallback's own (now de-quote-aware) raw scan agrees and allows; kept as a backstop.
-            return _git_discard_fallback(command, data.get("cwd"))
+                "AIQT rule prsunc (preserve-uncommitted-work): this command runs a git work-losing verb "
+                "and the environment carries a non-cosmetic ambient GIT_* variable (e.g. GIT_DIR/"
+                "GIT_WORK_TREE), which can point every git it runs at a DIFFERENT repository than any "
+                "worktree this guard resolves, so no snapshot it takes provably contains the state the "
+                "command would discard; denied rather than run on a possibly unrecoverable discard (a "
+                "leading GUARDRAIL_ALLOW_DISCARD=1 does not lift this precondition). Unset the GIT_* "
+                "override, or commit or stash your work first. {}".format(_DISCARD_ALTS),
+                "AIQT guardrail: denied a git discard under an ambient GIT_* repository-view override "
+                "this guard cannot resolve to snapshot (rule prsunc); unset the override, or commit or "
+                "stash first.")
+        _gate_cwd = data.get("cwd")
+        if not (isinstance(_gate_cwd, str) and _gate_cwd):
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): this command runs a git work-losing verb "
+                "and the hook payload carries no session working directory, so this guard has no "
+                "worktree to snapshot for a discard that may act on it; denied rather than allowed with "
+                "no recovery point (a leading GUARDRAIL_ALLOW_DISCARD=1 does not lift this "
+                "precondition). Run it from a working directory the hook can see, or commit or stash "
+                "your work first. {}".format(_DISCARD_ALTS),
+                "AIQT guardrail: denied a git discard with no session directory to snapshot (rule "
+                "prsunc); run it from a working directory the hook can see, or commit or stash first.")
+    # A provably plain command is out of scope (never a raw lossy hit); a lexically plain command with
+    # a recognized lossy verb keeps the raw signal the exact handling below was written against.
+    raw_lossy = (not plain) and _raw_lossy_anywhere(command)
+    segments = _segments(command)  # lexically plain: _lexically_plain_git_subs already parsed it
 
     # Precisely-identified lossy git segments (the clean-parse signal). A git command-word segment whose
     # verb-form is not "allow" is a real in-scope lossy form. Used for the in-scope decision on a

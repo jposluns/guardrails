@@ -1565,11 +1565,13 @@ def _main_isolated(monitor):
         # rule (clean-session allow with zero snapshots under ambient GIT_* or env --chdir, codex round-3
         # blocker), and the opt-out is never honoured on an unparseable command. A non-lossy unparseable
         # command stays the true-boundary ALLOW.
-        expect("(bound-b) unparseable + lossy verb denies (sound-rule gate)",
-               'git checkout -- "unbalanced', "deny", cwd=rp)
+        # D-DISCARD-ALLOWLIST: an unparseable command is not provably plain, so with a usable cwd and no
+        # target redirect it takes the possibly-discarding branch (snapshot the cwd, then allow).
+        expect("(bound-b) unparseable + lossy verb with a cwd snapshot-then-allows (allowlist gate)",
+               'git checkout -- "unbalanced', "allow-note", cwd=rp)
         expect("(bound-b2) unparseable non-lossy command allows", 'ls -la "unbalanced', "allow")
-        expect("(bound-b3) unparseable + lossy + opt-out prefix denies (opt-out not honoured on unparseable)",
-               'GUARDRAIL_ALLOW_DISCARD=1 git reset --hard "unbalanced', "deny", cwd=rp)
+        expect("(bound-b3) unparseable + lossy + opt-out prefix snapshot-then-allows (opt-out not honoured)",
+               'GUARDRAIL_ALLOW_DISCARD=1 git reset --hard "unbalanced', "allow-note", cwd=rp)
         # (bound-b4) a relative -C redirect on a NON-destructive form (checkout -b creates a branch,
         # discards nothing): with NO session cwd the sound-rule gate now DENIES every in-scope command
         # (round-3 QA, claude blocker 1 class); WITH a session cwd the opaque redirect keeps its
@@ -1809,8 +1811,10 @@ def _main_isolated(monitor):
         expect("(f97-4) reset --soft (recognized safe form) still allows", "git reset --soft", "allow",
                cwd=rp)
         expect("(f97-5) clean -n (recognized safe form) still allows", "git clean -n", "allow", cwd=rp)
-        expect("(f97-6) worktree remove -f unflagged, still allows at the true boundary",
-               "git worktree remove -f", "allow", cwd=rp)
+        # D-DISCARD-ALLOWLIST: worktree is outside the non-discarding set (remove --force discards the
+        # removed worktree's changes), so it snapshot-then-allows instead of the old silent allow.
+        expect("(f97-6) worktree remove -f (not provably plain) snapshot-then-allows",
+               "git worktree remove -f", "allow-note", cwd=rp)
 
         # === previously-fooled shell-expansion pathspecs now ASK (F-62.1, F-64.1/2, F-65.F1) ==
         # A pathspec carrying a variable, command substitution, glob, brace, or tilde used to be probed
@@ -2191,7 +2195,8 @@ def _main_isolated(monitor):
             #    round-2 bytes); the dirty-cwd snapshot-backed allow is unchanged (inert catch-all)
             ("safe-clean-dry", "git clean -nd ; true", "deny", 0, "allow-note", 1),
             ("safe-reset-soft", "git reset --soft HEAD ; true", "deny", 0, "allow-note", 1),
-            ("safe-log-pipe", "git log --oneline | grep reset", "deny", 0, "allow-note", 1),
+            # D-DISCARD-ALLOWLIST: a provably plain non-discarding command is out of scope (allow, no snapshot)
+            ("safe-log-pipe", "git log --oneline | grep reset", "allow", 0, "allow", 0),
             ("safe-switch-pull", "git switch main && git pull", "deny", 0, "allow-note", 1),
             ("safe-checkout-b", "git checkout -b npn2-feat ; true", "deny", 0, "allow-note", 1),
             ("safe-stash-pop", "git stash pop && git status", "deny", 0, "allow-note", 1),
@@ -2208,7 +2213,8 @@ def _main_isolated(monitor):
             # cat is now in scope - deny with no cwd, snapshot-backed with one (the accepted, DISCLOSED
             # over-refusal, pinned); a non-lossy body stays the silent boundary allow
             ("hd-cat-control", "cat <<'EOF'\ngit reset --hard\nEOF", "deny", 0, "allow-note", 1),
-            ("hd-safe-body", "bash <<'EOF'\ngit status\nEOF", "allow", 0, "allow", 0),
+            # D-DISCARD-ALLOWLIST: a heredoc is not provably plain, so this is possibly discarding
+            ("hd-safe-body", "bash <<'EOF'\ngit status\nEOF", "deny", 0, "allow-note", 1),
         )
         aiqt_hooks._record_recovery = _npnc_count
         try:
@@ -2351,8 +2357,9 @@ def _main_isolated(monitor):
             ("gate-coB-attached", 'git checkout -fB main', "deny", 0, "allow-note", 1),
             ("gate-coB-long", 'git checkout --force -B main', "deny", 0, "allow-note", 1),
             # codex r3 blocker: the lexer-error fallback decided BEFORE the sound rule
-            ("gate-unparse", 'git reset --hard <<EOF\nEOF', "deny", 0, "deny", 0),
-            ("gate-unparse-herestring", "git reset --hard <<<''", "deny", 0, "deny", 0),
+            # D-DISCARD-ALLOWLIST: a heredoc or here-string with no target redirect snapshot-then-allows
+            ("gate-unparse", 'git reset --hard <<EOF\nEOF', "deny", 0, "allow-note", 1),
+            ("gate-unparse-herestring", "git reset --hard <<<''", "deny", 0, "allow-note", 1),
             ("gate-unparse-envchdir", 'env --chdir={} git reset --hard <<EOF\nEOF'.format(_npnc_t_s), "deny", 0, "deny", 0),
             ("gate-unparse-envC", "env -C{} git reset --hard <<<''".format(_npnc_t_s), "deny", 0, "deny", 0),
             # claude r3 major 2 (F-97 on the non-pristine path): an unrecognized flagged sub or an
@@ -2385,8 +2392,10 @@ def _main_isolated(monitor):
             ("pin-grep-C", "grep -rn -C3 'git reset --hard' .", "deny", 0, "deny", 0),
             ("pin-hd-commit-marker", 'git commit --allow-empty -q -m "$(cat <<\'EOF\'\nDiscard guard: deny git -C/--chdir reset --hard forms\nEOF\n)"', "deny", 0, "deny", 0),
             ("keep-hd-commit", 'git commit --allow-empty -q -m "$(cat <<\'EOF\'\nDiscard guard: deny git reset --hard forms\nEOF\n)"', "deny", 0, "allow-note", 1),
-            ("keep-commit-msg", 'git commit -m "reset docs" && git push', "deny", 0, "allow-note", 1),
-            ("keep-optout", "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "allow", 0, "allow", 0),
+            # D-DISCARD-ALLOWLIST: a provably plain commit-and-push is out of scope; the opt-out no longer
+            # lifts the cwd precondition (it still skips the snapshot past it)
+            ("keep-commit-msg", 'git commit -m "reset docs" && git push', "allow", 0, "allow", 0),
+            ("keep-optout", "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "deny", 0, "allow", 0),
         )
         aiqt_hooks._record_recovery = _npnc_count
         try:
@@ -2411,7 +2420,7 @@ def _main_isolated(monitor):
                 ("amb4-herestring-clean", "git reset --hard <<<''", str(_npn2_c), "deny", 0),
                 ("amb4-pristine-dirty", "git reset --hard", str(_npnc), "deny", 0),
                 ("amb4-allowform-clean", "git checkout -b npn4b", str(_npn2_c), "deny", 0),
-                ("amb4-optout", "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", str(_npnc), "allow", 0),
+                ("amb4-optout", "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", str(_npnc), "deny", 0),
             )
             os.environ["GIT_DIR"] = str(tmp / "npn4-ambient" / ".git")
             try:
@@ -2432,6 +2441,56 @@ def _main_isolated(monitor):
                 os.environ.pop("GIT_DIR", None)
         finally:
             aiqt_hooks._record_recovery = _orig_npnc_rec
+
+        # === D-DISCARD-ALLOWLIST: the top gate is an allowlist. Each non-plain shell form below hides a
+        # === discard from the raw text scan (the pinned bytes allowed every one with no snapshot); it is
+        # === not provably plain, so it denies with no cwd and snapshot-then-allows with a dirty one. The
+        # === plain-* rows are provably plain non-discarding commands that keep the exact handling's
+        # === allow; the stray-* rows put a git word outside a git command-word position, which is never
+        # === provably plain.
+        _np5_cases = (
+            ("continuation", "git merge \\\n--abort", "deny", 0, "allow-note", 1),
+            ("ansi-c", "git $'\\x72eset' --hard", "deny", 0, "allow-note", 1),
+            ("locale", 'git $"re"$"set" --hard', "deny", 0, "allow-note", 1),
+            ("heredoc", "bash <<EOF\nv=set; git re\\$v --hard\nEOF", "deny", 0, "allow-note", 1),
+            ("here-string", 'v=set; bash <<< "git re$v --hard"', "deny", 0, "allow-note", 1),
+            ("substitution", "git $(echo re)set --hard", "deny", 0, "allow-note", 1),
+            ("eval", "v=set; eval git re$v --hard", "deny", 0, "allow-note", 1),
+            ("sh-c", "sh -c 'git re$0 --hard' set", "deny", 0, "allow-note", 1),
+            ("fragment", "g'i't merge --abort", "deny", 0, "allow-note", 1),
+            ("plain-status", "git status --short", "allow", 0, "allow", 0),
+            ("plain-log-grep", "git log --oneline | grep reset", "allow", 0, "allow", 0),
+            ("plain-commit-msg", 'git commit -m "reset the clock" && git push', "allow", 0, "allow", 0),
+            ("plain-diff-gitdir", "git --git-dir=.git diff HEAD -- file.txt", "allow", 0, "allow", 0),
+            ("stray-reserved", "if true; then git reset --hard; fi", "deny", 0, "allow-note", 1),
+            ("stray-xargs", "echo --hard | xargs git reset", "deny", 0, "allow-note", 1),
+            ("stray-pipe-shell", "echo git reset --hard | bash", "deny", 0, "allow-note", 1),
+        )
+        aiqt_hooks._record_recovery = _npnc_count
+        try:
+            for _lab, _cmd, _w_nc, _n_nc, _w_c, _n_c in _np5_cases:
+                _got_nc = _npnc_run(_cmd, None)
+                if (_got_nc[0], _got_nc[2]) != (_w_nc, _n_nc):
+                    failures.append("(np5-{}-nocwd) {!r} with no session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_nc, _n_nc,
+                                                                      _got_nc[0], _got_nc[2]))
+                _got_c = _npnc_run(_cmd, str(_npnc))
+                if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
+                    failures.append("(np5-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
+                                                                      _got_c[0], _got_c[2]))
+        finally:
+            aiqt_hooks._record_recovery = _orig_npnc_rec
+        for _lab, _cmd, _w in (
+                ("plain-allowlist", "git status", True), ("plain-bare", "git --version", True),
+                ("plain-gitdir-opt", "git --git-dir=T/.git log", True),
+                ("not-plain-reset", "git reset --hard", False), ("not-plain-merge", "git merge --abort", False),
+                ("not-plain-alias", "git -c alias.x=status x", False),
+                ("not-plain-path-git", "/usr/bin/git reset --hard", False),
+                ("not-plain-upper", "GIT reset --hard", False)):
+            _pp = getattr(aiqt_hooks, "_provably_plain", None)
+            if _pp is None or _pp(_cmd) is not _w:
+                failures.append("(np5-{}) _provably_plain({!r}) must be {}".format(_lab, _cmd, _w))
 
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file allows with a note on dirty tree",
@@ -2507,8 +2566,8 @@ def _main_isolated(monitor):
                            ("time", "time git reset --hard"), ("builtin", "builtin git reset --hard")):
             expect("(b8-{}) wrapper hiding git reset --hard snapshot-then-allows".format(label), cmd,
                    "allow-note", cwd=rp)
-        expect("(b8-status) wrapper over a non-lossy git command allows", "command git status", "allow",
-               cwd=rp)
+        expect("(b8-status) wrapper over a non-lossy git command (not provably plain) snapshot-then-allows",
+               "command git status", "allow-note", cwd=rp)
 
         # === EN-6 ULTRA-CONSERVATIVE pristine gate: any shell structure ASKS (never a silent allow) =
         # A lossy-verb command reaches the clean probe ONLY when it is a PRISTINE SINGLE BARE 'git <verb>'
@@ -3158,17 +3217,17 @@ def _main_isolated(monitor):
             failures.append("(rec-heredoc-snap) expected a best-effort recovery ref for an unparseable "
                             "dirty-tree discard (Class C)")
 
-        # (rec-unbalanced) an unbalanced-quote discard is UNPARSEABLE, so the round-3 sound-rule gate
-        # DENIES it before any snapshot (the old fallback snapshot-then-allowed here; its clean-session
-        # sibling was the codex round-3 blocker), and no recovery ref is written.
+        # (rec-unbalanced) an unbalanced-quote discard is UNPARSEABLE (the round-3 gate denied it here).
         rec_ub = _init_repo(tmp / "rec-unbalanced")
         (rec_ub / "file.txt").write_text("committed line\nunbalanced dirty\n", encoding="utf-8")
+        # D-DISCARD-ALLOWLIST: with a usable cwd and no target redirect it is possibly discarding, so the
+        # cwd is snapshotted first and the command allowed with a note.
         got_ub = _decision(handler, 'git reset --hard "unbalanced', cwd=str(rec_ub))
-        if got_ub != "deny":
-            failures.append("(rec-unbalanced) an unparseable discard on a dirty tree must DENY (sound-rule "
-                            "gate), got {}".format(got_ub))
-        if _recovery_refs(rec_ub):
-            failures.append("(rec-unbalanced-snap) the unparseable-command DENY must write no recovery ref")
+        if got_ub != "allow-note":
+            failures.append("(rec-unbalanced) an unparseable discard on a dirty tree must snapshot-then-allow "
+                            "(allowlist gate), got {}".format(got_ub))
+        if not _recovery_refs(rec_ub):
+            failures.append("(rec-unbalanced-snap) the unparseable-command allow must write a recovery ref")
 
         # (rec-subdir-tmp) C2: cwd is a SUBDIR of the repo and TMPDIR points at the worktree ROOT (above cwd).
         # The temp-dir containment check anchors on the resolved TOPLEVEL, not the cwd, so the temp dir is
@@ -3777,8 +3836,8 @@ def _main_isolated(monitor):
                cwd=str(r6clean))
         # Round-3 QA gate: an unparseable lossy discard DENIES even with no redirect and a clean cwd -
         # the clean-session allow was exactly the fallback hole the sound rule closes (codex blocker).
-        expect("(r6-f4-ctl-noredirect) unparseable 'git checkout -- x <<EOF' with no redirect denies (gate)",
-               "git checkout -- file.txt <<EOF\nx\nEOF", "deny", cwd=str(r6clean))
+        expect("(r6-f4-ctl-noredirect) unparseable 'git checkout -- x <<EOF' with no redirect allows with a "
+               "note (allowlist gate)", "git checkout -- file.txt <<EOF\nx\nEOF", "allow-note", cwd=str(r6clean))
         # FINDING 5: a --git-dir/GIT_DIR STAGED discard to a DIFFERENT repo destroys that repo's index, which a
         # session snapshot cannot capture -> DENY (was allow-with-session-snap). (reset --hard case: r13-3c-f5.)
         r6stg = _init_repo(tmp / "r6-staged")
