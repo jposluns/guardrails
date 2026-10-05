@@ -11,7 +11,7 @@ description: The OPF operating loop for an AI development assistant. Read the ad
   verification is never shortened for speed.
 ---
 
-<!-- OPF-FLOW: release=0.3.0 template-sha256=ba446f5eecfa3884627f7323d8cf0bdb4918b24d457d012b0baf50dcd61b7d19 -->
+<!-- OPF-FLOW: release=0.3.0 template-sha256=a1231ea425c78430ea314fcdbdb18732bd7613d7db8f1ba0cfa0b333e5072987 -->
 
 # /flow: the OPF operating loop
 
@@ -47,12 +47,13 @@ Three rules govern everything else:
 1. Resolve the store through the committed pointer and manifest discovery (sections 4.3 and 4.5).
    A pointer or discovery outcome that does not resolve is a stop and a report, never a guess.
 2. Honor the store consistency contract (section 5.7): reconcile against the sync target before
-   operating; a behind store is pulled current as its own surfaced step; a store left ahead is
-   reconciled by the lease holder's authorized push, its own surfaced step; a divergent store
-   always halts for the human. Every store write goes through the sanctioned writer, which takes
-   and releases the single-writer lease itself, one operation at a time (section 8.8); the
-   session never takes `lease.toml` by hand and never holds it across operations, because the
-   writer refuses under a held lease.
+   operating (a store with no dedicated sync target takes in the maintainer's records by the
+   route section 4 gives); a behind store is pulled current as its own surfaced step; a store
+   left ahead is reconciled by the lease holder's authorized push, its own surfaced step; a
+   divergent store always halts for the human. Every store write goes through the sanctioned
+   writer, which takes and releases the single-writer lease itself, one operation at a time
+   (section 8.8); the session never takes `lease.toml` by hand and never holds it across
+   operations, because the writer refuses under a held lease.
 3. Run the adopter's validator (`opf doctor` where the reference tooling is in use). A confirmed
    integrity defect is fixed before any new work starts, and no workflow change lands while a
    confirmed integrity diagnostic stands unaddressed. A failing validator or readiness
@@ -145,11 +146,13 @@ Three rules govern everything else:
    superseded, or withdrawn moves nothing by itself, and a `/proposed` landing, the only landing
    open to an assistant or automation actor under section 8.4, is in any case a proposal. A step
    parked behind an overlapping stream, whose trigger is that stream's backlog item, moves once
-   that stream merges, finishes, or parks (section 3, step 5). A stream the maintainer ended
-   with a `finish` entry stays ended: selection never starts a new stream on an item whose
-   latest flow entry (section 5) is a `finish` the maintainer wrote, and only a further record
-   the maintainer writes moves that item. A unit being structurally ready (a verified plan
-   exists) is never by itself authorization to implement it.
+   that stream merges, finishes, or parks, and a unit parked waiting for its lane moves once its
+   trigger stream converges, merges, finishes, or parks, and takes that lane ahead of any new
+   stream (section 3, step 5). A stream the maintainer ended with a `finish` entry stays ended:
+   selection never starts a new stream on an item whose latest flow entry (section 5) is a
+   `finish` the maintainer wrote, and only a further record the maintainer writes moves that
+   item. A unit being structurally ready (a verified plan exists) is never by itself
+   authorization to implement it.
 3. **ACTIVATE.** Move the item `open` to `active` through `opf record transition` (section 8.8).
    `active` is an ungated working state, so an assistant lands it unqualified (section 8.4). The
    transition appends its own worklog entry and re-renders the declared views in the same act
@@ -191,23 +194,24 @@ Three rules govern everything else:
    the clearing act. A proposed block, an in-flight wait, absent authorization, or partial
    evidence never counts. Any item failing the test is worked, not reported blocked. Parking is
    not blocking, and a pending decision parks a step, never an item: a unit parked under section
-   7, a delivery parked by the section 3 overlap guard, or any step awaiting a
-   `pending_decision` holds a recorded trigger (the `trigger=` field of its `park` entry,
-   section 5), is reported as parked awaiting that record, exactly as an unratified completion
-   is reported awaiting ratification, and frees its stream. The item stays actionable in the
-   section 8.5 sense, because OPF actionability is the block join alone; parking answers a
-   different question, whether one step can proceed now. Every step that does not depend on a
-   parked one keeps advancing as far as standing authority allows: the other units of the same
-   parent item (each its own derived item, step 2), its plan production, the hardening lane, and
-   every other actionable item. A ratified block answers whether an item may be selected; a
-   section 7 park answers whether one unit's step may go on, which only a record the maintainer
-   writes moves (section 7); neither substitutes for the other, and no proposal is read as
-   ratified on either path. Prefer advancing plan production for upcoming items over idling. The
-   run reaches the section 8 closing handoff only when this enumeration shows no item with any
-   step that can proceed, every remaining `open` or `active` item accounted for by a ratified
-   block that scopes it, by steps parked on recorded triggers, by a stream the maintainer ended
-   (step 2), or, for a parent item, by derived units each closed, so accounted for, or awaiting
-   ratification, and it carries the enumeration there; a turn never ends on a bare stop.
+   7, a delivery parked by the section 3 overlap guard, a unit parked waiting for its lane
+   (section 3, step 5), or any step awaiting a `pending_decision` holds a recorded trigger (the
+   `trigger=` field of its `park` entry, section 5), is reported as parked awaiting that record,
+   exactly as an unratified completion is reported awaiting ratification, and frees its stream
+   and its lane. The item stays actionable in the section 8.5 sense, because OPF actionability
+   is the block join alone; parking answers a different question, whether one step can proceed
+   now. Every step that does not depend on a parked one keeps advancing as far as standing
+   authority allows: the other units of the same parent item (each its own derived item, step
+   2), its plan production, the hardening lane, and every other actionable item. A ratified
+   block answers whether an item may be selected; a section 7 park answers whether one unit's
+   step may go on, which only a record the maintainer writes moves (section 7); neither
+   substitutes for the other, and no proposal is read as ratified on either path. Prefer
+   advancing plan production for upcoming items over idling. The run reaches the section 8
+   closing handoff only when this enumeration shows no item with any step that can proceed,
+   every remaining `open` or `active` item accounted for by a ratified block that scopes it, by
+   steps parked on recorded triggers, by a stream the maintainer ended (step 2), or, for a
+   parent item, by derived units each closed, so accounted for, or awaiting ratification, and it
+   carries the enumeration there; a turn never ends on a bare stop.
 
 Turn discipline, at every step: never end a turn "waiting" while any stream or the plan buffer
 can advance; and never end a turn on a stated intention ("reviews are running, I will collect
@@ -412,36 +416,55 @@ viability advice above. Then, by mode:
    append a `rescope` flow entry re-declaring the stream's scope (section 5) and proceed;
    overlapping, park as above. An expanded scope holds its paths against other streams exactly
    as a declared one does, and the hold is released when its stream merges, finishes, or parks.
-   Before any `unpark` the run writes, which ends only such an overlap park, and before it takes
-   up a unit the maintainer unparked (section 7), the run re-runs the pairwise check (step 3) on
-   the stream's declared scope together with every path its branch already changes, against
-   every live stream's scope: disjoint, the stream unparks or is taken up; overlapping, it stays
-   or goes parked, through a new `park` entry whose `trigger=` names the overlapping stream's
-   item ID, so no unpark ever brings two live streams onto one file. A unit so unparked or taken
-   up whose lane another live stream holds waits, its status not `parked`, until that lane is
-   free and taking it up keeps the run within the recorded rate, and is reported waiting for its
-   lane, so no unpark or take-up ever runs more advancement streams than the recorded rate or
-   two streams in one lane.
+   Before any `unpark` the run writes, which ends only such an overlap park or a lane park
+   (below), and before it takes up a unit the maintainer unparked (section 7), the run re-runs
+   the pairwise check (step 3) on the stream's declared scope together with every path its
+   branch already changes, against every live stream's scope: disjoint, the stream unparks or is
+   taken up; overlapping, it stays or goes parked, through a new `park` entry whose `trigger=`
+   names the overlapping stream's item ID, so no unpark ever brings two live streams onto one
+   file. A parked unit holds no lane: while it is parked, its lane is free to another stream. A
+   unit so unparked or taken up resumes only in its own lane (the lane its latest flow entry
+   carrying `lane=` names, or the one section 7 gives a unit an `unpark` returns from the merge
+   lane), and only once no other live stream holds that lane and, for an advancement lane, fewer
+   advancement streams than the recorded rate are live. Until both hold, it stays or goes
+   parked, through a new `park` entry, a lane park, whose `trigger=` names the item ID of the
+   stream holding that lane, or, where that lane is free but the rate is full, of the live
+   advancement stream with the lowest item ID. A lane park is swept, and this re-check re-run,
+   when its trigger stream converges, merges, finishes, or parks; the run's own `unpark` ends
+   it, and the unit takes its lane ahead of any new stream (section 1, step 2). So no unpark or
+   take-up ever runs more advancement streams than the recorded rate or two streams in one lane,
+   and a unit waiting for its lane is always a recorded park (section 1, step 8).
 
 ## 4. Store writes under parallel streams
 
 The run's store writes have one writer: this orchestrating session. That rule governs the run,
-not the maintainer: a record the maintainer writes (section 7) is written outside the session's
-integration checkout, reaches the store through its sync target, and is read from the store at
-the next run start (section 0, step 2 reconciles first; a bare `/flow` is one), like every other
-record. All the run's record writes happen serially, in the integration checkout, under the
-single-writer lease (section 5.7). Stream worktrees carry product changes only and never write
-the store: parallel branches of an in-repo store would otherwise allocate the same record IDs
-from the same committed counters, and store files are never hand-merged (section 5.7). Workers
-never write the store or the repository at all (section 9). The writer leaves each change
-uncommitted in the working tree (section 8.8, operation sequence step 8), and its cleanliness
-gate refuses the next operation over tracked dirt at the planned destinations (step 5: "the
-planned destinations MUST be clean"), so the cadence is one writer operation, one commit: the
-session commits each store change in the integration checkout before the next writer call,
-including the write pairs a single trigger produces (an ACTIVATE and its `flow start`, a
-post-merge rotation and its flow entry), and syncs the store back to its target in the same
-session (section 5.7), so a stream branch never carries a store write and the store is never
-left ahead on one system.
+not the maintainer: a record the maintainer writes (section 7) is the maintainer's own write,
+never one the session makes, and the run reads it at its next run start (a bare `/flow` is one),
+where section 0, step 2 brings it in by the route the store's pattern gives it (section 5.7). A
+store with a dedicated sync target receives the record through that target, and that step pulls
+it current. The default in-repo store has no dedicated sync target: there the record is a commit
+on the integration branch, and the session brings its integration checkout to that branch's
+remote tip, by a fast-forward where it commits to that branch directly, or, where its writes
+ride a store branch (below), by merging that tip into the store branch it writes next; a store
+file that conflicts is resolved as section 5.7 requires, by taking the integration base's
+version and redoing the session's own authoring operation on that base, never by a hand merge,
+and section 0, step 3's validator catches an ID both sides claimed. A local-only store has no
+sync target at all: there the maintainer writes into the one store through the writer, which
+takes the same lease, so the two writers' operations serialize, and commits that output before
+the run's next run start, since the writer leaves each change uncommitted and its cleanliness
+gate refuses the run's next operation over it (below). All the run's record writes happen
+serially, in the integration checkout, under the single-writer lease (section 5.7). Stream
+worktrees carry product changes only and never write the store: parallel branches of an in-repo
+store would otherwise allocate the same record IDs from the same committed counters, and store
+files are never hand-merged (section 5.7). Workers never write the store or the repository at
+all (section 9). The writer leaves each change uncommitted in the working tree (section 8.8,
+operation sequence step 8), and its cleanliness gate refuses the next operation over tracked
+dirt at the planned destinations (step 5: "the planned destinations MUST be clean"), so the
+cadence is one writer operation, one commit: the session commits each store change in the
+integration checkout before the next writer call, including the write pairs a single trigger
+produces (an ACTIVATE and its `flow start`, a post-merge rotation and its flow entry), and syncs
+the store back to its target, where it has one, in the same session (section 5.7), so a stream
+branch never carries a store write and the store is never left ahead on one system.
 
 Which branch carries those commits depends on the integration branch. Where the session may
 commit to it directly (under the bound `merge_authority`), store commits land on the integration
@@ -513,7 +536,7 @@ entry carries it, and every sweep matches on it.
 | `verdict` | `fixing` (`result=findings`: confirmed findings to fix) or `verifying` (`result=clean` on a VERIFY, next DISCOVERY pending; or `result=failed`, the round re-issued); it carries `phase=`, `result=`, and `rev=` |
 | `converge` | `converged`; it carries the converging DISCOVERY round's `phase=discovery`, `result=clean`, and `rev=`, and `lane=merge` |
 | `park` | `parked`; it carries `trigger=` |
-| `unpark` | the status the stream resumes at, never `parked` or `done`: in a maintainer's `unpark`, the status the maintainer gives it, with an optional `lane=` (section 7); in the run's own, which ends only an overlap park (section 3, step 5), that of its latest flow entry whose status is not `parked` |
+| `unpark` | the status the stream resumes at, never `parked` or `done`: in a maintainer's `unpark`, the status the maintainer gives it, with an optional `lane=` (section 7); in the run's own, which ends only an overlap or lane park (section 3, step 5), that of its latest flow entry whose status is not `parked` |
 | `rescope` | the stream's current status, unchanged: any value here but `parked` or `done`; the entry re-declares `scope=` (section 3, step 5) |
 | `merge` | `merging` |
 | `finish` | `done` |
@@ -559,7 +582,8 @@ row, which has no flow entry, renders fixed values:
 - Lane: the `lane=` field of the item's latest flow entry carrying one, except that a `merge`
   there, where the item's latest flow entry whose status is not `parked` carries `drafting`,
   `verifying`, or `fixing` (a maintainer's `unpark` with no `lane=`, section 7), renders the
-  lane the item's `start` entry set; a planned row renders `-`.
+  lane the item's `start` entry set; a row at `parked` shows the lane it resumes in, which it
+  does not hold while parked (section 3, step 5); a planned row renders `-`.
 - Stream: the item's ID and `title` (envelope fields, section 8.3) plus the `branch=` field of
   its latest flow entry carrying one; a planned row renders the branch as `-`.
 - Status: the `status=` field of the item's latest flow entry; a planned row renders `planned`.
@@ -672,36 +696,37 @@ light panel writes the `converge` entry that takes the unit to `lane=merge`.
   `trigger=` names that decision (section 5), and surfaces it (section 8). The run never acts on
   that decision's answer, or on any decision's: it shows the parked unit in the table (section
   5) and does nothing further with it. Only a record the maintainer writes, through `opf record`
-  under the maintainer's own authorship, moves a unit parked on a decision again (an overlap
-  park, section 3, step 5, is the run's own, and the run's own `unpark` ends it): an `unpark`
-  flow entry, whose `status=` is the status the unit resumes at and whose `next` line names the
-  action it takes up; a `finish` flow entry, which ends the stream and leaves the item in its
-  state (section 1, step 2); or a transition of the unit's item. The `next` line directs the
-  work only within the grants the run already holds and is never itself a recorded decision or a
-  grant: an `unpark` whose `next` line names an action outside them (a de-escalation, accepting
-  a residual, dropping a family, or anything section 8 defers at a timeout) or an action the run
-  cannot tell is within them, or whose `lane=` is `merge` at a status before `converged`, does
-  not move the unit: the run parks it again under this rule, on a `pending_decision` naming that
-  `unpark`, and reports it, never acting on it. A unit an `unpark` returns from the merge lane
-  to a status before `converged` resumes in the lane its `lane=` names, else in the lane its
-  `start` entry set, which the run's next flow entry for it re-declares, since the merge lane
-  authors no product changes (section 2). The session never writes, scribes, or proposes, for
-  any actor, a record that moves a unit parked on a decision, so no timer, standing grant,
-  decision landing, or console reply moves one. The run reads those records from the store at
-  its next run start (section 4), through the section 5 selector, as it reads every flow entry;
-  a maintainer's `unpark` widens no grant (section 0, step 5), and before the run takes the unit
-  up it runs the section 3, step 5 re-check. A `park` entry is written only on a unit whose
-  `flow start` entry exists, so a decision that surfaces before that entry waits for it, the
-  write that follows the activation at once (section 4), and every parked unit has a lane, a
-  scope, and a status to resume from. A decision that surfaces on an item with no activation
-  under way (its plan production, section 1, step 7) links `relates` to that item and parks that
-  step with no `park` entry, as a gap parks a parent's close (section 1, step 2): selection
-  never activates the item for that step until a record the maintainer writes moves it, such as
-  the maintainer's own transition of the item. No such record is convergence, and none takes a
-  unit past the merge gate below. Until one lands, the unit stays parked, the run moves to the
-  next step that can proceed, plan production included, and the park is reported as section 1,
-  step 8 defines: parked awaiting the maintainer, never blocked, since a park is not a block
-  record.
+  under the maintainer's own authorship, moves a unit parked on a decision again (an overlap or
+  lane park, section 3, step 5, is the run's own, and the run's own `unpark` ends it): an
+  `unpark` flow entry, whose `status=` is the status the unit resumes at and whose `next` line
+  names the action it takes up; a `finish` flow entry, which ends the stream and leaves the item
+  in its state (section 1, step 2); or a transition of the unit's item. The `next` line directs
+  the work only within the grants the run already holds and is never itself a recorded decision
+  or a grant: an `unpark` whose `next` line names an action outside them (a de-escalation,
+  accepting a residual, dropping a family, or anything section 8 defers at a timeout) or an
+  action the run cannot tell is within them, or whose `lane=` is `merge` at a status before
+  `converged`, does not move the unit: the run parks it again under this rule, on a
+  `pending_decision` naming that `unpark`, and reports it, never acting on it. A unit an
+  `unpark` returns from the merge lane to a status before `converged` resumes in the lane its
+  `lane=` names, else in the lane its `start` entry set, which the run's next flow entry for it
+  re-declares, since the merge lane authors no product changes (section 2). The session never
+  writes, scribes, or proposes, for any actor, a record that moves a unit parked on a decision,
+  so no timer, standing grant, decision landing, or console reply moves one. The run reads those
+  records from the store at its next run start (section 4), through the section 5 selector, as
+  it reads every flow entry; a maintainer's `unpark` widens no grant (section 0, step 5), and
+  before the run takes the unit up it runs the section 3, step 5 re-check. A `park` entry is
+  written only on a unit whose `flow start` entry exists, so a decision that surfaces before
+  that entry waits for it, the write that follows the activation at once (section 4), and every
+  parked unit has a lane, a scope, and a status to resume from. A decision that surfaces on an
+  item with no activation under way (its plan production, section 1, step 7) links `relates` to
+  that item and parks both that item's plan production and its activation, with no `park` entry,
+  as a gap parks a parent's close (section 1, step 2): selection neither resumes that plan
+  production nor activates the item until a record the maintainer writes moves it, such as the
+  maintainer's own transition of the item, while every other item advances. No such record is
+  convergence, and none takes a unit past the merge gate below. Until one lands, the unit stays
+  parked, the run moves to the next step that can proceed, plan production included, and the
+  park is reported as section 1, step 8 defines: parked awaiting the maintainer, never blocked,
+  since a park is not a block record.
 
 **The effort schedule.** The review effort each phase runs at, by tier, is bound by the
 `flow-effort-schedule` region here, beside the cycle it governs (section 10 gives the region
@@ -776,36 +801,38 @@ convergence rule.
   it is recorded only as its `pending_decision` and `park` entry, with no block written or
   proposed, and attended it is also surfaced at once, stating that no console reply moves it and
   naming the records that do (section 7: the maintainer's own `unpark`, with its `status=`,
-  `next` line, and optional `lane=`, a `finish`, or a transition of the unit's item); a section
-  1, step 2 gap decision, which parks only a parent's close and writes no `park` entry, is
-  likewise never blocking. Only when the section 1, step 8 enumeration shows no item with any
-  step that can proceed, every remaining `open` or `active` item accounted for by a ratified
-  block that scopes it, by steps parked on recorded triggers, by a stream the maintainer ended,
-  or, for a parent item (section 1, step 2), by derived units each closed, so accounted for, or
-  awaiting ratification, does the run execute the adopter's closing handoff: that enumeration,
-  the pending-decisions queue in full, and a `handoff` record. OPF-SPEC.md section 8.5 requires
-  that posting a new handoff "MUST supersede the previous in the same act", so the closing
-  handoff requires a writer that supersedes the previous `current` handoff in the posting
-  operation itself; where no clean `current` handoff authored by a non-importer actor exists,
-  the new one supersedes nothing and any writer may post it. The reference writer lacks that
-  capability: it documents that "posting a new handoff does not supersede the previous one in
-  the same act" (`opf record`), and a `create` followed by a separate `transition` of the old
-  handoff is two acts, not one, so the run never composes the two. Where the writer in use lacks
-  it, as the reference writer does, and such a `current` handoff exists, the run records the
-  enumeration and the pending-decisions queue in full (every `open` `pending_decision` ID) in
-  one `infra` worklog entry whose `detail` opens with the single line `flow handoff-deferred`
-  and which links with `relates` the `current` handoff it could not supersede, tying the newer
-  state to that handoff by record, posts no `handoff` record, since a second one would leave two
-  live handoffs, and surfaces the gap, a writer capability the adopter must supply, in its
-  report and at the next attended boundary. The handoff rests on that enumerated fact, not on
-  OPF actionability: an item awaiting a decision stays actionable in the section 8.5 sense, its
-  parked steps wait on their triggers, and the next run takes up the first step that can proceed
-  (section 1, step 2); no proposal is thereby treated as ratified, and no stop is granted by
-  one. A non-blocking decision is appended to the pending-decisions queue (`pending_decision`
-  records) and surfaced in full at the next attended boundary. That boundary is observable only:
-  an inbound operator message, or the bound mode source newly reading attended (for example, a
-  new clean `active` `mode` record, written by the maintainer as above, that sets attended);
-  never inferred.
+  `next` line, and optional `lane=`, a `finish`, or a transition of the unit's item) and that
+  the run reads such a record at its next run start, which a bare `/flow` is (section 4); a
+  section 1, step 2 gap decision, which parks only a parent's close, and a section 7 decision on
+  an item with no activation under way, which parks only that item's plan production and
+  activation, write no `park` entry and are likewise never blocking. Only when the section 1,
+  step 8 enumeration shows no item with any step that can proceed, every remaining `open` or
+  `active` item accounted for by a ratified block that scopes it, by steps parked on recorded
+  triggers, by a stream the maintainer ended, or, for a parent item (section 1, step 2), by
+  derived units each closed, so accounted for, or awaiting ratification, does the run execute
+  the adopter's closing handoff: that enumeration, the pending-decisions queue in full, and a
+  `handoff` record. OPF-SPEC.md section 8.5 requires that posting a new handoff "MUST supersede
+  the previous in the same act", so the closing handoff requires a writer that supersedes the
+  previous `current` handoff in the posting operation itself; where no clean `current` handoff
+  authored by a non-importer actor exists, the new one supersedes nothing and any writer may
+  post it. The reference writer lacks that capability: it documents that "posting a new handoff
+  does not supersede the previous one in the same act" (`opf record`), and a `create` followed
+  by a separate `transition` of the old handoff is two acts, not one, so the run never composes
+  the two. Where the writer in use lacks it, as the reference writer does, and such a `current`
+  handoff exists, the run records the enumeration and the pending-decisions queue in full (every
+  `open` `pending_decision` ID) in one `infra` worklog entry whose `detail` opens with the
+  single line `flow handoff-deferred` and which links with `relates` the `current` handoff it
+  could not supersede, tying the newer state to that handoff by record, posts no `handoff`
+  record, since a second one would leave two live handoffs, and surfaces the gap, a writer
+  capability the adopter must supply, in its report and at the next attended boundary. The
+  handoff rests on that enumerated fact, not on OPF actionability: an item awaiting a decision
+  stays actionable in the section 8.5 sense, its parked steps wait on their triggers, and the
+  next run takes up the first step that can proceed (section 1, step 2); no proposal is thereby
+  treated as ratified, and no stop is granted by one. A non-blocking decision is appended to the
+  pending-decisions queue (`pending_decision` records) and surfaced in full at the next attended
+  boundary. That boundary is observable only: an inbound operator message, or the bound mode
+  source newly reading attended (for example, a new clean `active` `mode` record, written by the
+  maintainer as above, that sets attended); never inferred.
 - A bound sibling surface (a decisions tool, a status panel) that is configured but broken is an
   integrity defect to fix, never a silent fallback.
 
