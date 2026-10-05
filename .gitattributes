@@ -13,6 +13,7 @@
 .aiqt/core/gates/manifest.toml text eol=lf
 .aiqt/core/hooks/ORCHESTRATION.md text eol=lf
 .aiqt/core/hooks/manifest.toml text eol=lf
+.aiqt/core/hooks/preview.toml text eol=lf
 .aiqt/core/hooks/scripts/aiqt_hooks.py text eol=lf
 .aiqt/core/hooks/scripts/clock-inject.py text eol=lf
 .aiqt/core/hooks/scripts/future-stamp-write.py text eol=lf

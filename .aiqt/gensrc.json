@@ -30,7 +30,8 @@
       "sources": [
         ".aiqt/core/rules/",
         ".aiqt/core/hooks/manifest.toml",
-        ".aiqt/core/gates/manifest.toml"
+        ".aiqt/core/gates/manifest.toml",
+        ".aiqt/core/hooks/preview.toml"
       ],
       "target": ".aiqt/enforceability.json"
     },

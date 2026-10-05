@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8131d98e2058137bc5fe19acff0dcd21cc854e84922714128de00519a9b0363b"
+tree-sha256 = "cad43cd8ab633cdbf004a74f00881bd7efe7c93c9637b6f8d3d580cd5bbf184a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -73,6 +73,11 @@ sha256 = "2fe6b09bad5eacdffd6b1d26475ff26c991a5dbadaae58f9297ed1f58acdc064"
 path = ".aiqt/core/hooks/manifest.toml"
 bytes = 143211
 sha256 = "1d7fe7333d8177545669371e6224ad8f56b54af09c1ac9a3a94dd8e708d19381"
+
+[[sources]]
+path = ".aiqt/core/hooks/preview.toml"
+bytes = 1354
+sha256 = "f36a61e67ba3a6cbfd1c3cd40d01c52e2a258fb7cad6dccabbc9c80de9784b02"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
@@ -806,8 +811,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 342745
-sha256 = "4ece930329b7dd00e4e6ab7503fede496da100cc0b94c738d6230dc7812fbc6b"
+bytes = 346570
+sha256 = "f5f53289281c2e8f0402cfed7584e55cc764f93a2d867d113d19db6fa199c7b9"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -816,8 +821,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 10409
-sha256 = "39591a086a7173b1fc596d005a2fab0ad268fb81c037fe492c3e7f066a3a84ca"
+bytes = 10450
+sha256 = "6265edb9fb396a283142678542b00bf24e4754ced0734da04ab0e731554cc15c"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2251,8 +2256,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41666
-sha256 = "21a47c9e7d86d66670277586ac844966f476448d7091feb2f0b89a86dea8da24"
+bytes = 41708
+sha256 = "e34699792015f950012fb8a41bfd532a2ccb554b46b2f32b92eccbe9c7b14a09"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2306,8 +2311,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 195108
-sha256 = "0ccfd58d98bafbc59fa67f29c273eb6ffdab1bec92bc50a7c194f06f6a331c3a"
+bytes = 196345
+sha256 = "9de33bef9cdca221a7d70b02500af38b4784538669819da9fd7692a7cb66862e"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3066,8 +3071,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 244135
-sha256 = "e50af5d5eb67e4b082a231b871b041f2d3c8a2c48b18189fc2b26cc4efd6aa01"
+bytes = 245495
+sha256 = "5c1eec378b278638ebae5c0b4e014e5e58391418733e368019550d0eaa059e10"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3331,8 +3336,8 @@ sha256 = "38c9b2eed313e5cfd3ebde312ddc7c5329cd8376e24203f96ffd31eb706ad16c"
 
 [[sources]]
 path = "tools/check_overclaim.py"
-bytes = 279108
-sha256 = "d8576229c890bcd84bbb36f5e1c4673fc3778f7b4d6f21cb6aadd9de12e1d9d6"
+bytes = 279139
+sha256 = "5de92004b9fa93e8ec3d9edd5de5b7db6e0e0a6d2cbd97f4d8f37054ef580e40"
 
 [[sources]]
 path = "tools/check_portability.py"
@@ -3481,13 +3486,13 @@ sha256 = "f68d246fb296fa6f3bd5a09cbf321f059759f15cc7472d8c8937e1531f53de4a"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
-bytes = 42612
-sha256 = "83d83418f800350147d842304e168f41249faff506199bdd2862d208877e80b7"
+bytes = 67408
+sha256 = "04269091c137cf6c83819a0da7b77eeaaf526e747047d39e3ea1531cce15ac5f"
 
 [[sources]]
 path = "tools/gen_enforcement_register.py"
-bytes = 71268
-sha256 = "3f865d411bf0a2e54f6de982a4059924070f35e559b4a4350e4c5c0c3aeb92f1"
+bytes = 81666
+sha256 = "86975baaf075d861c85d7c1684a6ee9bed06b6de951259cf41f3e632a5018a8f"
 
 [[sources]]
 path = "tools/gen_gensrc.py"
