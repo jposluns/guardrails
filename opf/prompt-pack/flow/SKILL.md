@@ -11,7 +11,7 @@ description: The OPF operating loop for an AI development assistant. Read the ad
   verification is never shortened for speed.
 ---
 
-<!-- OPF-FLOW: release=0.3.0 template-sha256=07647cb6b966466dd4f96daedc23418ff12a0642593cd2eea26bbcae42fe32e8 -->
+<!-- OPF-FLOW: release=0.3.0 template-sha256=865bb309683fc76346b2500d5a724afc357b6dd92acc2aa3ad75eb082a2c6869 -->
 
 # /flow: the OPF operating loop
 
@@ -166,9 +166,8 @@ Three rules govern everything else:
    changes it by superseding the answer: a gap's `waive`, read at every parent close check, and
    the residuals an `accept` names, read at the section 7 merge gate and, for a unit already
    resumed under another option, at every anchor (step 1), so an `accept` that supersedes the
-   answer a unit resumed under takes that unit to the merge gate at the next anchor, to merge
-   only the revision that `accept` covers (section 7); the gate carries out in the `accept`'s
-   place any other option a superseding answer names. Every other
+   answer a unit resumed under takes that unit to the merge gate at the next anchor; the gate
+   carries out in the `accept`'s place any other option a superseding answer names. Every other
    act the run carries out on an answer and records (an `unpark` or `rescope` entry, a filed
    unit) is done once and stays done, never repeated or undone, and beyond those two effects an
    answer that supersedes one the run already acted on grants nothing further. The run never
@@ -530,7 +529,7 @@ no clean round to converge on, so its `merge` entry carries `lane=merge` instead
 `tier=` is `light`, `substantive`, or `sensitive` (section 7). `phase=` is `discovery` or
 `verify`, `result=` is `clean`, `findings`, or `failed`, and `rev=` names the reviewed revision;
 every `verdict` entry carries all three. A failed or timed-out round writes its own `verdict`
-entry (`result=failed`) before the re-issue, so the store holds every round the unit ran, in
+entry (`result=failed`) before any re-issue, so the store holds every round the unit ran, in
 `WL` order. The ancestor walk, which the section 7 standing-rule limit reads, starts at the
 unit's own item (one unit, one item, section 1, step 2) and follows each `follows` link from an
 item it reads to that link's target, the earlier unit whose scope the item carries (section 1,
@@ -684,8 +683,10 @@ the mechanical gates.
   decided by the project's own verification discipline, the rule bound through the
   `verification_convergence_rule` slot (section 10; default: continue while each round makes
   progress; a genuine stall is the same class reopening, or new findings that need a different
-  threat model). This skill defines no progress measure, round count, or stall test of its own:
-  it computes no progress signal, counts no rounds, and resets nothing. When that rule declares
+  threat model; a finding that disappears with no deliberate intervening change is not
+  progress, the AIQT Guardrails pack's `rerun-pass-is-still-failure` rule). This skill defines
+  no progress measure, round count, or stall test of its own: it computes no progress signal,
+  counts no rounds, and resets nothing. When that rule declares
   a stall, the run parks the unit on a `pending_decision`, or applies a governing `flow rule
   stall rescope` standing rule once along the unit's lineage (both below), and records the
   declaration, with the basis the rule states, in that `pending_decision` and its `park` entry,
@@ -695,21 +696,21 @@ the mechanical gates.
   the unit's flow entries (section 5) and its per-family verdicts, fixes, and re-issues on the
   lines after those entries' two fixed lines, and applies the rule after each DISCOVERY
   `verdict` entry, so the rule, and a resumed run, read from the store the unit's rounds, its
-  `unpark` entries, and the answer each `unpark` resumed it under (the decision rule). A failed
-  round never counts toward a stall the rule declares: the rule's basis is the unit's DISCOVERY
-  rounds at `result=clean` or `result=findings` alone, so a declaration whose stated basis
-  includes a `result=failed` round is no declaration, and it neither parks the unit nor lets a
-  standing rule act.
+  `unpark` entries, and the answer each `unpark` resumed it under (the decision rule). That rule
+  alone decides which rounds, a `result=failed` round included, count toward a stall it
+  declares; this skill adds no exclusion or basis of its own.
 - **Reviewer reliability**: a reviewer silent past `stall_minutes` (default 45) is re-issued;
   an absent family is re-issued, never waived; the first valid delivery per leg is authoritative
   and a late valid delivery is read as a cross-reference; an invalid delivery never satisfies
   the family requirement; no missing-family or otherwise degraded panel converges. A failed
-  round is a reliability failure, never a stall a standing rule acts on. A required family stays
-  unavailable once a delivery it owes fails, as this bullet and the quoted-evidence rule above
-  define a failed delivery, and the re-issue of that delivery fails in turn, both failures
-  recorded on the lines after their rounds' `verdict` entries; the run then parks the unit on a
-  `pending_decision` naming the reliability failures, through the park path of the next bullet,
-  never through a rescope.
+  round is a reliability failure, never a stall a standing rule acts on. A reviewer delivery
+  that is degraded, failed, or UNVERIFIABLE is handled exactly as the AIQT Guardrails pack's
+  `verifier-delivery-completeness` rule says, which also sets when a required family is
+  unavailable: a degraded or failed delivery is no verdict and is re-dispatched, and an
+  UNVERIFIABLE outcome is terminal, "treated as not-passed and resolved by fixing the input",
+  never re-sent unchanged. Where a required family is unavailable on that rule's terms, the run
+  parks the unit on a `pending_decision` naming the reliability failures, through the park path
+  of the next bullet, never through a rescope.
 - **At a stall the verification rule declares**: first apply a governing standing rule (the
   standing-rules bullet), whose rescope is recorded as an `autonomous_decision`, never a
   `pending_decision`; where no `rescope` rule governs, a `none` rule included, park the unit,
@@ -826,17 +827,12 @@ convergence rule.
   through section 1, step 2's decision rule, from the decisions the unit's own `park` entries
   name: where a maintainer has since superseded an `accept` with another option, the gate
   carries out that option in the `accept`'s place, as at an `unpark`, rather than asking again.
-  An `accept` merges exactly the revision the findings it names were raised against, the `rev=`
-  of the DISCOVERY `verdict` entry that confirmed them, re-verified only by this gate's
-  mechanical checks and CI (`merge_check_cmd`) on that exact revision: a commit made after it, a
-  fix included, is never merged under that `accept` and reaches integration only after a fresh
-  DISCOVERY panel reviews it, so a finding still unfixed at that revision is a residual of the
-  merge whatever a later commit fixed, a round in flight on a later revision never changes what
-  the `accept` merges, and where the named findings were raised against more than one revision
-  the unit stays unmerged and parks again on a fresh `pending_decision` naming them. Merges are
-  strictly serial and pinned to the reviewed head, under an `accept` to the accepted revision.
-  Before waiting on CI, confirm the change is actually mergeable; a conflicting change never
-  starts CI, and waiting on it is idle time.
+  Within those limits, merging itself, what an `accept` allows to merge and which revision
+  merges included, follows the adopter's own merge gate, the rule bound through the `merge_gate`
+  slot (section 10; default: the AIQT Guardrails pack's `branch-and-merge-on-green` and
+  `gate-discipline` rules); this skill adds no revision rule of its own. Merges are strictly
+  serial and pinned to the reviewed head. Before waiting on CI, confirm the change is actually
+  mergeable; a conflicting change never starts CI, and waiting on it is idle time.
 - After a refresh onto the integration branch, run merge-delta verification and the full suite,
   not only the conflicted files' tests: a clean three-way merge can still violate a newer
   cross-file rule.
@@ -1046,6 +1042,7 @@ configuration naming the slot (the Bindings rule below).
 | `gate_cmds` | `flow-gate-cmds` | (required) the gate and suite commands of the gated apply chain |
 | `merge_check_cmd` | `flow-merge-check-cmd` | (required) how CI status on the exact pushed revision is read |
 | `merge_authority` | `flow-merge-authority` | (required) who merges, and under which standing grant |
+| `merge_gate` | `flow-merge-gate` | the project's merge gate: what may merge, under an `accept` included, and which revision merges (section 7) |
 | `mode_source` | `flow-mode-source` | (required) the committed or operator-owned mode record (section 8) |
 | `flow_rate_source` | `flow-flow-rate-source` | where the current flow rate is read (section 2) |
 | `verification_floor` | `flow-verification-floor` | the merge verification floor (section 7) |
@@ -1105,6 +1102,10 @@ merge_check_cmd = (required; unbound)
 merge_authority = (required; unbound)
 <!-- /OVERLAY:flow-merge-authority -->
 
+<!-- OVERLAY:flow-merge-gate -->
+merge_gate = the AIQT Guardrails pack's `branch-and-merge-on-green` and `gate-discipline` rules
+<!-- /OVERLAY:flow-merge-gate -->
+
 <!-- OVERLAY:flow-mode-source -->
 mode_source = (required; unbound)
 <!-- /OVERLAY:flow-mode-source -->
@@ -1118,7 +1119,7 @@ verification_floor = the store's declared profile floor
 <!-- /OVERLAY:flow-verification-floor -->
 
 <!-- OVERLAY:flow-verification-convergence-rule -->
-verification_convergence_rule = continue while each round makes progress; a genuine stall is the same class reopening, or new findings that need a different threat model
+verification_convergence_rule = continue while each round makes progress; a genuine stall is the same class reopening, or new findings that need a different threat model; a finding that disappears with no deliberate intervening change is not progress (the AIQT Guardrails pack's `rerun-pass-is-still-failure` rule)
 <!-- /OVERLAY:flow-verification-convergence-rule -->
 
 <!-- OVERLAY:flow-status-surface -->
