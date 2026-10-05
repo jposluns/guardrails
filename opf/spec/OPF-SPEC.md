@@ -240,11 +240,12 @@ empty retirement record included, never evaluates as this run's record.
 The apply side's bundle verifier, through which `opf adopt status` reports a run, MUST hold every
 adoption inventory to that bar against its bundle's own `plan.toml`: it MUST yield cannot-evaluate
 for an inventory that names a phase other than the one its file name carries or a plan digest
-other than that plan's, and for every bundle whose `plan.toml` is absent, unreadable or not
-canonical, names another run, or carries a `plan_digest` that does not re-seal its own bytes, an
-empty base inventory included. It MUST check that plan's inventory row against the same bytes its
-seal was proven from. It does not check the approval's binding, which the doctor's admission
-checks.
+other than that plan's, and, except for an inventory in the recognized legacy format below, which
+is its named finding, for every inventory of a bundle whose `plan.toml` is absent, unreadable or
+not canonical, names another run, or carries a `plan_digest` that does not re-seal its own bytes,
+an empty base inventory included (a bundle with no inventory is its own named finding). It MUST
+check that plan's inventory row against the same bytes its seal was proven from. It does not check
+the approval's binding, which the doctor's admission checks.
 A retirement is recorded only by a sealed retirement inventory in the shape the
 retirement-phase transaction derives from its own create ops: one row per move row of the plan,
 occupying or not, whose recorded Move destination (its move-file destination) lies beneath
