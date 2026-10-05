@@ -2083,9 +2083,28 @@ def _self_test():
                   "s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);s.loader.exec_module(m);"
                   "UTC=datetime.timezone.utc\n" % os.path.abspath(__file__))
 
-    def in_subprocess(expr, timeout):
-        """Run `expr` (with module m loaded) in a fresh interpreter; return stdout, raising on timeout."""
-        return subprocess.run([sys.executable, "-I", "-B", "-c", CHILD_HEAD + "print(%s)" % expr],
+    # The FIFO guard for a child: an audit hook (the `open` event fires for os.open, the builtin open, io.open
+    # and io.FileIO alike) refuses every open of a listed FIFO without O_NONBLOCK and records it in _blocking,
+    # so a blocking open fails the test at once, even where a fail-open handler swallows the refusal, and no
+    # opener can bypass it; the child's timeout stays a hang guard only. Paths compare absolute.
+    FIFO_GUARD = (
+        "import os, sys\n"
+        "_fifos, _blocking = [os.path.abspath(p) for p in %r], []\n"
+        "def _fifo_guard(event, args):\n"
+        "    if event == 'open' and isinstance(args[0], (str, bytes)) and isinstance(args[2], int) and \\\n"
+        "            os.path.abspath(os.fsdecode(args[0])) in _fifos and not args[2] & os.O_NONBLOCK:\n"
+        "        _blocking.append(args[0])\n"
+        "        raise AssertionError('a FIFO opened without O_NONBLOCK: %%r' %% (args,))\n"
+        "sys.addaudithook(_fifo_guard)\n")
+    # every opener the guard covers, each tried once on the FIFO in a child (the guard's own vector)
+    FIFO_OPENERS = ("lambda p: os.open(p, os.O_RDONLY)", "lambda p: open(p, 'rb')",
+                    "lambda p: __import__('io').open(p, 'rb')", "lambda p: __import__('io').FileIO(p, 'r')")
+
+    def in_subprocess(expr, timeout, fifos=()):
+        """Run `expr` (with module m loaded) in a fresh interpreter; return stdout, raising on timeout. With
+        `fifos`, FIFO_GUARD runs first and the output gains a last line, the repr of the refused opens."""
+        guard, tail = (FIFO_GUARD % (list(fifos),), "\nprint(repr(_blocking))") if fifos else ("", "")
+        return subprocess.run([sys.executable, "-I", "-B", "-c", guard + CHILD_HEAD + "print(%s)" % expr + tail],
                               capture_output=True, text=True, timeout=timeout).stdout.strip()
 
     # A timing verdict compares the same code with itself on the same host, never with a wall-clock figure (a
@@ -2255,7 +2274,7 @@ def _self_test():
 
         def write(self, entries, mode="w"):
             if mode == "w":  # a fresh transcript path: a real transcript is append-only
-                self.tr = os.path.join(self.tmp, f"t{time.monotonic_ns()}.jsonl")
+                self.tr = os.path.join(self.tmp, f"t{os.urandom(8).hex()}.jsonl")
             with open(self.tr, mode) as f:
                 for e in entries:
                     f.write((e if isinstance(e, str) else json.dumps(e)) + "\n")
@@ -3056,8 +3075,26 @@ def _self_test():
             os.mkfifo(fifo)
             out = in_subprocess("(m.lease_start(%r), m.evaluate({'transcript_path':%r,'last_assistant_message':"
                                 "'[2099-01-01T00:00Z] x'}, datetime.datetime.now(UTC), None, %r) is not None)"
-                                % (fifo, fifo, self.sdir), timeout=HANG_TIMEOUT)  # the hang guard
-            self.assertEqual(out, "(None, True)")
+                                % (fifo, fifo, self.sdir), timeout=HANG_TIMEOUT, fifos=[fifo])  # the hang guard
+            self.assertEqual(out.splitlines(), ["(None, True)", "[]"])  # FIFO_GUARD refused no open
+
+        def test_fifo_guard_refuses_every_blocking_opener(self):
+            # the guard's vector: each opener in FIFO_OPENERS, without O_NONBLOCK, is refused and recorded at once
+            # (none blocks, so the hang guard is never reached); an O_NONBLOCK os.open passes and is not recorded
+            fifo = os.path.join(self.tmp, "gfifo")
+            os.mkfifo(fifo)
+            code = FIFO_GUARD % ([fifo],) + (
+                "refused = 0\n"
+                "for opener in (%s,):\n"
+                "    try:\n"
+                "        opener(%r)\n"
+                "    except AssertionError:\n"
+                "        refused += 1\n"
+                "os.close(os.open(%r, os.O_RDONLY | os.O_NONBLOCK))\n"
+                "print(refused, len(_blocking))\n") % (", ".join(FIFO_OPENERS), fifo, fifo)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.split(), [str(len(FIFO_OPENERS))] * 2, r.stderr)
 
         def test_inactive_lease_never_reads_history(self):
             lease = os.path.join(self.tmp, "lease.md")
@@ -3421,7 +3458,8 @@ def _self_test():
             os.mkfifo(fifo)
             lease = self.lease("**Active-session:** sess-2026-09-23-opus55-r1\n")
             self.assertEqual(in_subprocess("(m.transcript_start(%r), m.lease_start(%r, %r))" % (fifo, lease, fifo),
-                                           timeout=HANG_TIMEOUT), "(None, None)")  # the hang guard
+                                           timeout=HANG_TIMEOUT, fifos=[fifo]).splitlines(),
+                             ["(None, None)", "[]"])  # the hang guard; FIFO_GUARD refused no open
 
         def test_r13_inactive_lease_stays_unknown(self):
             self.write([self.user("go", self.start)])
@@ -3580,7 +3618,7 @@ def _self_test():
             env["AIQT_LEASE_FILE"] = os.path.join(self.tmp, "no-lease.md")  # never the host's real lease
             with open("/dev/full", "w") as full:
                 p = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__)], stdout=full,
-                                   stderr=subprocess.PIPE, text=True, env=env, timeout=30,
+                                   stderr=subprocess.PIPE, text=True, env=env, timeout=HANG_TIMEOUT,
                                    input=json.dumps({"last_assistant_message": "[2099-01-01T00:00Z] x"}))
             self.assertEqual(p.returncode, 0, p.stderr)
 
@@ -3598,7 +3636,7 @@ def _self_test():
             code = ("import importlib.util as u, io;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print('before', flush=True);b=io.StringIO();b.close();"
                     "m._emit_line('x', b);print('after', flush=True)" % os.path.abspath(__file__))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=30)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=HANG_TIMEOUT)
             self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "before\n", ""))
 
         def test_closed_stderr_line_never_reaches_stdout(self):
@@ -3610,7 +3648,7 @@ def _self_test():
             close2 = "import os, sys; os.close(2); os.execv(sys.argv[1], sys.argv[1:])"
             for closed in (False, True):
                 argv = [sys.executable, "-I", "-S", "-B", "-c", close2] + hook if closed else hook
-                p = subprocess.run(argv, input="{}", capture_output=True, text=True, env=env, timeout=30)
+                p = subprocess.run(argv, input="{}", capture_output=True, text=True, env=env, timeout=HANG_TIMEOUT)
                 self.assertEqual((p.returncode, p.stdout), (0, ""), (closed, p.stderr))
                 self.assertEqual("skipped, worker marker present" in p.stderr, not closed, (closed, p.stderr))
 
@@ -4876,13 +4914,49 @@ def _self_test():
                 "assert not left, left\n"
                 "print('R32-OK')\n")
             p = subprocess.run([sys.executable, "-I", "-B", "-c", child, os.path.abspath(__file__), self.tmp],
-                               capture_output=True, text=True, timeout=30)
+                               capture_output=True, text=True, timeout=HANG_TIMEOUT)
             self.assertEqual((p.returncode, p.stdout.strip()), (0, "R32-OK"), p.stderr[-2000:])
             src = " ".join(inspect.getsource(_write_prune_cursor).split())
             self.assertIn("os.O_EXCL", src)
             self.assertIn("os.replace(tmp, PRUNE_CURSOR", src)
             self.assertNotIn("O_TRUNC", src)
             self.assertIn("never by opening the existing entry", " ".join(__doc__.split()))
+
+        def test_no_short_timeout_or_clock_in_parent(self):
+            # the leftover-timing probe, wider than the assertion scan below: in the parent's own code (a child's
+            # source is a string literal, not scanned) every timeout keyword is HANG_TIMEOUT (in_subprocess
+            # passes its own argument on), so no verdict rests on a few seconds of host time, and the parent
+            # neither sleeps nor reads an elapsed-time clock (time.sleep, monotonic, perf_counter, process_time,
+            # thread_time, clock_gettime, each _ns variant too), under the time module or an alias of it, nor
+            # imports from time (an unaliased name would escape); a wall-clock timestamp (time.time, time_ns)
+            # that only dates a fixture stays allowed
+            import ast
+
+            def leftover(source):
+                tree = ast.parse(source)
+                mods = {"time"} | {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
+                                   for a in n.names if a.name == "time"}
+                found = [("timeout", k.value.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                         for k in n.keywords if k.arg == "timeout" and not (
+                             isinstance(k.value, ast.Name) and k.value.id in ("HANG_TIMEOUT", "timeout"))]
+                found += [("time." + n.func.attr, n.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                          and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                          and n.func.value.id in mods and n.func.attr.replace("_ns", "") in (
+                              "sleep", "monotonic", "perf_counter", "process_time", "thread_time",
+                              "clock_gettime")]
+                found += [("from time import", n.lineno) for n in ast.walk(tree)
+                          if isinstance(n, ast.ImportFrom) and n.module == "time"]
+                return sorted(found, key=lambda item: item[1])
+
+            self.assertEqual(leftover(inspect.getsource(_self_test)), [])
+            bad = ("def f():\n    subprocess.run(c, timeout=5)\n    p.wait(timeout=2.5)\n    t = time.monotonic()\n"
+                   "    time.sleep(1)\n    import time as tm\n    tm.perf_counter_ns()\n"
+                   "    from time import process_time\n    time.tzset()\n    run(c, timeout=HANG_TIMEOUT)\n"
+                   "    t = time.time_ns()\n    time.clock_gettime(1)\n"
+                   "    s = 'time.sleep(60)'\n")
+            self.assertEqual([what for what, _line in leftover(bad)],
+                             ["timeout", "timeout", "time.monotonic", "time.sleep", "time.perf_counter_ns",
+                              "from time import", "time.clock_gettime"])
 
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
         HANG_GUARD_TESTS = ()

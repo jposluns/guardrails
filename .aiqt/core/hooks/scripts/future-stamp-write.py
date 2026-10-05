@@ -3574,6 +3574,31 @@ def _self_test():
         timed child runs under the default policy only."""
         return {k: v for k, v in os.environ.items() if not k.startswith("MALLOC_") and k != "GLIBC_TUNABLES"}
 
+    # The FIFO guard for a child: an audit hook (the `open` event fires for os.open, the builtin open, io.open
+    # and io.FileIO alike) refuses every open of a listed FIFO without O_NONBLOCK and records it in _blocking,
+    # so a blocking open fails the test at once, even where a fail-open handler swallows the refusal, and no
+    # opener can bypass it; the child's timeout stays a hang guard only. Paths compare absolute.
+    FIFO_GUARD = (
+        "import os, sys\n"
+        "_fifos, _blocking = [os.path.abspath(p) for p in %r], []\n"
+        "def _fifo_guard(event, args):\n"
+        "    if event == 'open' and isinstance(args[0], (str, bytes)) and isinstance(args[2], int) and \\\n"
+        "            os.path.abspath(os.fsdecode(args[0])) in _fifos and not args[2] & os.O_NONBLOCK:\n"
+        "        _blocking.append(args[0])\n"
+        "        raise AssertionError('a FIFO opened without O_NONBLOCK: %%r' %% (args,))\n"
+        "sys.addaudithook(_fifo_guard)\n")
+    # every opener the guard covers, each tried once on the FIFO in a child (the guard's own vector)
+    FIFO_OPENERS = ("lambda p: os.open(p, os.O_RDONLY)", "lambda p: open(p, 'rb')",
+                    "lambda p: __import__('io').open(p, 'rb')", "lambda p: __import__('io').FileIO(p, 'r')")
+
+    # the ten r7 command shapes of bash_writes and the date_spans shape, each a maker of size k: shared by the
+    # operation-count check and the small-size CPU-scaling check
+    R7_CASES = [("bash_writes", make) for make in (
+        lambda k: "'" + "a" * (4 * k), lambda k: "x " * (2 * k), lambda k: "2>&1 " * k, lambda k: "\\" * (4 * k),
+        lambda k: "$'\\'" * k, lambda k: '"$(' * k, lambda k: '"$(x)"' * k, lambda k: '"`x`"' * k,
+        lambda k: "$((" * k + "))" * k, lambda k: "1>& 2 " * k)]
+    R7_CASES.append(("date_spans", lambda k: "$(" * (5 * k) + "`" * (k + 1) + "$(A=B" * (k // 2) + " 2099-01-01T00:00Z"))
+
     def run_timed(code, timeout):
         """Run `code` in a fresh isolated interpreter under child_env() (the ambient allocator policy
         neutralized), killed at `timeout` seconds (raising TimeoutExpired); return the JSON its last stdout
@@ -3744,13 +3769,35 @@ def _self_test():
             self.assertEqual(read_existing(fp2, EXISTING_MAX_BYTES)[1], True)
 
         def test_fifo_existing_content_does_not_block(self):
+            # FIFO_GUARD fails a blocking open of the FIFO at once, whatever the opener; the timeout is the hang
+            # guard only
             fifo = os.path.join(self.tmp, "fifo")
             os.mkfifo(fifo)
-            code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
-                    "s.loader.exec_module(m);print(repr(m.read_existing(%r, 10)))" % (os.path.abspath(__file__), fifo))
+            code = FIFO_GUARD % ([fifo],) + (
+                "import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
+                "s.loader.exec_module(m);print(repr(m.read_existing(%r, 10)));print(repr(_blocking))"
+                % (os.path.abspath(__file__), fifo))
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
-                               timeout=HANG_TIMEOUT)  # the hang guard: a blocking FIFO open never returns
-            self.assertEqual(r.stdout.strip(), "('', False)")
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.splitlines(), ["('', False)", "[]"], r.stderr)
+
+        def test_fifo_guard_refuses_every_blocking_opener(self):
+            # the guard's vector: each opener in FIFO_OPENERS, without O_NONBLOCK, is refused and recorded at once
+            # (none blocks, so the hang guard is never reached); an O_NONBLOCK os.open passes and is not recorded
+            fifo = os.path.join(self.tmp, "gfifo")
+            os.mkfifo(fifo)
+            code = FIFO_GUARD % ([fifo],) + (
+                "refused = 0\n"
+                "for opener in (%s,):\n"
+                "    try:\n"
+                "        opener(%r)\n"
+                "    except AssertionError:\n"
+                "        refused += 1\n"
+                "os.close(os.open(%r, os.O_RDONLY | os.O_NONBLOCK))\n"
+                "print(refused, len(_blocking))\n") % (", ".join(FIFO_OPENERS), fifo, fifo)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.split(), [str(len(FIFO_OPENERS))] * 2, r.stderr)
 
         def test_store_root_env_override(self):
             os.environ["AIQT_STORE_ROOT"] = self.tmp
@@ -4247,6 +4294,140 @@ def _self_test():
             small, large = run_timed(code, HANG_TIMEOUT)
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
+        def test_r7_operation_counts_scale_linearly(self):
+            # Deterministic, no clock: every character the scanners read from the command, through indexing,
+            # iteration, a C-level str method (charged by the span it scans: a find to its hit or the end, a
+            # startswith by its prefix), or a module regex (match by its matched span, search to its hit or the
+            # end, finditer per match as consumed, findall, sub and split over the whole text) is charged to one
+            # counter. The count at GROWTH * n over the count at n stays under 3 * GROWTH (24: linear about
+            # GROWTH, quadratic about GROWTH squared) for the ten r7 shapes of bash_writes and for date_spans,
+            # and the verdict is unchanged by the proxies. Work on DERIVED structures (word buffers, token lists,
+            # the frame stack) is not charged here; the CPU growth checks above cover it. Residual (disclosed): a
+            # failed match is charged one step, so regex backtracking is left to those CPU checks too.
+            work = [0]
+
+            def wrap(value):
+                if type(value) is str:
+                    return Counted(value)
+                if type(value) in (list, tuple):
+                    return type(value)(wrap(v) for v in value)
+                return value
+
+            class Counted(str):
+                def __getitem__(self, key):
+                    value = str.__getitem__(self, key)
+                    work[0] += max(1, len(value))
+                    return Counted(value)
+
+                def __iter__(self):
+                    for i in range(len(self)):
+                        yield self[i]
+
+            def charged(name):
+                def method(self, *args):
+                    result = getattr(str, name)(self, *args)
+                    if name in ("startswith", "endswith"):
+                        cost = max(map(len, args[0])) if isinstance(args[0], tuple) else len(args[0])
+                    elif name in ("find", "index", "count", "rfind", "rindex"):
+                        lo, hi, _ = slice(*(tuple(args[1:3]) + (None, None))[:2]).indices(len(self))
+                        hit = name in ("find", "index") and result >= 0
+                        cost = result + len(args[0]) - lo if hit else hi - lo
+                    else:
+                        cost = len(self)
+                    work[0] += cost + 1
+                    return wrap(result)
+                return method
+
+            for name in ("count", "find", "rfind", "index", "rindex", "__contains__", "split", "rsplit",
+                         "partition", "rpartition", "replace", "splitlines", "strip", "lstrip", "rstrip",
+                         "startswith", "endswith", "lower", "upper", "expandtabs", "translate", "isspace",
+                         "isdigit", "isalnum", "isalpha"):
+                setattr(Counted, name, charged(name))
+
+            class CountedPattern:
+                def __init__(self, pattern):
+                    self.pattern = pattern
+
+                def __getattr__(self, name):
+                    return getattr(self.pattern, name)
+
+                def match(self, string, pos=0, endpos=sys.maxsize):
+                    m = self.pattern.match(string, pos, endpos)
+                    work[0] += (m.end() - pos if m else 0) + 1
+                    return m
+
+                def fullmatch(self, string, pos=0, endpos=sys.maxsize):
+                    m = self.pattern.fullmatch(string, pos, endpos)
+                    work[0] += (m.end() - pos if m else 0) + 1
+                    return m
+
+                def search(self, string, pos=0, endpos=sys.maxsize):
+                    m = self.pattern.search(string, pos, endpos)
+                    work[0] += max(0, (m.end() if m else min(endpos, len(string))) - pos) + 1
+                    return m
+
+                def finditer(self, string, pos=0, endpos=sys.maxsize):
+                    last = pos
+                    work[0] += 1
+                    for m in self.pattern.finditer(string, pos, endpos):
+                        work[0] += m.end() - last + 1
+                        last = m.end()
+                        yield m
+
+                def findall(self, string, pos=0, endpos=sys.maxsize):
+                    work[0] += max(0, min(endpos, len(string)) - pos) + 1
+                    return self.pattern.findall(string, pos, endpos)
+
+                def sub(self, repl, string, *args, **kwargs):
+                    work[0] += len(string) + 1
+                    return self.pattern.sub(repl, string, *args, **kwargs)
+
+                def subn(self, repl, string, *args, **kwargs):
+                    work[0] += len(string) + 1
+                    return self.pattern.subn(repl, string, *args, **kwargs)
+
+                def split(self, string, *args, **kwargs):
+                    work[0] += len(string) + 1
+                    return self.pattern.split(string, *args, **kwargs)
+
+            def counted(fn, text):
+                saved = {k: v for k, v in globals().items() if isinstance(v, re.Pattern)}
+                globals().update({k: CountedPattern(v) for k, v in saved.items()})
+                work[0] = 0
+                try:
+                    got = fn(Counted(text))
+                finally:
+                    globals().update(saved)
+                self.assertEqual(got, fn(text))  # the proxies change no verdict
+                return work[0]
+
+            n = 500
+            for index, (name, make) in enumerate(R7_CASES):
+                fn = globals()[name]
+                small, large = counted(fn, make(n)), counted(fn, make(GROWTH * n))
+                self.assertGreater(small, 0, index)
+                self.assertLess(large / small, 3 * GROWTH, (index, name, small, large))
+
+        def test_r7_derived_work_cpu_scaling(self):
+            # Work on derived structures (word buffers, token lists, the frame stack) is invisible to the counts
+            # above, so each R7_CASES case is timed on CPU (time.process_time, interleaved, best of 2, in a child
+            # under the hang ceiling) at n and at GROWTH * n: the ratio stays under 3 * GROWTH (24: linear about
+            # GROWTH, quadratic about GROWTH squared). The size is small, so a quadratic regression fails here on
+            # its ratio at once rather than only at the large-size checks' hang ceiling
+            n = 500
+            cases = [(name, make(n), make(GROWTH * n)) for name, make in R7_CASES]
+            path = os.path.join(self.tmp, "r7.json")  # the commands go by file: too long for an argument
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cases, f)
+            for index in range(len(cases)):  # one child per case, so each stays seconds of CPU under the ceiling
+                code = TIMED_PRELUDE + (
+                    "with open(%r, encoding='utf-8') as f:\n"
+                    "    name, small, large = json.load(f)[%d]\n"
+                    "fn = getattr(m, name)\n"
+                    "print(json.dumps(interleaved((0, 1), lambda k: fn((small, large)[k]), 2)))\n") % (path, index)
+                small, large = run_timed(code, HANG_TIMEOUT)
+                self.assertLess(large / max(small, 1e-3), 3 * GROWTH, (index, cases[index][0], small, large))
+
         # -- round 8 (round-7 findings) --
         def test_r8_new_block_ends_table(self):
             # finding 1 (HIGH): a list item, heading, blockquote, or fence after a Due table inherited its context
@@ -4521,7 +4702,7 @@ def _self_test():
                     "[ a > b1 ]", "[[ a > c1 ]]", "[[ z < c2 ]]", "test a > b2")
             with open(os.path.join(self.tmp, "in"), "w") as f:
                 f.write("i\n")
-            subprocess.run(["bash", "-c", "; ".join(cmds)], cwd=self.tmp, capture_output=True, timeout=5)
+            subprocess.run(["bash", "-c", "; ".join(cmds)], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             made = set(os.listdir(self.tmp))
             self.assertTrue({"o1", "o2", "o3", "b1", "b2"} <= made, made)
             self.assertFalse({"c1", "c2"} & made, made)
@@ -4579,7 +4760,7 @@ def _self_test():
                     "time -p -p [[ a > b1 ]]", "time -x [[ a > b2 ]]", "time -- -p [[ a > b3 ]]",
                     "function f { echo > b4; }; f", "g() { echo > b5; }; g", "function h { [[ a > c8 ]]; }; h")
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             made = set(os.listdir(self.tmp))
             self.assertTrue({"b1", "b2", "b3", "b4", "b5"} <= made, made)
             self.assertFalse({"c%d" % k for k in range(1, 9)} & made, made)
@@ -4614,7 +4795,7 @@ def _self_test():
                     "x=$((echo x) > b4)", "echo $(( `echo > b5` 1 > 0 ))")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5"})
 
         # -- round 17 --
@@ -4665,7 +4846,7 @@ def _self_test():
                     "!(( 1 > c5 ))")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4"})
 
         # -- round 18 --
@@ -4704,7 +4885,7 @@ def _self_test():
                     "function q for ((i=0;i<1;i++)) do echo > b6; done; q")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5", "b6"})
 
         # -- round 19 --
@@ -4760,7 +4941,7 @@ def _self_test():
                     "if (( 2 > c2 )) then :; fi", "[[ a && (b || c > c3) ]]")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5", "b6", "b7"})
 
         # -- round 20 --
@@ -4805,7 +4986,7 @@ def _self_test():
                     "[[ x =~ (a>c1) ]]", "[[ x == x]] ]] && [[ y > c2 ]]")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b%d" % k for k in range(1, 10)})
 
         # -- round 21 --
@@ -4852,7 +5033,7 @@ def _self_test():
                     "[[ ( a )]] && echo > b8; [[ x ]]")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b%d" % k for k in range(1, 9)})
 
         # -- round 22 --
@@ -4904,7 +5085,7 @@ def _self_test():
                     "r=x\n[[ ( -n x )]] # it's fine\n[[ \"$r\" =~ (x)]] || \"$r\" > 'c1' ]]")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3"})
 
         # -- round 23 --
@@ -4935,9 +5116,9 @@ def _self_test():
             if not shutil.which("bash"):
                 self.skipTest("bash absent")
             ok = subprocess.run(["bash", "-c", "r=`[[ -n x ]]` && r=`[[ -n x ]] ` && echo > b1"], cwd=self.tmp,
-                                capture_output=True, timeout=5)
+                                capture_output=True, timeout=HANG_TIMEOUT)
             bad = subprocess.run(["bash", "-c", "r=`[[ -n x ]]y` && echo > b2"], cwd=self.tmp, capture_output=True,
-                                 timeout=5)
+                                 timeout=HANG_TIMEOUT)
             self.assertEqual(ok.returncode, 0, ok.stderr)
             self.assertNotEqual(bad.returncode, 0)
             self.assertTrue(os.path.exists(os.path.join(self.tmp, "b1")))
@@ -5025,7 +5206,7 @@ def _self_test():
             code = ("import importlib.util as u, io;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print('before', flush=True);b=io.StringIO();b.close();"
                     "m._emit_line('x', b);print('after', flush=True)" % os.path.abspath(__file__))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=30)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=HANG_TIMEOUT)
             self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "before\n", ""))
 
 
@@ -5052,7 +5233,7 @@ def _self_test():
             payload = {"tool_name": "Bash", "tool_input": {"command": f"echo 2099-01-01T00:00Z > {PROJ}/private/s.md"}}
             with open("/dev/full", "w") as full:
                 p = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__)], stdout=full,
-                                   stderr=subprocess.PIPE, text=True, env=env, timeout=30, input=json.dumps(payload))
+                                   stderr=subprocess.PIPE, text=True, env=env, timeout=HANG_TIMEOUT, input=json.dumps(payload))
             self.assertEqual(p.returncode, 0, p.stderr)
 
         def test_r24b_keywords_match_whole_words(self):
@@ -5136,7 +5317,7 @@ def _self_test():
                     f.write(text)
             before = {n: open(os.path.join(self.tmp, n)).read() for n in ("rules.sed", "ref", "prog.pl")}
             subprocess.run(["bash", "-c", "sed -i -f rules.sed -e 's/b/c/' X && truncate -r ref T && "
-                            "perl -pi -I . -e 's/x/y/' P && perl -i prog.pl P"], cwd=self.tmp, timeout=10, check=True)
+                            "perl -pi -I . -e 's/x/y/' P && perl -i prog.pl P"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True)
             self.assertEqual({n: open(os.path.join(self.tmp, n)).read() for n in before}, before)
             self.assertEqual((open(os.path.join(self.tmp, "X")).read(), os.path.getsize(os.path.join(self.tmp, "T")),
                               open(os.path.join(self.tmp, "P")).read()), ("c\n", 3, "y\n"))
@@ -5194,11 +5375,21 @@ def _self_test():
 
         def test_r26_item6_hang_guard_interrupts(self):
             # finding 6 (LOW): the growth test's ceiling was asserted only after every run returned, so it could
-            # not interrupt a hang; timed runs now go through run_timed, which kills the child at its timeout
-            t0 = time.monotonic()
-            with self.assertRaises(subprocess.TimeoutExpired):
-                run_timed("import time\ntime.sleep(60)\n", 1)
-            self.assertLess(time.monotonic() - t0, 30.0)
+            # not interrupt a hang; timed runs now go through run_timed, which kills the child at its timeout.
+            # The verdict is the TimeoutExpired and the timeout run_timed hands on, never an elapsed time: without
+            # the timeout the child sleeps its minute and returns, and assertRaises fails
+            seen, real_run = [], subprocess.run
+
+            def recording_run(*args, **kwargs):
+                seen.append(kwargs.get("timeout"))
+                return real_run(*args, **kwargs)
+            subprocess.run = recording_run
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    run_timed("import time\ntime.sleep(60)\n", 1)
+            finally:
+                subprocess.run = real_run
+            self.assertEqual(seen, [1])
             for test in (T.test_r4_scan_is_linear, T.test_r26_item5_unreadable_edit_literal_index_is_linear):
                 src = inspect.getsource(test)
                 self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
@@ -5219,7 +5410,7 @@ def _self_test():
             os.mkdir(os.path.join(self.tmp, "store"))
             with open(os.path.join(self.tmp, "src"), "w") as f:
                 f.write("s\n")
-            subprocess.run(["cp", "src", "store/s.md", "--suf", ".bak"], cwd=self.tmp, timeout=10, check=True)
+            subprocess.run(["cp", "src", "store/s.md", "--suf", ".bak"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True)
             self.assertTrue(os.path.exists(os.path.join(self.tmp, "store", "s.md")))  # the write is real
 
         # -- round 27 --
@@ -5256,17 +5447,17 @@ def _self_test():
             for name in ("X", "S"):
                 with open(os.path.join(self.tmp, name), "w") as f:
                     f.write("old\n")
-            r = subprocess.run(["perl", "-pi", "-e", f"s/old/{F}/", "X", "-I", "S"], cwd=self.tmp, timeout=10,
+            r = subprocess.run(["perl", "-pi", "-e", f"s/old/{F}/", "X", "-I", "S"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                                capture_output=True, text=True, env=self.real_env())
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("-I", r.stderr)  # perl tried to open a FILE named -I
             self.assertEqual([open(os.path.join(self.tmp, n)).read() for n in ("X", "S")], [F + "\n"] * 2)
-            r = subprocess.run(["sed", "s/old/new/", "S", "-n"], cwd=self.tmp, timeout=10, capture_output=True,
+            r = subprocess.run(["sed", "s/old/new/", "S", "-n"], cwd=self.tmp, timeout=HANG_TIMEOUT, capture_output=True,
                                text=True, env=self.real_env())
             self.assertEqual((r.returncode, r.stdout), (0, ""))  # -n after the operand is still an option
             with open(os.path.join(self.tmp, "T"), "w") as f:
                 f.write("abc")
-            subprocess.run(["truncate", "T", "-s", "0"], cwd=self.tmp, timeout=10, check=True, env=self.real_env())
+            subprocess.run(["truncate", "T", "-s", "0"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True, env=self.real_env())
             self.assertEqual(os.path.getsize(os.path.join(self.tmp, "T")), 0)
 
         def test_r27_script_text_naming_store_is_unknown_target(self):
@@ -5311,17 +5502,17 @@ def _self_test():
             cap = os.path.join(self.tmp, "store", "cap.md")
             with open(os.path.join(self.tmp, "in"), "w") as f:
                 f.write("ts: old\n")
-            subprocess.run(["sed", "-i", f"s/ts: .*/ts: {F}/w {cap}", "in"], cwd=self.tmp, timeout=10, check=True,
+            subprocess.run(["sed", "-i", f"s/ts: .*/ts: {F}/w {cap}", "in"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True,
                            env=self.real_env())
             self.assertEqual(open(cap).read(), f"ts: {F}\n")
             os.unlink(cap)
-            subprocess.run(["sed", "-n", "-e", f"w {cap}", "in"], cwd=self.tmp, timeout=10, check=True,
+            subprocess.run(["sed", "-n", "-e", f"w {cap}", "in"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True,
                            env=self.real_env())
             self.assertEqual(open(cap).read(), f"ts: {F}\n")
             if not shutil.which("ex"):
                 self.skipTest("ex absent")
             exw = os.path.join(self.tmp, "store", "ex.md")
-            subprocess.run(["ex", "-s", "-c", f"w! {exw}", "-c", "q", "in"], cwd=self.tmp, timeout=10,
+            subprocess.run(["ex", "-s", "-c", f"w! {exw}", "-c", "q", "in"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            env=self.real_env())
             self.assertEqual(open(exw).read(), f"ts: {F}\n")
@@ -5383,14 +5574,14 @@ def _self_test():
             os.mkdir(store)
             with open(os.path.join(self.tmp, "audit.log"), "w") as f:
                 f.write(f"read {store}/s.md {F}\nother\n")
-            r = subprocess.run(["sed", "-n", f"\\|{store}/s.md {F}|p", "audit.log"], cwd=self.tmp, timeout=10,
+            r = subprocess.run(["sed", "-n", f"\\|{store}/s.md {F}|p", "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                                capture_output=True, text=True, env=self.real_env())
             self.assertEqual((r.returncode, r.stdout, os.listdir(store)), (0, f"read {store}/s.md {F}\n", []))
-            r = subprocess.run(["sed", "-n", f"1{{w {store}/early}}", "audit.log"], cwd=self.tmp, timeout=10,
+            r = subprocess.run(["sed", "-n", f"1{{w {store}/early}}", "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                                capture_output=True, text=True, env=self.real_env())
             self.assertNotEqual(r.returncode, 0)  # the script fails (unmatched `{`) ...
             self.assertEqual(os.listdir(store), ["early}"])  # ... after its `w` file was created
-            subprocess.run(["sed", "-n", f"s/other/{F}/ w {store}/flag", "audit.log"], cwd=self.tmp, timeout=10,
+            subprocess.run(["sed", "-n", f"s/other/{F}/ w {store}/flag", "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                            check=True, env=self.real_env())
             self.assertEqual(open(os.path.join(store, "flag")).read(), f"{F}\n")
 
@@ -5454,24 +5645,24 @@ def _self_test():
             os.mkdir(store)
             with open(os.path.join(self.tmp, "audit.log"), "w") as f:
                 f.write("x\n")
-            subprocess.run(["sed", f"--expr=s/x/{F}/w {store}/s.md", "audit.log"], cwd=self.tmp, timeout=10,
+            subprocess.run(["sed", f"--expr=s/x/{F}/w {store}/s.md", "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                            check=True, capture_output=True, env=self.real_env())
             self.assertEqual(open(os.path.join(store, "s.md")).read(), f"{F}\n")
             with open(os.path.join(store, "state.md"), "w") as f:
                 f.write("x\n")
-            subprocess.run(["sed", "--in", f"s/x/{F}/", f"{store}/state.md"], cwd=self.tmp, timeout=10, check=True,
+            subprocess.run(["sed", "--in", f"s/x/{F}/", f"{store}/state.md"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True,
                            env=self.real_env())
             self.assertEqual(open(os.path.join(store, "state.md")).read(), f"{F}\n")
-            r = subprocess.run(["sed", "--f", "-n", "p", "audit.log"], cwd=self.tmp, timeout=10, capture_output=True,
+            r = subprocess.run(["sed", "--f", "-n", "p", "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT, capture_output=True,
                                text=True, env=self.real_env())
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("ambiguous", r.stderr)
             if shutil.which("cp"):
-                subprocess.run(["cp", "--targ", store, "audit.log"], cwd=self.tmp, timeout=10, check=True,
+                subprocess.run(["cp", "--targ", store, "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True,
                                env=self.real_env())
                 self.assertTrue(os.path.exists(os.path.join(store, "audit.log")))
             if shutil.which("perl"):
-                r = subprocess.run(["perl", "--in", "-e", "1"], cwd=self.tmp, timeout=10, capture_output=True,
+                r = subprocess.run(["perl", "--in", "-e", "1"], cwd=self.tmp, timeout=HANG_TIMEOUT, capture_output=True,
                                    text=True, env=self.real_env())
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn("Unrecognized switch", r.stderr)
@@ -5512,11 +5703,11 @@ def _self_test():
                                  (["-pi", "-e", "s/a/b/", "x", "--version"], True)):
                 with open(x, "w") as f:
                     f.write("a\n")
-                r = subprocess.run(["perl"] + args, cwd=self.tmp, timeout=10, capture_output=True,
+                r = subprocess.run(["perl"] + args, cwd=self.tmp, timeout=HANG_TIMEOUT, capture_output=True,
                                    stdin=subprocess.DEVNULL, env=self.real_env())
                 self.assertEqual((r.returncode, open(x).read()), (0, "b\n" if edited else "a\n"), args)
             for bad in ("--vers", "--version=1"):
-                r = subprocess.run(["perl", bad], cwd=self.tmp, timeout=10, capture_output=True, text=True,
+                r = subprocess.run(["perl", bad], cwd=self.tmp, timeout=HANG_TIMEOUT, capture_output=True, text=True,
                                    stdin=subprocess.DEVNULL, env=self.real_env())
                 self.assertIn("Unrecognized switch", r.stderr, bad)
 
@@ -5553,12 +5744,12 @@ def _self_test():
             with open(os.path.join(self.tmp, "t"), "w") as f:
                 f.write(f"heartbeat: {F}\n")
             r = subprocess.run(["mv", "-T", "--exchange", os.path.join(store, "s.md"), "t"], cwd=self.tmp,
-                               timeout=10, capture_output=True, text=True, env=self.real_env())
+                               timeout=HANG_TIMEOUT, capture_output=True, text=True, env=self.real_env())
             if r.returncode != 0 and "exchange" in r.stderr:
                 self.skipTest("this mv has no --exchange")
             self.assertEqual((r.returncode, open(os.path.join(store, "s.md")).read()), (0, f"heartbeat: {F}\n"))
             if shutil.which("install"):
-                subprocess.run(["install", "-d", os.path.join(store, "d1"), "d2"], cwd=self.tmp, timeout=10,
+                subprocess.run(["install", "-d", os.path.join(store, "d1"), "d2"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                                check=True, env=self.real_env())
                 self.assertTrue(os.path.isdir(os.path.join(store, "d1")))
 
@@ -5594,7 +5785,7 @@ def _self_test():
             # the real tool, observed: uutils install consumes the separate word (GNU install would not)
             if not shutil.which("install"):
                 self.skipTest("install absent")
-            v = subprocess.run(["install", "--version"], capture_output=True, text=True, timeout=10,
+            v = subprocess.run(["install", "--version"], capture_output=True, text=True, timeout=HANG_TIMEOUT,
                                env=self.real_env())
             if "uutils" not in v.stdout:
                 self.skipTest("install is not uutils")
@@ -5603,10 +5794,10 @@ def _self_test():
             with open(os.path.join(self.tmp, "src"), "w") as f:
                 f.write(f"heartbeat: {F}\n")
             subprocess.run(["install", "src", os.path.join(store, "s.md"), "--context", "foo"], cwd=self.tmp,
-                           timeout=10, check=True, capture_output=True, env=self.real_env())
+                           timeout=HANG_TIMEOUT, check=True, capture_output=True, env=self.real_env())
             self.assertEqual(open(os.path.join(store, "s.md")).read(), f"heartbeat: {F}\n")
             r = subprocess.run(["install", "src", "--context", os.path.join(store, "t.md")], cwd=self.tmp,
-                               timeout=10, capture_output=True, text=True, env=self.real_env())
+                               timeout=HANG_TIMEOUT, capture_output=True, text=True, env=self.real_env())
             self.assertNotEqual(r.returncode, 0)  # the store path was consumed as the context: no destination
             self.assertIn("missing destination", r.stderr)
 
@@ -5634,7 +5825,7 @@ def _self_test():
                         f.write("A\n")
                     os.mkdir(os.path.join(d, "D"))
                     word = values.get(opt, "Wn")
-                    r = subprocess.run([tool, "a", "D", opt, word], cwd=d, timeout=10, capture_output=True,
+                    r = subprocess.run([tool, "a", "D", opt, word], cwd=d, timeout=HANG_TIMEOUT, capture_output=True,
                                        text=True, stdin=subprocess.DEVNULL, env=self.real_env())
                     consumed = r.returncode == 0 and os.path.lexists(os.path.join(d, "D", "a"))
                     if not consumed:
@@ -5653,7 +5844,7 @@ def _self_test():
         # -- round 31 --
         def bash_run(self, cmd, cwd):
             """Run `cmd` in real bash in `cwd` (inside self.tmp), with no inherited environment beyond PATH."""
-            return subprocess.run(["bash", "-c", cmd], cwd=cwd, capture_output=True, text=True, timeout=10,
+            return subprocess.run(["bash", "-c", cmd], cwd=cwd, capture_output=True, text=True, timeout=HANG_TIMEOUT,
                                   stdin=subprocess.DEVNULL, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                                                                  "HOME": self.tmp, "LC_ALL": "C"})
 
@@ -6190,8 +6381,44 @@ def _self_test():
             doc = " ".join(__doc__.split())
             self.assertIn("Round 33: the shell -c WRAPPER check is charged too", doc)
 
+        def test_no_short_timeout_or_clock_in_parent(self):
+            # the leftover-timing probe, wider than the assertion scan below: in the parent's own code (a child's
+            # source is a string literal, not scanned) every timeout keyword is HANG_TIMEOUT (run_timed
+            # passes its own argument on), so no verdict rests on a few seconds of host time, and the parent
+            # neither sleeps nor reads an elapsed-time clock (time.sleep, monotonic, perf_counter, process_time,
+            # thread_time, clock_gettime, each _ns variant too), under the time module or an alias of it, nor
+            # imports from time (an unaliased name would escape); a wall-clock timestamp (time.time, time_ns)
+            # that only dates a fixture stays allowed
+            import ast
+
+            def leftover(source):
+                tree = ast.parse(source)
+                mods = {"time"} | {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
+                                   for a in n.names if a.name == "time"}
+                found = [("timeout", k.value.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                         for k in n.keywords if k.arg == "timeout" and not (
+                             isinstance(k.value, ast.Name) and k.value.id in ("HANG_TIMEOUT", "timeout"))]
+                found += [("time." + n.func.attr, n.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                          and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                          and n.func.value.id in mods and n.func.attr.replace("_ns", "") in (
+                              "sleep", "monotonic", "perf_counter", "process_time", "thread_time",
+                              "clock_gettime")]
+                found += [("from time import", n.lineno) for n in ast.walk(tree)
+                          if isinstance(n, ast.ImportFrom) and n.module == "time"]
+                return sorted(found, key=lambda item: item[1])
+
+            self.assertEqual(leftover(inspect.getsource(_self_test)), [])
+            bad = ("def f():\n    subprocess.run(c, timeout=5)\n    p.wait(timeout=2.5)\n    t = time.monotonic()\n"
+                   "    time.sleep(1)\n    import time as tm\n    tm.perf_counter_ns()\n"
+                   "    from time import process_time\n    time.tzset()\n    run(c, timeout=HANG_TIMEOUT)\n"
+                   "    t = time.time_ns()\n    time.clock_gettime(1)\n"
+                   "    s = 'time.sleep(60)'\n")
+            self.assertEqual([what for what, _line in leftover(bad)],
+                             ["timeout", "timeout", "time.monotonic", "time.sleep", "time.perf_counter_ns",
+                              "from time import", "time.clock_gettime"])
+
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
-        HANG_GUARD_TESTS = ("test_r26_item6_hang_guard_interrupts",)
+        HANG_GUARD_TESTS = ()
 
         def test_no_wall_clock_verdict(self):
             """Residual (disclosed): the scan covers direct calls, imported aliases, and assigned aliases within a
