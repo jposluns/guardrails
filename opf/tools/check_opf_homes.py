@@ -2951,7 +2951,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    # QA r5: --self-test runs through main() too, so an OSError out of a self-test read (for example
-    # the non-blocking SPEC reader refusing a FIFO reached through an accepted directory link) is the
-    # NAMED cannot-evaluate exit 2, never a raw traceback or a blocking read.
+    # QA r5: self_test() itself maps an OSError out of a self-test read (for example the non-blocking
+    # SPEC reader refusing a FIFO reached through an accepted directory link) to the NAMED
+    # cannot-evaluate exit 2, never a raw traceback or a blocking read, as main() does.
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(main())
