@@ -170,8 +170,15 @@ close reached from a composer (each through _journal._yield_close_exceptions, an
 interrupt in flight there kept as itself with the close exception noted on it), and the transaction's
 close-outs, sweep and listings (recorded, then selected in the order RAISED: the lock read's close
 before the release, the release's own exceptions, the closes after it, the closing sweep and listing,
-then the final close-out), so a later interrupt never propagates in place of an earlier one. A close
-OSError that yields to an exception already in flight (#378) is released and not named, as before.
+then the final close-out), so a later interrupt never propagates in place of an earlier one. An
+exception a close raised leaves the close helpers marked (_journal._mark_fd_release_raised), so a handler that
+reads its class as a clean signal (release_lock's unreadable lock, _poststate_verifies' does-not-verify)
+raises it rather than dropping it with what is recorded on it; a lock clause names each exception with
+its notes (_journal._msg_said), and a transaction whose state cannot be classified names why. Not named
+(disclosed): a close OSError that yields to an exception already in flight (#378), as before; a close
+OSError on a quiet teardown close (_journal._close_fd_quietly: the lock identity's and the first
+listing's held descriptors, _journal's cleanup loops), whose descriptor close(2) released anyway; and a
+close OSError inside _poststate_verifies, which reads as does-not-verify (the fail-closed answer).
 Residual (disclosed, not chased): when a SECOND ORDINARY fault (an Exception) arrives during a cleanup
 that is already failing, which of the two propagates and which is named beside it (in a note, or as the
 other's context) is not specified, for instance a _journal close exception with an error in flight
@@ -1408,10 +1415,12 @@ def _refusal_text(head, observed=None, ours=True):
 def _unreadable_lock(exc, at_acquire=False):
     """The clause for a journal lock that cannot be read: never blind-removed, refused by the next run and
     by reconcile() alike, so no sanctioned path clears it, and the clause says so and names it. Only on
-    the acquire path can it be this run's own unfinished write."""
+    the acquire path can it be this run's own unfinished write. An exception is named with every note
+    recorded on it (_journal._msg_said)."""
+    said = _journal._msg_said(exc) if isinstance(exc, BaseException) else exc
     return ("a journal lock is present but unreadable ({}){}; it is never blind-removed, the next run and "
             "reconcile() both refuse on it, and no sanctioned path clears it, so {}/lock STAYS".format(
-                exc, ", possibly this run's own unfinished write" if at_acquire else "", JOURNAL_REL))
+                said, ", possibly this run's own unfinished write" if at_acquire else "", JOURNAL_REL))
 
 
 def _lock_identity(jr_fd, keep=None, raised=None):
@@ -1590,7 +1599,8 @@ def _release_outcome(jr_fd, journal_root, mine, raised=None):
     The detail names EVERY exception R and B raised, in every row and every state, whether or not it is
     also stop, so none is dropped: with B nothing, R's clause (the exception itself when "own"), else "its
     release left it" on "stays" and None on "unidentified" and "released"; on "unreadable", B itself when
-    R raised nothing and B is "own", else R's clause, then B's.
+    R raised nothing and B is "own", else R's clause, then B's. Each exception is named with every note
+    recorded on it (_journal._msg_said, _journal._exc_said), so a fault a close recorded on R is named too.
 
     The caller (_release_note, then run_adopt_transaction) gives every row the same result whether
     `mine` is known or None. Committed (no outcome in flight): stop None, the commit returns on
@@ -1633,6 +1643,8 @@ def _release_outcome(jr_fd, journal_root, mine, raised=None):
             None if failed is None else failed if isinstance(failed, str)
             else "its release raised {}".format(_journal._exc_said(failed)),
             "its read-back raised {}".format(_journal._exc_said(read))) if s), stop
+    if isinstance(failed, BaseException):
+        failed = _journal._msg_said(failed)     # its message, then every note recorded on it
     if now is not None and mine is not None and now == mine:
         return "stays", failed or "its release left it", stop
     if now is not None and mine is not None and now[:2] == mine[:2]:
@@ -1699,7 +1711,7 @@ def _interrupted_lock_state(jr_fd, exc, raised=None):
         return "untaken", None
     return "unidentified", ("a journal lock {}/lock is present after this run's lock acquire {}, and this run "
                             "cannot tell whether it is its own: it stays, and the next run refuses on "
-                            "it".format(JOURNAL_REL, "failed with an error ({!r})".format(exc)
+                            "it".format(JOURNAL_REL, "failed with an error ({})".format(_journal._exc_said(exc))
                                         if isinstance(exc, Exception) else "was interrupted"))
 
 
@@ -1730,8 +1742,8 @@ def _failed_lock_state(jr_fd, journal_root, error, raised=None):
         except (_journal.JournalError, OSError) as exc:
             return "unreadable", _unreadable_lock(exc, at_acquire=True), None
         except BaseException as exc:    # noqa: BLE001  returned: named beside the acquire's error
-            return "stays", ("this run's own journal lock WAS created, and reading it back raised {!r}: it "
-                             "stays, and the next run refuses on it".format(exc)), exc
+            return "stays", ("this run's own journal lock WAS created, and reading it back raised {}: it "
+                             "stays, and the next run refuses on it".format(_journal._exc_said(exc))), exc
         if owner is None:
             return "untaken", "this run left no journal lock", None
         if not current:
@@ -1941,8 +1953,9 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 # before INTENT is told apart from one after it (the record-publication precedent).
                 try:
                     state = _journal.classify_state(jr_fd, journal_root / txn)
-                except _journal.JournalError:
-                    state = None
+                except _journal.JournalError as unread:     # named below, never dropped
+                    state = "in an unreadable state (its classification raised {})".format(
+                        _journal._exc_said(unread))
                 if state == "nothing-opened":
                     entered = False
                     raise AdoptApplyError("the adoption transaction was refused before it opened "
@@ -1955,7 +1968,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 lock_state = "retained"
                 raise AdoptApplyError("the adoption transaction {} FAILED and is {} ({}); the journal lock "
                                       "is retained so the next run refuses into reconcile() "
-                                      "(fail-closed)".format(txn, state or "in an unreadable state", exc))
+                                      "(fail-closed)".format(txn, state, exc))
             done = True
             return txn
         except BaseException as exc:    # noqa: BLE001  re-raised: only marks the outcome in flight
@@ -5181,6 +5194,103 @@ def _self_test_checks():
                       and "may not be durable" in full and not leaked,
                       observed="exception={!r} injected={!r} rendering={!r} leaked={!r}".format(
                           raised, fired, full[-900:], leaked))
+        # 6a'''b3n (D-U10-SECOND-FAULT, round 17): a JournalError a CLOSE inside the release's owner read
+        # raises is never read as release_lock's unreadable-lock signal and dropped. An EIO at
+        # read_lock_owner_at's close, then a JournalError at read_lock_owner's (the EIO recorded on it), and
+        # that JournalError alone: on a commit and on a refusal every injected exception is named in the
+        # full rendering beside COMMITTED or the refusal (red against release_lock returning on any
+        # JournalError, and against a lock clause naming its exception without the notes recorded on it).
+        for name, plan in (
+                ("release-owner-read-close-eio-then-journal-error-both-named",
+                 dict(((rlo_at_code, lambda: OSError(errno.EIO, "FIRST-CLOSE-EIO")),
+                       (rlo_code, lambda: _journal.JournalError("SECOND-CLOSE"))))),
+                ("release-owner-read-close-journal-error-named",
+                 dict(((rlo_at_code, lambda: _journal.JournalError("SINGLE-CLOSE-SENTINEL")),)))):
+            for committed in (True, False):
+                with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                    saved_umask = os.umask(0o022)
+                    try:
+                        root, files = fixture(temp)
+                        raised, fired, leaked = _helper_close_run(
+                            root, compose_committed if committed else compose_refused_here, plan, outcome_code)
+                    finally:
+                        os.umask(saved_umask)
+                full = rendering(raised)
+                check("{}-{}".format(name, "committed" if committed else "refused"),
+                      len(fired) == len(plan) and all(exc.args[-1] in full for exc in fired)
+                      and (type(raised) is AdoptCommittedLockError and "COMMITTED" in full if committed
+                           else type(raised) is AdoptApplyError and "an injected compose refusal" in full)
+                      and not leaked,
+                      observed="exception={!r} injected={!r} rendering={!r} leaked={!r}".format(
+                          raised, fired, full[-900:], leaked))
+        # the "altered" state names what the release raised (red against its clause dropping R)
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root, files = fixture(temp)
+            altered_error = None
+
+            def malformed_then_eio(journal_root):
+                (Path(journal_root) / "lock").write_bytes(b"[")
+                raise OSError(errno.EIO, "ALTERED-RELEASE-EIO")
+            with mock.patch.object(_journal, "release_lock", malformed_then_eio):
+                try:
+                    run_adopt_transaction(root, rid, compose_full(files))
+                except AdoptApplyError as exc:
+                    altered_error = exc
+        check("commit-release-altered-lock-names-the-release-error",
+              isinstance(altered_error, AdoptCommittedLockError) and "altered and stays" in str(altered_error)
+              and "ALTERED-RELEASE-EIO" in str(altered_error), observed="exception={!r}".format(altered_error))
+        # a transaction whose state classification raises names that exception in the refusal (red against
+        # the handler dropping it as an unreadable state)
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root, files = fixture(temp)
+            unclassified = None
+
+            def transaction_fails(*args, **kwargs):
+                raise _journal.JournalError("TRANSACTION-FAULT")
+
+            def classify_raises(*args, **kwargs):
+                raise _journal.JournalError("CLASSIFY-CLOSE-SENTINEL")
+            with mock.patch.object(_journal, "run_transaction", transaction_fails), \
+                    mock.patch.object(_journal, "classify_state", classify_raises):
+                try:
+                    run_adopt_transaction(root, rid, compose_full(files))
+                except AdoptApplyError as exc:
+                    unclassified = exc
+        check("failed-transaction-classification-error-named",
+              type(unclassified) is AdoptApplyError and "CLASSIFY-CLOSE-SENTINEL" in str(unclassified)
+              and "TRANSACTION-FAULT" in str(unclassified) and "retained" in str(unclassified),
+              observed="exception={!r}".format(unclassified))
+        # a JournalError a close inside _poststate_verifies raises propagates as itself, never read as
+        # does-not-verify (red against the handler returning False on it); with no injection it verifies
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            with open(os.path.join(temp, "f"), "wb") as fh:
+                fh.write(b"poststate bytes")
+            os.chmod(os.path.join(temp, "f"), 0o644)
+            post_op = dict(op="create", path="f", poststate=dict(kind="file", mode=0o644))
+            post_op["poststate"]["content-sha256"] = hashlib.sha256(b"poststate bytes").hexdigest()
+            real_prop_p, fired_p, raised_p = _journal._close_fd_propagating, [], None
+
+            def prop_p(fd):
+                real_prop_p(fd)
+                if not fired_p:
+                    fired_p.append(_journal.JournalError("POSTSTATE-CLOSE-SENTINEL"))
+                    raise fired_p[0]
+            post_fd = os.open(temp, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                control_p = _journal._poststate_verifies(post_fd, post_op)
+                baseline = _fds_open()
+                with mock.patch.object(_journal, "_close_fd_propagating", prop_p):
+                    try:
+                        verdict_p = _journal._poststate_verifies(post_fd, post_op)
+                    except _journal.JournalError as exc:
+                        verdict_p, raised_p = None, exc
+                leaked = sorted(_fds_open() - baseline)
+            finally:
+                os.close(post_fd)
+        check("poststate-close-journal-error-propagates", control_p is True and bool(fired_p)
+              and raised_p is fired_p[0] and verdict_p is None and not leaked,
+              observed="control={!r} verdict={!r} raised={!r} injected={!r} leaked={!r}".format(
+                  control_p, verdict_p, raised_p, fired_p, leaked))
         # an interrupt inside the lock acquire, then another in the read of what it left: the acquire's,
         # the first, propagates as itself, the read's named beside it; an ordinary fault in the acquire,
         # then an interrupt in that read: the read's interrupt propagates, the acquire's fault noted on it

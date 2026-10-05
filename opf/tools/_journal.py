@@ -203,6 +203,26 @@ def _exc_said(exc):
     return repr(exc) if not notes else "{!r} [recorded on it: {}]".format(exc, " | ".join(notes))
 
 
+def _msg_said(exc):
+    """str(exc), followed by every note recorded on it, as _exc_said renders repr(exc): a clause that names
+    an exception by its message never drops what was recorded there (an earlier close fault among them)."""
+    notes = getattr(exc, "__notes__", None) or []
+    return str(exc) if not notes else "{} [recorded on it: {}]".format(exc, " | ".join(notes))
+
+
+def _mark_fd_release_raised(exc):
+    """Mark `exc` as raised by a descriptor close (fd_release_raised = True) as it leaves the close helpers
+    (_close_fd_yielding, _yield_close_exceptions), so a handler that reads its class as a clean signal
+    (release_lock's unreadable lock, _poststate_verifies' does-not-verify) tells it from the condition
+    that signal means and raises it, never drops it with every fault recorded on it."""
+    exc.fd_release_raised = True
+
+
+def _fd_release_raised(exc):
+    """True when `exc` left a close helper (_mark_fd_release_raised)."""
+    return getattr(exc, "fd_release_raised", False) is True
+
+
 def _first_interrupt(excs):
     """The FIRST interrupt (a BaseException that is not an Exception) among `excs`, taken in the order
     they were raised, else None: the one first-interrupt selection every close of the adoption
@@ -219,8 +239,9 @@ def _yield_close_exceptions(inflight, raised):
     first interrupt is never demoted to a note, else the first of them; each other one, and an ERROR in
     flight (an Exception, also its context), is noted on it. A close exception is therefore never only a
     note on an error a caller may catch as a clean signal and drop (_open_parent's FileNotFoundError,
-    release_lock's JournalError among them); which of two faults propagates is the disclosed second-fault
-    residual (module docstring of _opf_adopt_apply)."""
+    release_lock's JournalError among them), and the one raised is marked (_mark_fd_release_raised), so such a
+    caller raises it rather than reading it as that signal; which of two faults propagates is the
+    disclosed second-fault residual (module docstring of _opf_adopt_apply)."""
     if not raised:
         return
     if inflight is not None and not isinstance(inflight, Exception):
@@ -228,6 +249,8 @@ def _yield_close_exceptions(inflight, raised):
             inflight.add_note("a close raised {} while this interrupt was in flight: recorded here, never "
                               "raised in its place".format(_exc_said(exc)))
         return
+    for exc in raised:
+        _mark_fd_release_raised(exc)
     stop = _first_interrupt(raised)
     if stop is None:
         stop = raised[0]
@@ -270,10 +293,15 @@ def _close_fd_yielding(fd):
     A close that raises anything but OSError (an interrupt, or an injected exception) while an interrupt
     is in flight never replaces it: it is noted on it. While an error is in flight, that close exception
     propagates with the error noted on it, so it is never left only as a note on an error a caller catches
-    and drops (_yield_close_exceptions)."""
+    and drops (_yield_close_exceptions). A close exception that leaves here is marked
+    (_mark_fd_release_raised)."""
     inflight = _in_flight_in(sys._getframe(1))
     if inflight is None:
-        _close_fd_propagating(fd)
+        try:
+            _close_fd_propagating(fd)
+        except BaseException as exc:    # noqa: BLE001  marked, then raised as itself
+            _mark_fd_release_raised(exc)
+            raise
         return
     try:
         _close_fd_propagating(fd)
@@ -1081,12 +1109,16 @@ def release_lock(journal_root):
     lock owned by another process is NEVER unlinked, so a foreign live lock is never deleted (the
     concurrency-lease fail-safe). An absent lock is a clean no-op; an unreadable or malformed lock is left
     in place (fail-closed, never blind-unlinked). Breaking a confirmed-dead stale lock is the caller's
-    explicit reconcile step (break_stale_and_acquire), never this release path."""
+    explicit reconcile step (break_stale_and_acquire), never this release path. A JournalError a CLOSE
+    inside the owner read raised (_fd_release_raised) is not that signal: it propagates as itself, with
+    every fault recorded on it, the lock left in place."""
     journal_root = Path(journal_root)
     lock = journal_root / "lock"
     try:
         owner = read_lock_owner(journal_root)
-    except JournalError:
+    except JournalError as exc:
+        if _fd_release_raised(exc):
+            raise                                         # a close's exception: never dropped as unreadable
         return                                            # unreadable/malformed: never blind-unlink
     if owner is None:
         return                                            # already absent
@@ -1430,7 +1462,10 @@ def _verify_prestate_at(pfd, name, relpath, prestate):
 def _poststate_verifies(root_fd, op):
     """Domain-separated post-state check per op kind (file: exists, regular, mode, content digest; dir:
     exists, directory, mode, NO digest; removed: absent). Used ONLY by the roll-forward election, which
-    fires solely when EVERY op already verifies. Never raises: a lookup error reads as does-not-verify."""
+    fires solely when EVERY op already verifies. A lookup error reads as does-not-verify; a JournalError or
+    KeyError a CLOSE raised (_fd_release_raised) propagates as itself, never dropped as that answer (inside
+    run_transaction it still rolls back first). A close OSError still reads as does-not-verify, the fail-
+    closed answer, unnamed (disclosed, module docstring of _opf_adopt_apply)."""
     try:
         post = op["poststate"]
         st = _lstat_contained(root_fd, op["path"])
@@ -1446,7 +1481,9 @@ def _poststate_verifies(root_fd, op):
                 return False
             data, _ = _read_contained(root_fd, op["path"])
             return hashlib.sha256(data).hexdigest() == post["content-sha256"]
-    except (JournalError, OSError, KeyError):
+    except (JournalError, OSError, KeyError) as exc:
+        if _fd_release_raised(exc) and not isinstance(exc, OSError):
+            raise
         return False
     return False
 
