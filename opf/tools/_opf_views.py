@@ -83,20 +83,21 @@ call into the mutant, the one made in _blocks' worker thread included); and
 tools/check_footer._close_vectors_guarded (the lazy _close_selftest import, its later calls and the reverted
 body). A KeyboardInterrupt of exactly that class propagates at each; the one ending _blocks' worker
 thread is re-raised in the calling thread once the worker is released. A KeyboardInterrupt subclass, which
-only loaded code raises (an operator's Ctrl-C raises the exact class), is cannot-evaluate at each like any
-other process-ending exception and is never re-raised, since an uncaught one whose __notes__ property raises
-SystemExit 0 ends the interpreter's own report with status 0. No guard inspects the caught instance to
-build its diagnostic: each names the family from its except clause or from type(exc) alone, and
-check_opf_init_p0 reads only the one exact-str argument of an exact AssertionError or RuntimeError (any
-other is a fixed message, and an exact AssertionError from a reverted call without one is cannot-evaluate),
-so an exception whose __class__ property or __str__ raises SystemExit 0 is cannot-evaluate there too. The
-one exception is an Exception from a later call into a budget mutant, which _GuardedMutant passes on as
-itself (the vectors read the mutant's own GateError), so the budget self-test, not the guard, decides that
-outcome. The vectors' recorders read a KeyboardInterrupt's argument or a SystemExit's code only from the
-exact built-in class and an exact str, int or None, and re-raise a KeyboardInterrupt only as the exact
-class (_propagate_interrupt: a subclass becomes a fresh KeyboardInterrupt, its context suppressed); a
-recorder that names an escape by type(exc).__name__ still reads that class's metaclass (not closed here).
-No gate entry is
+only loaded code raises (an operator's Ctrl-C raises the exact class), is never re-raised as itself: at
+_opf_emit._backstop, check_opf_init_contract._in_loaded and the observe and prompt_pack backstops it becomes
+a fresh KeyboardInterrupt, so the run stops as interrupted, and at every other site above it is
+cannot-evaluate like any other process-ending exception. Each guard names the family from its except clause
+or from type(exc) alone, and check_opf_init_p0 reads only the one exact-str argument of an exact
+AssertionError or RuntimeError (any other is a fixed message, and an exact AssertionError from a reverted
+call without one is cannot-evaluate). The one exception is an Exception from a later call into a budget
+mutant, which _GuardedMutant passes on as itself (the vectors read the mutant's own GateError), so the
+budget self-test, not the guard, decides that outcome. The guards and the vectors' recorders address
+ACCIDENTAL process-ending exceptions. Hostile exception objects are a disclosed residual of this class and
+are not closed: an exception that repository code deliberately crafts to defeat a guard (a custom __class__,
+a __str__, __notes__, args or code member that runs code, a planted __context__ or __cause__ chain, an
+argument with a hostile __eq__, a metaclass whose __name__ runs code, or a KeyboardInterrupt subclass with
+any such member) can still run its own code, an exit with status 0 included, where a guard, a recorder or
+the interpreter's own report reads it. No gate entry is
 wrapped: the `__main__` entry of every script that .github/workflows/quality.yml, tools/run_all_checks.sh or
 opf/tools/run_all_checks.sh launches, those of the files named above included, remains unwrapped, so outside
 the sites above such an exit ends the gate with the exception's own status (exit 0 for SystemExit 0 or None).
@@ -2210,7 +2211,8 @@ def _interrupt_filter_outcomes(sent):
     """The interrupt filters over hostile inputs: _is_interrupt of an exact KeyboardInterrupt(sent), of a
     subclass whose args property returns (sent,), and of an exact KeyboardInterrupt whose argument is a str
     subclass or an object whose __eq__ is always true; whether _propagate_interrupt raises a fresh exact
-    KeyboardInterrupt, its context suppressed, for that subclass; and the names of any instance code they ran.
+    KeyboardInterrupt, its context suppressed, for that subclass (probed in a worker thread, so an operator's
+    Ctrl-C is never caught here); and the names of any instance code they ran.
     Expected: (True, False, False, False, True, [])."""
     ran = []
 
@@ -2241,17 +2243,25 @@ def _interrupt_filter_outcomes(sent):
     outcomes = [_is_interrupt(KeyboardInterrupt(sent), sent), _is_interrupt(_ArgsProperty(), sent),
                 _is_interrupt(KeyboardInterrupt(_StrEq(sent)), sent),
                 _is_interrupt(KeyboardInterrupt(_AnyEq()), sent)]
-    try:
+    import threading
+    probed = []
+
+    def _probe():
+        # Runs in a worker thread: an operator's Ctrl-C is raised only in the main thread (in the join below,
+        # from which it propagates), so every KeyboardInterrupt caught here is this probe's own.
         try:
-            raise _ArgsProperty()
+            try:
+                raise _ArgsProperty()
+            except KeyboardInterrupt as exc:
+                _propagate_interrupt(exc)
         except KeyboardInterrupt as exc:
-            _propagate_interrupt(exc)
-    except KeyboardInterrupt as exc:
-        if type(exc) is KeyboardInterrupt and type(exc.__context__) is not _ArgsProperty:
-            raise  # not this probe's own, such as an operator's real Ctrl-C
-        outcomes.append(type(exc) is KeyboardInterrupt and exc.args == () and exc.__suppress_context__)
-    else:
-        outcomes.append("returned")
+            probed.append(type(exc) is KeyboardInterrupt and exc.args == () and exc.__suppress_context__)
+        else:
+            probed.append("returned")
+    worker = threading.Thread(target=_probe, daemon=True)
+    worker.start()
+    worker.join()
+    outcomes.append(probed[0] if probed else "raised")
     return tuple(outcomes) + (ran,)
 
 

@@ -1352,9 +1352,6 @@ def _quiet(fn, *args):
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             return fn(*args)
-    except KeyboardInterrupt as exc:
-        sys.stderr.write(err.getvalue())
-        _propagate_interrupt(exc)
     except BaseException:
         sys.stderr.write(err.getvalue())
         raise
@@ -1485,7 +1482,8 @@ def _interrupt_filter_outcomes(sent):
     """The interrupt filters over hostile inputs: _is_interrupt of an exact KeyboardInterrupt(sent), of a
     subclass whose args property returns (sent,), and of an exact KeyboardInterrupt whose argument is a str
     subclass or an object whose __eq__ is always true; whether _propagate_interrupt raises a fresh exact
-    KeyboardInterrupt, its context suppressed, for that subclass; and the names of any instance code they ran.
+    KeyboardInterrupt, its context suppressed, for that subclass (probed in a worker thread, so an operator's
+    Ctrl-C is never caught here); and the names of any instance code they ran.
     Expected: (True, False, False, False, True, [])."""
     ran = []
 
@@ -1516,17 +1514,25 @@ def _interrupt_filter_outcomes(sent):
     outcomes = [_is_interrupt(KeyboardInterrupt(sent), sent), _is_interrupt(_ArgsProperty(), sent),
                 _is_interrupt(KeyboardInterrupt(_StrEq(sent)), sent),
                 _is_interrupt(KeyboardInterrupt(_AnyEq()), sent)]
-    try:
+    import threading
+    probed = []
+
+    def _probe():
+        # Runs in a worker thread: an operator's Ctrl-C is raised only in the main thread (in the join below,
+        # from which it propagates), so every KeyboardInterrupt caught here is this probe's own.
         try:
-            raise _ArgsProperty()
+            try:
+                raise _ArgsProperty()
+            except KeyboardInterrupt as exc:
+                _propagate_interrupt(exc)
         except KeyboardInterrupt as exc:
-            _propagate_interrupt(exc)
-    except KeyboardInterrupt as exc:
-        if type(exc) is KeyboardInterrupt and type(exc.__context__) is not _ArgsProperty:
-            raise  # not this probe's own, such as an operator's real Ctrl-C
-        outcomes.append(type(exc) is KeyboardInterrupt and exc.args == () and exc.__suppress_context__)
-    else:
-        outcomes.append("returned")
+            probed.append(type(exc) is KeyboardInterrupt and exc.args == () and exc.__suppress_context__)
+        else:
+            probed.append("returned")
+    worker = threading.Thread(target=_probe, daemon=True)
+    worker.start()
+    worker.join()
+    outcomes.append(probed[0] if probed else "raised")
     return tuple(outcomes) + (ran,)
 
 
@@ -2251,9 +2257,9 @@ def self_test(report_path=None):
                 ("harness/mutant-load-keyboardinterrupt-propagates",
                  "raise KeyboardInterrupt({!r})\n".format(POISON_INTERRUPT), "KeyboardInterrupt")):
             check(check_id, _mutant_load_exit(tmp, body), want)
-        # A KeyboardInterrupt subclass whose __str__ and __notes__ raise SystemExit(0) is a harness error (exit
-        # 2) at load, in a later call and in _blocks' worker thread, never re-raised as itself (an uncaught one
-        # ends the interpreter's report with status 0). Red if any of the three guards re-raises it.
+        # A KeyboardInterrupt subclass raised by a mutant is a harness error (exit 2) at load, in a later call
+        # and in a later call made in _blocks' worker thread (_GuardedMutant's guard runs there, before _blocks
+        # sees the escape). Red if _mutant's load guard or _GuardedMutant's call guard re-raises it.
         subclass_exits = ("class _InterruptExits(KeyboardInterrupt):\n    def __str__(self):\n"
                           "        raise SystemExit(0)\n\n    @property\n    def __notes__(self):\n"
                           "        raise SystemExit(0)\n\n\n")
@@ -2266,6 +2272,16 @@ def self_test(report_path=None):
                                   "\n" + subclass_exits + "def read_text(path, where):\n    raise _InterruptExits()\n")
         check("harness/mutant-call-in-worker-thread-keyboardinterrupt-subclass-exit-2",
               _escape_of(_blocks, thread_subclass.read_text, tmp / "worker-thread-read-subclass"), 2)
+
+        class _PlainSubclass(KeyboardInterrupt):
+            pass
+
+        def _unguarded_subclass_read(path, where):
+            raise _PlainSubclass()
+        # _blocks' own branch, reached by a read with no guard of its own: a KeyboardInterrupt subclass ending
+        # the worker thread is _blocks' exit 2, never re-raised (red if _attempt stores it as an interrupt).
+        check("harness/worker-thread-unguarded-keyboardinterrupt-subclass-exit-2",
+              _escape_of(_blocks, _unguarded_subclass_read, tmp / "worker-thread-unguarded-subclass"), 2)
         # The recorder filters run no code from the caught instance: _is_interrupt and _propagate_interrupt
         # (red if either reads an args property, compares through an argument's __eq__ or re-raises a
         # subclass), and _escape_of, which returns only an exact SystemExit's int or None code (red if it reads

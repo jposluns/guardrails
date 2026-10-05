@@ -762,6 +762,7 @@ expected-check-ids = [
   "harness/mutant-load-keyboardinterrupt-subclass-exit-2",
   "harness/mutant-call-keyboardinterrupt-subclass-exit-2",
   "harness/mutant-call-in-worker-thread-keyboardinterrupt-subclass-exit-2",
+  "harness/worker-thread-unguarded-keyboardinterrupt-subclass-exit-2",
   "harness/interrupt-filters-run-no-instance-code",
   "harness/escape-of-reads-only-an-exact-int-code",
   "revert/character-set-red",

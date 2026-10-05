@@ -385,7 +385,8 @@ def _interrupt_filter_outcomes(sent):
     """The interrupt filters over hostile inputs: _is_interrupt of an exact KeyboardInterrupt(sent), of a
     subclass whose args property returns (sent,), and of an exact KeyboardInterrupt whose argument is a str
     subclass or an object whose __eq__ is always true; whether _propagate_interrupt raises a fresh exact
-    KeyboardInterrupt, its context suppressed, for that subclass; and the names of any instance code they ran.
+    KeyboardInterrupt, its context suppressed, for that subclass (probed in a worker thread, so an operator's
+    Ctrl-C is never caught here); and the names of any instance code they ran.
     Expected: (True, False, False, False, True, [])."""
     ran = []
 
@@ -416,17 +417,25 @@ def _interrupt_filter_outcomes(sent):
     outcomes = [_is_interrupt(KeyboardInterrupt(sent), sent), _is_interrupt(_ArgsProperty(), sent),
                 _is_interrupt(KeyboardInterrupt(_StrEq(sent)), sent),
                 _is_interrupt(KeyboardInterrupt(_AnyEq()), sent)]
-    try:
+    import threading
+    probed = []
+
+    def _probe():
+        # Runs in a worker thread: an operator's Ctrl-C is raised only in the main thread (in the join below,
+        # from which it propagates), so every KeyboardInterrupt caught here is this probe's own.
         try:
-            raise _ArgsProperty()
+            try:
+                raise _ArgsProperty()
+            except KeyboardInterrupt as exc:
+                _propagate_interrupt(exc)
         except KeyboardInterrupt as exc:
-            _propagate_interrupt(exc)
-    except KeyboardInterrupt as exc:
-        if type(exc) is KeyboardInterrupt and type(exc.__context__) is not _ArgsProperty:
-            raise  # not this probe's own, such as an operator's real Ctrl-C
-        outcomes.append(type(exc) is KeyboardInterrupt and exc.args == () and exc.__suppress_context__)
-    else:
-        outcomes.append("returned")
+            probed.append(type(exc) is KeyboardInterrupt and exc.args == () and exc.__suppress_context__)
+        else:
+            probed.append("returned")
+    worker = threading.Thread(target=_probe, daemon=True)
+    worker.start()
+    worker.join()
+    outcomes.append(probed[0] if probed else "raised")
     return tuple(outcomes) + (ran,)
 
 
