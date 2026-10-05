@@ -8022,58 +8022,124 @@ def _orch_root(data):
     return _recovery_toplevel(cwd)
 
 
-# git's own report that discovery walked up from cwd and found no repository, under the C locale: either the
-# whole parent chain was searched, or discovery stopped at a filesystem boundary
-# (GIT_DISCOVERY_ACROSS_FILESYSTEM is scrubbed with every other GIT_* variable). Any other failure (a bare
-# repository, a git directory, an ownership refusal, a broken gitfile) is NOT this message and is a
-# discovery failure.
-_ORCH_NOT_A_REPO_RE = re.compile(
-    r"fatal: not a git repository \(or any of the parent directories\): \.git\n"
-    r"|fatal: not a git repository \(or any parent up to mount point [^\n]*\)\n"
-    r"Stopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.\n",
-    re.IGNORECASE)
+# Orchestration-scope discovery WITHOUT git (round 3): the registry is this suite's scope declaration and
+# always lives at a directory on the session cwd's PHYSICAL ancestor chain (a resolvable git toplevel is
+# itself an ancestor of cwd, so every registry the old rev-parse scoping could read at the toplevel is on
+# this walk), so the truncation guard decides scope by walking that chain directly with no-follow,
+# descriptor-anchored lookups. A git discovery failure alone (no git binary on PATH, a dubious-ownership
+# refusal, a broken config, a bare repository, a cwd inside a .git directory, a timeout) therefore no
+# longer denies every Bash call in an ordinary session: with no registry on the walk the session is out of
+# scope, while the same session inside an orchestrated tree still finds the registry and keeps the guard
+# active. The sibling orchestration guards still root via the scrubbed rev-parse primitive (_orch_root).
+_ORCH_WALK_BOUND = 4096  # ancestor-chain safety bound; a deeper chain is a walk failure, never an allow
+# O_PATH (Linux): a walk step then needs only SEARCH permission on the chain, exactly as path resolution
+# itself does, so a search-only (execute-only) ancestor such as a shared parent directory does not fail the
+# walk; where O_PATH is unavailable the O_RDONLY fallback additionally requires read permission on each
+# ancestor, an over-DENY in the fail direction (never an allow) on such platforms.
+_ORCH_O_WALK = getattr(os, "O_PATH", os.O_RDONLY)
 
 
-def _orch_cwd_scope(cwd):
-    """Locate the session repository for a non-empty string cwd, telling a CONFIRMED non-repository apart
-    from a discovery that could not finish. Returns ('root', toplevel) when git resolves a work-tree
-    toplevel; ('outside', None) ONLY when cwd is an existing directory this process can read and enter AND
-    git's own discovery reports that no repository contains it (_ORCH_NOT_A_REPO_RE, read under the C
-    locale so the message is never translated); ('fail', detail) otherwise: a NUL in the path, a path that
-    cannot be stat'ed or is not a directory, an unreadable directory, or a rev-parse that cannot start,
-    times out, prints an unusable toplevel, or exits non-zero with any other message (a bare repository, a
-    git directory, a dubious-ownership refusal). The probe is the same scrubbed primitive as _orch_root
-    (_recovery_git), so this decides scope exactly as git would from cwd; a directory git itself does not
-    recognize as a repository (for example a damaged .git directory it skips) counts as outside."""
+def _orch_dirfd_has_registry(dirfd):
+    """Whether the directory open at dirfd carries an orchestration registry entry, judged with NO-FOLLOW,
+    DESCRIPTOR-ANCHORED lookups (openat semantics, so a path component swapped mid-walk cannot redirect the
+    probe). Returns False ONLY on a clean not-present: the `.aiqt` entry, or both registry names inside a
+    real `.aiqt` directory, raise FileNotFoundError. EVERY other outcome returns True, reading as PRESENT
+    in the deny-safe direction: a successful no-follow stat of either registry name, whatever its file type
+    (presence, not validity, decides scope: a present-but-unreadable or malformed registry has always kept
+    the guard ACTIVE, never inert), and equally a `.aiqt` entry these lookups cannot cleanly rule out (a
+    symlink the O_NOFOLLOW open refuses, a regular file, an unreadable directory, or any other fault),
+    which must never read as absent - that would silently disarm an orchestrated tree."""
+    try:
+        aiqt_fd = os.open(".aiqt", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # a .aiqt entry this walk cannot examine is not cleanly absent: PRESENT (deny-safe)
+    try:
+        for rel in _ORCH_REGISTRY_FILES:
+            name = rel.rsplit("/", 1)[-1]
+            try:
+                os.stat(name, dir_fd=aiqt_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue  # this registry name is cleanly not present: try the next one
+            except OSError:
+                return True  # a name these lookups cannot stat is not cleanly absent: PRESENT (deny-safe)
+            return True
+        return False
+    finally:
+        os.close(aiqt_fd)
+
+
+def _orch_registry_walk(cwd):
+    """Locate the truncation guard's registry scope for a non-empty string cwd WITHOUT consulting git: walk
+    cwd's PHYSICAL ancestor chain (an O_PATH|O_DIRECTORY descriptor stepped with openat(fd, ".."), so no
+    component is ever re-resolved by name, a symlinked cwd path cannot alias the chain, and each step needs
+    only the SEARCH permission path resolution itself needs; ".." is never a symlink, and the walk ends
+    where parent and child share one dev/ino, the filesystem root) looking for a
+    directory that carries an orchestration registry (_orch_dirfd_has_registry). Returns ('found', None)
+    when a chain directory carries one (or one the no-follow lookups cannot cleanly rule out); ('none',
+    None) when the walk reaches the root with every lookup a clean not-present (the session is OUT OF
+    SCOPE, whatever git would say: a git failure alone never denies); ('fail', (detail, fix)) when the walk
+    itself cannot be carried out - a NUL in the path, a path that cannot be stat'ed or is not a directory,
+    a directory this process cannot read and enter, an ancestor directory the walk cannot open or examine,
+    or a chain past _ORCH_WALK_BOUND - where detail completes "this Bash call's cwd ..." and fix names the
+    action that repairs it. AGREEMENT with the git path (_orch_root/_recovery_toplevel, which the sibling
+    orchestration guards still use): where git resolves a toplevel, that toplevel is an ancestor of cwd, so
+    a registry at it is on this walk and the two scopings agree; the walk additionally reaches a registry
+    above a nested repository or a filesystem boundary (git discovery stops at a mount point; this walk
+    does not) and decides scope even where git cannot run or answer, which the rev-parse scoping turned
+    into a blanket deny (the round-3 lockout, withdrawn)."""
     if "\x00" in cwd:
-        return ("fail", "contains a NUL character")
+        return ("fail", ("contains a NUL character",
+                         "Re-issue the call with a cwd carrying no control characters."))
     try:
         st = os.stat(cwd)
     except (OSError, ValueError) as exc:
-        return ("fail", "is not an existing path ({})".format(type(exc).__name__))
+        return ("fail", ("is not an existing path ({})".format(type(exc).__name__),
+                         "Re-issue the call from an existing directory."))
     if not stat.S_ISDIR(st.st_mode):
-        return ("fail", "is not a directory")
+        return ("fail", ("is not a directory",
+                         "Re-issue the call with a directory, not a file, as the cwd."))
     if not os.access(cwd, os.R_OK | os.X_OK):
-        return ("fail", "is a directory this process cannot read and enter")
+        return ("fail", ("is a directory this process cannot read and enter",
+                         "Grant this process read and search permission on it, or re-issue the call from "
+                         "a readable directory."))
     try:
-        result = _recovery_git(cwd, ["rev-parse", "--show-toplevel"],
-                               env_extra={"LC_ALL": "C", "LANGUAGE": ""}, timeout=5)
-    except subprocess.TimeoutExpired:
-        return ("fail", "could not be resolved: repository discovery (git rev-parse --show-toplevel) "
-                        "timed out")
-    except (subprocess.SubprocessError, OSError, ValueError) as exc:
-        return ("fail", "could not be resolved: repository discovery failed ({})".format(type(exc).__name__))
-    stdout = result.stdout if isinstance(result.stdout, str) else ""
-    if result.returncode == 0:
-        top = stdout[:-1] if stdout.endswith("\n") else stdout   # git's one terminator, as _recovery_toplevel
-        if not top or not os.path.isabs(top):
-            return ("fail", "could not be resolved: repository discovery returned no absolute toplevel")
-        return ("root", top)
-    stderr = result.stderr if isinstance(result.stderr, str) else ""
-    if result.returncode == 128 and _ORCH_NOT_A_REPO_RE.fullmatch(stderr):
-        return ("outside", None)
-    return ("fail", "could not be resolved: repository discovery failed (git rev-parse exited {}: {})"
-            .format(result.returncode, " ".join(stderr.split())[:120] or "no message"))
+        fd = os.open(cwd, _ORCH_O_WALK | os.O_DIRECTORY)
+    except OSError as exc:
+        return ("fail", ("could not be opened for the registry walk ({})".format(type(exc).__name__),
+                         "Re-issue the call from a directory this process can open."))
+    try:
+        cur = os.fstat(fd)
+        for _ in range(_ORCH_WALK_BOUND):
+            if _orch_dirfd_has_registry(fd):
+                return ("found", None)
+            try:
+                parent = os.open("..", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError as exc:
+                return ("fail", ("has an ancestor directory this walk cannot open ({})"
+                                 .format(type(exc).__name__),
+                                 "Grant this process search permission on every ancestor directory of "
+                                 "the cwd, or re-issue the call from a directory whose ancestors it can "
+                                 "search."))
+            try:
+                pst = os.fstat(parent)
+            except OSError as exc:
+                os.close(parent)
+                return ("fail", ("has an ancestor directory this walk cannot examine ({})"
+                                 .format(type(exc).__name__),
+                                 "Re-issue the call from a directory whose ancestors this process can "
+                                 "read."))
+            if pst.st_dev == cur.st_dev and pst.st_ino == cur.st_ino:
+                os.close(parent)
+                return ("none", None)  # the filesystem root: every lookup was a clean not-present
+            os.close(fd)
+            fd, cur = parent, pst
+        return ("fail", ("sits deeper than this walk's {}-directory ancestor bound"
+                         .format(_ORCH_WALK_BOUND),
+                         "Re-issue the call from a directory at an ordinary filesystem depth."))
+    finally:
+        os.close(fd)
 
 
 def _orch_registry(root):
@@ -9500,9 +9566,9 @@ def _orch_foreground_detach(command):
     quote that leaves the scan balanced but misaligned; (4) inside an arithmetic subscript that runs a
     substitution; (5) QUOTE SHIFT: after a quote character that bash reads as data but the scan reads as a
     quote, above all an apostrophe or double quote in a here-document body (quoted delimiter or not,
-    including the commit-message form); the scan then reads a LATER real bare `&` (between two
-    here-documents, or before a second stray quote that rebalances the scan) as quoted text and allows it;
-    and (6) COMMENT SHIFT: after a `#` that follows a blank inside an unquoted ${...} parameter expansion,
+    including the double-quoted commit-message form), which flips the scan's quote state so that a LATER
+    real bare `&` (between two here-documents, or before a second stray quote that rebalances the scan)
+    reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that follows a blank inside an unquoted ${...} parameter expansion,
     which bash reads as expansion text but the scan reads as a comment start, so a real bare `&` later on
     that line is skipped (echo ${x:- #} & job, echo ${line%% #*} & job)."""
     return _orch_foreground_detach_kind(command) is not None
@@ -9607,15 +9673,19 @@ def orch_truncation_guard(data):
     not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
     malformed, never read as foreground), and a command that is not a string are each DENIED with a
     reason naming the defect, never silently allowed. REGISTRY SCOPE (a disclosed residual, not a
-    fail-closed case): the registry is this suite's scope declaration, so with NO registry file present the
-    guard is inert and allows every Bash call that passes the pre-scope checks below, while a
-    present-but-unreadable or invalid registry keeps it active. PRE-SCOPE DENIES, checked BEFORE the
+    fail-closed case): the registry is this suite's scope declaration, located by walking the cwd's
+    physical ancestor chain with no-follow, descriptor-anchored lookups (_orch_registry_walk; git is NOT
+    consulted, so a git discovery failure alone - no git binary, a dubious-ownership refusal, a broken
+    config, a bare repository - never denies), so with NO registry entry on that chain the guard is inert
+    and allows every Bash call that passes the pre-scope checks below, while a chain directory whose
+    registry entry is present, unreadable, or invalid keeps it active. PRE-SCOPE DENIES, checked BEFORE the
     registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
-    or not a string; a cwd that is missing, null, empty, or not a string; and a string cwd that contains a
-    NUL, is not an existing directory this process can read, or whose repository discovery fails (an error,
-    a timeout, or any git refusal other than its not-a-repository report: _orch_cwd_scope). Only a readable
-    directory that git's own discovery confirms is in no repository is out of scope (allow), and a
-    non-Bash string tool_name is out of scope."""
+    not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
+    not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
+    that is not an existing directory this process can read and enter, or an ancestor directory the walk
+    cannot read: _orch_registry_walk), each deny naming the defect and an action that repairs it. Only a
+    plain non-Bash string tool_name, and a cwd whose completed walk finds no registry, are out of scope
+    (allow)."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name("trkasy")
@@ -9629,6 +9699,17 @@ def orch_truncation_guard(data):
             .format("empty" if tool_name == "" else _orch_json_kind(tool_name)),
             "AIQT guardrail: denied a PreToolUse call with an unreadable tool_name (rule trkasy, "
             "fail-closed).")
+    if any(ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f for ch in tool_name):
+        # A NUL or any other control character (C0, DEL, C1) never appears in a real tool name, so such a
+        # name must not read as an ordinary non-Bash tool and take the out-of-scope allow unread (the
+        # round-3 finding: a tool_name of "Bash" plus a NUL was allowed silently); it denies pre-scope.
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (fail-closed): malformed payload: tool_name contains a "
+            "NUL or another control character, so it is not a real tool name and this guard cannot tell "
+            "whether the call is a Bash call; it is denied rather than allowed out of scope "
+            "(check-fails-closed-on-unreadable). Re-issue the call with the plain tool name.",
+            "AIQT guardrail: denied a PreToolUse call whose tool_name carries a control character (rule "
+            "trkasy, fail-closed).")
     if tool_name != "Bash":
         return _allow()
     cwd = data.get("cwd")
@@ -9640,21 +9721,20 @@ def orch_truncation_guard(data):
             "registry; it is denied rather than allowed unread (check-fails-closed-on-unreadable). Re-issue "
             "the call with a string cwd.".format(kind),
             "AIQT guardrail: denied a Bash call with no readable cwd (rule trkasy, fail-closed).")
-    scope, found = _orch_cwd_scope(cwd)
+    scope, found = _orch_registry_walk(cwd)
     if scope == "fail":
+        detail, fix = found
         return _deny(
             "AIQT rule trkasy (track-launched-work) (fail-closed): this Bash call's cwd {}, so this guard "
-            "cannot establish whether the session is in a repository carrying an orchestration registry; "
-            "it is denied rather than read as out of scope (check-fails-closed-on-unreadable). Re-issue the "
-            "call from an existing, readable directory.".format(found),
-            "AIQT guardrail: denied a Bash call whose cwd could not be resolved to a repository or a "
-            "confirmed non-repository (rule trkasy, fail-closed).")
-    if scope == "outside":
-        return _allow()  # a readable directory git confirms is in no repository: not an orchestrated session
-    root = found
-    status, _reg = _orch_registry(root)
-    if status == "absent":
-        return _allow()  # registry-scoped by design: a disclosed residual (see the docstring)
+            "cannot walk the cwd's ancestor directories for the orchestration registry that scopes it; it "
+            "is denied rather than read as out of scope (check-fails-closed-on-unreadable). {}"
+            .format(detail, fix),
+            "AIQT guardrail: denied a Bash call whose cwd could not be walked for an orchestration "
+            "registry (rule trkasy, fail-closed).")
+    if scope == "none":
+        # No registry on the cwd's ancestor chain: not an orchestrated session, whatever git would say (a
+        # git discovery failure alone never denies: this guard's scope does not consult git at all).
+        return _allow()
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
         kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
