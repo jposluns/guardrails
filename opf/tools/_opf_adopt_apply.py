@@ -140,7 +140,9 @@ or in the outcome report after them (what was not reached stays open, and that i
 propagates in place of the run's own outcome, which is then not named beside it); or inside a
 _journal helper (acquire_lock's lock descriptor among them, and the rest of a _journal close-out loop,
 in _open_parent, ensure_journal_dirs, _open_dir_contained or _journal_txn_dirs, once one of its closes
-raises anything but OSError).
+raises anything but OSError); or inside the store's _open_working_dir_fd, where an interrupt (or any
+exception but OSError) raised by its parent close leaves the `.working` descriptor it had just opened
+open, that exception propagating as itself.
 Leak-freedom under interrupt, or under an exception raised in those windows, is NOT claimed. The
 finish ops add their own: all three finish ops
 compose into this shell's transactions, which refuse a resolved store (no lease join), so once init-store
@@ -444,6 +446,7 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
     # beneath THAT held identity, never re-walked from root_fd, so an evidence home swapped onto its
     # pathname between the caller's listing and this verification can never contribute a bundle.
     dir_fds = dict()
+    missing = set()     # each directory found absent once: a later path beneath it never reopens it
     if home_fd is not None:
         # Round 7 MINOR: the subscript KEY is computed BEFORE the dup (Python evaluates an
         # assignment right-hand side first), so a _check_rel raise on a malformed bundle path can
@@ -455,15 +458,23 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
     def dir_at(parts):
         """The RETAINED dir fd for the relative directory `parts` (a tuple of components; () is the
         product root itself): each component is opened O_DIRECTORY|O_NOFOLLOW beneath its retained
-        parent exactly once and reused for every later read of this verification."""
+        parent exactly once and reused for every later read of this verification. One found absent is
+        remembered and raises FileNotFoundError again unopened, as does every path beneath it."""
         if not parts:
             return root_fd
+        if parts in missing:
+            raise FileNotFoundError("contained directory {!r} is absent".format("/".join(parts)))
         fd = dir_fds.get(parts)
         if fd is None:
-            pfd = dir_at(parts[:-1])
+            try:
+                pfd = dir_at(parts[:-1])
+            except FileNotFoundError:
+                missing.add(parts)
+                raise
             try:
                 fd = os.open(parts[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
             except FileNotFoundError:
+                missing.add(parts)
                 raise
             except OSError as exc:
                 raise _journal.JournalError("cannot open contained directory component {!r} of "
@@ -1367,7 +1378,7 @@ def _unreadable_lock(exc, at_acquire=False):
                 exc, ", possibly this run's own unfinished write" if at_acquire else "", JOURNAL_REL))
 
 
-def _lock_identity(jr_fd, keep=None):
+def _lock_identity(jr_fd, keep=None, raised=None):
     """The journal lock beneath the held journal descriptor, no-follow: (st_dev, st_ino, its bytes), or
     None when absent. JournalError or OSError when what is present cannot be read. When `keep` is a list,
     the O_RDONLY|O_NOFOLLOW descriptor the identity was read from is handed to it and stays open: while it
@@ -1379,7 +1390,10 @@ def _lock_identity(jr_fd, keep=None):
     inside the protected block, so no instruction between its binding and that block goes uncovered by an
     exception raised in Python code; an asynchronous interrupt (SIGINT, SIGTERM) that lands between the
     open's C return and that binding, or inside the finally's close, can leave the descriptor open until
-    the process exits, a disclosed residual (module docstring)."""
+    the process exits, a disclosed residual (module docstring). When `raised` is a list, the close here
+    RECORDS its exception there (_close_held_into), never raising it past an exception already in flight
+    (an interrupt in the read among them) nor in place of an identity already read: the caller names
+    every one beside its outcome."""
     lfd = None
     try:
         try:
@@ -1395,7 +1409,10 @@ def _lock_identity(jr_fd, keep=None):
         return identity
     finally:
         if lfd is not None and (keep is None or lfd not in keep):
-            _journal._close_fd_quietly(lfd)
+            if raised is None:
+                _journal._close_fd_quietly(lfd)
+            else:
+                _close_held_into([lfd], raised)
 
 
 def _close_held_into(fds, raised, close=None):
@@ -1445,7 +1462,8 @@ def _close_held(fds):
 
 def _close_out_said(raised):
     """The clause naming EVERY exception the transaction's close-outs recorded (`raised`, in order: the
-    early lock close's, then the final close-out's), or None when they recorded none. It is reported
+    lock reads' own closes (_lock_identity's, the release read-back's among them), the early lock
+    close's, then the final close-out's), or None when they recorded none. It is reported
     BESIDE the run's own outcome, never in its place. Each exception is named with what it says of its
     descriptor: an OSError is a close's own error, and that close has still released the descriptor
     (man 2 close); any other exception was raised between a descriptor's pop and the end of its close,
@@ -1471,7 +1489,7 @@ def _observation_raised_said(raised):
                 "; then ".join(repr(exc) for exc in raised)))
 
 
-def _release_outcome(jr_fd, journal_root, mine):
+def _release_outcome(jr_fd, journal_root, mine, raised=None):
     """Release this run's own journal lock (ownership-checked) and read back, beneath the held journal
     descriptor, what that left, judged by the lock's identity, never by process identity: ("stays", why)
     ONLY when the lock present is the inode and content this run's acquire wrote (`mine`); ("unidentified",
@@ -1488,7 +1506,8 @@ def _release_outcome(jr_fd, journal_root, mine):
     `mine`'s inode IS the file this run's acquire wrote (equal bytes its lock left in place, other bytes a
     genuine in-place alteration), and a peer's lock lands at a fresh inode, read as released, never as this
     run's. A per-acquire token would change the journal lock format other readers validate, so none is
-    added here."""
+    added here. When `raised` is a list, the read-back's close records its exception there
+    (_lock_identity), so it never raises past an interrupt the release raised, nor conceals the outcome."""
     failed = interrupt = None
     try:
         _journal.release_lock(journal_root)
@@ -1498,7 +1517,7 @@ def _release_outcome(jr_fd, journal_root, mine):
         interrupt = exc
         failed = "its release was interrupted ({!r})".format(exc)
     try:
-        now = _lock_identity(jr_fd)
+        now = _lock_identity(jr_fd, raised=raised)
     except (_journal.JournalError, OSError) as exc:
         return "unreadable", exc, interrupt
     if now is not None and mine is not None and now == mine:
@@ -1513,11 +1532,12 @@ def _release_outcome(jr_fd, journal_root, mine):
     return "released", None, interrupt
 
 
-def _release_note(jr_fd, journal_root, mine):
+def _release_note(jr_fd, journal_root, mine, raised=None):
     """The run's normal lock release, at the end of a transaction or a refusal under the lock: (state,
     clause, interrupt), the clause None when the lock is released, else naming what stays or what may not
-    be durable, reported as _failed_lock_state reports it on the acquire path, never swallowed."""
-    state, detail, interrupt = _release_outcome(jr_fd, journal_root, mine)
+    be durable, reported as _failed_lock_state reports it on the acquire path, never swallowed. `raised`
+    as _release_outcome's."""
+    state, detail, interrupt = _release_outcome(jr_fd, journal_root, mine, raised)
     if state == "released":
         return state, None, interrupt
     if state == "unreadable":
@@ -1541,13 +1561,14 @@ def _altered_lock(detail):
             "run refuses on it".format(JOURNAL_REL, detail))
 
 
-def _interrupted_lock_state(jr_fd, exc):
+def _interrupted_lock_state(jr_fd, exc, raised=None):
     """What an interrupt, or another exception `exc`, inside acquire_lock left, OBSERVED beneath the held
     journal descriptor, never presumed: (state, clause). No lock present is "untaken"; a present lock this
     run cannot tell from another's (`exc` may have come before or after its create) is named and stays. An
-    Exception is described as an error, only any other BaseException as an interrupt."""
+    Exception is described as an error, only any other BaseException as an interrupt. When `raised` is a
+    list, the read's close records its exception there, never raising it past `exc` (_lock_identity)."""
     try:
-        now = _lock_identity(jr_fd)
+        now = _lock_identity(jr_fd, raised=raised)
     except (_journal.JournalError, OSError) as exc:
         return "unreadable", _unreadable_lock(exc, at_acquire=True)
     if now is None:
@@ -1558,7 +1579,7 @@ def _interrupted_lock_state(jr_fd, exc):
                                         if isinstance(exc, Exception) else "was interrupted"))
 
 
-def _failed_lock_state(jr_fd, journal_root, error):
+def _failed_lock_state(jr_fd, journal_root, error, raised=None):
     """What an acquire_lock that failed with an OSError left, read beneath the held journal descriptor, so
     the refusal reports it precisely: (state, clause, interrupt) as _release_note's. acquire_lock creates
     the lock BEFORE it writes and synchronizes it, so such a failure can leave this run's own lock, and it
@@ -1568,14 +1589,16 @@ def _failed_lock_state(jr_fd, journal_root, error):
     thread's of this same process, or any lock when the create itself failed) is never touched, nor is
     an unreadable one. The identity's own descriptor is HELD from the moment it is read until after the
     release's read-back (as every _release_outcome caller holds it), so a filesystem that reuses freed
-    inode numbers can never hand this lock's inode to a peer's lock inside that window."""
+    inode numbers can never hand this lock's inode to a peer's lock inside that window. When `raised` is
+    a list, every close here (the identity's own, the read-back's and the held descriptor's) records its
+    exception there, never raising it past one already in flight nor in place of the state returned."""
     if not getattr(error, "lock_created", False):
         return "untaken", "this run left no journal lock (its create failed), and no lock present is touched", None
     held = []   # the identity's own descriptor, HELD across the release and its read-back (inode reuse)
     try:
         try:
             owner = _journal.read_lock_owner_at(jr_fd)
-            mine = _lock_identity(jr_fd, keep=held)
+            mine = _lock_identity(jr_fd, keep=held, raised=raised)
         except (_journal.JournalError, OSError) as exc:
             return "unreadable", _unreadable_lock(exc, at_acquire=True), None
         if owner is None:
@@ -1583,7 +1606,7 @@ def _failed_lock_state(jr_fd, journal_root, error):
         if not _journal._owner_is_current(owner):
             return "untaken", ("the journal lock present is another run's (pid {}), not this "
                                "run's".format(owner.get("pid"))), None
-        state, detail, interrupt = _release_outcome(jr_fd, journal_root, mine)
+        state, detail, interrupt = _release_outcome(jr_fd, journal_root, mine, raised)
         if state == "released":
             return state, "this run's own journal lock WAS created, then released again", interrupt
         if state == "unreadable":
@@ -1596,7 +1619,10 @@ def _failed_lock_state(jr_fd, journal_root, error):
         return state, ("this run's own journal lock WAS created and STAYS ({}): the next run refuses on it, and "
                        "reconcile() breaks it once this process has exited".format(detail)), interrupt
     finally:
-        _close_held(held)
+        if raised is None:
+            _close_held(held)
+        else:
+            _close_held_into(held, raised)
 
 
 def _lock_said(lock_state, lock_note):
@@ -1683,7 +1709,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     mine_held = []          # the lock identity's descriptor, HELD until after the closing comparison
     anchors = []            # the product-root, then the journal descriptor: closed LAST, by the teardown
     failure = None
-    closeout = []           # every exception this run's close-outs record: named beside its outcome
+    closeout = []           # every exception this run's close-outs and lock read closes record: named beside its outcome
     lock_state, lock_note = "untaken", None
     held = retain = done = entered = False
     try:
@@ -1693,7 +1719,11 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             _journal.require_containment()
         except _journal.JournalError as exc:
             raise AdoptApplyError("{} (fail-closed)".format(exc))
-        before = _journal_listing(root_fd, keep=held_components)   # BEFORE this run creates anything
+        # BEFORE this run creates anything. Not the closing path: its walk's child closes still RAISE (no
+        # `raised` list), so a close there raising anything but OSError replaces an exception already in
+        # flight, an interrupt among them, which then survives only as that exception's __context__; it
+        # fails the run before it writes anything.
+        before = _journal_listing(root_fd, keep=held_components)
         journal_clean_or_refuse(root_fd, journal_root)
         _store_posture_or_refuse(product_root)
         try:
@@ -1724,7 +1754,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 raise AdoptApplyError("cannot take the adoption journal lock ({})".format(exc))
             except OSError as exc:
                 maybe_mine = getattr(exc, "lock_created", False)
-                lock_state, clause, interrupted = _failed_lock_state(jr_fd, journal_root, exc)
+                lock_state, clause, interrupted = _failed_lock_state(jr_fd, journal_root, exc, closeout)
                 if interrupted is not None or lock_state not in ("untaken", "released"):
                     lock_note = clause      # named once, by the composer, in place of the claim
                     if interrupted is not None:
@@ -1732,14 +1762,14 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                     raise AdoptApplyError("cannot take the adoption journal lock ({})".format(exc))
                 raise AdoptApplyError("cannot take the adoption journal lock ({}); {}".format(exc, clause))
             except BaseException as exc:   # an interrupt or other error inside acquire: observed, never presumed
-                lock_state, lock_note = _interrupted_lock_state(jr_fd, exc)
+                lock_state, lock_note = _interrupted_lock_state(jr_fd, exc, closeout)
                 raise
             held = True
             lock_state = "held"
             try:
                 # what THIS acquire wrote, its descriptor HELD, so the release reads back by identity
                 # and a freed-inode reuse can never read a peer's lock as this run's
-                mine = _lock_identity(jr_fd, keep=mine_held)
+                mine = _lock_identity(jr_fd, keep=mine_held, raised=closeout)
                 maybe_mine = mine is None
             except (_journal.JournalError, OSError) as exc:
                 raise AdoptApplyError("cannot read back the adoption journal lock this run took ({})".format(exc))
@@ -1783,7 +1813,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         finally:
             if held and not retain:
                 try:
-                    lock_state, lock_note, interrupted = _release_note(jr_fd, journal_root, mine)
+                    lock_state, lock_note, interrupted = _release_note(jr_fd, journal_root, mine, closeout)
                 finally:
                     # closed right after the read-back ONLY when that read-back, taken while this
                     # descriptor still pinned the lock's inode, saw this run's lock gone (released, or
@@ -1814,7 +1844,9 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             ours = True
             left, unconfirmed = [], []
             if before is not None and not done:
-                said = [lock_note] if lock_note else []     # bound before the sweep: one that raises keeps it
+                # bound before the sweep, the state's clause too: a sweep that raises keeps the lock clause
+                said = ([lock_note] if lock_note else
+                        [_lock_said(lock_state, None)] if lock_state not in ("untaken", "released") else [])
             if created and not (done or retain):
                 left, unconfirmed = _remove_journal_dirs(root_fd, created, raised=listed)
             if before is not None and not done:
@@ -1830,8 +1862,6 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                                  "later run inspects the adoption journal before it writes, reuses these "
                                  "directories, and refuses into reconcile() on a held lock or an open "
                                  "transaction there")
-                if lock_state not in ("untaken", "released") and not lock_note:
-                    said.append(_lock_said(lock_state, lock_note))
                 after = _journal_listing(root_fd, raised=listed)
                 if listed:
                     raise listed[0]     # its close-out raised: this observation stops, every one named below
@@ -3792,7 +3822,17 @@ def _self_test_checks():
                      "closing-sweep-fault-then-close-interrupt-propagates-as-itself",
                      "closing-sweep-close-fault-keeps-the-lock-clause",
                      "closing-listing-close-fault-stops-the-observation",
-                     "closing-listing-interrupt-names-the-own-exception"):
+                     "closing-listing-interrupt-names-the-own-exception",
+                     "release-readback-close-fault-keeps-the-release-interrupt-refused",
+                     "release-readback-close-fault-keeps-the-release-interrupt-committed",
+                     "acquire-interrupt-lock-read-close-fault-keeps-the-interrupt",
+                     "failed-acquire-readback-close-fault-keeps-the-release-interrupt",
+                     "failed-acquire-held-identity-close-fault-keeps-the-owner-interrupt",
+                     "failed-acquire-identity-read-close-fault-keeps-the-read-interrupt",
+                     "own-identity-read-close-fault-keeps-the-read-interrupt",
+                     "closing-sweep-close-fault-keeps-the-state-lock-clause",
+                     "closing-walk-close-fault-stops-the-walk",
+                     "closing-sweep-close-fault-stops-the-sweep"):
             skipped.append((name, no_census))
     else:
         import dis
@@ -4145,7 +4185,7 @@ def _self_test_checks():
                     raised = exc
             return raised, injected, sorted(_fds_open() - baseline)
 
-        def lock_stays_note(jr_fd, journal_root, mine):
+        def lock_stays_note(jr_fd, journal_root, mine, raised=None):
             return "stays", "an injected lock STAYS clause", None
         closing_path_legs = (
             ("closing-walk-interrupt-then-fault-propagates-as-itself", "walk",
@@ -4236,6 +4276,189 @@ def _self_test_checks():
               and len(popped) == 1 and leaked == sorted(popped),
               observed="exception={!r} note={!r} popped={!r} leaked={!r}".format(raised, text[-600:], popped,
                                                                                   leaked))
+        # 6a'''b3i: every close on a lock read and release path RECORDS its exception in the run's close-out
+        # list, never raising past one already in flight nor in place of an outcome already read. Each
+        # injection makes the real call first, then raises: an interrupt inside the release, then a fault
+        # at the read-back's close, propagates the interrupt as ITSELF with the fault named in its note, on
+        # a refusal and on a commit (which still says COMMITTED); the same beside an interrupt inside
+        # acquire (the observed lock state's read close), beside an interrupt inside the release of a lock
+        # a failed acquire created (that release's read-back close), beside an interrupt at the failed
+        # acquire's owner check (the held identity descriptor's close), and beside an interrupt inside the
+        # read of the identity this run's acquire wrote, on the transaction's own read and on the failed
+        # acquire's (red against each close raising past the interrupt: the fault replaces it). A release
+        # note that raised leaves its lock clause in the refusal through a sweep close fault (red against
+        # the state's clause bound only after the sweep). A walk or sweep close fault with nothing in
+        # flight stops that walk or sweep at once: no later child is opened, no later rmdir runs (red
+        # against those own-raise lines removed). No injection leaks a descriptor.
+        identity_code, outcome_code = _lock_identity.__code__, _release_outcome.__code__
+        failed_code, interrupted_code = _failed_lock_state.__code__, _interrupted_lock_state.__code__
+
+        def _called_from(frame, codes):
+            while frame is not None and frame.f_code.co_name.startswith("_close_held"):
+                frame = frame.f_back
+            for code in codes:
+                if frame is None or frame.f_code is not code:
+                    return False
+                frame = frame.f_back
+            return True
+
+        def _lock_read_run(root, compose, at, read_at=None, acquire=None, release=False, owner=False):
+            """One transaction over `compose` whose quiet close called from the frames `at` (innermost first)
+            makes its real close, then raises an injected fault, once; `read_at` likewise interrupts the
+            lock read there after the real read; `acquire` (an exception factory) raises after the real
+            acquire; `release` interrupts the release before it unlinks; `owner` interrupts the failed
+            acquire's owner check. (exception, the injected exceptions in order, leaked)."""
+            real_quiet, real_read = _journal._close_fd_quietly, _journal._read_fd
+            real_acquire, real_owner = _journal.acquire_lock, _journal._owner_is_current
+            fired = []
+
+            def fire(exc):
+                fired.append(exc)
+                raise exc
+
+            def quiet(fd):
+                real_quiet(fd)
+                if not any(isinstance(e, _InjectedCloseFault) for e in fired) and _called_from(
+                        sys._getframe(1), at):
+                    fire(_InjectedCloseFault("lock read close #{}".format(len(fired) + 1)))
+
+            def reading(fd, *args, **kwargs):
+                data = real_read(fd, *args, **kwargs)
+                if read_at is not None and all(isinstance(e, Exception) for e in fired) and _called_from(sys._getframe(1), read_at):
+                    fire(_InjectedCloseInterrupt("lock read #{}".format(len(fired) + 1)))
+                return data
+
+            def acquiring(journal_root, session):
+                real_acquire(journal_root, session)
+                if acquire is not None:
+                    fire(acquire())
+
+            def releasing(journal_root):
+                fire(_InjectedCloseInterrupt("release #{}".format(len(fired) + 1)))
+
+            def owning(owner_row):
+                if owner:
+                    fire(_InjectedCloseInterrupt("owner check #{}".format(len(fired) + 1)))
+                return real_owner(owner_row)
+            raised = None
+            baseline = _fds_open()
+            with mock.patch.object(_journal, "_close_fd_quietly", quiet), \
+                    mock.patch.object(_journal, "_read_fd", reading), \
+                    mock.patch.object(_journal, "acquire_lock", acquiring), \
+                    mock.patch.object(_journal, "_owner_is_current", owning), \
+                    mock.patch.object(_journal, "release_lock", releasing if release else _journal.release_lock):
+                try:
+                    run_adopt_transaction(root, rid, compose)
+                except (AdoptApplyError, RuntimeError, KeyboardInterrupt) as exc:
+                    raised = exc
+            return raised, fired, sorted(_fds_open() - baseline)
+
+        def acquire_failed():
+            exc = OSError(5, "an injected acquire EIO after the lock was created")
+            exc.lock_created = True
+            return exc
+
+        def acquire_interrupted():
+            return _InjectedCloseInterrupt("acquire #1")
+
+        def compose_committed(ops):
+            return None
+        lock_read_legs = (
+            ("release-readback-close-fault-keeps-the-release-interrupt-refused", compose_refused_here,
+             dict(at=(identity_code, outcome_code), release=True), False),
+            ("release-readback-close-fault-keeps-the-release-interrupt-committed", compose_committed,
+             dict(at=(identity_code, outcome_code), release=True), True),
+            ("acquire-interrupt-lock-read-close-fault-keeps-the-interrupt", compose_refused_here,
+             dict(at=(identity_code, interrupted_code), acquire=acquire_interrupted), False),
+            ("failed-acquire-readback-close-fault-keeps-the-release-interrupt", compose_refused_here,
+             dict(at=(identity_code, outcome_code, failed_code), acquire=acquire_failed, release=True), False),
+            ("failed-acquire-held-identity-close-fault-keeps-the-owner-interrupt", compose_refused_here,
+             dict(at=(failed_code,), acquire=acquire_failed, owner=True), False),
+            ("failed-acquire-identity-read-close-fault-keeps-the-read-interrupt", compose_refused_here,
+             dict(at=(identity_code, failed_code), read_at=(identity_code, failed_code), acquire=acquire_failed),
+             False),
+            ("own-identity-read-close-fault-keeps-the-read-interrupt", compose_refused_here,
+             dict(at=(identity_code, txn_code), read_at=(identity_code, txn_code)), False))
+        for name, compose_here, how, committed in lock_read_legs:
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                saved_umask = os.umask(0o022)
+                try:
+                    root, files = fixture(temp)
+                    raised, fired, leaked = _lock_read_run(root, compose_here, **how)
+                finally:
+                    os.umask(saved_umask)
+            stop = next((exc for exc in fired if not isinstance(exc, Exception)), None)
+            fault = next((exc for exc in fired if isinstance(exc, _InjectedCloseFault)), None)
+            text = " ".join(getattr(raised, "__notes__", []) or [])
+            check(name, stop is not None and fault is not None and raised is stop and repr(fault) in text
+                  and (not committed or "COMMITTED" in text) and not leaked,
+                  observed="exception={!r} injected={!r} note={!r} leaked={!r}".format(
+                      raised, fired, text[-600:], leaked))
+
+        def release_note_raised(jr_fd, journal_root, mine, raised=None):
+            raise RuntimeError("an injected release error")
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            saved_umask = os.umask(0o022)
+            try:
+                root, files = fixture(temp)
+                raised, injected, leaked = _path_fault_run(root, "sweep-close", (_InjectedCloseFault,),
+                                                           compose_refused_here, release_note_raised)
+            finally:
+                os.umask(saved_umask)
+        check("closing-sweep-close-fault-keeps-the-state-lock-clause",
+              type(raised) is AdoptApplyError and len(injected) == 1 and repr(injected[0]) in str(raised)
+              and "this run's journal lock outcome was not observed" in str(raised) and not leaked,
+              observed="exception={!r} injected={!r} leaked={!r}".format(raised, injected, leaked))
+        for name, where in (("closing-walk-close-fault-stops-the-walk", "walk"),
+                            ("closing-sweep-close-fault-stops-the-sweep", "sweep")):
+            counted = []
+            real_quiet_here, real_rmdir_here = _journal._close_fd_quietly, os.rmdir
+
+            def counting_quiet(fd):
+                real_quiet_here(fd)
+                up = sys._getframe(1)
+                while up is not None and up.f_code.co_name.startswith("_close_held"):
+                    up = up.f_back
+                if where == "walk" and up is not None and up.f_code is walk_code:
+                    while up is not None and up.f_code is walk_code:
+                        up = up.f_back
+                    if (up is not None and up.f_code is listing_code and up.f_locals.get("keep") is None
+                            and up.f_back is not None and up.f_back.f_code is txn_code):
+                        counted.append(fd)
+                        if len(counted) == 1:
+                            raise _InjectedCloseFault("{} close #1".format(where))
+                elif where == "sweep" and up is not None and up.f_code is sweep_code and len(counted) == 1:
+                    counted.append(fd)
+                    raise _InjectedCloseFault("{} close #1".format(where))
+
+            def counting_rmdir(path, *args, **kwargs):
+                real_rmdir_here(path, *args, **kwargs)
+                if sys._getframe(1).f_code is sweep_code:
+                    counted.append(path)
+            raised = None
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                saved_umask = os.umask(0o022)
+                try:
+                    root, files = fixture(temp)
+                    if where == "walk":
+                        os.makedirs(root / JOURNAL_REL / "a")
+                        os.makedirs(root / JOURNAL_REL / "b")
+                    baseline = _fds_open()
+                    with mock.patch.object(_journal, "_close_fd_quietly", counting_quiet), \
+                            mock.patch.object(os, "rmdir", counting_rmdir), \
+                            mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {counting_rmdir}):
+                        try:
+                            run_adopt_transaction(root, rid, compose_refused_here)
+                        except (AdoptApplyError, RuntimeError, KeyboardInterrupt) as exc:
+                            raised = exc
+                    leaked = sorted(_fds_open() - baseline)
+                finally:
+                    os.umask(saved_umask)
+            # the walk: one child close only (the other child is never opened); the sweep: its first rmdir,
+            # then its parent close, and no later rmdir
+            check(name, type(raised) is AdoptApplyError and len(counted) == (1 if where == "walk" else 2)
+                  and repr(_InjectedCloseFault("{} close #1".format(where))) in str(raised) and not leaked,
+                  observed="exception={!r} counted={!r} leaked={!r}".format(raised, counted, leaked))
         # 6a'''b3d: _journal_listing's own close-out (no `keep`: the closing listing of a refused run) runs
         # through _close_held too. An exception injected between a journal path component descriptor's
         # pop and its close (the patched close-out raises instead of closing) at the FIRST such close
@@ -4559,10 +4782,10 @@ def _self_test_checks():
                     real_release(journal_root)
                     seen["release ran"] = True
 
-                def interrupted_readback(jr_fd, keep=None):
+                def interrupted_readback(jr_fd, keep=None, raised=None):
                     if keep is None and seen.get("release ran"):
                         raise KeyboardInterrupt("an injected interrupt inside the release read-back")
-                    return real_identity(jr_fd, keep=keep)
+                    return real_identity(jr_fd, keep=keep, raised=raised)
 
                 def peer_before_closing_listing2(root_fd, keep=None, raised=None):
                     if keep is None and seen.pop("release ran", None):
