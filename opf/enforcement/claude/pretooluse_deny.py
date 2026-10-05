@@ -38,7 +38,8 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      there. Denied; OPF content changes only through the sanctioned writer (`opf record` and the other
      opf verbs, which run under their own write guard). Both the lexically normalized target and the
      realpath resolution OF THE ORIGINAL SPELLING are checked (symlinks resolve before any `..`
-     collapses), so neither an existing symlink nor a symlink-then-dotdot spelling evades R1.
+     collapses), so neither an existing symlink nor a symlink-then-dotdot spelling evades R1 at
+     the time of the check (a re-link between the check and the write is a disclosed residual).
   R2 adoption-archive writes. A target under `.working/archive/adoption/` is denied with the spec's own
      sentence: writes under `.working/archive/adoption/<run-id>/` are denied outright (spec 14.1).
      (R2 is a subset of R1; it exists so the archive denial is named, probed and reported on its own.)
@@ -50,8 +51,10 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
   R4 declared-view writes. Each machine-store manifest's views targets are declared view destinations;
      a target equal to one is denied (views change only through `opf render`; spec 5.8, 14.1).
   R5 Bash writes the matcher CAN see. EVERY Bash command is first dequoted WHOLE by a shell-aware
-     loose lexer (quoted spans, backslash escapes, ANSI-C dollar-quoted spans, word-start comments,
-     here-document bodies and arithmetic spans are read; ONLY the shell's own unquoted operator
+     loose lexer (quoted spans, backslash escapes, ANSI-C dollar-quoted spans decoded as bash
+     decodes them, a NUL escape ending the span, locale dollar-double-quoted spans read as ordinary
+     double-quoted spans, word-start comments, here-document delimiters and bodies read as bash
+     reads them, and arithmetic spans are read; ONLY the shell's own unquoted operator
      characters split words, so braces, carriage returns and the other literal pathname characters
      the shell keeps inside a word stay inside the word here too), so a quoted operand stays one
      word even when redirection or sequencing rides beside it, and a path spelled with a literal
@@ -59,11 +62,20 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      the shell would EXPAND (a comma or `..` between unquoted braces) DENIES as cannot-evaluate:
      the expansion could spell a protected path this lexer cannot see (a literal `{}` operand or a
      quoted brace stays a word; `${` is parameter expansion, the disclosed lexical floor).
+     A here-document body is DATA (each line one word) unless the command names a program that
+     runs code (a shell, eval or source, an interpreter such as python, perl or node, or xargs,
+     make, watch or su; `.` in command position): then every here-document body, as its consumer
+     receives it, and every word that could carry further shell syntax (a here-string, a -c or
+     eval argument) is ALSO read as a command, recursively, and a command substitution inside a
+     word (as inside double quotes) is always read as a command too.
      A command whose quote or here-document structure cannot be read to the end (an unterminated
      quote, a trailing backslash, an undecodable dollar-quote escape, an unreadable here-document
-     delimiter, an unclosed arithmetic span, an unquoted brace pattern the shell would
-     expand) DENIES as cannot-evaluate: the shell could run such a
-     command differently than this hook read it, and a partially read command is never judged. A
+     delimiter, a here-document whose delimiter line never appears, an unclosed arithmetic span, a
+     `<<` inside a bare (( arithmetic command, the obsolete $[ ] form, a literal NUL character, an
+     unquoted brace pattern the shell would expand, and a body or word a code-running program
+     would run that cannot itself be read as a command) DENIES as cannot-evaluate: the shell could
+     run such a command differently than this hook read it, and a partially read command is never
+     judged. A
      command whose raw text or dequoted words reference a protected token is denied unless the WHOLE
      command is a single plain invocation of the sanctioned writer (allowance A1 below); there is no
      other allowance. The protected tokens are the `.working` store tree (any substring spelling,
@@ -198,6 +210,15 @@ per-platform residual coverage carry the same list):
   - Per-clone installation and bypass: the settings.json registration is local configuration; a clone
     that never registered the hook runs no hook, and the same user can deregister or edit it
     (same-user tampering, canonical hand edits).
+  - The check is point-in-time: the hook resolves every path (realpath, roster discovery, the
+    machine-store test) in its own process BEFORE the tool runs, so a same-user change made
+    between the check and the tool's own open (a background job re-pointing a symlink, renaming a
+    directory or rewriting a roster) is not seen (a check-to-use race; same-user preparation, as
+    spec 14.1 accepts).
+  - A program that runs code is recognized by its literal name only (_runs_code): one reached
+    through a variable, alias, function or an unlisted name leaves its here-document body as
+    data, and a code-running program's own language (python string concatenation, an awk print
+    redirection) can spell any path; both fall under the lexical-floor residual above.
   - Platform hook-startup failures may fall through to the platform's normal permission flow.
   - Shell or interpreter wrapping of the platform itself is outside the hook's reach.
   - Over-approximation is the accepted cost of the fail-closed posture: R5/R7 deny EVERY
@@ -209,7 +230,12 @@ per-platform residual coverage carry the same list):
     absolute paths or operands than the discovery budget and an unknown-tool payload over the
     string-scan budget deny as cannot-evaluate even when reference-free, as does a command whose
     quote or here-document structure cannot be read to the end (the shell could run it differently
-    than the hook read it), a command carrying an unquoted brace pattern the shell would expand
+    than the hook read it), a here-document whose delimiter line never appears, a `<<` inside a
+    bare (( arithmetic command, a dollar-quote escape beyond ASCII or a control-character escape,
+    a command naming a code-running program whose here-document body, here-string or quoted
+    word cannot itself be read as a command (a python body with an escaped apostrophe, a quoted
+    argument such as "it's" beside python3), a command substitution that cannot itself be read,
+    a command carrying an unquoted brace pattern the shell would expand
     (`mkdir {a,b}`: the expansion could spell a protected path the lexer cannot see), an unknown
     tool's payload with no tool_input object or no absolute session cwd, and a TodoWrite
     (write-capable on some platforms, so no longer read-only-listed) whose todo text names a
@@ -224,7 +250,9 @@ per-platform residual coverage carry the same list):
     message, say) still trips R5.
   - The IMPORTED record series is NOT yet protected here: the leaves `worklog.imported.toml` and
     `<type>.imported.index.toml` DIRECTLY inside the machine store directory (exactly
-    `.working/<machine>/<leaf>`, no other depth) are exempt from R1 by name, because
+    `.working/<machine>/<leaf>`, no other depth, where `<machine>` is a plain directory whose
+    manifest.toml declares [opf] standard = "opf"; the same leaf in any other directory, an absent
+    one included, denies) are exempt from R1 by name, because
     enforcement MUST NOT ship before the writer can perform every operation it forces (spec 14.1) and
     the import writer (`opf record import --batch`, spec 8.8) has not shipped. The imported-series
     protection slice lands with or after that writer and removes this exemption.
@@ -341,6 +369,27 @@ ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9])/[A-Za-z0-9_./@%+,=~^-]+")
 _ASSIGNMENT_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*=")
 _PYTHON_RE = re.compile(r"\Apython(3(\.\d+)?)?\Z")
 _PYFLAGS_RE = re.compile(r"\A-[IBEsuPb]+\Z")
+# The programs that run their input or arguments as code (R5): a shell, eval or source, an
+# interpreter, or a program that hands its input or arguments to one (xargs and parallel run
+# commands built from stdin, make runs recipes through a shell, watch and su run a shell string).
+# Matched on a word's basename with an optional version suffix (python3.12, ksh93). `.` (source)
+# counts only in command position (SHELL_PREFIX_WORDS keep that position).
+_CODE_RUNNER_RE = re.compile(
+    r"\A(?:sh|bash|rbash|dash|ash|zsh|ksh|mksh|pdksh|oksh|yash|posh|csh|tcsh|fish|busybox|toybox"
+    r"|eval|source|xargs|parallel|make|gmake|bmake|watch|su|awk|gawk|mawk|nawk|python|pypy|perl"
+    r"|ruby|irb|node|nodejs|deno|bun|php|lua|luajit|tclsh|wish|expect|Rscript|osascript|pwsh"
+    r"|powershell)[0-9.]*\Z")
+# The words after which the next word still sits in command position (R5's `.` detection).
+SHELL_PREFIX_WORDS = frozenset(("!", "if", "then", "else", "elif", "do", "while", "until", "time",
+                                chr(123), "exec", "command", "builtin", "nohup", "env", "sudo"))
+# A word holding any of these characters could carry further shell syntax when a program runs it
+# as code (blanks, quotes, backslash, dollar, backquote, comment, braces, operators, newline).
+_NESTED_SYNTAX = frozenset(" " + chr(9) + chr(10) + chr(13) + chr(39) + chr(34) + chr(92) + chr(36)
+                           + chr(96) + "#" + chr(123) + chr(125) + ";&|<>()")
+_NESTED_REASON = ("a here-document body, here-string or word this command could run as code "
+                  "cannot itself be read as a command")
+# The recursion bound for code read as a command inside code (here-document bodies, -c strings).
+MAX_NESTING = 8
 
 SANCTIONED = ("OPF content changes only through the sanctioned writer: run the opf CLI (opf record, "
               "opf render, and the other opf verbs), or make the change outside the store's scope")
@@ -405,17 +454,34 @@ def _candidates(target, cwd):
     return sorted(set((norm, real)))
 
 
+def _is_machine_store(working, name):
+    """True only when `working`/`name` is a machine store: a plain directory (never a symlink)
+    whose manifest.toml is a readable regular file declaring [opf] standard = "opf" (spec 4.5).
+    Anything else, an absent or unreadable manifest included, is not the machine store."""
+    sub = os.path.join(working, name)
+    if not os.path.isdir(sub) or os.path.islink(sub):
+        return False
+    doc, reason = _read_roster_toml(os.path.join(sub, "manifest.toml"), "the machine-store manifest")
+    if reason is not None or not isinstance(doc, dict):
+        return False
+    base = doc.get(MANIFEST_STANDARD)
+    return isinstance(base, dict) and base.get("standard") == MANIFEST_STANDARD
+
+
 def _store_rule(candidate):
     """R1/R2 over one absolute candidate path: a deny reason, or None. The imported-series leaf
-    exemption (module docstring) applies only inside a machine-store candidate subdir."""
+    exemption (module docstring) applies only directly inside THE machine store (a store subdir
+    whose manifest declares the OPF standard), never inside another first-level directory."""
     comps = _components(candidate)
     if WORKING not in comps:
         return None
-    after = comps[comps.index(WORKING) + 1:]
+    index = comps.index(WORKING)
+    after = comps[index + 1:]
     if len(after) >= 2 and (after[0], after[1]) == ADOPTION_ARCHIVE:
         return ("writes under %s/archive/adoption/<run-id>/ are denied: the adoption archive holds "
                 "digest-bound preserved originals (spec 14.1). %s." % (WORKING, SANCTIONED))
-    if (len(after) == 2 and after[0] not in CONTROL_SUBDIRS and IMPORTED_LEAF_RE.match(after[1])):
+    if (len(after) == 2 and after[0] not in CONTROL_SUBDIRS and IMPORTED_LEAF_RE.match(after[1])
+            and _is_machine_store(os.sep + os.path.join(*comps[:index + 1]), after[0])):
         return None  # the imported-series machine-store leaves stay writer-less until the import writer ships
     if after and after[0] == "imported":
         return ("direct writes under %s/imported/ are denied: adoption and import evidence is written "
@@ -868,17 +934,25 @@ def _is_sanctioned_opf(tokens, cwd):
 
 def _ansi_c_span(text, start):
     """Decode one ANSI-C dollar-quoted span body beginning at `start` (just past the opening
-    quote): (characters, index past the closing quote, None), or (None, None, reason) when the span
-    is unterminated or carries an escape this hook cannot decode EXACTLY as the shell does (a
-    partially decoded operand could hide a protected spelling, so the caller fails closed)."""
+    quote) EXACTLY as bash does: (characters, index past the closing quote, None), or (None, None,
+    reason) when the span is unterminated or carries an escape this hook does not decode exactly
+    as the shell does (a partially decoded operand could hide a protected spelling, so the caller
+    fails closed). An escape that decodes to NUL (a zero octal, hex or unicode escape) ENDS the
+    decoded string, as in bash (the span is a C string): the rest of the span up to its closing
+    quote is read for its escapes but contributes nothing, and the word continues after the
+    quote. An octal escape is masked to one byte, as bash does; a byte or code point above ASCII
+    (its spelling depends on the shell's locale) and the escapes this hook does not implement
+    (control-character, braced-hex and unknown escapes) fail closed."""
     out = []
+    ended = False  # True once a NUL has ended the decoded string
     i, n = start, len(text)
     while i < n:
         ch = text[i]
         if ch == chr(39):
             return out, i + 1, None
         if ch != chr(92):
-            out.append(ch)
+            if not ended:
+                out.append(ch)
             i += 1
             continue
         i += 1
@@ -886,10 +960,9 @@ def _ansi_c_span(text, start):
             break
         esc = text[i]
         if esc in ANSI_SIMPLE:
-            out.append(ANSI_SIMPLE[esc])
+            value = ord(ANSI_SIMPLE[esc])
             i += 1
-            continue
-        if esc in ("x", "u", "U"):
+        elif esc in ("x", "u", "U"):
             width = dict(x=2, u=4, U=8)[esc]
             j = i + 1
             digits = []
@@ -899,26 +972,25 @@ def _ansi_c_span(text, start):
             if not digits:
                 return None, None, "a dollar-quoted escape this hook does not decode"
             value = int("".join(digits), 16)
-            if value > 0x10FFFF or (esc == "x" and value > 0x7F):
-                # a raw byte above ASCII or an out-of-range code point cannot be mapped
-                # faithfully onto the str paths this hook compares, so it fails closed.
-                return None, None, "a dollar-quoted escape this hook does not decode"
-            out.append(chr(value))
             i = j
-            continue
-        if esc in "01234567":
+        elif esc in "01234567":
             j = i
             digits = []
             while j < n and len(digits) < 3 and text[j] in "01234567":
                 digits.append(text[j])
                 j += 1
-            value = int("".join(digits), 8)
-            if value > 0x7F:
-                return None, None, "a dollar-quoted escape this hook does not decode"
-            out.append(chr(value))
+            value = int("".join(digits), 8) & 0xFF  # bash keeps the low byte
             i = j
-            continue
-        return None, None, "a dollar-quoted escape this hook does not decode"
+        else:
+            return None, None, "a dollar-quoted escape this hook does not decode"
+        if value > 0x7F:
+            # a raw byte or code point above ASCII is spelled through the shell's locale, which
+            # this hook cannot see, so it cannot be mapped faithfully and fails closed.
+            return None, None, "a dollar-quoted escape this hook does not decode"
+        if value == 0:
+            ended = True
+        elif not ended:
+            out.append(chr(value))
     return None, None, "an unterminated dollar-quoted span"
 
 
@@ -941,37 +1013,183 @@ def _mentions_rel(rel, text):
         start = i + 1
 
 
-def _loose_words(command):
-    """R5's shell-aware loose dequote of the WHOLE command: (words, None), or (None, reason) when
-    the quote or here-document structure cannot be read to the end. A quoted span joins the current
-    word (a quoted operand beside redirection or sequencing stays whole); ONLY an unquoted shell
-    operator character, space, tab or newline splits words (braces, carriage returns and the other
-    control characters stay IN the word, exactly as the shell keeps them: a pathname may carry
-    them literally); a word whose unquoted braces the shell would EXPAND (a comma or a double dot
-    between an unquoted brace pair; a dollar sign immediately before the brace is parameter
-    expansion, not brace expansion) is refused as a brace expansion this lexer cannot enumerate;
-    a word-start # comment runs to end of line; a here-document
-    body contributes each of its lines as one data word; and an arithmetic $((...)) span stays
-    inside its word (never a false here-document). Unlike _pristine_tokens this lexer reads EVERY
-    command; its words feed the roster token scan, the root binding and the word-resolution pass,
-    never any allowance."""
-    words = []
+def _heredoc_delimiter(command, i):
+    """Read one here-document delimiter word starting at `i` (just past `<<` or `<<-` and any
+    blanks) exactly as bash reads it: the word runs to the first unquoted blank, newline or operator
+    character; single quotes, double quotes (a backslash there drops only before a dollar sign,
+    backquote, double quote or backslash) and backslash escapes are removed, and ANY quoting marks
+    the delimiter quoted (its body then takes no line splicing and no expansion). Returns
+    (delimiter, quoted, index past the word, None) or (None, None, None, reason) for a form this
+    hook does not read exactly (a dollar sign or backquote, a newline inside the word, an
+    unterminated quote, no word at all)."""
+    n = len(command)
+    delim, quoted, start = [], False, i
+    while i < n:
+        dc = command[i]
+        if dc in (" ", chr(9), chr(10)) or dc in WORD_SEPARATORS:
+            break
+        if dc in (chr(36), chr(96)):
+            return None, None, None, "a here-document delimiter this hook cannot read"
+        if dc == chr(39):
+            end = command.find(chr(39), i + 1)
+            if end < 0:
+                return None, None, None, "an unterminated here-document delimiter"
+            delim.append(command[i + 1:end])
+            quoted = True
+            i = end + 1
+            continue
+        if dc == chr(34):
+            quoted = True
+            i += 1
+            while True:
+                if i >= n:
+                    return None, None, None, "an unterminated here-document delimiter"
+                c = command[i]
+                if c == chr(34):
+                    i += 1
+                    break
+                if c in (chr(36), chr(96)):
+                    return None, None, None, "a here-document delimiter this hook cannot read"
+                if c == chr(92) and i + 1 < n and command[i + 1] in DQ_ESCAPABLE:
+                    delim.append(command[i + 1])
+                    i += 2
+                    continue
+                delim.append(c)
+                i += 1
+            continue
+        if dc == chr(92):
+            if i + 1 >= n:
+                return None, None, None, "a trailing backslash"
+            delim.append(command[i + 1])
+            quoted = True
+            i += 2
+            continue
+        delim.append(dc)
+        i += 1
+    if i == start:
+        return None, None, None, "a here-document with no delimiter"
+    text = "".join(delim)
+    if chr(10) in text:
+        return None, None, None, "a here-document delimiter this hook cannot read"
+    return text, quoted, i, None
+
+
+def _heredoc_body(command, i, delim, strip_tabs, quoted):
+    """Read one here-document body starting at `i` (the start of the line after the operator's
+    command line) exactly as bash reads it: line by line, an UNQUOTED delimiter's body splicing
+    each backslash-newline pair away BEFORE the line is compared (a backslash before any other
+    character keeps both characters), `<<-` stripping leading tabs before the comparison, and the
+    body ending at the first line equal to the delimiter. Returns (lines, the body as the consumer
+    receives it, index past the delimiter line, None), or (None, None, None, reason) when no
+    delimiter line ends the body. The consumer's text applies the here-document expansion of an
+    unquoted body (a backslash before a dollar sign, backquote or backslash is removed; dollar and
+    backquote expansions stay as text, the disclosed lexical floor)."""
+    n = len(command)
+    lines = []
+    while i < n:
+        chars = []
+        while i < n:
+            c = command[i]
+            if c == chr(10):
+                i += 1
+                break
+            if c == chr(92) and not quoted:
+                if command[i + 1:i + 2] == chr(10):
+                    i += 2  # an unquoted body splices a backslash-newline pair away
+                    continue
+                chars.append(command[i:i + 2])
+                i += 2
+                continue
+            chars.append(c)
+            i += 1
+        line = "".join(chars)
+        if (line.lstrip(chr(9)) if strip_tabs else line) == delim:
+            text = chr(10).join(lines) + chr(10)
+            if not quoted:
+                text = re.sub(r"\\([$`\\])", r"\1", text)
+            return lines, text, i, None
+        lines.append(line)
+    return None, None, None, "a here-document whose delimiter line never appears"
+
+
+def _runs_code(word):
+    """True when `word` names a program that runs its input or arguments as code (a shell, eval,
+    source, an interpreter such as python, perl or node, or a program that hands its input to one:
+    xargs, make, watch, su), matched on the word's basename with an optional version suffix."""
+    return bool(_CODE_RUNNER_RE.match(os.path.basename(word)))
+
+
+def _substitutions(word):
+    """The command-substitution texts inside one word (a `$(` span to its balanced closing
+    parenthesis, or to the word's end when none balances, and a backquoted span), each read again
+    as a command: inside double quotes the shell still runs them."""
+    out = []
+    k = word.find("$(")
+    while k >= 0:
+        if word[k + 2:k + 3] == "(":
+            k = word.find("$(", k + 3)  # an arithmetic $(( span, read in place by _lex
+            continue
+        depth, j = 0, k + 1
+        while j < len(word):
+            if word[j] == "(":
+                depth += 1
+            elif word[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        out.append(word[k:j + 1])
+        k = word.find("$(", j + 1)
+    k = word.find(chr(96))
+    while k >= 0:
+        end = word.find(chr(96), k + 1)
+        out.append(word[k + 1:end] if end >= 0 else word[k + 1:])
+        if end < 0:
+            break
+        k = word.find(chr(96), end + 1)
+    return out
+
+
+def _lex(command):
+    """One pass of R5's shell-aware loose dequote (module docstring): (words, data, bodies,
+    command-position words, None) or (None, None, None, None, reason) when the structure cannot be
+    read to the end. `words` are the dequoted shell words; `data` are the here-document body lines
+    (each one data word); `bodies` are the here-document bodies as their consumer receives them."""
+    words, data, bodies, heads = [], [], [], []
     cur = []
     has = False
     pending = []
     braces = []    # open unquoted-brace records of the CURRENT word; [True] once expandable
     prev = None    # the last PLAIN unquoted character appended (None after any quoted span)
+    state = dict(head=True, redirect=False, arith=False)
+
+    def flush():
+        if has:
+            word = "".join(cur)
+            words.append(word)
+            if state["redirect"]:
+                state["redirect"] = False
+            elif state["head"]:
+                heads.append(word)
+                state["head"] = bool(_ASSIGNMENT_RE.match(word)) or word in SHELL_PREFIX_WORDS
+
+    if chr(0) in command:
+        # the shell may end the command at a NUL or drop the NUL, and this hook cannot tell which
+        return None, None, None, None, "a literal NUL character"
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
         if ch == chr(39):
             end = command.find(chr(39), i + 1)
             if end < 0:
-                return None, "an unterminated single-quoted span"
+                return None, None, None, None, "an unterminated single-quoted span"
             cur.append(command[i + 1:end])
             has = True
             prev = None
             i = end + 1
+            continue
+        if ch == chr(36) and command[i + 1:i + 2] == chr(34):
+            i += 1  # locale quoting reads as an ordinary double-quoted span
             continue
         if ch == chr(34):
             i += 1
@@ -979,14 +1197,14 @@ def _loose_words(command):
             prev = None
             while True:
                 if i >= n:
-                    return None, "an unterminated double-quoted span"
+                    return None, None, None, None, "an unterminated double-quoted span"
                 dq = command[i]
                 if dq == chr(34):
                     i += 1
                     break
                 if dq == chr(92):
                     if i + 1 >= n:
-                        return None, "an unterminated double-quoted span"
+                        return None, None, None, None, "an unterminated double-quoted span"
                     nxt = command[i + 1]
                     if nxt in DQ_ESCAPABLE:
                         if nxt != chr(10):
@@ -1001,7 +1219,7 @@ def _loose_words(command):
             continue
         if ch == chr(92):
             if i + 1 >= n:
-                return None, "a trailing backslash"
+                return None, None, None, None, "a trailing backslash"
             if command[i + 1] != chr(10):
                 cur.append(command[i + 1])
                 has = True
@@ -1011,21 +1229,23 @@ def _loose_words(command):
         if ch == chr(36) and command[i + 1:i + 2] == chr(39):
             got, nxt, reason = _ansi_c_span(command, i + 2)
             if reason is not None:
-                return None, reason
+                return None, None, None, None, reason
             cur.append("".join(got))
             has = True
             prev = None
             i = nxt
             continue
+        if ch == chr(36) and command[i + 1:i + 2] == chr(91):
+            return None, None, None, None, "an obsolete $[ ] arithmetic span"
         if ch == chr(36) and command[i + 1:i + 3] == "((":
             end = command.find("))", i + 3)
             if end < 0:
-                return None, "an unclosed arithmetic span"
+                return None, None, None, None, "an unclosed arithmetic span"
             span = command[i:end + 2]
             if chr(123) in span and ("," in span or ".." in span):
                 # brace expansion runs BEFORE arithmetic expansion and is purely textual, so an
                 # expandable brace pattern inside the span could split it into unseen words.
-                return None, "a brace expansion this hook does not enumerate"
+                return None, None, None, None, "a brace expansion this hook does not enumerate"
             cur.append(span)
             has = True
             prev = None
@@ -1038,34 +1258,29 @@ def _loose_words(command):
             i = end
             continue
         if ch == chr(10):
-            if has:
-                words.append("".join(cur))
+            flush()
             cur, has, braces, prev = [], False, [], None
+            state.update(head=True, redirect=False)
             i += 1
-            while pending:
-                delim, strip_tabs = pending.pop(0)
-                while i <= n:
-                    end = command.find(chr(10), i)
-                    stop = end if end >= 0 else n
-                    line = command[i:stop]
-                    i = end + 1 if end >= 0 else n
-                    marker = line.lstrip(chr(9)) if strip_tabs else line
-                    if marker == delim:
-                        break
-                    if line:
-                        words.append(line)
-                    if end < 0:
-                        break
+            for delim, strip_tabs, quoted in pending:
+                lines, text, i, reason = _heredoc_body(command, i, delim, strip_tabs, quoted)
+                if reason is not None:
+                    return None, None, None, None, reason
+                data.extend(line for line in lines if line)
+                bodies.append(text)
+            pending = []
             continue
         if ch == "<" and command[i:i + 3] == "<<<":
-            if has:
-                words.append("".join(cur))
+            flush()
             cur, has, braces, prev = [], False, [], None
             i += 3
             continue
         if ch == "<" and command[i:i + 2] == "<<":
-            if has:
-                words.append("".join(cur))
+            if state["arith"]:
+                # inside an arithmetic command `<<` is a left shift, not a here-document; this
+                # hook does not evaluate arithmetic commands, so it fails closed.
+                return None, None, None, None, "a << inside an arithmetic command"
+            flush()
             cur, has, braces, prev = [], False, [], None
             i += 2
             strip_tabs = command[i:i + 1] == "-"
@@ -1073,36 +1288,22 @@ def _loose_words(command):
                 i += 1
             while i < n and command[i] in (" ", chr(9)):
                 i += 1
-            delim = []
-            while i < n:
-                dc = command[i]
-                if dc in (" ", chr(9), chr(10)) or dc in WORD_SEPARATORS:
-                    break
-                if dc in QUOTES:
-                    end = command.find(dc, i + 1)
-                    if end < 0:
-                        return None, "an unterminated here-document delimiter"
-                    delim.append(command[i + 1:end])
-                    i = end + 1
-                    continue
-                if dc == chr(92):
-                    if i + 1 >= n:
-                        return None, "a trailing backslash"
-                    delim.append(command[i + 1])
-                    i += 2
-                    continue
-                if dc == chr(36):
-                    return None, "a here-document delimiter this hook cannot read"
-                delim.append(dc)
-                i += 1
-            if not delim:
-                return None, "a here-document with no delimiter"
-            pending.append(("".join(delim), strip_tabs))
+            delim, quoted, i, reason = _heredoc_delimiter(command, i)
+            if reason is not None:
+                return None, None, None, None, reason
+            pending.append((delim, strip_tabs, quoted))
             continue
         if ch in WORD_SEPARATORS or ch in (" ", chr(9)):
-            if has:
-                words.append("".join(cur))
+            flush()
             cur, has, braces, prev = [], False, [], None
+            if ch in ("<", ">"):
+                state["redirect"] = True
+            elif ch != " " and ch != chr(9):
+                state.update(head=True, redirect=False)
+            if ch == "(" and command[i + 1:i + 2] == "(":
+                state["arith"] = True
+            elif ch == ")" and command[i + 1:i + 2] == ")":
+                state["arith"] = False
             i += 1
             continue
         if ch == chr(123):
@@ -1110,7 +1311,7 @@ def _loose_words(command):
                 braces.append([False])
         elif ch == chr(125):
             if braces and braces.pop()[0]:
-                return None, "a brace expansion this hook does not enumerate"
+                return None, None, None, None, "a brace expansion this hook does not enumerate"
         elif ch == ",":
             if braces:
                 braces[-1][0] = True
@@ -1120,9 +1321,58 @@ def _loose_words(command):
         has = True
         prev = ch
         i += 1
-    if has:
-        words.append("".join(cur))
-    return words, None
+    flush()
+    if pending:
+        return None, None, None, None, "a here-document whose delimiter line never appears"
+    return words, data, bodies, heads, None
+
+
+def _loose_words(command, depth=0):
+    """R5's shell-aware loose dequote of the WHOLE command: (words, None), or (None, reason) when
+    the quote or here-document structure cannot be read to the end. A quoted span joins the current
+    word (a quoted operand beside redirection or sequencing stays whole); ONLY an unquoted shell
+    operator character, space, tab or newline splits words (braces, carriage returns and the other
+    control characters stay IN the word, exactly as the shell keeps them: a pathname may carry
+    them literally); a word whose unquoted braces the shell would EXPAND (a comma or a double dot
+    between an unquoted brace pair; a dollar sign immediately before the brace is parameter
+    expansion, not brace expansion) is refused as a brace expansion this lexer cannot enumerate;
+    a word-start # comment runs to end of line; an ANSI-C dollar-quoted span is decoded as bash
+    decodes it (a NUL ends it) and a locale dollar-double-quoted span reads as an ordinary
+    double-quoted span; a here-document delimiter and body are read as bash reads them (quote
+    removal on the delimiter, backslash-newline splicing in an unquoted body before the delimiter
+    comparison) and each body line is one DATA word; and an arithmetic $((...)) span stays inside
+    its word (never a false here-document), while a `<<` inside a bare (( arithmetic command and
+    the obsolete $[ ] form are refused. When a word of the command names a program that runs code
+    (_runs_code; `.` counts in command position), every here-document body (as its consumer
+    receives it) and every word that could carry further shell syntax (a here-string or a -c or
+    eval argument among them) is ALSO read as a command, recursively, and a body or word that
+    cannot be read that way is refused: the program could run it differently than this hook read
+    it. A word carrying a command substitution ($( or a backquote, as inside double quotes) is read
+    as a command from that point the same way. Unlike _pristine_tokens this lexer reads EVERY
+    command; its words feed the roster token scan, the root binding and the word-resolution pass,
+    never any allowance."""
+    words, data, bodies, heads, reason = _lex(command)
+    if reason is not None:
+        return None, reason
+    runs_code = any(_runs_code(w) for w in words) or "." in heads
+    nested = []
+    if runs_code:
+        nested.extend(bodies)
+        nested.extend(w for w in words if any(c in _NESTED_SYNTAX for c in w))
+    else:
+        for w in words:
+            nested.extend(_substitutions(w))
+    nested = [text for text in nested if text != command]
+    if nested and depth >= MAX_NESTING:
+        return None, "code nested deeper than %d levels" % (MAX_NESTING,)
+    for text in nested:
+        sub, reason = _loose_words(text, depth + 1)
+        if reason is not None:
+            if reason.startswith(_NESTED_REASON):
+                return None, reason
+            return None, "%s (%s)" % (_NESTED_REASON, reason)
+        words.extend(sub)
+    return words + data, None
 
 
 def _bound_roots(text, cwd, extras=()):
