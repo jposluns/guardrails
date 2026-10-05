@@ -48,7 +48,13 @@ reviewed edit here. Six legs:
       the two pack copies share with each other, must be identical: `inspect.getsource` for functions,
       (pattern, flags) for compiled regexes, equality for constants. Each pair is compared in one child
       [sys.executable, "-I", "-S", "-B", <this file>, "--parity-child", ...] that loads both files with
-      importlib. `_is_worker` and `_sibling_or_skip` must be absent from both pack copies. `_cfg` is
+      importlib. The child writes its structured result at interpreter shutdown, AFTER the loaded
+      files' own cleanup (non-daemon threads joined, their atexit hooks run), and the parent accepts
+      a verdict only with the zero exit, the complete result ending in its terminator line, and no
+      uncaught-exception traceback on the child's error stream (the fail-closed child-process rule,
+      secfcl; merge train 2 QA, claude MEDIUM): loaded code that faults in a thread or cleanup hook,
+      or ends the child from its cleanup, is a cannot-evaluate (exit 2), never a pass.
+      `_is_worker` and `_sibling_or_skip` must be absent from both pack copies. `_cfg` is
       excluded from the pairs with the Stop hook, because the preview Stop hook still reads the legacy
       spelling. A missing or unloadable pair file is a cannot-evaluate (exit 2), never a skip, so
       promoting or retiring the Stop hook forces a deliberate edit to PAIRS.
@@ -87,6 +93,7 @@ fixture set and manifest mismatch).
   check_hook_scripts.py             run the gate
   check_hook_scripts.py --self-test seeded faults against copies of the real files
 """
+import atexit
 import datetime
 import importlib.util
 import inspect
@@ -141,6 +148,9 @@ PAIRS = (
 )
 # Declared divergence: these names must be ABSENT from both pack copies.
 ABSENT_IN_PACK = ("_is_worker", "_sibling_or_skip")
+# Leg (p): the parity child's completeness terminator, written after the JSON result line at
+# the child's shutdown; a result without it was cut short by the loaded code's cleanup (secfcl).
+PARITY_COMPLETE = "AIQT-PARITY-RESULT-COMPLETE"
 
 
 class GateError(Exception):
@@ -580,8 +590,17 @@ def leg_parity(root, findings):
             shutil.rmtree(work, ignore_errors=True)
         if res.returncode != 0:
             raise GateError("(p) pair %s: cannot evaluate: %s" % (label, _bounded(res.stdout + res.stderr)))
+        if b"Traceback (most recent call last):" in res.stderr:
+            raise GateError("(p) pair %s: a fault on the comparison child's error stream over its "
+                            "zero exit; a cleanup or thread fault in loaded code is never a pass "
+                            "(secfcl): %s" % (label, _bounded(res.stderr)))
+        lines = res.stdout.decode("utf-8", "replace").splitlines()
+        if len(lines) < 2 or lines[-1] != PARITY_COMPLETE:
+            raise GateError("(p) pair %s: no complete structured result after the child's cleanup; "
+                            "loaded code that ends or cuts the child during cleanup leaves no "
+                            "verdict to accept (secfcl): %s" % (label, _bounded(res.stdout + res.stderr)))
         try:
-            diffs = json.loads(res.stdout.decode("utf-8"))
+            diffs = json.loads(lines[-2])
         except ValueError:
             raise GateError("(p) pair %s: unreadable comparison output" % label)
         for name in diffs:
@@ -598,9 +617,22 @@ def leg_parity(root, findings):
 
 
 def parity_child(spec):
-    """Child mode: load both files, print the JSON list of names that differ. Exit 2 if a file cannot be
-    loaded."""
+    """Child mode: load both files and compare the named objects. The structured result (one JSON
+    line holding the list of names that differ, then the PARITY_COMPLETE line) is written at
+    interpreter shutdown by an atexit hook registered BEFORE the pair is loaded: atexit is LIFO
+    and runs after non-daemon threads are joined, so the write comes after any cleanup the loaded
+    files registered, and loaded code that ends the child from its cleanup suppresses the result
+    instead of leaving an already-reported pass standing (the fail-closed child-process rule,
+    secfcl; merge train 2 QA, claude MEDIUM). Exit 2 if a file cannot be loaded."""
     path_a, path_b, funcs, regexes, consts = json.loads(spec)
+    outcome = []
+
+    def emit():
+        if outcome:
+            sys.stdout.write(json.dumps(outcome[0]) + "\n" + PARITY_COMPLETE + "\n")
+            sys.stdout.flush()
+
+    atexit.register(emit)
     mods = []
     for i, path in enumerate((path_a, path_b)):
         try:
@@ -624,7 +656,7 @@ def parity_child(spec):
                 diffs.append(name)
             elif kind == "const" and a != b:
                 diffs.append(name)
-    print(json.dumps(diffs))
+    outcome.append(diffs)
     return 0
 
 
@@ -714,7 +746,11 @@ def main(argv):
 # a basename present in .preview/ too; a manifest
 # script with no fixture set (cannot-evaluate); and for leg (p): a one-character change to a shared
 # constant, a changed shared function on either side, a changed regex, a drifted _cfg, _is_worker
-# reintroduced into a pack copy, and a missing pair file (exit 2). The unmodified copy must pass legs
+# reintroduced into a pack copy, a missing pair file (exit 2), and the secfcl child-process pair
+# (merge train 2 QA, claude MEDIUM; each a cannot-evaluate, and each passed before the parity child
+# met the rule): a seeded background-thread fault in a loaded file (zero exit, empty diffs, the
+# traceback only on the child's error stream) and a seeded cleanup os._exit(0) (the child ends
+# before its shutdown-written result). The unmodified copy must pass legs
 # (w), (k), (l), (d) and (p).
 
 _FAULT_HEAD = "def main(argv):\n"
@@ -993,6 +1029,26 @@ def self_test_main():
         findings, unver = run_gate(gone, legs=("p",))
         if not unver:
             failures.append("missing pair file: expected cannot-evaluate (exit 2), got %s" % findings)
+
+        # Merge train 2 QA, claude MEDIUM (secfcl): the parity verdict must cover the loaded
+        # code's cleanup. The seeded thread fault leaves the child's exit 0 and its diffs empty,
+        # so only the error-stream scan refuses it; the seeded cleanup os._exit(0) ends the child
+        # before the shutdown-written result, so only the completeness check refuses it. Both
+        # were a clean pass before the parity child met the fail-closed child-process rule.
+        for name, append, needle in (
+                ("cleanup-fault", "\n\nimport threading as _seeded_threading\n"
+                 "_seeded_threading.Thread(target=lambda: 1 // 0).start()\n",
+                 "fault on the comparison child's error stream"),
+                ("cleanup-exit", "\n\nimport atexit as _seeded_atexit\nimport os as _seeded_os\n"
+                 "_seeded_atexit.register(_seeded_os._exit, 0)\n",
+                 "no complete structured result after the child's cleanup"),
+        ):
+            root = fresh("p-" + name)
+            _patch(root / STOP_REL, "", "", append)
+            findings, unver = run_gate(root, legs=("p",))
+            if not any(needle in u for u in unver):
+                failures.append("parity %s: expected a cannot-evaluate containing %r, got %s %s"
+                                % (name, needle, findings, unver))
     except (GateError, OSError) as exc:
         failures.append("self-test setup failed: %s" % _bounded(exc))
     finally:
@@ -1011,8 +1067,9 @@ def self_test_main():
           "(legs (w) and (l)) in each of seven spellings of the script path, an extra direct entry, a "
           "duplicated entry, a dual-present basename, a changed shared "
           "constant, function (either side), regex or _cfg, and a reintroduced _is_worker are each "
-          "caught by their own check, and a missing pair file and a script with no fixture set are "
-          "cannot-evaluate")
+          "caught by their own check, and a missing pair file, a script with no fixture set, a seeded "
+          "thread fault on the parity child's error stream and a seeded cleanup exit that cuts "
+          "off its shutdown-written result are cannot-evaluate (secfcl)")
     return 0
 
 
