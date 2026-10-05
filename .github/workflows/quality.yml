@@ -187,6 +187,9 @@ jobs:
       - name: OPF adoption apply-shell self-test (clean-start adoption U1)
         run: python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
 
+      - name: OPF adoption state self-test (homes-1 adoption control area and bounded adoption state)
+        run: python3 -I -B opf/tools/_opf_adopt_state.py --self-test
+
       - name: OPF adoption enable-hook merge-core self-test (PR3 slice 1)
         run: python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
 
