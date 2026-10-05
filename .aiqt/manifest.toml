@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1d99e4fc666e682078c89e50372295c4b45b18e4a59c22f8ed2c39aa38f3a0fe"
+tree-sha256 = "e67761e72a36e05d70f5ecb37f09ee7a4d7df9ba623c58a0327bede05546770a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -46,8 +46,8 @@ sha256 = "566cdd353538798199eff9aef9aadb403e31ba9dda366b41d8abcc1ee560761c"
 
 [[sources]]
 path = ".aiqt/core/enforcement-roadmap.toml"
-bytes = 11495
-sha256 = "97d3b08f55413edabbccc035d7548a61a4750a8e4a05a6b1852cc116ccdaa978"
+bytes = 11515
+sha256 = "07a248d0ae1be0f0d02c64bc54138aee0fb7d842fc915e4fdebc31f857a75b09"
 
 [[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 250976
-sha256 = "80aab848d3697b883631accb677ba5e099df5947bd56b33cbdef851cfcd39bf3"
+bytes = 254929
+sha256 = "941517e5e768d12ff4d2c234a0eb94c5d2da6cc414f62e0a5dd8180212d494de"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -796,8 +796,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 331196
-sha256 = "90516777dea86c9650273348f54c9cf55c084dbdd73418090193ec0dd6e45fdc"
+bytes = 335609
+sha256 = "b9f81513d57d98b2581350ea98d0ab5dadc16c85e04b405d934dd00af568de07"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2241,8 +2241,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41446
-sha256 = "ba6894708b55299c5405d62f48efe385bc79c279c716e278aedef273416304f2"
+bytes = 41485
+sha256 = "2f080ffa44c8c42885023d60051a26fe86bbe5b2325c4e87a43337be80ea444b"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2306,8 +2306,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 186544
-sha256 = "f7f9b12038c6499918eae753094dd39eb4a917eebef9f2338276b84be6c6024b"
+bytes = 190556
+sha256 = "75e7ad6fa8b521c189b738fc1e6e807eb8baf1e3316ae521b7a98d7e73086bb9"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3056,8 +3056,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 233909
-sha256 = "bc023f225305a5ddd232ef5d9f9457d6078703e9bb2a3cf28ca5dc55f04eb599"
+bytes = 238428
+sha256 = "4037191af5047523ded156f6efb695363aa499826bbc44ccf3f6b5ca067e1edf"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3230,6 +3230,11 @@ bytes = 51591
 sha256 = "732d02c86582a9b19dacf41f8cc98bd0f8e786edf7459c1ea73ff80bccfa52ee"
 
 [[sources]]
+path = "tools/check_entry_guard.py"
+bytes = 42222
+sha256 = "9787ee614932e6a34d6296330ef5f06cdc04abb28c0e779c1bbbc6f7daf347ae"
+
+[[sources]]
 path = "tools/check_footer.py"
 bytes = 22176
 sha256 = "7839b82a8bcbf6246156aeb86f1df3317458fdb0a372a41a0b3bdcf61bc7db31"
@@ -3376,8 +3381,8 @@ sha256 = "683e94db8330824c5b73ee79164ec0d30ee555b2ba9b852af0a82e0a7b4b3f08"
 
 [[sources]]
 path = "tools/check_selftest_execution.py"
-bytes = 57364
-sha256 = "2844edc6d7ea5f3b60c694a0b548469c60d8e4a6b2acfc75b88c4a7a8cc07c43"
+bytes = 57693
+sha256 = "779db6263ca107b5219d016a99fb933d52cf4e349acf943e2a2321538c30497a"
 
 [[sources]]
 path = "tools/check_site.py"
@@ -3591,8 +3596,8 @@ sha256 = "21e3d8ae910d0c10103055d5c3fa992f72e2729d8a4e81b2634403b96c550d70"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 18481
-sha256 = "1defcc0af28d7d69cabb8ea506cdf63096e2643961c526c0284c36230724308c"
+bytes = 18654
+sha256 = "92ac757d8593279cb4c0d66bfcdea6cf6154ae58cc1431c76320c702819d574c"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -3606,8 +3611,8 @@ sha256 = "b448a94715f2f63ae90dfa035cd56d869fd3d9ff6767fdf307bcc34677b69123"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 40419
-sha256 = "8447cba3a4bd4848da43e329be4c63a958752fe33333d8ef8f0daf8e161a35d8"
+bytes = 40933
+sha256 = "596b7fefb52d87a04a8cfd45a9b0534a001c36b75377838edc381b79aede3c80"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
