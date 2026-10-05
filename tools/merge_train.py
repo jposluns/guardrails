@@ -745,6 +745,23 @@ def guard_commit_parents(scratch, old, new):
             parents[0] if parents else "(none)", old))
 
 
+def guard_ancestry(scratch, ancestor, descendant):
+    """True when ancestor is an ancestor of descendant, False when it is not, and Refuse
+    git-failed when git cannot tell. `merge-base --is-ancestor` is TRI-STATE: exit 0 is an
+    ancestor, exit 1 is not, and any other exit evaluated nothing (QA round 8, codex, observed on
+    git 2.53.0: exit 128 with "fatal: Not a valid commit name" when the base commit cannot be
+    read from the scratch's store, which a reader of "nonzero" took as "not an ancestor", so a
+    dry run reported would-merge after a git error). Only exit 0, or exit 1 with no stderr
+    output, is an answer; anything else is refused with git's exit code and stderr."""
+    rc, _out, err = _git(scratch, "merge-base", "--is-ancestor", ancestor, descendant, ok=None)
+    if rc == 0:
+        return True
+    if rc == 1 and not err.strip():
+        return False
+    raise Refuse("git-failed", "git merge-base --is-ancestor %s %s could not be evaluated "
+                 "(exit %d): %s" % (ancestor, descendant, rc, err.strip()[:300] or "(no stderr)"))
+
+
 def guard_fresh_checkout(ctx, scratch, new):
     """Refuse normal-checkout-failed unless the candidate commit also passes every declared check
     in a SECOND, normal private checkout: a fresh --shared clone of the private checkout with the
@@ -864,6 +881,7 @@ GUARDS = dict([
     ("scratch-complete", guard_scratch_complete),
     ("generated-confined", guard_generated_confined),
     ("pushed-bytes", guard_pushed_bytes),
+    ("ancestry", guard_ancestry),
     ("commit-parents", guard_commit_parents),
     ("commit-tree", guard_commit_tree),
     ("fresh-checkout", guard_fresh_checkout),
@@ -1169,7 +1187,7 @@ def _process_pr(ctx, apply):
              extra_env=dict(_ALTERNATE_FETCH_ENV), timeout=ctx["net_timeout"])
         if _git_text(scratch, "rev-parse", "FETCH_HEAD^0") != old:
             raise Refuse("pr-head-moved", "the remote head moved during the fetch")
-        if _git(scratch, "merge-base", "--is-ancestor", ctx["base_sha"], old, ok=None)[0] == 0:
+        if _guard("ancestry")(scratch, ctx["base_sha"], old):
             return dict(result="current", old_head=old, new_head=None, reason="")
         if not apply:
             return dict(result="would-merge", old_head=old, new_head=None,
@@ -1188,10 +1206,14 @@ def _merge_commit_push(ctx, scratch, old, base):
                  GIT_COMMITTER_NAME=ctx["cfg"]["commit"]["name"],
                  GIT_COMMITTER_EMAIL=ctx["cfg"]["commit"]["email"])
     scratch_git = _git_text(scratch, "rev-parse", "--path-format=absolute", "--git-dir")
-    _git(scratch, "merge", "--no-commit", "--no-ff", "--no-edit", base, extra_env=ident, ok=None,
-         timeout=ctx["cmd_timeout"])
+    # ok=None: a conflicted merge exits 1 and is handled below. A merge that did not start is
+    # refused with git's exit code and stderr (QA round 8, claude minor 2: a base-side object the
+    # store cannot supply was otherwise refused without naming its cause).
+    rc, _out, err = _git(scratch, "merge", "--no-commit", "--no-ff", "--no-edit", base,
+                         extra_env=ident, ok=None, timeout=ctx["cmd_timeout"])
     if not os.path.lexists(os.path.join(scratch_git, "MERGE_HEAD")):
-        raise Refuse("git-failed", "the merge did not start")
+        raise Refuse("git-failed", "the merge did not start (git merge exited %d): %s" % (
+            rc, err.strip()[:300] or "(no stderr)"))
     unmerged = _unmerged(scratch)
     _guard("source-conflict")(unmerged, generated)
     for path in sorted(unmerged):
@@ -1471,7 +1493,8 @@ CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 FAILURES = []
 EXECUTED = []
 _EXECUTED_SET = set()
-_RECORDER = dict(executed=_EXECUTED_SET, list=EXECUTED, failures=FAILURES)
+SKIPPED = []
+_RECORDER = dict(executed=_EXECUTED_SET, list=EXECUTED, failures=FAILURES, skipped=SKIPPED)
 
 TOY_GEN = r"""import hashlib, os, sys
 root = os.getcwd()
@@ -1570,13 +1593,28 @@ NINE = "".join("l%d\n" % n for n in range(1, 10))
 
 
 def check(name, got, want):
-    if name in _RECORDER["executed"]:
+    if name in _RECORDER["executed"] or name in [n for n, _why in _RECORDER["skipped"]]:
         print("SELF-TEST HARNESS ERROR: duplicate check id %r" % name, file=sys.stderr)
         sys.exit(2)
     _RECORDER["executed"].add(name)
     _RECORDER["list"].append(name)
     if got != want:
         _RECORDER["failures"].append("%s: got %r, want %r" % (name, got, want))
+
+
+def skip(name, why):
+    """Record a registered check that was NOT run: it stays out of the executed set (and so out of
+    the execution report and the executed count), and the verdict line names it as not run."""
+    if name in _RECORDER["executed"] or name in [n for n, _why in _RECORDER["skipped"]]:
+        print("SELF-TEST HARNESS ERROR: duplicate check id %r" % name, file=sys.stderr)
+        sys.exit(2)
+    _RECORDER["skipped"].append((name, why))
+
+
+def _can_read(path):
+    """Whether this process can still read path after its mode was set to 0 (root and a process
+    holding CAP_DAC_OVERRIDE can): OBSERVED, never inferred from the uid."""
+    return os.access(path, os.R_OK)
 
 
 ZERO = "0" * 40
@@ -3139,6 +3177,32 @@ def case_partial(tmp):
           (1, "scratch-incomplete", old, [], False, []))
     check("scratch/partial-clone-invariants", _invariants(fx), [])
     _unreadable_checkout(tmp)
+    _base_missing_blob(tmp)
+
+
+def _base_missing_blob(tmp):
+    # QA round 8 (claude minor 2, observed on git 2.53.0): the same partial-clone shape on the
+    # BASE side. A promised blob of the base tip is missing from the author's store; the private
+    # base fetch succeeds without it (its connectivity check trusts objects reachable from the
+    # alternate's refs) and `git merge` exits 2 with "error: unable to read sha1 file of
+    # src/a.txt". The refusal must carry git's exit code and stderr, so the cause is named.
+    fx = _fixture(tmp, "base-partial")
+    wt = fx.add_pr(1, "feat/x", dict([("src/b.txt", "bravo\n")]))
+    base = fx.advance_main(dict([("src/a.txt", NINE + "l10\n")]))
+    old = fx.remote_ref("feat/x")
+    blob = _git_text(fx.main, "rev-parse", base + ":src/a.txt")
+    for key, value in (("remote.origin.promisor", "true"),
+                       ("remote.origin.partialclonefilter", "blob:none")):
+        _git(fx.main, "config", key, value)
+    objects = _git_text(fx.main, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+    os.remove(os.path.join(objects, blob[:2], blob[2:]))
+    rc, reports, _fatal = fx.run(apply=True)
+    reason = "".join(r["reason"] for r in reports if r["pr"] == 1)
+    check("scratch/base-missing-blob-merge-refused-named",
+          (rc, _result(reports, 1), "git merge exited" in reason, "unable to read" in reason,
+           fx.remote_ref("feat/x"), fx.pushes(), _has_marker(wt)),
+          (1, "git-failed", True, True, old, [], False))
+    check("scratch/base-missing-blob-invariants", _invariants(fx), [])
 
 
 def _unreadable_checkout(tmp):
@@ -3146,18 +3210,18 @@ def _unreadable_checkout(tmp):
     # unreadable, `git status` prints "dir/file: Permission denied" on stderr, prints NOTHING on
     # stdout and exits 0, so a probe that reads stdout alone accepts the checkout. Both status
     # probes (scratch-complete right after the checkout, fixpoint after regenerate) must refuse
-    # by name. Root reads a mode-0 directory, so the error cannot be produced there: the checks
-    # are then recorded as a NAMED skip on stderr, never as an evaluated pass.
-    want = [("scratch-incomplete", True), ("regenerate-not-fixpoint", True)]
-    if os.geteuid() == 0:
-        print("SELF-TEST SKIP scratch/unreadable-checkout-refused and "
-              "scratch/unreadable-checkout-fixpoint-refused: running as root, which reads a "
-              "mode-0 directory, so the permission error cannot be produced", file=sys.stderr)
-        got = want = ["skipped-as-root", "skipped-as-root"]
-    else:
-        got = _unreadable_probe(tmp)
-    check("scratch/unreadable-checkout-refused", got[0], want[0])
-    check("scratch/unreadable-checkout-fixpoint-refused", got[1], want[1])
+    # by name. A process that still reads the mode-0 directory (root, CAP_DAC_OVERRIDE; observed
+    # with _can_read) cannot produce the error: the checks are then recorded as NOT RUN through
+    # skip(), out of the executed set and named in the verdict line, never as an evaluated pass.
+    got = _unreadable_probe(tmp)
+    if got is None:
+        for name in ("scratch/unreadable-checkout-refused",
+                     "scratch/unreadable-checkout-fixpoint-refused"):
+            skip(name, "this process reads a mode-0 directory, so the permission error cannot "
+                       "be produced")
+        return
+    check("scratch/unreadable-checkout-refused", got[0], ("scratch-incomplete", True))
+    check("scratch/unreadable-checkout-fixpoint-refused", got[1], ("regenerate-not-fixpoint", True))
 
 
 def _unreadable_probe(tmp):
@@ -3176,6 +3240,8 @@ def _unreadable_probe(tmp):
     got = []
     os.chmod(target, 0)
     try:
+        if _can_read(target):
+            return None
         for name in ("scratch-complete", "fixpoint"):
             try:
                 _guard(name)(scratch)
@@ -3190,7 +3256,8 @@ def _unreadable_probe(tmp):
 @contextlib.contextmanager
 def _object_unavailable(repo, sha, how):
     """A REAL read failure of one loose object of repo's store for the duration: "missing" moves
-    the file aside, "unreadable" sets its mode to 0; either is undone on exit."""
+    the file aside, "unreadable" sets its mode to 0; either is undone on exit. Yields the
+    object's path."""
     objects = _git_text(repo, "rev-parse", "--path-format=absolute", "--git-path", "objects")
     path = os.path.join(objects, sha[:2], sha[2:])
     if how == "missing":
@@ -3198,7 +3265,7 @@ def _object_unavailable(repo, sha, how):
     else:
         os.chmod(path, 0)
     try:
-        yield
+        yield path
     finally:
         if how == "missing":
             os.rename(path + ".aside", path)
@@ -3227,7 +3294,8 @@ def case_gitread(tmp):
     # missing commit exits 128) and commit-tree (rev-parse <missing>^{tree} exits 128) call git with
     # ok=(0,), so _git refuses git-failed. config-source (git show of a missing config blob exits
     # 128) reads as no config, which load_config fails closed as "not enabled", never as an empty
-    # config. Root reads a mode-0 file, so the unreadable variant is a NAMED skip there.
+    # config. A process that still reads a mode-0 file (observed with _can_read) cannot produce
+    # the unreadable variant, which is then recorded as NOT RUN through skip().
     src = Path(tmp) / "gitread-src"
     _git(tmp, "init", "--quiet", str(src))
     for rel, text in (("dir/file", "x\n"), ("top", "t\n"), (CONFIG_PATH, "version = 1\n")):
@@ -3256,16 +3324,14 @@ def case_gitread(tmp):
         got = _status_of(fresh)
     check("gitread/fresh-checkout-missing-blob-refused",
           (got[0], "unable to read" in str(got[1])), ("normal-checkout-failed", True))
-    if os.geteuid() == 0:
-        print("SELF-TEST SKIP gitread/fresh-checkout-unreadable-blob-refused: running as root, "
-              "which reads a mode-0 file, so the permission error cannot be produced",
-              file=sys.stderr)
-        got = want = "skipped-as-root"
+    with _object_unavailable(src, blob, "unreadable") as path:
+        got = None if _can_read(path) else _status_of(fresh)
+    if got is None:
+        skip("gitread/fresh-checkout-unreadable-blob-refused",
+             "this process reads a mode-0 file, so the permission error cannot be produced")
     else:
-        with _object_unavailable(src, blob, "unreadable"):
-            status, reason = _status_of(fresh)
-        got, want = (status, "Permission denied" in str(reason)), ("normal-checkout-failed", True)
-    check("gitread/fresh-checkout-unreadable-blob-refused", got, want)
+        check("gitread/fresh-checkout-unreadable-blob-refused",
+              (got[0], "Permission denied" in str(got[1])), ("normal-checkout-failed", True))
     check("gitread/fresh-checkout-removed",
           [p for p in SCRATCHES[made:] if os.path.exists(p)], [])
 
@@ -3289,6 +3355,98 @@ def case_gitread(tmp):
     check("gitread/config-source-missing-blob-fails-closed",
           (_status_of(lambda: _guard("config-source")(src, head))[1], got),
           ("version = 1\n", (None, "fail-closed")))
+
+
+def case_ancestry(tmp):
+    # QA round 8 (codex MEDIUM, observed on git 2.53.0): `merge-base --is-ancestor` exits 128
+    # when it cannot read a commit, and the PR step read every nonzero exit as "not an
+    # ancestor", so a dry run reported would-merge after a git error. The ancestry guard is
+    # tri-state. Legs: real git exits 0, 1 and 128; exit 1 WITH stderr (injected at _run_child,
+    # since no real read failure found here produces it); and the end-to-end dry run with the
+    # base commit's object moved aside for the duration of the real git call alone.
+    global _git, _run_child
+    src = Path(tmp) / "ancestry-src"
+    _git(tmp, "init", "--quiet", str(src))
+    shas = []
+    for n in range(2):
+        with open(str(src / "f"), "w", encoding="utf-8") as handle:
+            handle.write("%d\n" % n)
+        _git(src, "add", "f")
+        _git(src, "commit", "-q", "-m", "c%d" % n, extra_env=FIXTURE_IDENT)
+        shas.append(_git_text(src, "rev-parse", "HEAD"))
+    first, second = shas
+
+    def probe():
+        return _status_of(lambda: _guard("ancestry")(src, first, second))
+
+    with _object_unavailable(src, first, "missing"):
+        missing = probe()
+    check("ancestry/tri-state-real-exits",
+          (probe(), _status_of(lambda: _guard("ancestry")(src, second, first)), missing[0],
+           "(exit 128)" in str(missing[1])),
+          (("accepted", True), ("accepted", False), "git-failed", True))
+    real_child = _run_child
+
+    def exit_1_with_stderr(argv, **_kw):
+        return subprocess.CompletedProcess(list(argv), 1, b"", b"error: injected read failure\n")
+
+    _run_child = exit_1_with_stderr
+    try:
+        injected = probe()
+    finally:
+        _run_child = real_child
+    check("ancestry/exit-1-with-stderr-refused",
+          (injected[0], "injected read failure" in str(injected[1])), ("git-failed", True))
+    fx = _fixture(tmp, "ancestry")
+    wt = _stale_pr(fx)
+    old, base = fx.remote_ref("feat/x"), fx.remote_ref("main")
+    real_git = _git
+
+    def unreadable_base(cwd, *args, **kw):
+        if args[:2] != ("merge-base", "--is-ancestor"):
+            return real_git(cwd, *args, **kw)
+        with _object_unavailable(fx.main, base, "missing"):
+            return real_git(cwd, *args, **kw)
+
+    _git = unreadable_base
+    try:
+        rc, reports, _fatal = fx.run(apply=False)
+    finally:
+        _git = real_git
+    reason = "".join(r["reason"] for r in reports if r["pr"] == 1)
+    check("ancestry/dry-run-unreadable-base-refused",
+          (rc, _result(reports, 1), "(exit 128)" in reason, fx.remote_ref("feat/x"),
+           fx.pushes(), _has_marker(wt)),
+          (1, "git-failed", True, old, [], False))
+    check("ancestry/invariants", _invariants(fx), [])
+
+
+def case_rootskip(tmp):
+    # QA round 8 (claude minor 1): as root the permission checks were counted as executed and
+    # passed. With _can_read forced true (what root observes), the three permission checks must
+    # be recorded as NOT RUN, kept out of the executed set, with no failure recorded.
+    global _can_read
+    names = ["gitread/fresh-checkout-unreadable-blob-refused",
+             "scratch/unreadable-checkout-fixpoint-refused", "scratch/unreadable-checkout-refused"]
+    saved, real = dict(_RECORDER), _can_read
+    inner = dict(executed=set(), list=[], failures=[], skipped=[])
+    _RECORDER.update(inner)
+
+    def reads_everything(_path):
+        return True
+
+    sub = tempfile.mkdtemp(prefix="rootskip-", dir=tmp)
+    _can_read = reads_everything
+    try:
+        _unreadable_checkout(sub)
+        case_gitread(sub)
+    finally:
+        _can_read = real
+        _RECORDER.update(saved)
+    check("selftest/unreadable-skips-not-counted-as-run",
+          (sorted(set(names) & inner["executed"]), sorted(n for n, _why in inner["skipped"]),
+           inner["failures"]),
+          ([], names, []))
 
 
 def case_signal(tmp):
@@ -3811,12 +3969,18 @@ CASES = dict([
     ("cli", case_cli), ("refmap", case_refmap), ("basefetch", case_basefetch),
     ("leak", case_leak), ("partial", case_partial), ("signal", case_signal),
     ("crlf", case_crlf), ("latepush", case_latepush), ("rename", case_rename),
-    ("gitread", case_gitread),
+    ("gitread", case_gitread), ("ancestry", case_ancestry), ("rootskip", case_rootskip),
 ])
 
 
 def _noop(*_args, **_kwargs):
     return None
+
+
+def _ancestry_reverted(scratch, ancestor, descendant):
+    """The reverted ancestry guard: every nonzero exit, a failed read included, reads as "not an
+    ancestor"."""
+    return _git(scratch, "merge-base", "--is-ancestor", ancestor, descendant, ok=None)[0] == 0
 
 
 def _reraise(exc):
@@ -3840,6 +4004,7 @@ REVERTS = dict([
     ("scratch-complete", (_noop, "partial")),
     ("generated-confined", (_noop, "symlink")),
     ("pushed-bytes", (_noop, "filter")),
+    ("ancestry", (_ancestry_reverted, "ancestry")),
     ("commit-parents", (_noop, "tamper")),
     ("commit-tree", (_noop, "tamper")),
     ("fresh-checkout", (_noop, "crlf")),
@@ -3862,7 +4027,7 @@ def _red_on_revert(tmp):
     for name, (revert, case) in REVERTS.items():
         saved = GUARDS[name]
         GUARDS[name] = revert
-        _RECORDER.update(executed=set(), list=[], failures=[])
+        _RECORDER.update(executed=set(), list=[], failures=[], skipped=[])
         try:
             sub = tempfile.mkdtemp(prefix="red-%s-" % name, dir=tmp)
             _run_case(case, sub)
@@ -3870,7 +4035,7 @@ def _red_on_revert(tmp):
             GUARDS[name] = saved
         if not _RECORDER["failures"]:
             stale.append("%s (case %s)" % (name, case))
-    _RECORDER.update(executed=_EXECUTED_SET, list=EXECUTED, failures=FAILURES)
+    _RECORDER.update(executed=_EXECUTED_SET, list=EXECUTED, failures=FAILURES, skipped=SKIPPED)
     return stale
 
 
@@ -3925,10 +4090,13 @@ def self_test(red_on_revert=False, report_path=None):
     expected = _expected_check_ids()
     if expected is None:
         return 2
-    for check_id in sorted(expected - _EXECUTED_SET):
+    not_run = set(n for n, _why in SKIPPED)
+    for check_id in sorted(expected - _EXECUTED_SET - not_run):
         FAILURES.append("execution-set/missing: %s" % check_id)
-    for check_id in sorted(_EXECUTED_SET - expected):
+    for check_id in sorted((_EXECUTED_SET | not_run) - expected):
         FAILURES.append("execution-set/extra: %s" % check_id)
+    for check_id, why in SKIPPED:
+        print("SELF-TEST NOT RUN %s: %s" % (check_id, why), file=sys.stderr)
     for guard in stale:
         FAILURES.append("red-on-revert: reverting guard %s left its case green" % guard)
     if FAILURES:
@@ -3936,8 +4104,10 @@ def self_test(red_on_revert=False, report_path=None):
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: %d unique checks executed; execution set reconciled against "
+    print("SELF-TEST PASS: %d unique checks executed; %sexecution set reconciled against "
           "tools/selftest_checks.toml%s" % (len(EXECUTED), (
+              "%d registered checks NOT RUN (%s), not counted as executed; " % (
+                  len(SKIPPED), ", ".join(n for n, _why in SKIPPED))) if SKIPPED else "", (
               "; all %d guards in GUARDS went red when reverted" % len(REVERTS))
               if red_on_revert else ""))
     return 0

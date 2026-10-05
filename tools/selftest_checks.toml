@@ -810,6 +810,8 @@ expected-check-ids = [
   "scratch/partial-clone-invariants",
   "scratch/unreadable-checkout-refused",
   "scratch/unreadable-checkout-fixpoint-refused",
+  "scratch/base-missing-blob-merge-refused-named",
+  "scratch/base-missing-blob-invariants",
   # ---------- QA round 8: GUARDS git calls over a real object read failure ----------
   "gitread/fresh-checkout-baseline-accepted",
   "gitread/fresh-checkout-missing-blob-refused",
@@ -818,6 +820,12 @@ expected-check-ids = [
   "gitread/pushed-bytes-missing-object-refused",
   "gitread/commit-guards-missing-commit-refused",
   "gitread/config-source-missing-blob-fails-closed",
+  # ---------- QA round 8: tri-state ancestry; permission checks not run are not counted ----------
+  "ancestry/tri-state-real-exits",
+  "ancestry/exit-1-with-stderr-refused",
+  "ancestry/dry-run-unreadable-base-refused",
+  "ancestry/invariants",
+  "selftest/unreadable-skips-not-counted-as-run",
   "signal/sigterm-cleans-up",
   "signal/sighup-cleans-up",
   "signal/sigquit-cleans-up",
