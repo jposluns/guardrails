@@ -100,8 +100,12 @@ def _in_loaded(what, call, *args):
     loaded code can never end the gate with its own status: ANY exception (every BaseException, SystemExit
     0, None or a non-int code included) becomes CANNOT-EVALUATE (exit 2) with a fixed message naming `what`,
     except a KeyboardInterrupt, which is re-raised after a fixed message as a fresh KeyboardInterrupt (its
-    context suppressed) so it stops the runner. Residuals, not covered: os._exit, atexit handlers, signal handlers, threads the loaded code starts,
-    interpreter shutdown, mutation of sys or of this module's globals by the loaded code, deliberately
+    context suppressed) so it stops the runner. Background fault channels are settled at this gate's entry
+    (_fail_closed_main): a fault ending a worker thread or a destructor is recorded by the hooks installed
+    there and forces exit 2 over a passing verdict, and the verdict ends the process with os._exit, so an
+    atexit callback registered by loaded code never runs after it. Residuals, not covered: os._exit called
+    by the loaded code itself, signal handlers it installs, mutation of sys or of this module's globals by
+    the loaded code, deliberately
     hostile objects (the one residual stated in the _opf_views class disclosure), and a
     process exit raised while this module's own top-level imports run, before this guard is entered."""
     try:
@@ -415,11 +419,168 @@ def _self_test():
     _expect(labels[0] == "F01" and labels[-1] == "F30" and len(labels) == 30, "F-range")
     _expect(ACTOR_LINE.count('"') == 8, "actor line shape")
     _self_test_loaded_exit()
+    _self_test_fault_channels()
     sys.stdout.write("PASS check_opf_init_contract self-test\n")
     sys.exit(0)
 
 
+
+# --- background fault channels of code loaded in process (atexit, worker thread, destructor) ----------
+# Fail-closed settlement for the background fault channels of the code this gate loads and runs in
+# process. _fail_closed_main installs the recorders BEFORE the gate's work (so before any in-process
+# load) and settles them AFTER it: a fault the interpreter reports only to stderr (a destructor, weakref
+# or similar callback through sys.unraisablehook; an unhandled exception ending a worker thread through
+# threading.excepthook) is recorded and forces exit 2 over a passing verdict, never a silent pass; the
+# verdict then ends the process with os._exit, so an atexit callback registered by loaded code can never
+# run after it (that channel is unreachable, not merely disclosed). A SystemExit ending a worker thread
+# is the interpreter's normal thread exit (default-hook parity) and is not recorded. Each recorder
+# chains to the hook it wrapped, so the usual traceback still reaches stderr after the marker line.
+# Paths that end outside _gate_exit (a propagating KeyboardInterrupt, an escaping exception) already end
+# non-zero, and an ACCIDENTAL fault in an atexit callback cannot turn that non-zero end into exit 0, so
+# no background fault reads as a pass there. Residual: loaded code replacing these hooks, this record or
+# the exit itself is the reporting-machinery channel disclosed once in the _opf_views class disclosure
+# (D-411-HOSTILE-DISCLOSED).
+_LOADED_FAULTS = []
+_FAULT_MARKER = "LOADED-CODE-FAULT"
+
+
+def _install_fault_hooks():
+    import threading
+
+    previous_unraisable = sys.unraisablehook
+    previous_thread = threading.excepthook
+
+    def _record(channel, chained, args):
+        _LOADED_FAULTS.append(channel)
+        try:
+            sys._loaded_code_fault = True
+            sys.stderr.write("{}: a {} fault was recorded; a passing verdict will fail closed\n".format(
+                _FAULT_MARKER, channel))
+        finally:
+            chained(args)
+
+    def _record_unraisable(args):
+        _record("destructor-or-callback", previous_unraisable, args)
+
+    def _record_thread(args):
+        if args.exc_type is not None and issubclass(args.exc_type, SystemExit):
+            previous_thread(args)
+        else:
+            _record("worker-thread", previous_thread, args)
+
+    sys.unraisablehook = _record_unraisable
+    threading.excepthook = _record_thread
+
+
+def _gate_exit(code):
+    """Settle and END the process: flush both streams, force a recorded background fault to exit 2 over a
+    passing verdict, then os._exit, so no atexit callback registered by loaded code runs after the verdict
+    (the gate's own cleanup runs inside its work; this gate registers no atexit work of its own)."""
+    import os
+    if type(code) is bool:
+        code = 1 if code else 0
+    elif code is None:
+        code = 0
+    elif type(code) is not int:
+        # The code object is never formatted: a loaded object's __str__ must not run here.
+        sys.stderr.write("{}: a non-int SystemExit code at the gate entry; exit 1\n".format(_FAULT_MARKER))
+        code = 1
+    if code == 0 and (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False)):
+        sys.stderr.write("{}: {} background fault(s) from loaded code over a passing verdict; "
+                         "fail-closed\n".format(_FAULT_MARKER, len(_LOADED_FAULTS) or 1))
+        code = 2
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        if code == 0:
+            code = 2
+    os._exit(code)
+
+
+def _fail_closed_main(run):
+    """The canonical process entry: install the fault recorders, run the gate's own work, settle, end."""
+    _install_fault_hooks()
+    try:
+        code = run()
+    except SystemExit as exc:
+        code = exc.code
+    _gate_exit(code)
+
+
+# The background fault channels, each driven through this gate's REAL entry in a child: the probe runs
+# this file with run_name "__main__" and wraps runpy.run_path so the gate's own validator load is followed
+# by a load of one fixture, the way a validator fault would arrive. An atexit callback registered by
+# loaded code never runs (unreachable behind os._exit); a worker-thread fault and a destructor fault are
+# recorded by the hooks installed before the load and force exit 2 over the passing verdict.
+_FAULT_CHANNEL_PROBE = """import runpy, sys
+gate, fixture = sys.argv[1:3]
+real = runpy.run_path
+def hooked(path, *args, **kwargs):
+    loaded = real(path, *args, **kwargs)
+    real(fixture)
+    return loaded
+runpy.run_path = hooked
+real(gate, run_name="__main__")
+"""
+
+# (label, fixture source, expected exit, marker required, text that must NOT appear on stderr)
+_FAULT_CHANNEL_CASES = (
+    ("clean", "x = 1\n", 0, False, None),
+    ("atexit", "import atexit, sys\n"
+     "def callback():\n"
+     "    sys.stderr.write('FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "    raise RuntimeError('fault-fixture-atexit')\n"
+     "atexit.register(callback)\n", 0, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("joined-thread", "import threading\n"
+     "def fault():\n"
+     "    raise RuntimeError('fault-fixture-thread')\n"
+     "worker = threading.Thread(target=fault)\n"
+     "worker.start()\n"
+     "worker.join()\n", 2, True, None),
+    ("destructor", "import gc\n"
+     "class Fault:\n"
+     "    def __del__(self):\n"
+     "        raise RuntimeError('fault-fixture-destructor')\n"
+     "Fault()\n"
+     "gc.collect()\n", 2, True, None),
+)
+
+
+def _self_test_fault_channels():
+    """Each fault-channel case must end the child as required: the expected exit code, the fault marker
+    exactly when a fault must be recorded, and for the atexit case no trace of the callback (it must never
+    run). Red without the entry wrapper: the gate then ends 0 for every channel (the atexit child with the
+    callback's trace on stderr, the thread and destructor children with the default hooks' output alone),
+    where the atexit case requires a clean stderr and the other two require exit 2 with the marker."""
+    import subprocess
+    import tempfile
+    failures = []
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="opf-init-contract-fault-channel-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
+        for index, (label, body, expected, marked, absent) in enumerate(_FAULT_CHANNEL_CASES):
+            case = Path(tmp) / "fault_channel_{}.py".format(index)
+            case.write_text(body, encoding="utf-8")
+            try:
+                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                       capture_output=True, text=True, timeout=120)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("fault-channel/{}: probe did not run ({})".format(label, type(exc).__name__))
+                continue
+            if child.returncode != expected:
+                failures.append("fault-channel/{}: expected exit {}, got {}".format(
+                    label, expected, child.returncode))
+            elif marked != ((_FAULT_MARKER + ":") in child.stderr):
+                failures.append("fault-channel/{}: fault marker {}".format(
+                    label, "absent" if marked else "present"))
+            elif absent is not None and absent in child.stderr:
+                failures.append("fault-channel/{}: the atexit callback ran".format(label))
+    _expect(not failures, "fault-channel vectors: " + "; ".join(failures))
+
+
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
-        _self_test()
-    _checks()
+        _fail_closed_main(_self_test)
+    _fail_closed_main(_checks)
