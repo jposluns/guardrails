@@ -236,7 +236,9 @@ SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install.html",
                      "opf/site/adopt.md", "opf/site/adopt.html", "opf/spec/OPF-QUICKSTART.md",
                      ".preview/README.md")
-SURFACE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
+# A repo-relative .py path. A segment may open with one dot (a hidden directory such as .preview); a
+# segment that is . or .. is refused separately (load_source).
+SURFACE_RE = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
 FLOOR_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)")
 FLAG_SETS = ((), ("-O",), ("-OO",))
 CHILD_TIMEOUT = 60
@@ -1104,6 +1106,9 @@ def _self_test_cases(base):
           2)
     check("source/escaping-surface-cannot-evaluate",
           evaluate(_fixture(base, source=_source_text(surfaces=["../demo.py"])))[0], 2)
+    check("source/hidden-dir-surface-passes", evaluate(_fixture(
+        base, source=_source_text(surfaces=[".preview/demo.py"]),
+        files={".preview/demo.py": demo["tools/demo.py"]}))[0], 0)
     check("source/unsorted-surfaces-cannot-evaluate", evaluate(_fixture(
         base, source=_source_text(surfaces=["tools/demo.py", "tools/a.py"]),
         files={"tools/a.py": _entry(guard_text("a.py", floor)), **demo}))[0], 2)

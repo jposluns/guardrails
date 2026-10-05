@@ -19,6 +19,12 @@
 format-version = 1
 python-floor = "3.14"
 guarded-surfaces = [
+    ".preview/clock-inject.py",
+    ".preview/future-stamp-write.py",
+    ".preview/record-remove-check.py",
+    ".preview/stamp-truth-stop.py",
+    ".preview/unbounded-wait.py",
+    ".preview/ungated-record.py",
     "opf/tools/_journal.py",
     "opf/tools/_opf_absorb.py",
     "opf/tools/_opf_adopt.py",

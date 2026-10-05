@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "433e715d919b2e3c9605eddd27cb5bb4fcc80fba7946e28db364a946dc8ee270"
+tree-sha256 = "3259c6b394c1ad2f8e8379180b510d25879e3a871e10d41884d5b6b1f209c72a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -111,8 +111,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 2840
-sha256 = "058d0fadd9aa7ba18ec917f598ae57d0d2b53442b5430f617ad35334f54b5251"
+bytes = 3053
+sha256 = "1dde0edd6d8b58911cb9b546577a14f5dec437c4b2bf50a8f005cf8e23f67ff8"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2251,43 +2251,43 @@ sha256 = "100ac19dceab9be4d4278453b880deba79a043839323cdf13d154cba0c8cdea1"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 23148
-sha256 = "808fb8dd662bb888b1d302191a0596b8675dc6491eb68a38be238f0bdcdff7bc"
+bytes = 23945
+sha256 = "ecefea92651bd46401348c21c3e349ee787a6cc951ab569b9217521b99ee6a94"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 636
-sha256 = "c8e807be66c7390f99b1a19cd39fc849b007b2e1bc8e534f4657eac206270c46"
+sha256 = "6da2556bc873d96a55ece06fffb9f0d5bda7a378941ab20d3a71ce77146261e0"
 
 [[sources]]
 path = ".preview/clock-inject.py"
-bytes = 63009
-sha256 = "65fe1cae733f72d2f82b884b9bb710310b0b6ad0dcccd8c874c5f2bdd2e25386"
+bytes = 63327
+sha256 = "c29c3849bee5a3d2e3a6ea4fdaf453fba08ed8c71c64a933b216947f9156074a"
 
 [[sources]]
 path = ".preview/future-stamp-write.py"
-bytes = 421778
-sha256 = "77d4f32496bde3593845aba73f84dc1498c2ece83c380d491e642885f211c5e9"
+bytes = 422102
+sha256 = "4a33429f732bb2319f3c0f579b8f6d633d503103d4fef0e07d283b902a399a5a"
 
 [[sources]]
 path = ".preview/record-remove-check.py"
-bytes = 174808
-sha256 = "815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f"
+bytes = 175133
+sha256 = "0fb0a63d0635441d079a477ed5840a61ec5fc91726eb6ab223648df282dd0382"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 326079
-sha256 = "92ad7d0b93ddb1a5eefa57b1534ac8cc405ebb0df8f4b892b3754403d2b55e4d"
+bytes = 326401
+sha256 = "00c2443c7f73dad00b9fdcd7ae2f0722ab757bf33406d4d7ca8506f20f999eb7"
 
 [[sources]]
 path = ".preview/unbounded-wait.py"
-bytes = 112423
-sha256 = "06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd"
+bytes = 112743
+sha256 = "2b41eaf1281d049bbd9fa3b8670bc4f28c861f7d86bd248438bd639cb0ecef8f"
 
 [[sources]]
 path = ".preview/ungated-record.py"
-bytes = 127841
-sha256 = "286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd"
+bytes = 128161
+sha256 = "0d56b109d885260d38332f36cd451b4d46488daea0c82e6976cbae1fca862c2b"
 
 [[sources]]
 path = "AGENTS.md"
@@ -3326,8 +3326,8 @@ sha256 = "83cf95b293c000625a35643929b82e23eeadb2770ad9dad0ac1604767437597f"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 100574
-sha256 = "52ed78165f31396d3f4de5be88caf029655360f2466fc29f2ed7afe09079cd68"
+bytes = 100942
+sha256 = "a124b6caa29b4b9a8f5ec43ec681d390bfa8521d7f9bb79e947d8f45510b3712"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -3606,8 +3606,8 @@ sha256 = "b448a94715f2f63ae90dfa035cd56d869fd3d9ff6767fdf307bcc34677b69123"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 40086
-sha256 = "6bb74eae6483046b420119fa3ae043cd61c6cee00b8857c5bff0de581d927a20"
+bytes = 40124
+sha256 = "890660f29506970cad70f61d4a558f0449961736b7b59318b5e6d99e97283b97"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

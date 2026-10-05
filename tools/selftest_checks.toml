@@ -907,6 +907,7 @@ expected-check-ids = [
   "source/malformed-floor-cannot-evaluate",
   "source/non-bool-switch-cannot-evaluate",
   "source/escaping-surface-cannot-evaluate",
+  "source/hidden-dir-surface-passes",
   "source/unsorted-surfaces-cannot-evaluate",
   "source/missing-surface-cannot-evaluate",
   "source/wrong-floor-finding",
