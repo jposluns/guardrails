@@ -29,25 +29,30 @@ reverse swap (10.3/10.6), with NO 9.3 journal and NO lock. The corrupt-state car
 DEFERRED at this release (they refuse fail-closed); a migration cutover journal is DETECTED (it blocks a pin)
 but is reconciled by the deferred migration tool, never here.
 
-Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition.
+Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition. An
+interpreter older than Python 3.14 is refused at exit 2 before anything runs.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: pin.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import json
 import os
 import stat
-import sys
 import time
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402  the 9.3 engine: contained fd-bound helpers (open/read/lstat/apply/is_terminal)
 import _optlevel  # noqa: E402  level-0 source parse for the docstring check, shared with opf/tools
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: pin.py requires Python 3.11+ (tomllib).")
 
 EXIT_OK = 0
 EXIT_FINDING = 1

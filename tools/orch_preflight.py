@@ -4,8 +4,17 @@ would act on, so the orchestrator sees per-item (id, class, proof) BEFORE yieldi
 re-enumerate authoritatively at yield time; this CLI adds visibility, never enforcement, and
 escalating it to a required permit is a recorded phase-2 option.
   orch_preflight.py [stop|idle|drain]   exit 0 with the table; exit 2 on no registry or a bad operation
+  An interpreter older than Python 3.14 is refused at exit 2 before anything runs.
 """
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: orch_preflight.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
