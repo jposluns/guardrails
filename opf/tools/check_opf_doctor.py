@@ -91,15 +91,21 @@ tracked pack directory included, an existing pre-commit hook, an unreadable pack
 (unprivileged user only) and a hooks path that is not a directory; an inherited GIT_DIR naming another
 repository cannot redirect it, and a missing dirname run from another repository's pack directory installs
 nowhere (2). Inherited GIT_TRACE and GIT_TRACE2 destinations naming another repository's tracked file leave
-it unchanged, for the installer and for the hook. A stub that does not read back (no cat) is removed, with
+it unchanged, for the installer and for the hook. A stub that does not read back (no cmp) is removed, with
 the hooks directory the run created. The destination is confined to the clone's common git directory: a
 hooks directory that is a symbolic link (to another repository's hooks directory, or to a tracked directory
-of the working tree) and a git directory inside the working tree under no .git component are refused with
-nothing written there. A core.hooksPath only another linked worktree reads (its config.worktree, or an
-includeIf onbranch: for its branch) is refused. The existing stub is compared byte for byte: one more
-trailing newline, or a symbolic link to the exact text, is refused. A write that fails partway (a zero
-file-size limit) leaves no stub and no temporary file, and a trace2 target the kept global configuration
-names writes nothing. A post-checkout and a post-merge a branch commits in the pack directory
+of the working tree) and a git directory inside any worktree's top level other than as its own .git
+directory are refused with nothing written there: inside the working tree the installer runs from, inside
+the main working tree when it runs from a linked worktree, inside a linked worktree when it runs from the
+main one, and equal to the top level (`gitdir: .`); a git directory outside every working tree
+(--separate-git-dir) installs. A core.hooksPath only another linked worktree reads (its config.worktree, or
+an includeIf onbranch: for its branch) is refused, and so is a worktree registry that cannot be read
+(unprivileged user only). The existing stub is compared byte for byte: one more trailing newline, or a
+symbolic link to the exact text, is refused. A write that fails partway (a zero file-size limit) leaves no
+stub and no temporary file, and a trace2 target the kept global configuration names writes nothing. A link
+to another repository's hooks directory, or a directory, that arrives at the stub path just before ln is
+refused and kept, with nothing this run wrote left in either repository. A refusal names a backslash in a
+path as it is. A post-checkout and a post-merge a branch commits in the pack directory
 do not run on checkout or merge. From a linked worktree under a path with spaces the stub lands in the
 common hooks directory and the worktree's commits are checked; the stub refuses a commit whose working tree
 lacks the pack hook. Through real `git commit` runs over an installed fixture: a clean staged
@@ -1247,7 +1253,7 @@ def _self_test_isolated():
         hook_tools = ("git", "dirname", "mktemp", "env", "sed", "mkdir", "rm")
         # ls is not run by the installer; it is here so an installer that still lists the hooks directory
         # with it is judged on the command a vector removes, not on a missing ls.
-        install_tools = ("git", "dirname", "env", "sed", "cmp", "chmod", "ln", "rm", "rmdir", "mkdir", "ls")
+        install_tools = ("git", "dirname", "env", "sed", "cat", "cmp", "chmod", "ln", "rm", "rmdir", "mkdir", "ls")
 
         def _path_without(missing, needed=hook_tools, tag="hook"):
             # A PATH holding only the external commands the script runs (`needed`), less `missing`.
@@ -1452,6 +1458,103 @@ def _self_test_isolated():
                    (_install(cfg_traced, dict(GIT_CONFIG_GLOBAL=str(trace_cfg))), _stub_ok(cfg_traced),
                     (traced / "TRACED.md").read_text(encoding="utf-8")),
                    (EXIT_OK, True, "traced\n"))
+            # The trackable-destination check covers every worktree of the clone, not only the one the
+            # installer runs from. A git directory inside the main working tree, installed from a linked
+            # worktree, is refused (2) with no stub written there.
+            inner_main = _fixture("install-inner-gitdir-main")
+            inner_lw = base / "install inner gitdir linked"
+            os.rename(str(inner_main / ".git"), str(inner_main / "gd"))
+            (inner_main / ".git").write_text("gitdir: gd\n", encoding="utf-8")
+            _git(inner_main, home, "worktree", "add", "-q", "-b", "lw", str(inner_lw))
+            expect("install-refuses-gitdir-in-main-from-linked-worktree",
+                   (_install(inner_lw), (inner_main / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A git directory inside a linked worktree's top level, installed from the main worktree whose
+            # own top level does not hold it, is refused (2) with no stub written there.
+            outer_main = _fixture("install-gitdir-in-linked")
+            outer_lw = base / "install gitdir in linked wt"
+            _git(outer_main, home, "worktree", "add", "-q", "-b", "lw", str(outer_lw))
+            os.rename(str(outer_main / ".git"), str(outer_lw / "gd"))
+            (outer_main / ".git").write_text("gitdir: " + str(outer_lw / "gd") + "\n", encoding="utf-8")
+            outer_entries = os.listdir(str(outer_lw / "gd" / "worktrees"))
+            if len(outer_entries) != 1:
+                raise OSError("the linked worktree entry of {} could not be found".format(outer_main))
+            (outer_lw / ".git").write_text("gitdir: " + str(outer_lw / "gd" / "worktrees" / outer_entries[0]) + "\n",
+                                           encoding="utf-8")
+            expect("install-refuses-gitdir-in-linked-worktree",
+                   (_install(outer_main), (outer_lw / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A git directory AT the top level (its .git file reads `gitdir: .`, so the common git directory
+            # equals the top level) is refused (2) with no stub written there.
+            flat = _fixture("install-gitdir-at-top")
+            for name in os.listdir(str(flat / ".git")):
+                os.rename(str(flat / ".git" / name), str(flat / name))
+            os.rmdir(str(flat / ".git"))
+            (flat / ".git").write_text("gitdir: .\n", encoding="utf-8")
+            expect("install-refuses-gitdir-equals-top",
+                   (_install(flat), (flat / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A git directory outside every working tree (--separate-git-dir) still installs from the main
+            # worktree (0), and the stub lands in that git directory's hooks.
+            sep_wt = _fixture("install-separate", commit=False)
+            sep_git = base / "install-separate.git"
+            os.rename(str(sep_wt / ".git"), str(sep_git))
+            (sep_wt / ".git").write_text("gitdir: " + str(sep_git) + "\n", encoding="utf-8")
+            _git(sep_wt, home, "add", "-A")
+            _git(sep_wt, home, "commit", "-q", "--no-verify", "-m", "seed store")
+            expect("install-separate-gitdir-from-main",
+                   (_install(sep_wt), (sep_git / "hooks" / "pre-commit").is_file()), (EXIT_OK, True))
+            # A worktree registry that cannot be read (it would list as empty) is refused (2), with no stub
+            # written, while a linked worktree it holds sets core.hooksPath. Root reads it, so this is an
+            # unprivileged-user vector.
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                unreg = _fixture("install-unreadable-registry")
+                _git(unreg, home, "config", "extensions.worktreeConfig", "true")
+                _git(unreg, home, "worktree", "add", "-q", "-b", "side", str(base / "install unreadable registry wt"))
+                _git(base / "install unreadable registry wt", home, "config", "--worktree", "core.hooksPath",
+                     str(base / "elsewhere"))
+                os.chmod(str(unreg / ".git" / "worktrees"), 0o311)
+                try:
+                    rc = _install(unreg)
+                finally:
+                    os.chmod(str(unreg / ".git" / "worktrees"), 0o755)
+                expect("install-refuses-unreadable-worktree-registry", (rc, _stub(unreg)), (EXIT_ERROR, None))
+            # Something that arrives at the stub path between the last check and ln (a stand-in ln makes it
+            # arrive, then runs the real ln): a link to another repository's hooks directory, and a
+            # directory. Each is refused (2) and kept; nothing this run wrote is left in either repository.
+            real_ln = shutil.which("ln")
+            real_mkdir = shutil.which("mkdir")
+            if real_ln is None or real_mkdir is None:
+                raise OSError("ln or mkdir not found on PATH; the placement race vectors cannot be built")
+            race_target = _fixture("install-race-target")
+            (race_target / ".git" / "hooks").mkdir(exist_ok=True)
+            for kind in ("link", "dir"):
+                racer = _fixture("install-race-" + kind)
+                (racer / ".git" / "hooks").mkdir(exist_ok=True)
+                race_env = _path_without("ln", install_tools, "install-race-" + kind)
+                shim = Path(race_env["PATH"]) / "ln"
+                arrive = ('"$OPF_QA_REAL_LN" -s -- "$OPF_QA_TARGET" "$last" || exit 1\n' if kind == "link"
+                          else '"$OPF_QA_REAL_MKDIR" -- "$last" || exit 1\n')
+                shim.write_text("#!/bin/sh\nfor last in \"$@\"; do :; done\n" + arrive
+                                + 'exec "$OPF_QA_REAL_LN" "$@"\n', encoding="utf-8")
+                os.chmod(str(shim), 0o755)
+                race_env.update(OPF_QA_REAL_LN=os.path.abspath(real_ln), OPF_QA_REAL_MKDIR=os.path.abspath(real_mkdir),
+                                OPF_QA_TARGET=str(race_target / ".git" / "hooks"))
+                race_stub = racer / ".git" / "hooks" / "pre-commit"
+                rc = _install(racer, race_env)
+                kept = os.path.islink(str(race_stub)) if kind == "link" else (
+                    race_stub.is_dir() and not os.path.islink(str(race_stub)) and os.listdir(str(race_stub)) == [])
+                expect("install-placement-race-" + kind + "-leaves-nothing",
+                       (rc, kept, sorted(n for n in os.listdir(str(racer / ".git" / "hooks")) if n.startswith(".opf-")),
+                        [n for n in os.listdir(str(race_target / ".git" / "hooks"))
+                         if n.startswith(".opf-") or n == "pre-commit"]),
+                       (EXIT_ERROR, True, [], []))
+            # A path that names a backslash is printed as it is (printf, not echo, whose operand some shells
+            # read for escapes): the refusal names a core.hooksPath of a\tb with its backslash.
+            slashed = _fixture("install-backslash")
+            _git(slashed, home, "config", "core.hooksPath", "a\\tb")
+            slashed_err = base / "install-backslash.err"
+            rc = _run(["-c", 'sh "$0" 2> "$1"', str(slashed / rel / "install.sh"), str(slashed_err)], base)
+            expect("install-message-keeps-backslash",
+                   (rc, "core.hooksPath is set to a\\tb " in slashed_err.read_text(encoding="utf-8", errors="replace")),
+                   (EXIT_ERROR, True))
             # A branch cannot add a hook: a post-checkout and a post-merge committed in the pack directory on
             # another branch do not run on checkout or merge, since no tracked directory is a hooks path.
             branchy = _fixture("branch-hooks")
@@ -1714,9 +1817,13 @@ def _self_test_isolated():
               "status contract 1=assertion 2=harness; pre-commit floor: installer writes a stub in the "
               "untracked hooks directory, sets no core.hooksPath, keeps other hooks, and refuses any "
               "hooksPath (another linked worktree's included), an existing pre-commit hook (compared byte "
-              "for byte, never through a symlink), a symlinked or in-worktree hooks destination, an "
+              "for byte, never through a symlink), a symlinked hooks destination, a git directory in any "
+              "worktree's top level (from a linked worktree, from the main one, and equal to the top level) "
+              "while a separate git directory installs, an unreadable worktree registry, an "
               "unreadable pack hook and an ambient GIT_DIR redirect; no dirname, inherited GIT_TRACE*, a "
-              "configured trace2 target, read-back rollback, a partial write left nowhere, "
+              "configured trace2 target, read-back rollback, a partial write left nowhere, a link or "
+              "directory arriving at the stub path refused and kept with nothing left, a backslash kept in "
+              "a refusal, "
               "branch-added hooks not run, "
               "linked worktree with spaces, stub refuses a missing pack hook, cherry-pick residual held; "
               "git commit over the staged snapshot refuses a staged tamper by "

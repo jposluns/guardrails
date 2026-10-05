@@ -70,7 +70,7 @@ if [ "$#" -gt 0 ]; then
     exit 2
 fi
 fail() {
-    echo "opf-pre-commit: cannot evaluate: $1" >&2
+    printf '%s\n' "opf-pre-commit: cannot evaluate: $1" >&2
     exit 2
 }
 # The inherited GIT_ variables. The listing and its parse are two checked steps, so a failure of either
@@ -138,7 +138,7 @@ snap=$(mktemp -d "${TMPDIR:-/tmp}/opf-pre-commit.XXXXXX") || fail "could not cre
 # A removal that fails, or leaves the directory in place, exits 2 whatever the checks returned.
 cleanup() {
     rm -rf -- "$snap" && [ ! -e "$snap" ] && [ ! -L "$snap" ] && return 0
-    echo "opf-pre-commit: cannot evaluate: could not remove the snapshot directory $snap" >&2
+    printf '%s\n' "opf-pre-commit: cannot evaluate: could not remove the snapshot directory $snap" >&2
     return 1
 }
 trap 'cleanup || exit 2' EXIT
