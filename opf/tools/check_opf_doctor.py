@@ -88,12 +88,13 @@ A SECOND, git-independent self-test leg verifies the enforcement pack's Claude C
 child (python -I, the doc-confirmed PreToolUse stdin/stdout contract) over throwaway store fixtures,
 and the deny matrix is asserted END TO END: a direct Write/Edit/NotebookEdit into the store tree, the
 adoption archive, a plan-frozen old file, a declared view, a traversal-relative and a symlinked
-spelling each DENY with a structured decision; a pristine opf invocation (an opf record call
-included), a read-only Bash reference, a store-safe git form, a non-write tool, an unrelated write
-and the still-writerless imported-series leaves each ALLOW; a Bash store/frozen/view reference
-outside the pristine allowances DENIES; a malformed payload, a mis-wired hook event and a missing
-target field FAIL CLOSED (a blocking exit 2 or a structured deny); and an unparseable adoption plan
-fails closed for every write under its root. Every vector fails without the hook, so the leg proves
+spelling each DENY with a structured decision; a pristine sanctioned-writer invocation (an opf
+record call included), a known read-only tool, an unrelated write and the still-writerless
+imported-series leaves each ALLOW; EVERY other Bash command or unknown-tool payload that references
+or resolves to a protected token DENIES, read-only spellings (grep, git diff) included: the single
+writer allowance is the whole allowance surface; a malformed payload, a mis-wired hook event and a
+missing target field FAIL CLOSED (a blocking exit 2 or a structured deny); and an unparseable
+adoption plan fails closed for every write under its root. Every vector fails without the hook, so the leg proves
 the shipped file, not a model of it.
 """
 import sys
@@ -1150,7 +1151,17 @@ def _claude_hook_self_test():
     format, empty source path, migrate rows frozen, ambiguous two-manifest store, truly oversized
     valid-prefix plan), never an empty roster; tilde targets expand before classification; an unknown
     tool denies when a payload string RESOLVES to a protected path, not only on a textual token; and a
-    symlink-then-dotdot spelling is classified after full resolution.
+    symlink-then-dotdot spelling is classified after full resolution. The round-3 fixes are pinned the
+    same way: a quoted operand beside redirection, sequencing or dollar-quoting binds its roster and
+    denies (the loose dequote of every command), an unreadable quote structure denies cannot-evaluate,
+    a resolved command word landing on a protected path denies, a dangling run-directory,
+    imported-home or store-tree symlink denies (an unresolved ancestor is never an absent roster), the
+    frozen and view rosters match through a symlinked directory (realpath beside each entry), a
+    control-character payload string that resolves to a protected path denies, the pack's own hook and
+    writer files and the per-product registration are protected (R8) while a plain pristine pack-tool
+    launch stays allowed, the envelope byte cap and the crash backstop each exit 2, Edit and
+    NotebookEdit are pinned through their own explicit mappings, the python3 launcher is verb-bound,
+    and the boundary-anchored discovery budget no longer counts prose slashes.
     git-independent (the hook reads only the live tree; nothing is committed), offline,
     hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
@@ -1459,12 +1470,24 @@ def _claude_hook_self_test():
             # quote-split spelling of a view still references it.
             deny("bash-quote-split-view-denied",
                  payload("Bash", dict(command="touch VER''SION"), root), "VERSION")
-            # The absolute-path discovery budget DENIES when exceeded: 64 filler paths used to
-            # evict the protected operand from a truncated scan.
+            # BOTH absolute-path discovery budgets DENY when exceeded: the raw-text match count
+            # (identical filler paths used to evict the protected operand from a truncated scan;
+            # these collapse in the deduplicated operand set, so only the raw bound catches them)
+            # and the deduplicated operand set (quoted spaced operands the raw regex cannot see;
+            # distinct, so only the operand bound catches them). Boundary anchoring keeps prose
+            # slashes (and/or) from consuming either budget: a reference-free command stays
+            # allowed even spelling MORE of them than the budget.
             deny("bash-abs-path-budget-denied",
-                 payload("Bash", dict(command="printf %s" + (" /dev/null" * 64) + " "
+                 payload("Bash", dict(command="printf %s" + (" /dev/null" * 513) + " "
                                               + os.path.join(root, "VERSION")), basestr),
                  "budget")
+            deny("bash-operand-budget-denied",
+                 payload("Bash", dict(command="printf %s "
+                                              + " ".join("'/ pad/" + str(i) + "'"
+                                                         for i in range(513))), basestr),
+                 "budget")
+            allow("bash-prose-slashes-allowed",
+                  payload("Bash", dict(command="echo" + (" and/or" * 600)), basestr))
             # Roster tokens are matched with path boundaries: a longer word is a DIFFERENT path and
             # does not trip the view, while the view's own spellings still deny.
             allow("bash-version-word-boundary-allowed",
@@ -1506,6 +1529,94 @@ def _claude_hook_self_test():
                  payload("Bash", dict(command="git checkout -- LEGACY.md"), root), "LEGACY.md")
             # A Bash command with no protected reference allows.
             allow("bash-free-allowed", payload("Bash", dict(command="echo hello"), root))
+            # A quoted protected operand binds its roster and denies even when the command is NOT
+            # pristine: redirection, sequencing or dollar-quoting rides beside it (the loose
+            # dequote reads the whole operand; the raw-text scan alone saw only the space-free
+            # prefix of a spaced root).
+            spaced_view = os.path.join(spaced_root, "VERSION")
+            deny("bash-redirect-quoted-spaced-root-denied",
+                 payload("Bash", dict(command="printf overwritten > '" + spaced_view + "'"),
+                         basestr), "VERSION")
+            deny("bash-sequenced-quoted-spaced-root-denied",
+                 payload("Bash", dict(command="truncate -s 0 '" + spaced_view + "'; true"),
+                         basestr), "VERSION")
+            deny("bash-dollarquote-spaced-root-denied",
+                 payload("Bash", dict(command="printf x > $'" + spaced_view + "'"), basestr),
+                 "VERSION")
+            # A command whose quote structure cannot be read to the end denies cannot-evaluate
+            # (the shell could run it differently than the hook read it), while word-start
+            # comments, here-document bodies and decodable dollar-quotes carrying prose
+            # apostrophes stay readable and reference-free commands stay allowed.
+            deny("bash-unterminated-quote-denied",
+                 payload("Bash", dict(command="echo 'abc"), root), "cannot be read")
+            deny("bash-undecodable-dollarquote-denied",
+                 payload("Bash", dict(command="echo $'a\\qb'"), root), "cannot be read")
+            allow("bash-comment-apostrophe-allowed",
+                  payload("Bash", dict(command="echo ok # don't worry"), basestr))
+            allow("bash-heredoc-apostrophe-allowed",
+                  payload("Bash", dict(command="cat > notes.txt <<EOF" + chr(10)
+                                               + "Don't worry, it's prose" + chr(10) + "EOF"
+                                               + chr(10)), basestr))
+            allow("bash-dollarquote-free-allowed",
+                  payload("Bash", dict(command="printf $'a\\tb'"), basestr))
+            # A word of the command that RESOLVES to a protected path denies even with no textual
+            # token in the command (the word-resolution pass judges each dequoted word the way a
+            # file-tool target is judged).
+            deny("bash-word-resolves-view-denied",
+                 payload("Bash", dict(command="touch STATUS.md"),
+                         os.path.join(root, "docs")), "resolves")
+            # R8: the hook, the writer and their siblings cannot be rewritten through the gated
+            # tools, a bound product root's settings registration cannot either, and a plain
+            # pristine launch of a pack tool stays allowed (only its SCRIPT operand is exempt).
+            deny("edit-hook-file-denied",
+                 payload("Edit", dict(file_path=str(hook), old_string="a", new_string="b"),
+                         basestr), "R8")
+            deny("write-writer-sibling-denied",
+                 payload("Write", dict(file_path=str(Path(__file__).resolve().parent
+                                                     / "_opf_store.py"), content="x"), basestr),
+                 "R8")
+            deny("mcp-writer-denied",
+                 payload("mcp__filesystem__write_file", dict(path=str(writer), content="x"),
+                         basestr), "R8")
+            deny("bash-overwrite-hook-denied",
+                 payload("Bash", dict(command="cp notes.txt " + str(hook)), basestr), "R8")
+            allow("bash-run-pack-tool-allowed",
+                  payload("Bash", dict(command="python3 -I -B " + str(writer)
+                                               + " doctor --root ."), basestr))
+            deny("write-registration-denied",
+                 payload("Write", dict(file_path=os.path.join(root, ".claude", "settings.json"),
+                                       content="x"), root), "registration")
+            allow("write-claude-other-allowed",
+                  payload("Write", dict(file_path=os.path.join(root, ".claude", "notes.json"),
+                                        content="x"), root))
+            # Explicit file-tool mappings: a RELATIVE Edit or NotebookEdit target with no session
+            # cwd fails closed through the file-tool rule itself (under an R7 fallback these
+            # would silently allow: no cwd binds no roster), pinning each mapping on its own.
+            deny("edit-relative-no-cwd-denied",
+                 payload("Edit", dict(file_path="notes.md", old_string="a", new_string="b"),
+                         None), "failing closed")
+            deny("notebook-relative-no-cwd-denied",
+                 payload("NotebookEdit", dict(notebook_path="notes.ipynb"), None),
+                 "failing closed")
+            # A payload string carrying a control character still RESOLVES (a newline-bearing
+            # symlink alias reaches the store like any other path), so R7 judges it, never skips;
+            # and R7's store-resolve branch holds on its own through a directory symlink with no
+            # textual token and no frozen or view match.
+            ctl_alias = os.path.join(root, "alias" + chr(10) + ".md")
+            os.symlink(counters, ctl_alias)
+            deny("mcp-controlchar-alias-resolves-denied",
+                 payload("mcp__filesystem__write_file", dict(path=ctl_alias, content="x"),
+                         basestr), "R7")
+            os.symlink(machine, os.path.join(basestr, "lnk"))
+            deny("mcp-symlink-resolves-store-denied",
+                 payload("mcp__filesystem__write_file",
+                         dict(path=os.path.join(basestr, "lnk", "fresh.toml"), content="x"),
+                         basestr), "R7")
+            # The python3 launcher form takes ONLY the writer verbs: another verb with a protected
+            # mention denies (nothing else pins the verb bound on the python3 launcher form).
+            deny("bash-python-writer-other-verb-denied",
+                 payload("Bash", dict(command="python3 -I -B opf/tools/opf.py doctor --root "
+                                              ".working/.."), str(repo_root)), "store tree")
 
             # Envelope fail-closed: a malformed payload and a mis-wired event each exit 2 (blocking
             # error) with a located stderr message and NO structured decision.
@@ -1518,6 +1629,31 @@ def _claude_hook_self_test():
                 dict(hook_event_name="PostToolUse", tool_name="Write",
                      tool_input=dict(file_path=counters), cwd=root))
             expect("mis-wired-event-exit", (rc, decision), (2, None))
+            # The envelope byte cap is pinned by a just-over-cap payload that would ALLOW if it
+            # were parsed (a Read call), so a lifted cap flips this vector to exit 0; a payload
+            # with no tool_name exits 2; and a nesting depth that overruns the parser's recursion
+            # reaches the crash backstop, which must exit 2, never a silent allow.
+            pad = "a" * (64 * 1024 * 1024)
+            rc, decision, _reason, _err = run_hook(raw=json.dumps(
+                dict(hook_event_name="PreToolUse", tool_name="Read",
+                     tool_input=dict(pad=pad), cwd="/")).encode("utf-8"))
+            expect("oversize-payload-exit", (rc, decision), (2, None))
+            rc, decision, _reason, _err = run_hook(
+                dict(hook_event_name="PreToolUse", tool_input=dict(), cwd="/"))
+            expect("no-tool-name-exit", (rc, decision), (2, None))
+            rc, decision, _reason, _err = run_hook(raw=b"[" * 200000)
+            expect("deep-nesting-backstop-exit", (rc, decision), (2, None))
+            # Malformed tool_input shapes take a structured deny, never a silent allow.
+            deny("write-null-toolinput-denied", payload("Write", None, root), "failing closed")
+            deny("bash-no-command-denied", payload("Bash", dict(), root), "failing closed")
+            # A control character inside a quoted span keeps a command non-pristine, so a writer
+            # spelling whose double-quoted title carries a literal newline still denies on its
+            # protected mention (disclosed over-refusal; a scan that admitted control characters
+            # into double quotes would let this ride the A1 allowance instead).
+            deny("bash-dq-newline-title-denied",
+                 payload("Bash", dict(command="opf record create --title " + chr(34) + "a"
+                                              + chr(10) + ".working" + chr(34)), root),
+                 "store tree")
 
             # R6 roster fail-closed: once the adoption plan is unparseable, EVERY write under that
             # root denies (the frozen roster cannot be computed), while A1 stays open for repair.
@@ -1641,6 +1777,65 @@ def _claude_hook_self_test():
             deny("dangling-manifest-symlink-fails-closed",
                  payload("Write", dict(file_path=os.path.join(root, "TODO.md"), content="x"), root),
                  "failing closed")
+            os.remove(manifest_path)
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                fh.write(manifest_text)
+            # An absent leaf under a real directory chain is absence, but a DANGLING INTERMEDIATE
+            # link is cannot-evaluate: a dangling run-directory symlink (its plan cannot be
+            # located), a dangling imported home and a dangling store tree each deny EVERY write
+            # under their root, never an absent (empty) roster.
+            dangling_run = os.path.join(root, _opf_store.WORKING_DIRNAME, "imported", "adoption",
+                                        "adopt-20260101T000000Z-feedfeedfeedfeed")
+            os.symlink(os.path.join(basestr, "gone"), dangling_run)
+            deny("dangling-run-dir-fails-closed", unrelated_write, "failing closed")
+            os.remove(dangling_run)
+            root2 = os.path.join(basestr, "product2")
+            machine2 = os.path.join(root2, _opf_store.WORKING_DIRNAME, "toml")
+            os.makedirs(machine2)
+            with open(os.path.join(machine2, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]' + chr(10) + 'standard = "opf"' + chr(10))
+            os.symlink(os.path.join(basestr, "gone"),
+                       os.path.join(root2, _opf_store.WORKING_DIRNAME, "imported"))
+            deny("dangling-imported-home-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root2, "notes.md"), content="x"),
+                         root2), "failing closed")
+            root3 = os.path.join(basestr, "product3")
+            os.makedirs(root3)
+            os.symlink(os.path.join(basestr, "gone"),
+                       os.path.join(root3, _opf_store.WORKING_DIRNAME))
+            deny("dangling-store-tree-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root3, "notes.md"), content="x"),
+                         root3), "failing closed")
+            # The frozen and view rosters match THROUGH a symlinked directory: a write through the
+            # REAL directory behind a symlinked roster component denies (each roster entry carries
+            # its realpath spelling beside its lexical one).
+            root4 = os.path.join(basestr, "product4")
+            machine4 = os.path.join(root4, _opf_store.WORKING_DIRNAME, "toml")
+            evidence4 = os.path.join(root4, _opf_store.WORKING_DIRNAME, "imported", "adoption",
+                                     RUN_ID)
+            os.makedirs(machine4)
+            os.makedirs(evidence4)
+            os.makedirs(os.path.join(root4, "site_docs"))
+            with open(os.path.join(machine4, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[opf]' + chr(10) + 'standard = "opf"' + chr(10) + '[views.status]'
+                         + chr(10) + 'kind = "deterministic"' + chr(10)
+                         + 'sources = ["worklog"]' + chr(10) + 'target = "docs/STATUS.md"'
+                         + chr(10))
+            with open(os.path.join(evidence4, "plan.toml"), "w", encoding="utf-8") as fh:
+                fh.write('format = "opf.adoption.plan/v2"' + chr(10) + '[[sources]]' + chr(10)
+                         + 'path = "docs/OLD.md"' + chr(10) + 'digest = "sha256:' + "0" * 64
+                         + '"' + chr(10) + 'disposition = "retire"' + chr(10)
+                         + 'occupying = false' + chr(10))
+            for leaf in ("STATUS.md", "OLD.md"):
+                with open(os.path.join(root4, "site_docs", leaf), "w", encoding="utf-8") as fh:
+                    fh.write("fixture" + chr(10))
+            os.symlink(os.path.join(root4, "site_docs"), os.path.join(root4, "docs"))
+            deny("write-view-real-dir-denied",
+                 payload("Write", dict(file_path=os.path.join(root4, "site_docs", "STATUS.md"),
+                                       content="x"), root4), "opf render")
+            deny("edit-frozen-real-dir-denied",
+                 payload("Edit", dict(file_path=os.path.join(root4, "site_docs", "OLD.md"),
+                                      old_string="a", new_string="b"), root4), "frozen")
     except OSError as exc:
         print("check_opf_doctor claude-hook self-test: harness error: " + str(exc), file=sys.stderr)
         return EXIT_ERROR
@@ -1675,8 +1870,23 @@ def _claude_hook_self_test():
           "FIFO (prompt, O_NONBLOCK), out-of-vocabulary-disposition, sources-less, "
           "empty-source-path, wrong-format, truly-oversized (valid prefix), migrate-row or "
           "unsearchable adoption plan, and on an unparseable, dangling-symlink, undeclared- or "
-          "wrong-standard or ambiguous two-manifest machine store, for every write under that "
-          "root)")
+          "wrong-standard or ambiguous two-manifest machine store, and on a dangling "
+          "run-directory, imported-home or store-tree link (an unresolved ancestor is never an "
+          "absent roster), for every write under that root. ROUND 3: a quoted spaced-root operand "
+          "beside redirection, sequencing or dollar-quoting denies (every command is loose-"
+          "dequoted whole), an unreadable quote structure and an undecodable dollar-quote escape "
+          "deny cannot-evaluate while comment and here-document apostrophes stay readable, a "
+          "dequoted word resolving to a protected path denies with no textual token, the frozen "
+          "and view rosters match through a symlinked directory (realpath beside each entry), a "
+          "control-character alias string resolving into the store denies (R7 judges, never "
+          "skips), the pack's own hook and writer files and the per-product registration deny "
+          "(R8) while a plain pristine pack-tool launch and a non-registration .claude write stay "
+          "allowed, an over-cap envelope, a missing tool_name and a parser-overrun crash each "
+          "exit 2, a null tool_input and a command-less Bash payload take structured denies, a "
+          "double-quoted literal newline keeps a writer spelling non-pristine (denied on its "
+          "protected mention), the python3 launcher form is verb-bound, Edit and NotebookEdit "
+          "relative targets without a cwd deny through their own explicit mappings, and prose "
+          "slashes no longer consume the boundary-anchored discovery budget)")
     return EXIT_OK
 
 
