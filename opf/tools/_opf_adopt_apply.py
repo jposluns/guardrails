@@ -6790,6 +6790,19 @@ def _init_store_git_checks(check, ctx, refused):
             return mint_run_id(datetime.datetime(2026, 9, 17, 12, 0, 0,
                                                  tzinfo=datetime.timezone.utc), next(nonce))
 
+        def plant(root, rel, data):
+            """Write a fixture file, setting every directory the write creates to EXACTLY 0755,
+            the mode the substrate plans and admits. A planted directory otherwise takes the
+            ambient umask (0775 under umask 002) or a default ACL on the TMPDIR (0750), and each
+            vector would then refuse on that directory's mode instead of the fact it pins."""
+            made, parent = [], os.path.dirname(os.path.join(root, rel))
+            while not os.path.isdir(parent):
+                made.append(parent)
+                parent = os.path.dirname(parent)
+            init_op._write(os.path.join(root, rel), data)
+            for path in reversed(made):
+                os.chmod(path, 0o755)
+
         # The probe: the SUBSTRATE itself publishes one store in a scratch repo, and the
         # planner-bindable view digests are harvested from it (each view is a pure function of the
         # planned sources, so the harvest is repository-independent; the probe never meets the
@@ -6869,7 +6882,7 @@ def _init_store_git_checks(check, ctx, refused):
         # verifies and preserves the frozen source byte-exact through the whole publication.
         root = init_op._plain_repo(os.path.join(base, "blind"), env)
         payload = b"adopter notes\n"
-        init_op._write(os.path.join(root, store.WORKING_DIRNAME, "notes.md"), payload)
+        plant(root, os.path.join(store.WORKING_DIRNAME, "notes.md"), payload)
         before = snap(root)
         check("init-store-undispositioned-working-refused",
               refused(dispatch(row, ctx(root, run_id=rid())), "undispositioned foreign")
@@ -6882,7 +6895,7 @@ def _init_store_git_checks(check, ctx, refused):
         check("init-store-dispositioned-working-admitted", res.status == valid and intact
               and store.resolve_store(root).status == store.RESOLVED)
         root = init_op._plain_repo(os.path.join(base, "driftsrc"), env)
-        init_op._write(os.path.join(root, store.WORKING_DIRNAME, "notes.md"), b"drifted\n")
+        plant(root, os.path.join(store.WORKING_DIRNAME, "notes.md"), b"drifted\n")
         check("init-store-drifted-frozen-source-refused",
               refused(dispatch(row, ctx(root, run_id=rid(), sources=[frozen_row])),
                       "undispositioned foreign") and op_ids(root) == [])
@@ -6893,9 +6906,9 @@ def _init_store_git_checks(check, ctx, refused):
         run = rid()
         home = evidence_home_rel(run)
         data = b"evidence payload\n"
-        init_op._write(os.path.join(root, home, "observe.json"), data)
+        plant(root, os.path.join(home, "observe.json"), data)
         inv = emit_inventory(run, [inventory_row(home + "/observe.json", data)])
-        init_op._write(os.path.join(root, home, "inventory.toml"), inv)
+        plant(root, os.path.join(home, "inventory.toml"), inv)
         res = dispatch(row, ctx(root, run_id=run))
         check("init-store-verified-bundle-admitted", res.status == valid
               and store.resolve_store(root).status == store.RESOLVED
@@ -6903,9 +6916,9 @@ def _init_store_git_checks(check, ctx, refused):
         root = init_op._plain_repo(os.path.join(base, "badbundle"), env)
         run = rid()
         home = evidence_home_rel(run)
-        init_op._write(os.path.join(root, home, "observe.json"), b"tampered\n")
-        init_op._write(os.path.join(root, home, "inventory.toml"),
-                       emit_inventory(run, [inventory_row(home + "/observe.json", data)]))
+        plant(root, os.path.join(home, "observe.json"), b"tampered\n")
+        plant(root, os.path.join(home, "inventory.toml"),
+              emit_inventory(run, [inventory_row(home + "/observe.json", data)]))
         check("init-store-tampered-bundle-refused",
               refused(dispatch(row, ctx(root, run_id=run)), "does not verify")
               and op_ids(root) == [])
@@ -7093,7 +7106,7 @@ def _init_store_git_checks(check, ctx, refused):
         occ_bytes = b"# a foreign manifest-shaped file\n"
         for fixture, mem in (("occupied", members), ("occupied2", wrongv)):
             root = init_op._plain_repo(os.path.join(base, fixture), env)
-            init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+            plant(root, manifest_rel, occ_bytes)
             run = rid()
             run_adopt_transaction(root, run, lambda ops: ops.archive_occupying(
                 manifest_rel, "sha256:" + _sha256(occ_bytes)))
@@ -7145,7 +7158,7 @@ def _init_store_git_checks(check, ctx, refused):
         occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
                        occupying=True, preservation=archive_rel(run, manifest_rel))
         os.makedirs(os.path.join(root, machine_dir))
-        init_op._write(os.path.join(root, archive_rel(run, manifest_rel)), occ_bytes)
+        plant(root, archive_rel(run, manifest_rel), occ_bytes)
         os.chmod(os.path.join(root, store.WORKING_DIRNAME), 0o755)
         os.chmod(os.path.join(root, machine_dir), 0o755)
         before = snap(root)
@@ -7155,7 +7168,7 @@ def _init_store_git_checks(check, ctx, refused):
               and snap(root) == before and op_ids(root) == [])
 
         root = init_op._plain_repo(os.path.join(base, "rbarchival"), env)
-        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        plant(root, manifest_rel, occ_bytes)
         run = rid()
         real_staged_verify = _journal._verify_staged_digest
 
@@ -7177,7 +7190,7 @@ def _init_store_git_checks(check, ctx, refused):
         finally:
             _journal._verify_staged_digest = real_staged_verify
         os.unlink(os.path.join(root, manifest_rel))
-        init_op._write(os.path.join(root, archive_rel(run, manifest_rel)), occ_bytes)
+        plant(root, archive_rel(run, manifest_rel), occ_bytes)
         occ_row = dict(path=manifest_rel, digest=occ_digest, disposition="retire",
                        occupying=True, preservation=archive_rel(run, manifest_rel))
         before = snap(root)
@@ -7188,7 +7201,7 @@ def _init_store_git_checks(check, ctx, refused):
               and snap(root) == before and op_ids(root) == [])
 
         root = init_op._plain_repo(os.path.join(base, "presonly"), env)
-        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        plant(root, manifest_rel, occ_bytes)
         run = rid()
         run_adopt_transaction(root, run, lambda ops: ops.preserve(manifest_rel, occ_digest))
         os.unlink(os.path.join(root, manifest_rel))
@@ -7205,7 +7218,7 @@ def _init_store_git_checks(check, ctx, refused):
         # recorded -- and the SAME run id then succeeds once the mode is corrected, proving
         # the id was never burnt by the refusal.
         root = init_op._plain_repo(os.path.join(base, "mode775"), env)
-        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        plant(root, manifest_rel, occ_bytes)
         run = rid()
         run_adopt_transaction(root, run, lambda ops: ops.archive_occupying(
             manifest_rel, "sha256:" + _sha256(occ_bytes)))
@@ -7237,7 +7250,7 @@ def _init_store_git_checks(check, ctx, refused):
         # with no operation record and the SAME run id reruns once the mode is corrected --
         # never a burnt id.
         root = init_op._plain_repo(os.path.join(base, "wmode"), env)
-        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        plant(root, manifest_rel, occ_bytes)
         run = rid()
         run_adopt_transaction(root, run, lambda ops: ops.archive_occupying(
             manifest_rel, "sha256:" + _sha256(occ_bytes)))
@@ -7265,7 +7278,7 @@ def _init_store_git_checks(check, ctx, refused):
         # the postcondition refusal, and SIGKILL inside the publication plus reconcile().
         for fixture, kill in (("prior", None), ("prior2", "source:2")):
             root = init_op._plain_repo(os.path.join(base, fixture), env)
-            init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+            plant(root, manifest_rel, occ_bytes)
             r1 = rid()
             run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(
                 manifest_rel, occ_digest))
@@ -7299,7 +7312,7 @@ def _init_store_git_checks(check, ctx, refused):
         # is admitted whole by the fresh run; an admission re-spelled to the bundle and archive
         # homes alone strands this bundle and goes red here.
         root = init_op._plain_repo(os.path.join(base, "priormove"), env)
-        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        plant(root, manifest_rel, occ_bytes)
         moved_rel = store.moved_dest("prior-note.md")
         moved_bytes = b"a prior run's committed Move payload" + b"\x0a"
         r1 = rid()
@@ -7328,7 +7341,7 @@ def _init_store_git_checks(check, ctx, refused):
         # the copy and a verifying inventory hand-placed afterwards (neither a committed
         # transaction nor a rolled-back prior init-store transaction proves them).
         root = init_op._plain_repo(os.path.join(base, "priorbad"), env)
-        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        plant(root, manifest_rel, occ_bytes)
         r1 = rid()
         run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(
             manifest_rel, occ_digest))
@@ -7346,7 +7359,7 @@ def _init_store_git_checks(check, ctx, refused):
               and snap(root) == before and op_ids(root) == [])
 
         root = init_op._plain_repo(os.path.join(base, "priorrb"), env)
-        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        plant(root, manifest_rel, occ_bytes)
         r1 = rid()
         rolled = None
         _journal._verify_staged_digest = failing_inventory_for(r1)
@@ -7359,8 +7372,8 @@ def _init_store_git_checks(check, ctx, refused):
         finally:
             _journal._verify_staged_digest = real_staged_verify
         os.unlink(os.path.join(root, manifest_rel))
-        init_op._write(os.path.join(root, archive_rel(r1, manifest_rel)), occ_bytes)
-        init_op._write(os.path.join(root, inventory_rel(r1)), emit_inventory(
+        plant(root, archive_rel(r1, manifest_rel), occ_bytes)
+        plant(root, inventory_rel(r1), emit_inventory(
             r1, [inventory_row(archive_rel(r1, manifest_rel), occ_bytes)]))
         before = snap(root)
         check("init-store-prior-rolled-back-archival-refused",
@@ -7375,7 +7388,7 @@ def _init_store_git_checks(check, ctx, refused):
         # snapshot unchanged and no operation record; dropping the terminal-ROLLED-BACK gate
         # (and its absent-transaction sibling) admits it and goes red here.
         root = init_op._plain_repo(os.path.join(base, "priornoinit"), env)
-        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        plant(root, manifest_rel, occ_bytes)
         r1 = rid()
         run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(
             manifest_rel, occ_digest))
@@ -7391,7 +7404,7 @@ def _init_store_git_checks(check, ctx, refused):
         # and no operation record; dropping the committed-creation equality admits it and
         # goes red here.
         root = init_op._plain_repo(os.path.join(base, "priorextra"), env)
-        init_op._write(os.path.join(root, manifest_rel), occ_bytes)
+        plant(root, manifest_rel, occ_bytes)
         r1 = rid()
         run_adopt_transaction(root, r1, lambda ops: ops.archive_occupying(
             manifest_rel, occ_digest))
@@ -7401,8 +7414,8 @@ def _init_store_git_checks(check, ctx, refused):
                                        ctx(root, run_id=r1, sources=[occ_row])),
                               "restoring NOT-ADOPTED")
         planted = b"hand-planted, never committed" + b"\x0a"
-        init_op._write(os.path.join(root, archive_rel(r1, "planted.txt")), planted)
-        init_op._write(os.path.join(root, inventory_rel(r1)), emit_inventory(r1, [
+        plant(root, archive_rel(r1, "planted.txt"), planted)
+        plant(root, inventory_rel(r1), emit_inventory(r1, [
             inventory_row(archive_rel(r1, manifest_rel), occ_bytes),
             inventory_row(archive_rel(r1, "planted.txt"), planted)]))
         before = snap(root)
