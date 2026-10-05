@@ -1043,7 +1043,7 @@ def _absent_journal_dirs(root_fd):
     return []
 
 
-def _remove_journal_dirs(root_fd, created):
+def _remove_journal_dirs(root_fd, created, raised=None):
     """Deepest first, remove the journal directories this run created, once its refusal has released the
     lock, so a refusal whose sweep returns ([], []) leaves the tree as it found it (the caller names
     anything else). rmdir only, never forced: a directory that is no
@@ -1053,36 +1053,49 @@ def _remove_journal_dirs(root_fd, created):
     ancestor is removable through its own parent. Returns (stays, unconfirmed): what stays, each with its
     reason, omitting anything beneath a directory this sweep removed or found absent (an rmdir succeeds
     only on an empty directory); and what it removed whose parent fsync then failed, so the removal may
-    not be durable. ([], []) when the tree is as found."""
+    not be durable. ([], []) when the tree is as found. When `raised` is a list, each parent close RECORDS
+    its exception there, never raising it past an exception already in flight (an interrupt in an rmdir
+    among them), and with none in flight raises the one it recorded, which stops the sweep."""
     left = []
     unconfirmed = []
     gone = []
     for rel in reversed(created):
         parent = []     # owns the parent descriptor from its binding on; the finally empties it
+        unwinding = False
         try:
             try:
-                pfd, name = _journal._open_parent(root_fd, rel)
-            except FileNotFoundError:
-                continue    # never created: a preparation that failed part-way
-            except (_journal.JournalError, OSError) as exc:
-                left.append((rel, "not reached: {}".format(exc)))
-                continue
-            parent.append(pfd)
-            try:
-                os.rmdir(name, dir_fd=pfd)
-            except FileNotFoundError:
+                try:
+                    pfd, name = _journal._open_parent(root_fd, rel)
+                except FileNotFoundError:
+                    continue    # never created: a preparation that failed part-way
+                except (_journal.JournalError, OSError) as exc:
+                    left.append((rel, "not reached: {}".format(exc)))
+                    continue
+                parent.append(pfd)
+                try:
+                    os.rmdir(name, dir_fd=pfd)
+                except FileNotFoundError:
+                    gone.append(rel)
+                    continue
+                except OSError as exc:
+                    left.append((rel, "not removed: {}".format(exc)))
+                    continue
                 gone.append(rel)
-                continue
-            except OSError as exc:
-                left.append((rel, "not removed: {}".format(exc)))
-                continue
-            gone.append(rel)
-            try:
-                os.fsync(pfd)
-            except OSError as exc:
-                unconfirmed.append("{} (parent fsync failed: {})".format(rel, exc))
+                try:
+                    os.fsync(pfd)
+                except OSError as exc:
+                    unconfirmed.append("{} (parent fsync failed: {})".format(rel, exc))
+            except BaseException:   # noqa: BLE001  re-raised: only marks an exception in flight
+                unwinding = True
+                raise
         finally:
-            _close_held(parent)
+            if raised is None:
+                _close_held(parent)
+            else:
+                mark = len(raised)
+                _close_held_into(parent, raised)
+                if len(raised) > mark and not unwinding:
+                    raise raised[mark]  # nothing in flight: this close's own exception stops the sweep
     return (["{} ({})".format(rel, why) for rel, why in left
              if not any(rel.startswith(g + "/") for g in gone)], unconfirmed)
 
@@ -1119,9 +1132,11 @@ def _journal_listing(root_fd, keep=None, raised=None):
     joins the kept descriptors (keyed ""), which the caller closes, and with no `keep` every descriptor
     is closed here through _close_held, each popped before its one close, the rest still closed when one
     close raises (the first exception re-raised, each later one noted on it); when `raised` is a list,
-    that close-out instead RECORDS every exception it meets there, in order, and raises none, so the
-    caller holds each exception object itself (an interrupt among them) and reports every one. An
-    asynchronous interrupt
+    that close-out and every child close of the recursive walk instead RECORD every exception they meet
+    there, in order, so no close raises past an exception already in flight and the caller holds each
+    exception object itself (an interrupt among them) and reports every one: a walk child close that
+    records one with nothing in flight raises it, stopping the walk, and the final close-out raises none.
+    An asynchronous interrupt
     (SIGINT, SIGTERM) that lands between a C call's return and the binding of the descriptor it returned,
     between a pop and its close in the close-out (that one descriptor), or at _close_held_into's own loop
     boundary, can leave a descriptor
@@ -1159,6 +1174,7 @@ def _journal_listing(root_fd, keep=None, raised=None):
             found[sub] = (_entry_kind(st), st.st_dev, st.st_ino)
             if deep and stat.S_ISDIR(st.st_mode):
                 child = []      # owns the child descriptor from its binding on; the finally empties it
+                mark = len(raised) if raised is not None else 0
                 try:
                     try:
                         child.append(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -1168,7 +1184,14 @@ def _journal_listing(root_fd, keep=None, raised=None):
                     if child and opened_as(sub, st, child[0]):
                         walk(child[0], sub, True)
                 finally:
-                    _close_held(child)
+                    # with `raised`, recorded there, never raised past an exception in flight (a deeper
+                    # frame's, an interrupt among them, which this frame's close would otherwise replace)
+                    if raised is None:
+                        _close_held(child)
+                    else:
+                        _close_held_into(child, raised)
+                if raised is not None and len(raised) > mark:
+                    raise raised[mark]  # nothing in flight: this close's own exception stops the walk
 
     parts = JOURNAL_REL.split("/")
     opened = keep if keep is not None else []   # handed over as each is bound: the caller's list owns it
@@ -1785,15 +1808,16 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         failure = exc
         raise
     finally:
-        teardown, listed = None, []     # listed: every exception the closing listing's close-out records
+        teardown, listed = None, []     # listed: every exception the closing sweep's and listing's closes record
         try:
             observed = said = None      # inside the teardown-protected try from its first statement on
             ours = True
             left, unconfirmed = [], []
-            if created and not (done or retain):
-                left, unconfirmed = _remove_journal_dirs(root_fd, created)
             if before is not None and not done:
-                said = [lock_note] if lock_note else []
+                said = [lock_note] if lock_note else []     # bound before the sweep: one that raises keeps it
+            if created and not (done or retain):
+                left, unconfirmed = _remove_journal_dirs(root_fd, created, raised=listed)
+            if before is not None and not done:
                 if (left or unconfirmed) and not entered:
                     if left:
                         said.append("the refusal's cleanup is INCOMPLETE: journal directories this run created "
@@ -1863,8 +1887,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         else:
             phase_said = "the adoption transaction {} did not open".format(txn)
         seen_said = None
-        # every exception the closing cleanup or observation raised, then each later one the closing
-        # listing's close-out recorded: none is lost, an interrupt among them included
+        # every exception the closing cleanup or observation raised, then each later one a close of the
+        # closing sweep or listing recorded: none is lost, an interrupt among them included
         torn = ([teardown] if teardown is not None else []) + [exc for exc in listed if exc is not teardown]
         if torn:
             # the closing cleanup or observation raised (the closing listing's own close-out included):
@@ -1887,7 +1911,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             else:
                 stood = [phase_said, "the run's own exception stands beside this interrupt: {!r}".format(
                     failure)] + (observed or [])
-            stop.add_note("; ".join(stood + ([closed_said] if closed_said else [])) + " (fail-closed)")
+            stood = "; ".join(stood + ([closed_said] if closed_said else []))
+            stop.add_note(stood if stood.endswith(" (fail-closed)") else stood + " (fail-closed)")
             raise stop
         if failure is not None and (not isinstance(failure, Exception) or failure is interrupted):
             # an interrupt still propagates as itself, with the transaction state and the outcome named
@@ -3760,6 +3785,15 @@ def _self_test_checks():
         for name, _targets, _kind in final_close_legs:
             skipped.append((name, no_census))
         skipped.append(("journal-listing-close-out-injected-fault-closes-the-rest", no_census))
+        for name in ("closing-walk-interrupt-then-fault-propagates-as-itself",
+                     "closing-walk-fault-then-interrupt-propagates-as-itself",
+                     "closing-walk-two-faults-every-fault-named",
+                     "closing-sweep-interrupt-then-close-fault-propagates-as-itself",
+                     "closing-sweep-fault-then-close-interrupt-propagates-as-itself",
+                     "closing-sweep-close-fault-keeps-the-lock-clause",
+                     "closing-listing-close-fault-stops-the-observation",
+                     "closing-listing-interrupt-names-the-own-exception"):
+            skipped.append((name, no_census))
     else:
         import dis
 
@@ -3979,7 +4013,7 @@ def _self_test_checks():
                         mock.patch.object(store, "_close_fd_exc_safe", lambda fd: faulting(real_exc_safe, fd)):
                     try:
                         run_adopt_transaction(root, rid, compose)
-                    except (AdoptApplyError, _InjectedCloseFault, KeyboardInterrupt) as exc:
+                    except (AdoptApplyError, RuntimeError, KeyboardInterrupt) as exc:   # an injected fault among them
                         raised = exc
                 leaked = _fds_open() - baseline
             finally:
@@ -4046,6 +4080,162 @@ def _self_test_checks():
                            "after the first injection={!r} leaked={!r} state={!r}".format(
                                None if control is None else (control[0], control[3]), raised, text[-400:],
                                popped, after, leaked, committed))
+        # 6a'''b3h: every close on the closing path RECORDS its exception beside one already in flight,
+        # never raising past it. The closing listing's recursive walk closes each child descriptor in a
+        # finally, so with <journal>/outer/inner present the inner close and then the outer close run as
+        # the frames unwind: each injection makes the real close, then raises. An interrupt at the inner
+        # close then a fault at the outer one, and the reverse, each propagate the interrupt as ITSELF, the
+        # refusal and both exceptions named in order in its note; two faults are both named beside the
+        # refusal (red against a walk child close that raises past the deeper frame's exception: the
+        # outer close's exception replaces it and the inner one is named nowhere). The closing sweep's
+        # parent close does the same beside an exception raised by that sweep's rmdir, in both orders. A
+        # sweep close fault with the lock left in place keeps the lock's clause in the refusal (red
+        # against that clause bound only after the sweep). A fault recorded by the closing listing's own
+        # close-out stops the observation there: the step after it never runs and is named nowhere. A
+        # run whose compose raised an ordinary exception, its closing listing's close-out interrupted,
+        # propagates that interrupt with the run's own exception named in its note. No note ends with a
+        # doubled "(fail-closed)". No injection leaks a descriptor: each makes its real close first.
+        me = sys.modules[__name__]
+        walk_code = next(c for c in listing_code.co_consts if getattr(c, "co_name", None) == "walk")
+        sweep_code = _remove_journal_dirs.__code__
+
+        def _path_fault_run(root, where, faults, compose, release_note=None):
+            """One transaction over `compose` whose calls at `where` each make their real call, then raise
+            in turn an instance of each class of `faults`, named for its ordinal: "walk", each child close
+            of the closing listing's recursive walk (deepest first); "sweep", the closing sweep's first
+            rmdir, then its parent close; "sweep-close", the sweep's first parent close. `release_note`
+            stands in for _release_note when given: (exception, the injected exceptions, leaked)."""
+            real_quiet, real_rmdir = _journal._close_fd_quietly, os.rmdir
+            injected = []
+
+            def inject():
+                exc = faults[len(injected)]("{} #{}".format(where, len(injected) + 1))
+                injected.append(exc)
+                raise exc
+
+            def faulting_quiet(fd):
+                real_quiet(fd)
+                up = sys._getframe(1)
+                while up is not None and up.f_code.co_name.startswith("_close_held"):
+                    up = up.f_back
+                if len(injected) >= len(faults) or up is None:
+                    return
+                if where == "walk" and up.f_code is walk_code:
+                    while up is not None and up.f_code is walk_code:
+                        up = up.f_back
+                    if (up is not None and up.f_code is listing_code and up.f_locals.get("keep") is None
+                            and up.f_back is not None and up.f_back.f_code is txn_code):
+                        inject()
+                elif up.f_code is sweep_code and (where == "sweep-close" or (where == "sweep" and injected)):
+                    inject()
+
+            def faulting_rmdir(path, *args, **kwargs):
+                real_rmdir(path, *args, **kwargs)
+                if where == "sweep" and faults and not injected and sys._getframe(1).f_code is sweep_code:
+                    inject()
+            raised = None
+            baseline = _fds_open()
+            with mock.patch.object(_journal, "_close_fd_quietly", faulting_quiet), \
+                    mock.patch.object(os, "rmdir", faulting_rmdir), \
+                    mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {faulting_rmdir}), \
+                    mock.patch.object(me, "_release_note", release_note or _release_note):
+                try:
+                    run_adopt_transaction(root, rid, compose)
+                except (AdoptApplyError, RuntimeError, KeyboardInterrupt) as exc:
+                    raised = exc
+            return raised, injected, sorted(_fds_open() - baseline)
+
+        def lock_stays_note(jr_fd, journal_root, mine):
+            return "stays", "an injected lock STAYS clause", None
+        closing_path_legs = (
+            ("closing-walk-interrupt-then-fault-propagates-as-itself", "walk",
+             (_InjectedCloseInterrupt, _InjectedCloseFault), None),
+            ("closing-walk-fault-then-interrupt-propagates-as-itself", "walk",
+             (_InjectedCloseFault, _InjectedCloseInterrupt), None),
+            ("closing-walk-two-faults-every-fault-named", "walk", (_InjectedCloseFault, _InjectedCloseFault), None),
+            ("closing-sweep-interrupt-then-close-fault-propagates-as-itself", "sweep",
+             (_InjectedCloseInterrupt, _InjectedCloseFault), None),
+            ("closing-sweep-fault-then-close-interrupt-propagates-as-itself", "sweep",
+             (_InjectedCloseFault, _InjectedCloseInterrupt), None),
+            ("closing-sweep-close-fault-keeps-the-lock-clause", "sweep-close", (_InjectedCloseFault,),
+             lock_stays_note))
+        for name, where, faults, release_note in closing_path_legs:
+            control = got = None
+            for injected in ((), faults):
+                with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                    saved_umask = os.umask(0o022)
+                    try:
+                        root, files = fixture(temp)
+                        if where == "walk":
+                            os.makedirs(root / JOURNAL_REL / "outer" / "inner")
+                        outcome = _path_fault_run(root, where, injected, compose_refused_here, release_note)
+                        if injected:
+                            got = outcome
+                        else:
+                            control = outcome
+                    finally:
+                        os.umask(saved_umask)
+            raised, injected, leaked = got if got is not None else (None, [], [])
+            stop = next((exc for exc in injected if not isinstance(exc, Exception)), None)
+            text = (" ".join(getattr(raised, "__notes__", [])) if isinstance(raised, KeyboardInterrupt)
+                    else str(raised))
+            at = [text.find(repr(exc)) for exc in injected]
+            if stop is not None:
+                stands = raised is stop and "the run's refusal stands beside this interrupt" in text
+            else:
+                stands = type(raised) is AdoptApplyError and _NOTHING_WRITTEN not in text
+            check(name, control is not None and type(control[0]) is AdoptApplyError and not control[2]
+                  and (release_note is None or "an injected lock STAYS clause" in str(control[0]))
+                  and stands and len(injected) == len(faults) and "an injected compose refusal" in text
+                  and "observation of the adoption journal RAISED" in text
+                  and -1 not in at and at == sorted(at) and "(fail-closed) (fail-closed)" not in text
+                  and (release_note is None or "an injected lock STAYS clause" in text) and not leaked,
+                  observed="control (exception, leaked)={!r} exception={!r} injected={!r} text={!r} "
+                           "leaked={!r}".format(None if control is None else (control[0], control[2]),
+                                                raised, injected, text[-600:], leaked))
+        reached = []
+
+        def unbound_after_listing(jr_fd, held, after):
+            reached.append("the observation step after the closing listing")
+            raise _InjectedCloseFault(reached[-1])
+
+        def compose_errored_here(ops):
+            raise RuntimeError("an injected compose error")
+        stops_got = own_got = None
+        for leg in ("stops", "own"):
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                saved_umask = os.umask(0o022)
+                try:
+                    root, files = fixture(temp)
+                    os.makedirs(root / JOURNAL_REL)
+                    if leg == "stops":
+                        with mock.patch.object(me, "_journal_unbound", unbound_after_listing):
+                            stops_got = _final_close_run(root, ("_journal_listing",), compose_refused_here)
+                    else:
+                        own_got = _final_close_run(root, ("_journal_listing",), compose_errored_here,
+                                                   (_InjectedCloseInterrupt,))
+                finally:
+                    os.umask(saved_umask)
+        raised, popped, _after, leaked = stops_got if stops_got is not None else (None, [], [], [])
+        text = str(raised)
+        check("closing-listing-close-fault-stops-the-observation",
+              type(raised) is AdoptApplyError and not reached
+              and repr(_InjectedCloseFault("_journal_listing")) in text
+              and "observation of the adoption journal RAISED an exception" in text
+              and len(popped) == 1 and leaked == sorted(popped),
+              observed="exception={!r} later step reached={!r} popped={!r} leaked={!r}".format(
+                  raised, reached, popped, leaked))
+        raised, popped, _after, leaked = own_got if own_got is not None else (None, [], [], [])
+        text = " ".join(getattr(raised, "__notes__", []))
+        check("closing-listing-interrupt-names-the-own-exception",
+              type(raised) is _InjectedCloseInterrupt
+              and "the run's own exception stands beside this interrupt: {!r}".format(
+                  RuntimeError("an injected compose error")) in text
+              and repr(_InjectedCloseInterrupt("_journal_listing")) in text
+              and not text.endswith("(fail-closed) (fail-closed)")
+              and len(popped) == 1 and leaked == sorted(popped),
+              observed="exception={!r} note={!r} popped={!r} leaked={!r}".format(raised, text[-600:], popped,
+                                                                                  leaked))
         # 6a'''b3d: _journal_listing's own close-out (no `keep`: the closing listing of a refused run) runs
         # through _close_held too. An exception injected between a journal path component descriptor's
         # pop and its close (the patched close-out raises instead of closing) at the FIRST such close
