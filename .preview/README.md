@@ -106,9 +106,14 @@ What changed in the pack copies:
   turns off a plugin's hooks is not named here, because it has not been verified.
 - The plugin registers `clock-inject.py` on `PostToolUse` only, with matcher `.*`, so a failed tool call
   gets no clock line.
-- The plugin launches each script as `python3 -I -S -B <file>`, without the `[ -d ... ]` launch guard
-  this page uses. A standard stream that is a directory makes Python exit at startup, before the hook can
-  fail open.
+- The plugin does not run `python3 -I -S -B <file>` directly. It runs a short fixed launcher,
+  `python3 -I -S -B -c <launcher> <file>`, which runs the file and exits 1 with the reason on stderr if
+  the file is missing, cannot be read or parsed, raises an error, or exits with any code other than 0.
+  Run directly, Python exits 2 on a missing file, and exit 2 on `PreToolUse` blocks the call. Exit 1 is
+  a non-blocking hook error (from the host hook documentation, not a live probe). Two launch paths remain.
+  A `python3` older than 3.4 rejects `-I` and exits 2. A standard stream that is a directory makes Python
+  exit 1 at startup, before the hook can fail open, because the plugin does not use the `[ -d ... ]`
+  launch guard this page uses.
 
 A copy kept from this page keeps the older behaviour: the preview `future-stamp-write.py` denies, and both
 preview copies keep the worker skip and the `ORCH_` fallback. `stamp-truth-stop.py` stays here, still

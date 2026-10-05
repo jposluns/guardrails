@@ -7,15 +7,16 @@ source lives in .aiqt/core/hooks/scripts/ and tools/gen_hooks.py copies it byte-
 plugin/aiqt-guardrails-hooks/hooks/scripts/ (byte identity is that generator's --check, not this gate).
 Every script the manifest names must have a fixture set in build_specs below, and every fixture set must
 be in the manifest; a mismatch either way is a cannot-evaluate (exit 2), so a new script forces a
-reviewed edit here. Five legs:
+reviewed edit here. Six legs:
 
   (a) SELF-TEST. Each source script runs as [sys.executable, "-I", "-S", "-B", <path>, "--self-test"]
       under the run contract below. A nonzero exit is a finding.
-  (w) WARN ONLY, through the rendered hooks.json. Each script's hooks.json entry must be exactly
-      ["-I", "-S", "-B", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/<file>"] under its manifest event and
-      matcher, and the plugin copy is run that way on each fixture. Every run must exit 0, and stdout must
-      be empty or one JSON object: for future-stamp-write.py only `systemMessage`, one line of at most 100
-      characters; for clock-inject.py only `hookSpecificOutput` with exactly hookEventName and
+  (w) WARN ONLY, through the rendered hooks.json. Each script's hooks.json entry must be exactly type
+      "command", command "python3" and args ["-I", "-S", "-B", "-c", <gen_hooks.SCRIPT_LAUNCHER>,
+      "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/<file>"] under its manifest event and matcher, and the plugin
+      copy is run through those args (under sys.executable) on each fixture. Every run must exit 0, and
+      stdout must be empty or one JSON object: for future-stamp-write.py only `systemMessage`, one line
+      of at most 100 characters; for clock-inject.py only `hookSpecificOutput` with exactly hookEventName and
       additionalContext. A `decision`, `permissionDecision`, `continue`, or `stopReason` key anywhere is
       a finding, as is a fixture whose class (silent, warn, context) differs from the one expected.
       Fixtures are relative to the real clock (future literals at now plus two days).
@@ -28,6 +29,12 @@ reviewed edit here. Five legs:
       fixtures record a disclosed dependency instead of inertness: CDPATH on a relative cd (expected
       silent) and TZ on an unzoned literal (its class is printed, not asserted). Each script must have
       an inert fixture whose class is not silent, so inertness is tested on real output.
+  (l) LAUNCH FAILURE. The rendered entry of each script is run (its command must be python3, run as
+      sys.executable) with the script file replaced, in a scratch plugin root, by: no file, a directory,
+      a syntax error, a module that raises, and a module that exits 2. Each launch must exit 0 or 1 (never
+      2, which blocks a PreToolUse call), print nothing on stdout, and say why on stderr. A module that
+      exits 0 when run as __main__ with sys.argv equal to [its path] must give exit 0, so the launcher is
+      shown to run the file the way a direct launch would.
   (d) DUPLICATES. A file name present both in .preview/ and in the manifest's script set is a finding:
       a reader could install both copies and run the check twice.
   (p) REPOSITORY PARITY. Code the pack copies share with .preview/stamp-truth-stop.py, and the `_cfg`
@@ -39,7 +46,7 @@ reviewed edit here. Five legs:
       spelling. A missing or unloadable pair file is a cannot-evaluate (exit 2), never a skip, so
       promoting or retiring the Stop hook forces a deliberate edit to PAIRS.
 
-RUN CONTRACT for legs (a), (w) and (k): a fresh temporary working directory per run, stdin closed or
+RUN CONTRACT for legs (a), (w), (k) and (l): a fresh temporary working directory per run, stdin closed or
 fed the fixture, every AIQT_, ORCH_ and CLAUDE_ variable and CDPATH removed, TZ=UTC, and per-run
 temporary store and lease paths where a fixture needs them. A run that outlives its deadline is a
 cannot-evaluate (exit 2).
@@ -51,6 +58,10 @@ DISCLOSED RESIDUALS (what this gate does not catch):
   - Leg (k) tries the named variables only; another variable that changes behaviour is not found.
   - Leg (p) compares the listed names only; shared code outside the lists can drift.
   - The scripts run under this gate's interpreter (sys.executable), not the host's `python3` lookup.
+    Not exercised: a python3 too old to accept -I (before 3.4), which exits 2 with a usage error before
+    the launcher runs; a python3 that cannot be found or started (the outcome is the host's); and a
+    script that ends the process itself with os._exit(2), which bypasses the launcher (leg (w) sees it
+    only on a fixture that reaches it).
 
 Exit: 0 pass; 1 a finding; 2 cannot-evaluate (a missing input, an unloadable pair file, a timeout, a
 fixture set and manifest mismatch).
@@ -200,11 +211,22 @@ def contract_env(extra):
 
 
 def run_script(path, args, payload, extra, timeout):
-    """Run one script under the contract; returns (rc, stdout bytes, stderr bytes). Raises GateError on
-    a timeout or a launch failure."""
+    """Run one script directly under the contract; returns (rc, stdout bytes, stderr bytes)."""
+    return run_argv(["-I", "-S", "-B", str(path)] + list(args), payload, extra, timeout)
+
+
+def launch_argv(args, plugin_root):
+    """The rendered args with the plugin root substituted (run_argv puts sys.executable first)."""
+    return [str(a).replace("${CLAUDE_PLUGIN_ROOT}", str(plugin_root)) for a in args]
+
+
+def run_argv(pyargs, payload, extra, timeout):
+    """Run sys.executable with pyargs under the contract; returns (rc, stdout bytes, stderr bytes).
+    Raises GateError on a timeout or a launch failure."""
+    path = pyargs[-1]
     work = tempfile.mkdtemp(prefix="aiqt-hook-scripts-")
     try:
-        argv = [sys.executable, "-I", "-S", "-B", str(path)] + list(args)
+        argv = [sys.executable] + list(pyargs)
         try:
             if payload is None:
                 res = subprocess.run(argv, cwd=work, capture_output=True, timeout=timeout,
@@ -283,7 +305,8 @@ def reduce_outcome(script, rc, out, err, event):
 
 
 def load_script_rows(root):
-    """[(script, event, matcher)] for every manifest row with a `script` key."""
+    """([(script, event, matcher)] for every manifest row with a `script` key, the generator's
+    SCRIPT_LAUNCHER program)."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
         import gen_hooks  # noqa: E402  the manifest loader and its validation
@@ -293,29 +316,88 @@ def load_script_rows(root):
         _plugin, hooks = gen_hooks.load_manifest(root / MANIFEST_REL)
     except (ValueError, OSError) as exc:
         raise GateError("%s: %s" % (MANIFEST_REL, _bounded(exc)))
-    return [(h["script"], h["event"], h.get("matcher")) for h in hooks if "script" in h]
+    return ([(h["script"], h["event"], h.get("matcher")) for h in hooks if "script" in h],
+            gen_hooks.SCRIPT_LAUNCHER)
 
 
-def check_rendered(root, rows, findings):
-    """The hooks.json entry for each script row must be exactly the isolated launcher."""
+def want_args(script, launcher):
+    """The exact args of a script's rendered entry (its command is "python3")."""
+    return ["-I", "-S", "-B", "-c", launcher, "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/" + script]
+
+
+def rendered_entries(root, script):
+    """[(event, matcher, type, command, args)] for every hooks.json entry whose last arg is script."""
     try:
         with open(root / HOOKS_JSON_REL, encoding="utf-8") as fh:
             rendered = json.load(fh)
-        events = rendered["hooks"]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise GateError("%s: %s" % (HOOKS_JSON_REL, _bounded(exc)))
-    for script, event, matcher in rows:
-        want = ["-I", "-S", "-B", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/" + script]
         found = []
-        for ev, groups in events.items():
+        for ev, groups in rendered["hooks"].items():
             for group in groups:
                 for hook in group.get("hooks", []):
                     args = hook.get("args") or []
                     if args and str(args[-1]).endswith("/hooks/scripts/" + script):
-                        found.append((ev, group.get("matcher"), args))
-        if (event, matcher, want) not in found:
-            findings.append("(w) %s: no hooks.json entry %s %r with args %s (found %s)"
-                            % (script, event, matcher, want, found))
+                        found.append((ev, group.get("matcher"), hook.get("type"), hook.get("command"), args))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise GateError("%s: %s" % (HOOKS_JSON_REL, _bounded(exc)))
+    return found
+
+
+def check_rendered(root, rows, launcher, findings):
+    """The hooks.json entry for each script row must be exactly the isolated launcher: type, command
+    and args all compared."""
+    for script, event, matcher in rows:
+        want = (event, matcher, "command", "python3", want_args(script, launcher))
+        found = rendered_entries(root, script)
+        if want not in found:
+            findings.append("(w) %s: no hooks.json entry %s %r of type 'command' with command 'python3' "
+                            "and args %s (found %s)"
+                            % (script, event, matcher, want[4], _bounded(found, 600)))
+
+
+# Leg (l): (case, file content or None for no file, or "<dir>" for a directory, expected exit).
+LAUNCH_CASES = (
+    ("missing", None, 1),
+    ("directory", "<dir>", 1),
+    ("syntax-error", "def (\n", 1),
+    ("raises", "raise RuntimeError('seeded launch fault')\n", 1),
+    ("exit-2", "import sys\nsys.exit(2)\n", 1),
+    ("runs", "import sys\nsys.exit(0 if __name__ == '__main__' and sys.argv == [__file__] else 1)\n", 0),
+)
+
+
+def leg_launch(root, rows, findings):
+    """Leg (l): run each script's rendered launch against a missing, broken or exiting script file."""
+    for script, event, matcher in rows:
+        found = [f for f in rendered_entries(root, script) if f[0] == event and f[1] == matcher]
+        if not found:
+            findings.append("(l) %s: no hooks.json entry %s %r to launch" % (script, event, matcher))
+            continue
+        _ev, _m, htype, command, args = found[0]
+        if htype != "command" or command != "python3":
+            findings.append("(l) %s: type %r command %r is not the python3 launcher; the launch cannot "
+                            "be judged" % (script, htype, command))
+            continue
+        for case, content, expect in LAUNCH_CASES:
+            label = "(l) %s %s" % (script, case)
+            plugin = Path(tempfile.mkdtemp(prefix="aiqt-hook-launch-"))
+            try:
+                target = plugin / "hooks" / "scripts" / script
+                os.makedirs(target.parent)
+                if content == "<dir>":
+                    os.makedirs(target)
+                elif content is not None:
+                    target.write_text(content, encoding="utf-8")
+                rc, out, err = run_argv(launch_argv(args, plugin), "{}", dict(), RUN_TIMEOUT)
+            finally:
+                shutil.rmtree(plugin, ignore_errors=True)
+            if rc != expect:
+                findings.append("%s: the launcher exited %s, expected %s (a warn-only launch exits 0 or 1, "
+                                "never 2)" % (label, rc, expect))
+            if out.strip():
+                findings.append("%s: the launcher printed on stdout: %s" % (label, _bounded(out)))
+            if expect and not err.strip():
+                findings.append("%s: the failure is not reported on stderr" % label)
+        print("  (l) %s: %s launch cases run" % (script, len(LAUNCH_CASES)))
 
 
 def leg_selftest(root, scripts, findings):
@@ -328,16 +410,17 @@ def leg_selftest(root, scripts, findings):
             print("  (a) %s: --self-test exit 0" % script)
 
 
-def leg_warn_and_inert(root, specs, scripts, findings):
+def leg_warn_and_inert(root, specs, scripts, launcher, findings):
     for script in scripts:
         spec = specs[script]
         path = root / PLUGIN_REL / "hooks" / "scripts" / script
         if not path.is_file():
             raise GateError("%s: the plugin copy is absent (run tools/gen_hooks.py)" % path)
+        argv = launch_argv(want_args(script, launcher), root / PLUGIN_REL)
         nonsilent = False
         for fixture in spec["fixtures"]:
             label = "%s %s" % (script, fixture["name"])
-            rc, out, err = run_script(path, [], fixture["payload"], fixture["env"], RUN_TIMEOUT)
+            rc, out, err = run_argv(argv, fixture["payload"], fixture["env"], RUN_TIMEOUT)
             cls, problems = classify(script, rc, out, spec["event"])
             for problem in problems:
                 findings.append("(w) %s: %s" % (label, problem))
@@ -355,7 +438,7 @@ def leg_warn_and_inert(root, specs, scripts, findings):
             for vname, pairs in INERT_VARIANTS:
                 env = dict(fixture["env"])
                 env.update(dict(pairs))
-                vrc, vout, verr = run_script(path, [], fixture["payload"], env, RUN_TIMEOUT)
+                vrc, vout, verr = run_argv(argv, fixture["payload"], env, RUN_TIMEOUT)
                 _cls, vproblems = classify(script, vrc, vout, spec["event"])
                 for problem in vproblems:
                     findings.append("(w) %s under %s: %s" % (label, vname, problem))
@@ -449,11 +532,11 @@ def parity_child(spec):
     return 0
 
 
-def run_gate(root, legs=("a", "w", "d", "p"), only=None):
+def run_gate(root, legs=("a", "w", "l", "d", "p"), only=None):
     """(findings, unverifiable) for the tree at root. `only` restricts legs (a) and (w)(k) to scripts."""
     findings = []
     try:
-        rows = load_script_rows(root)
+        rows, launcher = load_script_rows(root)
         scripts = sorted(set(r[0] for r in rows))
         now = datetime.datetime.now(datetime.timezone.utc)
         base = tempfile.mkdtemp(prefix="aiqt-hook-scripts-base-")
@@ -467,8 +550,10 @@ def run_gate(root, legs=("a", "w", "d", "p"), only=None):
             if "a" in legs:
                 leg_selftest(root, chosen, findings)
             if "w" in legs:
-                check_rendered(root, rows, findings)
-                leg_warn_and_inert(root, specs, chosen, findings)
+                check_rendered(root, rows, launcher, findings)
+                leg_warn_and_inert(root, specs, chosen, launcher, findings)
+            if "l" in legs:
+                leg_launch(root, [r for r in rows if r[0] in chosen], findings)
             if "d" in legs:
                 leg_duplicates(root, scripts, findings)
             if "p" in legs:
@@ -493,8 +578,8 @@ def report(findings, unverifiable):
         return 2
     if findings:
         return 1
-    print("PASS: hook scripts are warn-only, inert to the worker and legacy variables tried, "
-          "unduplicated, and in parity")
+    print("PASS: hook scripts are warn-only, inert to the worker and legacy variables tried, launched "
+          "so a missing or failing script exits 1 (never 2), unduplicated, and in parity")
     return 0
 
 
@@ -512,11 +597,20 @@ def main(argv):
 
 
 # --- self-test -------------------------------------------------------------------------------------
-# Seeded faults against a scratch copy of the real files. Each must be caught: a deny key, a block key,
-# an honoured worker variable, an over-length line, a failing self-test, a basename present in .preview/
-# too, and for leg (p): a one-character change to a shared constant, a changed shared function on either
-# side, a changed regex, a drifted _cfg, _is_worker reintroduced into a pack copy, and a missing pair
-# file (exit 2). The unmodified copy must pass legs (w), (k), (d) and (p).
+# Seeded faults against a scratch copy of the real files. Each must be caught, by the finding text of the
+# check it pins (every needle of a row must appear): a deny key; a block key (both the forbidden-key walk
+# and the clock shape check); an honoured worker variable; an over-length line holding a line break (the
+# length and line-break checks); a script returning 2 (the exit check: the launcher reports it as exit
+# 1) and one ending the process with os._exit(2) (the exit check sees the 2 itself); a silent clock
+# script (the class check and the no-inert-output check); a wrong hookEventName, a non-CLOCK context
+# and an `elapsed` segment where a fixture forbids it; a failing self-test; in hooks.json, a substituted
+# command, the launcher reverted to a direct `python3 <file>` launch (leg (l): a missing script exits 2),
+# a launcher that never runs the file, and one that reports a failure on stdout, not stderr (leg (l));
+# a basename present in .preview/ too; a manifest
+# script with no fixture set (cannot-evaluate); and for leg (p): a one-character change to a shared
+# constant, a changed shared function on either side, a changed regex, a drifted _cfg, _is_worker
+# reintroduced into a pack copy, and a missing pair file (exit 2). The unmodified copy must pass legs
+# (w), (k), (l), (d) and (p).
 
 _FAULT_HEAD = "def main(argv):\n"
 
@@ -526,18 +620,45 @@ def _fault(body):
     return "def main(argv):\n" + body + "\n\n\ndef _orig_main(argv):\n"
 
 
+# (name, script, leg, needles, replacement main). Every needle must appear in some finding.
 _FAULTS = (
-    ("deny", RECORD, "w", "permissionDecision",
+    ("deny", RECORD, "w", ("permissionDecision",),
      _fault("    print(json.dumps(dict(hookSpecificOutput=dict(hookEventName='PreToolUse', "
             "permissionDecision='deny'))))\n    return 0")),
-    ("block", CLOCK, "w", "'decision'",
+    ("block", CLOCK, "w", ("forbidden decision key 'decision'", "expected only hookSpecificOutput"),
      _fault("    print(json.dumps(dict(decision='block', reason='x')))\n    return 0")),
-    ("worker", RECORD, "w", "AIQT_HOOKS_WORKER=1 changes",
+    ("worker", RECORD, "w", ("AIQT_HOOKS_WORKER=1 changes",),
      _fault("    if os.environ.get('AIQT_HOOKS_WORKER') == '1':\n        return 0\n    return _orig_main(argv)")),
-    ("overlong", RECORD, "w", "characters (at most",
-     _fault("    print(json.dumps(dict(systemMessage='x' * 150)))\n    return 0")),
-    ("selftest", CLOCK, "a", "--self-test exited 1",
+    ("overlong", RECORD, "w", ("characters (at most", "holds a line break"),
+     _fault("    print(json.dumps(dict(systemMessage='x' * 150 + '\\n')))\n    return 0")),
+    ("return-2", CLOCK, "w", ("exit 1 (only 0 is allowed)",), _fault("    return 2")),
+    ("os-exit-2", CLOCK, "w", ("exit 2 (only 0 is allowed)",), _fault("    os._exit(2)")),
+    ("silent", CLOCK, "w", ("class silent, expected context", "no inert fixture produced output"),
+     _fault("    return 0")),
+    ("clock-shape", CLOCK, "w", ("hookEventName 'PreToolUse', expected", "is not one CLOCK line",
+                                 "output contains 'elapsed'"),
+     _fault("    print(json.dumps(dict(hookSpecificOutput=dict(hookEventName='PreToolUse', "
+            "additionalContext='elapsed'))))\n    return 0")),
+    ("selftest", CLOCK, "a", ("--self-test exited 1",),
      _fault("    if argv[1:] == ['--self-test']:\n        return 1\n    return _orig_main(argv)")),
+)
+
+# Faults in the rendered hooks.json: (name, script, leg, needles, function(entry) that edits the entry).
+_DIRECT_ARGS = ["-I", "-S", "-B"]
+# A launcher that exits 1 on a failure but reports it on stdout (the hook protocol channel), not stderr.
+_STDOUT_LAUNCHER = ("import sys\nimport runpy\ntry:\n    sys.argv = sys.argv[-1:]\n"
+                    "    runpy.run_path(sys.argv[0], run_name='__main__')\nexcept SystemExit as e:\n"
+                    "    sys.exit(0 if e.code in (None, 0) else 1)\nexcept BaseException as e:\n"
+                    "    print(type(e).__name__)\n    sys.exit(1)\n")
+_RENDER_FAULTS = (
+    ("command", CLOCK, "w", ("'/bin/false'",), lambda h: h.update(command="/bin/false")),
+    ("direct-launch", RECORD, "l", ("missing: the launcher exited 2",),
+     lambda h: h.update(args=_DIRECT_ARGS + h["args"][-1:])),
+    ("launcher-skips-file", RECORD, "l", ("runs: the launcher exited 1, expected 0",),
+     lambda h: h.update(args=h["args"][:4] + ["import sys; sys.exit(1)"] + h["args"][-1:])),
+    ("launcher-stdout", CLOCK, "l", ("missing: the launcher printed on stdout",
+                                     "missing: the failure is not reported on stderr"),
+     lambda h: h.update(args=h["args"][:4] + [_STDOUT_LAUNCHER] + h["args"][-1:])),
 )
 
 _PARITY_FAULTS = (
@@ -563,6 +684,24 @@ def _copy_tree(src_root, dst):
         shutil.copyfile(src_root / rel, dst / rel)
 
 
+def _patch_rendered(root, script, edit):
+    """Apply edit() to every hooks.json entry whose last arg names script."""
+    path = root / HOOKS_JSON_REL
+    with open(path, encoding="utf-8") as fh:
+        rendered = json.load(fh)
+    hits = 0
+    for groups in rendered["hooks"].values():
+        for group in groups:
+            for hook in group["hooks"]:
+                if str(hook["args"][-1]).endswith("/hooks/scripts/" + script):
+                    edit(hook)
+                    hits += 1
+    if not hits:
+        raise GateError("self-test setup: no hooks.json entry for %s" % script)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(rendered, indent=2) + "\n")
+
+
 def _patch(path, old, new, append=""):
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
@@ -583,18 +722,37 @@ def self_test_main():
             _copy_tree(ROOT, dst)
             return dst
 
-        findings, unver = run_gate(fresh("clean"), legs=("w", "d", "p"))
+        findings, unver = run_gate(fresh("clean"), legs=("w", "l", "d", "p"))
         if findings or unver:
             failures.append("clean copy: expected no finding, got %s %s" % (findings, unver))
 
-        for name, script, leg, needle, src in _FAULTS:
+        def expect(name, needles, findings, unver):
+            missing = [n for n in needles if not any(n in f for f in findings)]
+            if unver or missing:
+                failures.append("fault %s: expected findings containing %r, got %s %s"
+                                % (name, missing, findings[:4], unver))
+
+        for name, script, leg, needles, src in _FAULTS:
             root = fresh(name)
             target = root / (SRC_REL if leg == "a" else PLUGIN_REL + "/hooks/scripts") / script
             _patch(target, _FAULT_HEAD, src)
             findings, unver = run_gate(root, legs=(leg,), only=(script,))
-            if unver or not any(needle in f for f in findings):
-                failures.append("fault %s: expected a finding containing %r, got %s %s"
-                                % (name, needle, findings[:3], unver))
+            expect(name, needles, findings, unver)
+
+        for name, script, leg, needles, edit in _RENDER_FAULTS:
+            root = fresh("r-" + name)
+            _patch_rendered(root, script, edit)
+            findings, unver = run_gate(root, legs=(leg,), only=(script,))
+            expect(name, needles, findings, unver)
+
+        extra = fresh("unfixtured")
+        _patch(extra / MANIFEST_REL, "", "", '\n[[hook]]\nid = "unfixtured"\nrules = ["tstamp"]\n'
+               'platform = "claude-code"\nevent = "PostToolUse"\nmatcher = ".*"\nscript = "unfixtured.py"\n'
+               'default = "warn"\nclass = "c"\nresidue = "A self-test row with no fixture set."\n')
+        findings, unver = run_gate(extra, legs=("d",))
+        if not any("update build_specs" in u for u in unver):
+            failures.append("a manifest script with no fixture set: expected cannot-evaluate, got %s %s"
+                            % (findings, unver))
 
         dup = fresh("dup")
         shutil.copyfile(dup / SRC_REL / CLOCK, dup / PREVIEW_REL / CLOCK)
@@ -624,10 +782,14 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: a clean copy passes legs (w), (k), (d) and (p); a deny key, a block key, an "
-          "honoured worker variable, an over-length line, a failing self-test, a dual-present basename, "
-          "a changed shared constant, function (either side), regex or _cfg, and a reintroduced _is_worker "
-          "are each caught, and a missing pair file is a cannot-evaluate")
+    print("SELF-TEST PASS: a clean copy passes legs (w), (k), (l), (d) and (p); a deny key, a block key, "
+          "an honoured worker variable, an over-length line with a line break, a script returning 2 or "
+          "calling os._exit(2), a silent clock script, a wrong clock shape, an elapsed segment where "
+          "forbidden, a failing self-test, a substituted command, a direct python3 <file> launch, a "
+          "launcher that skips the file or reports on stdout, a dual-present basename, a changed shared "
+          "constant, function (either side), regex or _cfg, and a reintroduced _is_worker are each "
+          "caught by their own check, and a missing pair file and a script with no fixture set are "
+          "cannot-evaluate")
     return 0
 
 
