@@ -12,7 +12,8 @@ reviewed edit here. Six legs:
   (a) SELF-TEST. Each source script runs as [sys.executable, "-I", "-S", "-B", <path>, "--self-test"]
       under the run contract below. A nonzero exit is a finding.
   (w) WARN ONLY, through the rendered hooks.json. The hooks.json entries that name a script (in any arg
-      or the command) must be, counted with their multiplicity, exactly one per manifest row of that
+      or the command, in any spelling of its path: see NAMING below) must be, counted with their
+      multiplicity, exactly one per manifest row of that
       script: under its event and matcher, the whole entry {type "command", command "python3", args
       ["-I", "-S", "-B", "-c", <gen_hooks.SCRIPT_LAUNCHER>, "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/<file>"],
       timeout <the row's, default gen_hooks.TIMEOUT>}, so an extra or duplicated entry is a finding. The
@@ -52,6 +53,13 @@ reviewed edit here. Six legs:
       spelling. A missing or unloadable pair file is a cannot-evaluate (exit 2), never a skip, so
       promoting or retiring the Stop hook forces a deliberate edit to PAIRS.
 
+NAMING, for legs (w) and (l): an entry names a script when a word of its command or of any arg (split at
+whitespace, quotes, `=`, `;`, `|`, `&`, `<`, `>` and parentheses) either, with ${CLAUDE_PLUGIN_ROOT} or
+$CLAUDE_PLUGIN_ROOT replaced by the plugin root, resolves to the plugin copy of the script (symlinks
+followed, or the same file by device and inode), or has the script's name as its last path component
+once ./, // and .. are normalised. So `scripts/./<file>`, `scripts//<file>`, `scripts/../scripts/<file>`,
+a symlinked plugin root, a symlink to the file under another name and a relative path all name it.
+
 RUN CONTRACT for legs (a), (w), (k) and (l): a fresh temporary working directory per run, stdin closed or
 fed the fixture, every AIQT_, ORCH_ and CLAUDE_ variable and CDPATH removed, TZ=UTC, and per-run
 temporary store and lease paths where a fixture needs them. A run that outlives its deadline is a
@@ -70,7 +78,9 @@ DISCLOSED RESIDUALS (what this gate does not catch):
     only on a fixture that reaches it); a directory as a standard stream, which makes Python exit 1 at
     startup; and a host that runs command and args through a shell (the launcher assumes it does not).
   - Leg (w) reconciles only entries that name a manifest script; an entry naming none (a dispatcher
-    row, or any other) and group-level keys are tools/gen_hooks.py --check's drift comparison.
+    row, or any other) and group-level keys are tools/gen_hooks.py --check's drift comparison. An entry
+    that reaches a script without a word NAMING accepts (a path built at run time, a relative path to a
+    copy under another name, or the program read from stdin) is not matched.
 
 Exit: 0 pass; 1 a finding; 2 cannot-evaluate (a missing input, an unloadable pair file, a timeout, a
 fixture set and manifest mismatch).
@@ -334,10 +344,35 @@ def want_args(script, launcher):
     return ["-I", "-S", "-B", "-c", launcher, "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/" + script]
 
 
+_WORD_RE = re.compile(r"[^\s'\"`=;|&<>()]+")
+_ROOT_VARS = ("${CLAUDE_PLUGIN_ROOT}", "$CLAUDE_PLUGIN_ROOT")
+
+
+def _names_script(text, plugin_root, script, target):
+    """Whether a word of text names script by its path (see NAMING in the module docstring)."""
+    for word in _WORD_RE.findall(text):
+        if os.path.basename(os.path.normpath(word)) == script:
+            return True
+        for var in _ROOT_VARS:
+            word = word.replace(var, str(plugin_root))
+        if not os.path.isabs(word):
+            continue
+        resolved = os.path.realpath(word)
+        if resolved == target:
+            return True
+        try:
+            if os.path.samefile(resolved, target):
+                return True
+        except OSError:
+            pass
+    return False
+
+
 def rendered_entries(root, script):
-    """[(event, matcher, entry dict)] for every hooks.json entry that names script, as a path ending in
-    /hooks/scripts/<script>, in its command or in any of its args."""
-    named = re.compile(r"/hooks/scripts/" + re.escape(script) + r"(?![\w.-])")
+    """[(event, matcher, entry dict)] for every hooks.json entry that names script in its command or in any
+    of its args, in any spelling of its path (NAMING in the module docstring)."""
+    plugin_root = root / PLUGIN_REL
+    target = os.path.realpath(plugin_root / "hooks" / "scripts" / script)
     try:
         with open(root / HOOKS_JSON_REL, encoding="utf-8") as fh:
             rendered = json.load(fh)
@@ -347,7 +382,8 @@ def rendered_entries(root, script):
                 for hook in group.get("hooks", []):
                     args = hook.get("args")
                     texts = [str(a) for a in args] if isinstance(args, list) else [str(args)]
-                    if any(named.search(t) for t in texts + [str(hook.get("command"))]):
+                    if any(_names_script(t, plugin_root, script, target)
+                           for t in texts + [str(hook.get("command"))]):
                         found.append((ev, group.get("matcher"), hook))
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise GateError("%s: %s" % (HOOKS_JSON_REL, _bounded(exc)))
@@ -665,13 +701,16 @@ def main(argv):
 # its own) and one ending the process with os._exit(2) (the exit check sees the 2 itself); a silent clock
 # script (the class check and the no-inert-output check); a wrong hookEventName, a non-CLOCK context
 # and an `elapsed` segment where a fixture forbids it; a failing self-test; in hooks.json, a substituted
-# command, the launcher reverted to a direct `python3 <file>` launch (leg (l): a missing script exits 2),
+# command, timeout, matcher, or an extra key in an entry (leg (w)'s whole-entry comparison), the launcher
+# reverted to a direct `python3 <file>` launch (leg (l): a missing script exits 2),
 # a launcher that never runs the file, one that reports a failure on stdout, not stderr, one that takes
 # the last argument as the script (leg (l)'s appended argument), one that swallows a failure as exit 0
 # (leg (l)'s exact 1), and one that exits 2 on an unreadable file (leg (l)'s unreadable case, skipped
 # with a printed note where this user can read a mode 0 file); an extra entry beside the right one that
 # exits 2 (caught by leg (w)'s reconciliation and, separately, by leg (l) running every entry), an extra
-# direct `python3 <file>` entry (leg (l)), and a duplicate of the right entry (leg (w)'s counts);
+# direct `python3 <file>` entry (leg (l)), and a duplicate of the right entry (leg (w)'s counts); the
+# extra exit-2 entry once per other spelling of the script path (./, //, .., a symlinked plugin root, a
+# symlink under another name, a relative path), each caught by legs (w) and (l) through NAMING;
 # a basename present in .preview/ too; a manifest
 # script with no fixture set (cannot-evaluate); and for leg (p): a one-character change to a shared
 # constant, a changed shared function on either side, a changed regex, a drifted _cfg, _is_worker
@@ -728,6 +767,10 @@ _UNREADABLE_2 = "import os, sys\nif os.path.isfile(sys.argv[1]) and not os.acces
 _RENDER_FAULTS = (
     ("command", CLOCK, "w", ("missing hooks.json entry", '"command": "/bin/false"'),
      lambda h: h.update(command="/bin/false")),
+    ("timeout", CLOCK, "w", ("missing hooks.json entry", '"timeout": 11'),
+     lambda h: h.update(timeout=h["timeout"] + 1)),
+    ("extra-key", RECORD, "w", ("missing hooks.json entry", '"statusMessage": "seeded"'),
+     lambda h: h.update(statusMessage="seeded")),
     ("direct-launch", RECORD, "l", ("missing: the launcher exited 2",),
      lambda h: h.update(args=_DIRECT_ARGS + h["args"][-1:])),
     ("launcher-skips-file", RECORD, "l", ("runs: the launcher exited 1, expected 0",),
@@ -744,6 +787,12 @@ _RENDER_FAULTS = (
      lambda h: h.update(args=h["args"][:4] + [_UNREADABLE_2 + h["args"][4]] + h["args"][-1:])),
 )
 
+# Faults in the group holding the entry: (name, script, leg, needles, function(group) that edits it).
+_GROUP_FAULTS = (
+    ("matcher", CLOCK, "w", ("missing hooks.json entry PostToolUse '.*'", "exactly one): PostToolUse 'Bash'"),
+     lambda g: g.update(matcher="Bash")),
+)
+
 # Entries added beside the right one: (name, script, leg, needles, function(entry) returning the new entry).
 _EXTRA_BLOCKING = lambda h: dict(h, args=h["args"][:4] + ["import sys; sys.exit(2)"] + h["args"][-1:])
 _ADD_FAULTS = (
@@ -755,6 +804,21 @@ _ADD_FAULTS = (
      lambda h: dict(h, args=_DIRECT_ARGS + h["args"][-1:])),
     ("duplicate-entry", CLOCK, "w", ("1 hooks.json entry not accounted for by the manifest",),
      lambda h: dict(h)),
+)
+
+# Other spellings of the script path, each in an extra exit-2 entry beside the right one: (name, setup(root,
+# script) run first or None, function(script, rendered path) giving the spelling).
+_SCRIPTS_REL = "/hooks/scripts/"
+_SPELLINGS = (
+    ("dot", None, lambda s, p: p.replace(_SCRIPTS_REL, _SCRIPTS_REL + "./")),
+    ("double-slash", None, lambda s, p: p.replace(_SCRIPTS_REL, _SCRIPTS_REL + "/")),
+    ("dot-dot", None, lambda s, p: p.replace(_SCRIPTS_REL, _SCRIPTS_REL + "../scripts/")),
+    ("symlinked-root",
+     lambda r, s: os.symlink(Path(PLUGIN_REL).name, (r / PLUGIN_REL).parent / "aiqt-root-link"),
+     lambda s, p: p.replace("${CLAUDE_PLUGIN_ROOT}", "${CLAUDE_PLUGIN_ROOT}/../aiqt-root-link")),
+    ("symlink-alias", lambda r, s: os.symlink(s, r / PLUGIN_REL / "hooks" / "scripts" / "seeded-alias.py"),
+     lambda s, p: p[:-len(s)] + "seeded-alias.py"),
+    ("relative", None, lambda s, p: p.replace("${CLAUDE_PLUGIN_ROOT}/", "")),
 )
 
 _PARITY_FAULTS = (
@@ -780,8 +844,8 @@ def _copy_tree(src_root, dst):
         shutil.copyfile(src_root / rel, dst / rel)
 
 
-def _patch_rendered(root, script, edit):
-    """Apply edit() to every hooks.json entry whose last arg names script."""
+def _patch_rendered(root, script, edit, group_level=False):
+    """Apply edit() to every hooks.json entry whose last arg names script (to its group if group_level)."""
     path = root / HOOKS_JSON_REL
     with open(path, encoding="utf-8") as fh:
         rendered = json.load(fh)
@@ -790,7 +854,7 @@ def _patch_rendered(root, script, edit):
         for group in groups:
             for hook in group["hooks"]:
                 if str(hook["args"][-1]).endswith("/hooks/scripts/" + script):
-                    edit(hook)
+                    edit(group if group_level else hook)
                     hits += 1
     if not hits:
         raise GateError("self-test setup: no hooks.json entry for %s" % script)
@@ -875,11 +939,31 @@ def self_test_main():
             findings, unver = run_gate(root, legs=(leg,), only=(script,))
             expect(name, needles, findings, unver)
 
+        for name, script, leg, needles, edit in _GROUP_FAULTS:
+            root = fresh("g-" + name)
+            _patch_rendered(root, script, edit, group_level=True)
+            findings, unver = run_gate(root, legs=(leg,), only=(script,))
+            expect(name, needles, findings, unver)
+
         for name, script, leg, needles, make in _ADD_FAULTS:
             root = fresh("e-%s-%s" % (name, leg))
             _add_rendered(root, script, make)
             findings, unver = run_gate(root, legs=(leg,), only=(script,))
             expect("%s (leg %s)" % (name, leg), needles, findings, unver)
+
+        for name, setup, spell in _SPELLINGS:
+            root = fresh("s-" + name)
+            if setup is not None:
+                setup(root, RECORD)
+            def respelled(h, spell=spell):
+                extra = _EXTRA_BLOCKING(h)
+                extra["args"] = extra["args"][:-1] + [spell(RECORD, extra["args"][-1])]
+                return extra
+            _add_rendered(root, RECORD, respelled)
+            findings, unver = run_gate(root, legs=("w", "l"), only=(RECORD,))
+            expect("spelling %s" % name, ("hooks.json entry not accounted for by the manifest",
+                                          "entry 2 of 2) missing: the launcher exited 2, expected 1"),
+                   findings, unver)
 
         extra = fresh("unfixtured")
         _patch(extra / MANIFEST_REL, "", "", '\n[[hook]]\nid = "unfixtured"\nrules = ["tstamp"]\n'
@@ -923,8 +1007,9 @@ def self_test_main():
           "calling os._exit(2), a silent clock script, a wrong clock shape, an elapsed segment where "
           "forbidden, a failing self-test, a substituted command, a direct python3 <file> launch, a "
           "launcher that skips the file, reports on stdout, takes the last argument, swallows a failure "
-          "or exits 2 on an unreadable file, an extra exit-2 entry (legs (w) and (l)), an extra direct "
-          "entry, a duplicated entry, a dual-present basename, a changed shared "
+          "or exits 2 on an unreadable file, a changed timeout, matcher or extra key, an extra exit-2 entry "
+          "(legs (w) and (l)) in each of seven spellings of the script path, an extra direct entry, a "
+          "duplicated entry, a dual-present basename, a changed shared "
           "constant, function (either side), regex or _cfg, and a reintroduced _is_worker are each "
           "caught by their own check, and a missing pair file and a script with no fixture set are "
           "cannot-evaluate")
