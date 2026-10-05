@@ -129,10 +129,14 @@ at the same point (an injected one included), can leave a descriptor open in the
 exits: one landing between a C call's return and the binding of the descriptor it returned; between a
 helper's return and the handoff of the descriptors it returned to the owning list (journal_state's
 transaction directory descriptors, bound to txns before held.extend has taken them all); between a
-descriptor's pop and its close inside a close-out (_close_held still closes the rest of its list and
-_close_held_chain the lists after it, re-raising the first exception, so only that popped descriptor
-stays open), or at a close-out's own loop boundary, outside its per-descriptor handler (what that loop
-has not reached stays open); or inside a _journal helper (acquire_lock's lock descriptor among them).
+descriptor's pop and its close inside a close-out (every close-out loop in this module runs through
+_close_held, which still closes the rest of its list, and _close_held_chain the lists after it,
+re-raising the first exception, so only a descriptor popped and then interrupted before its close stays
+open); or an asynchronous interrupt landing at _close_held's or _close_held_chain's own loop boundary or
+in its handler, outside the per-descriptor try (what that loop has not reached stays open); or inside a
+_journal helper (acquire_lock's lock descriptor among them, and the rest of a _journal close-out loop,
+in _open_parent, ensure_journal_dirs, _open_dir_contained or _journal_txn_dirs, once one of its closes
+raises anything but OSError).
 Leak-freedom under interrupt, or under an exception raised in those windows, is NOT claimed. The
 finish ops add their own: all three finish ops
 compose into this shell's transactions, which refuse a resolved store (no lease join), so once init-store
@@ -550,8 +554,7 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
                                 "drift)".format(path))
         return schema._ok() if not findings else schema._invalid(findings)
     finally:
-        for fd in dir_fds.values():
-            _journal._close_fd_quietly(fd)
+        _close_held(list(dir_fds.values()))     # one close that raises never abandons the rest
 
 
 # --- composition: preserve-first, derived inventories, immutable homes (spec 4.2, 14.2) ---------------
@@ -1105,10 +1108,11 @@ def _journal_listing(root_fd, keep=None):
     step), so from then on the caller alone closes it, on every path an exception reaches; one bound but
     interrupted before that append (a synchronous raise) is adopted by the close-out: with a `keep` it
     joins the kept descriptors (keyed ""), which the caller closes, and with no `keep` every descriptor
-    is closed here, each popped before its one close. An asynchronous interrupt (SIGINT, SIGTERM) that
-    lands between a C call's return and the binding of the descriptor it returned, or inside the
-    close-out, can leave a descriptor open until the process exits: a disclosed residual (module
-    docstring), never a second close."""
+    is closed here through _close_held, each popped before its one close, the rest still closed when one
+    close raises (the first exception re-raised). An asynchronous interrupt (SIGINT, SIGTERM) that lands
+    between a C call's return and the binding of the descriptor it returned, between a pop and its close
+    in the close-out (that one descriptor), or at _close_held's own loop boundary, can leave a descriptor
+    open until the process exits: a disclosed residual (module docstring), never a second close."""
     found = {}
 
     def opened_as(rel, st, fd):
@@ -1182,8 +1186,8 @@ def _journal_listing(root_fd, keep=None):
         if cur != root_fd and cur not in [fd for _rel, fd in opened]:
             opened.append(("", cur))    # bound, but interrupted before its append: adopted, so one party closes it
         if keep is None:
-            while opened:   # deepest first, each popped before its one close
-                _journal._close_fd_quietly(opened.pop()[1])
+            _close_held(opened)     # deepest first, each popped before its one close; one that raises
+                                    # never abandons the rest, and the first exception is re-raised
     return found
 
 
@@ -3452,8 +3456,7 @@ def _self_test_checks():
                                                              seen.get("peer"), owner_now))
         finally:
             os.umask(saved_umask)
-            for pinned_lock_fd in pinned_locks:
-                _journal._close_fd_quietly(pinned_lock_fd)
+            _close_held(pinned_locks)
     # Shared by the two inode-reuse vectors below (6a'''b and 6a11d): the ext4 reuse rule, modelled with
     # no ext4 mount. A freed inode number may be handed to the very next create; one still held by any open
     # descriptor of this process never is (the census is /proc/self/fd, fstat'ed with the REAL os.fstat).
@@ -3607,8 +3610,8 @@ def _self_test_checks():
     # exits, at the boundary between a C call's return and the binding of the descriptor it returned
     # (skipped here), between a helper's return and the handoff of its descriptors to the owning list
     # (journal_state's transaction directories before held.extend has taken them all), between a
-    # descriptor's pop and its close inside a close-out of a caller (that one descriptor, 6a'''b3c), at a
-    # close-out's own loop boundary, or inside a _journal helper (acquire_lock's own lock descriptor
+    # descriptor's pop and its close inside a close-out (that one descriptor, 6a'''b3c and 6a'''b3d), at
+    # a close-out's own loop boundary, or inside a _journal helper (acquire_lock's own lock descriptor
     # among them); no signal mask is used, so these legs establish no leak-freedom under interrupt
     # (red against an ownership flag set after the append: two closes; and against a transfer inside the
     # finally: a leak).
@@ -3622,6 +3625,7 @@ def _self_test_checks():
             skipped.append((name, no_census))
         for name, _targets in final_close_legs:
             skipped.append((name, no_census))
+        skipped.append(("journal-listing-close-out-injected-fault-closes-the-rest", no_census))
     else:
         import dis
 
@@ -3705,10 +3709,7 @@ def _self_test_checks():
                         sys.settrace(prior_trace)
                 leaked = _fds_open() - baseline - guarded
             finally:
-                for fd in sorted(guarded):
-                    _journal._close_fd_quietly(fd)
-                _journal._close_fd_quietly(guard_r)
-                _journal._close_fd_quietly(guard_w)
+                _close_held([guard_w, guard_r] + sorted(guarded, reverse=True))
             return fired, outcome, sorted(doubles), sorted(leaked)
 
         def compose_refused_here(ops):
@@ -3798,8 +3799,7 @@ def _self_test_checks():
                         raised = exc
                 leaked = _fds_open() - baseline
             finally:
-                for fd in popped:
-                    _journal._close_fd_quietly(fd)
+                _close_held(list(popped))   # a copy: the caller reads popped
             return raised, popped, after, sorted(leaked)
         for name, targets in final_close_legs:
             with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -3822,6 +3822,72 @@ def _self_test_checks():
                                "the first injection={!r} leaked={!r}".format(
                                    None if control is None else (control[0], control[3]), raised, popped,
                                    after, leaked))
+        # 6a'''b3d: _journal_listing's own close-out (no `keep`: the closing listing of a refused run) runs
+        # through _close_held too. An exception injected between a journal path component descriptor's
+        # pop and its close (the patched close-out raises instead of closing) at the FIRST such close
+        # leaves exactly that popped descriptor open: its sibling component descriptors are still closed
+        # and the injected exception propagates. A listing with no injection is the control (red against
+        # a close-out loop that stops at its first failure: the unreached siblings leak).
+        comp_rels = ["/".join(JOURNAL_REL.split("/")[:i + 1]) for i in range(len(JOURNAL_REL.split("/")))]
+
+        def _listing_close_run(root, inject):
+            """One listing with no `keep` over `root`, its close-out injected at its first close of a
+            journal path component when `inject`: (exception, popped descriptors, component descriptors
+            closed after the injection, descriptors leaked)."""
+            real_quiet = _journal._close_fd_quietly
+            comp_ids = set()
+            for rel in comp_rels:
+                cst = _real_lstat(root / rel)
+                comp_ids.add((cst.st_dev, cst.st_ino))
+            popped, after = [], []
+
+            def faulting_quiet(fd):
+                try:
+                    fst = _real_fstat(fd)
+                except OSError:
+                    return real_quiet(fd)
+                if (fst.st_dev, fst.st_ino) in comp_ids:
+                    if inject and not popped:
+                        popped.append(fd)
+                        raise _InjectedCloseFault("journal listing")
+                    after.append(fd)
+                return real_quiet(fd)
+            raised, leaked = None, set()
+            root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                baseline = _fds_open()
+                try:
+                    with mock.patch.object(_journal, "_close_fd_quietly", faulting_quiet):
+                        try:
+                            _journal_listing(root_fd)
+                        except _InjectedCloseFault as exc:
+                            raised = exc
+                    leaked = _fds_open() - baseline
+                finally:
+                    _close_held(list(popped))   # a copy: the caller reads popped
+            finally:
+                os.close(root_fd)
+            return raised, popped, after, sorted(leaked)
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            saved_umask = os.umask(0o022)
+            control = got = None
+            try:
+                root, files = fixture(temp)
+                os.makedirs(root / JOURNAL_REL)
+                control = _listing_close_run(root, False)
+                got = _listing_close_run(root, True)
+            finally:
+                os.umask(saved_umask)
+            raised, popped, after, leaked = got if got is not None else (None, [], [], [])
+            check("journal-listing-close-out-injected-fault-closes-the-rest",
+                  control is not None and control[0] is None and not control[1]
+                  and len(control[2]) == len(comp_rels) and not control[3]
+                  and isinstance(raised, _InjectedCloseFault) and len(popped) == 1
+                  and leaked == sorted(popped) and len(after) == len(comp_rels) - 1,
+                  observed="control (exception, component closes, leaked)={!r} exception={!r} popped={!r} "
+                           "component closes after the injection={!r} leaked={!r}".format(
+                               None if control is None else (control[0], control[2], control[3]), raised,
+                               popped, after, leaked))
     # 6a'''b4: an NFS product root, modelled: a file unlinked while this process still holds it open is
     # renamed to .nfsXXXX (the client's silly-rename) and removed at its last close. The run closes the
     # lock descriptor it holds right after the release's read-back, before the cleanup and the closing
@@ -4243,8 +4309,7 @@ def _self_test_checks():
                   observed="refusal={!r} component (st_dev, st_ino) before/after={!r}".format(err, seen))
         finally:
             os.umask(saved_umask)
-            for pinned_component_fd in pinned_components:
-                _journal._close_fd_quietly(pinned_component_fd)
+            _close_held(pinned_components)
     # 6a11b: only a directory at a journal path component may be this run's recreation; anything else there
     # is named by its type, never as possibly recreated by this run (red against the label for any type).
     comp_dir = _entry_named(JOURNAL_REL, ("directory", 1, 2), [], rid, None, False)
@@ -5403,11 +5468,7 @@ def _self_test_checks():
                 continue
             _m2_left.append(_fd)
         check("r7-txn-dirs-no-held-descriptor-survives-path-error", not _m2_left)
-        for _fd in _m2_left:              # a pre-fix run leaks it; close so the failing suite stays clean
-            try:
-                os.close(_fd)
-            except OSError:
-                pass
+        _close_held(_m2_left)             # a pre-fix run leaks it; close so the failing suite stays clean
         os.close(jr_fd)
 
     # 10: apply takes only a plan/v2 (spec 14.1): a v1-marked plan is never apply input. The v1 schema no
