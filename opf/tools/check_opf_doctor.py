@@ -99,7 +99,13 @@ dedicated sync target equal to the clone's remote stays VALID in the snapshot. U
 run by hand: exact order and arguments (doctor --require-store, then render --check, over one snapshot root
 under TMPDIR), each launched -I -B; the clone left unchanged over the read-only snapshot described above; a doctor
 finding stopping before render, a render error forwarded, an out-of-vocabulary status normalized to 2 and a
-surplus operand a usage 2 with no step run; and every snapshot directory removed on exit.
+surplus operand a usage 2 with no step run; and every snapshot directory removed on exit. Fail closed, each a
+named 2: the installer refuses a hooks directory it cannot list (run only for an unprivileged user, as root
+reads any directory) or that is not a directory, and a git below the 2.32 floor; it writes the local
+configuration when core.hooksPath is supplied only by the environment; the hook stops before any step under a
+git below the floor or when the GIT_ variable names cannot be read from the environment (no sed), and exits 2
+when the snapshot removal fails (no rm). The disclosed CI residual is held as behaviour and text: a staged
+tamper the hook refuses, committed with --no-verify, passes the CI recipe, and the shipped files say so.
 """
 import sys
 
@@ -1200,6 +1206,29 @@ def _self_test_isolated():
 
         done_rel = "{}/{}/done.index.toml".format(_opf_store.WORKING_DIRNAME,
                                                      _opf_store.DEFAULT_MACHINE_SUBDIR)
+        # A git that reports 2.31.0 (below the 2.32 floor) and otherwise runs the real git.
+        old_bin = base / "old-git-bin"
+        old_bin.mkdir()
+        (old_bin / "git").write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = --version ]; then echo 'git version 2.31.0'; exit 0; fi\n"
+            "exec \"$OPF_REAL_GIT\" \"$@\"\n", encoding="utf-8")
+        os.chmod(str(old_bin / "git"), 0o755)
+        old_git_env = dict(PATH=str(old_bin) + os.pathsep + _env().get("PATH", os.defpath), OPF_REAL_GIT=git)
+
+        def _path_without(missing):
+            # A PATH holding only the external commands the hook runs, less `missing`.
+            tools = base / ("bin-without-" + missing)
+            tools.mkdir()
+            for tool in ("git", "dirname", "mktemp", "env", "sed", "mkdir", "rm"):
+                if tool == missing:
+                    continue
+                found = shutil.which(tool)
+                if found is None:
+                    raise OSError(tool + " not found on PATH; the hook's tool set cannot be built")
+                os.symlink(os.path.abspath(found), str(tools / tool))
+            return dict(PATH=str(tools))
+
         try:
             # --- The installer. It sets core.hooksPath to the pack directory relative to the top level
             # (0), and a rerun is a no-op (0). ---
@@ -1231,6 +1260,34 @@ def _self_test_isolated():
                     _hookspath(decoy)), (EXIT_OK, rel, None))
             # A surplus operand is a usage error.
             expect("install-usage", _run([str(inst / rel / "install.sh"), "x"], base), EXIT_ERROR)
+            # A hooks directory that cannot be listed is never read as empty: the hook it holds would be
+            # silently stopped, so the installer refuses (2) with core.hooksPath unset. Root reads any
+            # directory, so this vector runs only for an unprivileged user.
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                unread = _fixture("install-unreadable-hooks")
+                unread_hooks = unread / ".git" / "hooks"
+                unread_hooks.mkdir(exist_ok=True)
+                (unread_hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+                os.chmod(str(unread_hooks), 0o111)
+                try:
+                    expect("install-refuses-unreadable-hooks-dir", (_install(unread), _hookspath(unread)),
+                           (EXIT_ERROR, None))
+                finally:
+                    os.chmod(str(unread_hooks), 0o755)
+            # A hooks path that is not a directory cannot be listed either, and is refused.
+            notdir = _fixture("install-hooks-not-dir")
+            shutil.rmtree(str(notdir / ".git" / "hooks"), ignore_errors=True)
+            (notdir / ".git" / "hooks").write_text("", encoding="utf-8")
+            expect("install-refuses-hooks-not-dir", (_install(notdir), _hookspath(notdir)), (EXIT_ERROR, None))
+            # A core.hooksPath supplied only by the environment (a `git -c` or alias caller) does not read
+            # as installed: the installer writes the local configuration.
+            envcfg = _fixture("install-env-config")
+            env_only = dict(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath", GIT_CONFIG_VALUE_0=rel)
+            expect("install-ignores-env-config", (_install(envcfg, env_only), _hookspath(envcfg)), (EXIT_OK, rel))
+            # A git older than the 2.32 floor is refused (2) with core.hooksPath unset.
+            oldgit = _fixture("install-old-git")
+            expect("install-refuses-old-git", (_install(oldgit, old_git_env), _hookspath(oldgit)),
+                   (EXIT_ERROR, None))
 
             # --- End to end through git commit, over the installed fixture. A clean staged change commits.
             (inst / "README.md").write_text("readme\n", encoding="utf-8")
@@ -1275,16 +1332,40 @@ def _self_test_isolated():
             (remote / "README.md").write_text("readme\n", encoding="utf-8")
             _git(remote, home, "add", "README.md")
             expect("commit-remote-sync-target-passes", _committed(remote), (EXIT_OK, True))
+            # The disclosed CI residual, held as behaviour and as text: a history violation the hook refuses,
+            # committed past it with --no-verify, passes the CI recipe (doctor's prior there is that same
+            # commit), and the shipped files say so rather than calling CI the floor for it.
+            bypass = _fixture("bypass")
+            expect("bypass-install", _install(bypass), EXIT_OK)
+            _tamper(bypass)
+            _git(bypass, home, "add", done_rel)
+            expect("bypass-hook-refuses", _refused(bypass), (True, True, True))
+            expect("bypass-no-verify-commits", _committed(bypass, "--no-verify"), (EXIT_OK, True))
+            expect("bypass-ci-recipe-misses-history", _run_ci_recipe(bypass), EXIT_OK)
+            hook_text = " ".join((pack / "pre-commit").read_text(encoding="utf-8").replace("#", " ").split())
+            inst_text = " ".join((pack / "install.sh").read_text(encoding="utf-8").replace("#", " ").split())
+            expect("residuals-disclosed", (
+                "CI does not catch a history violation committed past this hook" in hook_text,
+                "C-HISTORY-RESURRECTION, C-HISTORY-APPEND-ONLY, C-HISTORY-COUNTERS" in hook_text,
+                "The hook runs checked-out code" in hook_text,
+                "A missing hook is silent" in hook_text,
+                "Requires git 2.32 or later" in hook_text,
+                "CI (../ci/opf-ci.sh) does not close these for the history checks" in inst_text,
+                "CI stays the shared floor" in hook_text,
+                "is the floor that every change meets" in inst_text,
+                "CI is the shared floor" in inst_text),
+                (True, True, True, True, True, True, False, False, False))
 
             # --- The hook's contract, run by hand under a recording stub tool. ---
             serial = [0]
 
-            def _stubbed(root, rc_doctor=0, rc_render=0, args=()):
+            def _stubbed(root, rc_doctor=0, rc_render=0, args=(), extra=None):
                 serial[0] += 1
                 log = base / "stub-log-{}".format(serial[0])
-                rc = _run([rel + "/pre-commit"] + list(args), root, {
-                    "OPF_TOOL": str(stub), "OPF_STUB_LOG": str(log),
-                    "OPF_STUB_RC_DOCTOR": str(rc_doctor), "OPF_STUB_RC_RENDER": str(rc_render)})
+                env = dict(OPF_TOOL=str(stub), OPF_STUB_LOG=str(log),
+                           OPF_STUB_RC_DOCTOR=str(rc_doctor), OPF_STUB_RC_RENDER=str(rc_render))
+                env.update(extra or dict())
+                rc = _run([rel + "/pre-commit"] + list(args), root, env)
                 calls = []
                 if log.is_file():
                     calls = [line.split(chr(31)) for line in log.read_text(encoding="utf-8").splitlines()]
@@ -1318,6 +1399,21 @@ def _self_test_isolated():
             expect("hook-usage", (rc, calls), (EXIT_ERROR, []))
             # Every snapshot is removed on exit.
             expect("hook-snapshots-removed", sorted(os.listdir(str(snaps))), [])
+            # Fail closed, each before any step: a git older than the 2.32 floor, and an environment whose
+            # GIT_ variable names cannot be read (no sed), so the snapshot is never built still bound to
+            # the hook environment.
+            rc, calls, _f = _stubbed(stubbed, extra=old_git_env)
+            expect("hook-old-git-refused", (rc, calls), (EXIT_ERROR, []))
+            rc, calls, _f = _stubbed(stubbed, extra=_path_without("sed"))
+            expect("hook-env-enumeration-failure-refused", (rc, calls), (EXIT_ERROR, []))
+            # A snapshot removal that fails (no rm) exits 2 after passing steps; the directory it names is
+            # then removed here.
+            rc, calls, _f = _stubbed(stubbed, extra=_path_without("rm"))
+            left = sorted(os.listdir(str(snaps)))
+            expect("hook-cleanup-failure-refused", (rc, [c[0] for c in calls], len(left)),
+                   (EXIT_ERROR, ["doctor", "render"], 1))
+            for name in left:
+                shutil.rmtree(str(snaps / name), ignore_errors=True)
         finally:
             shutil.rmtree(str(base), ignore_errors=True)
         return failures
@@ -1378,7 +1474,9 @@ def _self_test_isolated():
               "ambient GIT_DIR redirect; git commit over the staged snapshot refuses a staged tamper by "
               "doctor's finding, ignores an unstaged one, checks GIT_INDEX_FILE for commit PATH and -a, "
               "passes an unborn branch and a remote sync target; stubbed hook order, -I -B, read-only, "
-              "propagation, normalization, usage and snapshot cleanup)")
+              "propagation, normalization, usage and snapshot cleanup; fail closed on an unlistable hooks "
+              "directory, an environment-only hooksPath, git below 2.32, an unreadable environment and a "
+              "failed cleanup; the --no-verify history bypass CI misses is disclosed and held)")
     return rc
 
 

@@ -14,20 +14,36 @@
 #   3. The CI floor's two checks run over that snapshot, in order, stopping at the first failure:
 #      opf doctor --require-store, then opf render --check (see ../ci/opf-ci.sh).
 # Exit status is 0/1/2 only (0 clean, 1 finding, 2 cannot-evaluate), normalized as in opf-ci.sh; git
-# refuses the commit on any status but 0. The temporary directory is removed on exit. The only write to
-# this repository is the tree objects git write-tree stores, which the commit itself would store.
+# refuses the commit on any status but 0. The temporary directory is removed on exit, and a removal that
+# fails exits 2 naming the directory left behind. The only write to this repository is the tree objects
+# git write-tree stores, which the commit itself would store. Every failure to build the snapshot,
+# including a failure to list the environment whose GIT_ variables it drops, exits 2 before any check.
+#
+# Requires git 2.32 or later (GIT_CONFIG_GLOBAL; --path-format=absolute needs 2.31); an older git exits 2.
 #
 # Environment overrides:
 #   OPF_PYTHON  the interpreter (default: python3); always launched isolated (-I -B)
 #   OPF_TOOL    the path to opf.py (default: ../../tools/opf.py beside this file, the pack layout)
 #   TMPDIR      where the snapshot is built (default: /tmp)
 #
-# Residuals this hook does not close (spec 14.1), so CI stays the shared floor:
+# Residuals this hook does not close (spec 14.1):
 #   - Per-clone installation: core.hooksPath is local configuration. It is not cloned or pushed, so a
 #     clone that never ran install.sh runs no hook.
 #   - Bypass: git commit --no-verify skips the hook, and the same user can unset core.hooksPath or edit
 #     this file.
-#   - The checks run the working-tree opf.py (OPF_TOOL), not the staged one.
+#   - A missing hook is silent: core.hooksPath names this directory relative to the working tree, so
+#     after a checkout, merge or staged removal leaves no pre-commit file here (a branch that predates the
+#     pack, say), git runs no hook and prints nothing, including for the commit that removes it.
+#   - The hook runs checked-out code: git runs the working-tree copy of this file, and it runs the
+#     working-tree opf.py (OPF_TOOL), not the staged ones. Checking out a branch, merge or pull request
+#     that changes them runs the changed code, with the user's privileges, at the next git commit.
+#   - What CI does and does not catch: ../ci/opf-ci.sh runs the same two checks over the revision CI
+#     checks out, so a store or declared view that fails them in that revision alone is caught, whether
+#     or not its commits bypassed this hook. The history checks (C-HISTORY-RESURRECTION,
+#     C-HISTORY-APPEND-ONLY, C-HISTORY-COUNTERS) compare the store with its prior committed snapshot,
+#     which in CI is the checked-out commit itself, so CI does not catch a history violation committed
+#     past this hook (the CI receipt-identity comparison is a later release, U25). For those checks this
+#     hook is the pack's only check.
 #   - The snapshot checkout reads no global, system or local configuration of this repository, so a
 #     clean or smudge filter that configuration defines is not applied to the snapshot.
 #   - Only this repository's staged tree is snapshotted; a store that lives in another repository is not.
@@ -44,6 +60,16 @@ fail() {
     echo "opf-pre-commit: cannot evaluate: $1" >&2
     exit 2
 }
+gv=$(git --version) || fail "could not read the git version"
+gv=${gv#git version }
+gmajor=${gv%%.*}
+gminor=${gv#*.}
+gminor=${gminor%%.*}
+case "$gmajor$gminor" in
+    ''|*[!0-9]*) fail "could not parse the git version $gv" ;;
+esac
+[ "$gmajor" -gt 2 ] || { [ "$gmajor" -eq 2 ] && [ "$gminor" -ge 32 ]; } || \
+    fail "git $gv is older than 2.32, the floor this hook needs"
 # Run one check step and normalize its status: the step's own 0/1/2 is returned unchanged, and any other
 # status (a launch failure such as 126 or 127, or a signal death) becomes 2 (cannot-evaluate).
 run_step() {
@@ -68,9 +94,20 @@ else
 fi
 objects=$(git rev-parse --path-format=absolute --git-path objects) || fail "could not locate the object store"
 remotes=$(git remote) || fail "git remote could not list the remotes"
+# The GIT_ variables the snapshot drops. The listing and its parse are two checked steps, so a failure of
+# either (a missing env or sed, say) stops here rather than leaving the hook environment bound.
+envlist=$(env) || fail "could not list the environment"
+git_vars=$(printf '%s\n' "$envlist" | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p') || \
+    fail "could not read the GIT_ variable names from the environment"
 
 snap=$(mktemp -d "${TMPDIR:-/tmp}/opf-pre-commit.XXXXXX") || fail "could not create a temporary directory"
-trap 'rm -rf -- "$snap"' EXIT
+# A removal that fails, or leaves the directory in place, exits 2 whatever the checks returned.
+cleanup() {
+    rm -rf -- "$snap" && [ ! -e "$snap" ] && [ ! -L "$snap" ] && return 0
+    echo "opf-pre-commit: cannot evaluate: could not remove the snapshot directory $snap" >&2
+    return 1
+}
+trap 'cleanup || exit 2' EXIT
 trap 'exit 2' HUP INT TERM
 : > "$snap/remotes" || fail "could not write the remote list"
 for name in $remotes; do
@@ -81,8 +118,8 @@ done
 # The snapshot is built with every GIT_ variable dropped, so the hook environment cannot rebind these
 # commands to this repository, and with global and system configuration neutralized.
 (
-    for var in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
-        unset "$var"
+    for var in $git_vars; do
+        unset "$var" || exit 2
     done
     GIT_CONFIG_GLOBAL=/dev/null
     GIT_CONFIG_NOSYSTEM=1

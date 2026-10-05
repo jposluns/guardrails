@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "df0afa9f20da2ce9d76d7913573e7cd1784f464b443c9509f89f32a628fc7ce4"
+tree-sha256 = "c19148a7d222fed84109e8a599c810dcfaea2dabb97f5e0d7cde8b0205637e27"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 249118
-sha256 = "e746940a93094806f497ccc83cd9cb2df9830fd95c8270ed75ba80ce5064dc3f"
+bytes = 250108
+sha256 = "2cc547ad23356ff017905268190f8bb0f8e08f0883c1f916b111f7678841cba1"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2241,8 +2241,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41298
-sha256 = "3c5c025b2870561769cc0387253f1d0429c36a6e78ed90d4cd7103b5c7a905d0"
+bytes = 41396
+sha256 = "87121fae7ea3327e046db9766a0014048343c0520bf8178fc599e29775399a81"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2428,6 +2428,16 @@ sha256 = "f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5"
 path = "opf/enforcement/ci/opf-ci.sh"
 bytes = 2178
 sha256 = "0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104"
+
+[[sources]]
+path = "opf/enforcement/precommit/install.sh"
+bytes = 5363
+sha256 = "4096ee998b40883466d42cdaaef9925af6a74407203f4593aa6c0c9227d8b5c0"
+
+[[sources]]
+path = "opf/enforcement/precommit/pre-commit"
+bytes = 8187
+sha256 = "25f51f5038710ece5a89a1e3bac19a88a84ccbaeaea4190f3d2888d4c64d2232"
 
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
@@ -2866,8 +2876,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 97150
-sha256 = "4247f107d6a88b53f5121d5ee08a7ff0f6409c5059a92503c1c6fca839e358e3"
+bytes = 104145
+sha256 = "fef2afd32159e70da0d4983cd60ace3d5d66dd60ffb7d96915a4c9c4fbcced9e"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"
