@@ -13,64 +13,95 @@ never importing or running the file, and reports:
 
   deserialize  a reference to an unsafe loader (pickle, _pickle, cPickle, dill, cloudpickle
                load/loads/Unpickler and their private _load/_loads/_Unpickler, marshal,
-               shelve, jsonpickle, pandas.read_pickle, joblib.load, torch.load, the yaml
+               shelve and its Unpickler re-export, jsonpickle, the multiprocessing
+               ForkingPickler.loads, pandas.read_pickle, joblib.load, torch.load, the yaml
                unsafe and full loader functions, constructors and Loader classes), a
-               yaml.load or yaml.load_all whose Loader is not a safe or base loader, and an
-               allow_pickle= keyword that is not literal False;
+               yaml.load or yaml.load_all whose Loader is not proven a safe or base loader,
+               and an allow_pickle= keyword that is not literal False;
   tls          verify= or verify_ssl= that is False, 0 or not a literal, ssl= that is False or
                0, a .verify attribute set to anything but a non-false literal, any reference to
                _create_unverified_context, _create_stdlib_context, _create_default_https_context,
                CERT_NONE, CERT_OPTIONAL or CLIENT_AUTH, an ssl.SSLContext whose protocol is not
-               ssl.PROTOCOL_TLS_CLIENT (or referenced uncalled), and a check_hostname or
-               verify_mode set to anything but True or ssl.CERT_REQUIRED (assignment, a literal
-               setattr, or a keyword, cert_reqs= included);
+               proven ssl.PROTOCOL_TLS_CLIENT (or referenced uncalled), and a check_hostname or
+               verify_mode set to anything but True or a proven ssl.CERT_REQUIRED (assignment,
+               a literal setattr, or a keyword, cert_reqs= included);
   shell        a subprocess run/call/check_call/check_output/Popen whose shell is on, or cannot
                be seen (a ** spread that is not a literal dict, a * spread, or a ninth
                positional argument that is not literal False), over a non-literal command;
-               os.system, os.popen, subprocess.getoutput/getstatusoutput,
-               asyncio.create_subprocess_shell and any loop.subprocess_shell over a
-               non-literal command; and any of these referenced without a call (an alias);
+               os.system, os.popen, posix.system, nt.system, subprocess.getoutput and
+               getstatusoutput, asyncio.create_subprocess_shell (asyncio.subprocess included)
+               and any loop.subprocess_shell over a non-literal command or one a * or **
+               spread hides; and any of these referenced without a call (an alias);
   code         any reference to eval or exec (builtins and __builtins__ included),
                types.FunctionType, and the runpy, timeit, cProfile, profile, pdb and code
-               runners.
+               runners, and any call of a method named exec_module or load_module (an importlib
+               loader running a module's code, whatever object it is called on).
 
 Names resolve PER SCOPE as Python binds them: a binding in a function is local to it (unless
 declared global or nonlocal), a nested function sees its enclosing functions but not a class
 body, and a module, class or comprehension scope that binds a name may still see the outer
 binding, so every binding it could have is a candidate and the reference is a finding if any
-candidate is a sink. A judged callable referenced without a call (r = subprocess.run), a sink
-module bound to another name (m = subprocess) or passed to getattr with a non-literal name, and
-a star import or literal importlib.import_module of a sink module are findings;
-getattr(module, "name") is read as module.name. A reviewed site is admitted only by an
+candidate is a sink. An unbound name falls back to the builtin of that name, where one exists.
+A sink module reached as an attribute of another module names that module (shutil.os.system
+is os.system, and from logging.handlers import pickle binds pickle), except an attribute named
+like the module that holds it (timeit.timeit is a function). getattr(x, "name") is read as
+x.name, and so is a name or attribute directly followed by a string literal in a call's
+positional arguments or a tuple or list display (the monkeypatch idiom: (os, "system") is a
+reference to os.system), except in setattr, delattr, hasattr and a mock patch.object, which
+store, delete or test the attribute rather than read it.
+
+A sink module (each STAR_MODULES name) used other than as an attribute base is a finding: an
+attribute base is m.x, the first argument of getattr, setattr, delattr or a mock patch.object
+with a literal attribute name, the argument of hasattr, or the name read with a string literal
+as above. So a sink module bound to another name in any form (assignment, unpacking, walrus,
+conditional or boolean expression, default parameter, match capture, for or with target),
+passed as an argument, returned, yielded, held in a container, or passed to getattr with a
+non-literal name, is a finding. A judged callable referenced without a call (r = subprocess.run),
+a star import from a sink module and a literal importlib.import_module or __import__ of one are
+findings.
+
+Keywords are read as Python binds them: a literal ** dict is read by its keys, a duplicate key
+keeping its LAST value as Python does, and dict(key=value) only where the name dict can only be
+the builtin. A safe value (a yaml Loader, an SSLContext protocol, a verify_mode or cert_reqs)
+is PROVEN only when every binding the name may hold names the safe value; a name that may also
+hold an assignment, a parameter or any other value the scan cannot name, an unbound name, and
+an expression prove nothing, so they are findings. A reviewed site is admitted only by an
 ALLOWLIST entry (path, enclosing qualname, kind, exact count, reason); an entry whose count no
 longer matches is itself a finding.
 
 Fail closed: each file is decoded as Python decodes it (tokenize.detect_encoding, so a BOM and
 a PEP 263 coding cookie are honoured) and a cookie other than utf-8 is cannot-evaluate, since
 the scan would otherwise read a different program than Python runs. A file the scan cannot
-stat, read, decode or parse, a directory it cannot list, ANY symlink inside a scanned root
-(file or directory, valid or broken), a missing root, and a non-regular *.py entry are
-cannot-evaluate (exit 2), never a clean pass.
+stat, read, decode or parse, a directory it cannot list or search (each plugin directory and
+its hooks directory included: discovery lists them, so an unlistable one is never read as a
+plugin without hooks), ANY symlink inside a scanned root or directly under plugin/ (file or
+directory, valid or broken), a missing root, and a non-regular *.py entry are cannot-evaluate
+(exit 2), never a clean pass. Every directory under a scanned root is walked, __pycache__
+included; only the vendored opf/tools/_vendor tree is excluded.
 
 Residuals (not seen): dynamic dispatch (getattr with a non-literal name on an object that is
 not a sink module, setattr with a non-literal name, importlib with a non-literal name,
-globals(), vars(), __dict__ or __builtins__[...] lookups, a sink returned from a call or held
-in a container, a sink module passed as an argument or returned); a method run on a profiler,
-debugger or trace object (cProfile.Profile().run, bdb.Bdb.run); a shell launched through an
-argv list naming a shell (["sh", "-c", text]), an executable= override, or os.exec*, os.spawn*
-or pty.spawn of a shell; a verify= or ssl= value hidden in a ** spread that is not a literal
-dict (only the subprocess shell switch is denied when unseen); TLS verification disabled
-inside a third-party library's own defaults, through a library option this scan does not name,
-or through environment variables (PYTHONHTTPSVERIFY, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE); a
-deserializer outside the named set; a star import from a module outside STAR_MODULES;
-literalness is judged, not data flow, so a literal command or a non-false verify can still be
-attacker-shaped; and code outside the scanned roots (the vendored opf/tools/_vendor tree,
-.github, .preview, site, and Python embedded in a non-.py file). The class and comprehension
-scopes only widen the candidate set (they fall through to the outer scope), so their own
-bindings never hide a sink.
+globals(), vars(), __dict__, sys.modules or __builtins__[...] lookups); an attribute chain
+whose base is not an import binding (a parameter, self, a call result or a subscript, so
+self.os.system and sys.modules["os"].system are not resolved), and a sink module re-exported
+under a name other than its own (a module that binds pickle as _p, reached as mod._p.loads);
+a sink function (not module) obtained from such an object or from a call; a method run on a
+profiler, debugger or trace object (cProfile.Profile().run, bdb.Bdb.run); a shell launched
+through an argv list naming a shell (["sh", "-c", text]), an executable= override, or os.exec*,
+os.spawn* or pty.spawn of a shell; a verify= or ssl= value hidden in a ** spread that is not a
+literal dict (only the subprocess shell switch and the command, Loader and protocol of the
+judged sinks are denied when unseen); TLS verification disabled inside a third-party library's
+own defaults, through a library option this scan does not name, or through environment
+variables (PYTHONHTTPSVERIFY, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE); a deserializer outside the
+named set; a star import from a module outside STAR_MODULES; literalness is judged, not data
+flow, so a literal command or a non-false verify can still be attacker-shaped; and code
+outside the scanned roots (the vendored opf/tools/_vendor tree, .github, .preview, site, and
+Python embedded in a non-.py file). The class and comprehension scopes only widen the
+candidate set (they fall through to the outer scope), so their own bindings never hide a sink.
 """
 import argparse
 import ast
+import builtins
 import io
 import os
 import shutil
@@ -84,7 +115,6 @@ SCAN_ROOTS = ("tools", "opf/tools", ".aiqt/core/hooks/scripts")
 PLUGIN_ROOT = "plugin"
 PLUGIN_SCRIPTS = ("hooks", "scripts")
 EXCLUDED_DIRS = frozenset({"opf/tools/_vendor"})
-SKIPPED_NAMES = frozenset({"__pycache__"})
 
 KIND_RULES = {
     "deserialize": ("secdsz",),
@@ -104,7 +134,8 @@ DESERIALIZE_SINKS = frozenset(
     [mod + "." + fn for mod in _PICKLE_MODULES for fn in _UNSAFE_LOADER_FUNCS]
     + ["yaml." + name for name in _YAML_UNSAFE]
     + ["marshal.load", "marshal.loads", "shelve.open", "shelve.Shelf", "shelve.DbfilenameShelf",
-       "shelve.BsdDbShelf", "jsonpickle.decode", "jsonpickle.unpickler.decode",
+       "shelve.BsdDbShelf", "shelve.Unpickler", "jsonpickle.decode",
+       "jsonpickle.unpickler.decode", "multiprocessing.reduction.ForkingPickler.loads",
        "pandas.read_pickle", "joblib.load", "torch.load"])
 YAML_LOAD = frozenset({"yaml.load", "yaml.load_all"})
 YAML_SAFE_LOADERS = frozenset("yaml." + name for name in (
@@ -115,8 +146,10 @@ TLS_ATTRS = frozenset({"_create_unverified_context", "_create_stdlib_context",
 SSL_CONTEXT = "ssl.SSLContext"
 SUBPROCESS_FUNCS = frozenset("subprocess." + name for name in (
     "run", "call", "check_call", "check_output", "Popen"))
-ALWAYS_SHELL = frozenset({"os.system", "os.popen", "subprocess.getoutput",
-                          "subprocess.getstatusoutput", "asyncio.create_subprocess_shell"})
+ALWAYS_SHELL = frozenset({"os.system", "os.popen", "posix.system", "nt.system",
+                          "subprocess.getoutput", "subprocess.getstatusoutput",
+                          "asyncio.create_subprocess_shell",
+                          "asyncio.subprocess.create_subprocess_shell"})
 CODE_SINKS = frozenset({"eval", "exec", "builtins.eval", "builtins.exec", "types.FunctionType",
                         "types.LambdaType", "runpy.run_path", "runpy.run_module",
                         "runpy._run_code", "runpy._run_module_code", "timeit.timeit",
@@ -124,6 +157,9 @@ CODE_SINKS = frozenset({"eval", "exec", "builtins.eval", "builtins.exec", "types
                         "profile.run", "profile.runctx", "pdb.run", "pdb.runeval", "pdb.runctx",
                         "code.InteractiveInterpreter", "code.InteractiveConsole",
                         "code.interact"})
+# A loader method that runs a module's code (spec.loader.exec_module(m), loader.load_module()):
+# its receiver is an object the scan cannot name, so the method name alone is the finding.
+LOADER_METHODS = frozenset({"exec_module", "load_module"})
 # The callables whose call site is judged (shell switch, command, Loader, protocol): any other
 # reference to them is an alias the call-site check cannot follow, so it is a finding.
 CALL_JUDGED = YAML_LOAD | SUBPROCESS_FUNCS | ALWAYS_SHELL | {SSL_CONTEXT}
@@ -133,20 +169,30 @@ STAR_MODULES = {"pickle": "deserialize", "_pickle": "deserialize", "cPickle": "d
                 "dill": "deserialize", "cloudpickle": "deserialize", "marshal": "deserialize",
                 "shelve": "deserialize", "jsonpickle": "deserialize", "yaml": "deserialize",
                 "pandas": "deserialize", "joblib": "deserialize",
-                "ssl": "tls", "os": "shell", "subprocess": "shell", "asyncio": "shell",
+                "ssl": "tls", "os": "shell", "posix": "shell", "nt": "shell",
+                "subprocess": "shell", "asyncio": "shell",
                 "builtins": "code", "types": "code", "runpy": "code", "timeit": "code",
                 "cProfile": "code", "profile": "code", "pdb": "code", "code": "code"}
+# An unbound name falls back to the builtin of that name only where one exists (any other
+# unbound name is a NameError when run, so it names nothing).
+BUILTIN_NAMES = frozenset(builtins.__dict__) | {"__builtins__"}
 _GETATTR = frozenset({"getattr", "builtins.getattr"})
+_HASATTR = frozenset({"hasattr", "builtins.hasattr"})
+_DELATTR = frozenset({"delattr", "builtins.delattr"})
 _SETATTR = frozenset({"setattr", "builtins.setattr"})
+# A mock patch of one literal attribute names that attribute (patch.object(os, "kill") is os.kill)
+# and leaves the module itself in place, so its target is an attribute base like getattr's.
+_PATCH_OBJECT = frozenset({"unittest.mock.patch.object", "mock.patch.object"})
 _IMPORTERS = frozenset({"importlib.import_module", "__import__", "builtins.__import__"})
 
 # Every detector the scan runs; the self-test disables each in turn to prove its vectors
-# depend on it. "alias" is import-alias resolution and "scope" its per-scope binding (off, it
-# falls back to one file-global, last-wins map); the rest are the sink checks and the
-# fail-closed and allowlist legs of the tree scan.
-CHECKS = ("alias", "scope", "star-import", "module-escape", "dsz-ref", "dsz-yaml", "dsz-numpy",
-          "tls-verify", "tls-ref", "tls-hostname", "tls-verify-mode", "tls-context",
-          "shell-subprocess", "shell-always", "code-ref",
+# depend on it. "alias" is import-alias resolution, "scope" its per-scope binding (off, it
+# falls back to one file-global, last-wins map) and "chain" the reading of a sink module
+# reached as an attribute of another module (shutil.os.system is os.system); the rest are
+# the sink checks and the fail-closed and allowlist legs of the tree scan.
+CHECKS = ("alias", "scope", "chain", "star-import", "module-escape", "dsz-ref", "dsz-yaml",
+          "dsz-numpy", "tls-verify", "tls-ref", "tls-hostname", "tls-verify-mode", "tls-context",
+          "shell-subprocess", "shell-always", "code-ref", "code-loader",
           "fail-encoding", "fail-read", "fail-parse", "fail-nonregular", "fail-symlink",
           "fail-walk", "fail-root", "allowlist-stale", "allowlist-shape")
 
@@ -183,8 +229,12 @@ ALLOWLIST = (
      "self-test fixture runner: runs the Python body its own supervisor passes after an"
      " explicit isolated sys.executable -I -B -c argv, the same trust as python3 -c; the body"
      " is a self-test literal, never adopter or network input"),
-    ("opf/tools/_opf_emit.py", "_st_guardian_close_reuse", "code", 1,
-     _MUTANT + " (the guardian close revert)"),
+    ("opf/tools/_opf_emit.py", "_st_guardian_close_reuse", "code", 2,
+     _MUTANT + " (the guardian close revert); exec_module loads the repository's own _journal.py"
+     " beside this file as the close harness"),
+    ("opf/tools/_opf_emit.py", "_load_byte_canon_authority", "code", 1,
+     "authority loader: exec_module of the repository's own opf/tools/_byte_canon.py beside"
+     " this file, the equivalent of an import; no external input"),
     ("opf/tools/_opf_init_substrate.py", "_t_s23_plan_close_reuse", "code", 1,
      _MUTANT + " (the T-s23 plan close revert)"),
     ("opf/tools/_opf_manifest_regressions.py", "_validator_namespace", "code", 1,
@@ -203,8 +253,9 @@ ALLOWLIST = (
      " external input"),
     ("opf/tools/check_opf_init_p0.py", "red_on_revert", "code", 1,
      _MUTANT + " (each guard revert, matched exactly once)"),
-    ("opf/tools/check_opf_prompt_pack.py", "_close_vectors", "code", 1,
-     _MUTANT + " (the _read_regular close revert)"),
+    ("opf/tools/check_opf_prompt_pack.py", "_close_vectors", "code", 2,
+     _MUTANT + " (the _read_regular close revert); exec_module loads the repository's own"
+     " _journal.py beside this file as the close harness"),
     ("opf/tools/check_opf_record.py", "flip_t70", "code", 1,
      _MUTANT + " (the _opf_oplock _acquire_body T70 flip)"),
     ("opf/tools/opf.py", "_watchdog_completion_case", "code", 5,
@@ -219,13 +270,49 @@ ALLOWLIST = (
     ("opf/tools/opf.py", "_watchdog_completion_case.resolve_exception_classes", "code", 1,
      "static analysis: getattr(builtins, name) resolves an except-clause name in the"
      " repository's own _opf_emit source and asserts it is an exception class; never called"),
-    ("opf/tools/opf.py", "_cli_self_test._import_leg", "code", 3,
+    ("opf/tools/opf.py", "_cli_self_test._import_leg", "code", 5,
      "self-test probes: types.FunctionType rebinds the repository's own _cmd_import code object"
-     " (or a planted swap of it compiled from this file's own source) to a probe namespace;"
-     " no external input"),
-    ("opf/tools/check_opf_upgrade.py", "_suite_isolated", "code", 1,
-     "self-test flip: types.FunctionType rebinds the code of a module built from the"
-     " repository's own _opf_upgrade source with one literal replacement; no external input"),
+     " (or a planted swap of it compiled from this file's own source) to a probe namespace, and"
+     " the builtins module is planted as a probe namespace value; no external input"),
+    ("opf/tools/opf.py", "_cli_self_test._import_leg", "shell", 2,
+     "self-test deny table: (module, name) seams patched to refuse process and file effects"
+     " (subprocess.Popen and os names from a fixed literal tuple); replaced, never called"),
+    ("opf/tools/check_opf_upgrade.py", "_suite_isolated", "code", 2,
+     "self-test flip: exec_module builds a module from the repository's own _opf_upgrade"
+     " source with one literal replacement, and types.FunctionType rebinds its code; no"
+     " external input"),
+    ("tools/check_instruction_budget.py", "_mutant", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this gate's own production source with"
+     " one reviewed literal substitution; no external input"),
+    ("tools/check_python_floor.py", "_rule_reverts", "code", 1,
+     "self-test mutant: exec_module of a copy of this gate's own source with one rule removed"
+     " from RULES; no external input"),
+    ("tools/gen_crosswalk.py", "_fdopen_vectors.flipped", "code", 1,
+     _MUTANT + " (each fdopen close revert, loaded by exec_module from a scratch file)"),
+    ("tools/_close_selftest.py", "_StCloseFault.__init__", "shell", 1,
+     "self-test fault injector: wraps the os functions named in its own fixed _ST_WATCHED"
+     " tuple (descriptor stat and seek calls) to count closes; never runs a shell"),
+    ("opf/tools/_journal.py", "_StCloseFault.__init__", "shell", 1,
+     "self-test fault injector: wraps the os functions named in its own fixed _ST_WATCHED"
+     " tuple (descriptor stat and seek calls) to count closes; never runs a shell"),
+    ("opf/tools/check_opf_record.py", "_t77_claim_failing", "shell", 1,
+     "self-test fault injector: passes os to the journal's own _st_supports to find the support"
+     " table holding the one function it patches; never runs a shell"),
+    ("opf/tools/_opf_adopt_hook.py", "self_test", "shell", 4,
+     "self-test deny table: the (module, name) seams it patches to refuse file, socket and"
+     " process effects (subprocess.Popen and os names from a fixed literal tuple); replaced,"
+     " never called"),
+    ("opf/tools/_opf_adopt_observe.py", "self_test.deny_effects", "shell", 1,
+     "self-test deny patch: mock.patch.object(os, name) over a fixed literal tuple of spawn and"
+     " exec names, each replaced with a refusal; never called"),
+    ("tools/selftest_aiqt_hooks.py", "_main_isolated", "shell", 1,
+     _SAVED + " (the hook module's own subprocess.run, reached as aiqt_hooks.subprocess.run)"),
+    ("tools/selftest_orch_hooks.py", "_main_isolated._recheck_under", "shell", 1,
+     "self-test fault injector: picks the hook module's own os (or os.path) to patch one"
+     " function its caller names from a fixed fault table; never runs a shell"),
+    ("tools/selftest_orch_hooks.py", "_main_isolated", "shell", 1,
+     "self-test fault injector: setattr on the hook module's own os with a function name from"
+     " its fixed fault table; never runs a shell"),
     ("opf/tools/check_opf_init_contract.py", "_checks", "code", 1,
      "check harness: runpy.run_path loads the repository's own"
      " opf/tools/_opf_init_contract.py, the equivalent of an import; no external input"),
@@ -280,9 +367,10 @@ def _verify_ok(node):
     return isinstance(node, ast.Constant) and node.value is not False and node.value != 0
 
 
-def _effective_keywords(call):
-    """The call's keywords as (name, value) pairs; a ** spread of a literal dict with string keys,
-    or of dict(key=value), is read as its keys; any other ** spread is one (None, value) pair."""
+def _effective_keywords(call, builtin_dict):
+    """The call's keywords as (name, value) pairs in source order; a ** spread of a literal dict
+    with string keys, or of dict(key=value) when the name dict can only be the builtin, is read
+    as its keys; any other ** spread is one (None, value) pair."""
     out = []
     for kw in call.keywords:
         value = kw.value
@@ -292,7 +380,7 @@ def _effective_keywords(call):
                 isinstance(k, ast.Constant) and isinstance(k.value, str) for k in value.keys):
             out.extend((k.value, v) for k, v in zip(value.keys, value.values))
         elif isinstance(value, ast.Call) and isinstance(value.func, ast.Name) \
-                and value.func.id == "dict" and not value.args \
+                and value.func.id == "dict" and builtin_dict and not value.args \
                 and all(k.arg is not None for k in value.keywords):
             out.extend((k.arg, k.value) for k in value.keywords)
         else:
@@ -301,10 +389,13 @@ def _effective_keywords(call):
 
 
 def _kw(pairs, name):
+    """The value Python binds to the keyword: the LAST pair for it, as a literal dict keeps its
+    last duplicate key (a keyword given twice across a spread is a TypeError, never a call)."""
+    found = None
     for key, value in pairs:
         if key == name:
-            return value
-    return None
+            found = value
+    return found
 
 
 def _all_args(args):
@@ -458,7 +549,6 @@ class _Scanner(ast.NodeVisitor):
         self.findings = []
         self.called = set()
         self.based = set()
-        self.escaping = set()
 
     def on(self, check):
         return check not in self.disabled
@@ -485,16 +575,43 @@ class _Scanner(ast.NodeVisitor):
                 if scope.kind == "function":
                     return out
             scope = scope.parent
-        if fallback:
+        if fallback and name in BUILTIN_NAMES:
             out.add("builtins" if name == "__builtins__" else name)
         return out
 
     def resolve(self, node):
+        """Every dotted name the node may name; a binding the scan cannot name is dropped, which
+        is sound for sink detection only (a reference is a finding if ANY candidate is a sink)."""
+        return {name for name in self._names(node) if name is not None}
+
+    def _names(self, node):
+        """As resolve, but None stands for any value the scan cannot name (an assignment, a
+        parameter, a call result), so a proof of a safe value can see it is not proven."""
         if isinstance(node, ast.Name):
-            return {c for c in self.candidates(node.id) if c is not None}
-        if isinstance(node, ast.Attribute):
-            return {base + "." + node.attr for base in self.resolve(node.value)}
-        return set()
+            out = set(self.candidates(node.id)) or {None}
+        elif isinstance(node, ast.Attribute):
+            out = {None if base is None else base + "." + node.attr
+                   for base in self._names(node.value)}
+        else:
+            return {None}
+        return out | {alias for name in out if name is not None for alias in self._chain(name)}
+
+    def _chain(self, name):
+        """A sink module reached as an attribute of another module names the sink module itself:
+        shutil.os.system is os.system and pydoc.builtins.exec is builtins.exec."""
+        if not self.on("chain"):
+            return []
+        parts = name.split(".")
+        # A member named after its own module (timeit.timeit, code.code) is not a re-export.
+        return [".".join(parts[i:]) for i in range(1, len(parts))
+                if parts[i] in STAR_MODULES and parts[i] != parts[i - 1]]
+
+    def proves(self, node, allowed):
+        """True only when every value the node may hold is a name in allowed (or a chain to one);
+        an absent node, an expression, or any binding the scan cannot name proves nothing."""
+        names = self._names(node) if node is not None else {None}
+        return None not in names and all(
+            name in allowed or set(self._chain(name)) & allowed for name in names)
 
     def _enter(self, node):
         _kind, outer, inner = _scope_parts(node)
@@ -520,12 +637,37 @@ class _Scanner(ast.NodeVisitor):
             self.add(node, STAR_MODULES[node.module], "star-import",
                      "star import from " + node.module + " hides its sinks")
 
+    def _pairs(self, items):
+        """A name or attribute followed by a string literal, in a call's positional arguments or
+        a tuple or list display, is read as that attribute (the monkeypatch idiom (os, "stat")
+        names os.stat): it is judged as a reference to it, and the module is its base."""
+        for first, second in zip(items, items[1:]):
+            if isinstance(first, (ast.Name, ast.Attribute)) and isinstance(second, ast.Constant) \
+                    and isinstance(second.value, str):
+                self.based.add(id(first))
+                for base in sorted(self.resolve(first)):
+                    self._reference_name(first, base + "." + second.value, False)
+                self._tls_ref(first, {second.value})
+
+    def visit_Tuple(self, node):
+        self._pairs(node.elts)
+        self.generic_visit(node)
+
+    visit_List = visit_Tuple
+
     def visit_Call(self, node):
         self.called.add(id(node.func))
-        pairs = _effective_keywords(node)
-        for name in sorted(self.resolve(node.func)):
+        pairs = _effective_keywords(node, self.candidates("dict") == {"dict"})
+        names = self.resolve(node.func)
+        # A store, delete, patch or test of a literal attribute reads no sink (judged below).
+        if not names & (_SETATTR | _DELATTR | _PATCH_OBJECT | _HASATTR):
+            self._pairs(node.args)
+        for name in sorted(names):
             self._judge_call(node, name, pairs)
         func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in LOADER_METHODS \
+                and self.on("code-loader"):
+            self.add(node, "code", "code-loader", func.attr + " runs a loaded module's code")
         if isinstance(func, ast.Attribute) and func.attr == "subprocess_shell" \
                 and self.on("shell-always"):
             command = _first(_positional(node, 1), _kw(pairs, "cmd"))
@@ -538,8 +680,7 @@ class _Scanner(ast.NodeVisitor):
     def _judge_call(self, node, name, pairs):
         if name in YAML_LOAD and self.on("dsz-yaml"):
             loader = _first(_kw(pairs, "Loader"), _positional(node, 1))
-            found = self.resolve(loader) if loader is not None else set()
-            if not found or not found <= YAML_SAFE_LOADERS:
+            if not self.proves(loader, YAML_SAFE_LOADERS):
                 self.add(node, "deserialize", "dsz-yaml", name + " without a safe Loader")
         if name in SUBPROCESS_FUNCS and self.on("shell-subprocess"):
             shell = _kw(pairs, "shell")
@@ -560,24 +701,22 @@ class _Scanner(ast.NodeVisitor):
                 self.add(node, "shell", "shell-always", name + " over a non-literal command")
         if name == SSL_CONTEXT and self.on("tls-context"):
             protocol = _first(_positional(node, 0), _kw(pairs, "protocol"))
-            if protocol is None or self.resolve(protocol) != {"ssl.PROTOCOL_TLS_CLIENT"}:
+            if not self.proves(protocol, {"ssl.PROTOCOL_TLS_CLIENT"}):
                 self.add(node, "tls", "tls-context",
                          "ssl.SSLContext without ssl.PROTOCOL_TLS_CLIENT (no verification)")
-        if name in _GETATTR or name in ("hasattr", "builtins.hasattr"):
+        if name in _HASATTR and _positional(node, 0) is not None:
+            # hasattr returns a bool, so its target never escapes, whatever the name.
+            self.based.add(id(_positional(node, 0)))
+        if name in _GETATTR or name in _DELATTR or name in _SETATTR or name in _PATCH_OBJECT:
+            # A literal attribute name makes the target an attribute base (getattr(m, "x") is
+            # m.x); a non-literal one leaves the target a bare use, so a sink module there is
+            # an alias the scan cannot follow (module-escape in visit_Name).
             target, attr = _positional(node, 0), _positional(node, 1)
-            if not (isinstance(attr, ast.Constant) and isinstance(attr.value, str)):
-                if target is not None and name in _GETATTR:
-                    self.escaping.add(id(target))
-            elif isinstance(target, (ast.Name, ast.Attribute)):
+            if isinstance(attr, ast.Constant) and isinstance(attr.value, str) \
+                    and target is not None:
                 self.based.add(id(target))
-                if name in _GETATTR:
-                    for base in sorted(self.resolve(target)):
-                        self._reference_name(node, base + "." + attr.value, False)
-                    self._tls_ref(node, {attr.value})
-        if name in _SETATTR:
-            attr = _positional(node, 1)
-            if isinstance(attr, ast.Constant) and isinstance(attr.value, str):
-                self._check_store(attr.value, _positional(node, 2), node, True)
+                if name in _SETATTR:
+                    self._check_store(attr.value, _positional(node, 2), node, True)
         if name in _IMPORTERS and self.on("module-escape"):
             target = _first(_positional(node, 0), _kw(pairs, "name"))
             if isinstance(target, ast.Constant) and isinstance(target.value, str) \
@@ -601,7 +740,7 @@ class _Scanner(ast.NodeVisitor):
         if self.on("tls-verify-mode"):
             for key in ("verify_mode", "cert_reqs"):
                 value = _kw(pairs, key)
-                if value is not None and self.resolve(value) != {"ssl.CERT_REQUIRED"}:
+                if value is not None and not self.proves(value, {"ssl.CERT_REQUIRED"}):
                     self.add(node, "tls", "tls-verify-mode", key + "= is not ssl.CERT_REQUIRED")
         if self.on("dsz-numpy"):
             value = _kw(pairs, "allow_pickle")
@@ -613,7 +752,7 @@ class _Scanner(ast.NodeVisitor):
                 and (value is None or not _is_true(value)):
             self.add(node, "tls", "tls-hostname", "check_hostname set to a value other than True")
         if attr == "verify_mode" and self.on("tls-verify-mode") \
-                and (value is None or self.resolve(value) != {"ssl.CERT_REQUIRED"}):
+                and not self.proves(value, {"ssl.CERT_REQUIRED"}):
             self.add(node, "tls", "tls-verify-mode",
                      "verify_mode set to a value other than ssl.CERT_REQUIRED")
         if attr == "verify" and attribute and self.on("tls-verify") \
@@ -628,13 +767,7 @@ class _Scanner(ast.NodeVisitor):
         elif isinstance(target, ast.Name):
             self._check_store(target.id, value, node, False)
 
-    def _escapes(self, value):
-        """A sink module bound to another name (m = subprocess) is an alias it cannot follow."""
-        for item in (value.elts if isinstance(value, (ast.Tuple, ast.List)) else [value]):
-            self.escaping.add(id(item))
-
     def visit_Assign(self, node):
-        self._escapes(node.value)
         for target in node.targets:
             for leaf in ast.walk(target):
                 if isinstance(leaf, (ast.Attribute, ast.Name)) \
@@ -644,7 +777,6 @@ class _Scanner(ast.NodeVisitor):
 
     def visit_AnnAssign(self, node):
         if node.value is not None:
-            self._escapes(node.value)
             self._target(node.target, node.value, node)
         self.generic_visit(node)
 
@@ -653,32 +785,41 @@ class _Scanner(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_NamedExpr(self, node):
-        self._escapes(node.value)
         self._target(node.target, node.value, node)
         self.generic_visit(node)
 
     def visit_Attribute(self, node):
         self.based.add(id(node.value))
         if isinstance(node.ctx, ast.Load):
-            self._reference(node, node.attr)
+            names = self._reference(node, node.attr)
+            self._escape(node, names)
         self.generic_visit(node)
 
     def visit_Name(self, node):
         if not isinstance(node.ctx, ast.Load):
             return
-        self._reference(node, None)
-        if id(node) in self.escaping and self.on("module-escape"):
-            imported = self.candidates(node.id, False) if self.on("alias") else set()
-            for name in sorted(imported & set(STAR_MODULES)):
-                self.add(node, STAR_MODULES[name], "module-escape",
-                         "sink module " + name + " bound to another name (an alias)")
+        names = self._reference(node, None)
+        imported = self.candidates(node.id, False) if self.on("alias") else set()
+        self._escape(node, names & imported | {alias for name in imported if name
+                                               for alias in self._chain(name)})
+
+    def _escape(self, node, names):
+        """A sink module used other than as an attribute base (m.x, or the target of a literal
+        getattr, hasattr, delattr or setattr) is an alias the scan cannot follow: bound to any
+        other name, passed, returned, held, defaulted, matched or tested, it is a finding."""
+        if id(node) in self.based or not self.on("module-escape"):
+            return
+        for name in sorted(names & set(STAR_MODULES)):
+            self.add(node, STAR_MODULES[name], "module-escape",
+                     "sink module " + name + " used other than as an attribute base (an alias)")
 
     def _reference(self, node, attr):
         names = self.resolve(node)
         called = id(node) in self.called
         for name in sorted(names):
             self._reference_name(node, name, called)
-        self._tls_ref(node, {attr} if attr is not None else {n.rsplit(".", 1)[-1] for n in names})
+        self._tls_ref(node, {attr} if attr is not None
+                      else {node.id} | {n.rsplit(".", 1)[-1] for n in names})
         return names
 
     def _tls_ref(self, node, lasts):
@@ -772,15 +913,31 @@ def _python_files(root, disabled):
     def walk_error(exc):
         raise CannotEvaluate("cannot list a directory inside a scanned root: " + str(exc))
 
+    def listing(path):
+        """The entries of a directory plugin discovery descends: one it cannot list is
+        cannot-evaluate, never read as empty or absent."""
+        try:
+            return [path / name for name in sorted(os.listdir(path))]
+        except OSError as exc:
+            if "fail-walk" in disabled:
+                return []
+            raise CannotEvaluate("cannot list a directory inside a scanned root: "
+                                 + rel(path) + ": " + str(exc))
+
+    def subdirs(path):
+        """The real subdirectories of path; a symlink or an unstatable entry is refused."""
+        return [entry for entry in listing(path)
+                if not linked(entry) and stat.S_ISDIR(os.lstat(entry).st_mode)]
+
     roots = [root / sub for sub in SCAN_ROOTS]
     plugin = root / PLUGIN_ROOT
     if plugin.is_dir():
-        for entry in sorted(plugin.iterdir()):
-            hooks = entry / PLUGIN_SCRIPTS[0]
-            if os.path.lexists(hooks) and not linked(entry) and not linked(hooks):
-                scripts = entry.joinpath(*PLUGIN_SCRIPTS)
-                if os.path.lexists(scripts) and not linked(scripts) and scripts.is_dir():
-                    roots.append(scripts)
+        # Every plugin directory and every hooks directory is listed, so an unlistable or
+        # unsearchable one is cannot-evaluate rather than a plugin that seems to have no hooks.
+        for entry in ([] if linked(plugin) else subdirs(plugin)):
+            for hooks in subdirs(entry):
+                if hooks.name == PLUGIN_SCRIPTS[0]:
+                    roots.extend(s for s in subdirs(hooks) if s.name == PLUGIN_SCRIPTS[1])
     elif "fail-root" not in disabled:
         raise CannotEvaluate("scan root missing: " + PLUGIN_ROOT)
     files = []
@@ -794,8 +951,7 @@ def _python_files(root, disabled):
             continue
         for current, dirnames, filenames in os.walk(base, onerror=onerror, followlinks=False):
             rel_dir = rel(current)
-            dirnames[:] = [d for d in sorted(dirnames) if d not in SKIPPED_NAMES
-                           and (rel_dir + "/" + d) not in EXCLUDED_DIRS
+            dirnames[:] = [d for d in sorted(dirnames) if (rel_dir + "/" + d) not in EXCLUDED_DIRS
                            and not linked(Path(current) / d)]
             for name in sorted(filenames):
                 if not linked(Path(current) / name) and name.endswith(".py"):
@@ -925,6 +1081,7 @@ POSITIVE_VECTORS = (
     ("import requests\nrequests.get(url, verify=flag)\n", ("tls-verify",)),
     ("import requests\nrequests.get(url, **{'verify': False})\n", ("tls-verify",)),
     ("import requests\nrequests.get(url, **dict(verify=False))\n", ("tls-verify",)),
+    ("import requests\nrequests.get(url, **{'verify': True, 'verify': False})\n", ("tls-verify",)),
     ("session.verify = False\n", ("tls-verify",)),
     ("client.get(url, verify_ssl=False)\n", ("tls-verify",)),
     ("connect(host, ssl=False)\n", ("tls-verify",)),
@@ -932,11 +1089,21 @@ POSITIVE_VECTORS = (
     ("import ssl\nmode = ssl.CERT_NONE\n", ("tls-ref",)),
     ("from ssl import CERT_NONE as none\nmode = none\n", ("alias", "tls-ref")),
     ("mode = CERT_NONE\n", ("tls-ref",)),
+    ("import ssl\ngetattr(ssl, '_create_unverified_context')()\n", ("tls-ref",)),
+    ("import ssl\nfactories = [(ssl, '_create_unverified_context')]\n", ("tls-ref",)),
     ("handler._create_default_https_context = factory\n", ("tls-ref",)),
     ("import ssl\nssl.create_default_context(ssl.Purpose.CLIENT_AUTH)\n", ("tls-ref",)),
     ("import ssl\nctx = ssl.SSLContext(ssl.PROTOCOL_TLS)\n", ("tls-context",)),
     ("import ssl\nctx = ssl.SSLContext()\n", ("tls-context",)),
     ("import ssl\nfactory = ssl.SSLContext\n", ("tls-context",)),
+    # A safe-looking import later overwritten in the same scope proves nothing.
+    ("import ssl\ndef f():\n    from ssl import PROTOCOL_TLS_CLIENT as protocol\n"
+     "    protocol = 2\n    return ssl.SSLContext(protocol)\n", ("tls-context",)),
+    ("import yaml\ndef f():\n    from yaml import SafeLoader as L\n    L = make()\n"
+     "    return yaml.load(text, Loader=L)\n", ("dsz-yaml",)),
+    ("def f(ctx):\n    from ssl import CERT_REQUIRED as mode\n    mode = 0\n"
+     "    ctx.verify_mode = mode\n", ("tls-verify-mode",)),
+    ("import http.client\nhttp.client.ssl.SSLContext()\n", ("chain", "tls-context")),
     ("ctx.check_hostname = False\n", ("tls-hostname",)),
     ("class Ctx:\n    check_hostname = chosen\n", ("tls-hostname",)),
     ("make_context(check_hostname=False)\n", ("tls-hostname",)),
@@ -952,6 +1119,12 @@ POSITIVE_VECTORS = (
     ("import subprocess\nsubprocess.run(['ls', name], shell=True)\n", ("shell-subprocess",)),
     ("import subprocess\nsubprocess.run(args=cmd, shell=True)\n", ("shell-subprocess",)),
     ("import subprocess\nsubprocess.Popen(cmd, **opts)\n", ("shell-subprocess",)),
+    ("import subprocess\nsubprocess.run(cmd, shell=use_shell)\n", ("shell-subprocess",)),
+    ("import subprocess\nsubprocess.run(cmd, shell=1)\n", ("shell-subprocess",)),
+    ("import subprocess\nsubprocess.run(cmd, **{'shell': False, 'shell': True})\n",
+     ("shell-subprocess",)),
+    ("import subprocess\ndef dict(**kw):\n    return {'shell': True}\n"
+     "subprocess.run(cmd, **dict(shell=False))\n", ("shell-subprocess",)),
     ("import subprocess\nsubprocess.call(cmd, -1, None, None, None, None, None, True, True)\n",
      ("shell-subprocess",)),
     ("import subprocess\nsubprocess.Popen(*[cmd, -1, None, None, None, None, None, True, True])\n",
@@ -968,16 +1141,38 @@ POSITIVE_VECTORS = (
     ("import os\nlaunch = os.system\n", ("shell-always",)),
     ("from os import system\nsystem(cmd)\n", ("alias", "shell-always")),
     ("loop.subprocess_shell(factory, cmd)\n", ("shell-always",)),
+    ("import shutil\nshutil.os.system(cmd)\n", ("chain", "shell-always")),
+    ("import posix\nposix.system(cmd)\n", ("shell-always",)),
+    ("from asyncio.subprocess import create_subprocess_shell as s\ns(cmd)\n",
+     ("alias", "shell-always")),
+    ("import os\ntable = [(os, 'system')]\n", ("shell-always",)),
     ("eval(text)\n", ("code-ref",)),
     ("def f(text):\n    exec(text)\n", ("code-ref",)),
     ("run = exec\n", ("code-ref",)),
     ("import builtins as b\nb.exec(text)\n", ("alias", "code-ref")),
     ("__builtins__.exec(text)\n", ("alias", "code-ref")),
     ("import types\ntypes.FunctionType(compile(text, 'x', 'exec'), {})()\n", ("code-ref",)),
+    ("import pydoc\npydoc.builtins.exec(text)\n", ("chain", "code-ref")),
+    ("spec.loader.exec_module(module)\n", ("code-loader",)),
+    ("loader.load_module()\n", ("code-loader",)),
+    ("from logging.handlers import pickle\npickle.loads(data)\n", ("chain", "dsz-ref")),
     ("from pickle import *\nloads(b'')\n", ("star-import",)),
     ("import subprocess\nm = subprocess\nm.run(cmd, shell=True)\n", ("module-escape",)),
     ("import pickle\ngetattr(pickle, name)(data)\n", ("module-escape",)),
     ("import importlib\nimportlib.import_module('pickle')\n", ("module-escape",)),
+    ("import importlib\nimportlib.import_module(name='pickle')\n", ("module-escape",)),
+    # A sink module used other than as an attribute base, in each binding form.
+    ("import pickle\na, b = pickle, 1\n", ("module-escape",)),
+    ("import subprocess\nm: object = subprocess\n", ("module-escape",)),
+    ("import pickle\nif (m := pickle):\n    pass\n", ("module-escape",)),
+    ("import subprocess\nm = subprocess if c else subprocess\nm.run(cmd, shell=True)\n",
+     ("module-escape",)),
+    ("import pickle\nm = c or pickle\n", ("module-escape",)),
+    ("import os\ndef f(m=os):\n    m.system(cmd)\n", ("module-escape",)),
+    ("import os\ng = lambda m=os: m.system(cmd)\n", ("module-escape",)),
+    ("import pickle\nmatch pickle:\n    case m:\n        m.loads(d)\n", ("module-escape",)),
+    ("import os\nrun(os)\n", ("module-escape",)),
+    ("import shutil\nm = shutil.os\n", ("chain", "module-escape")),
     # Scope: a binding in another scope never hides the one Python resolves here.
     ("import pickle\ndef _u():\n    import json as pickle\npickle.loads(data)\n",
      ("scope", "dsz-ref")),
@@ -1017,9 +1212,15 @@ NEGATIVE_VECTORS = (
     "class Ctx:\n    check_hostname = True\n",
     "pattern.exec(text)\nre.compile(text)\n",
     "import pickle\ndef f(pickle):\n    return pickle.loads(x)\n",
-    "import os, subprocess, code\nwith patch.object(subprocess, 'run', fake):\n    pass\n"
+    "import os, subprocess, code\nfrom unittest.mock import patch\n"
+    "with patch.object(subprocess, 'run', fake):\n    pass\nsetattr(os, 'stat', fake)\n"
     "ok = hasattr(os, name)\ndef f():\n    code = make()\n    alias = code\n",
     "import pickle\ndef f():\n    pickle = Codec()\n    return pickle.loads(x)\n",
+    # A class body's binding is not visible inside its methods.
+    "class C:\n    from pickle import loads\n    def f(self):\n        return loads(x)\n",
+    # An unbound name that is not a builtin names nothing, so no chain is read through it.
+    "ok = any(item.code == 'x' for item in items)\n",
+    "import http.client\nctx = http.client.ssl.SSLContext(http.client.ssl.PROTOCOL_TLS_CLIENT)\n",
 )
 
 
@@ -1035,8 +1236,9 @@ _ROSTER = (
         "dill._Unpickler dill._load dill._loads dill.load dill.loads joblib.load "
         "jsonpickle.decode jsonpickle.unpickler.decode marshal.load marshal.loads "
         "pandas.read_pickle pickle.Unpickler pickle._Unpickler pickle._load pickle._loads "
+        "multiprocessing.reduction.ForkingPickler.loads "
         "pickle.load pickle.loads shelve.BsdDbShelf shelve.DbfilenameShelf shelve.Shelf "
-        "shelve.open torch.load yaml.CFullLoader yaml.CLoader yaml.CUnsafeLoader "
+        "shelve.Unpickler shelve.open torch.load yaml.CFullLoader yaml.CLoader yaml.CUnsafeLoader "
         "yaml.FullConstructor yaml.FullLoader yaml.Loader yaml.UnsafeConstructor "
         "yaml.UnsafeLoader yaml.constructor.FullConstructor yaml.constructor.UnsafeConstructor "
         "yaml.full_load yaml.full_load_all yaml.loader.FullLoader yaml.loader.Loader "
@@ -1048,8 +1250,9 @@ _ROSTER = (
         "runpy.run_path timeit.Timer timeit.repeat timeit.timeit types.FunctionType "
         "types.LambdaType").split()),
     ("shell-always", (
-        "asyncio.create_subprocess_shell os.popen os.system subprocess.getoutput "
-        "subprocess.getstatusoutput").split()),
+        "asyncio.create_subprocess_shell asyncio.subprocess.create_subprocess_shell nt.system "
+        "os.popen os.system posix.system subprocess.getoutput subprocess.getstatusoutput"
+        ).split()),
     ("shell-subprocess", (
         "subprocess.Popen subprocess.call subprocess.check_call subprocess.check_output "
         "subprocess.run").split()),
@@ -1062,8 +1265,8 @@ _ROSTER = (
         "ssl._create_stdlib_context ssl._create_unverified_context").split()),
     ("star-import", (
         "_pickle asyncio builtins cPickle cProfile cloudpickle code dill joblib jsonpickle "
-        "marshal os pandas pdb pickle profile runpy shelve ssl subprocess timeit types "
-        "yaml").split()),
+        "marshal nt os pandas pdb pickle posix profile runpy shelve ssl subprocess timeit "
+        "types yaml").split()),
 )
 
 
@@ -1126,21 +1329,30 @@ def _unlisted(rel):
         os.chmod(path, 0)
         real = os.scandir
 
+        real_list = os.listdir
+
         def refuse(target=".", _real=real, _path=path):
+            if os.fspath(target) == _path:
+                raise PermissionError(13, "listing refused", _path)
+            return _real(target)
+
+        def refuse_list(target=".", _real=real_list, _path=path):
             if os.fspath(target) == _path:
                 raise PermissionError(13, "listing refused", _path)
             return _real(target)
         if os.access(path, os.R_OK):
             os.scandir = refuse
+            os.listdir = refuse_list
 
         def undo():
             os.scandir = real
+            os.listdir = real_list
             os.chmod(path, 0o755)
         return undo
     return setup
 
 
-def _unstatable(rel):
+def _unstatable(rel, child="a.py"):
     """Leave a directory listable but its entries unstatable (read, no search permission); where
     permissions do not bind, os.lstat refuses the entries under that path instead."""
     def setup(base):
@@ -1152,7 +1364,7 @@ def _unstatable(rel):
             if os.fspath(target).startswith(_path):
                 raise PermissionError(13, "stat refused", os.fspath(target))
             return _real(target, *args, **kwargs)
-        if os.access(os.path.join(path, "a.py"), os.R_OK):
+        if os.access(os.path.join(path, child), os.R_OK):
             os.lstat = refuse
 
         def undo():
@@ -1180,6 +1392,40 @@ def _unreadable(rel):
         def undo():
             module._read_bytes = real
             os.chmod(path, 0o644)
+        return undo
+    return setup
+
+
+def _stat_refused(rel):
+    """os.stat refuses one listed file (it vanished or lost permission after the walk)."""
+    def setup(base):
+        path = os.path.join(base, rel)
+        real = os.stat
+
+        def refuse(target, *args, _real=real, _path=path, **kwargs):
+            if os.fspath(target) == _path:
+                raise PermissionError(13, "stat refused", _path)
+            return _real(target, *args, **kwargs)
+        os.stat = refuse
+
+        def undo():
+            os.stat = real
+        return undo
+    return setup
+
+
+def _parse_raises(exc_type):
+    """scan_source raises exc_type for every file (a parser failure that is not SyntaxError)."""
+    def setup(base):
+        module = sys.modules[__name__]
+        real = module.scan_source
+
+        def refuse(source, filename="<source>", disabled=()):
+            raise exc_type("parser refused " + filename)
+        module.scan_source = refuse
+
+        def undo():
+            module.scan_source = real
         return undo
     return setup
 
@@ -1237,6 +1483,18 @@ TREE_VECTORS = (
     ("missing plugin root", {}, (), _drop(PLUGIN_ROOT), CE, "fail-root", 0),
     ("plugin hook script scanned", {"plugin/p/hooks/scripts/h.py": _SITE}, (), None, 1,
      "code-ref", 0),
+    ("unlistable plugin directory", {"plugin/p/hooks/scripts/h.py": _SITE}, (),
+     _unlisted("plugin/p"), CE, "fail-walk", 0),
+    ("unlistable plugin hooks directory", {"plugin/p/hooks/scripts/h.py": _SITE}, (),
+     _unlisted("plugin/p/hooks"), CE, "fail-walk", 0),
+    ("unsearchable plugin hooks directory", {"plugin/p/hooks/scripts/h.py": _SITE}, (),
+     _unstatable("plugin/p/hooks", "scripts"), CE, "fail-walk", 0),
+    ("plugin directory symlink", {"outside/hooks/scripts/h.py": _SITE}, (),
+     _link("plugin/q", "outside"), CE, "fail-symlink", 0),
+    ("file unstatable after the walk", {"tools/a.py": _SITE}, (), _stat_refused("tools/a.py"),
+     CE, "fail-nonregular", 0),
+    ("parser ValueError", {"tools/a.py": _SITE}, (), _parse_raises(ValueError), CE,
+     "fail-parse", 0),
     ("allowlist count drift", {"tools/a.py": _SITE}, (_ENTRY[:3] + (2, _REASON),), None,
      2, "allowlist-stale", 0),
     ("allowlist entry vanished", {"tools/a.py": b"x = 1\n"}, (_ENTRY,), None, 1,
@@ -1283,6 +1541,8 @@ def self_test():
     if _tree_outcome({"tools/a.py": method},
                      (("tools/a.py", "C.f", "code", 1, _REASON),)) != 0:
         failures.append("tree: a reviewed method site (class-qualified) is not admitted")
+    if _tree_outcome({"tools/__pycache__/a.py": _SITE}) != 1:
+        failures.append("tree: a __pycache__ directory is not scanned")
     if _tree_outcome({"opf/tools/_vendor/v.py": _SITE}) != 0:
         failures.append("tree: the vendored tree is not excluded")
     if _tree_outcome({"tools/a.py": _SITE}) != 1:
@@ -1302,7 +1562,7 @@ def self_test():
         return 1
     print("SELF-TEST PASS: dangerous-api: {} positive vectors and {} generated sink-set vectors"
           " (each fails without its check), {} negatives, {} fail-closed and allowlist tree"
-          " vectors (each changes outcome without its check), 3 admission vectors.".format(
+          " vectors (each changes outcome without its check), 4 admission vectors.".format(
               len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS)))
     return 0
 

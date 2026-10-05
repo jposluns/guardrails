@@ -26,8 +26,9 @@ HONEST BOUNDARY. An "enforced" status records LINKAGE, not complete coverage: at
 hook cites the rule, and each mechanism carries its residual (what it does not catch) from the ledger. A
 linked mechanism may cover only part of a rule's violation surface. "partial" records the same linkage
 and states outright that the linked mechanisms are known to cover only part of the rule (each mechanism's
-residual names the uncovered clauses). "none" and "pending" both mean enforcement is not built yet;
-"pending" adds the intended-build description.
+residual names the uncovered clauses). A rule whose every linked mechanism is class c (partial by the
+class legend) must be "partial"; "enforced" there is refused as an overclaim (exit 2). "none" and
+"pending" both mean enforcement is not built yet; "pending" adds the intended-build description.
 
   gen_enforcement_register.py           regenerate ENFORCEMENT.md and the whole site/enforcement.html page
   gen_enforcement_register.py --check   fail (exit 1) on output drift; exit 2 on a bad or contradictory input
@@ -687,6 +688,12 @@ def build_views(root):
     for cid, row in roadmap.items():
         if row["status"] in LINKED:
             enforced_union.update(row["mechanisms"])
+        # Class c is partial by its own legend, so a rule whose every linked mechanism is class c
+        # is covered only in part and must say so: enforced there is an overclaim, cannot-evaluate.
+        if row["status"] == "enforced" and all(
+                controls[ref]["class"] == "c" for ref in row["mechanisms"]):
+            raise ValueError("roadmap rule {}: every linked mechanism is class c (partial), so its "
+                             "status must be 'partial', not 'enforced'".format(cid))
     # Defensive display-name uniqueness guard: the display name IS the ledger reference (identity, no
     # normalization), so a duplicate is structurally unreachable today. The check stays fail-closed so any
     # future normalizing transformation inherits a collision guard instead of a silent merge (ValueError
@@ -1189,6 +1196,14 @@ def self_test_main():
                                      'corpus-id = "ruledd"\nstatus = "none"\nmechanisms = []',
                                      'corpus-id = "ruledd"\nstatus = "enforced"\n'
                                      'mechanisms = ["gate:gate-alpha"]'))
+        # (h1) An enforced status whose every linked mechanism is class c (ruleaa on gate-alpha),
+        # with the ledger rewritten to match, so only the class-c invariant can refuse it.
+        def all_class_c(t):
+            replace_in(t / GATES, 'rules = ["ruleaa", "rulebb"]\nplatform = "ci"\n'
+                       'default = "block"\nclass = "a"',
+                       'rules = ["ruleaa", "rulebb"]\nplatform = "ci"\ndefault = "block"\nclass = "c"')
+            (t / LEDGER_REL).write_text(gen_enforceability.build_ledger(t), encoding="utf-8")
+        expect2("roadmap-enforced-all-class-c", all_class_c)
         # (h2) A partial status on a prose-only baseline (ruledd).
         expect2("roadmap-partial-prose",
                 lambda t: replace_in(t / ROADMAP,

@@ -55,7 +55,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "brnrot"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:branch-root", "hook:branch-root-guard"]
 
 [[rule]]
@@ -175,7 +175,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "exetgt"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:derived-command-parameters", "hook:write-scope"]
 
 [[rule]]
@@ -360,7 +360,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "seccet"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:python-launcher-isolation"]
 
 [[rule]]
@@ -515,7 +515,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secsec"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:secrets-scan", "hook:secrets-shift-left"]
 
 [[rule]]
@@ -575,7 +575,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "septsk"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:write-scope"]
 
 [[rule]]
@@ -670,5 +670,5 @@ mechanisms = ["hook:orch-truncation-guard"]
 
 [[rule]]
 corpus-id = "wowo01"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:write-scope"]
