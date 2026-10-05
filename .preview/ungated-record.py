@@ -130,11 +130,19 @@ Self-test: python3 -I -S -B ungated-record.py --self-test
     byte-identity check reports SKIPPED, never a pass.
 """
 
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: ungated-record.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import os
 import re
 import select
-import sys
 import time
 
 HOOK_ID = "ungated-record"
