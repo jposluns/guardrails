@@ -213,11 +213,16 @@ _ID_RE = re.compile(r"^([A-Z]{2})-([1-9][0-9]*)\Z")
 # The full id grammar over both series (spec 8.2): `^(?:imported:)?[A-Z]{2}-[1-9][0-9]*$`. _ID_RE above
 # stays the clean-only grammar that every existing caller relies on.
 _SERIES_ID_RE = re.compile(r"^(imported:)?([A-Z]{2})-([1-9][0-9]*)\Z")
-# The longest id number accepted: the CPython default int-to-str limit (4300 digits). It is judged by the
-# digit COUNT before any conversion, and the conversion below runs in chunks shorter than the smallest
-# limit sys.set_int_max_str_digits allows (640), so an id's verdict never depends on that process-wide
-# setting (test-hermeticity; guard-input-soundness).
+# The id-number ceiling of the SERIES-AWARE path (parse_series_id, and every helper called with
+# `imported_series=True` or `imported_namespaces`): the CPython default int-to-str limit (4300 digits), so
+# the largest id number is _MAX_ID_NUMBER. An id is judged by its digit COUNT before any conversion, a
+# counter by an int comparison with _MAX_ID_NUMBER, and both conversions run in chunks shorter than the
+# smallest limit sys.set_int_max_str_digits allows (640), so parsing, counter validation and allocation
+# share this one ceiling and never depend on that process-wide setting (test-hermeticity;
+# guard-input-soundness). The clean-only default path keeps its original ambient-limit rule
+# (_valid_id_shape, _genuine_high_water), so an existing caller's verdicts do not change.
 _MAX_ID_DIGITS = 4300
+_MAX_ID_NUMBER = 10 ** _MAX_ID_DIGITS - 1
 _ID_DIGIT_CHUNK = 600
 # RFC 3339 UTC with optional fractional seconds. UTC is expressible as `Z` OR the `+00:00` offset (both
 # denote a zero offset); both are accepted, any other numeric offset (e.g. +05:30) is not UTC and is
@@ -417,6 +422,33 @@ def _genuine_high_water(value):
     return True
 
 
+def _series_high_water(value):
+    """A non-negative int usable as a high-water on the series-aware path: not a bool, and at most
+    _MAX_ID_NUMBER, the largest number parse_series_id accepts. Judged by an int comparison, never a
+    str() conversion, so the verdict is the same under every sys.set_int_max_str_digits (spec 8.2)."""
+    return type(value) is int and 0 <= value <= _MAX_ID_NUMBER
+
+
+def _high_water_check(series_aware):
+    """The high-water predicate a helper applies: the fixed-ceiling _series_high_water on the
+    series-aware path, and the original ambient-limit _genuine_high_water on the clean-only default path
+    (so an existing caller's verdicts are unchanged)."""
+    return _series_high_water if series_aware else _genuine_high_water
+
+
+def _id_digits(n):
+    """The decimal digits of a positive id number of at most _MAX_ID_NUMBER, built in chunks shorter than
+    the smallest int-to-str limit (640 digits), so rendering an allocated id never depends on
+    sys.set_int_max_str_digits (test-hermeticity)."""
+    base = 10 ** _ID_DIGIT_CHUNK
+    chunks = []
+    while n >= base:
+        n, rest = divmod(n, base)
+        chunks.append(str(rest).zfill(_ID_DIGIT_CHUNK))
+    chunks.append(str(n))
+    return "".join(reversed(chunks))
+
+
 def parse_status(status, spec):
     """Parse a status string against a type's grammar (spec 8.4). Returns ((state, qualifier), None) on
     success, or (None, message) on a malformed or type-illegal status. `qualifier` is None or "proposed",
@@ -462,16 +494,18 @@ def _id_number(digits):
 
 def _valid_id_shape(value):
     """The (namespace, number) of a well-formed `<NS>-<n>` id, or None. An oversized numeric suffix
-    (more than _MAX_ID_DIGITS digits) is treated as MALFORMED input (None), never an uncontrolled crash:
-    mirrors check_clauses.split_clause_id's >4300-digit ordinal guard (guard-input-soundness; the caller
-    then reports the id as not well-formed). The digit count decides, never the ambient int limit."""
+    (CPython refuses int() on a string of more than 4300 digits, a ValueError) is treated as MALFORMED
+    input (None), never an uncontrolled crash: mirrors check_clauses.split_clause_id's >4300-digit
+    ordinal guard (guard-input-soundness; the caller then reports the id as not well-formed)."""
     if not isinstance(value, str):
         return None
     m = _ID_RE.match(value)
     if not m:
         return None
-    n = _id_number(m.group(2))
-    return None if n is None else (m.group(1), n)
+    try:
+        return (m.group(1), int(m.group(2)))  # an oversized numeric suffix raises ValueError -> None below
+    except ValueError:
+        return None
 
 
 def parse_series_id(value):
@@ -515,10 +549,13 @@ def _is_counter_key(key, imported_series):
 def _id_counter_shape(value, imported_series):
     """The (counter_key, number) of an id, or None when it is malformed: the clean grammar alone by
     default, and both series when `imported_series` is True, each id keyed to its own number line (spec
-    8.2)."""
+    8.2). An imported id is accepted only over IMPORTED_NAMESPACES, the same set every other imported
+    helper enforces (_is_counter_key), so a reserved or non-imported namespace is never certified."""
     if imported_series is True:
         shape = parse_series_id(value)
-        return None if shape is None else (shape[0], shape[2])
+        if shape is None or (shape[0] != shape[1] and shape[1] not in IMPORTED_NAMESPACES):
+            return None
+        return (shape[0], shape[2])
     return _valid_id_shape(value)
 
 
@@ -1328,6 +1365,9 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None, imp
     holds both series under their own keys. A malformed control is a finding and treated as empty."""
     findings = []
     high_water = {}
+    # The series-aware path (imported_namespaces given) judges every counter, clean or imported, against
+    # the one fixed id ceiling; the default path keeps the original ambient-limit rule.
+    hw_ok = _high_water_check(imported_namespaces is not None)
     if not isinstance(data, dict):
         return high_water, ["counters.toml is not a table"]
     # known_namespaces is a control naming the namespaces that MUST each carry a high-water. None means
@@ -1388,9 +1428,9 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None, imp
             if ns[len(IMPORTED_PREFIX):] not in imported_namespaces:
                 findings.append("[counters] imported counter {} is not a known imported namespace".format(
                     _safe_display(ns)))
-            if not _genuine_high_water(val):
-                findings.append("[counters].{} must be a non-negative integer high-water mark".format(
-                    _safe_display(ns)))
+            if not hw_ok(val):
+                findings.append("[counters].{} must be a non-negative integer high-water mark of at most "
+                                "{} digits".format(_safe_display(ns), _MAX_ID_DIGITS))
                 continue
             high_water[ns] = val
             continue
@@ -1415,7 +1455,7 @@ def validate_counters(data, known_namespaces=None, optional_namespaces=None, imp
         if known_namespaces is not None and not accepted_ns:
             findings.append("[counters] namespace {!r} is not a known namespace".format(ns))
         # A bool is an int subclass; a high-water is a genuine non-negative int, never True/False.
-        if not _genuine_high_water(val):
+        if not hw_ok(val):
             findings.append("[counters].{} must be a non-negative integer high-water mark".format(ns))
             continue
         high_water[ns] = val
@@ -1463,7 +1503,7 @@ def _validated_counter_map(high, where, imported_series=False):
             # and lose this module's named refusal, so it renders through _safe_display (Fable-F3).
             raise ValueError("{}: namespace {} is bound to no record type in the section 8.1 taxonomy "
                              "(spec 8.1/8.2)".format(where, _safe_display(ns)))
-        if not _genuine_high_water(val):
+        if not _high_water_check(imported_series is True)(val):
             raise ValueError("{}: high-water for {!r} must be a genuine non-negative int, got {} "
                              "(a bool is not a high-water; spec 8.2)".format(where, ns, _safe_display(val)))
 
@@ -1484,7 +1524,12 @@ def next_id(high, ns, known_complete=False, imported_series=False):
     With `imported_series=True` (a genuine bool), `ns` may also be an imported counter key
     `imported:<NS>`, which allocates `imported:<NS>-<n>` from that key's own high-water and never reads the
     clean `<NS>` line (spec 8.2); the map may then hold both series. Without it, an imported key is refused
-    exactly as before."""
+    exactly as before. For an absent imported key, `known_complete=True` asserts the imported series'
+    proof instead: validate_counters(..., imported_namespaces=...) listing that namespace, since a
+    clean-only known_namespaces proof says nothing about the imported line. On this series-aware path the
+    map's values and the allocated number share parse_series_id's fixed ceiling (_MAX_ID_NUMBER): an
+    allocation past it is refused, never emitted as an id the parser or check_ids_within_counters would
+    reject, whatever sys.set_int_max_str_digits is."""
     flag_error = _imported_series_error(imported_series)
     if flag_error is not None:
         raise ValueError("cannot allocate an id: {}".format(flag_error))
@@ -1510,9 +1555,18 @@ def next_id(high, ns, known_complete=False, imported_series=False):
     if ns not in high and not known_complete:
         raise ValueError("cannot allocate an id for namespace {!r}: it has no recorded high-water and the "
                          "counters map is not known complete; validate it with validate_counters(..., "
-                         "known_namespaces=...) and pass known_complete=True, so an absent counter cannot "
-                         "read as high-water 0 and reuse an existing id (spec 8.2)".format(ns))
+                         "{}=...) and pass known_complete=True, so an absent counter cannot "
+                         "read as high-water 0 and reuse an existing id (spec 8.2)".format(
+                             ns, "imported_namespaces" if ns.startswith(IMPORTED_PREFIX)
+                             else "known_namespaces"))
     n = high_water(high, ns) + 1
+    if imported_series:
+        # The series-aware path: one fixed ceiling, shared with parse_series_id and the counter checks, and
+        # a chunked rendering, so neither the verdict nor the id depends on the ambient int limit.
+        if n > _MAX_ID_NUMBER:
+            raise ValueError("cannot allocate an id for namespace {!r}: the next id number exceeds the "
+                             "{}-digit id ceiling ({}; spec 8.2)".format(ns, _MAX_ID_DIGITS, _safe_display(n)))
+        return "{}-{}".format(ns, _id_digits(n)), n
     if not _genuine_high_water(n):
         # The high-water passed _genuine_high_water (within the 4300-digit int-to-str limit), but the id it
         # allocates is high-water + 1, which at exactly the limit overflows one digit past it; refuse with
@@ -1543,7 +1597,7 @@ def check_monotonic(old_high, new_high, imported_series=False):
             if not _is_counter_key(ns, imported_series):
                 findings.append("{} counters namespace {} is bound to no record type in the section 8.1 "
                                 "taxonomy (spec 8.1/8.2)".format(label, _safe_display(ns)))
-            if not _genuine_high_water(val):
+            if not _high_water_check(imported_series)(val):
                 findings.append("{} counters high-water for {} must be a genuine non-negative int, got "
                                 "{} (a bool is not a high-water; spec 8.2)".format(label, _safe_display(ns), _safe_display(val)))
     if findings:
@@ -1579,7 +1633,9 @@ def check_ids_within_counters(ids, high, imported_series=False):
     for rid in ids:
         shape = _id_counter_shape(rid, imported_series)
         if shape is None:
-            findings.append("id {} is not a well-formed <NS>-<n> id".format(_safe_display(rid)))
+            findings.append(("id {} is not a well-formed <NS>-<n> or imported:<NS>-<n> id over a namespace "
+                             "its series may carry (spec 8.1/8.2)" if imported_series else
+                             "id {} is not a well-formed <NS>-<n> id").format(_safe_display(rid)))
             continue
         ns, n = shape
         if ns not in high:
@@ -1590,7 +1646,7 @@ def check_ids_within_counters(ids, high, imported_series=False):
         # genuine non-negative high-water, so do NOT certify the id against it (the comparison would
         # silently accept True/1.5, or reject against a negative). type(hv) is not int rejects bool, whose
         # type is bool not int (spec 8.2).
-        if not _genuine_high_water(hv):
+        if not _high_water_check(imported_series)(hv):
             findings.append("namespace {!r} high-water {} is not a non-negative integer (spec 8.2)".format(
                 ns, _safe_display(hv)))
             continue
@@ -1620,7 +1676,10 @@ def check_unique_ids(ids, imported_series=False):
         # (guard-input-soundness; spec 8.2). Uniqueness cannot be judged for a malformed id, so it is
         # surfaced and not added to `seen`.
         if _id_counter_shape(rid, imported_series) is None:
-            findings.append("malformed id {}: an id must be a well-formed '<NS>-<n>' string (spec 8.2)".format(_safe_display(rid)))
+            findings.append(("malformed id {}: an id must be a well-formed '<NS>-<n>' or 'imported:<NS>-<n>' "
+                             "string over a namespace its series may carry (spec 8.1/8.2)" if imported_series
+                             else "malformed id {}: an id must be a well-formed '<NS>-<n>' string (spec 8.2)"
+                             ).format(_safe_display(rid)))
             continue
         if rid in seen:
             findings.append("duplicate id {!r}: IDs are never reused (spec 8.2)".format(rid))
@@ -2586,6 +2645,13 @@ def self_test():
 
     # The imported series (spec 8.2): `imported:<NS>-<n>` ids and `"imported:<NS>"` counters, opt-in, each
     # series on its own number line; with no opt-in every helper keeps its clean-only behaviour.
+    def _alloc_refused(thunk):
+        try:
+            thunk()
+        except ValueError:
+            return True
+        return False
+
     check("series-id-imported-parses", parse_series_id("imported:BI-7") == ("imported:BI", "BI", 7))
     check("series-id-clean-parses", parse_series_id("BI-7") == ("BI", "BI", 7))
     for bad in ("imported:BI-07", "imported:BI-0", "Imported:BI-1", "imported:bi-1", "imported:BIX-1",
@@ -2602,12 +2668,50 @@ def self_test():
             check("series-id-malformed-oversized-limit-{}".format(_limit),
                   parse_series_id("imported:BI-" + "9" * (_MAX_ID_DIGITS + 1)) is None
                   and parse_series_id("BI-" + "9" * 5000) is None)
-            check("clean-id-malformed-oversized-limit-{}".format(_limit),
-                  _valid_id_shape("BI-" + "9" * (_MAX_ID_DIGITS + 1)) is None)
             check("series-id-max-digits-parses-limit-{}".format(_limit),
-                  parse_series_id("imported:BI-" + "9" * _MAX_ID_DIGITS)
-                  == ("imported:BI", "BI", 10 ** _MAX_ID_DIGITS - 1)
-                  and _valid_id_shape("BI-1" + "0" * (_MAX_ID_DIGITS - 1)) == ("BI", 10 ** (_MAX_ID_DIGITS - 1)))
+                  parse_series_id("imported:BI-" + "9" * _MAX_ID_DIGITS) == ("imported:BI", "BI", _MAX_ID_NUMBER))
+            # The clean-only default path keeps its original rule: an id is accepted exactly when int()
+            # of its suffix succeeds under the ambient limit, so every existing caller's verdict is
+            # unchanged, and an accepted id's number always renders back under that limit (a caller that
+            # formats it, such as a duplicate worklog id message, never crashes).
+            for _len in (641, _MAX_ID_DIGITS + 1):
+                _cid = "WL-" + "9" * _len
+                _shape = _valid_id_shape(_cid)
+                check("clean-id-default-rule-{}-limit-{}".format(_len, _limit),
+                      (_shape is not None) == (_limit == 0 or _len <= _limit)
+                      and (_shape is None or str(_shape[1]) == _cid[3:]))
+            # One ceiling for counter validation, allocation and parsing on the series-aware path: a
+            # counter past it is refused, a counter at it is valid but allocates nothing, and every id the
+            # allocator emits parses and passes the counter-bound and uniqueness checks.
+            _ceil_ctr = dict([("BI", _MAX_ID_NUMBER), ("imported:BI", _MAX_ID_NUMBER)])
+            _, _ceil_f = validate_counters(dict(schema=1, counters=dict(_ceil_ctr)), known_namespaces=["BI"],
+                                           imported_namespaces=["BI"])
+            check("series-counter-at-ceiling-ok-limit-{}".format(_limit), not _ceil_f)
+            for _key in ("BI", "imported:BI"):
+                _over = dict(_ceil_ctr)
+                _over[_key] = _MAX_ID_NUMBER + 1
+                _, _ceil_f = validate_counters(dict(schema=1, counters=_over), known_namespaces=["BI"],
+                                               imported_namespaces=["BI"])
+                check("series-counter-past-ceiling-flagged-{}-limit-{}".format(_key, _limit),
+                      any("[counters].{} must be".format(_key if _key == "BI" else _safe_display(_key)) in f
+                          for f in _ceil_f))
+                check("series-next-id-at-ceiling-refused-{}-limit-{}".format(_key, _limit),
+                      _alloc_refused(lambda: next_id(_ceil_ctr, _key, imported_series=True)))
+                check("series-next-id-past-ceiling-refused-{}-limit-{}".format(_key, _limit),
+                      _alloc_refused(lambda: next_id(_over, _key, imported_series=True)))
+                check("series-monotonic-past-ceiling-flagged-{}-limit-{}".format(_key, _limit),
+                      bool(check_monotonic(_ceil_ctr, _over, imported_series=True)))
+                check("series-ids-within-past-ceiling-high-flagged-{}-limit-{}".format(_key, _limit),
+                      bool(check_ids_within_counters(["BI-1", "imported:BI-1"], _over, imported_series=True)))
+                for _hw in (_MAX_ID_NUMBER - 1, 10 ** 700, 7):
+                    try:
+                        _rid, _n = next_id({_key: _hw}, _key, imported_series=True)
+                    except ValueError:
+                        _rid = _n = None
+                    check("series-next-id-parses-{}-{}-limit-{}".format(_key, _hw.bit_length(), _limit),
+                          _n == _hw + 1 and parse_series_id(_rid) == (_key, "BI", _n)
+                          and not check_ids_within_counters([_rid], {_key: _n}, imported_series=True)
+                          and not check_unique_ids([_rid], imported_series=True))
     finally:
         sys.set_int_max_str_digits(_series_prev_idlimit)
     check("series-id-clean-grammar-unchanged", _valid_id_shape("imported:BI-7") is None)
@@ -2642,12 +2746,12 @@ def self_test():
     check("imported-counters-malformed-control-flagged",
           any("imported_namespaces must be" in f for f in imp_f))
 
-    def _alloc_refused(thunk):
+    def _alloc_error(thunk):
         try:
             thunk()
-        except ValueError:
-            return True
-        return False
+        except ValueError as e:
+            return e
+        return None
 
     both = {"BI": 3, "imported:BI": 5}
     check("imported-next-id-own-line", next_id(both, "imported:BI", imported_series=True) == ("imported:BI-6", 6))
@@ -2686,6 +2790,26 @@ def self_test():
         ["imported:BI-1", "imported:BI-1"], imported_series=True)))
     check("imported-unique-default-malformed", bool(check_unique_ids(["imported:BI-1"])))
     check("imported-unique-nonbool-flag-flagged", bool(check_unique_ids(["BI-1"], imported_series=0)))
+    # Every helper that accepts imported ids enforces the one IMPORTED_NAMESPACES set (spec 8.1/8.2): the
+    # importer-only LF, the reserved TX, the unassigned CL and an unknown ZZ are refused even when the
+    # caller's map tracks them.
+    for _ns in ("LF", "TX", "CL", "ZZ"):
+        _ikey = "imported:" + _ns
+        _iid = _ikey + "-1"
+        check("imported-ids-within-namespace-refused-{}".format(_ns),
+              any("not a well-formed" in f for f in check_ids_within_counters(
+                  [_iid], {_ikey: 5}, imported_series=True)))
+        check("imported-unique-namespace-refused-{}".format(_ns),
+              any("malformed id" in f for f in check_unique_ids([_iid], imported_series=True)))
+        check("imported-monotonic-namespace-refused-{}".format(_ns),
+              bool(check_monotonic({_ikey: 1}, {_ikey: 1}, imported_series=True)))
+        check("imported-counters-namespace-refused-{}".format(_ns), bool(validate_counters(
+            dict(schema=1, counters={_ikey: 1}), imported_namespaces=[_ns])[1]))
+        check("imported-next-id-namespace-refused-{}".format(_ns), _alloc_refused(
+            lambda: next_id({_ikey: 1}, _ikey, imported_series=True)))
+    check("imported-next-id-proof-names-imported-control",
+          "imported_namespaces" in str(_alloc_error(
+              lambda: next_id(dict(BI=3), "imported:BI", imported_series=True))))
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
