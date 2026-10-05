@@ -1739,8 +1739,10 @@ def _with_recovery_lease(ctx, pending, recover):
     through this reconciliation and the claim retried once; a lease held by a live or possibly-live
     holder, a cross-host holder, or one with a malformed payload refuses before any recovery write and is
     never seized, and releasing any such lease stays the operator's explicit reconciliation step. A
-    released leftover is REPORTED: it heads the outcome lines `recover` returns, and a RecordError that
-    `recover` raises carries it appended, so no refusal reads as written-nothing over the released lease.
+    released leftover is REPORTED whatever follows it: it heads the outcome lines `recover` returns, a
+    RecordError that `recover` raises carries it appended, a WriteGuardError from the release after a
+    clean recovery carries it appended, and any other failure surfaces it on stderr (best-effort, never
+    displacing the failure), so no outcome reads as written-nothing over the released lease.
     The lease release is attempted when the recovery body returns and when it raises an ordinary exception
     (a signal may leave the lease: the module residual list); a release failure after a refusal is surfaced,
     saying the lease may be left, and never displaces the refusal, whatever the release raised, with a
@@ -1766,10 +1768,26 @@ def _with_recovery_lease(ctx, pending, recover):
                       "(spec 5.7), and the failure above still governs.".format(rel_exc), file=sys.stderr)
             except BaseException:
                 pass  # PR D fix 12: a failing diagnostic write never displaces the governing failure
-        if released is not None and isinstance(failure, RecordError):
-            raise RecordError("{} Before that refusal, {}.".format(failure, released)) from failure
+        if released is not None:
+            if isinstance(failure, RecordError):
+                raise RecordError("{} Before that refusal, {}.".format(failure, released)) from failure
+            try:
+                print("opf record: before that failure, {}.".format(released), file=sys.stderr)
+            except BaseException:
+                pass  # PR D fix 12: a failing diagnostic write never displaces the governing failure
         raise
-    _release(ctx, lease)
+    try:
+        _release(ctx, lease)
+    except BaseException as rel_exc:
+        if released is not None:
+            if isinstance(rel_exc, _opf_write_guard.WriteGuardError):
+                raise _opf_write_guard.WriteGuardError(
+                    "{} Before that failure, {}.".format(rel_exc, released)) from rel_exc
+            try:
+                print("opf record: before that failure, {}.".format(released), file=sys.stderr)
+            except BaseException:
+                pass  # PR D fix 12: a failing diagnostic write never displaces the governing failure
+        raise
     if released is not None:
         result = [released] + list(result or [])
     return result
