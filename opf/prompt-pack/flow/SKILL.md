@@ -10,6 +10,8 @@ description: The OPF operating loop for an AI development assistant. Read the ad
   stay serial; verification is never shortened for speed.
 ---
 
+<!-- OPF-FLOW: release=0.3.0 template-sha256=ae9b7f550ddf6289db7001df3ca34062652472b2d92ab31921c6a04d4a8e09be -->
+
 # /flow: the OPF operating loop
 
 This skill tells an AI development assistant how to run continuous development work on top of an
@@ -47,9 +49,9 @@ Three rules govern everything else:
    confirmed integrity diagnostic stands unaddressed. A failing validator or readiness
    instrument is itself the next unit of work; an instrument failure never licenses skipping the
    check it performs.
-4. Resolve the overlay bindings (section 10). A required slot that is unbound stops an
-   unattended run before it starts; an attended run surfaces the gap and proceeds only on what
-   the defaults cover.
+4. Resolve the overlay bindings (section 10). A required slot still carrying its unbound
+   default stops an unattended run before it starts; an attended run surfaces the gap and
+   proceeds only on what the region defaults cover.
 5. Read the operating mode from the bound mode source (section 8). An unattended run freezes its
    authorization set at entry: the grants it will act under are the ones recorded before entry,
    and nothing that arrives mid-run widens them.
@@ -337,6 +339,19 @@ the mechanical gates.
   accept-and-merge is outward and is held for the maintainer; otherwise the unit stays parked
   and the run routes to the next independent item.
 
+**The effort schedule.** The review effort each phase runs at, by tier, is bound by the
+`flow-effort-schedule` region here, beside the cycle it governs (section 10 gives the region
+grammar and lists the slot). A project overlay replaces the generic default below with its own
+per-tier schedule; no schedule, bound or default, weakens the panel composition, the convergence
+rule, the round budget, or any other floor above.
+
+<!-- OVERLAY:flow-effort-schedule -->
+Effort schedule (generic default): every DISCOVERY panel and every VERIFY pass runs each
+reviewer family at its standard review effort for the unit's tier, the heavier tier always at
+least as hard as the lighter one; effort choices never change the panel composition, the round
+budget, or the convergence rule.
+<!-- /OVERLAY:flow-effort-schedule -->
+
 **Routing and merge** (unchanged by tier):
 
 - Confirmed findings of medium or worse severity never leave the unit that found them. Minor
@@ -404,65 +419,160 @@ the mechanical gates.
 - Tests and fixtures must be hermetic: a fixture that walks up the filesystem out of its
   temporary directory can reach real host state.
 
-## 10. Shipping: skill, rendered command, overlay slots, drift check
+## 10. Shipping: skill, rendered command, overlay regions, drift check
 
 **One artifact, two deployment forms.** This member is simultaneously the skill and the render
 template, one file by design:
 
 - *Skill form*: copy the member beside its pack digest into the harness's skills directory. The
-  defaults in the slots table govern; the required slots must be bound by project instructions
-  or committed configuration before the loop runs unattended (section 0, step 4).
-- *Rendered-command form*: a deployer renders the member with the project overlay and installs
-  the output as a per-account command. Where commands are installed per account and read only at
-  session start, a deployed copy cannot self-update; the drift check below is the staleness
-  guard.
+  region defaults govern; the required slots must be bound by project instructions or committed
+  configuration before the loop runs unattended (section 0, step 4).
+- *Rendered-command form*: a deployer renders the member with the project's overlay directory
+  and installs the output as a per-account command. Where commands are installed per account
+  and read only at session start, a deployed copy cannot self-update; the drift check below is
+  the staleness guard.
 
 One file rather than a skill plus a separate template, because a second copy drifts from the
 first, the pack digest and the drift check need a single canonical source, and the document
-stays valid unrendered: every overlay marker sits in the slots table beside its declared
-default, so the unrendered text reads correctly with defaults and shows exactly which required
-slots are still unbound.
+stays valid unrendered: every region overlay carries its default text in place, so the
+unrendered text reads correctly with defaults and shows exactly which required slots are still
+unbound.
 
 **Adoption replaces the private flow.** On OPF adoption this skill replaces a project's private
 flow procedure; the project keeps only its overlay values. A local rule the project must keep
 either maps onto a slot below or rides the overlay as an additive requirement; a conflict with
 this document or the specification is reconciled upstream, never forked into the local copy.
 
-**Overlay marker syntax.** A marker is `{{flow.<slot>}}`, slot names in lower snake case. Markers
-appear exactly once each, in the Binding column of the slots table, so bound values have one
-home and the prose never goes stale. The render substitutes each marker with the overlay's value
-for that slot, else the slot's declared default. The render refuses, fail closed: a marker still
-unresolved after substitution (a required slot the overlay left unbound), a marker naming no
-slot in the table, and an overlay key naming no slot (a config typo is an error, never silently
-ignored). An overlay binds values and may add requirements; it never weakens a floor set here or
-in the specification, on the same posture as a profile (section 9.1 of OPF-SPEC.md).
+**Render contract.** The deployment renderer substitutes exactly two forms, and no other
+grammar exists; this member uses only the second:
 
-**Slots.** Required slots have no default and must be bound before unattended operation.
+- *Fixed placeholders*: a closed set of six project tokens, the names PROJECT, HOME, STORE,
+  REPO, GHREPO and LAUNCHER each written between two commercial-at signs, replaced in one
+  left-to-right pass. They carry project identity and paths, not flow policy, so none of the
+  slots below maps onto one, and this template deliberately contains no placeholder token:
+  a literal token anywhere in it would be substituted at render time.
+- *Region overlays*: a region is a block opened by an HTML comment whose body is `OVERLAY:`
+  followed by the region id and closed by the matching comment whose body is `/OVERLAY:`
+  followed by the same id, with the default text on its own lines between them; an id uses
+  only ASCII letters, digits, `.`, `_` and `-`. When the project's overlay directory holds a
+  non-blank file named `<id>.md`, the whole region, markers and default together, is replaced
+  by that file's content; otherwise the default text stays and the markers are dropped.
+  Regions replace, they never append: an overlay that adjusts a binding restates the whole
+  region body.
 
-| Slot | Default | Binding |
+The render fails closed on structure: it refuses to install output that still contains an
+overlay marker. An unbound required slot does not fail the render (its unbound default stays in
+the output); it stops the run instead, at section 0, step 4. An overlay binds values and may add
+requirements; it never weakens a floor set here or in the specification, on the same posture as
+a profile (section 9.1 of OPF-SPEC.md).
+
+**Slots.** Required slots must be bound before unattended operation. Each slot binds through
+its own region overlay, so a bound value has one home and the prose never goes stale: the
+region id is `flow-` followed by the slot name with underscores written as hyphens, and a
+project binds the slot by providing the overlay file `<region id>.md` whose content is the
+region body with the bound value in place of the default.
+
+| Slot | Region | What it binds |
 |---|---|---|
-| `review_families` | (required) the reviewer families for discovery panels | {{flow.review_families}} |
-| `review_families_light` | any two of `review_families` | {{flow.review_families_light}} |
-| `discovery_round_cap` | 9; an overlay may bind a lower value, never a higher one (the park-and-surface gate is a floor) | {{flow.discovery_round_cap}} |
-| `stall_minutes` | 45 | {{flow.stall_minutes}} |
-| `plan_buffer_min` | 3 | {{flow.plan_buffer_min}} |
-| `timer_seconds` | 300 | {{flow.timer_seconds}} |
-| `banned_launch_models` | empty list | {{flow.banned_launch_models}} |
-| `dispatch_cmd` | (required) the worker dispatch command | {{flow.dispatch_cmd}} |
-| `gate_cmds` | (required) the gate and suite commands of the gated apply chain | {{flow.gate_cmds}} |
-| `merge_check_cmd` | (required) how CI status on the exact pushed revision is read | {{flow.merge_check_cmd}} |
-| `merge_authority` | (required) who merges, and under which standing grant | {{flow.merge_authority}} |
-| `mode_source` | (required) the committed or operator-owned mode record | {{flow.mode_source}} |
-| `flow_rate_source` | the latest clean `maintainer_decision` opening `flow rate <n>`; none means a rate of 1 | {{flow.flow_rate_source}} |
-| `verification_floor` | the store's declared profile floor | {{flow.verification_floor}} |
-| `status_surface` | the console re-render of section 5 | {{flow.status_surface}} |
-| `branch_naming` | one branch per unit, named for its item | {{flow.branch_naming}} |
+| `review_families` | `flow-review-families` | (required) the reviewer families for discovery panels |
+| `review_families_light` | `flow-review-families-light` | the reviewer families for light units |
+| `effort_schedule` | `flow-effort-schedule` | the per-tier review effort schedule; its region sits in section 7, beside the cycle it governs |
+| `discovery_round_cap` | `flow-discovery-round-cap` | the DISCOVERY round budget per unit; an overlay may bind a lower value, never a higher one (the park-and-surface gate is a floor) |
+| `stall_minutes` | `flow-stall-minutes` | the reviewer re-issue timeout (section 7) |
+| `plan_buffer_min` | `flow-plan-buffer-min` | the plan-ahead buffer target (section 1, step 7) |
+| `timer_seconds` | `flow-timer-seconds` | the attended pause timer (section 8) |
+| `banned_launch_models` | `flow-banned-launch-models` | the launch deny list (section 9); an overlay may only extend it |
+| `dispatch_cmd` | `flow-dispatch-cmd` | (required) the worker dispatch command |
+| `gate_cmds` | `flow-gate-cmds` | (required) the gate and suite commands of the gated apply chain |
+| `merge_check_cmd` | `flow-merge-check-cmd` | (required) how CI status on the exact pushed revision is read |
+| `merge_authority` | `flow-merge-authority` | (required) who merges, and under which standing grant |
+| `mode_source` | `flow-mode-source` | (required) the committed or operator-owned mode record (section 8) |
+| `flow_rate_source` | `flow-flow-rate-source` | where the current flow rate is read (section 2) |
+| `verification_floor` | `flow-verification-floor` | the merge verification floor (section 7) |
+| `status_surface` | `flow-status-surface` | the persistent render of the section 5 table |
+| `branch_naming` | `flow-branch-naming` | the branch naming rule for stream worktrees |
 
-**Drift check.** The render prepends one generated provenance comment to its output: the pack
-version, this member's sha256 from the pack manifest, and the overlay's sha256. The drift check,
-run at deploy time and on a schedule (installed copies are read only at session start, so a
-stale copy otherwise persists silently), compares, for every installed copy: the provenance
-line's pack version and member digest against the current release's `pack.toml` row, and the
-installed bytes against a fresh render of the release member with the project's current
-overlay. Any difference fails the check; the fix is a re-render from the release, never an edit
-of the installed copy.
+**Bindings.** One region per slot; each region body is one binding line, `<slot> = <value>`. A
+required slot reads `(required; unbound)` until the project's overlay binds it, and that exact
+text is what section 0, step 4 stops on. The `flow-effort-schedule` region lives in section 7,
+beside the cycle it governs; its body is the schedule prose rather than a binding line.
+
+<!-- OVERLAY:flow-review-families -->
+review_families = (required; unbound)
+<!-- /OVERLAY:flow-review-families -->
+
+<!-- OVERLAY:flow-review-families-light -->
+review_families_light = any two of review_families
+<!-- /OVERLAY:flow-review-families-light -->
+
+<!-- OVERLAY:flow-discovery-round-cap -->
+discovery_round_cap = 9
+<!-- /OVERLAY:flow-discovery-round-cap -->
+
+<!-- OVERLAY:flow-stall-minutes -->
+stall_minutes = 45
+<!-- /OVERLAY:flow-stall-minutes -->
+
+<!-- OVERLAY:flow-plan-buffer-min -->
+plan_buffer_min = 3
+<!-- /OVERLAY:flow-plan-buffer-min -->
+
+<!-- OVERLAY:flow-timer-seconds -->
+timer_seconds = 300
+<!-- /OVERLAY:flow-timer-seconds -->
+
+<!-- OVERLAY:flow-banned-launch-models -->
+banned_launch_models = (empty list)
+<!-- /OVERLAY:flow-banned-launch-models -->
+
+<!-- OVERLAY:flow-dispatch-cmd -->
+dispatch_cmd = (required; unbound)
+<!-- /OVERLAY:flow-dispatch-cmd -->
+
+<!-- OVERLAY:flow-gate-cmds -->
+gate_cmds = (required; unbound)
+<!-- /OVERLAY:flow-gate-cmds -->
+
+<!-- OVERLAY:flow-merge-check-cmd -->
+merge_check_cmd = (required; unbound)
+<!-- /OVERLAY:flow-merge-check-cmd -->
+
+<!-- OVERLAY:flow-merge-authority -->
+merge_authority = (required; unbound)
+<!-- /OVERLAY:flow-merge-authority -->
+
+<!-- OVERLAY:flow-mode-source -->
+mode_source = (required; unbound)
+<!-- /OVERLAY:flow-mode-source -->
+
+<!-- OVERLAY:flow-flow-rate-source -->
+flow_rate_source = the latest clean `maintainer_decision` record whose `decision` opens with the fixed line `flow rate <n>` (section 2); where it yields no rate, the rate is 1
+<!-- /OVERLAY:flow-flow-rate-source -->
+
+<!-- OVERLAY:flow-verification-floor -->
+verification_floor = the store's declared profile floor
+<!-- /OVERLAY:flow-verification-floor -->
+
+<!-- OVERLAY:flow-status-surface -->
+status_surface = the console re-render of section 5
+<!-- /OVERLAY:flow-status-surface -->
+
+<!-- OVERLAY:flow-branch-naming -->
+branch_naming = one branch per unit, named for its item
+<!-- /OVERLAY:flow-branch-naming -->
+
+**Provenance and the drift check.** One provenance line is pinned near the top of this member
+as exact bytes: a single-line HTML comment whose body is `OPF-FLOW: release=<version>
+template-sha256=<64 hex>`. `release` is this prompt pack's version, the one whose pack.toml row
+binds this member. `template-sha256` is the SHA-256, lowercase hex, of this member's exact
+bytes with the provenance line excluded: delete the one line that begins with the HTML comment
+opener immediately followed by one space and `OPF-FLOW:`, together with that line's trailing
+newline, and hash every remaining byte. This member contains exactly one such line, and a
+maintainer who edits the member recomputes both the digest in that line and the member's
+pack.toml row. The line is template text, not render output: the render passes it through
+unchanged, so every installed copy carries it. The drift check, run at deploy time and on a
+schedule (installed copies are read only at session start, so a stale copy otherwise persists
+silently), reads the installed copy's provenance line, re-renders that release's member with
+the project's current overlay files, and compares the installed bytes against the fresh render
+byte for byte. Any difference fails the check; the fix is a re-render from the release, never
+an edit of the installed copy.
