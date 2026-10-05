@@ -1,12 +1,14 @@
 # .aiqt/core/enforcement-roadmap.toml: the human enforcement DECISION for every rule (GER-1).
 #
-# One [[rule]] per corpus-id, in ascending corpus-id order. `status` is enforced, none, or pending.
-# enforced: the enforceability ledger links at least one shipped control to the rule; `mechanisms`
-#   RESTATES that linkage (namespaced gate:/hook: refs, unique and sorted) so this file is reviewable
-#   standalone, and tools/gen_enforcement_register.py CROSS-VALIDATES it against the ledger, so the two
-#   can never fork. none: enforcement is not built yet. pending: not built yet, and `description` states
-#   the intended build. This file records the DECISION only; the linkage itself is authored in the gate
-#   and hook manifests and rendered into .aiqt/enforceability.json, never re-authored here.
+# One [[rule]] per corpus-id, in ascending corpus-id order. `status` is enforced, partial, none, or
+# pending. enforced: the enforceability ledger links at least one shipped control to the rule;
+#   `mechanisms` RESTATES that linkage (namespaced gate:/hook: refs, unique and sorted) so this file is
+#   reviewable standalone, and tools/gen_enforcement_register.py CROSS-VALIDATES it against the ledger, so
+#   the two can never fork. partial: the same linkage invariant as enforced, and the linked mechanisms are
+#   known to cover only part of the rule (their residues name the uncovered clauses). none: enforcement is
+#   not built yet. pending: not built yet, and `description` states the intended build. This file records
+#   the DECISION only; the linkage itself is authored in the gate and hook manifests and rendered into
+#   .aiqt/enforceability.json, never re-authored here.
 # Verified by tools/gen_enforcement_register.py (schema and ledger contradictions are fail-closed exit 2).
 
 version = 1
@@ -368,7 +370,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "seccry"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:dangerous-api"]
 
 [[rule]]
@@ -378,7 +380,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secdsz"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:dangerous-api"]
 
 [[rule]]
@@ -388,8 +390,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secenc"
-status = "enforced"
-mechanisms = ["gate:dangerous-api"]
+status = "none"
+mechanisms = []
 
 [[rule]]
 corpus-id = "secfcl"
@@ -413,7 +415,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secinp"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:dangerous-api"]
 
 [[rule]]
@@ -458,8 +460,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secout"
-status = "enforced"
-mechanisms = ["gate:dangerous-api"]
+status = "none"
+mechanisms = []
 
 [[rule]]
 corpus-id = "secpin"
