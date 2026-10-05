@@ -9,6 +9,12 @@ Defaults follow OPF-SPEC section 9, with optional modules disabled and no profil
 The initial Markdown view set is pinned; future registry additions do not expand it.
 Validation here covers individual bootstrap documents, not whole-store or publication integrity.
 
+The self-test loads the _byte_canon authority in-process, behind _opf_emit's backstop: a load or later call
+that ends the process is exit 2 (cannot evaluate), and a KeyboardInterrupt is re-raised to stop the run.
+That backstop guards only this self-test. A process ending in another self-test the opf.py aggregate runs
+is caught by the aggregator's subprocess-per-unit runner only once the unit runner of #385 is on main; until
+then the aggregate runs each unit in-process and nothing here catches it.
+
 Run: python3 opf/tools/_opf_init.py --self-test
 """
 
@@ -199,6 +205,13 @@ def build_index(type_name):
 # --- self-test --------------------------------------------------------------------------------------
 
 def self_test():
+    """The self-test behind _opf_emit's backstop, so the in-process _byte_canon authority (loaded, then
+    called) can never end it with its own status: any escaping exception is exit 2 with a fixed message,
+    and a KeyboardInterrupt is re-raised fresh. This is the callable the canonical entry invokes."""
+    return _opf_emit._backstop(_self_test_body, "_opf_init")
+
+
+def _self_test_body():
     """Exercise canonical bytes, independent defaults, validators, and negative discrimination."""
     from copy import deepcopy
 
@@ -418,6 +431,9 @@ def self_test():
         print("OPF-INIT SELF-TEST ERROR: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
 
+    for label, failure in _st_loaded_exit():
+        check("loaded-exit/{}: {}".format(label, failure), failure is None)
+
     if failures:
         for name in failures:
             print("FAIL: " + name, file=sys.stderr)
@@ -426,6 +442,75 @@ def self_test():
         return 1
     print("OPF-INIT SELF-TEST: PASS ({} checks)".format(checked))
     return 0
+
+
+# Each case is the module the self-test loads as its _byte_canon authority: (label, source, interrupt). A
+# load case ends the process while loading; the scan case ends it in the later authority.scan_bytes call. An
+# interrupt case must re-raise a fresh KeyboardInterrupt (the probe exits 130); every other case must give 2.
+_LOADED_EXIT_CASES = (
+    ("load SystemExit(0)", "raise SystemExit(0)\n", False),
+    ("load SystemExit(None)", "raise SystemExit\n", False),
+    ("load KeyboardInterrupt", "raise KeyboardInterrupt\n", True),
+    ("load GeneratorExit", "raise GeneratorExit\n", False),
+    ("load BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n", False),
+    ("load SystemExit(code whose repr exits 0)",
+     "class R:\n    def __repr__(self):\n        raise SystemExit(0)\n    __str__ = __repr__\n"
+     "raise SystemExit(R())\n", False),
+    ("load Exception whose str exits 0",
+     "class E(Exception):\n    def __str__(self):\n        raise SystemExit(0)\n    __repr__ = __str__\n"
+     "raise E()\n", False),
+    ("scan_bytes SystemExit(0)", "def scan_bytes(data):\n    raise SystemExit(0)\n", False),
+)
+
+# Run in a child through the real entry: load this file by path, point only the authority loader at one case
+# module (the vectors themselves are stubbed so the child never recurses), then exit with self_test()'s
+# status, or 130 when self_test re-raises a fresh KeyboardInterrupt (3 when the loaded object escapes).
+_LOADED_EXIT_PROBE = """import importlib.util, sys
+tool, case = sys.argv[1:3]
+sys.path.insert(0, tool.rsplit("/", 1)[0])
+spec = importlib.util.spec_from_file_location("_opf_init_entry_probe", tool)
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+def authority():
+    spec = importlib.util.spec_from_file_location("_opf_init_loaded_exit", case)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+gate._opf_emit._load_byte_canon_authority = authority
+gate._st_loaded_exit = lambda: ()
+try:
+    code = gate.self_test()
+except KeyboardInterrupt as exc:
+    sys.exit(130 if type(exc) is KeyboardInterrupt and exc.__suppress_context__ else 3)
+sys.exit(code)
+"""
+
+
+def _st_loaded_exit():
+    """Each case must give exit 2 with the fixed backstop message (an interrupt case: a fresh
+    KeyboardInterrupt with the fixed interrupt message) through the real self_test in a child process, so
+    the vector is red with the backstop removed from self_test. Yields (label, None or the failure)."""
+    import subprocess
+    import tempfile
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="opf-init-loaded-exit-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_LOADED_EXIT_PROBE, encoding="utf-8")
+        for index, (label, body, interrupt) in enumerate(_LOADED_EXIT_CASES):
+            case = Path(tmp) / "loaded_exit_{}.py".format(index)
+            case.write_text(body, encoding="utf-8")
+            try:
+                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                       capture_output=True, text=True, timeout=300)
+            except (OSError, subprocess.SubprocessError) as exc:
+                yield label, "probe did not run ({})".format(type(exc).__name__)
+                continue
+            want, message = (130, "_opf_init self-test interrupted: KeyboardInterrupt re-raised") if interrupt \
+                else (2, "_opf_init self-test cannot evaluate: in-process code raised")
+            if child.returncode != want or message not in child.stderr:
+                yield label, "expected exit {} with the fixed message, got {}".format(want, child.returncode)
+            else:
+                yield label, None
 
 
 def main():

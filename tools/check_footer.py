@@ -272,6 +272,245 @@ def _close_vectors(base):
     return failures, runs
 
 
+def _close_vectors_guarded(base):
+    """`_close_vectors(base)` with everything it runs in this process guarded: the lazy _close_selftest
+    import, the later calls into it and the reverted body. A process-ending exit or a fault there
+    (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception) is reported and returns None,
+    which _self_test makes CANNOT-EVALUATE (exit 2), never the vectors' own status. A KeyboardInterrupt of
+    exactly that class propagates unchanged, so an operator's Ctrl-C stops the run; a subclass, which only
+    loaded code raises, is cannot-evaluate too and is never re-raised. The message is fixed by the except clause
+    that caught the exception and never inspects or formats the escaping object (no isinstance, attribute,
+    repr or str of it), so a hostile exception (one whose __class__ property raises SystemExit 0, for
+    example) cannot run code from the handler (other hostile objects: the one residual in the _opf_views
+    class disclosure)."""
+    try:
+        return _close_vectors(base)
+    except KeyboardInterrupt as exc:
+        if type(exc) is KeyboardInterrupt:
+            raise
+        kind = "a KeyboardInterrupt subclass"
+    except Exception:
+        kind = "an exception"
+    except BaseException:  # noqa: BLE001  a sibling ending the process is cannot-evaluate, never a pass
+        kind = "a process-ending exception"
+    print("CANNOT-EVALUATE: check_footer self-test: the #378 close vectors (the _close_selftest sibling) "
+          "raised {}; fail-closed".format(kind), file=sys.stderr)
+    return None
+
+
+# The KeyboardInterrupt a poisoned _close_selftest sibling raises on purpose. Only it is recorded by
+# _poisoned_close_outcome; any other KeyboardInterrupt, such as an operator's real Ctrl-C, propagates.
+CLOSE_POISON_INTERRUPT = "check-footer-self-test-poisoned-close-selftest"
+
+
+def _is_interrupt(exc, sent):
+    """True only for an exact KeyboardInterrupt whose args are exactly (sent,), read through exact built-in
+    types alone, so a recorder never runs code from the caught instance (an args property or an argument's
+    __eq__ that raises SystemExit 0, for example); any other KeyboardInterrupt propagates."""
+    if type(exc) is not KeyboardInterrupt:
+        return False
+    args = exc.args
+    return len(args) == 1 and type(args[0]) is str and args[0] == sent
+
+
+def _interrupt_to_raise(exc):
+    """The KeyboardInterrupt _propagate_interrupt raises for the caught KeyboardInterrupt `exc`, chosen by the
+    exact class alone: `exc` itself, unchanged, when its class is exactly KeyboardInterrupt (what an
+    operator's Ctrl-C raises); for a subclass, which only loaded code raises, a fresh KeyboardInterrupt with
+    its context suppressed, so no code from the caught instance runs (a __notes__ property that raises
+    SystemExit 0 while the interpreter reports it, for example). It raises nothing, so the vector over it
+    catches no KeyboardInterrupt."""
+    if type(exc) is KeyboardInterrupt:
+        return exc
+    fresh = KeyboardInterrupt()
+    fresh.__suppress_context__ = True
+    return fresh
+
+
+def _propagate_interrupt(exc):
+    """Raise what _interrupt_to_raise gives for the caught KeyboardInterrupt `exc`: an exact one propagates
+    unchanged, and a subclass is never re-raised."""
+    raise _interrupt_to_raise(exc)
+
+
+def _interrupt_filter_outcomes(sent):
+    """The interrupt filters over hostile inputs: _is_interrupt of an exact KeyboardInterrupt(sent), of a
+    subclass whose args property returns (sent,), and of an exact KeyboardInterrupt whose argument is a str
+    subclass or an object whose __eq__ is always true; whether _interrupt_to_raise gives an exact
+    KeyboardInterrupt back unchanged and, for that subclass, a fresh exact KeyboardInterrupt with no args and
+    its context suppressed; and the names of any instance code they ran. Nothing here raises or catches a
+    KeyboardInterrupt, so an operator's Ctrl-C arriving here propagates unchanged (_real_sigint_propagates
+    is red if it does not). Expected: (True, False, False, False, True, [])."""
+    ran = []
+
+    class _ArgsProperty(KeyboardInterrupt):
+        @property
+        def args(self):
+            ran.append("args")
+            return (sent,)
+
+        def __str__(self):
+            ran.append("str")
+            return sent
+
+    class _StrEq(str):
+        def __eq__(self, other):
+            ran.append("str-subclass-eq")
+            return True
+
+        __hash__ = str.__hash__
+
+    class _AnyEq:
+        def __eq__(self, other):
+            ran.append("eq")
+            return True
+
+        __hash__ = object.__hash__
+
+    outcomes = [_is_interrupt(KeyboardInterrupt(sent), sent), _is_interrupt(_ArgsProperty(), sent),
+                _is_interrupt(KeyboardInterrupt(_StrEq(sent)), sent),
+                _is_interrupt(KeyboardInterrupt(_AnyEq()), sent)]
+    own = KeyboardInterrupt(sent)
+    fresh = _interrupt_to_raise(_ArgsProperty())
+    outcomes.append(_interrupt_to_raise(own) is own and type(fresh) is KeyboardInterrupt and fresh.args == ()
+                    and fresh.__suppress_context__ is True)
+    return tuple(outcomes) + (ran,)
+
+
+# Run in a child by _real_sigint_propagates: load the file named first by path, make its first
+# _interrupt_to_raise call deliver a real SIGINT to the child (as an operator's Ctrl-C does; a call outside the
+# main thread exits 3 instead), then run _interrupt_filter_outcomes. The child must end by that interrupt.
+_REAL_SIGINT_PROBE = """import importlib.util, os, signal, sys, threading
+signal.signal(signal.SIGINT, signal.default_int_handler)
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+spec = importlib.util.spec_from_file_location("_real_sigint_probe_target", sys.argv[1])
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+real = gate._interrupt_to_raise
+def hooked(exc):
+    gate._interrupt_to_raise = real
+    if threading.current_thread() is not threading.main_thread():
+        sys.exit(3)
+    signal.raise_signal(signal.SIGINT)
+    return real(exc)
+gate._interrupt_to_raise = hooked
+gate._interrupt_filter_outcomes(sys.argv[2])
+print("returned")
+"""
+
+
+def _real_sigint_propagates(sent):
+    """True when a real SIGINT delivered inside _interrupt_filter_outcomes, in a child process, ends that child
+    as an uncaught KeyboardInterrupt. Red if anything there catches a KeyboardInterrupt in the main thread (the
+    child then returns) or classifies in a worker thread (the hook exits 3 there). This process catches no
+    KeyboardInterrupt here: an operator's Ctrl-C reaches subprocess.run, which re-raises it."""
+    import signal
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="interrupt-filter-sigint-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_REAL_SIGINT_PROBE, encoding="utf-8")
+        child = subprocess.run([sys.executable, "-I", "-B", str(probe), str(Path(__file__).resolve()), sent],
+                               capture_output=True, text=True, timeout=120)
+    return (child.returncode in (-signal.SIGINT, 130) and "returned" not in child.stdout
+            and "KeyboardInterrupt" in child.stderr)
+
+
+# An exception whose __class__ property raises SystemExit(0): a guard that inspects the caught instance
+# (isinstance included) runs that property and ends the process with status 0 from its own handler.
+CLOSE_DESCRIPTOR_EXIT = ("class _ClassExits(BaseException):\n    @property\n    def __class__(self):\n"
+                         "        raise SystemExit(0)\n\n\n")
+# A KeyboardInterrupt subclass whose __str__ and __notes__ raise SystemExit(0): re-raised as the caught
+# instance, it ends the interpreter's report with status 0.
+CLOSE_INTERRUPT_SUBCLASS_EXIT = ("class _InterruptExits(KeyboardInterrupt):\n    def __str__(self):\n"
+                                 "        raise SystemExit(0)\n\n    @property\n    def __notes__(self):\n"
+                                 "        raise SystemExit(0)\n\n\n")
+
+
+def _poisoned_close_outcome(base, tag, body):
+    """What _close_vectors_guarded gives with a _close_selftest sibling whose source is `body` (written under
+    `base`): its return value, "KeyboardInterrupt" for CLOSE_POISON_INTERRUPT, or the class name of any other
+    escape. Any other KeyboardInterrupt propagates."""
+    import contextlib
+    import io
+    poison = base / "poisoned-{}".format(tag)
+    poison.mkdir()
+    (poison / "_close_selftest.py").write_text(body, encoding="utf-8")
+    saved = sys.modules.pop("_close_selftest", None)
+    sys.path.insert(0, str(poison))
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            return _close_vectors_guarded(poison)
+    except KeyboardInterrupt as exc:
+        if not _is_interrupt(exc, CLOSE_POISON_INTERRUPT):
+            _propagate_interrupt(exc)
+        return "KeyboardInterrupt"
+    except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
+        return type(exc).__name__
+    finally:
+        sys.path.remove(str(poison))
+        sys.modules.pop("_close_selftest", None)
+        if saved is not None:
+            sys.modules["_close_selftest"] = saved
+
+
+def _close_guard_vectors(base):
+    """The vectors for _close_vectors_guarded: a _close_selftest sibling that ends the process or faults at
+    import or in a later call returns None (cannot-evaluate), an exception whose __class__ property raises
+    SystemExit(0) included, and the sibling's own KeyboardInterrupt propagates. Only that KeyboardInterrupt
+    (carrying CLOSE_POISON_INTERRUPT) is recorded; any other, such as an operator's real Ctrl-C landing in this
+    window, propagates, at import and in a later call. Red if the guard is removed, red if it inspects the
+    caught instance, and red if the recorder records another KeyboardInterrupt. Returns (failures, cases)."""
+    sent = CLOSE_POISON_INTERRUPT
+    later = "class _StSentinel(Exception):\n    pass\n\n\ndef _st_helper_vectors(ns):\n    {}\n"
+    cases = (("import SystemExit(0)", "raise SystemExit(0)\n", None),
+             ("import SystemExit(None)", "raise SystemExit\n", None),
+             ("import GeneratorExit", "raise GeneratorExit\n", None),
+             ("import ValueError", "raise ValueError('poisoned')\n", None),
+             ("later call SystemExit(0)", later.format("raise SystemExit(0)"), None),
+             ("later call SystemExit(None)", later.format("raise SystemExit"), None),
+             ("later call BaseException subclass", later.format("raise type('B', (BaseException,), {})()"),
+              None),
+             ("import KeyboardInterrupt", "raise KeyboardInterrupt({!r})\n".format(sent), "KeyboardInterrupt"),
+             ("later call KeyboardInterrupt", later.format("raise KeyboardInterrupt({!r})".format(sent)),
+              "KeyboardInterrupt"),
+             ("import exception whose __class__ exits 0", CLOSE_DESCRIPTOR_EXIT + "raise _ClassExits()\n", None),
+             ("later call exception whose __class__ exits 0",
+              CLOSE_DESCRIPTOR_EXIT + later.format("raise _ClassExits()"), None),
+             ("import KeyboardInterrupt subclass that exits 0",
+              CLOSE_INTERRUPT_SUBCLASS_EXIT + "raise _InterruptExits()\n", None),
+             ("later call KeyboardInterrupt subclass that exits 0",
+              CLOSE_INTERRUPT_SUBCLASS_EXIT + later.format("raise _InterruptExits()"), None))
+    failures = []
+    for k, (label, body, want) in enumerate(cases):
+        got = _poisoned_close_outcome(base, k, body)
+        if got != want:
+            failures.append("a _close_selftest sibling poisoned at {}: got {!r}, want {!r}".format(
+                label, got, want))
+    # Any KeyboardInterrupt but CLOSE_POISON_INTERRUPT (here one carrying another value, standing in for a real
+    # Ctrl-C) propagates out of the recorder, at import and in a later call.
+    other = sent + "-other"
+    other_cases = (("import", "raise KeyboardInterrupt({!r})\n".format(other)),
+                   ("later call", later.format("raise KeyboardInterrupt({!r})".format(other))))
+    for label, body in other_cases:
+        try:
+            got = _poisoned_close_outcome(base, "other-" + label.replace(" ", "-"), body)
+        except KeyboardInterrupt as exc:
+            if not _is_interrupt(exc, other):
+                _propagate_interrupt(exc)
+        else:
+            failures.append("another KeyboardInterrupt at {} was recorded as {!r}, not propagated".format(
+                label, got))
+    # The recorder filters run no code from the caught instance.
+    filters = _interrupt_filter_outcomes(sent)
+    if filters != (True, False, False, False, True, []):
+        failures.append("the interrupt filters over hostile inputs gave {!r}".format(filters))
+    # A real SIGINT inside the interrupt filters ends the run as an interrupt. Red if a probe there catches it.
+    if not _real_sigint_propagates(sent):
+        failures.append("a real SIGINT inside the interrupt filters did not end the child as an interrupt")
+    return failures, len(cases) + len(other_cases) + 2
+
+
 def _self_test():
     import tempfile
     nav = '<nav><a href="/disclosure">Disclosure</a></nav>'
@@ -376,15 +615,21 @@ def _self_test():
         if quiet_run(root4) != 1:
             failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
     with tempfile.TemporaryDirectory() as d5:
-        close_failures, close_runs = _close_vectors(Path(d5))
+        closed = _close_vectors_guarded(Path(d5))
+    if closed is None:
+        return 2
+    close_failures, close_runs = closed
     failures.extend(close_failures)
+    with tempfile.TemporaryDirectory() as d6:
+        guard_failures, guard_cases = _close_guard_vectors(Path(d6))
+    failures.extend(guard_failures)
     if failures:
         print("FAIL: check_footer self-test")
         for f in failures:
             print("  " + f)
         return 1
     print("PASS: check_footer self-test ({} check_pages cases + run() exit-code legs + {} #378 close-vector "
-          "runs)".format(len(cases), close_runs))
+          "runs + {} close-vector guard cases)".format(len(cases), close_runs, guard_cases))
     return 0
 
 
