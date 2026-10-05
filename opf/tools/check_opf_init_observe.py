@@ -504,13 +504,84 @@ def shared_tests(module, capture_source, run_source, *, reversals):
               "candidate_sha256=" + digest)
 
 
-if __name__ == "__main__":
+# Threat model: the candidate this harness loads in-process (_opf_init_observe.py, and _opf_observe.py's
+# functions) is reviewed in-repo code; the guard catches an ACCIDENTAL process ending from it (a stray
+# sys.exit, SystemExit, KeyboardInterrupt, GeneratorExit, or any other BaseException that is not an
+# Exception) at load and in every later call. An Exception keeps its existing meaning, a red finding (exit 1).
+_PROCESS_ENDING = (BaseException,)
+
+
+def _backstop(run_all, args):
+    """Return run_all(args)'s status. An Exception propagates unchanged (a test failure, exit 1). Any other
+    BaseException (SystemExit 0, None or a non-int code included) is exit 2 (cannot evaluate) with a fixed
+    message that never formats the exception or anything loaded. Residuals, not covered: os._exit, atexit
+    handlers, signal handlers, threads the loaded code starts, interpreter shutdown, mutation of sys or of
+    this module's globals by the loaded code, deliberately hostile objects (for example a metaclass or an
+    exception class built to defeat this guard), and a process exit raised while this module's own
+    top-level imports run, before this guard is entered."""
+    try:
+        return run_all(args)
+    except Exception:
+        raise
+    except _PROCESS_ENDING:
+        sys.stderr.write("check_opf_init_observe: cannot evaluate: in-process code raised a process-ending "
+                         "exception; fail-closed\n")
+        return 2
+
+
+# Each case is a candidate loaded through load_candidate: (label, source, call run()).
+_LOADED_EXIT_CASES = (
+    ("load SystemExit(0)", "raise SystemExit(0)\n", False),
+    ("load SystemExit(None)", "raise SystemExit\n", False),
+    ("load KeyboardInterrupt", "raise KeyboardInterrupt\n", False),
+    ("load GeneratorExit", "raise GeneratorExit\n", False),
+    ("load BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n", False),
+    ("load SystemExit(code whose repr exits 0)",
+     "class R:\n    def __repr__(self):\n        raise SystemExit(0)\n    __str__ = __repr__\n"
+     "raise SystemExit(R())\n", False),
+    ("call SystemExit(0)", "def run():\n    raise SystemExit(0)\n", True),
+)
+
+# Run in a child through the real entry: load this file by path, replace only run() with a load of (and call
+# into) one case through the real load_candidate, then exit with main(["--self-test"]).
+_LOADED_EXIT_PROBE = """import importlib.util, sys
+tool, case, call = sys.argv[1:4]
+spec = importlib.util.spec_from_file_location("_init_observe_entry_probe", tool)
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+def body(source, *, reversals=False):
+    module = gate.load_candidate(gate.pathlib.Path(case).read_text(encoding="utf-8"), "_pr4_exit_probe")
+    if call == "call":
+        module.run()
+gate.run = body
+sys.exit(gate.main(["--self-test"]))
+"""
+
+
+def loaded_exit_vectors():
+    """Each case, at load or in a later call, must give exit 2 with the fixed backstop message through the
+    real entry in a child process, so the vector is red if the backstop is reverted (_PROCESS_ENDING
+    emptied) or removed from main()."""
+    import subprocess
+    import tempfile
+    tool = str(pathlib.Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="opf-init-observe-loaded-exit-") as tmp:
+        probe = pathlib.Path(tmp) / "probe.py"
+        probe.write_text(_LOADED_EXIT_PROBE, encoding="utf-8")
+        for index, (label, body, call) in enumerate(_LOADED_EXIT_CASES):
+            case = pathlib.Path(tmp) / "loaded_exit_{}.py".format(index)
+            case.write_text(body, encoding="utf-8")
+            child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case),
+                                    "call" if call else "load"], capture_output=True, text=True, timeout=300)
+            if child.returncode != 2 or "check_opf_init_observe: cannot evaluate" not in child.stderr:
+                raise RuntimeError("loaded-exit vector {}: expected exit 2 with the backstop message, got {}"
+                                   .format(label, child.returncode))
+            print("PASS loaded-exit/" + label)
+
+
+def _run_all(args):
     import ast
     import _opf_observe
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--red-on-revert", action="store_true")
-    args = parser.parse_args()
     here = pathlib.Path(__file__).parent
     source = here.joinpath("_opf_init_observe.py").read_text(encoding="utf-8")
     run(source, reversals=args.red_on_revert)
@@ -519,3 +590,18 @@ if __name__ == "__main__":
                  for node in ast.parse(shared_source).body if isinstance(node, ast.FunctionDef)}
     shared_tests(_opf_observe, functions["_capture_bounded"], functions["_run_git"],
                  reversals=args.red_on_revert)
+    if args.self_test:
+        loaded_exit_vectors()
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--red-on-revert", action="store_true")
+    args = parser.parse_args(argv)
+    return _backstop(_run_all, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

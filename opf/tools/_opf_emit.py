@@ -63,6 +63,8 @@ resident model, and this bounds that output rather than the structure.
 The live leg is folded into `opf/tools/opf.py --self-test` (build plan section 3); this module is a library
 consumed by U7 (import) and `opf init`, with no live/standalone mode beyond the self-test.
 The self-tests require Linux fork/waitid, readable procfs and child-subreaper support.
+The self-test backstop guards only this module's own self_test; a process ending in any other registered
+self-test of the opf.py aggregate is caught by the aggregator's subprocess-per-unit runner (#385), not here.
 
 Exit convention (matches the repo's gates): 0 clean, 1 a self-test finding, 2 misuse.
 """
@@ -3619,7 +3621,7 @@ def _st_guardian_close_reuse():
     return failures
 
 
-def self_test():
+def _self_test_body():
     """Round-trip fuzz over adversarial bodies, canonical-form determinism, constrained-subset coverage
     (accepted and rejected), and byte-canon cleanliness verified against _byte_canon itself."""
     failures = []
@@ -4834,6 +4836,10 @@ def self_test():
     # #378 P1: the guardian's subject-pidfd close, green, and red by REUSE alone under the pre-fix body.
     failures.extend(_st_guardian_close_reuse())
 
+    # A loaded module ending the process, at load or in a later call into it, is exit 2 through self_test,
+    # the callable both this module's entry and the opf.py self-test registry invoke.
+    failures.extend(_st_loaded_exit())
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
@@ -4859,6 +4865,137 @@ def _selected_mode(args):
     if args in (["--self-test"], ["--selftest"]):
         return "self-test"
     return "misuse"
+
+
+# Threat model: the code this self-test loads in-process (the _byte_canon authority and the shared _journal.py
+# close harness) is reviewed in-repo code; the guard catches an ACCIDENTAL process ending from it (a stray
+# sys.exit, SystemExit, KeyboardInterrupt, GeneratorExit, or any other BaseException) at load and in every
+# later call. Every BaseException is caught, so loaded code can never end the self-test with its own status;
+# a KeyboardInterrupt (an operator's Ctrl-C and one raised by loaded code are not told apart) is re-raised as a
+# fresh KeyboardInterrupt, so it stops any aggregate running this self-test instead of reading as a unit result.
+_PROCESS_ENDING = (BaseException,)
+
+
+def _ending_kind(exc):
+    """A fixed name for the family of exc's class, found by issubclass on type(exc) alone, so a diagnostic
+    never calls back into a loaded object (no repr, str or format of exc, of exc.code, or of any loaded
+    value)."""
+    cls = type(exc)
+    for base, name in ((SystemExit, "SystemExit"), (KeyboardInterrupt, "KeyboardInterrupt"),
+                       (GeneratorExit, "GeneratorExit"), (Exception, "Exception")):
+        if issubclass(cls, base):
+            return name
+    return "BaseException"
+
+
+def _backstop(run, owner="_opf_emit"):
+    """Return run()'s status, mapping ANY exception that escapes it to exit 2 (cannot evaluate) with a
+    fixed message naming `owner`, never the escaping code's own status (SystemExit 0, None or a non-int code
+    included). A KeyboardInterrupt is the one exception: after a fixed message it is re-raised as a fresh
+    KeyboardInterrupt (its context suppressed, so no loaded object is formatted), which stops the caller,
+    and an aggregate running this self-test, rather than being absorbed as this unit's exit 2.
+    Residuals, not covered: os._exit, atexit handlers, signal handlers, threads the loaded code starts,
+    interpreter shutdown, mutation of sys or of this module's globals by the loaded code, deliberately
+    hostile objects (for example a metaclass or an exception class built to defeat this guard), and a
+    process exit raised while this module's own top-level imports run, before this guard is entered."""
+    try:
+        return run()
+    except KeyboardInterrupt:
+        print("error: {} self-test interrupted: KeyboardInterrupt re-raised to stop the run; fail-closed".format(
+            owner), file=sys.stderr)
+        raise KeyboardInterrupt from None
+    except _PROCESS_ENDING as exc:
+        print("error: {} self-test cannot evaluate: in-process code raised {}; fail-closed".format(
+            owner, _ending_kind(exc)), file=sys.stderr)
+        return 2
+
+
+def self_test():
+    """The self-test behind the backstop. This is the callable both this module's entry and the opf.py
+    self-test registry invoke, so the backstop holds on the path CI runs, not only on this module's own
+    entry."""
+    return _backstop(_self_test_body)
+
+
+# Each case is a module the self-test loads the way it loads its siblings: (label, source, call run(),
+# interrupt). An interrupt case must re-raise a fresh KeyboardInterrupt (the probe exits 130); every other
+# case must give exit 2.
+_LOADED_EXIT_CASES = (
+    ("load SystemExit(0)", "raise SystemExit(0)\n", False, False),
+    ("load SystemExit(None)", "raise SystemExit\n", False, False),
+    ("load KeyboardInterrupt", "raise KeyboardInterrupt\n", False, True),
+    ("load KeyboardInterrupt subclass whose str exits 0",
+     "class K(KeyboardInterrupt):\n    def __str__(self):\n        raise SystemExit(0)\n    __repr__ = __str__\n"
+     "raise K()\n", False, True),
+    ("load GeneratorExit", "raise GeneratorExit\n", False, False),
+    ("load BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n", False, False),
+    ("load SystemExit(code whose repr exits 0)",
+     "class R:\n    def __repr__(self):\n        raise SystemExit(0)\n    __str__ = __repr__\n"
+     "raise SystemExit(R())\n", False, False),
+    ("load Exception whose str exits 0",
+     "class E(Exception):\n    def __str__(self):\n        raise SystemExit(0)\n    __repr__ = __str__\n"
+     "raise E()\n", False, False),
+    ("call SystemExit(0)", "def run():\n    raise SystemExit(0)\n", True, False),
+)
+
+# Run in a child through the real entry: load this file by path, replace only the self-test body with a
+# load of (and call into) one case module, then exit with self_test()'s status, or 130 when self_test
+# re-raises a fresh KeyboardInterrupt (3 when what escapes is the loaded object itself).
+_LOADED_EXIT_PROBE = """import importlib.util, sys
+tool, case, call = sys.argv[1:4]
+sys.path.insert(0, tool.rsplit("/", 1)[0])
+spec = importlib.util.spec_from_file_location("_opf_emit_entry_probe", tool)
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+def body():
+    spec = importlib.util.spec_from_file_location("_opf_emit_loaded_exit", case)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if call == "call":
+        module.run()
+    return 0
+gate._self_test_body = body
+try:
+    code = gate.self_test()
+except KeyboardInterrupt as exc:
+    sys.exit(130 if type(exc) is KeyboardInterrupt and exc.__suppress_context__ else 3)
+sys.exit(code)
+"""
+
+
+def _st_loaded_exit():
+    """Each case, at load or in a later call, must give exit 2 with the fixed backstop message through the
+    real self_test in a child process, so the vector is red if the backstop is reverted (_PROCESS_ENDING
+    emptied) or removed from self_test. An interrupt case must instead re-raise a fresh KeyboardInterrupt
+    with the fixed interrupt message, so the vector is red if the interrupt is absorbed as exit 2 (which
+    would let an aggregate run on past an operator's Ctrl-C). Returns the failures."""
+    import subprocess
+    import tempfile
+    failures = []
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="opf-emit-loaded-exit-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_LOADED_EXIT_PROBE, encoding="utf-8")
+        for index, (label, body, call, interrupt) in enumerate(_LOADED_EXIT_CASES):
+            case = Path(tmp) / "loaded_exit_{}.py".format(index)
+            case.write_text(body, encoding="utf-8")
+            try:
+                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case),
+                                        "call" if call else "load"], capture_output=True, text=True,
+                                       timeout=300)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("loaded-exit/{}: probe did not run ({})".format(label, type(exc).__name__))
+                continue
+            if interrupt:
+                if child.returncode != 130 or "_opf_emit self-test interrupted: KeyboardInterrupt re-raised" \
+                        not in child.stderr:
+                    failures.append("loaded-exit/{}: expected a fresh KeyboardInterrupt (130) with the interrupt "
+                                    "message, got {}".format(label, child.returncode))
+            elif child.returncode != 2 or "_opf_emit self-test cannot evaluate: in-process code raised" \
+                    not in child.stderr:
+                failures.append("loaded-exit/{}: expected exit 2 with the backstop message, got {}".format(
+                    label, child.returncode))
+    return failures
 
 
 def main():
