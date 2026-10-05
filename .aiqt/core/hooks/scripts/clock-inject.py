@@ -17,12 +17,12 @@ hooks contract requires. Both registrations are needed for both outcomes. Neithe
 call rejected before execution (an unknown tool, input failing validation, or a permission denial), so such
 calls, and any stretch of prose with no tool call, see no fresh reading.
 
-Elapsed resolution. The lease file is env AIQT_LEASE_FILE when it is set to a non-empty value (a legacy
-spelling is accepted as a fallback, see _cfg); otherwise there is NO lease and the elapsed segment is
+Elapsed resolution. The lease file is env AIQT_LEASE_FILE when it is set to a non-empty value (no other
+spelling is read, see _cfg); otherwise there is NO lease and the elapsed segment is
 omitted. No lease is derived from the project directory, the payload cwd, or the process cwd: set
 AIQT_LEASE_FILE (absolute) per session to enable elapsed.
 
-Lease start (shared verbatim with stamp-truth-stop.py; a self-test in each asserts the copies are
+Lease start (shared verbatim with a companion Stop hook; a repository gate asserts the copies are
 identical). A lease FIELD line is `Name: value`, `**Name:** value`, or either form after a `-` or `*` list
 bullet, with optional surrounding whitespace; the name is case-sensitive. ONLY the FIRST Active-session field
 is read, and its value decides, in this precedence:
@@ -30,7 +30,7 @@ is read, and its value decides, in this precedence:
      `S88-`): the start is that time (an impossible time, such as month 13, is unknown with no fallback).
   b. `none` (any case) or an empty value: the lease is INACTIVE, elapsed is unknown, and neither the
      Session-start-UTC field nor the transcript is consulted, so an inactive lease never shows elapsed.
-  c. Any other value is an active id that carries no time (for example `sess-2026-09-23-opus55-r1`, or a
+  c. Any other value is an active id that carries no time (for example `sess-2026-09-23-alpha1-r1`, or a
      malformed id): the start is the FIRST Session-start-UTC field of the lease's header section (the file
      up to the first markdown heading after the Active-session field), valued `YYYY-MM-DDTHH:MM:SSZ` or
      `YYYYMMDDTHHMMSSZ`. A malformed value there falls through to d.
@@ -53,15 +53,13 @@ payload is evaluated. The payload is read as BYTES and parsed by json.loads, so 
 on the process locale. Unparseable hook input still emits the clock line under PostToolUse (the clock does not
 depend on the payload). An error writing the output (a closed or full stdout) is swallowed and the hook
 still exits 0 (round 24); if the stream cannot even be pointed at /dev/null, the hook ends at once with
-os._exit(0), so no exit-time flush can fail it. Kill-switch: a subordinate worker process, detected as env
-AIQT_HOOKS_WORKER=1 (legacy spellings are also accepted, see _is_worker), exits 0 with no stdout, so it never
-distorts worker output; it writes one warning line to stderr (round 24), which on exit 0 reaches only the
-host's debug log.
+os._exit(0), so no exit-time flush can fail it. There is no worker bypass: no environment variable skips
+the hook, so a subordinate session gets the clock line too. The hook writes nothing to stderr.
 In-session subagents are deliberately NOT skipped (there is no agent_id check): they benefit from the true
 time too, and this hook only adds context, it never blocks.
 
 RESIDUAL COVERAGE. This INFORMS; it enforces nothing. The model can
-still ignore the line or mis-copy it; the companion Stop hook (stamp-truth-stop.py) is the check. The line
+still ignore the line or mis-copy it; no check of final prose ships with this hook. The line
 reflects the host clock, so a wrong host clock (no NTP) is reproduced faithfully. Elapsed is only as right
 as the lease: a lease id minted from a wrong clock, a stale id after an unclean exit, or a configured lease
 file that belongs to another session yields a wrong or missing elapsed. No session
@@ -75,10 +73,7 @@ bullet, a numbered list) is not a field, so a later line in a recognized form is
 covered are exactly those listed under Coverage.
 
 Self-test: python3 -I -S -B clock-inject.py --self-test
-Run beside its sibling hooks, the self-test also checks that the code shared verbatim with them is identical.
-Run alone (a single-hook install), those sibling-parity checks are SKIPPED, not passed, each naming the absent
-sibling; with env AIQT_HOOKS_REQUIRE_SIBLINGS=1 an absent sibling FAILS them instead (for a repository gate). A
-sibling that is present but unreadable fails them either way.
+It needs no sibling file: the code shared verbatim with a companion hook is compared by a repository gate.
 """
 
 import datetime
@@ -94,39 +89,10 @@ _EVENTS = ("PostToolUse", "PostToolUseFailure")
 
 
 def _cfg(name, env=None):
-    """AIQT_<name> primary; the legacy ORCH_<name> spelling is accepted as a fallback."""
+    """AIQT_<name>, or None when it is unset; no other spelling is read, and callers treat an empty value as
+    not configured."""
     env = os.environ if env is None else env
-    v = env.get("AIQT_" + name)
-    return v if v is not None else env.get("ORCH_" + name)
-
-
-def _is_worker(env=None):
-    """True in a subordinate worker process: AIQT_HOOKS_WORKER=1. Kept identical across the three hooks
-    (python3 -I forbids a sibling import)."""
-    env = os.environ if env is None else env
-    if env.get("AIQT_HOOKS_WORKER") == "1":
-        return True
-    return env.get("ORCH_WORKER") == "1" or "ORCH_VERIFY_OWNER" in env  # legacy spellings
-
-def _sibling_or_skip(name, env=None):
-    """Self-test helper, kept identical across the three hooks: the path of sibling hook `name` beside this file.
-    A genuinely absent sibling (os.lstat raises FileNotFoundError, nothing broader) SKIPS the calling test with a
-    message naming it, so a single-hook install self-tests clean; with env AIQT_HOOKS_REQUIRE_SIBLINGS=1 the
-    absence FAILS the test instead, so a repository gate never skips parity silently. Any other error (an
-    unreadable directory, say) propagates, and a sibling that exists but cannot be loaded fails when it is read,
-    so only a genuine absence ever skips."""
-    import unittest
-    env = os.environ if env is None else env
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
-    try:
-        os.lstat(path)
-    except FileNotFoundError:
-        if env.get("AIQT_HOOKS_REQUIRE_SIBLINGS") == "1":
-            raise AssertionError(f"sibling hook {name} is absent ({path}) and AIQT_HOOKS_REQUIRE_SIBLINGS=1 "
-                                 "requires it") from None
-        raise unittest.SkipTest(f"sibling hook {name} is absent (a standalone install); set "
-                                "AIQT_HOOKS_REQUIRE_SIBLINGS=1 to require it") from None
-    return path
+    return env.get("AIQT_" + name)
 
 
 def _wall_clock_asserts(source, exempt=()):
@@ -564,11 +530,6 @@ def main(argv):
     if self_test:
         return _self_test()
     try:
-        if _is_worker():
-            # round 24: the skip is no longer silent (stderr only, so worker output is never distorted)
-            _emit_line("clock-inject: skipped, worker marker present (AIQT_HOOKS_WORKER=1 or a legacy spelling)",
-                       sys.stderr)
-            return 0
         try:
             buf = getattr(sys.stdin, "buffer", None)  # bytes; a text stream (the self-test) has no buffer
             payload = json.loads(buf.read() if buf is not None else sys.stdin.read())
@@ -605,8 +566,7 @@ def _self_test():
         sys.stdin = io.StringIO(stdin_text) if isinstance(stdin_text, str) else stdin_text
         sys.stdout = io.StringIO()
         try:
-            for k in ("AIQT_HOOKS_WORKER", "ORCH_WORKER", "ORCH_VERIFY_OWNER", "AIQT_LEASE_FILE", "ORCH_LEASE_FILE",
-                      "CLAUDE_PROJECT_DIR"):
+            for k in ("AIQT_HOOKS_WORKER", "AIQT_LEASE_FILE", "CLAUDE_PROJECT_DIR"):
                 os.environ.pop(k, None)
             os.environ.update(env or {})
             rc = main(list(argv) if isinstance(argv, tuple) else argv)
@@ -621,8 +581,7 @@ def _self_test():
             base = "/dev/shm" if os.path.isdir("/dev/shm") else None
             self.tmp = tempfile.mkdtemp(prefix="clk.", dir=base)
             self.lease = os.path.join(self.tmp, "lease.md")
-            self._env = {k: os.environ.pop(k, None) for k in ("AIQT_LEASE_FILE", "ORCH_LEASE_FILE",
-                                                               "CLAUDE_PROJECT_DIR")}
+            self._env = {k: os.environ.pop(k, None) for k in ("AIQT_LEASE_FILE", "CLAUDE_PROJECT_DIR")}
 
         def tearDown(self):
             shutil.rmtree(self.tmp, ignore_errors=True)
@@ -679,17 +638,15 @@ def _self_test():
 
         def test_lease_file_derivation(self):
             self.assertIsNone(lease_file())  # nothing configured: no lease, no derivation
-            os.environ["ORCH_LEASE_FILE"] = self.lease + ".legacy"
-            self.assertEqual(lease_file(), self.lease + ".legacy")  # the legacy spelling is a fallback
             os.environ["AIQT_LEASE_FILE"] = self.lease
-            self.assertEqual(lease_file(), self.lease)  # AIQT_ beats ORCH_
+            self.assertEqual(lease_file(), self.lease)
             os.environ["AIQT_LEASE_FILE"] = ""
-            self.assertIsNone(lease_file())  # a set-but-empty AIQT_ value still beats ORCH_: no lease
+            self.assertIsNone(lease_file())  # set but empty: no lease
 
-        def test_cfg_precedence(self):
-            self.assertEqual(_cfg("X", {"AIQT_X": "a", "ORCH_X": "o"}), "a")
-            self.assertEqual(_cfg("X", {"AIQT_X": "", "ORCH_X": "o"}), "")
-            self.assertEqual(_cfg("X", {"ORCH_X": "o"}), "o")
+        def test_cfg_reads_only_aiqt(self):
+            self.assertEqual(_cfg("X", {"AIQT_X": "a", "OTHER_X": "o"}), "a")
+            self.assertEqual(_cfg("X", {"AIQT_X": "", "OTHER_X": "o"}), "")
+            self.assertIsNone(_cfg("X", {"OTHER_X": "o"}))  # no other spelling is read
             self.assertIsNone(_cfg("X", {}))
 
         def test_no_implicit_lease_discovery(self):
@@ -718,8 +675,6 @@ def _self_test():
             rc, out = run_main(json.dumps({"tool_name": "Bash", "cwd": "/"}), {"AIQT_LEASE_FILE": self.lease})
             self.assertEqual(rc, 0)
             self.assertIn("session elapsed", json.loads(out)["hookSpecificOutput"]["additionalContext"])
-            rc, out = run_main(json.dumps({"tool_name": "Bash", "cwd": "/"}), {"ORCH_LEASE_FILE": self.lease})
-            self.assertIn("session elapsed", json.loads(out)["hookSpecificOutput"]["additionalContext"])  # legacy
 
         def test_failure_event_name_matches(self):
             rc, out = run_main(json.dumps({"hook_event_name": "PostToolUseFailure", "tool_name": "Bash"}))
@@ -729,29 +684,14 @@ def _self_test():
             rc, out = run_main(json.dumps({"hook_event_name": "Bogus"}))
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
 
-        def test_worker_kill_switch_silent(self):
-            for env in ({"AIQT_HOOKS_WORKER": "1"}, {"ORCH_WORKER": "1"}):
-                rc, out = run_main(json.dumps({"tool_name": "Bash"}), env)
-                self.assertEqual((rc, out), (0, ""), env)
 
-        def test_worker_detected_by_verify_owner(self):
-            # legacy spelling: a launcher that exports ORCH_VERIFY_OWNER (any value, even empty) marks a worker
-            for value in ("x", ""):
-                rc, out = run_main(json.dumps({"tool_name": "Bash"}), {"ORCH_VERIFY_OWNER": value})
-                self.assertEqual((rc, out), (0, ""))
-            self.assertTrue(_is_worker({"ORCH_VERIFY_OWNER": ""}))
-            self.assertTrue(_is_worker({"ORCH_WORKER": "1"}))
-            self.assertFalse(_is_worker({"ORCH_WORKER": "0"}))
-            self.assertFalse(_is_worker({}))
 
-        def test_aiqt_hooks_worker(self):
-            self.assertTrue(_is_worker({"AIQT_HOOKS_WORKER": "1"}))
-            for value in ("0", "", "true", "yes", " 1"):
-                self.assertFalse(_is_worker({"AIQT_HOOKS_WORKER": value}), value)
+        def test_no_worker_bypass(self):
+            # no environment variable skips the hook: a subordinate session gets the clock line too
+            for value in ("1", "0", "", "true", "yes", " 1"):
                 rc, out = run_main(json.dumps({"tool_name": "Bash"}), {"AIQT_HOOKS_WORKER": value})
+                self.assertEqual(rc, 0, value)
                 self.assertRegex(json.loads(out)["hookSpecificOutput"]["additionalContext"], line_re)
-            # the legacy spellings still mark a worker whatever AIQT_HOOKS_WORKER says
-            self.assertTrue(_is_worker({"AIQT_HOOKS_WORKER": "0", "ORCH_VERIFY_OWNER": ""}))
 
         def test_subagent_still_gets_clock(self):
             # deliberate: in-session subagents are not skipped (context only, never a block)
@@ -770,7 +710,7 @@ def _self_test():
                     f.write(f"Active-session: {bad}\nActive-session: sess-20200101T000000Z\n")
                 self.assertIsNone(lease_start(self.lease), bad)
 
-        # -- round 13 (peer report): lease start sources --
+        # -- round 13: lease start sources --
         def write_lease(self, text):
             with open(self.lease, "w") as f:
                 f.write(text)
@@ -794,7 +734,7 @@ def _self_test():
                                                           "Active-session: sess-20260923T141710Z\n")), want)
 
         def test_r13_date_only_id_with_and_without_session_start(self):
-            ids = "# Lease\n\n**Active-session:** sess-2026-09-23-opus55-r1\n\n**Status:** active\n"
+            ids = "# Lease\n\n**Active-session:** sess-2026-09-23-alpha1-r1\n\n**Status:** active\n"
             self.assertIsNone(lease_start(self.write_lease(ids)))
             want = datetime.datetime(2026, 9, 23, 14, 18, 0, tzinfo=utc)
             for field in ("**Session-start-UTC:** 2026-09-23T14:18:00Z", "* Session-start-UTC: 20260923T141800Z"):
@@ -802,7 +742,7 @@ def _self_test():
             self.assertIsNone(lease_start(self.write_lease(ids + "## History\nSession-start-UTC: 20260920T010000Z\n")))
 
         def test_r13_transcript_fallback_and_main(self):
-            ids = "**Active-session:** sess-2026-09-23-opus55-r1\n"
+            ids = "**Active-session:** sess-2026-09-23-alpha1-r1\n"
             tp = self.transcript("2026-09-23T14:30:00.000Z", "2026-09-23T14:18:00.000Z", "garbage")
             self.assertEqual(lease_start(self.write_lease(ids), tp), datetime.datetime(2026, 9, 23, 14, 18, tzinfo=utc))
             self.assertIsNone(lease_start(self.lease))  # no transcript given: unknown
@@ -827,50 +767,21 @@ def _self_test():
         def test_r13_fifo_transcript_does_not_block(self):
             fifo = os.path.join(self.tmp, "tfifo")
             os.mkfifo(fifo)
-            self.write_lease("**Active-session:** sess-2026-09-23-opus55-r1\n")
+            self.write_lease("**Active-session:** sess-2026-09-23-alpha1-r1\n")
             code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print(m.lease_start(%r, %r))" % (os.path.abspath(__file__), self.lease, fifo))
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
                                timeout=HANG_TIMEOUT)
             self.assertEqual(r.stdout.strip(), "None")
 
-        def test_r13_shared_lease_code_identical_to_stop_hook(self):
-            import importlib.util
-            import inspect
-            sib = _sibling_or_skip("stamp-truth-stop.py")
-            spec = importlib.util.spec_from_file_location("sts_sibling", sib)
-            mod = importlib.util.module_from_spec(spec)
-            # the sibling is loaded with no bytecode written, so no __pycache__ is left beside the hooks
-            old_dwb, sys.dont_write_bytecode = sys.dont_write_bytecode, True
-            try:
-                spec.loader.exec_module(mod)
-            finally:
-                sys.dont_write_bytecode = old_dwb
-            for name in ("read_regular", "lease_file", "_utc_field", "transcript_start", "lease_start", "_is_worker",
-                     "_cfg", "_sibling_or_skip", "_wall_clock_asserts", "_wall_clock_alias_fixtures"):
-                self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
-            for name in ("_SESS_RE", "_LEASE_FIELD_RE", "_START_VALUE_RE", "_HEADING_RE"):
-                self.assertEqual((getattr(mod, name).pattern, getattr(mod, name).flags),
-                                 (globals()[name].pattern, globals()[name].flags), name)
-            self.assertEqual((mod.LEASE_MAX_BYTES, mod.TRANSCRIPT_PREFIX_BYTES),
-                             (LEASE_MAX_BYTES, TRANSCRIPT_PREFIX_BYTES))
 
 
-        # -- round 24 (field validation of round 12) --
-        def test_r24_worker_skip_warns_and_output_error_fails_open(self):
-            old_err, sys.stderr = sys.stderr, io.StringIO()
-            try:
-                rc, out = run_main(json.dumps({"tool_name": "Bash"}), {"AIQT_HOOKS_WORKER": "1"})
-                err = sys.stderr.getvalue()
-            finally:
-                sys.stderr = old_err
-            self.assertEqual((rc, out), (0, ""))
-            self.assertEqual(err.count("\n"), 1)
-            self.assertIn("skipped, worker marker present", err)
+        # -- round 24 --
+        def test_r24_output_error_fails_open(self):
+            # a failed stdout write (a full device) is swallowed: the hook still exits 0
             if not os.path.exists("/dev/full"):
                 self.skipTest("/dev/full absent")
-            env = {k: v for k, v in os.environ.items() if k not in ("AIQT_HOOKS_WORKER", "ORCH_WORKER",
-                                                               "ORCH_VERIFY_OWNER")}
+            env = dict(os.environ)
             env["AIQT_LEASE_FILE"] = os.path.join(self.tmp, "no-lease.md")  # never the host's real lease
             with open("/dev/full", "w") as full:
                 p = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__)], stdout=full,
@@ -898,18 +809,6 @@ def _self_test():
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=30)
             self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "before\n", ""))
 
-        def test_closed_stderr_line_never_reaches_stdout(self):
-            # the worker-skip line is for stderr only: with descriptor 2 closed (sys.stderr is None) it is dropped,
-            # never redirected to stdout, the hook's protocol channel; the open-stderr control shows it is emitted
-            env = {k: v for k, v in os.environ.items() if k not in ("ORCH_WORKER", "ORCH_VERIFY_OWNER")}
-            env["AIQT_HOOKS_WORKER"] = "1"
-            hook = [sys.executable, "-I", "-S", "-B", os.path.abspath(__file__)]
-            close2 = "import os, sys; os.close(2); os.execv(sys.argv[1], sys.argv[1:])"
-            for closed in (False, True):
-                argv = [sys.executable, "-I", "-S", "-B", "-c", close2] + hook if closed else hook
-                p = subprocess.run(argv, input="{}", capture_output=True, text=True, env=env, timeout=30)
-                self.assertEqual((p.returncode, p.stdout), (0, ""), (closed, p.stderr))
-                self.assertEqual("skipped, worker marker present" in p.stderr, not closed, (closed, p.stderr))
 
         def test_fail_open_before_evaluation(self):
             class Unreadable:
@@ -970,71 +869,9 @@ def _self_test():
             self.assertEqual([name for name, _line in _wall_clock_asserts(bad)], want)
             self.assertEqual(_wall_clock_asserts(good), [])
 
-        # -- sibling parity on a single-hook install --
-        PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_stop_hook",)
-        PARITY_SIBLINGS = ("stamp-truth-stop.py",)
 
-        def _parity_in_copy(self, siblings, value, dangling=False):
-            """Copy this file (and `siblings`, found beside it) into a fresh directory, run ONLY the copy's
-            sibling-parity tests in a child interpreter with AIQT_HOOKS_REQUIRE_SIBLINGS set to `value` (None:
-            unset, whatever the caller has), and return ([rc, run, skipped, failures, errors], child stderr).
-            With `dangling`, each sibling is a symlink to a missing target: it EXISTS but cannot be read."""
-            base = "/dev/shm" if os.path.isdir("/dev/shm") else None
-            d = tempfile.mkdtemp(prefix="sib.", dir=base)
-            try:
-                me = os.path.join(d, os.path.basename(os.path.abspath(__file__)))
-                shutil.copyfile(os.path.abspath(__file__), me)
-                for sib in siblings:
-                    shutil.copyfile(_sibling_or_skip(sib), os.path.join(d, sib))
-                if dangling:
-                    for sib in self.PARITY_SIBLINGS:
-                        os.symlink(os.path.join(d, "no-such-target"), os.path.join(d, sib))
-                env = {k: v for k, v in os.environ.items() if k != "AIQT_HOOKS_REQUIRE_SIBLINGS"}
-                if value is not None:
-                    env["AIQT_HOOKS_REQUIRE_SIBLINGS"] = value
-                code = ("import importlib.util as u, json, unittest\n"
-                        "s = u.spec_from_file_location('m', %r)\n"
-                        "m = u.module_from_spec(s)\n"
-                        "s.loader.exec_module(m)\n"
-                        "names = %r\n"
-                        "unittest.TestLoader.loadTestsFromTestCase = lambda self, tc: unittest.TestSuite("
-                        "tc(n) for n in names)\n"
-                        "box, run = [], unittest.TextTestRunner.run\n"
-                        "unittest.TextTestRunner.run = lambda self, t: box.append(run(self, t)) or box[-1]\n"
-                        "rc = m._self_test()\n"
-                        "r = box[0]\n"
-                        "print(json.dumps([rc, r.testsRun, len(r.skipped), len(r.failures), len(r.errors)]))\n"
-                        ) % (me, self.PARITY_TESTS)
-                p = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code], env=env, capture_output=True,
-                                   text=True, timeout=120)
-                self.assertTrue(p.stdout.strip(), p.stderr)
-                return json.loads(p.stdout.strip().splitlines()[-1]), p.stderr
-            finally:
-                shutil.rmtree(d, ignore_errors=True)
 
-        def test_sibling_parity_skips_alone_and_fails_when_required(self):
-            # a single-hook install: each sibling-parity test is SKIPPED (not passed) with a message naming the
-            # absent sibling, unless AIQT_HOOKS_REQUIRE_SIBLINGS=1, when the same absence FAILS it
-            n = len(self.PARITY_TESTS)
-            for value in (None, "0", ""):
-                got, err = self._parity_in_copy((), value)
-                self.assertEqual(got, [0, n, n, 0, 0], (value, err))
-                for sib in self.PARITY_SIBLINGS:
-                    self.assertIn(f"sibling hook {sib} is absent (a standalone install)", err)
-            got, err = self._parity_in_copy((), "1")
-            self.assertEqual(got, [1, n, 0, n, 0], err)
-            self.assertIn("AIQT_HOOKS_REQUIRE_SIBLINGS=1 requires it", err)
-            # a sibling that EXISTS but cannot be read fails (never skips), with or without the variable
-            for value in (None, "1"):
-                got, err = self._parity_in_copy((), value, dangling=True)
-                self.assertEqual((got[0], got[1], got[2], got[3] + got[4]), (1, n, 0, n), (value, err))
 
-        def test_sibling_parity_runs_and_passes_with_siblings_present(self):
-            # with every sibling beside the copy the parity tests RUN and pass, whatever the variable says
-            n = len(self.PARITY_TESTS)
-            for value in (None, "1"):
-                got, err = self._parity_in_copy(self.PARITY_SIBLINGS, value)
-                self.assertEqual(got, [0, n, 0, 0, 0], (value, err))
 
     result = unittest.TextTestRunner(verbosity=2).run(unittest.TestLoader().loadTestsFromTestCase(T))
     return 0 if result.wasSuccessful() else 1

@@ -634,7 +634,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "tstamp"
 status = "enforced"
-mechanisms = ["hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
+mechanisms = ["hook:clock-inject", "hook:future-stamp-write", "hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
 
 [[rule]]
 corpus-id = "tsthrm"

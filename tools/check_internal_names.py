@@ -73,6 +73,10 @@ SCOPE_RELPATHS = (
     "site/downloads/qa-skills",  # future generated QA skill outputs
     "docs/qa-suite.md",          # future QA-suite adopter docs
     ".preview",                  # the public hooks preview channel (skipped once retired)
+    ".aiqt/core/hooks/scripts/clock-inject.py",        # pack hook script promoted from .preview
+    ".aiqt/core/hooks/scripts/future-stamp-write.py",  # pack hook script promoted from .preview
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/clock-inject.py",        # its generated plugin copy
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/future-stamp-write.py",  # its generated plugin copy
 )
 
 # Internal provenance-id SHAPE patterns (generic; carry no codename). A guardrail-decision or finding id
