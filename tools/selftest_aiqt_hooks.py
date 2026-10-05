@@ -745,7 +745,8 @@ def _test_note_literal_sites(failures, tmp):
     """(nl-*) The note sites that once returned a literal {"systemMessage": ...} (now `return
     _allow_note(...)`), reached from their handlers and judged by _reduce_result: allow-note is required,
     so a silent mutant (allow) and an explicit permissionDecision "allow" mutant (explicit-allow) at the
-    site both fail. The PreToolUse sites are orch_yield_tool's two note returns and orch_resume_barrier's;
+    site both fail. The PreToolUse sites are orch_yield_tool's two note returns, orch_resume_barrier's and
+    review_dispatch_pin's;
     the PostToolUse ledger returns, the Stop loop-bound _stop_warn and the dispatcher's bad-argv
     fail-open note are pinned the same way (the other Stop and dispatcher sites: (ns-*)). The fixtures
     are selftest_orch_hooks.Fixture repos under tmp."""
@@ -813,6 +814,9 @@ def _test_note_literal_sites(failures, tmp):
         obj = "unparseable stdout " + repr(buf.getvalue())
     note("(nl-dispatch-warn) a bad-argv Stop invocation prints the dispatcher's fail-open note",
          (code, obj, None), "could not run")
+    rd = orch.RdpFixture(base, "review-dispatch")
+    note("(nl-review-dispatch) a review dispatch brief that declares a working-tree target allows with a note",
+         rd.dispatch(rd.brief(["Review-target: working-tree"])), "declares target working-tree")
 
 
 def _shape_mutant(source, func_name, lines):

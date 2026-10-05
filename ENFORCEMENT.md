@@ -8,9 +8,9 @@ This register lists every rule and the shipped mechanical controls linked to it.
 
 | Status | Rules |
 |---|---:|
-| Enforced | 34 |
+| Enforced | 35 |
 | Pending | 0 |
-| None | 98 |
+| None | 97 |
 
 ## Rules
 
@@ -34,7 +34,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Reproduce a defect before fixing it | `reprod` | None | Enforcement has not been built yet. |
 | A current timestamp is read from the clock | `tstamp` | Enforced | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
 | Validate an inferred premise before acting | `valinf` | None | Enforcement has not been built yet. |
-| Verify a fix is in its commit | `vfxcmt` | None | Enforcement has not been built yet. |
+| Verify a fix is in its commit | `vfxcmt` | Enforced | `hook:review-dispatch-pin`, class c |
 | Anything wrong is fixed first | `actbef` | None | Enforcement has not been built yet. |
 | Attestation lines are harness-owned | `attint` | None | Enforcement has not been built yet. |
 | Branch and merge only on green | `artbr1` | Enforced | `hook:protected-line-guard`, class b |
@@ -911,6 +911,19 @@ PUSH COVERAGE REMAINS SEPARATE. Commit-free commands retain the existing lexical
 
 Push residuals include execution outside Bash; renamed executables, aliases, functions, and scripts; runtime-expanded destinations; fragmentation beyond parsed/raw detection; a wrapped push when another earlier or later segment parses as ordinary Git and suppresses the push fallback; protected branches under names other than main/master; remote-side or hosting-provider actions; persisted repository/worktree/global/system configuration and includes; command-local remote.<name>.push refspecs; environment GIT_CONFIG_* protocols, including the explicit-refspec ambient-override gap; and upstream/triangular mappings that can diverge from the session-HEAD proxy. push.default selects refs rather than forcing or deleting by itself. The raw mirror-config fallback recognizes common quoted spellings but cannot model arbitrary option/key/value fragmentation or cross-mechanism precedence. Negated force/delete flags, standalone --force-if-includes, and dry-run force/delete can over-deny. Parse-error/raw fallback scans can also over-match quoted prose or unrelated option values. Push coverage is best-effort and is not widened by the commit certificates.
 
+```
+
+### `hook:review-dispatch-pin`
+
+- Platform: `claude-code`
+- Default: `block`
+- Entry point: `PreToolUse on Bash`
+- Class: `c`
+
+Technical limits (from the enforcement ledger):
+
+```
+Registry scoped and inert without a review dispatch binding. It sees only Bash calls whose lexed command word, after leading modifier wrappers, is a declared dispatch command with the brief passed as one file argument. A dispatch through an undeclared command, an alias, a function, a script that dispatches internally, a nested shell string, or a non-Bash tool is not seen and is allowed. It checks the declaration and the repository, not what the worker reads: a brief that pins the right revision while the worker reads the ambient working tree or another path passes. Only a worker bound to a checkout of the pinned revision closes that gap. A brief marked as targeting a working tree, or as not a review, is allowed with a note, so a misdeclared target bypasses the check. The authority is adopter code whose own correctness the hook cannot judge. A path the change needs that is missing from both the commit and the declaration, an undeclared context file, submodule contents behind a clean gitlink, checkout-filter output, a later commit that supersedes the pin, and edits to the brief or the tree between this check and the dispatch running are not caught. A stat-only change to a declared path (touched, same content) refuses until the index is refreshed. A malformed binding or an unreadable registry refuses every background Bash call until an operator repairs it. Delivery acceptance is not checked.
 ```
 
 ### `hook:secrets-shift-left`

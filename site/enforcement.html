@@ -73,7 +73,7 @@
 <section id="register">
   <div class="wrap">
         <p>This register lists every rule and the shipped mechanical controls linked to it. An enforced status records linkage, not complete coverage: at least one shipped gate or hook cites the rule, and each mechanism's class and residual describe the boundary of what it checks. A linked mechanism may cover only part of a rule's violation surface. A status of none means enforcement has not been built yet; pending also means enforcement has not been built yet, and its description states the intended build. The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim and not summarized. The class letter is a maintainer assessment of the check's decision procedure, not a coverage score.</p>
-        <p class="lead">Summary: <strong>34</strong> enforced, <strong>0</strong> pending, <strong>98</strong> none.</p>
+        <p class="lead">Summary: <strong>35</strong> enforced, <strong>0</strong> pending, <strong>97</strong> none.</p>
         <div class="tablewrap">
           <table class="dtable">
             <thead><tr><th>Rule</th><th>Corpus ID</th><th>Status</th><th>How enforced or intended</th></tr></thead>
@@ -96,7 +96,7 @@
             <tr id="rule-reprod"><td>Reproduce a defect before fixing it</td><td><code>reprod</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-tstamp"><td>A current timestamp is read from the clock</td><td><code>tstamp</code></td><td>Enforced</td><td><a href="#mechanism-hook-orch-prompt-stamp"><code>hook:orch-prompt-stamp</code></a>, class c; <a href="#mechanism-hook-orch-yield-tool-guard"><code>hook:orch-yield-tool-guard</code></a>, class b</td></tr>
             <tr id="rule-valinf"><td>Validate an inferred premise before acting</td><td><code>valinf</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
-            <tr id="rule-vfxcmt"><td>Verify a fix is in its commit</td><td><code>vfxcmt</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
+            <tr id="rule-vfxcmt"><td>Verify a fix is in its commit</td><td><code>vfxcmt</code></td><td>Enforced</td><td><a href="#mechanism-hook-review-dispatch-pin"><code>hook:review-dispatch-pin</code></a>, class c</td></tr>
             <tr id="rule-actbef"><td>Anything wrong is fixed first</td><td><code>actbef</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-attint"><td>Attestation lines are harness-owned</td><td><code>attint</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-artbr1"><td>Branch and merge only on green</td><td><code>artbr1</code></td><td>Enforced</td><td><a href="#mechanism-hook-protected-line-guard"><code>hook:protected-line-guard</code></a>, class b</td></tr>
@@ -973,6 +973,19 @@ PUSH COVERAGE REMAINS SEPARATE. Commit-free commands retain the existing lexical
 
 Push residuals include execution outside Bash; renamed executables, aliases, functions, and scripts; runtime-expanded destinations; fragmentation beyond parsed/raw detection; a wrapped push when another earlier or later segment parses as ordinary Git and suppresses the push fallback; protected branches under names other than main/master; remote-side or hosting-provider actions; persisted repository/worktree/global/system configuration and includes; command-local remote.&lt;name&gt;.push refspecs; environment GIT_CONFIG_* protocols, including the explicit-refspec ambient-override gap; and upstream/triangular mappings that can diverge from the session-HEAD proxy. push.default selects refs rather than forcing or deleting by itself. The raw mirror-config fallback recognizes common quoted spellings but cannot model arbitrary option/key/value fragmentation or cross-mechanism precedence. Negated force/delete flags, standalone --force-if-includes, and dry-run force/delete can over-deny. Parse-error/raw fallback scans can also over-match quoted prose or unrelated option values. Push coverage is best-effort and is not widened by the commit certificates.
 </blockquote>
+          </div>
+        </details>
+        <details class="more" id="mechanism-hook-review-dispatch-pin">
+          <summary><code>hook:review-dispatch-pin</code></summary>
+          <div class="inner">
+            <ul>
+              <li>Platform: <code>claude-code</code></li>
+              <li>Default: <code>block</code></li>
+              <li>Entry point: <code>PreToolUse on Bash</code></li>
+              <li>Class: <code>c</code></li>
+            </ul>
+            <p class="ledger-residual-label">Technical limits (from the enforcement ledger)</p>
+            <blockquote class="ledger-residual" data-mech="hook:review-dispatch-pin">Registry scoped and inert without a review dispatch binding. It sees only Bash calls whose lexed command word, after leading modifier wrappers, is a declared dispatch command with the brief passed as one file argument. A dispatch through an undeclared command, an alias, a function, a script that dispatches internally, a nested shell string, or a non-Bash tool is not seen and is allowed. It checks the declaration and the repository, not what the worker reads: a brief that pins the right revision while the worker reads the ambient working tree or another path passes. Only a worker bound to a checkout of the pinned revision closes that gap. A brief marked as targeting a working tree, or as not a review, is allowed with a note, so a misdeclared target bypasses the check. The authority is adopter code whose own correctness the hook cannot judge. A path the change needs that is missing from both the commit and the declaration, an undeclared context file, submodule contents behind a clean gitlink, checkout-filter output, a later commit that supersedes the pin, and edits to the brief or the tree between this check and the dispatch running are not caught. A stat-only change to a declared path (touched, same content) refuses until the index is refreshed. A malformed binding or an unreadable registry refuses every background Bash call until an operator repairs it. Delivery acceptance is not checked.</blockquote>
           </div>
         </details>
         <details class="more" id="mechanism-hook-secrets-shift-left">

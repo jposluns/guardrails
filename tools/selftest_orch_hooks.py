@@ -262,6 +262,314 @@ def now_iso(hours_ago=0):
     return t.isoformat()
 
 
+AUTH_STUB = """#!/usr/bin/env python3
+import json
+import sys
+import time
+ctl = json.load(open(sys.argv[1]))
+time.sleep(ctl.get("sleep", 0))
+sys.stdout.write(ctl.get("out", ""))
+sys.exit(ctl.get("exit", 0))
+"""
+
+
+def _rdp_git(root, *args):
+    """Run a fixture git command in root with a fixed identity; returns stdout text."""
+    p = subprocess.run(["git", "-C", str(root), "-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                        "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"] + list(args),
+                       check=True, capture_output=True, text=True, timeout=30)
+    return p.stdout.strip()
+
+
+class RdpFixture:
+    """One review dispatch pin fixture: a repo whose seed commit holds seed.txt, src/a.py and old.txt and
+    whose change commit (self.pin) modifies src/a.py, adds src/b.py and deletes old.txt; a registry with a
+    review_dispatch binding (or none); and an authority stub that prints the pin unless told otherwise."""
+    CHANGED = ("old.txt", "src/a.py", "src/b.py")
+
+    def __init__(self, base, name, binding=True):
+        self.root = base / name
+        self.briefs = base / (name + "-briefs")
+        self.briefs.mkdir(parents=True)
+        (self.root / "src").mkdir(parents=True)
+        _rdp_git(base, "init", "-q", "-b", "main", str(self.root))
+        (self.root / "seed.txt").write_text("seed\n", encoding="utf-8")
+        (self.root / "src" / "a.py").write_text("a = 1\n", encoding="utf-8")
+        (self.root / "old.txt").write_text("old\n", encoding="utf-8")
+        _rdp_git(self.root, "add", "-A")
+        _rdp_git(self.root, "commit", "-q", "-m", "seed")
+        self.seed = _rdp_git(self.root, "rev-parse", "HEAD")
+        (self.root / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        (self.root / "src" / "b.py").write_text("b = 1\n", encoding="utf-8")
+        (self.root / "old.txt").unlink()
+        _rdp_git(self.root, "add", "-A")
+        _rdp_git(self.root, "commit", "-q", "-m", "change")
+        self.pin = _rdp_git(self.root, "rev-parse", "HEAD")
+        self.ctl = self.briefs / "authority.json"
+        self.stub = self.briefs / "authority-stub.py"
+        self.stub.write_text(AUTH_STUB, encoding="utf-8")
+        self.authority(self.pin + "\n")
+        self.binding = dict(
+            commands=["orch-dispatch"], brief_option="--brief",
+            labels=dict(target="Review-target:", revision="Reviewed-revision:", path="Review-path:",
+                        repo="Review-repo:", branch="Review-branch:"),
+            authority=dict(argv=[sys.executable, "-I", "-B", str(self.stub), str(self.ctl)], timeout=30),
+            max_brief_bytes=4096)
+        (self.root / ".aiqt").mkdir()
+        self.write_registry(self.binding if binding else None)
+
+    def write_registry(self, binding):
+        reg = dict(version=1, state_dir=str(self.briefs / "state"))
+        if binding is not None:
+            reg["review_dispatch"] = binding
+        (self.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(reg), encoding="utf-8")
+
+    def authority(self, out, code=0, sleep=0):
+        self.ctl.write_text(json.dumps(dict(out=out, exit=code, sleep=sleep)), encoding="utf-8")
+
+    def brief(self, lines, name="brief.txt"):
+        path = self.briefs / name
+        path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+        return str(path)
+
+    def good(self, pin=None, paths=None, extra=()):
+        lines = ["Review the change.", "Review-target: revision", "Reviewed-revision: " + (pin or self.pin)]
+        lines += ["Review-path: " + p for p in (self.CHANGED if paths is None else paths)]
+        return self.brief(lines + list(extra))
+
+    def run(self, command, background=False):
+        return aiqt_hooks.review_dispatch_pin(dict(
+            hook_event_name="PreToolUse", cwd=str(self.root), session_id="s1", tool_name="Bash",
+            tool_input=dict(command=command, run_in_background=background)))
+
+    def dispatch(self, brief, background=False):
+        return self.run("orch-dispatch --brief " + brief, background)
+
+
+def _rdp_kind(result):
+    """_verdict, with a deny whose reason carries the UNVERIFIABLE: prefix reported as unverifiable."""
+    verdict = _verdict(result)
+    if verdict == "deny":
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "")
+        if reason.startswith("UNVERIFIABLE: "):
+            return "unverifiable"
+    return verdict
+
+
+def _rdp_cases(tmp):
+    """The review dispatch pin vectors (rdp/*). Each fixture is a throwaway repo under tmp."""
+    base = tmp / "rdp"
+    base.mkdir()
+    bare = base / "bare"
+    _rdp_git(base, "init", "-q", "-b", "main", str(bare))
+    check("rdp/registry-absent-inert", _verdict(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(bare), tool_name="Bash",
+        tool_input=dict(command="orch-dispatch --brief /nonexistent")))), "allow")
+    nb = RdpFixture(base, "nobinding", binding=False)
+    check("rdp/no-binding-inert", _verdict(nb.dispatch(nb.brief(["Review-branch: main"]))), "allow")
+
+    f = RdpFixture(base, "main")
+    branch_only = f.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
+    check("rdp/reconciled-allows", _rdp_kind(f.dispatch(f.good())), "allow")
+    check("rdp/undeclared-command-allows", _rdp_kind(f.run("other-dispatch --brief " + branch_only)), "allow")
+    check("rdp/missing-target-denies", _rdp_kind(f.dispatch(f.brief(["Reviewed-revision: " + f.pin]))), "deny")
+    check("rdp/unknown-target-denies", _rdp_kind(f.dispatch(f.brief(["Review-target: tip"]))), "deny")
+    check("rdp/duplicate-target-unverifiable", _rdp_kind(f.dispatch(f.brief(
+        ["Review-target: revision", "Review-target: working-tree"]))), "unverifiable")
+    check("rdp/working-tree-target-notes", _rdp_kind(f.dispatch(f.brief(["Review-target: working-tree"]))),
+          "warn")
+    check("rdp/branch-only-brief-denies", _rdp_kind(f.dispatch(branch_only)), "deny")
+    check("rdp/short-sha-denies", _rdp_kind(f.dispatch(f.good(pin=f.pin[:12]))), "deny")
+    check("rdp/ref-name-as-pin-denies", [_rdp_kind(f.dispatch(f.good(pin=p))) for p in ("HEAD", "main")],
+          ["deny", "deny"])
+    check("rdp/wrong-length-for-format-denies", _rdp_kind(f.dispatch(f.good(pin=f.pin + "0" * 24))), "deny")
+    check("rdp/uppercase-pin-denies", _rdp_kind(f.dispatch(f.good(pin=f.pin.upper()))), "deny")
+    check("rdp/duplicate-pin-unverifiable", _rdp_kind(f.dispatch(f.good(
+        extra=["Reviewed-revision: " + f.pin]))), "unverifiable")
+    check("rdp/absent-object-pin-unverifiable", _rdp_kind(f.dispatch(f.good(pin="1" * 40))), "unverifiable")
+    _rdp_git(f.root, "tag", "-a", "-m", "t", "rv1", f.pin)
+    tag_oid = _rdp_git(f.root, "rev-parse", "rv1")
+    check("rdp/tag-object-pin-unverifiable", (tag_oid != f.pin, _rdp_kind(f.dispatch(f.good(pin=tag_oid)))),
+          (True, "unverifiable"))
+    f.authority(f.seed + "\n")
+    check("rdp/authority-mismatch-denies", _rdp_kind(f.dispatch(f.good())), "deny")
+    f.authority(f.pin + "\n", code=3)
+    check("rdp/authority-error-unverifiable/exit", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.authority(f.pin + "\n" + f.pin + "\n")
+    check("rdp/authority-error-unverifiable/two-lines", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.authority(f.pin[:12] + "\n")
+    check("rdp/authority-error-unverifiable/short", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.authority(f.pin + "\n", sleep=3)
+    f.write_registry(dict(f.binding, authority=dict(f.binding["authority"], timeout=1)))
+    check("rdp/authority-error-unverifiable/timeout", _rdp_kind(f.dispatch(f.good())), "unverifiable")
+    f.write_registry(f.binding)
+    f.authority(f.pin + "\n")
+    check("rdp/declared-path-not-in-commit-denies", _rdp_kind(f.dispatch(f.good(
+        paths=f.CHANGED + ("src/c.py",)))), "deny")
+    check("rdp/committed-path-undeclared-denies", _rdp_kind(f.dispatch(f.good(paths=("src/a.py", "src/b.py")))),
+          "deny")
+    em = RdpFixture(base, "emptycommit")
+    _rdp_git(em.root, "commit", "-q", "--allow-empty", "-m", "empty")
+    empty_pin = _rdp_git(em.root, "rev-parse", "HEAD")
+    em.authority(empty_pin + "\n")
+    # A clean clone holds no untracked registry, so only the declared-paths check refuses the empty set there.
+    em_clone = base / "emptycommit-clone"
+    _rdp_git(base, "clone", "-q", str(em.root), str(em_clone))
+    check("rdp/no-declared-paths-denies", [_rdp_kind(f.dispatch(f.good(paths=()))), _rdp_kind(em.dispatch(
+        em.good(pin=empty_pin, paths=(), extra=["Review-repo: " + str(em_clone)])))], ["deny", "deny"])
+    (f.root / "seed.txt").write_text("unrelated edit\n", encoding="utf-8")
+    check("rdp/unrelated-dirty-path-allows", _rdp_kind(f.dispatch(f.good())), "allow")
+    _rdp_git(f.root, "checkout", "-q", "--", "seed.txt")
+    good = f.good()
+    check("rdp/stdin-heredoc-brief-denies", [_rdp_kind(f.run(c)) for c in (
+        "orch-dispatch --brief " + good + " <<'EOF'\nReview-target: working-tree\nEOF",
+        "orch-dispatch --brief - <<EOF\nReview-target: working-tree\nEOF",
+        "cat " + good + " | orch-dispatch --brief " + good,
+        "orch-dispatch --brief " + good + " < " + good,
+        "orch-dispatch",
+        "orch-dispatch --brief " + good + " --brief=" + good)],
+        ["deny"] * 6)
+    # A file literally named $BRIEF exists, so only the expansion check stops the literal read of it.
+    (f.root / "$BRIEF").write_text("Review-target: working-tree\n", encoding="utf-8")
+    check("rdp/opaque-brief-arg-unverifiable", _rdp_kind(f.run("orch-dispatch --brief $BRIEF")), "unverifiable")
+    (f.root / "$BRIEF").unlink()
+    rel = os.path.relpath(f.good(), str(f.root))
+    check("rdp/relative-brief-resolves-against-cwd", _rdp_kind(f.run("orch-dispatch --brief " + rel)), "allow")
+    check("rdp/cd-then-relative-brief-unverifiable",
+          _rdp_kind(f.run("cd " + str(f.root) + " && orch-dispatch --brief " + rel)), "unverifiable")
+    check("rdp/wrapper-prefixed-dispatch-recognized", [_rdp_kind(f.run(c + branch_only)) for c in (
+        "env FOO=1 nice -n 5 orch-dispatch --brief ", "command /usr/local/bin/orch-dispatch --brief=",
+        "true && nohup orch-dispatch --brief ")], ["deny", "deny", "deny"])
+    oversize = f.briefs / "oversize.txt"
+    oversize.write_text("Review-target: working-tree\n" + "x" * 5000 + "\n", encoding="utf-8")
+    bad_utf8 = f.briefs / "bad-utf8.txt"
+    bad_utf8.write_bytes(b"Review-target: working-tree\n\xff\n")
+    nul = f.briefs / "nul.txt"
+    nul.write_bytes(b"Review-target: working-tree\n\x00\n")
+    sep = f.briefs / "sep.txt"
+    sep.write_text("Note: see below\u2028Review-target: working-tree\n", encoding="utf-8")
+    unreadable = f.briefs / "unreadable.txt"
+    unreadable.write_text("Review-target: working-tree\n", encoding="utf-8")
+    unreadable.chmod(0)
+    fifo = f.briefs / "fifo.txt"
+    os.mkfifo(str(fifo))
+    got = [_rdp_kind(f.dispatch(str(p))) for p in (
+        f.briefs / "missing.txt", f.briefs, fifo, oversize, bad_utf8, nul, sep)]
+    # A privileged run reads a mode-0 file anyway, so that one leg is judged only where it can bite.
+    got.append(_rdp_kind(f.dispatch(str(unreadable))) if os.geteuid() != 0 else "unverifiable")
+    unreadable.chmod(0o644)
+    check("rdp/unreadable-brief-unverifiable", got, ["unverifiable"] * 8)
+
+    w = RdpFixture(base, "wtedit")
+    (w.root / "src" / "a.py").write_text("a = 3  # the real fix, never committed\n", encoding="utf-8")
+    check("rdp/pre-change-tip-worktree-edit-denies", _rdp_kind(w.dispatch(w.good())), "deny")
+    st = RdpFixture(base, "staged")
+    (st.root / "src" / "b.py").write_text("b = 2\n", encoding="utf-8")
+    _rdp_git(st.root, "add", "src/b.py")
+    check("rdp/staged-only-change-denies", _rdp_kind(st.dispatch(st.good())), "deny")
+    un = RdpFixture(base, "untracked")
+    (un.root / ".git" / "info" / "exclude").write_text("old.txt\n", encoding="utf-8")
+    (un.root / "old.txt").write_text("recreated\n", encoding="utf-8")
+    check("rdp/untracked-recreates-deleted-denies", _rdp_kind(un.dispatch(un.good())), "deny")
+
+    ro = RdpFixture(base, "rootcommit")
+    _rdp_git(ro.root, "checkout", "-q", ro.seed)
+    ro.authority(ro.seed + "\n")
+    check("rdp/root-commit-empty-tree-allows", _rdp_kind(ro.dispatch(ro.good(
+        pin=ro.seed, paths=("old.txt", "seed.txt", "src/a.py")))), "allow")
+
+    mg = RdpFixture(base, "merge")
+    _rdp_git(mg.root, "checkout", "-q", "-b", "side", mg.seed)
+    (mg.root / "side.txt").write_text("side\n", encoding="utf-8")
+    _rdp_git(mg.root, "add", "side.txt")
+    _rdp_git(mg.root, "commit", "-q", "-m", "side")
+    _rdp_git(mg.root, "checkout", "-q", "main")
+    _rdp_git(mg.root, "merge", "-q", "--no-ff", "-m", "merge", "side")
+    merge = _rdp_git(mg.root, "rev-parse", "HEAD")
+    mg.authority(merge + "\n")
+    check("rdp/merge-first-parent-allows", [_rdp_kind(mg.dispatch(mg.good(pin=merge, paths=p))) for p in (
+        ("side.txt",), mg.CHANGED)], ["allow", "deny"])
+
+    shallow = base / "shallow"
+    _rdp_git(base, "clone", "-q", "--depth", "1", "file://" + str(f.root), str(shallow))
+    shallow_result = f.dispatch(f.good(extra=["Review-repo: " + str(shallow)]))
+    shallow_reason = shallow_result[1]["hookSpecificOutput"]["permissionDecisionReason"]
+    check("rdp/shallow-missing-parent-unverifiable",
+          (_rdp_kind(shallow_result), "is not in the repository" in shallow_reason), ("unverifiable", True))
+    check("rdp/repo-label-not-toplevel-unverifiable", [_rdp_kind(f.dispatch(f.good(extra=["Review-repo: " + r])))
+                                                       for r in ("src", str(f.root / "src"))],
+          ["unverifiable", "unverifiable"])
+
+    rp = RdpFixture(base, "replace")
+    _rdp_git(rp.root, "replace", "--graft", rp.pin)
+    check("rdp/replace-ref-ignored", ("parent " in _rdp_git(rp.root, "cat-file", "commit", rp.pin),
+                                      _rdp_kind(rp.dispatch(rp.good()))), (False, "allow"))
+    gf = RdpFixture(base, "grafts")
+    (gf.root / ".git" / "info" / "grafts").write_text(gf.pin + "\n", encoding="utf-8")
+    check("rdp/grafts-file-ignored", (_rdp_git(gf.root, "log", "-1", "--format=%P", gf.pin),
+                                      _rdp_kind(gf.dispatch(gf.good()))), ("", "allow"))
+
+    seen = []
+    real_run = subprocess.run
+
+    def _capture(argv, **kw):
+        seen.append((list(argv), dict(kw.get("env") or {})))
+        return real_run(argv, **kw)
+    aiqt_hooks.subprocess.run = _capture
+    try:
+        aiqt_hooks._review_git(str(f.root), "rev-parse", "HEAD")
+    finally:
+        aiqt_hooks.subprocess.run = real_run
+    argv, env = seen[0] if seen else ([], {})
+    check("rdp/git-env-neutralized", (
+        env.get("GIT_OPTIONAL_LOCKS"), env.get("GIT_NO_REPLACE_OBJECTS"), env.get("GIT_GRAFT_FILE"),
+        env.get("GIT_LITERAL_PATHSPECS"), argv[:5]),
+        ("0", "1", os.devnull, "1", ["git", "-C", str(f.root), "-c", "core.commitGraph=false"]))
+
+    ps = RdpFixture(base, "pathspec")
+    for name in ("*", ":(glob)*.py"):
+        (ps.root / name).write_text("literal\n", encoding="utf-8")
+        _rdp_git(ps.root, "add", "--", ":(literal)" + name)
+    _rdp_git(ps.root, "commit", "-q", "-m", "odd names")
+    odd = _rdp_git(ps.root, "rev-parse", "HEAD")
+    ps.authority(odd + "\n")
+    (ps.root / "src" / "a.py").write_text("a = 9\n", encoding="utf-8")
+    check("rdp/pathspec-magic-literal", _rdp_kind(ps.dispatch(ps.good(pin=odd, paths=("*", ":(glob)*.py")))),
+          "allow")
+
+    bm = RdpFixture(base, "branchmoved")
+    (bm.root / "seed.txt").write_text("later\n", encoding="utf-8")
+    _rdp_git(bm.root, "commit", "-q", "-am", "later")
+    check("rdp/branch-label-moved-notes", [_rdp_kind(bm.dispatch(bm.good(extra=["Review-branch: " + b])))
+                                           for b in ("main", "no-such-branch")], ["warn", "warn"])
+
+    mb = RdpFixture(base, "malformed")
+    mb.write_registry(dict(mb.binding, surplus=1))
+    check("rdp/malformed-binding-denies-background-notes-foreground", [
+        _rdp_kind(mb.run("ls", background=True)), _rdp_kind(mb.run("ls"))], ["unverifiable", "warn"])
+    mb.write_registry(dict(mb.binding, labels=dict(mb.binding["labels"], path="Review-target:")))
+    check("rdp/duplicate-labels-malformed", _rdp_kind(mb.run("ls", background=True)), "unverifiable")
+    (mb.root / ".aiqt" / "orchestration.local.json").write_text("{not json", encoding="utf-8")
+    check("rdp/bad-registry-denies-background", [
+        _rdp_kind(mb.run("ls", background=True)), _rdp_kind(mb.run("ls"))], ["unverifiable", "warn"])
+
+    import contextlib
+    import io
+    saved_decide, saved_stdin = aiqt_hooks._rdp_decide, sys.stdin
+
+    def _boom(data):
+        raise RuntimeError("injected review dispatch fault")
+    try:
+        aiqt_hooks._rdp_decide = _boom
+        sys.stdin = io.StringIO(json.dumps(dict(hook_event_name="PreToolUse", cwd=str(f.root),
+                                                tool_name="Bash", tool_input=dict(command="ls"))))
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = aiqt_hooks.main(["review_dispatch_pin"])
+    finally:
+        aiqt_hooks._rdp_decide, sys.stdin = saved_decide, saved_stdin
+    check("rdp/handler-crash-fails-closed", rc, 2)
+
+
 def main(report_path=None):
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
@@ -2260,6 +2568,7 @@ def _main_isolated(report_path=None):
               set(json.loads((hsd / "forced-exit-surfaced.json").read_text(
                   encoding="utf-8")).get("keys", [])), {"k1", "k2"})
         check("forced5/second-pass-clean", aiqt_hooks._orch_forced_exit_findings(str(hsd)), [])
+        _rdp_cases(tmp)
     finally:
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)

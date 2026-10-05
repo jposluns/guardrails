@@ -1755,9 +1755,19 @@
       "corpus-id": "vfxcmt",
       "family": "aiqt",
       "gates": [],
-      "hooks": [],
+      "hooks": [
+        {
+          "class": "c",
+          "default": "block",
+          "event": "PreToolUse",
+          "id": "review-dispatch-pin",
+          "matcher": "Bash",
+          "platform": "claude-code",
+          "residue": "Registry scoped and inert without a review dispatch binding. It sees only Bash calls whose lexed command word, after leading modifier wrappers, is a declared dispatch command with the brief passed as one file argument. A dispatch through an undeclared command, an alias, a function, a script that dispatches internally, a nested shell string, or a non-Bash tool is not seen and is allowed. It checks the declaration and the repository, not what the worker reads: a brief that pins the right revision while the worker reads the ambient working tree or another path passes. Only a worker bound to a checkout of the pinned revision closes that gap. A brief marked as targeting a working tree, or as not a review, is allowed with a note, so a misdeclared target bypasses the check. The authority is adopter code whose own correctness the hook cannot judge. A path the change needs that is missing from both the commit and the declaration, an undeclared context file, submodule contents behind a clean gitlink, checkout-filter output, a later commit that supersedes the pin, and edits to the brief or the tree between this check and the dispatch running are not caught. A stat-only change to a declared path (touched, same content) refuses until the index is refreshed. A malformed binding or an unreadable registry refuses every background Bash call until an operator repairs it. Delivery acceptance is not checked."
+        }
+      ],
       "source": ".aiqt/core/rules/accur-verify-fix-in-commit.md",
-      "status": "prose-only"
+      "status": "hook-linked"
     },
     {
       "corpus-id": "vrfdiv",

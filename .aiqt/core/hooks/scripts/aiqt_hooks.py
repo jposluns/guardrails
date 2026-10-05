@@ -9772,18 +9772,9 @@ _ORCH_WRAPPER_SEP_VALUE_OPTS = {
 }
 
 
-def _orch_effective_sink_word(argv):
-    """ROUND-7 (codex finding 5). The EFFECTIVE command word of a pipeline stage, resolved THROUGH leading
-    shell command-modifier wrappers (command/env/builtin/exec/nice/nohup/stdbuf/time and a literal '\\'
-    alias-suppression escape) so a truncating sink hidden behind one ('command head', 'env head',
-    'nice -n0 head', 'stdbuf -oL tail') is still matched against _ORCH_TRUNCATING_SINKS. Leading
-    env-assignments (FOO=bar) are skipped first, as _command_word does. For each recognized wrapper word the
-    wrapper is peeled; then its OWN leading option/assignment tokens are skipped - env VAR=val assignments, a
-    '--' end-of-options marker, and any '-'-led option (the known value-taking separated options of that
-    wrapper skip their value too). Resolution STOPS, returning the current word's basename, at the first
-    token that is neither a wrapper nor a skippable option/assignment, so an unmodelled option grammar
-    degrades to the un-resolved word (a disclosed under-match residual, in the safe direction for a DENY
-    guard - it never invents a false head/tail match on a non-sink command). Purely lexical."""
+def _orch_effective_word_index(argv):
+    """The INDEX in argv of the effective command word that _orch_effective_sink_word resolves (the same
+    wrapper peeling, shared with the review dispatch pin), or None when there is no command word."""
     idx = _command_word_index(argv)   # skip leading env-assignments (FOO=bar)
     n = len(argv)
     guard = 0
@@ -9791,7 +9782,7 @@ def _orch_effective_sink_word(argv):
         guard += 1
         word = argv[idx].lstrip("\\").rsplit("/", 1)[-1]
         if word not in _ORCH_SINK_WRAPPERS:
-            return word
+            return idx
         sep_value_opts = _ORCH_WRAPPER_SEP_VALUE_OPTS.get(word, frozenset())
         j = idx + 1
         while j < n:
@@ -9808,9 +9799,25 @@ def _orch_effective_sink_word(argv):
                 continue
             break                                        # the wrapped command word (or another wrapper)
         if j >= n:
-            return ""                                    # the wrapper consumed every token: no sink word
+            return None                                  # the wrapper consumed every token: no command word
         idx = j
-    return argv[idx].lstrip("\\").rsplit("/", 1)[-1] if idx < n else ""
+    return idx if idx < n else None
+
+
+def _orch_effective_sink_word(argv):
+    """ROUND-7 (codex finding 5). The EFFECTIVE command word of a pipeline stage, resolved THROUGH leading
+    shell command-modifier wrappers (command/env/builtin/exec/nice/nohup/stdbuf/time and a literal '\\'
+    alias-suppression escape) so a truncating sink hidden behind one ('command head', 'env head',
+    'nice -n0 head', 'stdbuf -oL tail') is still matched against _ORCH_TRUNCATING_SINKS. Leading
+    env-assignments (FOO=bar) are skipped first, as _command_word does. For each recognized wrapper word the
+    wrapper is peeled; then its OWN leading option/assignment tokens are skipped - env VAR=val assignments, a
+    '--' end-of-options marker, and any '-'-led option (the known value-taking separated options of that
+    wrapper skip their value too). Resolution STOPS, returning the current word's basename, at the first
+    token that is neither a wrapper nor a skippable option/assignment, so an unmodelled option grammar
+    degrades to the un-resolved word (a disclosed under-match residual, in the safe direction for a DENY
+    guard - it never invents a false head/tail match on a non-sink command). Purely lexical."""
+    idx = _orch_effective_word_index(argv)
+    return "" if idx is None else argv[idx].lstrip("\\").rsplit("/", 1)[-1]
 
 
 def _orch_json_kind(value):
@@ -10301,6 +10308,401 @@ def orch_dispatch_ledger(data):
     if not _orch_append_jsonl(path, row):
         return _allow_note("AIQT guardrail: the dispatch-ledger write failed; "
                            "the launched work may be invisible to the stop guard.")
+    return _allow()
+
+
+# --- review dispatch pin (vfxcmt) --------------------------------------------------------------------
+# PreToolUse Bash, registry scoped. Inert unless the orchestration registry declares a `review_dispatch`
+# binding (ORCHESTRATION.md, "The review dispatch binding"). For a Bash call whose lexed command word, after
+# leading modifier wrappers, is a declared dispatch command, it reads the brief file passed as that
+# command's one brief argument and reconciles the brief's column-0 labels against the repository BEFORE the
+# command runs: an explicit review target; for a revision review, a full-length pin that resolves to exactly
+# that commit and equals the authoritative task revision the adopter's authority command prints; the
+# declared review paths equal to the pin's changed set (base derived from the commit's raw parent headers);
+# and no uncommitted state over any declared path. A refusal is a deny naming its reason; a cannot-evaluate
+# is a deny prefixed UNVERIFIABLE: so it stays distinct. Every git probe runs through _review_git, which
+# neutralizes replacement refs, grafts, pathspec magic and the commit-graph cache.
+_RDP_KEYS = frozenset(("commands", "brief_option", "labels", "authority", "max_brief_bytes"))
+_RDP_REQUIRED_KEYS = frozenset(("commands", "brief_option", "labels", "authority"))
+_RDP_LABEL_KEYS = frozenset(("target", "revision", "path", "repo", "branch"))
+_RDP_AUTHORITY_KEYS = frozenset(("argv", "timeout"))
+_RDP_TARGETS = frozenset(("revision", "working-tree", "not-a-review"))
+_RDP_DIR_CHANGE_WORDS = frozenset(("cd", "pushd", "popd"))
+# Line boundaries to Unicode that are not physical newlines (VT, FF, FS, GS, RS, NEL, LINE and PARAGRAPH
+# SEPARATOR): a brief carrying one is a cannot-evaluate, because it could hide a label inside another line.
+_RDP_NONPHYSICAL = ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+_RDP_DEFAULT_MAX_BRIEF = 1048576
+_RDP_DEFAULT_AUTH_TIMEOUT = 30
+_RDP_GIT_TIMEOUT = 10
+_RDP_MAX_LISTED = 20
+_RDP_OID_LEN = {"sha1": 40, "sha256": 64}
+
+
+def _review_git(repo, *args, stdin=None):
+    """One isolated git probe for the review dispatch pin: the _isolate_git_env scrub plus no optional
+    locks, replacement refs and grafts disabled (so a `git replace --graft` or an info/grafts file cannot
+    change the parents the base is derived from), literal pathspecs (a declared path is matched as a literal
+    path, never as glob or magic), and the commit-graph cache off. Bytes in and out. Returns the
+    CompletedProcess, or None when git could not be run or timed out (the caller's cannot-evaluate)."""
+    env = _isolate_git_env(dict(os.environ))
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = os.devnull
+    env["GIT_LITERAL_PATHSPECS"] = "1"
+    try:
+        return subprocess.run(["git", "-C", repo, "-c", "core.commitGraph=false", *args], input=stdin,
+                              capture_output=True, timeout=_RDP_GIT_TIMEOUT, env=env)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+
+
+def _rdp_binding(reg):
+    """The registry's review dispatch binding: (None, None) when undeclared, ("ok", cfg) when well formed,
+    ("bad", detail) otherwise. Strict: an unknown key, a missing required key, or a wrong type is malformed."""
+    if "review_dispatch" not in reg:
+        return (None, None)
+    raw = reg.get("review_dispatch")
+    if not isinstance(raw, dict):
+        return ("bad", "review_dispatch is {}, not an object".format(_orch_json_kind(raw)))
+    unknown = sorted(set(raw) - _RDP_KEYS)
+    if unknown:
+        return ("bad", "review_dispatch has unknown keys {}".format(unknown))
+    missing = sorted(_RDP_REQUIRED_KEYS - set(raw))
+    if missing:
+        return ("bad", "review_dispatch is missing {}".format(missing))
+    commands = raw["commands"]
+    if not isinstance(commands, list) or not commands or not all(
+            isinstance(c, str) and c and "/" not in c and c.strip() == c for c in commands):
+        return ("bad", "review_dispatch.commands is not a non-empty list of command basenames")
+    option = raw["brief_option"]
+    if not isinstance(option, str) or not option.startswith("-") or len(option) < 2 \
+            or any(ch.isspace() or ch == "=" for ch in option):
+        return ("bad", "review_dispatch.brief_option is not a single option word")
+    labels = raw["labels"]
+    if not isinstance(labels, dict) or set(labels) != _RDP_LABEL_KEYS:
+        return ("bad", "review_dispatch.labels must declare exactly {}".format(sorted(_RDP_LABEL_KEYS)))
+    values = list(labels.values())
+    if not all(isinstance(v, str) and v and v.strip() == v and "\n" not in v and "\r" not in v
+               for v in values):
+        return ("bad", "review_dispatch.labels values must be non-empty single-line strings")
+    if len(set(values)) != len(values) or any(
+            a != b and a.startswith(b + " ") for a in values for b in values):
+        return ("bad", "review_dispatch.labels values must be distinct")
+    authority = raw["authority"]
+    if not isinstance(authority, dict) or set(authority) - _RDP_AUTHORITY_KEYS or "argv" not in authority:
+        return ("bad", "review_dispatch.authority must be an object with argv and an optional timeout")
+    argv = authority["argv"]
+    if not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
+        return ("bad", "review_dispatch.authority.argv is not a non-empty list of non-empty strings")
+    timeout = authority.get("timeout", _RDP_DEFAULT_AUTH_TIMEOUT)
+    if type(timeout) is not int or not 0 < timeout <= 600:
+        return ("bad", "review_dispatch.authority.timeout is not an integer from 1 to 600")
+    max_bytes = raw.get("max_brief_bytes", _RDP_DEFAULT_MAX_BRIEF)
+    if type(max_bytes) is not int or not 0 < max_bytes <= 16 * _RDP_DEFAULT_MAX_BRIEF:
+        return ("bad", "review_dispatch.max_brief_bytes is not an integer from 1 to {}".format(
+            16 * _RDP_DEFAULT_MAX_BRIEF))
+    return ("ok", {"commands": frozenset(commands), "brief_option": option, "labels": dict(labels),
+                   "argv": list(argv), "timeout": timeout, "max_brief_bytes": max_bytes})
+
+
+def _rdp_brief_args(args, option):
+    """The brief values in a dispatch's arguments: each value after a separate `option` word (None when it
+    is the last word) and each `option=VALUE`."""
+    out = []
+    for k, tok in enumerate(args):
+        if tok == option:
+            out.append(args[k + 1] if k + 1 < len(args) else None)
+        elif tok.startswith(option + "="):
+            out.append(tok[len(option) + 1:])
+    return out
+
+
+def _rdp_read_brief(path, max_bytes):
+    """(text, None) for a readable brief, or (None, reason) for a cannot-evaluate: missing, not a regular
+    file, an I/O or permission error, over max_bytes, invalid UTF-8, a NUL, or a non-physical line boundary."""
+    try:
+        # The type is checked BEFORE the open as well as after it, so a FIFO or device never blocks the read.
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return (None, "the brief {} is not a regular file".format(path))
+        with open(path, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return (None, "the brief {} is not a regular file".format(path))
+            blob = fh.read(max_bytes + 1)
+    except OSError as exc:
+        return (None, "the brief {} cannot be read ({})".format(path, exc))
+    if len(blob) > max_bytes:
+        return (None, "the brief {} is larger than max_brief_bytes ({})".format(path, max_bytes))
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return (None, "the brief {} is not valid UTF-8 ({})".format(path, exc))
+    if "\x00" in text:
+        return (None, "the brief {} contains a NUL".format(path))
+    if any(ch in text for ch in _RDP_NONPHYSICAL):
+        return (None, "the brief {} contains a line boundary that is not a physical newline".format(path))
+    return (text, None)
+
+
+def _rdp_labels(text, labels):
+    """Map each label key to the list of its values: a label matches only at column 0, as the exact label
+    followed by one space, and its value is the rest of that physical line."""
+    found = {key: [] for key in labels}
+    for line in text.splitlines():
+        for key, label in labels.items():
+            if line.startswith(label + " "):
+                found[key].append(line[len(label) + 1:])
+    return found
+
+
+def _rdp_listing(items):
+    """A capped, readable listing of paths for a deny message."""
+    shown = [repr(p) for p in items[:_RDP_MAX_LISTED]]
+    more = len(items) - len(shown)
+    return ", ".join(shown) + (" and {} more".format(more) if more > 0 else "")
+
+
+def _rdp_git_records(repo, *args):
+    """The NUL-separated byte records of a git probe, or None on a failed or timed-out probe."""
+    p = _review_git(repo, *args)
+    if p is None or p.returncode != 0:
+        return None
+    return [rec for rec in p.stdout.split(b"\0") if rec]
+
+
+def _rdp_resolve(repo, name):
+    """The commit id name resolves to in repo, or None."""
+    p = _review_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", name + "^{commit}")
+    if p is None or p.returncode != 0:
+        return None
+    return p.stdout.decode("ascii", "replace").strip() or None
+
+
+def _rdp_reconcile(cfg, found, root, brief):
+    """Reconcile a revision-target brief against the repository: ("allow"|"note"|"deny"|"unverifiable",
+    message). The checks run in a fixed order and the first failure decides."""
+    labels = cfg["labels"]
+    pins = found["revision"]
+    if not pins:
+        return ("deny", "the brief targets a revision but has no {!r} line; a branch name or a "
+                "description is not a pin, so add the full commit id under review".format(labels["revision"]))
+    for key in ("revision", "repo", "branch"):
+        if len(found[key]) > 1:
+            return ("unverifiable", "the brief has {} {!r} lines; at most one is allowed".format(
+                len(found[key]), labels[key]))
+    pin = pins[0].strip()
+    repo = root
+    if found["repo"]:
+        repo = found["repo"][0].strip()
+        if not os.path.isabs(repo):
+            return ("unverifiable", "the {!r} value {!r} is not an absolute path".format(
+                labels["repo"], repo))
+        p = _review_git(repo, "rev-parse", "--show-toplevel")
+        top = p.stdout[:-1].decode("utf-8", "surrogateescape") if p is not None and p.returncode == 0 \
+            and p.stdout.endswith(b"\n") else None
+        if not top or os.path.realpath(top) != os.path.realpath(repo):
+            return ("unverifiable", "the {!r} value {!r} is not a repository top level".format(
+                labels["repo"], repo))
+    p = _review_git(repo, "rev-parse", "--show-object-format")
+    fmt = p.stdout.decode("ascii", "replace").strip() if p is not None and p.returncode == 0 else None
+    if fmt not in _RDP_OID_LEN:
+        return ("unverifiable", "the object format of {} cannot be read".format(repo))
+    width = _RDP_OID_LEN[fmt]
+    if len(pin) != width or any(ch not in "0123456789abcdef" for ch in pin):
+        return ("deny", "the pin {!r} is not a full {}-character lowercase {} commit id; a short "
+                "id, a branch name or HEAD is not accepted".format(pin, width, fmt))
+    if _rdp_resolve(repo, pin) != pin:
+        return ("unverifiable", "the pin {} does not resolve to that commit in {}".format(pin, repo))
+    try:
+        auth = subprocess.run(cfg["argv"] + [brief], capture_output=True, text=True,
+                              timeout=cfg["timeout"], cwd=root)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return ("unverifiable", "the authority command failed to run ({})".format(exc))
+    if auth.returncode != 0:
+        return ("unverifiable", "the authority command exited {}".format(auth.returncode))
+    out = auth.stdout or ""
+    auth_lines = (out[:-1] if out.endswith("\n") else out).split("\n")
+    if len(auth_lines) != 1 or len(auth_lines[0]) != width \
+            or any(ch not in "0123456789abcdef" for ch in auth_lines[0]):
+        return ("unverifiable", "the authority command did not print exactly one full commit id line")
+    if auth_lines[0] != pin:
+        return ("deny", "the pin {} is not the authoritative task revision ({})".format(
+            pin, auth_lines[0]))
+    p = _review_git(repo, "cat-file", "commit", pin)
+    if p is None or p.returncode != 0:
+        return ("unverifiable", "the raw commit {} cannot be read".format(pin))
+    parents = []
+    for line in p.stdout.split(b"\n"):
+        if not line:
+            break
+        if line.startswith(b"parent "):
+            parents.append(line[len(b"parent "):].decode("ascii", "replace"))
+    for parent in parents:
+        q = _review_git(repo, "cat-file", "-e", parent)
+        if q is None or q.returncode != 0:
+            return ("unverifiable", "the parent {} of {} is not in the repository (a shallow or "
+                    "partial clone), so the base cannot be derived".format(parent, pin))
+    if parents:
+        base = parents[0]
+    else:
+        q = _review_git(repo, "hash-object", "-t", "tree", "--stdin", stdin=b"")
+        base = q.stdout.decode("ascii", "replace").strip() if q is not None and q.returncode == 0 else ""
+        if len(base) != width:
+            return ("unverifiable", "the empty tree id cannot be computed in {}".format(repo))
+    changed = _rdp_git_records(repo, "diff-tree", "-r", "-z", "--name-only", "--no-renames", base, pin)
+    if changed is None:
+        return ("unverifiable", "the changed set of {} cannot be read".format(pin))
+    declared = found["path"]
+    if not declared:
+        return ("deny", "the brief declares no {!r} line; list every path the review covers".format(
+            labels["path"]))
+    if not all(declared):
+        return ("unverifiable", "the brief has an empty {!r} value".format(labels["path"]))
+    declared_b = set(d.encode("utf-8") for d in declared)
+    changed_b = set(changed)
+    if declared_b != changed_b:
+        parts = []
+        missing = sorted(c.decode("utf-8", "replace") for c in changed_b - declared_b)
+        extra = sorted(d.decode("utf-8", "replace") for d in declared_b - changed_b)
+        if missing:
+            parts.append("changed by {} but not declared: {}".format(pin, _rdp_listing(missing)))
+        if extra:
+            parts.append("declared but not changed by {}: {}".format(pin, _rdp_listing(extra)))
+        return ("deny", "the declared review paths do not match the commit's changed set ({})".format(
+            "; ".join(parts)))
+    paths = sorted(declared)
+    for what, args in (("staged against the pin", ("diff-index", "--cached", "-z", "--name-only", pin)),
+                       ("modified in the working tree", ("diff-files", "-z", "--name-only")),
+                       ("untracked or ignored in the working tree", ("ls-files", "-z", "--others"))):
+        dirty = _rdp_git_records(repo, *args, "--", *paths)
+        if dirty is None:
+            return ("unverifiable", "the uncommitted state of the declared paths cannot be read")
+        if dirty:
+            return ("deny", "declared path {} is {} (checked in {}); commit it, or set {!r} to "
+                    "a worktree checked out at the pin".format(
+                        _rdp_listing(sorted(d.decode("utf-8", "replace") for d in dirty)), what, repo,
+                        labels["repo"]))
+    if found["branch"]:
+        branch = found["branch"][0].strip()
+        tip = _rdp_resolve(repo, branch) if branch else None
+        if tip != pin:
+            return ("note", "AIQT rule vfxcmt: the review dispatch is pinned to {}, but the declared "
+                    "branch {!r} {}; the review covers the pin, not the branch".format(
+                        pin, branch, "resolves to {}".format(tip) if tip else "does not resolve"))
+    return ("allow", "")
+
+
+def _rdp_decide(data):
+    """The review dispatch decision for one Bash payload: ("allow"|"note"|"deny"|"unverifiable", message).
+    Every dispatch segment of the command is judged; the first refusal or cannot-evaluate decides."""
+    root = _orch_root(data)
+    if root is None:
+        return ("allow", "")
+    status, reg = _orch_registry(root)
+    if status == "absent":
+        return ("allow", "")
+    binding, cfg = _rdp_binding(reg) if status == "ok" else ("bad", reg)
+    if binding is None:
+        return ("allow", "")
+    tool_input = data.get("tool_input")
+    if binding == "bad":
+        # A malformed binding cannot say which commands dispatch, so every background call is withheld; a
+        # foreground call proceeds with a note, so a broken registry does not block every shell command.
+        if not isinstance(tool_input, dict) or tool_input.get("run_in_background", False) is not False:
+            return ("unverifiable", "the orchestration registry or its review_dispatch binding is malformed "
+                    "({}); a background dispatch is withheld until it is repaired".format(cfg))
+        return ("note", "AIQT rule vfxcmt: the orchestration registry or its review_dispatch binding is "
+                "malformed ({}); background Bash calls are refused until it is repaired".format(cfg))
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return ("unverifiable", "the Bash tool_input carries no command string")
+    try:
+        segments = _lex_command(command)
+    except ValueError as exc:
+        if not any(name in command for name in cfg["commands"]):
+            return ("allow", "")
+        if any(op in str(exc) for op in ("<<", "<(", ">(")):
+            return ("deny", "a declared dispatch command reads a heredoc, here-string or process "
+                    "substitution; pass the brief as one file argument ({} PATH)".format(cfg["brief_option"]))
+        return ("unverifiable", "the command names a declared dispatch command but cannot be parsed "
+                "({})".format(exc))
+    dir_changed = False
+    outcome = ("allow", "")
+    for k, seg in enumerate(segments):
+        idx = _orch_effective_word_index(seg.argv)
+        word = seg.argv[idx].lstrip("\\").rsplit("/", 1)[-1] if idx is not None else ""
+        if word in _RDP_DIR_CHANGE_WORDS:
+            dir_changed = True
+            continue
+        if word not in cfg["commands"]:
+            continue
+        if seg.opaque_shell:
+            return ("unverifiable", "the {} dispatch carries an unquoted expansion, so its arguments "
+                    "cannot be read".format(word))
+        piped = k > 0 and segments[k - 1].sep_after in ("|", "|&")
+        if piped or "<<" in seg.raw or any(r.op in ("<", "<>", "<&") for r in seg.redirects):
+            return ("deny", "the {} dispatch reads its standard input; pass the brief as one file "
+                    "argument ({} PATH)".format(word, cfg["brief_option"]))
+        briefs = _rdp_brief_args(seg.argv[idx + 1:], cfg["brief_option"])
+        if len(briefs) != 1 or not briefs[0] or briefs[0] == "-":
+            return ("deny", "the {} dispatch must pass exactly one brief file as {} PATH (found {})"
+                    .format(word, cfg["brief_option"], len(briefs)))
+        brief = briefs[0]
+        if not os.path.isabs(brief):
+            cwd = data.get("cwd")
+            if dir_changed or not isinstance(cwd, str) or not os.path.isabs(cwd):
+                return ("unverifiable", "the relative brief {!r} cannot be located (a directory change "
+                        "precedes the dispatch, or the session cwd is unusable)".format(brief))
+            brief = os.path.join(cwd, brief)
+        text, why = _rdp_read_brief(brief, cfg["max_brief_bytes"])
+        if text is None:
+            return ("unverifiable", why)
+        found = _rdp_labels(text, cfg["labels"])
+        targets = found["target"]
+        if not targets:
+            return ("deny", "the brief {} has no {!r} line; declare revision, working-tree or "
+                    "not-a-review".format(brief, cfg["labels"]["target"]))
+        if len(targets) > 1:
+            return ("unverifiable", "the brief {} has {} {!r} lines".format(
+                brief, len(targets), cfg["labels"]["target"]))
+        target = targets[0].strip()
+        if target not in _RDP_TARGETS:
+            return ("deny", "the brief {} declares the unknown target {!r}; use revision, working-tree "
+                    "or not-a-review".format(brief, target))
+        if target != "revision":
+            _orch_guard_event(root, "review-dispatch-pin", "allow-declared-target",
+                              "{}: {}".format(brief, target))
+            outcome = ("note", "AIQT rule vfxcmt: the brief {} declares target {}, so no revision was "
+                       "reconciled; a review of committed work must pin it".format(brief, target))
+            continue
+        result = _rdp_reconcile(cfg, found, root, brief)
+        if result[0] in ("deny", "unverifiable"):
+            return result
+        if result[0] == "note":
+            outcome = result
+    return outcome
+
+
+def review_dispatch_pin(data):
+    """vfxcmt, PreToolUse Bash: a review dispatch made through a registry-declared command pins an
+    immutable, authoritative revision whose changed set is the declared review set and whose declared
+    paths carry no uncommitted state, BEFORE the dispatch runs. Inert without a review_dispatch binding.
+    A refusal denies and names its reason; a cannot-evaluate denies with an UNVERIFIABLE: prefix; a
+    declared non-revision target, a malformed binding on a foreground call, or a branch label that does
+    not resolve to the pin is allowed with a note. A crash reaches main's PreToolUse fail-closed exit 2.
+    Hookless dispatchers run it as a preflight: `aiqt_hooks.py review_dispatch_pin` with the payload on
+    stdin."""
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("vfxcmt")
+    if tool_name != "Bash":
+        return _allow()
+    kind, message = _rdp_decide(data)
+    if kind in ("deny", "unverifiable"):
+        prefix = "UNVERIFIABLE: " if kind == "unverifiable" else ""
+        return _deny("{}AIQT rule vfxcmt: review dispatch withheld: {}.".format(prefix, message),
+                     "AIQT guardrail: {}review dispatch withheld (rule vfxcmt).".format(prefix))
+    if kind == "note":
+        return _allow_note(message)
     return _allow()
 
 
@@ -11614,6 +12016,7 @@ HANDLERS = {
     "orch_truncation_guard": orch_truncation_guard,
     "orch_untracked_wait_loop": orch_untracked_wait_loop,
     "orch_dispatch_ledger": orch_dispatch_ledger,
+    "review_dispatch_pin": review_dispatch_pin,
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
@@ -11650,6 +12053,7 @@ HANDLER_EVENT = {
     "orch_truncation_guard": PRETOOL,
     "orch_untracked_wait_loop": PRETOOL,
     "orch_dispatch_ledger": "PostToolUse",
+    "review_dispatch_pin": PRETOOL,
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,

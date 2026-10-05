@@ -25,6 +25,12 @@ keys except `version` are optional; an undeclared surface simply removes the pro
   "state_dir": "path",
   "yield_tools": ["ScheduleWakeup", "CronCreate"],
   "dispatch_tools": [],
+  "review_dispatch": {"commands": ["orch-dispatch"], "brief_option": "--brief",
+                      "labels": {"target": "Review-target:", "revision": "Reviewed-revision:",
+                                 "path": "Review-path:", "repo": "Review-repo:",
+                                 "branch": "Review-branch:"},
+                      "authority": {"argv": ["python3", "tools/task_revision.py"], "timeout": 30},
+                      "max_brief_bytes": 1048576},
   "mistakes_register": "path",
   "attestations": "path",
   "staleness": {"external_hours": 24, "task_hours": 24},
@@ -152,6 +158,72 @@ silently replaced and its line dropped. Any nonphysical line-boundary or separat
 otherwise smuggle a second item onto one physical line or embed content inside a sentinel; the enumerator
 rejects it rather than guess. Lines are otherwise split on physical newlines only (CR, LF, CRLF).
 
+## The review dispatch binding
+
+The optional `review_dispatch` key turns on the review dispatch hook (`review-dispatch-pin`, rule
+vfxcmt). Without it the hook does nothing. The key is checked strictly: an unknown key, a missing
+`commands`, `brief_option`, `labels` or `authority`, or a value of the wrong type makes the binding
+malformed.
+
+- `commands` lists the basenames of the commands that dispatch a review.
+- `brief_option` is the option that names the brief file, as `--brief PATH` or `--brief=PATH`.
+- `labels` names the five brief labels. They must be distinct.
+- `authority.argv` is a fixed argv, never a shell string. The hook runs it from the repository root
+  with the brief's absolute path appended, and it must print exactly one full commit id: the
+  authoritative task revision. `authority.timeout` is in seconds (default 30).
+- `max_brief_bytes` caps the brief size (default 1048576).
+
+The hook sees a Bash call when the command word, after leading modifier wrappers (`command`, `env`,
+`nohup`, `nice`, `stdbuf`, `time`, `exec`, `builtin`), is one of `commands`. The brief must be one
+file argument. A brief read from standard input, a pipe, a heredoc, a here-string or a process
+substitution is refused. A relative brief path resolves against the session cwd. If a `cd`, `pushd`
+or `popd` comes earlier in the same command, the path cannot be located and the dispatch is withheld.
+
+The hook reads labels only from the brief, only at column 0, and only as the exact label followed by
+one space. The value is the rest of that line. The brief must be UTF-8 with no NUL and no line
+boundary other than a physical newline.
+
+- `Review-target:` is required, once. It must be `revision`, `working-tree` or `not-a-review`. A
+  `working-tree` or `not-a-review` target is allowed with a note and a `guard-events.jsonl` row.
+- `Reviewed-revision:` is required, once, for a `revision` target. It must be the full lowercase
+  commit id, at the length of the repository's object format. A short id, a branch name or `HEAD`
+  is refused.
+- `Review-path:` lines list the review set, one path per line, each kept exactly as written.
+- `Review-repo:` (optional) is the absolute path of the repository top level the review reads. It
+  defaults to the session repository root.
+- `Review-branch:` (optional) is informational. If it does not resolve to the pin, the dispatch is
+  allowed with a note.
+
+For a `revision` target, the hook checks the following in order. The first failure decides.
+
+1. The pin resolves to exactly that commit. A tag object id is not accepted.
+2. The authority prints the same commit id.
+3. Every parent named in the raw commit is present.
+4. The commit's changed set equals the declared paths. The base is the sole parent, the first parent
+   of a merge, or the empty tree for a root commit.
+5. No declared path is staged against the pin, modified in the working tree, or untracked or
+   ignored there.
+
+Every git read disables replacement refs, grafts, pathspec magic and the commit-graph cache, and
+takes no optional locks.
+
+The hook refuses with a deny that names the reason. When it cannot evaluate, it denies with the
+reason prefixed `UNVERIFIABLE:`, so that outcome stays distinct. Cannot-evaluate cases include a
+duplicate label, an unreadable brief, a failed or timed-out git probe, and an authority that fails
+or prints anything other than one commit id. A malformed binding, or a registry that cannot be read,
+withholds every background Bash call. A foreground call is then allowed with a note.
+
+Limits:
+
+- A dispatch through an undeclared command, an alias, a function, a script, a nested shell string or
+  a non-Bash tool is not seen.
+- The hook checks the declaration and the repository, not what the worker reads. The worker must
+  read from a checkout of the pinned revision, so point `Review-repo:` at a worktree checked out
+  there.
+- A misdeclared target bypasses the check.
+- The authority's own correctness is the adopter's concern.
+- Delivery acceptance is not checked.
+
 ## Platforms without hooks
 
 The decision algorithm binds as an operating procedure: before any stop, idle wake, or drained
@@ -160,6 +232,10 @@ act on its disposition table; the deterministic gates (record drift, mistakes re
 are the enforced part on a hookless platform. The preflight is visibility only, not a blocking control,
 and carries no enforceability-ledger row; this prose operating procedure is never advertised as
 equivalent to a blocking hook.
+
+A dispatcher without hooks can run the review dispatch check as a preflight: pipe the PreToolUse
+payload (`tool_name` `Bash`, `cwd`, and `tool_input.command`) to `aiqt_hooks.py review_dispatch_pin`,
+and withhold the dispatch on exit 2 or on a printed `deny` decision.
 
 ## Honest limits (suite-level)
 
