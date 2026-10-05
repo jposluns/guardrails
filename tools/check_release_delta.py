@@ -1957,29 +1957,42 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     failures = []
 
     # F-TOML-BARE-VALUEERROR-CLASS: a predecessor TOML carrying an over-long integer literal (a BARE
-    # ValueError) or a 1200-deep nested array (a RecursionError) must fail closed as GateError at the
-    # _show_toml parse locus; run()'s ValueError backstop never covered the RecursionError member. The digit
-    # and recursion limits are pinned to the CPython defaults (test-hermeticity) and restored in finally.
+    # ValueError) or a parser overflow (a RecursionError) must fail closed as GateError at the _show_toml
+    # parse locus; run()'s ValueError backstop never covered the RecursionError member. The digit limit is
+    # pinned to the CPython default (test-hermeticity) and restored in finally.
+    # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise valid
+    # input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+    # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an unrelated
+    # refusal) under another.
     import tempfile as _tempfile
     with _tempfile.TemporaryDirectory(prefix="aiqt-delta-toml-class-") as tc_dir:
         tc_repo = Path(tc_dir)
         (tc_repo / "bigint.toml").write_text("big = " + "9" * 4400 + "\n", encoding="utf-8")
-        (tc_repo / "deep.toml").write_text("deep = " + "[" * 1200 + "]" * 1200 + "\n", encoding="utf-8")
+        (tc_repo / "deep.toml").write_text("deep = 1  # injected-overflow\n", encoding="utf-8")
         _git_init_commit(tc_repo, "toml class fixtures")
-        prev_digits, prev_reclimit = sys.get_int_max_str_digits(), sys.getrecursionlimit()
+        prev_digits = sys.get_int_max_str_digits()
         sys.set_int_max_str_digits(4300)
-        sys.setrecursionlimit(1000)
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
         try:
-            for tc_name in ("bigint.toml", "deep.toml"):
+            for tc_name, tc_needle in (("bigint.toml", ""), ("deep.toml", "injected parser overflow")):
                 try:
                     _show_toml(tc_repo, "HEAD", tc_name)
                     failures.append("_show_toml accepted {}".format(tc_name))
-                except GateError:
-                    pass
+                except GateError as exc:
+                    if tc_needle not in str(exc):
+                        failures.append("_show_toml refused {} without its finding ({})".format(tc_name, exc))
                 except (ValueError, RecursionError) as exc:
                     failures.append("_show_toml let a bare {} escape on {}".format(type(exc).__name__, tc_name))
         finally:
-            sys.setrecursionlimit(prev_reclimit)
+            tomllib.loads, tomllib.load = real_loads, real_load
             sys.set_int_max_str_digits(prev_digits)
 
     def _rows(*specs):

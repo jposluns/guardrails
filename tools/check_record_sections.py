@@ -633,16 +633,29 @@ def _self_test_isolated():
     # 4300-digit int-string limit makes tomllib raise a BARE ValueError
     # (not TOMLDecodeError); load_config must still refuse with GateError.
     # The digit limit is pinned to the default 4300 (test-hermeticity).
-    # A 1200-deep nested array (RecursionError, not a ValueError) must be
-    # refused the same way; the recursion limit is pinned to 1000 too.
+    # A parser overflow (RecursionError, not a ValueError) must be refused
+    # the same way, with the overflow in the refusal.
+    # The overflow is INJECTED (tomllib.loads and tomllib.load raise
+    # RecursionError on a marked, otherwise valid input) rather than provoked
+    # by a deeply nested body: the depth at which tomllib overflows is an
+    # interpreter limit, so a fixed body overflows under one recursion limit
+    # and parses (or trips an unrelated refusal) under another.
+    real_loads, real_load = tomllib.loads, tomllib.load
+
+    def overflowing_loads(text, **kwargs):
+        if "injected-overflow" in text:
+            raise RecursionError("injected parser overflow")
+        return real_loads(text, **kwargs)
+
+    tomllib.loads = overflowing_loads
+    tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
     prev_digits = sys.get_int_max_str_digits()
-    prev_reclimit = sys.getrecursionlimit()
     sys.set_int_max_str_digits(4300)
-    sys.setrecursionlimit(1000)
     try:
-        for big_label, big_value in (
-                ("an over-long integer literal", "9" * 4400),
-                ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+        for big_label, big_value, big_needle in (
+                ("an over-long integer literal", "9" * 4400, ""),
+                ("a parser overflow", "1  # injected-overflow",
+                 "injected parser overflow")):
             with tempfile.TemporaryDirectory(
                     prefix="aiqt-record-sections-bigint-") as big_dir:
                 big_cfg = Path(big_dir) / "record-sections.toml"
@@ -651,16 +664,17 @@ def _self_test_isolated():
                 try:
                     load_config(big_cfg)
                     big_outcome = "accepted"
-                except GateError:
-                    big_outcome = "refused"
+                except GateError as exc:
+                    big_outcome = ("refused" if big_needle in str(exc)
+                                   else "refused without the finding")
                 except (ValueError, RecursionError) as exc:
                     big_outcome = "a bare {} escaped".format(
                         type(exc).__name__)
                 expect(big_label + " in the config fails closed",
                        big_outcome, "refused")
     finally:
-        sys.setrecursionlimit(prev_reclimit)
         sys.set_int_max_str_digits(prev_digits)
+        tomllib.loads, tomllib.load = real_loads, real_load
 
     try:
         with tempfile.TemporaryDirectory(

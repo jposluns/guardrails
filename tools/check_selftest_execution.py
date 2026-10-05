@@ -666,24 +666,40 @@ def self_test():
         #     ValueError (not TOMLDecodeError); the manifest is still refused 2 BEFORE any launch
         #     (F-TOML-BARE-VALUEERROR-CLASS). The digit limit is pinned to the default 4300
         #     (test-hermeticity) and restored in finally.
-        #     A 1200-deep nested array (RecursionError, not a ValueError) is refused the same way; the
-        #     recursion limit is pinned to the CPython default 1000 too.
-        for label, value in (("over-long-int", "9" * 4400), ("deep-nesting", "[" * 1200 + "]" * 1200)):
-            prev_digits = sys.get_int_max_str_digits()
-            prev_reclimit = sys.getrecursionlimit()
-            sys.set_int_max_str_digits(4300)
-            sys.setrecursionlimit(1000)
-            try:
-                root = build(_manifest_text(header="format-version = " + value), _report_body(GOOD_IDS, 0))
+        #     A parser overflow (RecursionError, not a ValueError) is refused the same way, with the
+        #     overflow in the refusal.
+        #     The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
+        #     otherwise valid input) rather than provoked by a deeply nested body: the depth at which tomllib
+        #     overflows is an interpreter limit, so a fixed body overflows under one recursion limit and parses
+        #     (or trips an unrelated refusal) under another.
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
+        try:
+            for label, value in (("over-long-int", "9" * 4400), ("parser-overflow", "1  # injected-overflow")):
+                prev_digits = sys.get_int_max_str_digits()
+                sys.set_int_max_str_digits(4300)
+                err = ""
                 try:
-                    code, _out, _err = run(root)
-                except (ValueError, RecursionError) as exc:
-                    code = "a bare {} escaped".format(type(exc).__name__)
-            finally:
-                sys.setrecursionlimit(prev_reclimit)
-                sys.set_int_max_str_digits(prev_digits)
-            expect("st/manifest-{}-2".format(label), code, 2)
-            expect("st/manifest-{}-no-launch".format(label), launched(root), False)
+                    root = build(_manifest_text(header="format-version = " + value), _report_body(GOOD_IDS, 0))
+                    try:
+                        code, _out, err = run(root)
+                    except (ValueError, RecursionError) as exc:
+                        code = "a bare {} escaped".format(type(exc).__name__)
+                finally:
+                    sys.set_int_max_str_digits(prev_digits)
+                expect("st/manifest-{}-2".format(label), code, 2)
+                expect("st/manifest-{}-no-launch".format(label), launched(root), False)
+                if label == "parser-overflow":
+                    expect("st/manifest-parser-overflow-finding", "injected parser overflow" in err, True)
+        finally:
+            tomllib.loads, tomllib.load = real_loads, real_load
 
         # 8: child exits 0 but writes no report -> 2, never a pass
         code, _out, _err = run(build(_manifest_text(), "sys.exit(0)\n"))

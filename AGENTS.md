@@ -183,6 +183,12 @@ Where the string legitimately appears elsewhere, the invariant is asserted again
 state, or the negative predicate is scoped to the defect locus, rather than run as a naive whole-artefact
 string scan.
 
+A list kept by hand that selects what a generated view contains is itself such an input. Comparing the view
+with a fresh run of its generator shows that it is current, never that it is complete, since both read the
+list and an item the list omits is missing from each. A view that claims to cover a set checks, as it is
+generated, that each item of the authoritative set appears in it or is named in a recorded exclusion, and
+fails on an item in neither; a view that declares itself a curated selection makes no such claim.
+
 ## Measured and estimated figures stay separate
 
 A figure obtained by measurement or instrumentation is not summed, averaged, or otherwise blended with an
@@ -1188,6 +1194,14 @@ authorized.
 An exception or error in an authentication, authorization, validation, or cryptographic check leaves the
 system in the deny or otherwise safe state. A failed, unavailable, or unreadable check is treated as not
 passed, never as a default-allow.
+
+Code that such a check loads can exit with any status, fault outside any handler (error formatting, cleanup,
+background work, or shutdown), or replace the check's reporting machinery. Run in a child process, such code
+yields a passing verdict only with a zero exit, a complete structured result written after the child's
+cleanup, and no fault on its error stream, one that unreviewed or unpinned code cannot redirect or silence.
+In process, each channel is covered, unreachable, or disclosed under the gate-discipline rule, a
+fault-to-pass channel never merely disclosed; such review and pinning exempt from this only the channel by
+which loaded code replaces that machinery, disclosed as a residual.
 
 ## Validate federated identity and token flows
 
