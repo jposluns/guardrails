@@ -941,7 +941,11 @@ def _default_store_present_without_manifest(product_root):
         except (store.StoreError, OSError):
             return False
     finally:
-        _close_held(held)
+        if held:
+            # popped before its one close (never closed twice), closed in THIS frame so the #377 frame test
+            # sees the discovery's exception in flight and keeps it; with none in flight the close error is
+            # raised (fail-closed), never swallowed
+            store._close_fd_exc_safe(held.pop())
     return status == "present"
 
 
@@ -1364,10 +1368,12 @@ def _lock_identity(jr_fd, keep=None):
             _journal._close_fd_quietly(lfd)
 
 
-def _close_held_into(fds, raised):
+def _close_held_into(fds, raised, close=None):
     """Close every descriptor a caller HOLDS in the list `fds` (each a bare fd or a (rel, fd) pair),
     emptying it, and append EVERY exception raised on the way (an interrupt or an injected exception) to
-    the list `raised`, in order, raising none itself. Each descriptor is taken out of the list BEFORE its
+    the list `raised`, in order, raising none itself. Each close is `close(fd)` when given, else the quiet
+    _journal._close_fd_quietly; a `close` that propagates its close error (store._close_fd_exc_safe, called
+    from this frame, where no exception is ever in flight for its frame test) records that error too. Each descriptor is taken out of the list BEFORE its
     one close, so a later pass over the same list (an outer finally) never closes a number again: an
     exception raised between the two can at worst leave that one descriptor open until the process exits
     (a disclosed residual, module docstring), never closed twice (a second close can shut another
@@ -1376,7 +1382,11 @@ def _close_held_into(fds, raised):
     while fds:
         try:
             item = fds.pop()
-            _journal._close_fd_quietly(item[1] if isinstance(item, tuple) else item)
+            fd = item[1] if isinstance(item, tuple) else item
+            if close is None:
+                _journal._close_fd_quietly(fd)
+            else:
+                close(fd)
         except BaseException as exc:    # noqa: BLE001  keep closing; the caller reports every one
             raised.append(exc)
 
@@ -1797,10 +1807,14 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             # propagates, each with every close-out exception named beside it. An interrupt at a
             # close-out's own loop boundary, or between these calls, can still leave what was not reached
             # open and propagate in place of that outcome (the disclosed residual, module docstring).
-            # mine_held: any still held, a stay, a retained lock, or no release reached
+            # mine_held: any still held, a stay, a retained lock, or no release reached. anchors close
+            # through store._close_fd_exc_safe (#377), so a close error there is RECORDED, never
+            # swallowed: a run with no exception in flight still raises it (a commit as the cause of its
+            # AdoptCommittedLockError), and an exception or refusal in flight stays the outcome, the
+            # close error named beside it.
             _close_held_into(held_components, closeout)
             _close_held_into(mine_held, closeout)
-            _close_held_into(anchors, closeout)
+            _close_held_into(anchors, closeout, store._close_fd_exc_safe)
         closed_said = _close_out_said(closeout)
         if teardown is not None:
             if closed_said:
@@ -3822,11 +3836,11 @@ def _self_test_checks():
             """One transaction over `compose` whose final close-out is injected at the first close of each
             list named in `targets`: (exception, popped descriptors, descriptors closed after the first
             injection, descriptors leaked)."""
-            real_quiet = _journal._close_fd_quietly
+            real_quiet, real_exc_safe = _journal._close_fd_quietly, store._close_fd_exc_safe
             armed, popped, after = list(targets), [], []
 
-            def faulting_quiet(fd):
-                caller = sys._getframe(1)
+            def faulting(real, fd):
+                caller = sys._getframe(2)
                 if caller.f_code is held_code:
                     fds, up = caller.f_locals.get("fds"), caller.f_back
                     while up is not None and up.f_code is not txn_code and up.f_code.co_name.startswith(
@@ -3840,11 +3854,14 @@ def _self_test_checks():
                                 raise _InjectedCloseFault(list_name)
                         if popped:
                             after.append(fd)
-                return real_quiet(fd)
+                return real(fd)
             raised = None
             baseline = _fds_open()
             try:
-                with mock.patch.object(_journal, "_close_fd_quietly", faulting_quiet):
+                # every close the close-out makes: the quiet close for the held lists, the #377 close for
+                # anchors
+                with mock.patch.object(_journal, "_close_fd_quietly", lambda fd: faulting(real_quiet, fd)), \
+                        mock.patch.object(store, "_close_fd_exc_safe", lambda fd: faulting(real_exc_safe, fd)):
                     try:
                         run_adopt_transaction(root, rid, compose)
                     except (AdoptApplyError, _InjectedCloseFault, KeyboardInterrupt) as exc:

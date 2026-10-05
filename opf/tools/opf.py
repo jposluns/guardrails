@@ -15401,7 +15401,7 @@ def _close_exc_safe_vectors_self_test():
     sees no further os.close and no os.fstat. A run whose reuse setup failed (the unrelated file never
     reached the number) is red by REUSE, never a pass. Five flips then re-run the vectors and must turn
     exactly their own vectors red, each by that vector's own assertion: MASK (every close helper always
-    propagating) the body vectors; SWALLOW (always quiet) the normal and caller vectors; CALLER-FRAME
+    propagating, the adoption transaction's record-and-report close-out included) the body vectors; SWALLOW (always quiet) the normal and caller vectors; CALLER-FRAME
     (#377 fix 1's any-exception test in place of the calling-frame test, in both helpers, the ExitStack
     callback and the descriptor stack's close) the caller vectors; RECLOSE (the pre-P1 fstat-then-reclose
     recovery put back in #377's helpers, in _journal's _close_fd_quietly and _close_fd_propagating, and in
@@ -15461,6 +15461,16 @@ def _close_exc_safe_vectors_self_test():
             os.close(fd)
         if not quiet:
             raise first
+
+    def propagating_close_out(fds, raised, close=None):
+        """MASK at the adoption transaction's final close-out (_opf_adopt_apply._close_held_into): its
+        record-and-report undone, each held descriptor closed propagating, the first close error raised at
+        once in place of the run's own outcome. That close-out never lets a close error replace the
+        outcome, whatever helper it closes through, so masking the helpers alone cannot redden its body
+        vectors; this is the mask that can."""
+        while fds:
+            item = fds.pop()
+            propagating(item[1] if isinstance(item, tuple) else item)
 
     def reclose_exc_safe(fd):
         tb = sys.exc_info()[2]
@@ -16066,7 +16076,8 @@ def _close_exc_safe_vectors_self_test():
         ("MASK", ((_opf_store, "_close_fd_exc_safe", propagating),
                   (check_opf_prompt_pack, "_close_fd_exc_safe", propagating),
                   (_opf_store, "_close_fd_on_exit", lambda fd, *exc: propagating(fd)),
-                  (journal, "_close_fd_quietly", propagating))),
+                  (journal, "_close_fd_quietly", propagating),
+                  (_opf_adopt_apply, "_close_held_into", propagating_close_out))),
         ("SWALLOW", ((_opf_store, "_close_fd_exc_safe", quietly),
                      (check_opf_prompt_pack, "_close_fd_exc_safe", quietly),
                      (_opf_store, "_close_fd_on_exit", lambda fd, *exc: quietly(fd)))),
