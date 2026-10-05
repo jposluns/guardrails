@@ -962,8 +962,9 @@ conformance claim (checklist item 19) until the maintainer rules.
     This prompt builds no adoption of pre-existing files (section 14), no migration of an existing
     release pipeline (section 14.3), no import writer (section 8.8, `import --batch`; section 14.1,
     post-adoption import), no relocation (sections 5.4 to 5.6), no `opf sync` (section 5.7), no
-    schema upgrade other than the upgrades to 1.3.0 of step 8 (section 9.2) and no module (section
-    8.5). These texts bear on the ruling: section 16.1 defines an implementation as "a tool or tool
+    schema upgrade other than those of step 8 (section 9.2; the upgrades to 1.3.0 and the staged
+    upgrade to 1.2.0 of open point 21) and no module (section 8.5). These texts bear on the ruling:
+    section 16.1 defines an implementation as "a tool or tool
     suite offered to create, write, or validate OPF stores", and says that an upgrade-capable
     implementation "meets every section 9.2 requirement for each earlier base version and
     generation"; section 4.2 says the 1.3.0 target contract does "not claim that the reference
@@ -1050,22 +1051,25 @@ Build the primitives every later step relies on.
   - Unreadable: the file exists but cannot be read. Cannot-evaluate.
   - Malformed: the file does not parse; lacks the release identity, the `spec_version`, the homes
     generation or the worklog storage generation; carries any other key; or gives a value of the
-    wrong form or a class that is neither `upgrade-capable` nor `fresh-only`. An absent file
-    declares none of these fields and is malformed. Cannot-evaluate.
+    wrong form or a class that is neither `upgrade-capable` nor `fresh-only`. An absent file is
+    malformed: section 16.1 requires the declaration to carry the release identity, the class, the
+    `spec_version` and the generations, and an absent file carries none of them. The specification
+    does not yet name the absent case, so this is the prompt's reading. Cannot-evaluate.
   - Contradictory: a value disagrees with what the running release is and implements, that is, a
-    release identity other than the running release's own, a class other than `upgrade-capable`, a
-    `spec_version` other than the validator's ceiling (`1.3.0`), or a homes or worklog storage
-    generation other than 1. Compare the declared release identity with the identity the release
-    carries apart from the file, such as the version its build embeds in the program, never with a
-    value read from the declaration file itself: a declaration copied from another release with
-    the same class, version and generations is contradictory. Cannot-evaluate.
+    release identity other than the running release's own, a class key whose value is other than
+    `upgrade-capable`, a `spec_version` other than the validator's ceiling (`1.3.0`), or a homes or
+    worklog storage generation other than 1. Compare the declared release identity with the identity
+    the release carries apart from the file, such as the version its build embeds in the program,
+    never with a value read from the declaration file itself: a declaration copied from another
+    release with the same class, version and generations is contradictory. Cannot-evaluate.
   - No class: a file that is not unreadable, malformed or contradictory but has no class key. As
     section 16.1 rules, your implementation is then treated as upgrade-capable and every upgrade
     requirement binds it, so the check passes with the class `upgrade-capable`; this case is not
-    cannot-evaluate. A release that ships such a file still does not declare its class, as the
-    first rule requires, so checklist item 20 is not passed for it. An absent file also declares
-    no class; its class is treated the same way, and it yields cannot-evaluate only because it is
-    malformed. Ask the maintainer to confirm that reading of an absent file.
+    cannot-evaluate. A release that ships such a file still does not declare its class, as the first
+    rule requires, so checklist item 20 is not passed for it. The no-class rule does not reach an
+    absent file, because that file declares nothing at all and so lacks the release identity,
+    `spec_version` and generations that the first rule also requires, which makes it malformed under
+    the third rule rather than a declaration that omits only its class.
   - Valid: every field is present, well formed and in agreement with the running release. The
     check passes.
 
@@ -2957,7 +2961,8 @@ maintainer's ruling on an open point, report the ruling with it.
 Import and the imported-series writer (section 8.8, `import --batch`; section 14.1, post-adoption
 import), adoption of pre-existing files (section 14), migrating an existing release pipeline
 (section 14.3), store relocation (sections 5.4 to 5.6) and `opf sync` (section 5.7), schema upgrades
-other than the upgrades to 1.3.0 of step 8 (section 9.2), the homes-2 generation and its homes
+other than those of step 8 (section 9.2; the upgrades to 1.3.0 and the staged upgrade to 1.2.0 of
+open point 21), the homes-2 generation and its homes
 migration (sections 4.2 and 9.2), the modules (section 8.5) beyond what the step 8 upgrade fixtures
 need, profiles (section 9.1), and the fresh-only implementation class with its admission check
 (section 16.1). If your project needs any of these, read those sections at the same pinned commit
