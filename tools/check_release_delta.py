@@ -827,8 +827,10 @@ def _register_lifecycle(register):
 
 def clause_text_leg(prev_inv, head_inv, register, rows, head_version):
     """6.5 CLAUSE TEXT and 7.3 ID LIFECYCLE. Diff canonical text per clause-id; classify a same-id text
-    change via the public dispositions. Span or source-digest movement without a text change is not a
-    delta. For an ADD or a REMOVAL the accepted disposition is the id-history ROW (6.5 accepts exactly one
+    change via the public dispositions. A same-id LAYER change (core to detail or back; a row with no layer
+    key, from an inventory older than the field, reads as core) is a delta classified the same way, by
+    the same dispositions, and one disposition covers a clause whose text and layer both changed. Span or
+    source-digest movement without a text or layer change is not a delta. For an ADD or a REMOVAL the accepted disposition is the id-history ROW (6.5 accepts exactly one
     of: an id-history row; or a same-id behaviour-neutral/strengthened/default-correction disposition), so
     this leg REQUIRES that row, at THIS release and unique (VC-4 QA #3): an added id needs a born row
     dated head_version; a removed id needs exactly one retirement row dated head_version. Corpus-ids (the
@@ -837,6 +839,8 @@ def clause_text_leg(prev_inv, head_inv, register, rows, head_version):
     events, findings = [], []
     prev = {r["clause-id"]: r.get("canonical-text", "") for r in prev_inv if isinstance(r, dict)}
     head = {r["clause-id"]: r.get("canonical-text", "") for r in head_inv if isinstance(r, dict)}
+    prev_layer = {r["clause-id"]: r.get("layer", "core") for r in prev_inv if isinstance(r, dict)}
+    head_layer = {r["clause-id"]: r.get("layer", "core") for r in head_inv if isinstance(r, dict)}
     born_at, retire_count, retire_release = _register_lifecycle(register)
 
     def _require_born(ident, kind_label):
@@ -863,7 +867,9 @@ def clause_text_leg(prev_inv, head_inv, register, rows, head_version):
         events.append(DeltaEvent("clause", cid, "added", MINOR))
         _require_born(cid, "clause-id")
     for cid in sorted(prev.keys() & head.keys()):
-        if prev[cid].encode("utf-8") == head[cid].encode("utf-8"):
+        text_same = prev[cid].encode("utf-8") == head[cid].encode("utf-8")
+        layer_same = prev_layer[cid] == head_layer[cid]
+        if text_same and layer_same:
             continue
         for kind, floor in (("behaviour-neutral", PATCH), ("strengthened", MINOR),
                             ("default-correction", MINOR)):
@@ -871,8 +877,13 @@ def clause_text_leg(prev_inv, head_inv, register, rows, head_version):
                 events.append(DeltaEvent("clause", cid, kind, floor, kind))
                 break
         else:
-            events.append(DeltaEvent("clause", cid, "undispositioned-text-change", MAJOR,
-                                     detail="no public disposition; MAJOR floor (6.4 fail-closed)"))
+            if text_same:
+                events.append(DeltaEvent("clause", cid, "undispositioned-layer-change", MAJOR,
+                                         detail="layer {} -> {}; no public disposition; MAJOR floor (6.4 "
+                                         "fail-closed)".format(prev_layer[cid], head_layer[cid])))
+            else:
+                events.append(DeltaEvent("clause", cid, "undispositioned-text-change", MAJOR,
+                                         detail="no public disposition; MAJOR floor (6.4 fail-closed)"))
     prev_corpus = {c.partition(".")[0] for c in prev}
     head_corpus = {c.partition(".")[0] for c in head}
     for corp in sorted(prev_corpus - head_corpus):
@@ -1788,7 +1799,7 @@ def _disposition_findings(events, rows, head_version):
     them, so a mis-dated row for a current change is caught."""
     findings = []
     dispositioned_clause_changes = ("behaviour-neutral", "strengthened", "default-correction",
-                                    "undispositioned-text-change")
+                                    "undispositioned-text-change", "undispositioned-layer-change")
     clause_subjects = set(e.subject for e in events
                           if e.surface == "clause" and e.change in dispositioned_clause_changes)
     ownership_subjects = set(e.subject for e in events
@@ -5000,6 +5011,49 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     ev, fs = clause_text_leg(_inv(("c.1", "old")), _inv(("c.1", "new")), _reg(), _rows(), "1.1.0")
     if fs or _floors(ev) != [("clause", "c.1", "undispositioned-text-change", MAJOR)]:
         failures.append("clause undispositioned: expected MAJOR floor")
+    # same-id LAYER change with the text unchanged: a delta exactly like a text change. No disposition is the
+    # undispositioned MAJOR floor; a behaviour-neutral row dispositions it (PATCH); an older inventory row
+    # with no layer key reads as core, so core on head is no delta. Red on revert: the leg loaded through
+    # importlib with the layer comparison removed must report no event for the undispositioned move.
+    def _linv(*triples):
+        return [dict([("clause-id", cid), ("canonical-text", text)] + ([("layer", lay)] if lay else []))
+                for cid, text, lay in triples]
+    ev, fs = clause_text_leg(_linv(("c.1", "same", None)), _linv(("c.1", "same", "detail")), _reg(), _rows(),
+                             "1.1.0")
+    if fs or _floors(ev) != [("clause", "c.1", "undispositioned-layer-change", MAJOR)]:
+        failures.append("clause layer change undispositioned: expected the MAJOR floor")
+    ev, fs = clause_text_leg(_linv(("c.1", "same", "core")), _linv(("c.1", "same", "detail")), _reg(),
+                             _rows(("behaviour-neutral", "c.1", "1.1.0")), "1.1.0")
+    if fs or _floors(ev) != [("clause", "c.1", "behaviour-neutral", PATCH)]:
+        failures.append("clause layer change behaviour-neutral: expected PATCH")
+    ev, fs = clause_text_leg(_linv(("c.1", "same", None)), _linv(("c.1", "same", "core")), _reg(), _rows(),
+                             "1.1.0")
+    if fs or ev:
+        failures.append("clause layer missing then core: expected no delta (a missing layer reads as core)")
+    _rd_source = Path(__file__).read_text(encoding="utf-8")
+    _rd_prod, _rd_sep, _rd_tests = _rd_source.partition("\n# --- self-test ")
+    _rd_old = "layer_same = prev_layer[cid] == head_layer[cid]"
+    if not _rd_sep or _rd_prod.count(_rd_old) != 1:
+        failures.append("revert layer-delta: the fixed text must occur exactly once in the production code")
+    else:
+        import importlib.util
+        import tempfile
+        with tempfile.TemporaryDirectory() as _rd_tmp:
+            _rd_path = Path(_rd_tmp) / "check_release_delta_reverted_layer_delta.py"
+            _rd_path.write_text(_rd_prod.replace(_rd_old, "layer_same = True", 1) + _rd_sep + _rd_tests,
+                                encoding="utf-8")
+            _rd_saved = list(sys.path)
+            try:
+                _rd_spec = importlib.util.spec_from_file_location(_rd_path.stem, _rd_path)
+                _rd_mutant = importlib.util.module_from_spec(_rd_spec)
+                _rd_spec.loader.exec_module(_rd_mutant)
+            finally:
+                sys.path[:] = _rd_saved
+            ev, fs = _rd_mutant.clause_text_leg(_linv(("c.1", "same", "core")), _linv(("c.1", "same", "detail")),
+                                                _reg(), _rows(), "1.1.0")
+            if ev:
+                failures.append("revert layer-delta: with the layer comparison removed, the core-to-detail "
+                                "move still produced an event; the self-test does not exercise the guard")
 
     # --- PATH LAYOUT leg ---------------------------------------------------------------------------
     def _man(paths):
@@ -5353,6 +5407,43 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
         _release_schema.strict_clause_inventory(_clause_inv("aiqt/core/rules/x.md"), "unit clauses")
     except _release_schema.SchemaError as exc:
         failures.append("strict_clause_inventory wrongly rejected a clean source-path ({})".format(exc))
+    # The clause layer field: core and detail are accepted, an unknown or non-string value is refused. Red on
+    # revert: _release_schema loaded through importlib with the layer value check removed accepts each.
+    def _layer_inv(layer):
+        inv = _clause_inv("aiqt/core/rules/x.md")
+        inv["clause"][0]["layer"] = layer
+        return inv
+    _bad_layers = ("middle", "Core", "", 1, True, ["core"])
+    for _good in ("core", "detail"):
+        try:
+            _release_schema.strict_clause_inventory(_layer_inv(_good), "unit clauses")
+        except _release_schema.SchemaError as exc:
+            failures.append("strict_clause_inventory wrongly rejected layer {!r} ({})".format(_good, exc))
+    for _bad in _bad_layers:
+        try:
+            _release_schema.strict_clause_inventory(_layer_inv(_bad), "unit clauses")
+            failures.append("strict_clause_inventory accepted a bad layer {!r}".format(_bad))
+        except _release_schema.SchemaError:
+            pass
+    _rs_source = Path(_release_schema.__file__).read_text(encoding="utf-8")
+    _rs_old = 'if "layer" in row and (not isinstance(row["layer"], str) or row["layer"] not in CLAUSE_LAYERS):'
+    if _rs_source.count(_rs_old) != 1:
+        failures.append("revert layer-schema: the fixed text must occur exactly once in _release_schema.py")
+    else:
+        import importlib.util
+        import tempfile
+        with tempfile.TemporaryDirectory() as _rs_tmp:
+            _rs_path = Path(_rs_tmp) / "_release_schema_reverted_layer.py"
+            _rs_path.write_text(_rs_source.replace(_rs_old, "if False:", 1), encoding="utf-8")
+            _rs_spec = importlib.util.spec_from_file_location(_rs_path.stem, _rs_path)
+            _rs_mutant = importlib.util.module_from_spec(_rs_spec)
+            _rs_spec.loader.exec_module(_rs_mutant)
+            for _bad in _bad_layers:
+                try:
+                    _rs_mutant.strict_clause_inventory(_layer_inv(_bad), "unit clauses")
+                except _rs_mutant.SchemaError:
+                    failures.append("revert layer-schema: with the layer check removed, layer {!r} is still "
+                                    "refused; the self-test does not exercise the guard".format(_bad))
 
     # #3 captured-source is a DETERMINISTIC http(s) URL: a raw space in the host (the finding's escape), a
     # backslash, a non-http scheme, an empty host, and an out-of-range port are each rejected; real

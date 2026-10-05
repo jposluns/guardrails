@@ -259,6 +259,7 @@ import gen_gensrc  # noqa: E402  build_registry: the in-memory gensrc recomputat
 import gen_manifest  # noqa: E402  load_ownership: the [checkout].binary roster (collector 3 skip set)
 import gen_enforceability  # noqa: E402  build_ledger: recompute the residual map for the source-side residue-cleanliness leg
 import gen_enforcement_register  # noqa: E402  reuse ledger_index + load_roadmap to enumerate page-bound source strings
+import gen_rules  # noqa: E402  BodyGrammarError: a rule source the body grammar refuses is a flagged finding
 HTML_REL = gen_enforcement_register.HTML_REL  # single-sourced register page path (site/enforcement.html)
 # The origin the register page is served from, derived from the generator's own canonical page URL
 # (guard-input-soundness: read from the authoritative source, never a second hardcoded literal). Used to
@@ -1150,6 +1151,24 @@ def _page_bound_sources(root):
     each pending rule's roadmap description. gen_enforcement_register raises ValueError/OSError on a
     malformed or unreadable input, which the caller maps to a fail-closed exit 2."""
     return gen_enforcement_register.page_content_strings(root)
+
+
+def _page_bound_findings(root):
+    """The source-side leg's findings for the tree at root: _scan_page_bound_sources over _page_bound_sources.
+    A rule source the BODY GRAMMAR refuses (gen_rules.BodyGrammarError, raised while the page-bound strings
+    are enumerated, e.g. a homoglyph or zero-width character in a rule title) is a FAIL-CLOSED FINDING here,
+    naming the channel, the file, the line and the grammar message: never an unhandled exception and never
+    a silent pass. The refusal stops the enumeration, so the other channels are not scanned in that run;
+    the finding alone already fails the scan. Any other ValueError/OSError still propagates (main maps it
+    to a fail-closed exit 2)."""
+    try:
+        sources = _page_bound_sources(root)
+    except gen_rules.BodyGrammarError as exc:
+        where = exc.source if exc.line is None else "{}: line {}".format(exc.source, exc.line)
+        message = str(exc).encode("ascii", "backslashreplace").decode("ascii")
+        return ["{} source [{}]: refused by the rule-body grammar, fail-closed ({})".format(
+            exc.channel, where, message)]
+    return _scan_page_bound_sources(sources)
 
 
 # The Markdown render location each page-bound channel is EXPECTED to occupy, keyed by the field's OWN row
@@ -2314,8 +2333,9 @@ def main():
         # Source-side cleanliness leg: the plain marketing scan plus the printable-plus-ASCII-whitespace
         # allowlist reject, over EVERY page-bound verbatim source string the register renders (each mechanism
         # residue and reference id, and each pending description), so none can launder an overclaim onto the
-        # page. build_ledger / load_roadmap raise on a bad input -> fail-closed exit 2.
-        findings += _scan_page_bound_sources(_page_bound_sources(root))
+        # page. A rule source the body grammar refuses is a flagged finding (_page_bound_findings); any
+        # other bad input to build_ledger / load_roadmap raises -> fail-closed exit 2.
+        findings += _page_bound_findings(root)
         # Static asset-closure leg: the register page's inline <style>/<script> bodies and the same-origin
         # CSS/JS it links, marketing-scanned (plus CSS content: string extraction), so marketing injected
         # through page chrome is caught. An unreadable linked local asset is fail-closed (_FailClosed).
@@ -3355,7 +3375,7 @@ def _page_bound_source_self_test():
                 return []
             p.write_text(text.replace(needle, replacement, 1), encoding="utf-8")
             try:
-                return _scan_page_bound_sources(_page_bound_sources(sub))
+                return _page_bound_findings(sub)
             except (ValueError, OSError) as exc:
                 failures.append("INJECT {}: scan raised instead of flagging ({})".format(name, exc))
                 return []
@@ -3377,6 +3397,43 @@ def _page_bound_source_self_test():
                 if not has(fs, expect):
                     failures.append("COMPLETENESS: a {} in the {} channel source must be flagged (FIX 1)"
                                     .format(tag, label))
+                # The body grammar refuses a non-ASCII title, so the title cases are flagged as a grammar
+                # refusal that must name the file, the line and the grammar message.
+                if label == "title" and not has(fs, "title source [rule-aa.md: line "):
+                    failures.append("COMPLETENESS: a {} in the title must be flagged naming rule-aa.md and its "
+                                    "line".format(tag))
+                if label == "title" and not has(fs, "is outside the body grammar (the title text is printable"):
+                    failures.append("COMPLETENESS: a {} in the title must be flagged with the grammar message"
+                                    .format(tag))
+        # (n4b) the other grammar refusals of a rule source are flagged with their OWN channel label, file,
+        # line and grammar message, not only the title cases above: a refused body line, a duplicate split,
+        # a split with no blank line above it, a body with no title line (no line to name), and a line that
+        # reads as Detail but is not the split line, in the body and in the title. MUTATION: labelling
+        # every BodyGrammarError "title" fails the four body cases; formatting the no-title finding with a
+        # line ("line None") fails the no-title case; forcing the reads-as-Detail raise's channel to
+        # "title" fails body-reads-detail, and forcing it to "body" fails title-reads-detail.
+        body = "A rule for the enforcement-register self-test corpus."
+        grammar_cases = [
+            ("body-refused", body, "> Refused body", "body source [rule-aa.md: line 11]: ",
+             "rule-aa.md: line 11: '> Refused body' is outside the body grammar (a prose line starts"),
+            ("body-dup-split", body, body + "\n\n## Detail\n\nOne.\n\n## Detail\n\nTwo.",
+             "body source [rule-aa.md: line 17]: ",
+             "rule-aa.md: more than one '## Detail' line (lines 13 and 17)"),
+            ("body-no-blank", body, body + "\n## Detail\n\nMore.", "body source [rule-aa.md: line 12]: ",
+             "rule-aa.md: line 12: the '## Detail' split needs a blank line directly above it"),
+            ("no-title", "# Title of ruleaa\n\n" + body + "\n", "", "title source [rule-aa.md]: ",
+             "rule-aa.md: the body has no title line ('# ' and its text)"),
+            ("body-reads-detail", body, body + "\n\n**Details**", "body source [rule-aa.md: line 13]: ",
+             "rule-aa.md: line 13: '**Details**' reads as Detail but is not the split line '## Detail'"),
+            ("title-reads-detail", "# Title of ruleaa", "# Details", "title source [rule-aa.md: line 9]: ",
+             "rule-aa.md: line 9: '# Details' reads as Detail but is not the split line '## Detail'"),
+        ]
+        for name, needle, replacement, where, message in grammar_cases:
+            fs = inject_and_scan(name, ".aiqt/core/rules/rule-aa.md", needle, replacement)
+            if not has(fs, where + "refused by the rule-body grammar, fail-closed ("):
+                failures.append("COMPLETENESS: the {} grammar refusal must be flagged as {!r}".format(name, where))
+            if not has(fs, message):
+                failures.append("COMPLETENESS: the {} grammar refusal must carry the grammar message".format(name))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return failures

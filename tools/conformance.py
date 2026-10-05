@@ -39,7 +39,7 @@ from pathlib import Path
 # Sibling-import idiom, identical to check_rule_placement.py / check_mappings.py: this file lives in
 # tools/ next to the modules it reuses.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEYS
+import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEYS, _ADOPTER_MODE_CASES
 import gen_agents           # noqa: E402  render, sort_key, body_of
 import gen_adapters         # noqa: E402  ADAPTERS, render (GEMINI.md / copilot-instructions.md)
 import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cursor .mdc tree)
@@ -1187,6 +1187,20 @@ def self_test_main():
         if status_of(out, "C3") != NA:
             failures.append("no-.claude/rules tree expected C3 NOT APPLICABLE, not a hollow PASS:\n{}".format(out))
 
+        # 7b. An adopter rule in each ADOPTER MODE shape (gen_rules FRONTMATTER: CRLF line endings, a
+        #     comment line at column 0, indented or holding a tab) passes C3, which reads it through
+        #     check_rule_placement.check_drift; the pack's strict reader refuses each, so this fails if
+        #     check_drift stops reading in adopter mode.
+        for case, content, _strict_text in gen_rules._ADOPTER_MODE_CASES:
+            adopted = tmp / case
+            rule = adopted / ".claude" / "rules" / gen_rules._ADOPTER_MODE_REL
+            rule.parent.mkdir(parents=True)
+            rule.write_bytes(content.encode("utf-8"))
+            code, out = run_capture(adopted)
+            if status_of(out, "C3") != PASS:
+                failures.append("{} tree expected C3 PASS (an adopter rule in ADOPTER MODE):\n{}"
+                                .format(case, out))
+
         # 8. A malformed manifest with NO corpus -> exit 2, C4 MALFORMED. It must fail closed even though
         #    there is no corpus to cite it (the manifest is parsed before the absent-corpus short-circuit).
         badmanifest = tmp / "badmanifest"
@@ -1400,7 +1414,8 @@ def self_test_main():
           "empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
           "asserted both tight and broad fail; the hooks plugin surface (C5) verifies when present, "
           "degrades to NOT APPLICABLE when the opt-in plugin is absent, and fails on drift, a hooks "
-          "orphan, or an orphaned surface with no source; absent input (corpus, "
+          "orphan, or an orphaned surface with no source; an adopter rule with CRLF line endings or a "
+          "frontmatter comment line passes C3; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
           "(standards, core rules, generated families, the .aiqt/.claude/.github parents, and the plugin "
           "hooks subtree), and a bad --root fail closed" + skip_note)
