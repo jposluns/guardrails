@@ -24,7 +24,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
-import argparse
 import hashlib
 import re
 import tomllib
@@ -1244,13 +1243,13 @@ def self_test(vectors_only=False):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--vectors-only", action="store_true", help=argparse.SUPPRESS)
-    args = parser.parse_args(argv)
-    if not args.self_test:
-        parser.error("--self-test is required; use the library for parsing")
-    return self_test(vectors_only=args.vectors_only)
+    # Exact argument lists from a closed set, never a parser: no prefix (`--self-t`), alias or extra token
+    # selects the self-test. `--vectors-only` is the variant this module's own runner fixture forwards.
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args not in (["--self-test"], ["--self-test", "--vectors-only"]):
+        print("usage: _opf_pack_manifest.py --self-test (use the library for parsing)", file=sys.stderr)
+        return 2
+    return self_test(vectors_only=args == ["--self-test", "--vectors-only"])
 
 
 if __name__ == "__main__":

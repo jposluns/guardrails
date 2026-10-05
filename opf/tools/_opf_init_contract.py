@@ -771,7 +771,7 @@ def _run_self_test():
 
 
 if __name__ == "__main__":
-    if "--self-test" in sys.argv:
+    if sys.argv[1:] == ["--self-test"]:
         _run_self_test()
     sys.stderr.write("usage: python3 -I -B _opf_init_contract.py --self-test\n")
     sys.exit(2)

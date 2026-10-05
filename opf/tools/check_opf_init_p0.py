@@ -18,7 +18,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
-import argparse
 import copy
 import hashlib
 import subprocess
@@ -1003,23 +1002,32 @@ def runner_red_checks(expected):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--red-on-revert", action="store_true")
-    parser.add_argument("--vectors-only", action="store_true")
-    args = parser.parse_args()
+    # The self-test runs only for an exact argument list: `--self-test`, `--self-test --red-on-revert` as the
+    # runners call it, or `--self-test --vectors-only` as this module's runner fixture forwards it. Any other
+    # list exits 2 (no argparse, so no prefix abbreviation such as `--self-t`).
+    if sys.argv[1:] == ["--self-test"]:
+        return _self_test(reversals=False, vectors=False)
+    if sys.argv[1:] == ["--self-test", "--red-on-revert"]:
+        return _self_test(reversals=True, vectors=False)
+    if sys.argv[1:] == ["--self-test", "--vectors-only"]:
+        return _self_test(reversals=False, vectors=True)
+    print("usage: check_opf_init_p0.py --self-test [--red-on-revert | --vectors-only]", file=sys.stderr)
+    return 2
+
+
+def _self_test(*, reversals, vectors):
     try:
         f = fixtures()
         ids = run_vectors(p0, f)
-        if not args.vectors_only:
-            if args.red_on_revert:
+        if not vectors:
+            if reversals:
                 red_on_revert(Path(p0.__file__).read_text(encoding="utf-8"), f)
             runner_check(ids)
             print("PASS runner/declared-test-executes")
             for route, text in runner_routes("runner/declared-test-executes"):
                 runner_check(ids, text)
                 print("PASS runner/declared-test-executes/route-" + route)
-            if args.red_on_revert:
+            if reversals:
                 runner = Path(__file__).resolve().parent / "run_all_checks.sh"
                 text = runner.read_text(encoding="utf-8")
                 lines = [line for line in text.splitlines(keepends=True)

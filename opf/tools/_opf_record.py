@@ -3783,4 +3783,4 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
     print("usage: _opf_record.py --self-test (the verb is `opf record`)", file=sys.stderr)
-    sys.exit(EXIT_MALFORMED)
+    sys.exit(2)
