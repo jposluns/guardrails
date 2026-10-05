@@ -15401,7 +15401,8 @@ def _close_exc_safe_vectors_self_test():
     sees no further os.close and no os.fstat. A run whose reuse setup failed (the unrelated file never
     reached the number) is red by REUSE, never a pass. Five flips then re-run the vectors and must turn
     exactly their own vectors red, each by that vector's own assertion: MASK (every close helper always
-    propagating, the adoption transaction's record-and-report close-out included) the body vectors; SWALLOW (always quiet) the normal and caller vectors; CALLER-FRAME
+    propagating, the adoption transaction's record-and-report close-out included) the body vectors;
+    SWALLOW (always quiet) the normal and caller vectors; CALLER-FRAME
     (#377 fix 1's any-exception test in place of the calling-frame test, in both helpers, the ExitStack
     callback and the descriptor stack's close) the caller vectors; RECLOSE (the pre-P1 fstat-then-reclose
     recovery put back in #377's helpers, in _journal's _close_fd_quietly and _close_fd_propagating, and in

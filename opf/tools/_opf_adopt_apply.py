@@ -137,7 +137,7 @@ its place, so only a descriptor popped and then interrupted before its close sta
 asynchronous interrupt landing at _close_held_into's own loop boundary or in its handler, outside the
 per-descriptor try (what that loop has not reached stays open), or between the final close-out's calls
 or in the outcome report after them (what was not reached stays open, and that interrupt then
-propagates in place of the run's own outcome); or inside a
+propagates in place of the run's own outcome, which is then not named beside it); or inside a
 _journal helper (acquire_lock's lock descriptor among them, and the rest of a _journal close-out loop,
 in _open_parent, ensure_journal_dirs, _open_dir_contained or _journal_txn_dirs, once one of its closes
 raises anything but OSError).
@@ -1372,8 +1372,11 @@ def _close_held_into(fds, raised, close=None):
     """Close every descriptor a caller HOLDS in the list `fds` (each a bare fd or a (rel, fd) pair),
     emptying it, and append EVERY exception raised on the way (an interrupt or an injected exception) to
     the list `raised`, in order, raising none itself. Each close is `close(fd)` when given, else the quiet
-    _journal._close_fd_quietly; a `close` that propagates its close error (store._close_fd_exc_safe, called
-    from this frame, where no exception is ever in flight for its frame test) records that error too. Each descriptor is taken out of the list BEFORE its
+    _journal._close_fd_quietly; a `close` that propagates its close error records that error too:
+    store._close_fd_exc_safe, called from this frame, keeps a close quiet only for an exception whose
+    traceback head is THIS frame, and an exception still unwinding the caller's frame (a finally of
+    run_adopt_transaction) never has this frame as its head, so its close error is raised here and
+    recorded, never swallowed. Each descriptor is taken out of the list BEFORE its
     one close, so a later pass over the same list (an outer finally) never closes a number again: an
     exception raised between the two can at worst leave that one descriptor open until the process exits
     (a disclosed residual, module docstring), never closed twice (a second close can shut another
@@ -1411,14 +1414,29 @@ def _close_held(fds):
 
 
 def _close_out_said(raised):
-    """The clause naming EVERY exception the transaction's final close-out raised (`raised`, in order), or
-    None when it raised none. It is reported BESIDE the run's own outcome, never in its place."""
+    """The clause naming EVERY exception the transaction's close-outs recorded (`raised`, in order: the
+    early lock close's, then the final close-out's), or None when they recorded none. It is reported
+    BESIDE the run's own outcome, never in its place. Each exception is named with what it says of its
+    descriptor: an OSError is a close's own error, and that close has still released the descriptor
+    (man 2 close); any other exception was raised between a descriptor's pop and the end of its close,
+    so that one descriptor may stay open until the process exits."""
     if not raised:
         return None
-    return ("the run's final descriptor close-out RAISED {} after that outcome was fixed (a descriptor it "
-            "had popped may stay open until the process exits): {}".format(
-                "an exception" if len(raised) == 1 else "{} exceptions, in order".format(len(raised)),
-                "; then ".join(repr(exc) for exc in raised)))
+    return "the run's descriptor close-out RAISED {} beside that outcome, never in its place: {}".format(
+        "an exception" if len(raised) == 1 else "{} exceptions, in order".format(len(raised)),
+        "; then ".join("{!r} ({})".format(exc, "a close error: that close has still released its descriptor"
+                                          if isinstance(exc, OSError) else "the descriptor it had popped "
+                                          "may stay open until the process exits") for exc in raised))
+
+
+def _observation_raised_said(exc):
+    """The clause naming an exception the transaction's closing cleanup or observation raised (the closing
+    journal listing's own close-out included), reported BESIDE the run's own outcome, never in its place,
+    and in place of any claim about what the run left there: that observation did not finish."""
+    return ("the run's closing cleanup and observation of the adoption journal RAISED {!r} before it "
+            "finished, so what this run left there is not known (raised inside the closing listing's "
+            "close-out, it may leave the one descriptor that close-out had popped open until the process "
+            "exits)".format(exc))
 
 
 def _release_outcome(jr_fd, journal_root, mine):
@@ -1594,16 +1612,22 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     raised between a descriptor's pop and its close, can still leave a descriptor open until the process
     exits, here or inside a _journal helper, a disclosed residual (module docstring), so no leak-freedom
     under interrupt is claimed; the final close-out closes each list in turn and records every exception
-    it meets, so one such exception never abandons the descriptors after it, and none replaces the run's
-    own outcome: a commit still raises AdoptCommittedLockError (COMMITTED, its changes LANDED), a refusal
-    still refuses, and an exception still propagates as itself, each naming every close-out exception
-    beside it. A leftover only the
+    it meets, as the early lock close does, so one such exception never abandons the descriptors after
+    it, and none replaces the run's own outcome: a commit still raises AdoptCommittedLockError
+    (COMMITTED, its changes LANDED), a refusal still refuses, and an exception still propagates as
+    itself, each naming every close-out exception beside it. An exception the closing cleanup or
+    observation raises (the closing listing's own close-out included) is named the same way, beside the
+    outcome, and the refusal then claims nothing about what the run left. An interrupt (a BaseException
+    that is not an Exception) a close-out or that observation meets propagates as ITSELF, never wrapped
+    in an Exception, with the run's own outcome (its commit, refusal or exception) named in its note.
+    A leftover only the
     reconcile-first discipline clears is left to it rather than to hand removal, and one no sanctioned
     path clears is named as such. The lock release is read back by identity (the inode and content this
     run's acquire wrote, _lock_identity), never by process identity; at the end of a committed transaction
-    a release that leaves the lock or may not be durable, or a final close-out that raised, raises
-    AdoptCommittedLockError, whose changes LANDED. An interrupt (any BaseException but a refusal), one raised inside the release included,
-    propagates as itself, with the transaction state and the observed outcome attached as a note.
+    a release that leaves the lock or may not be durable, or a close-out that raised, raises
+    AdoptCommittedLockError, whose changes LANDED. An interrupt (any BaseException but a refusal), one
+    raised inside the release included, propagates as itself, with the transaction state and the
+    observed outcome attached as a note.
     Disclosed too: a concurrent run that
     prepared the journal but has not yet taken its lock can find the directory removed by that cleanup,
     and then refuses at the lock. A failure that may have left the transaction open RETAINS the lock (and
@@ -1627,6 +1651,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     mine_held = []          # the lock identity's descriptor, HELD until after the closing comparison
     anchors = []            # the product-root, then the journal descriptor: closed LAST, by the teardown
     failure = None
+    closeout = []           # every exception this run's close-outs record: named beside its outcome
     lock_state, lock_note = "untaken", None
     held = retain = done = entered = False
     try:
@@ -1739,16 +1764,19 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                     # can hand the lock's freed inode to a peer's lock and make that comparison read the
                     # peer's lock as this run's own. An interrupted read-back behind a release that did
                     # unlink can then hold a .nfsXXXX entry alive into the closing listing, which the
-                    # refusal names as a leftover: disclosed, never a misattribution.
+                    # refusal names as a leftover: disclosed, never a misattribution. This close-out
+                    # RECORDS every exception it meets in `closeout` and raises none, so one never
+                    # replaces the run's own outcome (a commit, a refusal, an interrupt): the reporting
+                    # below names it beside that outcome, as it does the final close-out's.
                     if lock_state in ("released", "unconfirmed"):
-                        _close_held(mine_held)
+                        _close_held_into(mine_held, closeout)
                 if interrupted is not None:
                     raise interrupted
     except BaseException as exc:
         failure = exc
         raise
     finally:
-        closeout, teardown = [], None
+        teardown = None
         try:
             observed = said = None      # inside the teardown-protected try from its first statement on
             ours = True
@@ -1792,7 +1820,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 unbound = _journal_unbound(jr_fd, jr_id, after)
                 ours = ours or bool(said) or unbound is not None
                 observed = said + ([unbound] if unbound else []) + delta
-        except BaseException as exc:    # noqa: BLE001  the observation failed: re-raised below, as before
+        except BaseException as exc:    # noqa: BLE001  the observation failed: named beside the outcome below
             teardown = exc
         finally:
             # every descriptor the run still holds is owned by one of these three LIVE lists:
@@ -1816,29 +1844,51 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             _close_held_into(mine_held, closeout)
             _close_held_into(anchors, closeout, store._close_fd_exc_safe)
         closed_said = _close_out_said(closeout)
+        if done:
+            phase_said = "the adoption transaction {} COMMITTED: its product-tree changes LANDED".format(txn)
+        elif entered:
+            phase_said = ("the adoption transaction {} was entered and is NOT confirmed committed or "
+                          "undone".format(txn))
+        else:
+            phase_said = "the adoption transaction {} did not open".format(txn)
+        seen_said = None
         if teardown is not None:
-            if closed_said:
-                teardown.add_note(closed_said)
-            raise teardown
+            # the closing cleanup or observation raised (the closing listing's own close-out included):
+            # never in place of the run's own outcome, which stands below with it named beside it, and
+            # what that observation did not finish is not claimed (no "nothing written")
+            seen_said = _observation_raised_said(teardown)
+            observed, ours = (said or []) + [seen_said], True
+        # an interrupt (a BaseException that is not an Exception) a close-out or the closing observation
+        # met propagates as ITSELF, never wrapped in an Exception nor dropped into a refusal's text; the
+        # run's own outcome (its commit, its refusal or its exception) is named beside it in its note
+        stop = None
+        if failure is None or isinstance(failure, Exception):
+            stop = next((exc for exc in closeout + [teardown]
+                         if exc is not None and not isinstance(exc, Exception)), None)
+        if stop is not None:
+            if failure is None:
+                stood = [phase_said] + [n for n in (lock_note, seen_said) if n]
+            elif isinstance(failure, AdoptApplyError):
+                stood = [phase_said, "the run's refusal stands beside this interrupt: "
+                         + _refusal_text(str(failure), observed, ours)]
+            else:
+                stood = [phase_said, "the run's own exception stands beside this interrupt: {!r}".format(
+                    failure)] + (observed or [])
+            stop.add_note("; ".join(stood + ([closed_said] if closed_said else [])) + " (fail-closed)")
+            raise stop
         if failure is not None and (not isinstance(failure, Exception) or failure is interrupted):
             # an interrupt still propagates as itself, with the transaction state and the outcome named
             if failure is interrupted or observed or closed_said:
-                if done:
-                    phase_said = "the adoption transaction {} COMMITTED: its product-tree changes LANDED".format(txn)
-                elif entered:
-                    phase_said = ("the adoption transaction {} was entered and is NOT confirmed committed or "
-                                  "undone".format(txn))
-                else:
-                    phase_said = "the adoption transaction {} did not open".format(txn)
                 lock_said = _lock_said(lock_state, lock_note)
                 failure.add_note("; ".join([phase_said] + ([] if lock_said in (observed or []) else [lock_said])
                                            + (observed or []) + ([closed_said] if closed_said else []))
                                  + " (fail-closed)")
         elif failure is None:
             # the transaction COMMITTED: that result stands, with a close-out exception named beside it
-            if lock_note or closed_said:
-                raise AdoptCommittedLockError(txn, "; ".join(n for n in (lock_note, closed_said) if n)) \
-                    from (closeout[0] if closeout else None)
+            noted = [n for n in (lock_note, closed_said, seen_said) if n]
+            if noted:
+                raise AdoptCommittedLockError(txn, "; ".join(noted)) \
+                    from (closeout[0] if closeout else teardown)
         elif isinstance(failure, AdoptApplyError):
             # the refusal stands, with every close-out exception added to it
             text = _refusal_text(str(failure), observed, ours) + ("; " + closed_said if closed_said else "")
@@ -3677,7 +3727,17 @@ def _self_test_checks():
                          "refused"),
                         ("final-close-out-fault-commit-stands-committed", ("anchors",), "committed"),
                         ("final-close-out-fault-interrupt-propagates-as-itself", ("held_components",),
-                         "interrupted"))
+                         "interrupted"),
+                        ("early-lock-close-fault-commit-stands-committed", ("mine_held",), "committed"),
+                        ("early-lock-close-fault-refusal-stands", ("mine_held",), "refused"),
+                        ("early-lock-close-fault-interrupt-propagates-as-itself", ("mine_held",), "interrupted"),
+                        ("closing-listing-close-fault-refusal-stands", ("_journal_listing",), "refused"),
+                        ("closing-listing-close-fault-interrupt-propagates-as-itself", ("_journal_listing",),
+                         "interrupted"),
+                        ("final-close-out-interrupt-commit-propagates-as-itself", ("anchors",),
+                         "committed-stopped"),
+                        ("final-close-out-interrupt-refusal-propagates-as-itself", ("held_components",),
+                         "refused-stopped"))
     if not census:
         for name, _target, _failing in handoff_legs:
             skipped.append((name, no_census))
@@ -3818,23 +3878,36 @@ def _self_test_checks():
         # closed, and the run's own refusal still propagates, naming the injected exception. With a
         # second injection at the first close of anchors, exactly the two popped descriptors stay open
         # and the refusal names BOTH, in the order they were raised. A committed run whose close-out is
-        # injected at anchors (the last list, so only root_fd closes after it) still reports COMMITTED (AdoptCommittedLockError, the injected exception
-        # named and chained as its cause, the transaction complete), and an interrupt raised by compose
-        # still propagates as itself, the injected exception named in its note. A refusal and a commit
-        # with no injection are the controls (red against sequential close-outs or a close-out that stops
-        # at its first failure: every descriptor after the injection leaks; against a close-out exception
-        # replacing the run's own outcome, which is what the pre-fix chain did; and against a later
-        # exception discarded without trace).
+        # injected at anchors (the last list, so only root_fd closes after it) still reports COMMITTED
+        # (AdoptCommittedLockError, the injected exception named and chained as its cause, the
+        # transaction complete), and an interrupt raised by compose still propagates as itself, the
+        # injected exception named in its note. The same three outcomes stand when the injection is at
+        # the EARLY lock close (mine_held, closed right after the release's read-back) and, for a refusal
+        # and an interrupt, at the first close of the closing journal listing's own close-out, whose
+        # exception is named beside the refusal in place of any "nothing written" claim. An injected
+        # KeyboardInterrupt in the close-out of a commit or a refusal propagates as ITSELF, never wrapped
+        # in AdoptCommittedLockError or dropped into the refusal text, the commit or the refusal named in
+        # its note. A refusal and a commit with no injection are the controls (red against sequential
+        # close-outs or a close-out that stops at its first failure: every descriptor after the
+        # injection leaks; against a close-out or observation exception replacing the run's own outcome,
+        # which is what the pre-fix chain, early lock close and observation re-raise did; against an
+        # interrupt wrapped as an Exception's cause; and against a later exception discarded without
+        # trace).
         class _InjectedCloseFault(RuntimeError):
             pass
+
+        class _InjectedCloseInterrupt(KeyboardInterrupt):
+            pass
         held_code, txn_code = _close_held_into.__code__, run_adopt_transaction.__code__
+        listing_code = _journal_listing.__code__
 
         def compose_interrupted_here(ops):
             raise KeyboardInterrupt("an injected compose interrupt")
 
-        def _final_close_run(root, targets, compose):
-            """One transaction over `compose` whose final close-out is injected at the first close of each
-            list named in `targets`: (exception, popped descriptors, descriptors closed after the first
+        def _final_close_run(root, targets, compose, fault=_InjectedCloseFault):
+            """One transaction over `compose` whose close-out raises `fault` at the first close of each
+            list named in `targets` (a list of the transaction's, or "_journal_listing": the closing
+            listing's own close-out): (exception, popped descriptors, descriptors closed after the first
             injection, descriptors leaked)."""
             real_quiet, real_exc_safe = _journal._close_fd_quietly, store._close_fd_exc_safe
             armed, popped, after = list(targets), [], []
@@ -3846,12 +3919,18 @@ def _self_test_checks():
                     while up is not None and up.f_code is not txn_code and up.f_code.co_name.startswith(
                             "_close_held"):
                         up = up.f_back
+                    if (up is not None and up.f_code is listing_code and "_journal_listing" in armed
+                            and up.f_back is not None and up.f_back.f_code is txn_code
+                            and up.f_locals.get("keep") is None and fds is up.f_locals.get("opened")):
+                        armed.remove("_journal_listing")
+                        popped.append(fd)
+                        raise fault("_journal_listing")
                     if up is not None and up.f_code is txn_code:
                         for list_name in armed:
                             if fds is up.f_locals.get(list_name):
                                 armed.remove(list_name)
                                 popped.append(fd)
-                                raise _InjectedCloseFault(list_name)
+                                raise fault(list_name)
                         if popped:
                             after.append(fd)
                 return real(fd)
@@ -3873,47 +3952,57 @@ def _self_test_checks():
         for name, targets, kind in final_close_legs:
             control = got = None
             committed = None
+            fault = _InjectedCloseInterrupt if kind.endswith("-stopped") else _InjectedCloseFault
             for injected in ((), targets):
                 with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
                     saved_umask = os.umask(0o022)
                     try:
                         root, files = fixture(temp)
-                        if kind == "committed":
+                        if kind.startswith("committed"):
                             compose = compose_full(files)
                         else:
                             os.makedirs(root / JOURNAL_REL)
                             compose = compose_refused_here
                             if kind == "interrupted" and injected:
                                 compose = compose_interrupted_here
-                        outcome = _final_close_run(root, injected, compose)
+                        outcome = _final_close_run(root, injected, compose, fault)
                         if injected:
                             got = outcome
-                            committed = txn_state(root, rid) if kind == "committed" else None
+                            committed = txn_state(root, rid) if kind.startswith("committed") else None
                         else:
                             control = outcome
                     finally:
                         os.umask(saved_umask)
             raised, popped, after, leaked = got if got is not None else (None, [], [], [])
-            named = [repr(_InjectedCloseFault(target)) for target in targets]
-            text = (" ".join(getattr(raised, "__notes__", [])) if kind == "interrupted"
+            named = [repr(fault(target)) for target in targets]
+            text = (" ".join(getattr(raised, "__notes__", [])) if isinstance(raised, KeyboardInterrupt)
                     else str(raised))
             at = [text.find(each) for each in named]
+            marker = ("observation of the adoption journal RAISED" if targets == ("_journal_listing",)
+                      else "descriptor close-out RAISED")
             if kind == "committed":
                 stands = (control is not None and control[0] is None
                           and isinstance(raised, AdoptCommittedLockError) and raised.txn == rid
                           and "COMMITTED" in text and "LANDED" in text and committed == "complete"
                           and isinstance(raised.__cause__, _InjectedCloseFault))
+            elif kind == "committed-stopped":
+                stands = (control is not None and control[0] is None and type(raised) is fault
+                          and "COMMITTED" in text and "LANDED" in text and committed == "complete")
             elif kind == "interrupted":
-                stands = (isinstance(raised, KeyboardInterrupt)
+                stands = (type(raised) is KeyboardInterrupt
                           and str(raised) == "an injected compose interrupt" and "did not open" in text)
+            elif kind == "refused-stopped":
+                stands = (type(raised) is fault and "the run's refusal stands beside this interrupt" in text
+                          and "an injected compose refusal" in text)
             else:
-                stands = (type(raised) is AdoptApplyError and "an injected compose refusal" in text)
-            check(name, (kind == "committed" or (control is not None
-                                                  and isinstance(control[0], AdoptApplyError)))
+                stands = (type(raised) is AdoptApplyError and "an injected compose refusal" in text
+                          and (marker == "descriptor close-out RAISED" or _NOTHING_WRITTEN not in text))
+            check(name, (kind.startswith("committed") or (control is not None
+                                                           and isinstance(control[0], AdoptApplyError)))
                   and control is not None and not control[1] and not control[3] and stands
-                  and "final descriptor close-out RAISED" in text and -1 not in at and at == sorted(at)
+                  and marker in text and -1 not in at and at == sorted(at)
                   and len(popped) == len(targets) and leaked == sorted(popped)
-                  and len(after) >= (1 if kind == "committed" else 2 + len(targets) - 1),
+                  and len(after) >= (1 if kind.startswith("committed") else 2 + len(targets) - 1),
                   observed="control (exception, leaked)={!r} exception={!r} text={!r} popped={!r} closed "
                            "after the first injection={!r} leaked={!r} state={!r}".format(
                                None if control is None else (control[0], control[3]), raised, text[-400:],
@@ -4025,6 +4114,57 @@ def _self_test_checks():
           and repr(_ListCloseFault(3)) in list_notes[1] and sorted(list_open) == sorted(list_popped),
           observed="raised={!r} notes={!r} still open={!r} popped={!r}".format(
               list_raised, list_notes, list_open, list_popped))
+    # 6a'''b3f: _verify_bundle_at's close-out of its retained directory descriptors runs through
+    # _close_held too. An exception injected at its FIRST close (the patched close-out raises instead of
+    # closing) over a bundle whose verification retains several directories leaves exactly that popped
+    # descriptor open: every other retained directory is still closed, and the injected exception is
+    # the one raised (red against a close-out loop that stops at its first failure: the unreached
+    # directories leak).
+    class _VerifyCloseFault(RuntimeError):
+        pass
+    verify_code = _verify_bundle_at.__code__
+    verify_seen, verify_popped, verify_raised = [], [], None
+
+    def verify_faulting_quiet(fd):
+        up = sys._getframe(1)
+        while (up is not None and up.f_code is not verify_code
+               and up.f_code.co_name.startswith("_close_held")):
+            up = up.f_back
+        if (up is not None and up.f_code is verify_code
+                and fd in (up.f_locals.get("dir_fds") or {}).values()):
+            verify_seen.append(fd)
+            if not verify_popped:
+                verify_popped.append(fd)
+                raise _VerifyCloseFault("the first retained directory close")
+        return real_quiet(fd)
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        try:
+            _root3f = Path(temp).resolve()
+            _payload3f = home + "/payload/a.md"
+            (_root3f / _payload3f).parent.mkdir(parents=True)
+            (_root3f / _payload3f).write_bytes(b"alpha\n")
+            (_root3f / inventory_rel(rid)).write_bytes(
+                emit_inventory(rid, [inventory_row(_payload3f, b"alpha\n")]))
+            verify_control = verify_bundle(_root3f, rid)
+            with mock.patch.object(_journal, "_close_fd_quietly", verify_faulting_quiet):
+                try:
+                    verify_bundle(_root3f, rid)
+                except _VerifyCloseFault as exc:
+                    verify_raised = exc
+            verify_open = []
+            for fd in verify_seen:
+                try:
+                    _real_fstat(fd)
+                except OSError:
+                    continue
+                verify_open.append(fd)
+        finally:
+            _close_held(list(verify_popped))
+    check("verify-bundle-close-out-injected-fault-closes-the-rest",
+          verify_control.status == store.VALID and isinstance(verify_raised, _VerifyCloseFault)
+          and len(verify_seen) >= 3 and verify_open == verify_popped,
+          observed="control={!r} raised={!r} closes seen={!r} still open={!r} popped={!r}".format(
+              verify_control.status, verify_raised, verify_seen, verify_open, verify_popped))
     # 6a'''b4: an NFS product root, modelled: a file unlinked while this process still holds it open is
     # renamed to .nfsXXXX (the client's silly-rename) and removed at its last close. The run closes the
     # lock descriptor it holds right after the release's read-back, before the cleanup and the closing
