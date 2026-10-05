@@ -1656,10 +1656,6 @@ _CS_JOINED = ("false positive: {} {} only through the one element key of {}, so 
               "later {} is a {}, not a descriptor")
 _CS_P1 = ("false positive, the P1 ownership-first idiom, reported on purpose (rule 2 keeps a moved source in its "
           "alias class): {}")
-_CS_RERUN = ("false positive, the deferred-interrupt close-out re-run (#407 round 3), reported on purpose: the "
-             "try's close empties {} pop-before-close under deferred interrupts, so the handler's re-run closes "
-             "only what an interrupt that landed before the deferral was in force left in the list, never a "
-             "number again, and then re-raises")
 _CLOSE_SWEEP_DISPOSITIONS = (
     ("opf/tools/_opf_oplock.py", "propagating", "AFTER", "fd", "fd", 1,
      "part C: false positive, part C's _st_reclose_yielding, the deliberate RECLOSE body its T-p2 flip runs; the "
@@ -1728,26 +1724,9 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      _CS_LEGS.format("journal-root open (or None until one)")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "root_fd", "", 7,
      _CS_LEGS.format("_open_dir_nofollow")),
-    ("opf/tools/_opf_adopt_apply.py", "run_adopt_transaction", "TRY", "mine_held", "mine_held", 2,
+    ("opf/tools/_opf_adopt_apply.py", "run_adopt_transaction", "TRY", "mine_held", "mine_held", 1,
      "false positive: _close_held pops each number out of the list before its one close, so the outer "
-     "finally's pass over a list the release path already emptied closes none twice, and that finally's "
-     "own handler re-run (the second hit) closes only what an interrupt left in the list"),
-    ("opf/tools/_opf_adopt_apply.py", "run_adopt_transaction", "TRY", "anchors", "anchors", 1,
-     _CS_RERUN.format("anchors")),
-    ("opf/tools/_opf_adopt_apply.py", "run_adopt_transaction", "TRY", "held_components", "held_components", 1,
-     _CS_RERUN.format("held_components")),
-    ("opf/tools/_opf_adopt_apply.py", "journal_state", "TRY", "held", "held", 1, _CS_RERUN.format("held")),
-    ("opf/tools/_opf_adopt_apply.py", "_failed_lock_state", "TRY", "held", "held", 1, _CS_RERUN.format("held")),
-    ("opf/tools/_opf_adopt_apply.py", "_default_store_present_without_manifest", "TRY", "held", "held", 1,
-     _CS_RERUN.format("held")),
-    ("opf/tools/_opf_adopt_apply.py", "_remove_journal_dirs", "TRY", "parent", "parent", 1,
-     _CS_RERUN.format("parent")),
-    ("opf/tools/_opf_adopt_apply.py", "walk", "TRY", "child", "child", 1, _CS_RERUN.format("child")),
-    ("opf/tools/_opf_adopt_apply.py", "_journal_listing", "TRY", "opened", "opened", 1,
-     "false positive, the deferred-interrupt close-out re-run (#407 round 3), reported on purpose: "
-     "_listing_close consumes `stray` with one pop and empties `opened` pop-before-close under deferred "
-     "interrupts, so the handler's re-run closes only what an interrupt that landed before the deferral "
-     "was in force left behind, never a number again, and then re-raises"),
+     "finally's pass over a list the release path already emptied closes none twice"),
     ("opf/tools/_opf_emit.py", "_boom_close7", "AFTER", "fd", "fd", 1,
      "false positive: a self-test close stub; its swallowed close is followed by a raise in the same block, so the "
      "later close never runs after it"),

@@ -121,7 +121,13 @@ more such home), so the stage driver refuses plan, approve and apply over a non-
 (require_clean_journal); the shipped `retire-file` vocabulary row is a single `remove`, while spec 1.3.0
 preserves the retirement preimage at apply and removes only after the green check, a vocabulary split for
 the op slices; interruption is exercised in-process through the journal's kill-point seam, and
-subprocess kill-injection arrives with the file ops. The finish ops add their own: all three finish ops
+subprocess kill-injection arrives with the file ops. Named residual (asynchronous interrupt): the
+transaction's descriptors are owned by a list from their binding on and closed pop-before-close, so no
+number is ever closed twice, but no signal mask is used, so an asynchronous interrupt (SIGINT or
+SIGTERM, delivered through any thread) can leave a descriptor open in the interrupted process until it
+exits: one landing between a C call's return and the binding of the descriptor it returned, inside a
+close-out, or inside a _journal helper (acquire_lock's lock descriptor among them). Leak-freedom under
+interrupt is NOT claimed. The finish ops add their own: all three finish ops
 compose into this shell's transactions, which refuse a resolved store (no lease join), so once init-store
 has run, a real adoption's plant, render and receipt transactions refuse until the lease join lands;
 render-views composes create-only view publications through this journal (an occupied view destination
@@ -158,7 +164,6 @@ import hashlib
 import os
 import re
 import shutil
-import signal
 import stat
 import subprocess
 import threading
@@ -795,12 +800,11 @@ def journal_state(root_fd, journal_root):
         raise AdoptApplyError("the adoption journal {} is not a directory; fail-closed".format(JOURNAL_REL))
     held = []   # jr_fd, then every held transaction directory descriptor: ONE list, ONE close-out
     try:
-        with _interrupts_deferred():
-            try:
-                held.append(_journal.open_journal_root_fd(root_fd, JOURNAL_REL))
-            except (_journal.JournalError, OSError) as exc:
-                raise AdoptApplyError("cannot open the adoption journal {} ({}); "
-                                      "fail-closed".format(JOURNAL_REL, exc))
+        try:
+            held.append(_journal.open_journal_root_fd(root_fd, JOURNAL_REL))
+        except (_journal.JournalError, OSError) as exc:
+            raise AdoptApplyError("cannot open the adoption journal {} ({}); "
+                                  "fail-closed".format(JOURNAL_REL, exc))
         jr_fd = held[0]
         try:
             owner = _journal.read_lock_owner_at(jr_fd)
@@ -809,20 +813,15 @@ def journal_state(root_fd, journal_root):
             # identity, so a transaction directory swapped onto its name after the enumeration (an
             # interrupted transaction renamed aside and replaced by an empty decoy) is still classified
             # from the enumerated directory's own frames, never reopened by name and read as clean.
-            with _interrupts_deferred():
-                txns = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True, hold=True)
-                held.extend(tfd for _t, tfd in txns)
+            txns = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True, hold=True)
+            held.extend(tfd for _t, tfd in txns)
             opened = sorted(t.name for t, tfd in txns
                             if _journal.classify_state(jr_fd, t, txn_fd=tfd) == "open")
         except (_journal.JournalError, OSError) as exc:
             raise AdoptApplyError("the adoption journal {} cannot be read ({}); "
                                   "fail-closed".format(JOURNAL_REL, exc))
     finally:
-        try:
-            _close_held(held)   # the held transaction directories (deepest appended last), then jr_fd
-        except BaseException:
-            _close_held(held)   # interrupted before its deferral was in force: close the rest, then raise
-            raise
+        _close_held(held)   # the held transaction directories (deepest appended last), then jr_fd
     return owner, opened
 
 
@@ -915,21 +914,16 @@ def _default_store_present_without_manifest(product_root):
     cannot-evaluate came from something else), and every discovery error read False (fail-closed)."""
     held = []
     try:
-        with _interrupts_deferred():
-            try:
-                held.append(_open_product_root(product_root))
-            except AdoptApplyError:
-                return False
+        try:
+            held.append(_open_product_root(product_root))
+        except AdoptApplyError:
+            return False
         try:
             status, _machine, _detail = store.discover_machine_store(held[0], Path(product_root))
         except (store.StoreError, OSError):
             return False
     finally:
-        try:
-            _close_held(held)
-        except BaseException:
-            _close_held(held)   # interrupted before its deferral was in force: close, then raise
-            raise
+        _close_held(held)
     return status == "present"
 
 
@@ -1042,17 +1036,16 @@ def _remove_journal_dirs(root_fd, created):
     unconfirmed = []
     gone = []
     for rel in reversed(created):
-        parent = []     # owns the parent descriptor from inside the deferral; the finally empties it
+        parent = []     # owns the parent descriptor from its binding on; the finally empties it
         try:
-            with _interrupts_deferred():
-                try:
-                    pfd, name = _journal._open_parent(root_fd, rel)
-                except FileNotFoundError:
-                    continue    # never created: a preparation that failed part-way
-                except (_journal.JournalError, OSError) as exc:
-                    left.append((rel, "not reached: {}".format(exc)))
-                    continue
-                parent.append(pfd)
+            try:
+                pfd, name = _journal._open_parent(root_fd, rel)
+            except FileNotFoundError:
+                continue    # never created: a preparation that failed part-way
+            except (_journal.JournalError, OSError) as exc:
+                left.append((rel, "not reached: {}".format(exc)))
+                continue
+            parent.append(pfd)
             try:
                 os.rmdir(name, dir_fd=pfd)
             except FileNotFoundError:
@@ -1067,11 +1060,7 @@ def _remove_journal_dirs(root_fd, created):
             except OSError as exc:
                 unconfirmed.append("{} (parent fsync failed: {})".format(rel, exc))
         finally:
-            try:
-                _close_held(parent)
-            except BaseException:
-                _close_held(parent)     # interrupted before its deferral was in force: re-run
-                raise
+            _close_held(parent)
     return (["{} ({})".format(rel, why) for rel, why in left
              if not any(rel.startswith(g + "/") for g in gone)], unconfirmed)
 
@@ -1090,39 +1079,6 @@ def _entry_kind(st):
     return "symlink" if stat.S_ISLNK(st.st_mode) else "special entry"
 
 
-
-_DEFERRABLE_SIGNALS = frozenset(getattr(signal, name) for name in ("SIGINT", "SIGTERM")
-                                if hasattr(signal, name))
-_SIGMASK = getattr(signal, "pthread_sigmask", None)
-
-
-class _interrupts_deferred:
-    """Defers asynchronous interrupt delivery (SIGINT, SIGTERM) across ONE descriptor
-    acquisition-to-handoff or ONE close-out: __enter__ blocks the two signals (signal.pthread_sigmask)
-    and __exit__ restores exactly the mask it saw, on every path (return, break and raise alike), so a
-    signal that arrives inside is delivered AT that restore (CPython checks for pending signals as
-    pthread_sigmask returns), a point where every descriptor the block touched is either closed or owned
-    by a live list a pending close-out empties. Nesting-safe: each level restores the mask it saved, so
-    an inner exit never unblocks an outer deferral. DISCLOSED LIMITS: where pthread_sigmask does not
-    exist (Windows; both supported platforms have it) this defers nothing, and what remains there is the
-    pre-deferral exposure: a real signal between a C call's return and the binding of the descriptor it
-    returned, or at the entry of a close-out, can lose descriptors. Off the main thread it also defers
-    nothing, which loses nothing: CPython delivers signals only to the main thread. A SYNCHRONOUS raise
-    (sys.settrace injection) is never a signal and is deferred by nothing; the pop-before-close and
-    append-is-handoff ownership discipline alone covers it."""
-
-    def __enter__(self):
-        self._prior = None
-        if _SIGMASK is not None and threading.current_thread() is threading.main_thread():
-            self._prior = _SIGMASK(signal.SIG_BLOCK, _DEFERRABLE_SIGNALS)
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if self._prior is not None:
-            _SIGMASK(signal.SIG_SETMASK, self._prior)
-        return False
-
-
 def _journal_listing(root_fd, keep=None):
     """A no-follow listing of the adoption journal tree beneath the held product-root descriptor: each
     JOURNAL_REL component, the direct entries of each ancestor, and every entry beneath the journal root,
@@ -1136,12 +1092,13 @@ def _journal_listing(root_fd, keep=None):
     recreation, so a later listing compared against this one can never read a recreated component as
     unchanged; the caller re-reads each held identity with fstat at that comparison and closes every kept
     descriptor. Each is appended to `keep` the moment it is bound (one list operation, no later transfer
-    step), so from then on the caller alone closes it, on every path, an interrupt included; one opened but
-    interrupted before that append is adopted by the close-out (_listing_close): with a `keep` it joins
-    the kept descriptors (keyed ""), which the caller closes, and with no `keep` every descriptor is
-    closed here. Each acquisition-to-handoff and the close-out run under deferred interrupts
-    (_interrupts_deferred), and the close-out is re-run once when an interrupt lands on the one boundary
-    before its deferral is in force, so one asynchronous interrupt leaks nothing and doubles no close."""
+    step), so from then on the caller alone closes it, on every path an exception reaches; one bound but
+    interrupted before that append (a synchronous raise) is adopted by the close-out: with a `keep` it
+    joins the kept descriptors (keyed ""), which the caller closes, and with no `keep` every descriptor
+    is closed here, each popped before its one close. An asynchronous interrupt (SIGINT, SIGTERM) that
+    lands between a C call's return and the binding of the descriptor it returned, or inside the
+    close-out, can leave a descriptor open until the process exits: a disclosed residual (module
+    docstring), never a second close."""
     found = {}
 
     def opened_as(rel, st, fd):
@@ -1174,22 +1131,17 @@ def _journal_listing(root_fd, keep=None):
                 continue
             found[sub] = (_entry_kind(st), st.st_dev, st.st_ino)
             if deep and stat.S_ISDIR(st.st_mode):
-                child = []      # owns the child descriptor from inside the deferral; the finally empties it
+                child = []      # owns the child descriptor from its binding on; the finally empties it
                 try:
-                    with _interrupts_deferred():
-                        try:
-                            child.append(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                                                 dir_fd=dfd))
-                        except OSError as exc:
-                            found[sub + "/"] = ("unlisted", str(exc))
+                    try:
+                        child.append(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                             dir_fd=dfd))
+                    except OSError as exc:
+                        found[sub + "/"] = ("unlisted", str(exc))
                     if child and opened_as(sub, st, child[0]):
                         walk(child[0], sub, True)
                 finally:
-                    try:
-                        _close_held(child)
-                    except BaseException:
-                        _close_held(child)      # interrupted before its deferral was in force: re-run
-                        raise
+                    _close_held(child)
 
     parts = JOURNAL_REL.split("/")
     opened = keep if keep is not None else []   # handed over as each is bound: the caller's list owns it
@@ -1207,43 +1159,22 @@ def _journal_listing(root_fd, keep=None):
             found[rel] = (_entry_kind(st), st.st_dev, st.st_ino)
             if not stat.S_ISDIR(st.st_mode):
                 break
-            with _interrupts_deferred():
-                try:
-                    cur = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
-                except OSError as exc:
-                    found[rel + "/"] = ("unlisted", str(exc))
-                    break
-                opened.append((rel, cur))
+            try:
+                cur = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
+            except OSError as exc:
+                found[rel + "/"] = ("unlisted", str(exc))
+                break
+            opened.append((rel, cur))
             if not opened_as(rel, st, cur):
                 break
             walk(cur, rel, i == len(parts) - 1)
     finally:
-        stray = [cur]   # a plain store, no call or jump: no asynchronous delivery can land on this line
-        try:
-            _listing_close(opened, keep, stray, root_fd)
-        except BaseException:
-            _listing_close(opened, keep, stray, root_fd)    # interrupted before its deferral: re-run
-            raise
-    return found
-
-
-def _listing_close(opened, keep, stray, root_fd):
-    """_journal_listing's close-out, under deferred interrupts and idempotent (every list operation
-    consumes what it closes), so its caller re-runs it when an interrupt lands on the one boundary before
-    the deferral is in force: `stray` holds the last component open, popped HERE on every path, and when
-    it is bound but was interrupted before its append (a synchronous raise; a real signal is deferred
-    across that handoff) it is adopted into `opened` first, so even its close is list-owned and runs
-    once, never again on a re-run; then with no `keep` every descriptor `opened` still holds is popped
-    and closed, deepest first. With a `keep`, the adopted stray is left in it for the caller, which
-    closes every kept descriptor."""
-    with _interrupts_deferred():
-        if stray:
-            cur = stray.pop()
-            if cur != root_fd and cur not in [fd for _rel, fd in opened]:
-                opened.append(("", cur))
+        if cur != root_fd and cur not in [fd for _rel, fd in opened]:
+            opened.append(("", cur))    # bound, but interrupted before its append: adopted, so one party closes it
         if keep is None:
-            while opened:
+            while opened:   # deepest first, each popped before its one close
                 _journal._close_fd_quietly(opened.pop()[1])
+    return found
 
 
 def _journal_components():
@@ -1391,54 +1322,37 @@ def _lock_identity(jr_fd, keep=None):
     only after that comparison. With no `keep`, and whenever what is present cannot be read, it is closed
     here. Ownership passes with the append itself (one list operation): the finally closes the descriptor
     ONLY while it is not in `keep`, so at every point exactly one party closes it, once. The open sits
-    inside the protected block, so no instruction between its binding and that block goes uncovered, and
-    the whole read runs under deferred interrupts (_interrupts_deferred): a signal that arrives inside it
-    is delivered at the exit, where the descriptor is already closed or owned by `keep`, so the C-return
-    boundary of the open and the finally's own close are covered against real signals too."""
+    inside the protected block, so no instruction between its binding and that block goes uncovered by an
+    exception raised in Python code; an asynchronous interrupt (SIGINT, SIGTERM) that lands between the
+    open's C return and that binding, or inside the finally's close, can leave the descriptor open until
+    the process exits, a disclosed residual (module docstring)."""
     lfd = None
-    with _interrupts_deferred():
+    try:
         try:
-            try:
-                lfd = os.open("lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=jr_fd)
-            except FileNotFoundError:
-                return None
-            st = os.fstat(lfd)
-            if not stat.S_ISREG(st.st_mode):
-                raise _journal.JournalError("journal lock is not a regular file (fail-closed)")
-            identity = st.st_dev, st.st_ino, _journal._read_fd(lfd, cap=_journal._MAX_JOURNAL_READ_BYTES)
-            if keep is not None:
-                keep.append(lfd)
-            return identity
-        finally:
-            if lfd is not None and (keep is None or lfd not in keep):
-                _journal._close_fd_quietly(lfd)
+            lfd = os.open("lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=jr_fd)
+        except FileNotFoundError:
+            return None
+        st = os.fstat(lfd)
+        if not stat.S_ISREG(st.st_mode):
+            raise _journal.JournalError("journal lock is not a regular file (fail-closed)")
+        identity = st.st_dev, st.st_ino, _journal._read_fd(lfd, cap=_journal._MAX_JOURNAL_READ_BYTES)
+        if keep is not None:
+            keep.append(lfd)
+        return identity
+    finally:
+        if lfd is not None and (keep is None or lfd not in keep):
+            _journal._close_fd_quietly(lfd)
 
 
 def _close_held(fds):
     """Close every descriptor a caller HOLDS in the list `fds` (each a bare fd or a (rel, fd) pair),
-    emptying it, under deferred interrupts (_interrupts_deferred). Each is taken out of the list BEFORE
-    its one close, so a later pass over the same list (an outer finally, or this function's own retry)
-    never closes a number again (a second close can shut another thread's reused number, man 2 close).
-    An interrupt that lands on a boundary before the deferral is in force (this frame's entry, or a
-    synchronous raise between the pop and the close) is caught, the remaining descriptors are closed on
-    the next deferred pass, and the interrupt then propagates; one deferred to the exit is delivered
-    there, after the list is empty. A caller whose `fds` no pending cleanup can still reach re-runs this
-    on BaseException (the one boundary left open is this frame's own entry)."""
-    interrupt = None
-    while True:
-        try:
-            with _interrupts_deferred():
-                while fds:
-                    item = fds.pop()
-                    _journal._close_fd_quietly(item[1] if isinstance(item, tuple) else item)
-        except BaseException as exc:
-            if fds:
-                interrupt = exc
-                continue
-            raise
-        if interrupt is not None:
-            raise interrupt
-        return
+    emptying it. Each is taken out of the list BEFORE its one close, so a later pass over the same list
+    (an outer finally) never closes a number again: an interrupt between the two can at worst leave that
+    one descriptor open until the process exits (a disclosed residual, module docstring), never closed
+    twice (a second close can shut another thread's reused number, man 2 close)."""
+    while fds:
+        item = fds.pop()
+        _journal._close_fd_quietly(item[1] if isinstance(item, tuple) else item)
 
 
 def _release_outcome(jr_fd, journal_root, mine):
@@ -1566,11 +1480,7 @@ def _failed_lock_state(jr_fd, journal_root, error):
         return state, ("this run's own journal lock WAS created and STAYS ({}): the next run refuses on it, and "
                        "reconcile() breaks it once this process has exited".format(detail)), interrupt
     finally:
-        try:
-            _close_held(held)
-        except BaseException:
-            _close_held(held)   # interrupted before its deferral was in force: close the rest, then raise
-            raise
+        _close_held(held)
 
 
 def _lock_said(lock_state, lock_note):
@@ -1612,11 +1522,11 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     client keeps a file unlinked while open as a .nfsXXXX entry until its last close), and the closing
     listing then attributes any lock present from that recorded outcome; on every other outcome, an
     interrupted read-back included, the descriptor stays held, so the closing comparison never reads a
-    peer's lock on a reused inode as this run's own. Asynchronous interrupt delivery (SIGINT, SIGTERM) is
-    DEFERRED (_interrupts_deferred, with its disclosed platform limits) across every descriptor
-    acquisition-to-handoff and every close-out here and in the helpers above, and each close-out is
-    re-run once when an interrupt lands on the one boundary before its deferral is in force, so one
-    asynchronous interrupt anywhere leaks no descriptor and doubles no close. A leftover only the
+    peer's lock on a reused inode as this run's own. Every descriptor this run holds is owned by a list
+    from its binding on (the append is the handoff) and closed pop-before-close, so no number is closed
+    twice; an asynchronous interrupt (SIGINT, SIGTERM, delivered through any thread) can still leave a
+    descriptor open until the process exits, here or inside a _journal helper, a disclosed residual
+    (module docstring), so no leak-freedom under interrupt is claimed. A leftover only the
     reconcile-first discipline clears is left to it rather than to hand removal, and one no sanctioned
     path clears is named as such. The lock release is read back by identity (the inode and content this
     run's acquire wrote, _lock_identity), never by process identity; at the end of a committed transaction
@@ -1649,9 +1559,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     lock_state, lock_note = "untaken", None
     held = retain = done = entered = False
     try:
-        with _interrupts_deferred():    # owned by `anchors` before a signal can be delivered
-            anchors.append(_open_product_root(product_root))
-            root_fd = anchors[-1]
+        anchors.append(_open_product_root(product_root))    # owned by `anchors` from its binding on
+        root_fd = anchors[-1]
         try:
             _journal.require_containment()
         except _journal.JournalError as exc:
@@ -1672,9 +1581,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         created = _absent_journal_dirs(root_fd)
         try:
             _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
-            with _interrupts_deferred():    # owned by `anchors` before a signal can be delivered
-                anchors.append(_journal.open_journal_root_fd(root_fd, JOURNAL_REL))
-                jr_fd = anchors[-1]
+            anchors.append(_journal.open_journal_root_fd(root_fd, JOURNAL_REL))     # owned from its binding on
+            jr_fd = anchors[-1]
             jr_st = os.fstat(jr_fd)
             jr_id = (jr_st.st_dev, jr_st.st_ino)    # the journal directory this run writes to
         except (_journal.JournalError, OSError) as exc:
@@ -1816,19 +1724,12 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             # every descriptor the run still holds is owned by one of these three LIVE lists:
             # held_components and (on any outcome but a confirmed-gone lock) mine_held, both HELD through
             # the closing comparison, and anchors, whose jr_fd is held through the closing observation so
-            # its identity stays this run's, then root_fd. Each list is emptied pop-before-close under
-            # deferred interrupts; the except re-runs the closes when an interrupt lands on the one
-            # boundary before a deferral is in force, then re-raises it, so one asynchronous interrupt
-            # abandons no descriptor and doubles no close.
-            try:
-                _close_held(held_components)
-                _close_held(mine_held)      # any still held: a stay, a retained lock, or no release reached
-                _close_held(anchors)
-            except BaseException:
-                _close_held(held_components)
-                _close_held(mine_held)
-                _close_held(anchors)
-                raise
+            # its identity stays this run's, then root_fd. Each list is emptied pop-before-close, so no
+            # number is closed twice; an asynchronous interrupt landing inside this close-out can leave
+            # what it has not reached open until the process exits (the disclosed residual)
+            _close_held(held_components)
+            _close_held(mine_held)      # any still held: a stay, a retained lock, or no release reached
+            _close_held(anchors)
         if failure is not None and (not isinstance(failure, Exception) or failure is interrupted):
             # an interrupt still propagates as itself, with the transaction state and the outcome named
             if failure is interrupted or observed:
@@ -3661,14 +3562,14 @@ def _self_test_checks():
     # reused descriptor; the leak census is /proc/self/fd. The lock leg runs the identity read of a held
     # lock, the failure leg the one inside _failed_lock_state (its created lock stays, as the interrupt
     # note says, and is removed between runs), the listing leg the run's first listing over a journal of
-    # three components. Scope: the injection here is a SYNCHRONOUS raise, which no signal mask defers,
-    # so these legs prove the pop-before-close and append-is-handoff ownership discipline alone; the one
-    # boundary between a C call's return and the binding of the descriptor it returned, and an interrupt
-    # inside a close-out of a caller (a finally that is already closing), are outside what that
-    # discipline alone can guarantee, and the former is skipped here. A REAL signal is further deferred
-    # across both (_interrupts_deferred, each close-out re-run once when one lands before its deferral is
-    # in force), on the main thread wherever pthread_sigmask exists; where it does not, those two
-    # boundaries stay open, as _interrupts_deferred discloses
+    # three components. Scope: the injection here is a SYNCHRONOUS raise, so these legs prove the
+    # pop-before-close and append-is-handoff ownership discipline, nothing more. NAMED RESIDUAL, not
+    # tested and not claimed: an ASYNCHRONOUS interrupt (SIGINT or SIGTERM, delivered through any thread)
+    # can leave a descriptor open in the interrupted process until it exits, at the boundary between a C
+    # call's return and the binding of the descriptor it returned (skipped here), inside a close-out of a
+    # caller (a finally that is already closing), or inside a _journal helper (acquire_lock's own lock
+    # descriptor among them); no signal mask is used, so these legs establish no leak-freedom under
+    # interrupt
     # (red against an ownership flag set after the append: two closes; and against a transfer inside the
     # finally: a leak).
     handoff_legs = (("descriptor-handoff-interrupt-lock-identity", _lock_identity, False),
@@ -3746,13 +3647,6 @@ def _self_test_checks():
             outcome = None
             leaked = set()
             prior_trace = sys.gettrace()
-            # the process signal mask is saved and restored around each run, as the SIGINT disposition is
-            # around the real-signal vectors: a synchronous raise at one of the few opcodes between
-            # _interrupts_deferred's enter and its protected range aborts the frame without its exit, a
-            # point a REAL signal can never be delivered at (the deferral holds it pending there), so the
-            # restore is this harness's hygiene, not something production relies on
-            prior_mask = (signal.pthread_sigmask(signal.SIG_BLOCK, set())
-                          if hasattr(signal, "pthread_sigmask") else None)
             try:
                 baseline = _fds_open()
                 with mock.patch.object(os, "close", ledger_close):
@@ -3767,8 +3661,6 @@ def _self_test_checks():
                         sys.settrace(prior_trace)
                 leaked = _fds_open() - baseline - guarded
             finally:
-                if prior_mask is not None:
-                    signal.pthread_sigmask(signal.SIG_SETMASK, prior_mask)
                 for fd in sorted(guarded):
                     _journal._close_fd_quietly(fd)
                 _journal._close_fd_quietly(guard_r)
