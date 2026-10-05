@@ -8022,15 +8022,18 @@ def _orch_root(data):
     return _recovery_toplevel(cwd)
 
 
-# Orchestration-scope discovery WITHOUT git (round 3): the registry is this suite's scope declaration and
-# always lives at a directory on the session cwd's PHYSICAL ancestor chain (a resolvable git toplevel is
-# itself an ancestor of cwd, so every registry the old rev-parse scoping could read at the toplevel is on
-# this walk), so the truncation guard decides scope by walking that chain directly with no-follow,
-# descriptor-anchored lookups. A git discovery failure alone (no git binary on PATH, a dubious-ownership
-# refusal, a broken config, a bare repository, a cwd inside a .git directory, a timeout) therefore no
-# longer denies every Bash call in an ordinary session: with no registry on the walk the session is out of
-# scope, while the same session inside an orchestrated tree still finds the registry and keeps the guard
-# active. The sibling orchestration guards still root via the scrubbed rev-parse primitive (_orch_root).
+# Orchestration-scope discovery (round 4): the truncation guard decides scope by the UNION of two legs.
+# Leg one walks the session cwd's PHYSICAL ancestor chain directly with no-follow, descriptor-anchored
+# lookups and needs no git at all, so a git discovery failure alone (no git binary on PATH, a
+# dubious-ownership refusal, a broken config, a bare repository, a cwd inside a .git directory, a timeout)
+# never denies an ordinary session: with no registry on the walk and none at a git-resolved toplevel the
+# session is out of scope, while the same session inside an orchestrated tree still finds the registry on
+# the walk and keeps the guard active. Leg two (restored from the rev-parse scoping after the round-4
+# finding) applies where git DOES resolve a toplevel for the cwd: core.worktree (set in a repository
+# config or a gitfile's gitdir target) can point the work tree OFF the cwd's physical ancestor chain,
+# where the walk alone would never visit its registry, so that toplevel's registry is consulted as well
+# (_orch_git_toplevel_has_registry); git success can only ADD a deny, and a git failure alone never
+# denies. The sibling orchestration guards still root via the scrubbed rev-parse primitive (_orch_root).
 _ORCH_WALK_BOUND = 4096  # ancestor-chain safety bound; a deeper chain is a walk failure, never an allow
 # O_PATH (Linux): a walk step then needs only SEARCH permission on the chain, exactly as path resolution
 # itself does, so a search-only (execute-only) ancestor such as a shared parent directory does not fail the
@@ -8074,21 +8077,33 @@ def _orch_registry_walk(cwd):
     """Locate the truncation guard's registry scope for a non-empty string cwd WITHOUT consulting git: walk
     cwd's PHYSICAL ancestor chain (an O_PATH|O_DIRECTORY descriptor stepped with openat(fd, ".."), so no
     component is ever re-resolved by name, a symlinked cwd path cannot alias the chain, and each step needs
-    only the SEARCH permission path resolution itself needs; ".." is never a symlink, and the walk ends
-    where parent and child share one dev/ino, the filesystem root) looking for a
-    directory that carries an orchestration registry (_orch_dirfd_has_registry). Returns ('found', None)
-    when a chain directory carries one (or one the no-follow lookups cannot cleanly rule out); ('none',
-    None) when the walk reaches the root with every lookup a clean not-present (the session is OUT OF
-    SCOPE, whatever git would say: a git failure alone never denies); ('fail', (detail, fix)) when the walk
-    itself cannot be carried out - a NUL in the path, a path that cannot be stat'ed or is not a directory,
-    a directory this process cannot read and enter, an ancestor directory the walk cannot open or examine,
-    or a chain past _ORCH_WALK_BOUND - where detail completes "this Bash call's cwd ..." and fix names the
-    action that repairs it. AGREEMENT with the git path (_orch_root/_recovery_toplevel, which the sibling
-    orchestration guards still use): where git resolves a toplevel, that toplevel is an ancestor of cwd, so
-    a registry at it is on this walk and the two scopings agree; the walk additionally reaches a registry
-    above a nested repository or a filesystem boundary (git discovery stops at a mount point; this walk
-    does not) and decides scope even where git cannot run or answer, which the rev-parse scoping turned
-    into a blanket deny (the round-3 lockout, withdrawn)."""
+    only the SEARCH permission path resolution itself needs; ".." is never a symlink) looking for a
+    directory that carries an orchestration registry (_orch_dirfd_has_registry). The walk ends only where
+    parent and child share one dev/ino AND that identity is the filesystem root's own: a non-root dev/ino
+    repeat (a directory bind-mounted onto its own child makes the mount root and its ".." parent one
+    identity) is stepped THROUGH rather than misread as the root, so a registry above such a mount point
+    is still reached (verified by simulation; these test hosts cannot create mounts, and the path-anchored
+    recheck below independently re-probes the textual chain, so an fd-walk miss at a mount edge surfaces
+    as a found or a deny, never an allow). Returns ('found', None) when a chain directory carries a
+    registry (or one the no-follow lookups cannot cleanly rule out); ('none', None) only when the walk
+    reaches the root with every lookup a clean not-present AND the post-walk recheck agrees
+    (_orch_walk_recheck, the round-4 concurrent-move detection: descriptor anchoring preserves each opened
+    directory's identity, not its parent relationship, so a mid-walk rename of an ancestor can redirect
+    this walk past a continuously present registry; the recheck re-resolves and re-probes the chain BY
+    PATH, scopes the session IN when it finds a registry, and FAILS the walk on a chain mismatch, never
+    allowing); ('fail', (detail, fix)) when the walk cannot be carried out - a NUL in the path, a path
+    that cannot be stat'ed or is not a directory, a directory this process cannot read and enter, an
+    ancestor directory the walk cannot open or examine, a chain past _ORCH_WALK_BOUND, or the recheck
+    mismatch above - where detail completes "this Bash call's cwd ..." and fix names the action that
+    repairs it. AGREEMENT with the git path (_orch_root/_recovery_toplevel, which the sibling
+    orchestration guards still use) is NOT assumed: core.worktree can point a git-resolvable toplevel OFF
+    this chain, which is why the truncation guard UNIONS this walk with _orch_git_toplevel_has_registry;
+    the walk additionally reaches a registry above a nested repository or a filesystem boundary (git
+    discovery stops at a mount point; this walk does not) and decides scope even where git cannot run or
+    answer, which the rev-parse scoping turned into a blanket deny (the round-3 lockout, withdrawn). The
+    walk-and-recheck is still not atomic with the Bash call it gates: a chain or registry that changes
+    after the recheck returns is out of view (the inherent pre-execution TOCTOU bound, disclosed in the
+    residue)."""
     if "\x00" in cwd:
         return ("fail", ("contains a NUL character",
                          "Re-issue the call with a cwd carrying no control characters."))
@@ -8105,12 +8120,20 @@ def _orch_registry_walk(cwd):
                          "Grant this process read and search permission on it, or re-issue the call from "
                          "a readable directory."))
     try:
+        root_st = os.stat(os.sep)
+        root_id = (root_st.st_dev, root_st.st_ino)
+    except OSError:
+        # With the root identity unknowable, a parent/child dev/ino repeat is never read as the root:
+        # the walk runs to its depth bound and FAILS (a deny), never misreading a mount edge as the top.
+        root_id = None
+    try:
         fd = os.open(cwd, _ORCH_O_WALK | os.O_DIRECTORY)
     except OSError as exc:
         return ("fail", ("could not be opened for the registry walk ({})".format(type(exc).__name__),
                          "Re-issue the call from a directory this process can open."))
     try:
         cur = os.fstat(fd)
+        chain = [(cur.st_dev, cur.st_ino)]
         for _ in range(_ORCH_WALK_BOUND):
             if _orch_dirfd_has_registry(fd):
                 return ("found", None)
@@ -8130,14 +8153,106 @@ def _orch_registry_walk(cwd):
                                  .format(type(exc).__name__),
                                  "Re-issue the call from a directory whose ancestors this process can "
                                  "read."))
-            if pst.st_dev == cur.st_dev and pst.st_ino == cur.st_ino:
+            if (pst.st_dev == cur.st_dev and pst.st_ino == cur.st_ino
+                    and (pst.st_dev, pst.st_ino) == root_id):
                 os.close(parent)
-                return ("none", None)  # the filesystem root: every lookup was a clean not-present
+                # The filesystem root with every lookup a clean not-present: confirm with the path-anchored
+                # recheck before reading the session as out of scope. A dev/ino repeat that is NOT the root
+                # (a directory bind-mounted onto its own child) falls through and is stepped through below.
+                return _orch_walk_recheck(cwd, chain)
             os.close(fd)
             fd, cur = parent, pst
+            chain.append((pst.st_dev, pst.st_ino))
         return ("fail", ("sits deeper than this walk's {}-directory ancestor bound"
                          .format(_ORCH_WALK_BOUND),
                          "Re-issue the call from a directory at an ordinary filesystem depth."))
+    finally:
+        os.close(fd)
+
+
+def _orch_walk_recheck(cwd, chain):
+    """CONFIRM a registry walk that found nothing (round-4 concurrent-move detection): re-resolve cwd's
+    physical ancestor chain BY PATH (os.path.realpath, then each textual parent), re-probe every chain
+    directory with the same registry probe the walk uses (_orch_dirfd_has_registry, so the deny-safe
+    crafted-entry reads and the self-test ceiling apply identically), and compare the re-resolved
+    (st_dev, st_ino) sequence against `chain`, the dev/ino sequence the descriptor walk actually visited.
+    A registry found on this second, path-anchored pass scopes the session IN (('found', None)): that is
+    the mid-walk-rename case, where the descriptor chain was redirected past a continuously present
+    registry, and equally a registry that appeared while the walk ran. A sequence mismatch means an
+    ancestor moved while the walk read the chain, so the clean not-present result cannot be trusted:
+    ('fail', (detail, fix)), a deny, never an allow; a recheck step that cannot be carried out fails the
+    same way (deny-safe). Only when every probe stays a clean not-present AND the two independently
+    resolved chains agree does ('none', None) stand. The recheck is itself a point-in-time read: agreement
+    means the out-of-scope read matches the chain as the recheck resolved it, and a change AFTER the
+    recheck returns is out of view (the inherent pre-execution TOCTOU bound, disclosed in the residue)."""
+    try:
+        path = os.path.realpath(cwd)
+    except (OSError, ValueError):
+        return ("fail", ("could not be re-resolved after the registry walk",
+                         "Re-issue the call from a stable directory."))
+    seen = []
+    for _ in range(_ORCH_WALK_BOUND + 1):
+        try:
+            fd = os.open(path, _ORCH_O_WALK | os.O_DIRECTORY)
+        except OSError as exc:
+            return ("fail", ("has an ancestor chain this walk's recheck cannot re-resolve ({})"
+                             .format(type(exc).__name__),
+                             "Re-issue the call once the cwd's directory tree is stable."))
+        try:
+            try:
+                rst = os.fstat(fd)
+            except OSError as exc:
+                return ("fail", ("has an ancestor chain this walk's recheck cannot examine ({})"
+                                 .format(type(exc).__name__),
+                                 "Re-issue the call once the cwd's directory tree is stable."))
+            seen.append((rst.st_dev, rst.st_ino))
+            if _orch_dirfd_has_registry(fd):
+                return ("found", None)
+        finally:
+            os.close(fd)
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    else:
+        return ("fail", ("sits deeper than this walk's {}-directory ancestor bound"
+                         .format(_ORCH_WALK_BOUND),
+                         "Re-issue the call from a directory at an ordinary filesystem depth."))
+    if seen != chain:
+        return ("fail", ("changed its ancestor chain while the registry walk read it (a concurrent "
+                         "rename or mount moved an ancestor directory mid-walk, so the walk's clean "
+                         "not-present result cannot be trusted)",
+                         "Re-issue the call once the cwd's directory tree is stable."))
+    return ("none", None)
+
+
+def _orch_git_toplevel_has_registry(cwd):
+    """The UNION leg of the truncation guard's registry scope (round 4): where git DOES resolve a toplevel
+    for the session cwd (the scrubbed _recovery_toplevel primitive, exactly the rooting the old rev-parse
+    scoping and the sibling orchestration guards use), that toplevel's registry is consulted IN ADDITION
+    to the ancestor walk, because core.worktree (set in a repository config or a gitfile's gitdir target)
+    can point the work tree OFF the cwd's physical ancestor chain: from inside such a repository's
+    metadata directory the old scoping read the external work tree's registry and denied, and the walk
+    alone never visits it (the round-4 finding). Returns True (IN SCOPE) when git resolves a toplevel and
+    the same no-follow registry probe the walk uses (_orch_dirfd_has_registry, so a crafted entry stays
+    deny-safe PRESENT and the self-test ceiling masks this leg identically) does not cleanly rule a
+    registry out there, and True when the resolved toplevel exists but cannot be opened as a directory (a
+    toplevel git can name but this probe cannot examine is not cleanly registry-free: deny-safe, matching
+    the old scoping's present-but-unreadable read). Returns False when git cannot resolve a toplevel at
+    all (git success can only ADD a deny; a git failure alone never denies), when the resolved toplevel is
+    cleanly gone (FileNotFoundError: nothing to consult), or when its registry probe is a clean
+    not-present."""
+    top = _recovery_toplevel(cwd)
+    if top is None:
+        return False
+    try:
+        fd = os.open(top, _ORCH_O_WALK | os.O_DIRECTORY)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    try:
+        return bool(_orch_dirfd_has_registry(fd))
     finally:
         os.close(fd)
 
@@ -9673,19 +9788,23 @@ def orch_truncation_guard(data):
     not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
     malformed, never read as foreground), and a command that is not a string are each DENIED with a
     reason naming the defect, never silently allowed. REGISTRY SCOPE (a disclosed residual, not a
-    fail-closed case): the registry is this suite's scope declaration, located by walking the cwd's
-    physical ancestor chain with no-follow, descriptor-anchored lookups (_orch_registry_walk; git is NOT
-    consulted, so a git discovery failure alone - no git binary, a dubious-ownership refusal, a broken
-    config, a bare repository - never denies), so with NO registry entry on that chain the guard is inert
-    and allows every Bash call that passes the pre-scope checks below, while a chain directory whose
-    registry entry is present, unreadable, or invalid keeps it active. PRE-SCOPE DENIES, checked BEFORE the
+    fail-closed case): the registry is this suite's scope declaration, located by the UNION of a walk of
+    the cwd's physical ancestor chain with no-follow, descriptor-anchored lookups (_orch_registry_walk,
+    with its post-walk concurrent-move recheck) and, where git resolves a toplevel for the cwd, that
+    toplevel's registry too (_orch_git_toplevel_has_registry: core.worktree can point the work tree off
+    the ancestor chain; a git discovery failure alone - no git binary, a dubious-ownership refusal, a
+    broken config, a bare repository - still never denies), so with NO registry entry on that chain and
+    none at a git-resolved toplevel the guard is inert and allows every Bash call that passes the
+    pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
+    unreadable, or invalid keeps it active. PRE-SCOPE DENIES, checked BEFORE the
     registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
     not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
     not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
-    that is not an existing directory this process can read and enter, or an ancestor directory the walk
-    cannot read: _orch_registry_walk), each deny naming the defect and an action that repairs it. Only a
-    plain non-Bash string tool_name, and a cwd whose completed walk finds no registry, are out of scope
-    (allow)."""
+    that is not an existing directory this process can read and enter, an ancestor directory the walk
+    cannot open or examine, or an ancestor chain that changed while the walk read it:
+    _orch_registry_walk), each deny naming the defect and an action that repairs it. Only a plain
+    non-Bash string tool_name, and a cwd whose completed walk and git-toplevel union find no registry,
+    are out of scope (allow)."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name("trkasy")
@@ -9732,9 +9851,12 @@ def orch_truncation_guard(data):
             "AIQT guardrail: denied a Bash call whose cwd could not be walked for an orchestration "
             "registry (rule trkasy, fail-closed).")
     if scope == "none":
-        # No registry on the cwd's ancestor chain: not an orchestrated session, whatever git would say (a
-        # git discovery failure alone never denies: this guard's scope does not consult git at all).
-        return _allow()
+        # No registry on the cwd's ancestor chain. UNION (round 4): where git resolves a toplevel for this
+        # cwd, that toplevel's registry is consulted too, because core.worktree can point the work tree
+        # (and its registry) off the ancestor chain; git success can only add a deny here, and a git
+        # failure alone still never denies (the union leg reads False then and the allow stands).
+        if not _orch_git_toplevel_has_registry(cwd):
+            return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
         kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)

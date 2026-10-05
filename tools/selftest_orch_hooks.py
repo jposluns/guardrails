@@ -957,8 +957,8 @@ def _main_isolated(report_path=None):
               raw(dict(tool_name="mcp__files__read", tool_input=None)), "allow")
         # A string cwd whose registry walk cannot be carried out (not a readable directory, a NUL, an
         # unreadable ancestor) denies with a named reason AND an actionable fix; a cwd whose COMPLETED walk
-        # finds no registry allows, whatever git would say (the round-3 git lockout is withdrawn). The
-        # confirmed-outside CONTROL row passes before and after the fix.
+        # and git-toplevel union find no registry allows (a git FAILURE alone never denies: the round-3
+        # git lockout is withdrawn). The confirmed-outside CONTROL row passes before and after the fix.
         def _cwd_case(cwd):
             res = aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=cwd))
             why = (res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
@@ -984,13 +984,14 @@ def _main_isolated(report_path=None):
         finally:
             aiqt_hooks.os.access = saved_access
         check("trunc/cwd-unreadable-dir-denies", (cv, "cannot read and enter" in cw), ("deny", True))
-        # ROUND-3 LOCKOUT WITHDRAWN: scope is the registry walk, never git, so a cwd git cannot resolve
-        # (a bare repository, a dubious-ownership refusal, a missing git binary, a broken config, a
-        # timeout) is OUT OF SCOPE when no registry sits on the cwd's ancestor chain (each such row was a
-        # blanket deny at the round-3 revision and now allows: the restored-allow controls), while the SAME
-        # failing git inside an orchestrated tree still applies the guard (a detach denies, a plain
-        # command allows). _recovery_git is patched to raise or refuse so a reintroduced git dependency in
-        # the truncation guard's scope would crash or flip these rows: git-independence by behaviour.
+        # ROUND-3 LOCKOUT WITHDRAWN: scope is the registry walk UNIONED with a git-resolved toplevel's
+        # registry (round 4), and a git FAILURE alone never denies, so a cwd git cannot resolve (a bare
+        # repository, a dubious-ownership refusal, a missing git binary, a broken config, a timeout) is
+        # OUT OF SCOPE when no registry sits on the cwd's ancestor chain (each such row was a blanket deny
+        # at the round-3 revision and now allows: the restored-allow controls), while the SAME failing git
+        # inside an orchestrated tree still applies the guard (a detach denies, a plain command allows).
+        # _recovery_git is patched to raise or refuse, so these rows pin that the union leg turns every
+        # git failure into a clean out-of-scope read, never a deny.
         bare = tmp / "cwd-bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True,
                        timeout=30)
@@ -1113,10 +1114,22 @@ def _main_isolated(report_path=None):
         # ceiling at ceil/inner reads the registry at ceil as absent, a registry AT the ceiling root is
         # still found, and with only the run-wide ceiling (which sits above ceil) the walk finds it, as
         # the production walk, which takes no ceiling, always does.
-        root_st = os.stat(os.path.realpath(os.sep))
-        check("trunc/hermetic-run-ceiling-covers-filesystem-root",
-              (root_st.st_dev, root_st.st_ino) in getattr(aiqt_hooks._orch_dirfd_has_registry, "above", ()),
-              True)
+        # BEHAVIOURAL, not declarative (round 4): the old form asserted the root's dev/ino sat in the
+        # ceiling's .above set, which a ceiling that declares the root but delegates its probe anyway
+        # still satisfies. This row drives descriptors through the probes instead: the ACTIVE run-wide
+        # ceiling must read a filesystem-root descriptor as registry-free, and a ceiling built by the
+        # same constructor over an always-True probe must mask the root while still delegating a
+        # descriptor at the ceiling root itself.
+        root_fd = os.open(os.path.realpath(os.sep), aiqt_hooks._ORCH_O_WALK | os.O_DIRECTORY)
+        tmpl_fd = os.open(os.path.realpath(str(tmp)), aiqt_hooks._ORCH_O_WALK | os.O_DIRECTORY)
+        try:
+            always = _registry_ceiling(tmp, lambda dirfd: True)
+            check("trunc/hermetic-run-ceiling-covers-filesystem-root",
+                  (aiqt_hooks._orch_dirfd_has_registry(root_fd), always(root_fd), always(tmpl_fd)),
+                  (False, False, True))
+        finally:
+            os.close(root_fd)
+            os.close(tmpl_fd)
         ceil = tmp / "ceil-probe"
         (ceil / ".aiqt").mkdir(parents=True)
         (ceil / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)), encoding="utf-8")
@@ -1133,6 +1146,184 @@ def _main_isolated(report_path=None):
         check("trunc/hermetic-ceiling-keeps-registry-at-root", at_root, ("found", None))
         check("trunc/hermetic-walk-without-inner-ceiling-finds-registry",
               aiqt_hooks._orch_registry_walk(str(ceil / "inner" / "sub")), ("found", None))
+        # ROUND 4, UNION LEG: core.worktree (in a repository config, or in the config of a separate git
+        # dir) can point the work tree OFF the cwd's physical ancestor chain. git then resolves a toplevel
+        # the walk never visits, and the registry THERE must still scope the guard in (main's rev-parse
+        # scoping denied these; the walk alone allowed them). Each detach row is red with the union leg
+        # removed; the plain row guards the other direction (an in-scope plain foreground call stays an
+        # allow). The union probes through the run-wide ceiling, so a host registry above tmp still never
+        # decides a row.
+        gw = tmp / "gw"
+        (gw / "B" / ".aiqt").mkdir(parents=True)
+        (gw / "B" / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                               encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(gw / "A")], check=True, capture_output=True, timeout=30)
+        subprocess.run(["git", "-C", str(gw / "A"), "config", "core.worktree", str(gw / "B")],
+                       check=True, capture_output=True, timeout=30)
+        cv, cw = _cwd_case(str(gw / "A"))
+        check("trunc/git-core-worktree-registry-detach-denies",
+              (cv, "detaches a child" in cw), ("deny", True))
+        check("trunc/git-core-worktree-registry-plain-allows",
+              _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                  nocwd, cwd=str(gw / "A"), tool_input=dict(command="ls -la")))), "allow")
+        sepg = tmp / "gw-sep"
+        sepg.mkdir()
+        subprocess.run(["git", "init", "-q", "--separate-git-dir", str(sepg / "meta.git"),
+                        str(sepg / "work")], check=True, capture_output=True, timeout=30)
+        subprocess.run(["git", "--git-dir", str(sepg / "meta.git"), "config", "core.worktree",
+                        str(sepg / "work")], check=True, capture_output=True, timeout=30)
+        (sepg / "work" / ".aiqt").mkdir()
+        (sepg / "work" / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                                    encoding="utf-8")
+        cv, cw = _cwd_case(str(sepg / "meta.git"))
+        check("trunc/git-separate-gitdir-worktree-registry-detach-denies",
+              (cv, "detaches a child" in cw), ("deny", True))
+        # ROUND 4, CRAFTED-.aiqt BRANCHES PINNED: each deny-safe branch of _orch_dirfd_has_registry gets a
+        # row that is red when the branch is removed. A symlinked .aiqt pointing at a REGISTRY-FREE
+        # directory pins both the no-follow open flag (following it would read a clean absent) and the
+        # OSError-reads-PRESENT branch (ELOOP); the dangling symlink and the regular file pin the same
+        # branch through different faults.
+        craft = tmp / "craft"
+        (craft / "target-no-registry").mkdir(parents=True)
+        (craft / "link-dir").mkdir()
+        os.symlink(str(craft / "target-no-registry"), str(craft / "link-dir" / ".aiqt"))
+        cv, cw = _cwd_case(str(craft / "link-dir"))
+        check("trunc/aiqt-symlink-dir-denies", (cv, "detaches a child" in cw), ("deny", True))
+        (craft / "dangling").mkdir()
+        os.symlink(str(craft / "no-such-target"), str(craft / "dangling" / ".aiqt"))
+        cv, cw = _cwd_case(str(craft / "dangling"))
+        check("trunc/aiqt-dangling-symlink-denies", (cv, "detaches a child" in cw), ("deny", True))
+        (craft / "regular-file").mkdir()
+        (craft / "regular-file" / ".aiqt").write_text("not a directory", encoding="utf-8")
+        cv, cw = _cwd_case(str(craft / "regular-file"))
+        check("trunc/aiqt-regular-file-denies", (cv, "detaches a child" in cw), ("deny", True))
+        # A registry NAME whose no-follow stat faults must read PRESENT (the deny-safe branch on the stat
+        # inside a real .aiqt directory). The os.stat seam is a hermetic proxy for a mode-000 .aiqt on a
+        # non-root run (the fault holds on any uid, including root, per the uid-independence precedent).
+        (craft / "stat-fault" / ".aiqt").mkdir(parents=True)
+        saved_stat = aiqt_hooks.os.stat
+        _reg_names = tuple(r.rsplit("/", 1)[-1] for r in aiqt_hooks._ORCH_REGISTRY_FILES)
+
+        def _stat_fault(path, *a, **k):
+            if k.get("dir_fd") is not None and path in _reg_names:
+                raise PermissionError(13, "Permission denied", path)
+            return saved_stat(path, *a, **k)
+        try:
+            aiqt_hooks.os.stat = _stat_fault
+            cv, cw = _cwd_case(str(craft / "stat-fault"))
+        finally:
+            aiqt_hooks.os.stat = saved_stat
+        check("trunc/aiqt-registry-name-stat-fault-denies", (cv, "detaches a child" in cw),
+              ("deny", True))
+        # A SEARCH-ONLY ancestor must not fail the walk: O_PATH steps need only the search permission path
+        # resolution itself needs, so the registry above is still found. The real chmod 0o311 exercises
+        # the kernel on a non-root run; the os.open seam refuses a READ-open of that ancestor so the row
+        # also discriminates on a root run (root is not bound by the chmod) and pins the O_PATH flag
+        # itself (a walk rebuilt on O_RDONLY turns this found into a walk failure).
+        sonly = tmp / "search-only"
+        (sonly / ".aiqt").mkdir(parents=True)
+        (sonly / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                            encoding="utf-8")
+        (sonly / "mid" / "leaf").mkdir(parents=True)
+        saved_open_so = aiqt_hooks.os.open
+        _opath = getattr(os, "O_PATH", 0)
+        _leaf_ino = os.stat(str(sonly / "mid" / "leaf")).st_ino
+
+        def _read_open_refused(path, flags, *a, **k):
+            if (_opath and path == ".." and k.get("dir_fd") is not None
+                    and os.fstat(k["dir_fd"]).st_ino == _leaf_ino and not flags & _opath):
+                raise PermissionError(13, "Permission denied", "..")
+            return saved_open_so(path, flags, *a, **k)
+        try:
+            aiqt_hooks.os.open = _read_open_refused
+            if _opath:
+                os.chmod(str(sonly / "mid"), 0o311)
+            so_res = aiqt_hooks._orch_registry_walk(str(sonly / "mid" / "leaf"))
+        finally:
+            os.chmod(str(sonly / "mid"), 0o755)
+            aiqt_hooks.os.open = saved_open_so
+        check("trunc/walk-search-only-ancestor-finds-registry", so_res, ("found", None))
+        # ROUND 4, CONCURRENT-MOVE DETECTION: descriptor anchoring preserves each opened directory's
+        # identity, not its parent relationship, so a mid-walk rename of an ancestor redirects the ".."
+        # chain. The seam performs REAL renames around the REAL openat (no filesystem result is
+        # fabricated) and restores the tree before the walk returns, the adversarial interleaving from
+        # the round-4 review. With the registry present throughout, the path-anchored recheck finds it and
+        # the detach denies (red with the recheck removed: the walk read only the bypassed chain and
+        # allowed); with no registry anywhere, the recheck's chain comparison catches the redirect and
+        # denies naming the changed chain.
+        race = tmp / "race"
+        saved_open_rc = aiqt_hooks.os.open
+
+        def _race_open_factory(branch, moved):
+            fired = []
+
+            def _race_open(path, flags, *a, **k):
+                if (not fired and path == ".." and k.get("dir_fd") is not None
+                        and os.fstat(k["dir_fd"]).st_ino == os.stat(str(branch)).st_ino):
+                    fired.append(True)
+                    os.rename(str(branch), str(moved))
+                    try:
+                        return saved_open_rc(path, flags, *a, **k)
+                    finally:
+                        os.rename(str(moved), str(branch))
+                return saved_open_rc(path, flags, *a, **k)
+            return _race_open
+        (race / "tree" / ".aiqt").mkdir(parents=True)
+        (race / "tree" / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                                    encoding="utf-8")
+        (race / "tree" / "branch" / "cwd").mkdir(parents=True)
+        (race / "outside").mkdir()
+        try:
+            aiqt_hooks.os.open = _race_open_factory(race / "tree" / "branch",
+                                                    race / "outside" / "branch")
+            cv, cw = _cwd_case(str(race / "tree" / "branch" / "cwd"))
+        finally:
+            aiqt_hooks.os.open = saved_open_rc
+        check("trunc/walk-raced-ancestor-rename-registry-still-denies",
+              (cv, "detaches a child" in cw), ("deny", True))
+        (race / "bare-tree" / "branch" / "cwd").mkdir(parents=True)
+        (race / "bare-outside").mkdir()
+        try:
+            aiqt_hooks.os.open = _race_open_factory(race / "bare-tree" / "branch",
+                                                    race / "bare-outside" / "branch")
+            cv, cw = _cwd_case(str(race / "bare-tree" / "branch" / "cwd"))
+        finally:
+            aiqt_hooks.os.open = saved_open_rc
+        check("trunc/walk-raced-ancestor-rename-chain-mismatch-denies",
+              (cv, "changed its ancestor chain" in cw), ("deny", True))
+        # ROUND 4, SELF-BIND-MOUNT EDGE: a directory bind-mounted onto its own child repeats one dev/ino
+        # between the mount root and its ".." parent without being the filesystem root, so the old
+        # dev/ino-repeat stop read it as the top and missed a registry above. The walk now steps THROUGH a
+        # non-root repeat. The os.fstat seam is a hermetic proxy for `mount --bind bindm/a bindm/a/b`
+        # (mount privilege is unavailable here): the directory opened at a/b reports a's identity, exactly
+        # as the kernel reports the bind source's identity at the mount root, while its ".." still names a.
+        bindm = tmp / "bindm"
+        (bindm / ".aiqt").mkdir(parents=True)
+        (bindm / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
+                                                            encoding="utf-8")
+        (bindm / "a" / "b").mkdir(parents=True)
+        saved_fstat = aiqt_hooks.os.fstat
+        _b_st = os.stat(str(bindm / "a" / "b"))
+        _a_st = os.stat(str(bindm / "a"))
+
+        def _bind_sim_fstat(fd):
+            st = saved_fstat(fd)
+            if st.st_ino == _b_st.st_ino and st.st_dev == _b_st.st_dev:
+                return _a_st
+            return st
+        # The path-anchored recheck would ALSO reach the registry here (path resolution crosses mounts),
+        # masking a reverted repeat-stop, so it is stubbed to a clean miss for this row alone: the found
+        # below can then come only from the walk stepping through the non-root repeat. The recheck's own
+        # behaviour is pinned by the raced-ancestor rows above.
+        saved_recheck = aiqt_hooks._orch_walk_recheck
+        try:
+            aiqt_hooks.os.fstat = _bind_sim_fstat
+            aiqt_hooks._orch_walk_recheck = lambda _cwd, _chain: ("none", None)
+            bind_res = aiqt_hooks._orch_registry_walk(str(bindm / "a" / "b"))
+        finally:
+            aiqt_hooks.os.fstat = saved_fstat
+            aiqt_hooks._orch_walk_recheck = saved_recheck
+        check("trunc/walk-self-bind-mount-sim-finds-registry-above", bind_res, ("found", None))
         # The shared dispatcher fails closed on ANY exception while reading stdin: deeply nested JSON raises
         # RecursionError and a read can raise MemoryError, which the old narrow except let escape as a
         # traceback with exit 1 (non-blocking). A PreToolUse hook now exits 2 naming the exception; a Stop
@@ -2023,8 +2214,10 @@ def _main_isolated(report_path=None):
           "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "
           "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, and fails "
           "closed on a missing or unreadable tool_name, an unreadable cwd or one whose registry walk cannot "
-          "be carried out (scope is the walk, never git), a malformed tool_input, run_in_background, or "
-          "command, and on any stdin the dispatcher cannot parse; the ledger records launches "
+          "be carried out (scope is the ancestor walk with its concurrent-move recheck, unioned with "
+          "a git-resolved toplevel; a git failure alone never denies), a malformed tool_input, "
+          "run_in_background, or command, and on any stdin the dispatcher cannot parse; the ledger "
+          "records launches "
           "and completions; the resume "
           "audit arms and clears the mutation barrier on real record state; the prompt stamp "
           "resets guard counters from genuine human input; an actor-owned, symlinked, or writable "
