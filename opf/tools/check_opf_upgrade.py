@@ -96,7 +96,10 @@ VECTOR ROSTER (U1-U28, P1):
       (FIX1 release never-seize, class-width): _opf_write_guard.acquire_lease returns the on-disk payload; after a
       peer REPLACES the lease with its own well-formed bytes, _opf_write_guard.release_lease refuses (never-seize) and
       LEAVES the replacement, yet an ordinary release of this run's OWN lease still removes it (fails under the
-      old ownership-blind unlink, which deleted the peer's lease).
+      old ownership-blind unlink, which deleted the peer's lease). U25c (F-LEASE-RELEASE-ANY-EXC): _upgrade_run
+      called from inside a caller's `except`, with a nonzero render (a return path) and an inert failing
+      release, propagates the release error; a flip restoring the finally's sys.exc_info() test turns it red,
+      and the flip leg asserts its exact swallow outcome (exit 2 plus the "additionally" release-failure note).
   U26 R8 non-boolean module: the planner precondition refuses a non-boolean value on ANY module (governance,
       operational_policy, decision_support), matching the merge-base _validate_modules, while a fully-boolean
       module set still plans; end-to-end, a stored governance="x" refuses exit 2 before any mutation. FIX3: an
@@ -113,12 +116,20 @@ VECTOR ROSTER (U1-U28, P1):
 
 Exit convention: 0 observed assertions pass; 1 an assertion fails; 2 cannot evaluate the harness.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_opf_upgrade.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import copy
 import os
 import random
 import stat
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -1905,6 +1916,69 @@ def _suite_isolated():
                       and "restore --staged" in rout
                       and (sf / ".working/toml/lease.toml").is_file()
                       and '"event": "upgraded"' not in rout)
+
+            # U25c) F-LEASE-RELEASE-ANY-EXC: the finally's "is an exception propagating" test is THIS frame's
+            # own exception path, not sys.exc_info(). _upgrade_run is called from inside a CALLER's `except`
+            # with a nonzero render (a return path) and an inert failing release (it raises, touching
+            # nothing): the release error must propagate, never be printed and swallowed because the
+            # caller's handled exception looked in flight. The flip restores the sys.exc_info() test and
+            # must turn the vector red with the EXACT swallow outcome (exit 2 plus the "additionally" note),
+            # so a flip that fails for an unrelated reason does not pass the leg.
+            import importlib.util as _importlib_util
+            import inspect as _inspect
+            import types as _types
+
+            def _caller_release_outcome(run, label):
+                # ("raised", message, stderr) for an _UpgradeError, ("other", repr, stderr) for any other
+                # Exception, or ("returned", rc, stderr) for a normal return.
+                sc = base / ("u25c-caller-except-" + label)
+                sc.mkdir()
+                build_store(sc)
+                _orig_render = opf._opf_views.render
+                opf._opf_write_guard.release_lease = lambda *a, **k: (_ for _ in ()).throw(
+                    opf._UpgradeError("synthetic release failure"))
+                opf._opf_views.render = lambda *a, **k: 2
+                err = _io.StringIO()
+                try:
+                    with _ctx.redirect_stdout(_io.StringIO()), _ctx.redirect_stderr(err):
+                        try:
+                            raise RuntimeError("the caller's handled exception")
+                        except RuntimeError:
+                            try:
+                                rc = run(str(sc))
+                            except opf._UpgradeError as exc:
+                                return ("raised", str(exc), err.getvalue())
+                            except Exception as exc:  # noqa: BLE001  recorded, so the check names it red
+                                return ("other", repr(exc), err.getvalue())
+                            return ("returned", rc, err.getvalue())
+                finally:
+                    opf._opf_write_guard.release_lease = _orig_rel
+                    opf._opf_views.render = _orig_render
+
+            _fixed25c = _caller_release_outcome(opf._upgrade_run, "fixed")
+            check("U25c a release failure on a return path propagates from inside a caller's except",
+                  _fixed25c[:2] == ("raised", "synthetic release failure")
+                  and "releasing the upgrade lease failed" not in _fixed25c[2])
+            _src25c = _inspect.getsource(opf._upgrade_run)
+            _new25c = "                if not propagating:\n"
+            _flip25c = None
+            if _src25c.count(_new25c) == 1:
+                # The reverted body is written to a scratch module and loaded; its code is then bound to
+                # opf's live globals, so the flip sees exactly the module state the fixed function sees.
+                _path25c = base / "u25c_flip_upgrade_run.py"
+                _path25c.write_text(_src25c.replace(_new25c, "                if sys.exc_info()[1] is None:\n"),
+                                    encoding="utf-8")
+                _spec25c = _importlib_util.spec_from_file_location("_opf_u25c_flip", _path25c)
+                _mod25c = _importlib_util.module_from_spec(_spec25c)
+                _spec25c.loader.exec_module(_mod25c)
+                _flip25c = _types.FunctionType(_mod25c._upgrade_run.__code__, vars(opf), "_upgrade_run")
+            check("U25c flip target (the frame-local propagating test) found exactly once", _flip25c is not None)
+            _flipout25c = _caller_release_outcome(_flip25c, "flip") if _flip25c is not None else None
+            check("U25c flip: the sys.exc_info() test swallows the release failure (returns 2 and prints the "
+                  "release-failure note; vector red)",
+                  _flipout25c is not None and _flipout25c[:2] == ("returned", EXIT_ERROR)
+                  and "opf upgrade: additionally, releasing the upgrade lease failed (synthetic release "
+                      "failure)" in _flipout25c[2])
 
             # U25b) FIX1 release never-seize (class-width): the RELEASE path (not only the acquisition path)
             # is ownership-verified. Acquire a lease, capture the payload, then have a peer REPLACE the lease

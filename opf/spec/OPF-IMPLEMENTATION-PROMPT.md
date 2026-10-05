@@ -39,15 +39,15 @@ store can be built by hand from those sections.
 ## Read the specification first
 
 Read these files in full before you write any code, at the pinned commit
-`5d8d0fc7450c016ff40d129ad844e5547f699e83` of `jposluns/guardrails`. Read them from the pinned URLs,
+`6850500e694d7e16c8259467e3518c09b6dcb744` of `jposluns/guardrails`. Read them from the pinned URLs,
 not from a branch, so the text cannot change under you. After downloading each file, compute its
 SHA-256 and compare it with the value given here; if any value differs, or a file cannot be fetched,
 stop and report it. Do not work from memory or from a summary, this one included.
 
 | File | Role | SHA-256 at the pinned commit |
 |---|---|---|
-| `opf/spec/OPF-SPEC.md` | The authoritative specification | `ec731c78ca75233de3cc0127425afc220b5c52b55110f9feb1a2e1b6d423cd02` |
-| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `88f04cc0d54a748c96e0870bd7b35cf160e52935e0400c45623e5b694021444e` |
+| `opf/spec/OPF-SPEC.md` | The authoritative specification | `245cb883fb4c3b948b8c7fdb300b6f4bd5c551174776642bc82f29ea5672e885` |
+| `opf/spec/OPF-QUICKSTART.md` | A short orientation; the specification governs | `8c4f5385c4388701ec1d8fdce88c0b13cba104ae75e9d32219b1af0843033e50` |
 | `opf/spec/OPF-INIT-D2B.md` | The coupled initialization contract | `4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec` |
 | `opf/spec/OPF-INIT-D2B-REVIEW.md` | The review register for that contract | `5b29499173ed8ad47607d3d604bb77e59cd47a639f35046fb4815e241a794ffa` |
 | `opf/enforcement/ci/opf-ci.sh` | The reference CI recipe (read for behaviour; do not copy) | `0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104` |
@@ -57,11 +57,11 @@ stop and report it. Do not work from memory or from a summary, this one included
 Each file's raw URL has this form, with the file's path from the table in place of `<path>`:
 
 ```text
-https://raw.githubusercontent.com/jposluns/guardrails/5d8d0fc7450c016ff40d129ad844e5547f699e83/<path>
+https://raw.githubusercontent.com/jposluns/guardrails/6850500e694d7e16c8259467e3518c09b6dcb744/<path>
 ```
 
 For example, the specification itself is at
-`https://raw.githubusercontent.com/jposluns/guardrails/5d8d0fc7450c016ff40d129ad844e5547f699e83/opf/spec/OPF-SPEC.md`.
+`https://raw.githubusercontent.com/jposluns/guardrails/6850500e694d7e16c8259467e3518c09b6dcb744/opf/spec/OPF-SPEC.md`.
 
 Facts about these sources that shape the work:
 
@@ -70,18 +70,21 @@ Facts about these sources that shape the work:
   the schema release that follows the specification is normative. Several formats in the
   specification are therefore illustrative, and some details are left open. This prompt lists the
   open points it found; you may find more.
-- Section 4.2 (Layout overview) says that the 1.3.0 requirements in sections 4.2, 6.1, 8, 9.2, 11,
-  12 and 14 are a target contract, which does not claim that the reference tooling has activated
-  adoption, imported-series validation or the import writer, and that "Activation MUST include the
-  tested upgrade in section 9.2 and deterministic doctor coverage before a writer accepts the new
-  format". This prompt therefore requires the full section 9.2 upgrade to 1.3.0, tested on
-  synthetic older-store fixtures that you build yourself, before any writer of yours accepts the
-  1.3.0 format (step 8): from 1.2.0, and from 1.0.0 and 1.1.0 by composing the earlier deltas,
-  including the completed-legacy-import route and the pre-upgrade repair route. Where the upgrade
-  needs a legacy-format detail the pinned sources do not give, that gap blocks activation until the
-  maintainer resolves it (open point 25). The same section says the
-  homes-2 contract (`spec_version = "2.0.0"`, `[opf].homes = 2`) is a separate, later activation,
-  and that the section 9 manifest example describes the 1.3.0 target on legacy homes.
+- Section 4.2 (Layout overview) says that the 1.3.0 requirements in sections 4.2, 4.5, 6.1, 8, 9.1,
+  9.2, 11, 12, 14 and 16.1 are a target contract, which does not claim that the reference tooling
+  has activated adoption, imported-series validation or the import writer, that "Activation MUST
+  include deterministic doctor coverage before a writer accepts the new format", and that "For an
+  upgrade-capable implementation (section 16.1), activation MUST also include the tested upgrade in
+  section 9.2"; a fresh-only implementation activates without it and instead includes the section
+  16.1 admission check and its refusal evidence. This prompt builds an upgrade-capable
+  implementation ("Choices to make before you start"), so it requires the full section 9.2 upgrade
+  to 1.3.0, tested on synthetic older-store fixtures that you build yourself, before any writer of
+  yours accepts the 1.3.0 format (step 8): from 1.2.0, and from 1.0.0 and 1.1.0 by composing the
+  earlier deltas, including the completed-legacy-import route and the pre-upgrade repair route.
+  Where the upgrade needs a legacy-format detail the pinned sources do not give, that gap blocks
+  activation until the maintainer resolves it (open point 25). The same section says the homes-2
+  contract (`spec_version = "2.0.0"`, `[opf].homes = 2`) is a separate, later activation, and that
+  the section 9 manifest example describes the 1.3.0 target on legacy homes.
 - The prompt pack manifest at the pinned commit (`format = "opf.prompt-pack/v1"`,
   `version = "0.1.0"`) lists no members. The pack has two roles in the specification, and this
   fresh start needs neither. Its prompts drive post-adoption import (section 14.1, One approval
@@ -135,13 +138,32 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   section 9.2, Store schema upgrades). Omit the `[opf].worklog` key or set it to `1`; `2` is
   reserved and refused (section 9, The manifest). Before any writer of yours accepts this format,
   implement and test the section 9.2 upgrade to 1.3.0 from 1.0.0, 1.1.0 and 1.2.0 (step 8), as
-  section 4.2 requires.
+  section 4.2 requires of an upgrade-capable implementation (next choice).
   Your validator refuses a `spec_version` above 1.3.0 as a fail-closed INVALID finding naming the
   tooling-upgrade remedy, keeps the reserved homes-2 declaration recognized under legacy homes-1
   grading (section 9.2, last paragraph), and grades a declaration below 1.3.0 as open point 21 says.
   Note that section 9.2 says the 1.2.0 reference validator refuses a 1.3.0 declaration as above its
   ceiling, so the reference tooling at the pinned commit will not validate your store; that is
   expected and is not a fault in your store.
+- **Implementation conformance class.** OPF-SPEC.md, section 16.1 (Implementation conformance
+  classes) defines two classes for a tool offered to create, write or validate OPF stores:
+  `upgrade-capable`, which meets every section 9.2 requirement for each earlier base version and
+  generation and grades legacy state under sections 8.1, 8.6, 11 and 14.1, and `fresh-only`, which
+  supports exactly one base `spec_version`, one homes generation and one worklog storage
+  generation, implements no section 9.2 upgrade and no legacy-state grading, and refuses an older
+  store or listed legacy state through an admission check. This prompt builds an upgrade-capable
+  implementation: step 6 grades legacy state and step 8 implements the upgrade. Section 16.1 says
+  that an implementation that declares no class "MUST be treated as upgrade-capable, and every
+  upgrade requirement binds it". Declare, in the documentation of each release and in every
+  conformance report you emit, your release identity, the class `upgrade-capable`, and the
+  supported `spec_version` (`1.3.0`), homes generation (1) and worklog storage generation (1)
+  (section 16.1). Declare it there only: section 9.1 says that a profile, a store manifest field or
+  a command-line request "MUST NOT declare, grant, or relax an implementation's class". A fresh
+  start of your project's store does not make your implementation fresh-only. If the maintainer
+  prefers the fresh-only class, this prompt does not cover it: its admission check, read-only
+  pre-scan, recovery bound, recheck after the lease claim and refusal fixtures (section 16.1)
+  replace step 8 and change how steps 2, 6, 7, 9 and 10 resolve, admit and recover a store, so stop
+  and agree a revised plan from section 16.1 before step 1.
 - **Location.** Use the default in-repo store: `.working/` in your project, with the pointer
   `.opf.toml` holding `[store] target = "dir:."` (section 4.3, The pointer; section 5.2, Location
   is a configuration). Relocation (`opf migrate`) is optional and out of this prompt's minimum.
@@ -347,10 +369,12 @@ reading, and it blocks activation until the maintainer resolves it.
     the adopter's commit of the upgrade must carry those files. Reading the base table and
     `spec_version` of the manifest in `HEAD` only to bound the second exception is also this
     prompt's reading, and it rests on a reading of section 17 that open point 21 shares: "The
-    retired 1.0.0 token `devprocess` is recognized by `opf upgrade` alone, purely to carry a legacy
-    store forward" bars discovering, grading or carrying forward a store under that token anywhere
-    else, but not reading a `[devprocess]` table's version as data about `HEAD` once the working
-    tree's store has been discovered under `[opf]`. So the validator discovers and validates no
+    retired 1.0.0 token `devprocess` is recognized by `opf upgrade`, purely to carry a legacy store
+    forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by
+    name". In an upgrade-capable implementation, the class this prompt builds, that bars
+    discovering, grading or carrying forward a store under that token anywhere but `opf upgrade`,
+    but not reading a `[devprocess]` table's version as data about `HEAD` once the working tree's
+    store has been discovered under `[opf]`. So the validator discovers and validates no
     store at `HEAD`, and open point 22 reads the prior snapshot at `HEAD` the same way, by path and
     file name. The opposite reading, that any reading of a `[devprocess]` table outside
     `opf upgrade` is recognition, removes the retired-table leg of the second exception, and then
@@ -368,14 +392,17 @@ reading, and it blocks activation until the maintainer resolves it.
     fourth exception for archive files that `HEAD` lacks and that year's `archive.toml` enumerates,
     or rotation that stages nothing, with gates compared only after the maintainer commits; ask the
     maintainer to choose. Ask the maintainer to ratify the whole rule.
-21. **Older declarations and the repair route.** Section 4.2 says "Activation MUST include the
-    tested upgrade in section 9.2 and deterministic doctor coverage before a writer accepts the new
-    format", and section 9.2 says "Earlier stores compose their applicable deltas with this delta".
+21. **Older declarations and the repair route.** Section 4.2 says "For an upgrade-capable
+    implementation (section 16.1), activation MUST also include the tested upgrade in section 9.2",
+    which binds the class this prompt builds, and section 9.2 says "Earlier stores compose their
+    applicable deltas with this delta".
     That is not open: step 8 implements and tests the upgrade from 1.2.0, and from 1.0.0 and 1.1.0
     by composing the deltas section 9.2 gives, with the completed-legacy-import route and the
     pre-upgrade repair route, before initialization (step 9) and the record writer (step 10) accept
     the format. What is open is how a 1.3.0 validator and writer treat a store that declares an
-    older version. Section 9.2 says how a validator treats a `spec_version` above its own (a
+    older version. Section 16.1 settles that only for a fresh-only implementation, which refuses
+    such a store as `unsupported-older-store`; for an upgrade-capable one it stays open. Section
+    9.2 says how a validator treats a `spec_version` above its own (a
     fail-closed INVALID finding naming the tooling-upgrade remedy) and that "Only the reserved
     homes-2 declaration of section 4.2 stays recognized, and that recognition keeps legacy homes-1
     grading"; it does not say how a 1.3.0 validator grades a lower declaration. It does say that the
@@ -400,29 +427,30 @@ reading, and it blocks activation until the maintainer resolves it.
       format, never an imported leaf or an imported counter row, so a maintainer can record the
       remedy there and commit it (open point 28 lists the remedies).
     - A 1.0.0 store carries the retired token `devprocess`, which section 17 says "is recognized by
-      `opf upgrade` alone, purely to carry a legacy store forward", so neither your validator nor
-      your writer discovers it. Discovery then finds `.working/` but no machine store in it, which
-      section 4.5 makes a cannot-evaluate outcome that "never treats it as an empty or absent
-      store". This prompt's choice is one generic message for every such zero-match result, chosen
-      from the presence of `.working/` alone and without reading any base table (step 2): it says
-      that `.working/` holds no discoverable machine store, names the subdirectories it examined,
-      and names the remedies that can apply there, `opf upgrade` for a legacy store and a correction
-      of the manifest for a damaged or mistyped one (section 17 says a mistyped token "resolves to
-      cannot-evaluate (fail-closed), never to a silent empty store"). It never names `opf init`,
-      which refuses an existing `.working/` (step 9). Because this message reads no base table, it
-      does not depend on the section 17 reading of open point 20. The alternative, naming
-      `opf upgrade` alone when a `[devprocess]` table is seen, is consistent with that reading,
-      which treats reading a table as data and not as recognition, and is the maintainer's to choose
-      instead; ask for the rulings on open points 20 and 21 together. Where the composed upgrade
-      from 1.0.0 must refuse for a withdrawn authority, its remedy names a
+      `opf upgrade`, purely to carry a legacy store forward", and otherwise only by a fresh-only
+      implementation, purely to refuse that store by name, so in your upgrade-capable implementation
+      neither your validator nor your writer discovers it. Discovery then finds `.working/` but no
+      machine store in it, which section 4.5 makes a cannot-evaluate outcome that "never treats it
+      as an empty or absent store". This prompt's choice is one generic message for every such
+      zero-match result, chosen from the presence of `.working/` alone and without reading any base
+      table (step 2): it says that `.working/` holds no discoverable machine store, names the
+      subdirectories it examined, and names the remedies that can apply there, `opf upgrade` for a
+      legacy store and a correction of the manifest for a damaged or mistyped one (section 17 says a
+      mistyped token "resolves to cannot-evaluate (fail-closed), never to a silent empty store"). It
+      never names `opf init`, which refuses an existing `.working/` (step 9). Because this message
+      reads no base table, it does not depend on the section 17 reading of open point 20. The
+      alternative, naming `opf upgrade` alone when a `[devprocess]` table is seen, is consistent
+      with that reading, which treats reading a table as data and not as recognition, and is the
+      maintainer's to choose instead; ask for the rulings on open points 20 and 21 together. Where
+      the composed upgrade from 1.0.0 must refuse for a withdrawn authority, its remedy names a
       staged route, which is this prompt's choice: `opf upgrade --to 1.2.0` applies only the deltas
-      section 9.2 gives up to 1.2.0 ("A 1.0.0 store takes the 1.0.0 delta above directly to
-      1.2.0"), under the same preconditions, guards and final validation, and leaves its change
-      uncommitted like any upgrade. The maintainer then reviews and commits that intermediate
-      upgrade before running the writer, since the writer's planned destinations "MUST be clean"
-      (section 8.8, item 5) and the intermediate upgrade has just changed `counters.toml` and
-      created indexes the writer writes. Only then does the maintainer record the remedy through the
-      writer on the committed 1.2.0 store, commit it, and retry the upgrade to 1.3.0.
+      section 9.2 gives up to 1.2.0 ("A 1.0.0 store takes the 1.0.0 delta above directly to 1.2.0"),
+      under the same preconditions, guards and final validation, and leaves its change uncommitted
+      like any upgrade. The maintainer then reviews and commits that intermediate upgrade before
+      running the writer, since the writer's planned destinations "MUST be clean" (section 8.8, item
+      5) and the intermediate upgrade has just changed `counters.toml` and created indexes the
+      writer writes. Only then does the maintainer record the remedy through the writer on the
+      committed 1.2.0 store, commit it, and retry the upgrade to 1.3.0.
     - Any other declaration below 1.3.0 is a fail-closed INVALID finding naming the store-upgrade
       remedy (`opf upgrade`, step 8).
 22. **The writer's pending cannot-evaluate outside the verb, and the comparison snapshot.** Section
@@ -681,15 +709,16 @@ reading, and it blocks activation until the maintainer resolves it.
     "withdraws a ratified `done` item's only receipt as legacy importer-authored, a
     maintainer-authored clean `maintainer_decision` that links `corrects` to that item and records
     that its completion stands MUST satisfy the item's receipt obligation in place of the withdrawn
-    receipt; `opf record create` authors such a decision, doctor and the upgrade MUST accept it". It
-    names no field or wording for "records that its completion stands". This prompt's choice: the
-    validator and the upgrade accept, for such an item, a clean `maintainer_decision` with
-    `actor.kind = "maintainer"` and a `corrects` link to that item whose `decision` field opens with
-    a fixed statement that you choose and record; they cannot check the statement's meaning.
-    Section 8.6 adds that "a maintainer who instead judges the work unfinished MUST record a new
-    clean backlog item linking `derives_from` back, never reopen the terminal `done`", and does not
-    say whether that also satisfies the receipt obligation. This prompt's reading: it does not, so
-    the upgrade keeps refusing on that item; ask the maintainer to rule.
+    receipt; `opf record create` authors such a decision, doctor and the upgrade MUST accept it",
+    and that this acceptance "binds an upgrade-capable implementation (section 16.1)", the class
+    this prompt builds. It names no field or wording for "records that its completion stands". This
+    prompt's choice: the validator and the upgrade accept, for such an item, a clean
+    `maintainer_decision` with `actor.kind = "maintainer"` and a `corrects` link to that item whose
+    `decision` field opens with a fixed statement that you choose and record; they cannot check the
+    statement's meaning. Section 8.6 adds that "a maintainer who instead judges the work unfinished
+    MUST record a new clean backlog item linking `derives_from` back, never reopen the terminal
+    `done`", and does not say whether that also satisfies the receipt obligation. This prompt's
+    reading: it does not, so the upgrade keeps refusing on that item; ask the maintainer to rule.
 27. **Manifest registration of the imported leaves.** Section 4.2 says the imported files are
     "registered managed leaves beside the clean-series files, using the same enabled-type roster"
     and that "Their manifest, emitter, upgrade and containment registrations MUST agree", and the
@@ -1265,6 +1294,13 @@ containment.
   gitignore fallback (section 5.1, Always a git repository). How it treats the views that init
   leaves unstaged, and the files and views that the step 8 upgrade creates and must not stage, is
   open point 20, whose reading names the only exceptions.
+- Unmanaged-path containment includes the section 14.2 rule (the `keep` disposition) that an
+  `[unmanaged]` path "MUST NOT equal or contain a discovery candidate", a `manifest.toml` present
+  in an immediate subdirectory of `.working/` (section 4.5): such an entry is a contradictory input
+  and yields cannot-evaluate. Section 14.2 also says that a no-follow existence probe of that
+  `manifest.toml`, used only by discovery (step 2), by this rule and by the section 16.1 admission
+  check, is not a read of a kept path. Your own store registers no `[unmanaged]` path, so this
+  arises only in test stores.
 - An `.opf.local.toml` at the product root is a finding when the snapshot that step 2 names holds
   it: the git index for a run on the working tree and for the pre-commit check, never the working
   tree itself, and the checked-out revision in CI. It is judged on that snapshot alone and never on
@@ -1377,6 +1413,9 @@ Acceptance checks, each as an automated test over a throwaway store the test bui
   index holds no ID each produce a finding or cannot-evaluate, and a valid store built from
   sections 4 and 9, with its views rendered by step 5, produces valid.
 - A truncated TOML file produces cannot-evaluate (exit 2), never valid.
+- A store whose `[unmanaged]` paths hold an entry that equals or contains a discovery candidate,
+  such as a directory `.working/notes/` that holds a `manifest.toml` with no `[opf]` table,
+  produces cannot-evaluate (section 14.2), never valid.
 - A maintainer-authored clean contribution at unqualified `acknowledged` with neither a `summary`
   nor a registered `x-<vendor>` table is a finding; with a `summary` it is not (open point 30). A
   dangling link in a clean record is a finding naming the link and its remedy in words.
@@ -1491,9 +1530,12 @@ Acceptance checks:
 
 ### Step 8: the store upgrade to 1.3.0 (`opf upgrade`)
 
-Section 4.2 (Layout overview) says "Activation MUST include the tested upgrade in section 9.2 and
-deterministic doctor coverage before a writer accepts the new format", and section 9.2 says "The
-1.3.0 delta remains a target contract until a tested upgrade and its required readers activate".
+Section 4.2 (Layout overview) says "Activation MUST include deterministic doctor coverage before a
+writer accepts the new format" and "For an upgrade-capable implementation (section 16.1),
+activation MUST also include the tested upgrade in section 9.2", and section 9.2 says "The 1.3.0
+delta remains a target contract until a tested upgrade and its required readers activate" and that
+each of its requirements on an upgrade "binds an upgrade-capable implementation", the class this
+prompt builds ("Choices to make before you start").
 Initialization (step 9) and the record writer (step 10) both write the 1.3.0 format, so implement
 and test the section 9.2 upgrade here, before either: from 1.2.0, and from 1.0.0 and 1.1.0, since
 section 9.2 says "Earlier stores compose their applicable deltas with this delta". The step 6
@@ -1507,6 +1549,9 @@ sections 4, 9 and 9.2, in throwaway repositories:
   and a view-omitting 1.0.0 store" (the 1.0.0 base field names are open point 25);
 - a 1.1.0 fixture, with the `[opf]` base table and `spec_version = "1.1.0"`;
 - 1.2.0 fixtures, with `spec_version = "1.2.0"`, no imported leaves and no imported counter rows;
+- a 1.2.0 fixture whose `[unmanaged]` paths hold an entry that equals or contains a discovery
+  candidate (section 14.2), such as a directory `.working/notes/` that holds a `manifest.toml` with
+  no `[opf]` table;
 - fixtures holding synthetic legacy importer-authored clean records, one of them without
   `created_at` (step 4), fixtures holding the two pending_decision chain shapes, A and B, of open
   point 28, and fixtures at `import_status = "partial"` and `"complete"`;
@@ -1570,12 +1615,15 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
   destinations and the index collision candidates. Fail closed on an unresolvable store, a declared
   `spec_version` above the tooling's, a divergence, a held lease, or populated state that
   contradicts the preconditions. Refuse a delta that would put a managed path or view at a
-  registered `[unmanaged]` path, naming the collision. Run the unresolved-import check below
+  registered `[unmanaged]` path, naming the collision. Refuse before any write a store whose
+  `[unmanaged]` entry equals or contains a discovery candidate (section 14.2), naming the entry and
+  the candidate; section 9.2 names the remedy, the adopter's own fresh plan re-dispositioning that
+  candidate, recorded before the upgrade is retried. Run the unresolved-import check below
   before any write. Also refuse before any write, naming the remedy, which is to commit the earlier
   change first, while any record present at `HEAD` has a working-tree status that differs from its
   status there, even one outside the planned destinations and collision candidates above (open point
-  22, this prompt's choice). The retired token `devprocess` is recognized here and nowhere else
-  (section 17).
+  22, this prompt's choice). In your upgrade-capable implementation the retired token
+  `devprocess` is recognized here and nowhere else (section 17).
 - **Finish.** Regenerate the declared views, require a full validator VALID (step 6), and leave the
   change uncommitted for the adopter's own branch and merge: never stage or commit it, and never
   write the adoption archive. The files and views the upgrade creates therefore stay outside the
@@ -1739,7 +1787,8 @@ Acceptance checks, over synthetic fixtures the test builds:
 - An upgrade that reaches 1.3.0, and a remedy writer operation that exits 0, each render under the
   lease that operation holds without taking a second one (step 7).
 - A held lease, a dirty planned destination, a manifest carrying a comment, a `spec_version`
-  above 1.3.0, a populated file at an imported leaf path, and a fixture holding a legacy
+  above 1.3.0, a populated file at an imported leaf path, the `[unmanaged]` discovery-candidate
+  fixture above (its refusal naming the entry and the candidate), and a fixture holding a legacy
   importer-authored clean record without `created_at` (cannot-evaluate until open point 25 is
   resolved) each refuse with nothing written.
   Your validator and your step 8 `create` and `transition` do not discover a `devprocess`
@@ -2480,7 +2529,7 @@ platform." Wire all four, not only the platform you run on.
   | R28 | A section 9.2 refusal for a withdrawn authority: a receipt-stripped `done` item, or another withdrawal that open point 28 asks you to name | 8.6, 9.2 | a maintainer | `create` of the open point 26 `maintainer_decision`, or of the remedy record you name under open point 28 (step 8) |
   | R28a | A section 9.2 refusal for a pending_decision chain that a withdrawn authority leaves without exactly one current effective resolution | 8.5, 8.6, 9.2 | a maintainer | under the reading ruled, `create` of a new pending_decision, a commit, its `transition` to unqualified `decided` with its resolution bundle and `supersedes` link, and a commit (step 8; open point 28) |
   | R29 | A section 9.2 refusal of a dirty store, or the open point 22 refusal of an uncommitted status change | 9.2; open point 22 | the operator | a commit; no store write |
-  | R30 | A section 9.2 refusal of a declaration above the tooling, or of a collision with an `[unmanaged]` path or a frozen source | 9.2 | the operator | a tooling upgrade; for a collision, the adopter's fresh plan, outside this prompt's scope, with R17 open |
+  | R30 | A section 9.2 refusal of a declaration above the tooling, of a collision with an `[unmanaged]` path or a frozen source, or of an `[unmanaged]` entry that equals or contains a discovery candidate | 9.2 | the operator | a tooling upgrade; for a collision, the adopter's fresh plan, outside this prompt's scope, with R17 open |
   | R31 | A section 9.2 refusal of an unresolved legacy import | 9.2 | the operator | reconciliation under its original contract; it arises only on step 8's synthetic fixtures, outside your store |
   | R31a | A section 9.2 refusal of "a populated collision, missing ancestral counter or unprovable prestate" | 9.2 | the operator | none that the specification names; it arises only on step 8's synthetic fixtures, outside your store, so report it to the maintainer |
   | R32 | A held or leftover lease, or an interrupted transaction | 5.7; 8.8, item 1 | the operator | the step 7 lease reconciliation and the step 10 reconcile-first recovery |
@@ -2802,6 +2851,11 @@ maintainer's ruling on an open point, report the ruling with it.
     its scope, its exclusions (relocation, import, adoption of pre-existing files, modules, and any
     open point you could not settle other than open point 25, which blocks the claim rather than
     narrowing it) and every cannot-evaluate result.
+20. The documentation of each release and every conformance report declare the release identity,
+    the class `upgrade-capable`, and the supported `spec_version` (`1.3.0`), homes generation (1)
+    and worklog storage generation (1), as section 16.1 requires, and no profile, manifest field or
+    command-line request declares or changes the class (section 9.1); the class claim says that it
+    is self-asserted (section 17).
 
 ## Out of scope for this prompt
 
@@ -2809,6 +2863,7 @@ Import and the imported-series writer (section 8.8, `import --batch`; section 14
 import), adoption of pre-existing files (section 14), migrating an existing release pipeline
 (section 14.3), store relocation and sync (sections 5.4 to 5.6), schema upgrades other than the
 upgrades to 1.3.0 of step 8 (section 9.2), the homes-2 generation and its homes migration
-(sections 4.2 and 9.2), the modules (section 8.5) beyond what the step 8 upgrade fixtures need, and
-profiles (section 9.1). If your project needs any of these, read those sections at the same pinned
+(sections 4.2 and 9.2), the modules (section 8.5) beyond what the step 8 upgrade fixtures need,
+profiles (section 9.1), and the fresh-only implementation class with its admission check (section
+16.1). If your project needs any of these, read those sections at the same pinned
 commit and extend the plan, under the same rules.

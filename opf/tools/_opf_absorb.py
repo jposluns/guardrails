@@ -56,11 +56,19 @@ rows (never the clock), so the self-test can golden the output; the standard doe
 may draft otherwise. Adopter-rooted like the rest of the tooling; the assurance rides the `--self-test` leg
 over synthetic stores, reached through `opf/tools/opf.py --self-test` as the `opf-absorb` leg.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_absorb.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import html
 import os
 import re
 import string
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
