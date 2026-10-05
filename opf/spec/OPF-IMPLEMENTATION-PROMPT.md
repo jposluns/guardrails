@@ -157,13 +157,18 @@ maintainer before step 1, and keep the confirmation in your implementation notes
   upgrade requirement binds it". Declare, in the documentation of each release and in every
   conformance report you emit, your release identity, the class `upgrade-capable`, and the
   supported `spec_version` (`1.3.0`), homes generation (1) and worklog storage generation (1)
-  (section 16.1). Declare it there only: section 9.1 says that a profile, a store manifest field or
-  a command-line request "MUST NOT declare, grant, or relax an implementation's class". A fresh
-  start of your project's store does not make your implementation fresh-only. If the maintainer
-  prefers the fresh-only class, this prompt does not cover it: its admission check, read-only
-  pre-scan, recovery bound, recheck after the lease claim and refusal fixtures (section 16.1)
-  replace step 8 and change how steps 2, 6, 7, 9 and 10 resolve, admit and recover a store, so stop
-  and agree a revised plan from section 16.1 before step 1.
+  (section 16.1). Section 9.1 says that a profile, a store manifest field or a command-line request
+  "MUST NOT declare, grant, or relax an implementation's class", so none of those carries it. This
+  prompt's choice is to keep the declaration in one file shipped inside each release of your
+  implementation, outside every store, and to produce the declaration in the release documentation
+  and in every report from that file. Section 16.1 also says "An unreadable, malformed, or
+  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation";
+  step 1 builds that check, and every command that reads, grades or writes a store runs it first.
+  A fresh start of your project's store does not make your implementation fresh-only. If the
+  maintainer prefers the fresh-only class, this prompt does not cover it: its admission check,
+  read-only pre-scan, recovery bound, recheck after the lease claim and refusal fixtures (section
+  16.1) replace step 8 and change how steps 2, 6, 7, 9 and 10 resolve, admit and recover a store,
+  so stop and agree a revised plan from section 16.1 before step 1.
 - **Location.** Use the default in-repo store: `.working/` in your project, with the pointer
   `.opf.toml` holding `[store] target = "dir:."` (section 4.3, The pointer; section 5.2, Location
   is a configuration). Relocation (`opf migrate`) is optional and out of this prompt's minimum.
@@ -201,7 +206,8 @@ question as a `pending_decision` record; only the maintainer records the ruling.
 conformance report, list these choices as implementation choices, not as requirements of the
 standard. None of them makes a stated MUST optional. Open point 25 differs from the others: it
 names details the upgrade needs that no choice of yours can supply, apart from one labelled interim
-reading, and it blocks activation until the maintainer resolves it.
+reading, and it blocks activation until the maintainer resolves it. Open point 32 blocks only the
+conformance claim (checklist item 19) until the maintainer rules.
 
 1. **Closed schemas per type.** Section 8.3 (The record envelope) says schemas are closed and types
    add their own fields, but the specification names only some type fields: `severity` on a
@@ -944,6 +950,28 @@ reading, and it blocks activation until the maintainer resolves it.
     which sanctioned act allocates the new ID. This point asks for that ruling only; it
     names no repair procedure. Until the ruling, step 14 reports each repair class that needs a new
     ID as not run.
+32. **Exclusions under section 16.1.** Section 16.1 says "A class changes which requirements bind
+    an implementation only where this specification says so; a declared scope, exclusion,
+    profile, or posture MUST NOT otherwise waive a base requirement. Current-format requirements,
+    the imported series, adoption, and the section 8.6 authority firewall included, bind both
+    classes." Section 16 says every report "names its scope, its exclusions, and its
+    cannot-evaluate results", and section 1 names "the standard command vocabulary of the
+    reference tooling" without saying that every implementation offers each command. The
+    specification does not say whether an implementation that offers no command for an activity
+    may name that activity as an exclusion. This prompt builds no adoption of pre-existing files
+    (section 14), no import writer (section 8.8, `import --batch`; section 14.1, post-adoption
+    import), no relocation or sync (sections 5.4 to 5.6) and no module (section 8.5). Two texts
+    bear on the ruling: section 4.2 says the 1.3.0 target contract does "not claim that the
+    reference tooling has activated adoption, imported-series validation, or the import writer",
+    and section 9.2 says "import writing is a separate later activation". This prompt's reading,
+    yours to confirm: section 16.1 binds every base requirement on what your implementation does,
+    so whatever it offers meets each one that governs it, the step 6 imported-series checks and the
+    section 8.6 firewall included, and no exclusion narrows that; an activity it does not offer at
+    all may be named as an exclusion only where the maintainer rules that no base requirement
+    obliges an implementation to offer it. Ask the maintainer to rule on each of adoption, the
+    import writer, relocation and sync, and the modules. Where the ruling is that naming one as an
+    exclusion waives a base requirement, make no conformance claim until your implementation
+    provides it; this prompt does not cover that work (see "Out of scope for this prompt").
 
 ## The store you are building
 
@@ -997,6 +1025,20 @@ Build the primitives every later step relies on.
 - Outcome reporting with three outcomes: valid, finding, and cannot-evaluate. Fail closed: an input
   a check is meant to cover that cannot be read, parsed or resolved yields failure or
   cannot-evaluate, never a clean pass (section 3, Design principles, "Fail closed").
+- The class declaration check. Read the declaration file of "Choices to make before you start"
+  from the running release and check it. Section 16.1 says "An unreadable, malformed, or
+  contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store
+  operation". The specification defines no format for the declaration and does not define the
+  three cases, so this prompt's reading, yours to confirm with the maintainer, is: unreadable is a
+  file that is absent or cannot be read; malformed is one that does not parse, lacks the release
+  identity, the class, the `spec_version`, the homes generation or the worklog storage generation,
+  carries any other key, or gives a value of the wrong form or a class that is neither
+  `upgrade-capable` nor `fresh-only`; contradictory is one whose values disagree with what the
+  release implements, that is, a class other than `upgrade-capable`, a `spec_version` other than
+  the validator's ceiling (`1.3.0`), or a homes or worklog storage generation other than 1. Each
+  case yields cannot-evaluate. Every command of yours that reads, grades or writes a store, `opf
+  init` and the step 13 and step 14 checks included, runs this check before it resolves, reads or
+  writes any store, and on cannot-evaluate it stops with exit 2 and performs no store operation.
 
 Acceptance checks:
 
@@ -1004,6 +1046,10 @@ Acceptance checks:
   non-canonical layout is detected as non-canonical.
 - An unreadable or malformed input produces cannot-evaluate in a unit test, never a pass.
 - A path with a `..` component, a backslash or an absolute form is refused.
+- The class declaration check yields cannot-evaluate for each of these declarations: absent,
+  unreadable, not parseable, missing each field in turn, carrying an extra key, naming an unknown
+  class, declaring `fresh-only`, declaring `spec_version = "1.2.0"`, and declaring homes
+  generation 2. The shipped declaration passes.
 
 ### Step 2: store resolution
 
@@ -1068,6 +1114,8 @@ Acceptance checks:
   not an empty store (section 17, Residual coverage disclosures); its message does not name
   `opf init`. A repository with no pointer and no `.working/` gives the message that names
   `opf init`.
+- With each failing class declaration of step 1 and a valid store present, resolution reports
+  cannot-evaluate, exits 2 and reads neither pointer nor any file under `.working/` (section 16.1).
 
 ### Step 3: manifest and control ledgers
 
@@ -2529,7 +2577,7 @@ platform." Wire all four, not only the platform you run on.
   | R28 | A section 9.2 refusal for a withdrawn authority: a receipt-stripped `done` item, or another withdrawal that open point 28 asks you to name | 8.6, 9.2 | a maintainer | `create` of the open point 26 `maintainer_decision`, or of the remedy record you name under open point 28 (step 8) |
   | R28a | A section 9.2 refusal for a pending_decision chain that a withdrawn authority leaves without exactly one current effective resolution | 8.5, 8.6, 9.2 | a maintainer | under the reading ruled, `create` of a new pending_decision, a commit, its `transition` to unqualified `decided` with its resolution bundle and `supersedes` link, and a commit (step 8; open point 28) |
   | R29 | A section 9.2 refusal of a dirty store, or the open point 22 refusal of an uncommitted status change | 9.2; open point 22 | the operator | a commit; no store write |
-  | R30 | A section 9.2 refusal of a declaration above the tooling, of a collision with an `[unmanaged]` path or a frozen source, or of an `[unmanaged]` entry that equals or contains a discovery candidate | 9.2 | the operator | a tooling upgrade; for a collision, the adopter's fresh plan, outside this prompt's scope, with R17 open |
+  | R30 | A section 9.2 refusal of a declaration above the tooling, of a collision with an `[unmanaged]` path or a frozen source, or of an `[unmanaged]` entry that equals or contains a discovery candidate | 9.2 | the operator | a tooling upgrade; for a collision, the adopter's fresh plan, outside this prompt's scope, with R17 open; for a discovery candidate, the adopter's own fresh plan re-dispositioning that candidate, recorded before the upgrade is retried (section 9.2), outside this prompt's scope |
   | R31 | A section 9.2 refusal of an unresolved legacy import | 9.2 | the operator | reconciliation under its original contract; it arises only on step 8's synthetic fixtures, outside your store |
   | R31a | A section 9.2 refusal of "a populated collision, missing ancestral counter or unprovable prestate" | 9.2 | the operator | none that the specification names; it arises only on step 8's synthetic fixtures, outside your store, so report it to the maintainer |
   | R32 | A held or leftover lease, or an interrupted transaction | 5.7; 8.8, item 1 | the operator | the step 7 lease reconciliation and the step 10 reconcile-first recovery |
@@ -2848,14 +2896,22 @@ maintainer's ruling on an open point, report the ruling with it.
 19. The conformance statement uses only the section 16 vocabulary, for example
     "`conformant_for_declared_scope` (OPFiles base, spec 1.3.0 on homes 1; self-asserted; profiles:
     none declared)", or `migration_incomplete` while an inventory entry is unresolved, and names
-    its scope, its exclusions (relocation, import, adoption of pre-existing files, modules, and any
-    open point you could not settle other than open point 25, which blocks the claim rather than
-    narrowing it) and every cannot-evaluate result.
+    its scope, its exclusions and every cannot-evaluate result. Section 16.1 says "a declared
+    scope, exclusion, profile, or posture MUST NOT otherwise waive a base requirement". So no
+    exclusion narrows a requirement on what your implementation does; an activity it does not offer
+    is named as an exclusion only as the maintainer's ruling on open point 32 allows; and an open
+    point you could not settle is named as an exclusion only where it waives no base requirement,
+    while one that a base requirement depends on, as open point 25 does, blocks the claim rather
+    than narrowing it. Until the maintainer rules on open point 32, this item is not passed.
 20. The documentation of each release and every conformance report declare the release identity,
     the class `upgrade-capable`, and the supported `spec_version` (`1.3.0`), homes generation (1)
     and worklog storage generation (1), as section 16.1 requires, and no profile, manifest field or
     command-line request declares or changes the class (section 9.1); the class claim says that it
-    is self-asserted (section 17).
+    is self-asserted (section 17). With each failing declaration of the step 1 checks, every
+    command that reads, grades or writes a store, `opf init`, `opf upgrade`, `opf record` and the
+    step 13 and step 14 checks included, stops with cannot-evaluate (exit 2) before any store
+    operation, as section 16.1 requires: "An unreadable, malformed, or contradictory declaration
+    MUST yield cannot-evaluate and MUST NOT authorize any store operation".
 
 ## Out of scope for this prompt
 
@@ -2866,4 +2922,6 @@ upgrades to 1.3.0 of step 8 (section 9.2), the homes-2 generation and its homes 
 (sections 4.2 and 9.2), the modules (section 8.5) beyond what the step 8 upgrade fixtures need,
 profiles (section 9.1), and the fresh-only implementation class with its admission check (section
 16.1). If your project needs any of these, read those sections at the same pinned
-commit and extend the plan, under the same rules.
+commit and extend the plan, under the same rules. Leaving one out of your implementation does not
+waive a base requirement it carries (section 16.1); open point 32 asks the maintainer which of the
+activities it lists a conformance claim may name as an exclusion.
