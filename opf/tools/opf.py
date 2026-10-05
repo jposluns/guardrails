@@ -13188,7 +13188,8 @@ def _cmd_adopt(rest):
           a run id). Exit 2: cannot-evaluate (a symlinked, dangling or wrong-type root or home, evidence-
           home entry or journal entry -- a journal entry other than a transaction directory or a
           regular, singly-linked `lock` / `lock.break` -- a root reached through a symlink, `..` included, a foreign
-          plan digest, a wrong phase, a missing or unproven plan.toml, or an unreadable
+          plan digest, a wrong phase, a missing or unproven plan.toml, unless an earlier finding
+          (no inventory, or a legacy-format inventory) ends verification first, or an unreadable
           journal or bundle). Like
           `plan`, a NOT-ADOPTED root is fine: adoption is the verb that PRECEDES a store, so neither
           subcommand requires store resolution (unlike import D7).

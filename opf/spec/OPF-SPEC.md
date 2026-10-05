@@ -245,7 +245,9 @@ is its named finding, for every inventory of a bundle whose `plan.toml` is absen
 not canonical, names another run, or carries a `plan_digest` that does not re-seal its own bytes,
 an empty base inventory included (a bundle with no inventory is its own named finding). It MUST
 check that plan's inventory row against the same bytes its seal was proven from. It does not check
-the approval's binding, which the doctor's admission checks.
+the approval's binding, which the doctor's admission checks. Verification stops at the first
+finding, a bundle without an inventory or an inventory in the recognized legacy format, so a
+cannot-evaluate that a later inventory would yield is not reported for that bundle.
 A retirement is recorded only by a sealed retirement inventory in the shape the
 retirement-phase transaction derives from its own create ops: one row per move row of the plan,
 occupying or not, whose recorded Move destination (its move-file destination) lies beneath
