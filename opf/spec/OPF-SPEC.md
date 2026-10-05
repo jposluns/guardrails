@@ -8,7 +8,7 @@ the relocator `opf migrate`, the
 synchronizer `opf sync`, the schema-upgrader `opf upgrade`, the absorber `opf absorb`, and the
 record author `opf record`,
 ship in later releases).
-Date: 2026-10-03 (UTC).
+Date: 2026-10-05 (UTC).
 
 OPFiles is a neutral, self-contained operational-files standard published under the Apache
 License 2.0 (except vendored third-party material, which remains under its own terms). AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand,
@@ -835,12 +835,15 @@ Clean record IDs have the form `<NS>-<n>`; imported IDs have the form `imported:
 for example `imported:BI-7`. The complete lexical grammar is
 `^(?:imported:)?[A-Z]{2}-[1-9][0-9]*$`, and the namespace MUST additionally name the
 record's enabled type in section 8.1. Namespaces map one-to-one to types within each series.
+The imported series MUST refuse the `LF` namespace, since new imports do not use LF quarantine
+(section 8.1).
 `counters.toml` MUST hold independent monotonic high-water values per series and namespace:
 `BI` for clean backlog items and the quoted TOML key `"imported:BI"` for imported backlog items.
 The same rule includes `"imported:WL"`; clean release spans MUST tile only the clean `WL` number
-line. Uniqueness, counter high-water, contiguity and no-deletion checks MUST evaluate each series
-independently; allocation MUST increment its counter under the store's lock as one atomic claim, so
-no gap between choosing and reserving can double-allocate. Counters MUST NOT be reset and IDs
+line. The doctor MUST require the imported counter rows only once the section 9.2 upgrade has
+created them. Uniqueness, counter high-water, contiguity and no-deletion checks MUST evaluate each
+series independently; allocation MUST increment its counter under the store's lock as one atomic
+claim, so no gap between choosing and reserving can double-allocate. Counters MUST NOT be reset and IDs
 MUST NOT be reused, even when a record is superseded, refuted, or its work reverted. Rotation, index
 rewrites, and store relocation MUST NOT touch `counters.toml`. Re-adoption MUST seed both series
 from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed
@@ -886,7 +889,9 @@ fields. Standalone imported `done` receipts are legal history. Historical `creat
 `updated_at`, `date` and `decided_at` are optional; when present they MUST be valid RFC 3339 UTC
 and no later than the writer's import clock instant. Import time MUST NOT stand in for event time.
 
-Other historical type fields MUST NOT be absent without an explicit missingness row. Supplied
+Other historical type fields MUST NOT be absent without an explicit missingness row. A missingness
+row MUST cover every absent field of the type's schema, optional fields included, while a field
+that the envelope table above marks optional needs no row when absent. Supplied
 fields MUST retain their declared value types and vocabularies; unknown keys still fail. Missing
 historical timestamps and type fields MUST be accounted for in `unrecorded = [{field, reason}]`,
 with one row per absent field, no duplicate fields and no row claiming a supplied field absent.
@@ -903,9 +908,10 @@ from the writer's clock). Optional `span` is an informational byte range in the 
 Optional `import.history` retains verbatim source-precision values that cannot be losslessly
 normalized, such as a date-only string; a UTC midnight MUST NOT be fabricated. Optional
 `import.unparsed` holds verbatim source text that cannot be mapped. The assistant MUST retain such
-text rather than drop it. The writer performs no byte-tiling or leftover accounting: byte-level
-coverage and semantic fidelity are not machine-proven. Preserved originals remain the restoration
-authority.
+text rather than drop it. When present, `import.span` MUST be an array of two integers,
+`import.history` an array of tables, and `import.unparsed` an array of strings. The writer performs
+no byte-tiling or leftover accounting: byte-level coverage and semantic fidelity are not
+machine-proven. Preserved originals remain the restoration authority.
 
 Imported records and their worklog entries MUST be immutable after publication; corrections MUST be
 a fresh import run retaining the old evidence. A conforming imported series can reach doctor VALID:
@@ -2093,7 +2099,10 @@ An implementation MUST declare, in the documentation of each release and in ever
 it emits, its release identity, its class, and its supported `spec_version`, homes generation, and
 worklog storage generation. An implementation that declares no class MUST be treated as
 upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or contradictory
-declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation.
+declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation. A missing
+declaration MUST be treated as malformed, because it states none of the release identity, class,
+`spec_version`, and generations required above, so it yields cannot-evaluate, never the no-class
+treatment.
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease
