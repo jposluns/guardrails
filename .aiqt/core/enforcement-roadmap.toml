@@ -368,8 +368,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "seccry"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["gate:dangerous-api"]
 
 [[rule]]
 corpus-id = "secdrr"
@@ -378,8 +378,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secdsz"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["gate:dangerous-api"]
 
 [[rule]]
 corpus-id = "secegr"
@@ -388,8 +388,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secenc"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["gate:dangerous-api"]
 
 [[rule]]
 corpus-id = "secfcl"
@@ -413,8 +413,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secinp"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["gate:dangerous-api"]
 
 [[rule]]
 corpus-id = "seckey"
@@ -458,8 +458,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secout"
-status = "none"
-mechanisms = []
+status = "enforced"
+mechanisms = ["gate:dangerous-api"]
 
 [[rule]]
 corpus-id = "secpin"

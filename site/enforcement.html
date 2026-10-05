@@ -73,7 +73,7 @@
 <section id="register">
   <div class="wrap">
         <p>This register lists every rule and the shipped mechanical controls linked to it. An enforced status records linkage, not complete coverage: at least one shipped gate or hook cites the rule, and each mechanism's class and residual describe the boundary of what it checks. A linked mechanism may cover only part of a rule's violation surface. A status of none means enforcement has not been built yet; pending also means enforcement has not been built yet, and its description states the intended build. The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim and not summarized. The class letter is a maintainer assessment of the check's decision procedure, not a coverage score.</p>
-        <p class="lead">Summary: <strong>34</strong> enforced, <strong>0</strong> pending, <strong>98</strong> none.</p>
+        <p class="lead">Summary: <strong>39</strong> enforced, <strong>0</strong> pending, <strong>93</strong> none.</p>
         <div class="tablewrap">
           <table class="dtable">
             <thead><tr><th>Rule</th><th>Corpus ID</th><th>Status</th><th>How enforced or intended</th></tr></thead>
@@ -171,21 +171,21 @@
             <tr id="rule-secau1"><td>Strong authentication</td><td><code>secau1</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secazn"><td>Least-privilege authorization</td><td><code>secazn</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-seccet"><td>Configuration that executes on load is treated as code</td><td><code>seccet</code></td><td>Enforced</td><td><a href="#mechanism-gate-python-launcher-isolation"><code>gate:python-launcher-isolation</code></a>, class c</td></tr>
-            <tr id="rule-seccry"><td>Sound cryptography</td><td><code>seccry</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
+            <tr id="rule-seccry"><td>Sound cryptography</td><td><code>seccry</code></td><td>Enforced</td><td><a href="#mechanism-gate-dangerous-api"><code>gate:dangerous-api</code></a>, class c</td></tr>
             <tr id="rule-secsup"><td>Trusted, pinned dependency provenance</td><td><code>secsup</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secfcl"><td>Fail closed in security-relevant paths</td><td><code>secfcl</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secfid"><td>Validate federated identity and token flows</td><td><code>secfid</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secupl"><td>Validate and contain uploaded files</td><td><code>secupl</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secgci"><td>Guardrail configuration is integrity-protected</td><td><code>secgci</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-sechau"><td>Human authorization for consequential actions</td><td><code>sechau</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
-            <tr id="rule-secinp"><td>Validate external input at the boundary</td><td><code>secinp</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
+            <tr id="rule-secinp"><td>Validate external input at the boundary</td><td><code>secinp</code></td><td>Enforced</td><td><a href="#mechanism-gate-dangerous-api"><code>gate:dangerous-api</code></a>, class c</td></tr>
             <tr id="rule-secagt"><td>Trust between agents is earned, not inherited</td><td><code>secagt</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-seckey"><td>Key management</td><td><code>seckey</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-seclpt"><td>Least-privilege tool and file access</td><td><code>seclpt</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secred"><td>Redact sensitive content from logs</td><td><code>secred</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secopd"><td>Social pressure is not authorization</td><td><code>secopd</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
-            <tr id="rule-secenc"><td>Encode output for its sink</td><td><code>secenc</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
-            <tr id="rule-secout"><td>Generated output is untrusted input</td><td><code>secout</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
+            <tr id="rule-secenc"><td>Encode output for its sink</td><td><code>secenc</code></td><td>Enforced</td><td><a href="#mechanism-gate-dangerous-api"><code>gate:dangerous-api</code></a>, class c</td></tr>
+            <tr id="rule-secout"><td>Generated output is untrusted input</td><td><code>secout</code></td><td>Enforced</td><td><a href="#mechanism-gate-dangerous-api"><code>gate:dangerous-api</code></a>, class c</td></tr>
             <tr id="rule-secpin"><td>Referenced instructions are pinned and re-verified</td><td><code>secpin</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secpsn"><td>Resist data, model, and memory poisoning</td><td><code>secpsn</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-rmvpth"><td>Prefer removing a path over constraining or monitoring it</td><td><code>rmvpth</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
@@ -194,7 +194,7 @@
             <tr id="rule-secaud"><td>Protect audit records from the actors they record</td><td><code>secaud</code></td><td>Enforced</td><td><a href="#mechanism-gate-mistakes-register"><code>gate:mistakes-register</code></a>, class a</td></tr>
             <tr id="rule-secvln"><td>Reject known-vulnerable dependency versions</td><td><code>secvln</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-secpub"><td>Publish artefacts with verifiable integrity</td><td><code>secpub</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
-            <tr id="rule-secdsz"><td>Deserialize untrusted data only as data</td><td><code>secdsz</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
+            <tr id="rule-secdsz"><td>Deserialize untrusted data only as data</td><td><code>secdsz</code></td><td>Enforced</td><td><a href="#mechanism-gate-dangerous-api"><code>gate:dangerous-api</code></a>, class c</td></tr>
             <tr id="rule-seccfg"><td>Secure by default configuration</td><td><code>seccfg</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-seclog"><td>Security logging with traceable context</td><td><code>seclog</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
             <tr id="rule-sectok"><td>Secure session and token handling</td><td><code>sectok</code></td><td>None</td><td>Enforcement has not been built yet.</td></tr>
@@ -334,6 +334,19 @@
             </ul>
             <p class="ledger-residual-label">Technical limits (from the enforcement ledger)</p>
             <blockquote class="ledger-residual" data-mech="gate:cursor-drift">A byte-identity drift gate over the artefact tools/gen_cursor.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.</blockquote>
+          </div>
+        </details>
+        <details class="more" id="mechanism-gate-dangerous-api">
+          <summary><code>gate:dangerous-api</code></summary>
+          <div class="inner">
+            <ul>
+              <li>Platform: <code>ci</code></li>
+              <li>Default: <code>block</code></li>
+              <li>Entry point: <code>tools/check_dangerous_api.py</code></li>
+              <li>Class: <code>c</code></li>
+            </ul>
+            <p class="ledger-residual-label">Technical limits (from the enforcement ledger)</p>
+            <blockquote class="ledger-residual" data-mech="gate:dangerous-api">An AST lint (tools/check_dangerous_api.py) over every *.py file under tools/, opf/tools/ (the vendored opf/tools/_vendor tree excluded), .aiqt/core/hooks/scripts/ and each plugin/*/hooks/scripts/ tree, parsed and never imported or run. It fails on: a reference to a named unsafe deserializer (pickle, _pickle, cPickle, dill, cloudpickle load/loads/Unpickler, marshal load/loads, shelve open/Shelf, jsonpickle.decode, pandas.read_pickle, yaml unsafe_load and full_load) and a yaml.load or yaml.load_all whose Loader is not a safe or base loader (secdsz); a verify= keyword that is False, 0 or not a literal, any reference to _create_unverified_context, _create_stdlib_context, CERT_NONE or CERT_OPTIONAL, and a check_hostname or verify_mode (cert_reqs=) set to anything but True or ssl.CERT_REQUIRED (seccry); a subprocess run/call/check_call/check_output/Popen with shell on, or unseen through ** keywords, over a non-literal command, and os.system, os.popen, subprocess.getoutput/getstatusoutput or asyncio.create_subprocess_shell over a non-literal command or referenced uncalled (secinp, secenc); and any reference to eval or exec, builtins included (secinp, secout). Names resolve through the file's own import aliases, and a star import from a named sink module is itself a finding. A current legitimate site is admitted only by a reviewed in-gate allowlist entry (path, enclosing qualname, kind, exact count, reason line), and a count that no longer matches is itself a finding; the shipped entries are self-test mutant and fixture exec sites over the repository's own source. A missing root, a non-regular or broken-symlink *.py entry, and a file it cannot read, decode as UTF-8 or parse are cannot-evaluate (exit 2), never a clean pass. It does NOT catch: dynamic dispatch (getattr(module, name), importlib, globals() or vars() lookups, a sink passed through a container or a call return); aliasing through getattr or through a plain-variable binding of a module object; a shell reached through an argv list that names a shell (sh -c) or an executable= override; TLS verification disabled inside a third-party library's defaults or through environment variables; a deserializer outside the named set; a symlinked directory inside a scanned root (not descended); a sink whose shell or verify argument is safe at the call site but whose input is attacker-shaped (the lint judges literalness, not data flow); and code outside the scanned roots (the vendored tree, .github, .preview, site, and Python embedded in a non-.py file). The allowlist reasons are maintainer-reviewed assertions; the gate checks their presence and count, not their truth.</blockquote>
           </div>
         </details>
         <details class="more" id="mechanism-gate-derived-command-parameters">

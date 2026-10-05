@@ -8,9 +8,9 @@ This register lists every rule and the shipped mechanical controls linked to it.
 
 | Status | Rules |
 |---|---:|
-| Enforced | 34 |
+| Enforced | 39 |
 | Pending | 0 |
-| None | 98 |
+| None | 93 |
 
 ## Rules
 
@@ -109,21 +109,21 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Strong authentication | `secau1` | None | Enforcement has not been built yet. |
 | Least-privilege authorization | `secazn` | None | Enforcement has not been built yet. |
 | Configuration that executes on load is treated as code | `seccet` | Enforced | `gate:python-launcher-isolation`, class c |
-| Sound cryptography | `seccry` | None | Enforcement has not been built yet. |
+| Sound cryptography | `seccry` | Enforced | `gate:dangerous-api`, class c |
 | Trusted, pinned dependency provenance | `secsup` | None | Enforcement has not been built yet. |
 | Fail closed in security-relevant paths | `secfcl` | None | Enforcement has not been built yet. |
 | Validate federated identity and token flows | `secfid` | None | Enforcement has not been built yet. |
 | Validate and contain uploaded files | `secupl` | None | Enforcement has not been built yet. |
 | Guardrail configuration is integrity-protected | `secgci` | None | Enforcement has not been built yet. |
 | Human authorization for consequential actions | `sechau` | None | Enforcement has not been built yet. |
-| Validate external input at the boundary | `secinp` | None | Enforcement has not been built yet. |
+| Validate external input at the boundary | `secinp` | Enforced | `gate:dangerous-api`, class c |
 | Trust between agents is earned, not inherited | `secagt` | None | Enforcement has not been built yet. |
 | Key management | `seckey` | None | Enforcement has not been built yet. |
 | Least-privilege tool and file access | `seclpt` | None | Enforcement has not been built yet. |
 | Redact sensitive content from logs | `secred` | None | Enforcement has not been built yet. |
 | Social pressure is not authorization | `secopd` | None | Enforcement has not been built yet. |
-| Encode output for its sink | `secenc` | None | Enforcement has not been built yet. |
-| Generated output is untrusted input | `secout` | None | Enforcement has not been built yet. |
+| Encode output for its sink | `secenc` | Enforced | `gate:dangerous-api`, class c |
+| Generated output is untrusted input | `secout` | Enforced | `gate:dangerous-api`, class c |
 | Referenced instructions are pinned and re-verified | `secpin` | None | Enforcement has not been built yet. |
 | Resist data, model, and memory poisoning | `secpsn` | None | Enforcement has not been built yet. |
 | Prefer removing a path over constraining or monitoring it | `rmvpth` | None | Enforcement has not been built yet. |
@@ -132,7 +132,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Protect audit records from the actors they record | `secaud` | Enforced | `gate:mistakes-register`, class a |
 | Reject known-vulnerable dependency versions | `secvln` | None | Enforcement has not been built yet. |
 | Publish artefacts with verifiable integrity | `secpub` | None | Enforcement has not been built yet. |
-| Deserialize untrusted data only as data | `secdsz` | None | Enforcement has not been built yet. |
+| Deserialize untrusted data only as data | `secdsz` | Enforced | `gate:dangerous-api`, class c |
 | Secure by default configuration | `seccfg` | None | Enforcement has not been built yet. |
 | Security logging with traceable context | `seclog` | None | Enforcement has not been built yet. |
 | Secure session and token handling | `sectok` | None | Enforcement has not been built yet. |
@@ -272,6 +272,19 @@ Technical limits (from the enforcement ledger):
 
 ```
 A byte-identity drift gate over the artefact tools/gen_cursor.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.
+```
+
+### `gate:dangerous-api`
+
+- Platform: `ci`
+- Default: `block`
+- Entry point: `tools/check_dangerous_api.py`
+- Class: `c`
+
+Technical limits (from the enforcement ledger):
+
+```
+An AST lint (tools/check_dangerous_api.py) over every *.py file under tools/, opf/tools/ (the vendored opf/tools/_vendor tree excluded), .aiqt/core/hooks/scripts/ and each plugin/*/hooks/scripts/ tree, parsed and never imported or run. It fails on: a reference to a named unsafe deserializer (pickle, _pickle, cPickle, dill, cloudpickle load/loads/Unpickler, marshal load/loads, shelve open/Shelf, jsonpickle.decode, pandas.read_pickle, yaml unsafe_load and full_load) and a yaml.load or yaml.load_all whose Loader is not a safe or base loader (secdsz); a verify= keyword that is False, 0 or not a literal, any reference to _create_unverified_context, _create_stdlib_context, CERT_NONE or CERT_OPTIONAL, and a check_hostname or verify_mode (cert_reqs=) set to anything but True or ssl.CERT_REQUIRED (seccry); a subprocess run/call/check_call/check_output/Popen with shell on, or unseen through ** keywords, over a non-literal command, and os.system, os.popen, subprocess.getoutput/getstatusoutput or asyncio.create_subprocess_shell over a non-literal command or referenced uncalled (secinp, secenc); and any reference to eval or exec, builtins included (secinp, secout). Names resolve through the file's own import aliases, and a star import from a named sink module is itself a finding. A current legitimate site is admitted only by a reviewed in-gate allowlist entry (path, enclosing qualname, kind, exact count, reason line), and a count that no longer matches is itself a finding; the shipped entries are self-test mutant and fixture exec sites over the repository's own source. A missing root, a non-regular or broken-symlink *.py entry, and a file it cannot read, decode as UTF-8 or parse are cannot-evaluate (exit 2), never a clean pass. It does NOT catch: dynamic dispatch (getattr(module, name), importlib, globals() or vars() lookups, a sink passed through a container or a call return); aliasing through getattr or through a plain-variable binding of a module object; a shell reached through an argv list that names a shell (sh -c) or an executable= override; TLS verification disabled inside a third-party library's defaults or through environment variables; a deserializer outside the named set; a symlinked directory inside a scanned root (not descended); a sink whose shell or verify argument is safe at the call site but whose input is attacker-shaped (the lint judges literalness, not data flow); and code outside the scanned roots (the vendored tree, .github, .preview, site, and Python embedded in a non-.py file). The allowlist reasons are maintainer-reviewed assertions; the gate checks their presence and count, not their truth.
 ```
 
 ### `gate:derived-command-parameters`
