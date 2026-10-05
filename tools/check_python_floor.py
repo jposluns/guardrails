@@ -89,10 +89,11 @@ Legs, in order:
                  versions below the floor, exits 2 with empty stdout and the exact refusal on stderr, and
                  leaves the working directory empty; the guard prefix alone, run at the floor's .0
                  release and at the real interpreter version, continues.
-  completeness   OFF until the source sets completeness-check = true (the unit that guards the last
-                 shipped entrypoint switches it on): every shipped entrypoint, a .py file outside
-                 EXCLUDED_TREES with a module-level `if __name__ == "__main__":`, must be listed in
-                 guarded-surfaces.
+  completeness   OFF until the source sets completeness-check = true. It stays false until the
+                 core-hook, preview-hook and adopter-tool units, which guard the last shipped
+                 entrypoints, are on main; until then an unlisted entrypoint is not a finding.
+                 Once on, every shipped entrypoint, a .py file outside EXCLUDED_TREES with a
+                 module-level `if __name__ == "__main__":`, must be listed in guarded-surfaces.
   documentation  OFF until the source sets documentation-check = true (the declarations unit switches
                  it on): each DECLARATION_FILES entry must contain "Python <floor> or newer".
 

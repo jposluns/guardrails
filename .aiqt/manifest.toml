@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "159211010a82ec6e3b9281dff6835936400cb5c3ae4df7ce8e39831659fb1af1"
+tree-sha256 = "e6f174696bd25e789bec2319c1dab7b725c5ea6919ad7e272504ea07f2c42394"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 251002
-sha256 = "9eab4fc0b1d68c319c80528f5eee2bfeaafe09f99e1b615ac16c9b118e7bbeb5"
+bytes = 251348
+sha256 = "856dc87904d6e003caf931ce6c948ddeb2d3c4c454451b1b055dd646b13005dc"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -111,8 +111,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 5470
-sha256 = "fe77206be8c89e85b102402f43da2f61dcf6547e10c041a6dc010cb46050feab"
+bytes = 5660
+sha256 = "e62ab0007901d41dbe3949451636bde22931be48d5410be45d7b27c972c1c9aa"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -127,7 +127,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2952
-sha256 = "41c330ae4043f08ae8cfb34b18f27667c1b73c75392858000f0446259b81ac7e"
+sha256 = "15f71754d02f3d5600232ef980499c8c1151565af32d45e28c4efb5fd6eee458"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3146,8 +3146,8 @@ sha256 = "5bb55aeaf3708f9df4545de618311bb22ac484568d5a494055f9967c5eb9ae7f"
 
 [[sources]]
 path = "tools/_gen_common.py"
-bytes = 5813
-sha256 = "ca56219b1fad7efe4a5e865d168dd25ecf470bd480b8e6df02916d7114987dff"
+bytes = 6359
+sha256 = "e7b2a98b964393e446cae41e603ad626b4ca3b8ca2180e7acec5125cebac9c6d"
 
 [[sources]]
 path = "tools/_git_fixture_env.py"
@@ -3166,8 +3166,8 @@ sha256 = "e19ad231e932a8b9fb463c4bc4d2f5837742b563d7c9f8fd0bd775b6c8832ede"
 
 [[sources]]
 path = "tools/_standards.py"
-bytes = 16516
-sha256 = "4ea0816c94640f89f9a04c8017aa89b05008c201629f108aee2d4900c2020bef"
+bytes = 17051
+sha256 = "74a31a8223e65cd04fa5871233f22138324f944bf0c7a21bc414f1614025dea3"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -3326,8 +3326,8 @@ sha256 = "5726920d74948592dd12b8cf3f115fc16f74f854d1a26cbe7384ec94520a7e20"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 100898
-sha256 = "368665ca65564d0e1fbf3466282fb5d09f291f21fd93be836da63468f757a159"
+bytes = 101038
+sha256 = "5455c7cc3e6b05377a397a88c3f01a2bbe1fd029831b3e2d3c0379ac0870e377"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"

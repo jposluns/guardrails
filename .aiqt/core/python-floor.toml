@@ -10,9 +10,11 @@
 # guarded-surfaces    the repo-relative entrypoints that carry the canonical refusal guard, sorted and
 #                     unique. Each is checked statically (the guard leads the file) and dynamically (run
 #                     in a child with a patched sys.version_info below the floor, it refuses with the exact
-#                     message and exit code). It starts EMPTY and grows unit by unit.
-# completeness-check  false until every shipped entrypoint is listed above; true then makes an unlisted
-#                     shipped entrypoint a finding.
+#                     message and exit code). It grows unit by unit; the core-hook, preview-hook and
+#                     adopter-tool entrypoints are not listed yet.
+# completeness-check  false (the check is OFF) until the core-hook, preview-hook and adopter-tool units
+#                     are on main and every shipped entrypoint is listed above; true then makes an
+#                     unlisted shipped entrypoint a finding.
 # documentation-check false until the declarations land; true then requires each declaration file to state
 #                     the floor.
 
