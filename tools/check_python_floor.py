@@ -1661,28 +1661,19 @@ def _expected_check_ids():
     return None
 
 
-def _write_report(report_path):
-    if report_path is None:
-        return True
-    try:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump(dict(format_version=1, suite=SUITE_ID, check_ids=EXECUTED), handle)
-            handle.write("\n")
-    except OSError as exc:
-        print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-            report_path, exc), file=sys.stderr)
-        return False
-    return True
-
-
 def self_test(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band. Imported only here: the
+        # red-on-revert legs run a copy of this gate in a fixture root that does not carry it.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _selftest_exit_report
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     try:
         with tempfile.TemporaryDirectory(prefix="python-floor-selftest-") as raw:
             _self_test_cases(Path(raw))
     except (CannotEvaluate, OSError) as exc:
         print("SELF-TEST HARNESS ERROR: {}".format(exc), file=sys.stderr)
-        return 2
-    if not _write_report(report_path):
         return 2
     expected = _expected_check_ids()
     if expected is None:
@@ -1720,4 +1711,6 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    _code = main(sys.argv[1:])
+    _finalizer = sys.modules.get("_selftest_exit_report")
+    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)

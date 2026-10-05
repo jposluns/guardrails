@@ -54,6 +54,7 @@ from _gen_common import repo_root  # noqa: E402
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
 from _git_fixture_env import scrub_git_environment  # noqa: E402
+import _selftest_exit_report  # noqa: E402
 
 FAILURES = []
 EXECUTED = []        # ordered check ids actually reached this run
@@ -263,6 +264,10 @@ def now_iso(hours_ago=0):
 
 
 def main(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band.
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
     with fixture_git_lifecycle():
@@ -2264,25 +2269,9 @@ def _main_isolated(report_path=None):
         aiqt_hooks._orch_dirfd_has_registry = saved_probe
         shutil.rmtree(tmp, ignore_errors=True)
 
-    if report_path is not None:
-        try:
-            with open(report_path, "w", encoding="utf-8") as handle:
-                json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
-                handle.write("\n")
-        except OSError as exc:
-            # A failed report write must not swallow the assertion diagnostics already collected:
-            # surface what the suite found first, then the harness error.
-            if FAILURES:
-                print("SELF-TEST FAIL:")
-                for f_ in FAILURES:
-                    print("  - " + f_)
-            print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
-                report_path, exc), file=sys.stderr)
-            return 2
-
     # In-run execution-set self-guard (defence in depth beside tools/check_selftest_execution.py): the
     # executed set reconciles against the hand-authored expectation manifest even on a direct developer
-    # run. The report above is written FIRST, so it always reflects what actually executed.
+    # run. The report is finalized at interpreter exit, so it always reflects what actually executed.
     expected_ids = _expected_check_ids()
     if expected_ids is None:
         return 2
@@ -2347,4 +2336,4 @@ def _parse_argv(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(report_path=_parse_argv(sys.argv[1:])))
+    _selftest_exit_report.exit_with(main(report_path=_parse_argv(sys.argv[1:])))

@@ -46,8 +46,19 @@ sibling branch-root gate carries. Third, the environment drop neutralizes the PY
 family only: a loader-level injection control such as LD_PRELOAD, and the interpreter binary
 sys.executable itself, sit at the same trusted-toolchain tier, outside this gate's threat model.
 The child's full stdout and stderr are forwarded UNFILTERED to this
-gate's own streams (no grep, no truncation), and its verdict is judged by its real return code plus
-the strict report reconcile, never by its prose. A report that is missing, truncated, malformed,
+gate's own streams (no grep, no truncation), and its verdict is judged by its real return code, its
+error stream, and the strict report reconcile, never by its prose. The fail-closed child contract
+(.aiqt/core/rules/security-seci-fail-closed.md): a pass needs a zero exit, the report FINALIZED at the
+child's exit, and an error stream empty apart from the suite's exact declared lines (DECLARED_STDERR;
+no registered suite declares any). The child arms tools/_selftest_exit_report.py as its first atexit
+registration, so the report is written only after every non-daemon thread is joined, every later
+atexit callback has run, and a bounded garbage collection, and the process then ends with os._exit;
+the report carries format_version 2, finalized true, and the exit_code that must equal the child's
+real exit status. A fault the child survived (an atexit callback, a destructor, a thread) therefore
+reaches the error stream and refuses the verdict, and an in-band (format 1) report is refused. The
+child-side residual (a destructor of an object still reachable at exit never runs, a daemon thread is
+killed, and in-process code can replace sys.stderr or the hooks that report a fault) is disclosed in
+that module. A report that is missing, truncated, malformed,
 wrong-suite, non-regular, or carrying a duplicate or wrong-typed entry is CANNOT-EVALUATE, never a
 pass, whatever the child's exit code; completeness is never inferred from output volume or from the
 absence of a reported problem.
@@ -58,8 +69,8 @@ cannot-evaluate (an unreadable, malformed, or suite-missing expectation manifest
 absent, non-regular, a symlink, or escapes the repo; runner source that does not parse or carries an
 unresolvable, aliased (a non-call check reference), comprehension-bound, or duplicate check id; a
 static source-to-manifest set mismatch; an unconfirmable repo
-root; unavailable temp storage; a launch failure; a child return code outside {0, 1}; or an invalid
-report).
+root; unavailable temp storage; a launch failure; a child return code outside {0, 1}; an undeclared
+line on the child's error stream; or an invalid, unfinalized, or exit-status-mismatched report).
 
 DISCLOSED RESIDUAL: this gate proves INVOCATION IDENTITY only. It does not prove an invoked assertion is
 discriminating (a constant-true check counts as executed), carries no mutation sensitivity, sees nothing
@@ -119,7 +130,12 @@ except ModuleNotFoundError:  # Python < 3.11
 
 MANIFEST_TOP_KEYS = {"format-version", "suite"}
 SUITE_ROW_KEYS = {"id", "runner", "expected-check-ids"}
-REPORT_KEYS = {"format_version", "suite", "check_ids"}
+REPORT_KEYS = {"format_version", "suite", "check_ids", "exit_code", "finalized"}
+REPORT_FORMAT_VERSION = 2
+# The exact stderr lines a registered suite may legitimately write, per suite id; any other byte on the
+# child's error stream is a fault, never a pass. Measured on every registered suite: none writes stderr
+# on a passing run, so no suite declares an allowance.
+DECLARED_STDERR = {}
 
 
 def _cannot(msg):
@@ -377,10 +393,12 @@ def _reject_dup_keys(pairs):
     return obj
 
 
-def _read_report(report_path, suite_id):
+def _read_report(report_path, suite_id, returncode):
     """The report's check-id list, strictly validated, or None after printing (the caller exits 2). A
     child exit 0 never overrides an invalid report; a run that did not deliver its agreed structured
-    verdict evidence is no verdict."""
+    verdict evidence is no verdict. Only the FINALIZED report (tools/_selftest_exit_report.py, written
+    at interpreter exit after the child's cleanup, its exit_code the status the child then exited
+    with) is accepted; an in-band format-1 report is refused."""
     try:
         st = os.lstat(report_path)
     except OSError:
@@ -401,8 +419,16 @@ def _read_report(report_path, suite_id):
     if not isinstance(data, dict) or set(data) != REPORT_KEYS:
         _cannot("execution report {}: keys must be exactly {}".format(report_path, sorted(REPORT_KEYS)))
         return None
-    if type(data["format_version"]) is not int or data["format_version"] != 1:
-        _cannot("execution report {}: format_version must be exactly the integer 1".format(report_path))
+    if type(data["format_version"]) is not int or data["format_version"] != REPORT_FORMAT_VERSION:
+        _cannot("execution report {}: format_version must be exactly the integer {} (the report "
+                "finalized at exit)".format(report_path, REPORT_FORMAT_VERSION))
+        return None
+    if data["finalized"] is not True:
+        _cannot("execution report {}: finalized must be exactly true".format(report_path))
+        return None
+    if type(data["exit_code"]) is not int or data["exit_code"] != returncode:
+        _cannot("execution report {}: exit_code {!r} is not the child's exit status {}".format(
+            report_path, data["exit_code"], returncode))
         return None
     if data["suite"] != suite_id:
         _cannot("execution report {}: suite {!r} is not the requested suite {!r}".format(
@@ -419,10 +445,25 @@ def _read_report(report_path, suite_id):
     return ids
 
 
+def _stderr_fault(blob, suite_id):
+    """The child's error stream judged against the suite's exact declared allowance: None when every
+    line is declared (an empty stream always is), else a description of the first undeclared line. A
+    fault the child survived (an atexit callback, a destructor, a thread) reaches only this stream,
+    so it is never a pass."""
+    if not blob:
+        return None
+    allowed = DECLARED_STDERR.get(suite_id, ())
+    for line in blob.decode("utf-8", errors="replace").splitlines():
+        if line not in allowed:
+            return "undeclared stderr line {!r}".format(line[:200])
+    return None
+
+
 def run_suite(root, suite_id):
     """Validate the manifest, statically reconcile the runner's source check() set against it BEFORE
     any launch, then launch the registered runner with a private report path, forward its full
-    output, and reconcile the executed set. Returns the gate exit code."""
+    output, require an error stream empty apart from the suite's declared lines, and reconcile the
+    executed set from the report finalized at the child's exit. Returns the gate exit code."""
     root = Path(root)
     manifest_path = root / "tools" / "selftest_checks.toml"
     suites = _manifest_suites(manifest_path)
@@ -520,7 +561,12 @@ def run_suite(root, suite_id):
         if child.returncode not in (0, 1):
             _cannot("child exited {} (a harness error or signal is no verdict)".format(child.returncode))
             return 2
-        observed = _read_report(report_path, suite_id)
+        fault = _stderr_fault(child.stderr, suite_id)
+        if fault is not None:
+            _cannot("suite {}: the child's error stream carries a fault ({}); a run that faulted, "
+                    "even after its last check, is no verdict".format(suite_id, fault))
+            return 2
+        observed = _read_report(report_path, suite_id, child.returncode)
         if observed is None:
             return 2
         missing = sorted(expected - set(observed))
@@ -555,13 +601,44 @@ def _manifest_text(ids=None, runner="tools/fake_runner.py", header="format-versi
             + '"\nexpected-check-ids = [' + rendered + ']\n')
 
 
-def _report_body(ids, rc, suite="demo"):
-    return ("json.dump({{'format_version': 1, 'suite': {suite!r}, 'check_ids': {ids!r}}}, "
-            "open(report, 'w'))\nsys.exit({rc})\n".format(suite=suite, ids=ids, rc=rc))
+def _report_body(ids, rc, suite="demo", before_exit=""):
+    """A fake runner tail on the real child contract: arm the exit finalizer, run before_exit (a fault
+    vector), then exit through exit_with, so the report is finalized at interpreter exit."""
+    return ("_selftest_exit_report.arm(report, {suite!r}, {ids!r})\n{before}"
+            "_selftest_exit_report.exit_with({rc})\n".format(
+                suite=suite, ids=ids, before=before_exit, rc=rc))
 
 
-def _raw_body(raw, rc=0):
-    return "open(report, 'w').write({raw!r})\nsys.exit({rc})\n".format(raw=raw, rc=rc)
+def _raw_body(raw, rc=0, before_exit=""):
+    """A fake runner tail that writes raw report bytes IN BAND (never through the finalizer)."""
+    return "open(report, 'w').write({raw!r})\n{before}sys.exit({rc})\n".format(
+        raw=raw, before=before_exit, rc=rc)
+
+
+def _report_json(**overrides):
+    """A finalized-shape report document, with keys replaced (or, given None, dropped)."""
+    data = {"format_version": REPORT_FORMAT_VERSION, "suite": "demo", "check_ids": GOOD_IDS,
+            "exit_code": 0, "finalized": True}
+    for key, value in overrides.items():
+        if value is None:
+            data.pop(key)
+        else:
+            data[key] = value
+    return json.dumps(data)
+
+
+# The three fault vectors the child survives AFTER its last check: each leaves exit 0 and a complete
+# report, and only its error stream carries the fault.
+FAULT_ATEXIT = ("import atexit\n"
+                "def _shutdown_fault():\n    raise RuntimeError('ST_ATEXIT_FAULT')\n"
+                "atexit.register(_shutdown_fault)\n")
+FAULT_DESTRUCTOR = ("class _Faulty:\n    def __del__(self):\n"
+                    "        raise RuntimeError('ST_DESTRUCTOR_FAULT')\n"
+                    "_cycle = _Faulty()\n_cycle.self = _cycle\ndel _cycle\n")
+FAULT_THREAD = ("import threading, time\n"
+                "def _thread_fault():\n    time.sleep(0.2)\n"
+                "    raise RuntimeError('ST_THREAD_FAULT')\n"
+                "threading.Thread(target=_thread_fault).start()\n")
 
 
 def self_test():
@@ -580,6 +657,9 @@ def self_test():
         _cannot("self-test temp storage unavailable: {}".format(exc))
         return 2
     counter = [0]
+    # The REAL child-side finalizer, copied into every synthetic root beside its fake runner.
+    finalizer_source = (Path(__file__).resolve().parent / "_selftest_exit_report.py").read_text(
+        encoding="utf-8")
 
     def dead_checks(ids):
         """A statically present but never-executed check() block: the fake runner writes its report
@@ -593,10 +673,14 @@ def self_test():
         (root / "tools").mkdir(parents=True)
         (root / "tools" / "selftest_checks.toml").write_text(manifest_text, encoding="utf-8")
         if runner_body is not None:
+            (root / "tools" / "_selftest_exit_report.py").write_text(
+                finalizer_source, encoding="utf-8")
             (root / "tools" / "fake_runner.py").write_text(
                 "#!/usr/bin/env python3\n"
                 "import json, os, sys\n"
                 "here = os.path.dirname(os.path.abspath(__file__))\n"
+                "sys.path.insert(0, here)\n"
+                "import _selftest_exit_report\n"
                 "open(os.path.join(here, 'launched.marker'), 'w').close()\n"
                 "report = sys.argv[2]\n"
                 + (dead_checks(GOOD_IDS) if source_block is None else source_block)
@@ -706,16 +790,20 @@ def self_test():
 
         # 9: malformed reports -> 2, whatever the child's exit code
         for label, raw in (
-                ("truncated-json", '{"format_version": 1, "suite": "demo", "check_ids": ["a/one"'),
-                ("missing-key", json.dumps({"format_version": 1, "check_ids": GOOD_IDS})),
-                ("extra-key", json.dumps(
-                    {"format_version": 1, "suite": "demo", "check_ids": GOOD_IDS, "count": 3})),
-                ("ids-not-list", json.dumps(
-                    {"format_version": 1, "suite": "demo", "check_ids": "a/one"})),
-                ("bool-format-version", json.dumps(
-                    {"format_version": True, "suite": "demo", "check_ids": GOOD_IDS})),
-                ("dup-member", '{"format_version": 1, "suite": "demo", "check_ids": ["a/wrong"], '
-                 '"check_ids": ["a/one", "a/two", "a/three"]}')):
+                ("truncated-json", '{"format_version": 2, "suite": "demo", "check_ids": ["a/one"'),
+                ("missing-key", _report_json(suite=None)),
+                ("extra-key", _report_json(count=3)),
+                ("ids-not-list", _report_json(check_ids="a/one")),
+                ("bool-format-version", _report_json(format_version=True)),
+                ("dup-member", _report_json(check_ids=["a/wrong"])[:-1]
+                 + ', "check_ids": ["a/one", "a/two", "a/three"]}'),
+                # an in-band report, even complete and well formed, was never finalized at exit
+                ("in-band-format-1", json.dumps(
+                    {"format_version": 1, "suite": "demo", "check_ids": GOOD_IDS})),
+                ("finalized-false", _report_json(finalized=False)),
+                ("finalized-missing", _report_json(finalized=None)),
+                ("exit-code-mismatch", _report_json(exit_code=1)),
+                ("exit-code-bool", _report_json(exit_code=False))):
             code, _out, _err = run(build(_manifest_text(), _raw_body(raw)))
             expect("st/report-{}-2".format(label), code, 2)
 
@@ -727,9 +815,8 @@ def self_test():
         code, _out, _err = run(build(_manifest_text(), "os.mkdir(report)\nsys.exit(0)\n"))
         expect("st/report-dir-2", code, 2)
         code, _out, _err = run(build(_manifest_text(), (
-            "open(report + '.real', 'w').write(json.dumps({'format_version': 1, 'suite': 'demo', "
-            "'check_ids': ['a/one', 'a/two', 'a/three']}))\n"
-            "os.symlink(report + '.real', report)\nsys.exit(0)\n")))
+            "open(report + '.real', 'w').write({!r})\n"
+            "os.symlink(report + '.real', report)\nsys.exit(0)\n".format(_report_json()))))
         expect("st/report-symlink-2", code, 2)
 
         # 12: child rc 1 with a complete report -> 1, never masked to 0
@@ -949,6 +1036,67 @@ def self_test():
         expect("st/static-empty-loop-named", "unresolvable check id at" in err, True)
         expect("st/static-empty-loop-no-launch", launched(root), False)
 
+        # 24 (fail-closed child contract): a fault the child survives AFTER its last check (an atexit
+        # callback, a destructor of collectable garbage, a thread joined at shutdown) leaves exit 0
+        # and a complete set, and is refused 2 through the error stream, under both the finalized
+        # report and the in-band report the gate formerly accepted; each fault-free twin passes
+        for label, vector, token in (("atexit", FAULT_ATEXIT, "ST_ATEXIT_FAULT"),
+                                     ("destructor", FAULT_DESTRUCTOR, "ST_DESTRUCTOR_FAULT"),
+                                     ("thread", FAULT_THREAD, "ST_THREAD_FAULT")):
+            code, _out, err = run(build(_manifest_text(),
+                                        _report_body(GOOD_IDS, 0, before_exit=vector)))
+            expect("st/fault-{}-finalized-2".format(label), code, 2)
+            expect("st/fault-{}-finalized-named".format(label),
+                   (token in err, "error stream carries a fault" in err), (True, True))
+            code, _out, err = run(build(_manifest_text(), _raw_body(
+                json.dumps({"format_version": 1, "suite": "demo", "check_ids": GOOD_IDS}),
+                before_exit=vector)))
+            expect("st/fault-{}-in-band-2".format(label), code, 2)
+            expect("st/fault-{}-in-band-named".format(label), token in err, True)
+        code, _out, _err = run(build(_manifest_text(), _report_body(
+            GOOD_IDS, 0, before_exit="import atexit, threading\natexit.register(int)\n"
+            "threading.Thread(target=int).start()\n")))
+        expect("st/fault-free-twin-passes", code, 0)
+
+        # 25: the finalizer contract itself: an armed child whose exit status bypassed exit_with
+        # writes no report (no verdict), one that wrote its report in band before the finalizer
+        # (exclusive creation) is refused, and an arm after any other atexit registration is a
+        # harness error; the child's exit status, not its report, is decisive in each
+        root = build(_manifest_text(),
+                     "_selftest_exit_report.arm(report, 'demo', {!r})\nsys.exit(0)\n".format(GOOD_IDS))
+        code, _out, err = run(root)
+        expect("st/finalizer-unrecorded-status-2", code, 2)
+        expect("st/finalizer-unrecorded-status-named", "no exit status was recorded" in err, True)
+        code, _out, err = run(build(_manifest_text(),
+                                    "open(report, 'w').write({!r})\n".format(_report_json())
+                                    + _report_body(GOOD_IDS, 0)))
+        expect("st/finalizer-preexisting-report-2", code, 2)
+        expect("st/finalizer-preexisting-report-named", "cannot finalize execution report" in err,
+               True)
+        code, _out, err = run(build(_manifest_text(),
+                                    "import atexit\natexit.register(int)\n"
+                                    + _report_body(GOOD_IDS, 0)))
+        expect("st/finalizer-not-first-2", code, 2)
+        expect("st/finalizer-not-first-named", "must be the first atexit registration" in err, True)
+
+        # 26: the declared stderr allowance is exact: a declared line passes, any other line (or a
+        # declared line's prefix) is still a fault; the pinned allowance is restored after
+        noisy = "sys.stderr.write('declared framing\\n')\n"
+        real_declared = dict(DECLARED_STDERR)
+        DECLARED_STDERR["demo"] = ("declared framing",)
+        try:
+            code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0,
+                                                                        before_exit=noisy)))
+            expect("st/stderr-declared-passes", code, 0)
+            code, _out, _err = run(build(_manifest_text(), _report_body(
+                GOOD_IDS, 0, before_exit=noisy + "sys.stderr.write('declared\\n')\n")))
+            expect("st/stderr-undeclared-2", code, 2)
+        finally:
+            DECLARED_STDERR.clear()
+            DECLARED_STDERR.update(real_declared)
+        code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0, before_exit=noisy)))
+        expect("st/stderr-undeclared-suite-2", code, 2)
+
         # Round 3 (FIX E note): leg 19 witnesses run_suite's mkdtemp guard; self_test's own base
         # tempdir guard above cannot be witnessed from inside this self-test without circularity,
         # and the runner's FAILURES-before-report-write-OSError ordering has no cheap hermetic
@@ -967,7 +1115,10 @@ def self_test():
     print("SELF-TEST PASS: the execution-set gate passes an exact or reordered set, names a missing and "
           "an extra id, refuses duplicate observed and expected ids (the latter with no launch), refuses "
           "a malformed expectation manifest before any launch, treats a missing, malformed, wrong-suite, "
-          "duplicate-member, or non-regular report as no verdict, never masks a failing child behind a "
+          "duplicate-member, non-regular, in-band, unfinalized, or exit-status-mismatched report as no "
+          "verdict, refuses an atexit, destructor, or thread fault the child survived (an error stream "
+          "carrying any undeclared line), refuses an armed child whose status or report bypassed the "
+          "exit finalizer, never masks a failing child behind a "
           "complete set, refuses a child harness error, refuses an escaping, non-regular, or symlinked "
           "runner without launching, reconciles the runner's static check() source set against the "
           "manifest before any launch (refusing an unregistered source check, a registered id with no "
