@@ -41,9 +41,17 @@ on a non-adopter root. The clean store's views are populated through the U4 engi
 (_opf_views.plan_views), never hand-built, so a clean render is clean by construction. Offline, stdlib only,
 fail-closed, launched isolated (-I -B). The tempdir is removed in a finally (test-hermeticity).
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_opf_drift.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the self-test's sibling imports below
