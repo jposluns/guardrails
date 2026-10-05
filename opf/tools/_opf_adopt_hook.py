@@ -357,7 +357,11 @@ def _parse(raw):
         return json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_pairs,
                           parse_constant=_no_constant, parse_float=_parse_number,
                           parse_int=_parse_number)
-    except (ValueError, RecursionError) as exc:  # ValueError covers JSONDecodeError/UnicodeDecodeError
+    # ValueError covers JSONDecodeError/UnicodeDecodeError. MemoryError is defence in depth: every
+    # parsed input (the old registration and the emitted bytes) is held to MAX_REGISTRATION_BYTES
+    # before it gets here, so the scanner cannot practically exhaust memory; if the host does, the
+    # parse is refused the same way rather than escaping as a traceback.
+    except (ValueError, RecursionError, MemoryError) as exc:
         raise _ParseRefusal("registration bytes are not strict JSON: {}".format(exc)) from None
 
 
@@ -2130,23 +2134,71 @@ def self_test():
     # parses but exceeds the Python-level emission depth (roughly the interpreter recursion limit)
     # exhausts EMISSION on the changed-merge path (mapped by the merged-emission handler, whose
     # message never claims a verification ran); dropping either RecursionError handler turns
-    # its vector into an uncaught crash here.
-    deep_parse = b"[" * 100000 + b"]" * 100000
-    r = merge_registration(deep_parse, entry)
-    check("deep-nesting-parse-cannot-eval", r.status is CANNOT_EVALUATE and r.new_bytes is None)
-    deep_env = b'{"env":' + b"[" * 2000 + b"]" * 2000 + b"}"
-    r = merge_registration(deep_env, entry)
+    # its vector red here. Both exhaustions are INJECTED (json.loads, then the emitter's value
+    # walk, raising RecursionError) rather than provoked by a fixed deep body: the depth at which
+    # the json scanner overflows depends on the build and its C stack, and the depth at which
+    # emission overflows depends on the recursion limit (at a higher limit a deep body reaches
+    # the emission byte bound first), so a fixed body can take another refusal path and the
+    # vector would stop exercising its handler. Each input merges cleanly without its injection
+    # and each finding is pinned to the injected text, so an injection that stops firing turns
+    # its vector red, never a false green.
+    def _merge_or_raised(raw):
+        try:
+            return merge_registration(raw, entry)
+        except (RecursionError, MemoryError):
+            return None
+
+    real_loads = json.loads
+    # The parse handler's MemoryError member gets the same injected vector (practically unreachable
+    # through real input under the byte bound; see _parse).
+    for parse_exc, parse_vector in ((RecursionError, "deep-nesting-parse-cannot-eval"),
+                                    (MemoryError, "parse-memory-exhaustion-cannot-eval")):
+        def _overflowing_loads(*args, _exc=parse_exc, **kwargs):
+            raise _exc("injected parser overflow")
+
+        json.loads = _overflowing_loads
+        try:
+            r = _merge_or_raised(b"{}")
+        finally:
+            json.loads = real_loads
+        check(parse_vector,
+              r is not None and r.status is CANNOT_EVALUATE and r.new_bytes is None
+              and r.findings == ["registration bytes are not strict JSON: injected parser overflow"])
+    real_emit_value = _emit_value
+
+    def _overflowing_emit_value(*args, **kwargs):
+        raise RecursionError("injected emission overflow")
+
+    try:
+        globals()["_emit_value"] = _overflowing_emit_value
+        r = _merge_or_raised(b"{}")
+    finally:
+        globals()["_emit_value"] = real_emit_value
     check("deep-nesting-emission-cannot-eval",
-          r.status is CANNOT_EVALUATE and r.new_bytes is None)
+          r is not None and r.status is CANNOT_EVALUATE and r.new_bytes is None)
     # the emission refusal is reported as an emission refusal, never as a failed verification
     # (catching it in the verification handler turns this red).
     check("deep-nesting-emission-not-reported-as-verification",
-          len(r.findings) == 1
-          and r.findings[0].startswith("merged registration cannot be emitted: ")
-          and "verification" not in r.findings[0])
+          r is not None
+          and r.findings == ["merged registration cannot be emitted: injected emission overflow"])
+    # the byte-bound refusal of a nested body is its own vector: nesting kept far below any
+    # recursion limit (66 levels) under a wide array whose every element emits about 130 bytes
+    # of indentation, so emission always reaches the byte bound and never exhausts recursion.
+    # The bound message is pinned, so dropping the _EmitBoundRefusal handler (the refusal then
+    # falls to the emission handler) turns it red.
+    bound_env = (b'{"env":' + b"[" * 64 + b"[" + b"0," * 19999 + b"0]" + b"]" * 64 + b"}")
+    r = _merge_or_raised(bound_env)
+    check("deep-nesting-emission-byte-bound-refuses",
+          r is not None and r.status is CANNOT_EVALUATE and r.new_bytes is None
+          and r.findings == ["merged registration would exceed {} bytes (the same bound the "
+                             "input is held to, refused by the emitter's running byte "
+                             "count so the over-bound output is never built and an "
+                             "accepted output always no-ops on its next merge)".format(
+                                 MAX_REGISTRATION_BYTES)])
     # a FINDING never recurses over adopter content either: exact bytes nesting an array in
-    # the entry type field just under the parser's own depth limit (found here by bisection,
-    # since the limit depends on the build and its stack) parse, then refuse on the type with
+    # the entry type field just under the parser's own depth limit or the input byte bound,
+    # whichever is lower (found here by bisection, since the parser limit depends on the build
+    # and its stack), parse, then refuse on the type with
     # the fixed array descriptor. A repr-based finding exhausts the stack on it on builds
     # whose repr overflows below the parser limit (round 7: from about 47,000 levels, against
     # a parser limit near 58,000, on CPython 3.14), an uncaught RecursionError.
@@ -2163,7 +2215,12 @@ def self_test():
             return False
         return True
 
-    low, high = 0, 100000
+    # the search is bounded by the input byte bound, not by a guessed depth, so it does not
+    # depend on the stack size: the deepest body merge_registration reads at all fills
+    # MAX_REGISTRATION_BYTES, and where the stack lets the parser accept that depth the vector
+    # uses it. The bisection assumes only that parsing is monotone in depth (a body that
+    # parses still parses with fewer levels).
+    low, high = 0, (MAX_REGISTRATION_BYTES - len(type_head) - len(type_tail)) // 2
     if _parses(_deep_type(high)):
         low = high
     while high - low > 1:
@@ -2281,15 +2338,24 @@ def self_test():
           and all(validate_registration_model(_timeout_model(good)).status is VALID
                   for good in ("60", "-0", "1.5E3", "1e-400")))
     # no FINDING path formats a caller value in a way that can raise: an exact int past the
-    # interpreter's digit limit and a code-built array nested far past any repr depth, each
-    # in the entry type field, refuse with a fixed descriptor (a repr-based finding raises
-    # ValueError on the first and RecursionError on the second).
-    deep_array = []
-    for _ in range(200000):
-        deep_array = [deep_array]
+    # interpreter's digit limit and a nested array whose repr overflows, each in the entry type
+    # field, refuse with a fixed descriptor (a repr-based finding raises ValueError on the first
+    # and RecursionError on the second). The array's repr overflow is INJECTED (its innermost
+    # _Number's repr raises RecursionError while the vector runs) rather than provoked by nesting
+    # far past a repr depth: that depth depends on the build and its C stack, so on a large enough
+    # stack a deep array's repr succeeds and the vector would stop exercising the never-raises
+    # rule. The array holds only types the entry gate admits, and every formatting of it (repr,
+    # str, format) reaches the injected repr, so a finding that formats it raises at any stack size.
+    deep_array = [[[_Number("1")]]]
+    real_number_repr = _Number.__dict__["__repr__"]
+
+    def _overflowing_number_repr(self):
+        raise RecursionError("injected repr overflow")
+
     for name, type_value, shown in (("huge-int", 10 ** 5000, _SHOWN_INT),
                                     ("int-in-array", [10 ** 5000], _SHOWN_ARRAY),
                                     ("deep-array", deep_array, _SHOWN_ARRAY)):
+        _Number.__repr__ = _overflowing_number_repr
         try:
             v = validate_registration_model({"hooks": {"Stop": [{"hooks": [
                 {"command": "x", "type": type_value}]}]}})
@@ -2298,7 +2364,21 @@ def self_test():
                     shown)]
         except (ValueError, RecursionError):
             refused = False
+        finally:
+            _Number.__repr__ = real_number_repr
         check("model-{}-type-refuses-never-raises".format(name), refused)
+    # the injection fires while installed and is gone after restore, so the vector above can
+    # never pass because the injected repr silently stopped raising
+    _Number.__repr__ = _overflowing_number_repr
+    try:
+        repr(deep_array)
+        injected = False
+    except RecursionError:
+        injected = True
+    finally:
+        _Number.__repr__ = real_number_repr
+    check("model-deep-array-repr-injection-fires",
+          injected and repr(deep_array) == "[[[" + repr(_Number("1")) + "]]]")
     del deep_array, type_value
 
     # 11: findings and refusal messages BOUND what they repeat (_shown): on every path that

@@ -485,8 +485,36 @@ def _self_test():
             check("legacy-required-absence", refused(lambda: load_worklog_at(fd, ".working/custom")))
             manifest.unlink()
             check("no-manifest-no-probe", refused(lambda: load_worklog_at(fd, ".working/custom")))
-            manifest.write_text("[opf]\nnested = " + "[" * 2000 + "0" + "]" * 2000, encoding="utf-8")
+            manifest.write_text("[opf\n", encoding="utf-8")
             check("malformed-manifest", refused(lambda: load_worklog_at(fd, ".working/custom")))
+            # A manifest whose parse overflows (tomllib raises RecursionError) is refused as a WorklogError carrying
+            # the store parse handler's finding (_opf_store._parse_store_toml), never a traceback.
+            # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked,
+            # otherwise valid input) rather than provoked by a deeply nested body: the depth at which tomllib
+            # overflows is an interpreter limit, so a fixed body overflows under one recursion limit and parses
+            # (or trips an unrelated refusal) under another.
+            import tomllib
+            manifest.write_text(valid_manifest + "# injected-overflow\n", encoding="utf-8")
+            real_loads, real_load = tomllib.loads, tomllib.load
+
+            def overflowing_loads(text, **kwargs):
+                if "injected-overflow" in text:
+                    raise RecursionError("injected parser overflow")
+                return real_loads(text, **kwargs)
+
+            tomllib.loads = overflowing_loads
+            tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
+            try:
+                load_worklog_at(fd, ".working/custom")
+                overflow = "loaded"
+            except WorklogError as exc:
+                overflow = str(exc)
+            except RecursionError:
+                overflow = "escaped RecursionError"
+            finally:
+                tomllib.loads, tomllib.load = real_loads, real_load
+            check("manifest-parse-overflow",
+                  "nesting is too deep; present but unparseable): injected parser overflow" in overflow)
         finally:
             os.close(fd)
     if failures:

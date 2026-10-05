@@ -14,7 +14,9 @@ Stdlib only; the sibling _opf_* helpers are imported directly. Every refusal is 
 calling verb maps to exit 2. Nothing here stages or commits anything.
 """
 import datetime
+import errno
 import os
+import re
 import socket
 import stat
 import sys
@@ -32,6 +34,13 @@ import _opf_views    # noqa: E402
 
 class WriteGuardError(Exception):
     """A fail-closed pre-mutation or lease refusal carrying the operator-facing reason (mapped to exit 2)."""
+
+
+class LeaseHeldError(WriteGuardError):
+    """acquire_lease's held-lease refusal, exactly the EEXIST present-is-held case (spec 5.7). A distinct
+    type so the RECOVERY claim (acquire_lease_for_recovery) can apply the spec 5.7 live-holder rule to
+    exactly this case; every other acquisition failure stays a plain WriteGuardError and is never examined
+    for release."""
 
 
 # --- write scope: the operation's store files plus every declared render destination ------------------
@@ -1058,7 +1067,7 @@ def acquire_lease(root_fd, machine_rel, verb):
         try:
             fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
         except FileExistsError:
-            raise WriteGuardError(lease_held_message(pfd, name, lease_rel, verb))
+            raise LeaseHeldError(lease_held_message(pfd, name, lease_rel, verb))
         try:
             try:
                 journal._write_all(fd, payload)
@@ -1092,8 +1101,12 @@ def acquire_lease(root_fd, machine_rel, verb):
 def read_lease_payload(pfd, name):
     """Read the lease at (pfd, name) SAFELY for an ownership compare, reusing the round-2 R3 pattern:
     O_RDONLY|O_NOFOLLOW|O_NONBLOCK (a planted FIFO or other special file cannot BLOCK the open), then fstat
-    the opened fd and, for any NON-REGULAR file, return None WITHOUT reading. Returns the file's raw bytes,
-    or None when it is absent, non-regular, or unreadable. Bounded read (never trusts the on-disk size)."""
+    the opened fd and, for any NON-REGULAR file, return None WITHOUT reading. Returns the file's COMPLETE
+    raw bytes, read through EOF, so no later validation or ownership compare ever judges a valid-looking
+    PREFIX of a larger payload (QA round 1: a 64 KiB valid prefix of an oversized malformed lease qualified
+    for release under the former single bounded read). Returns None when the file is absent, non-regular,
+    unreadable, or larger than the 64 KiB bound: the bound still never trusts the on-disk size, and an
+    oversized payload is never truncated into a readable one (fail-closed, present-is-held upstream)."""
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
     except OSError:
@@ -1101,7 +1114,16 @@ def read_lease_payload(pfd, name):
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
-        return os.read(fd, 65536)
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, 65537 - total)
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > 65536:
+                return None
+            chunks.append(chunk)
     except OSError:
         return None
     finally:
@@ -1137,8 +1159,12 @@ def unlink_owned_lease(pfd, name, lease_rel, expected_payload, verb):
     succeeds the run also reports exit-0 SUCCESS (a false "released") over the deleted peer lease rather than
     the never-seize refusal. This is inherent to unlink-by-name (there is no unlink-this-exact-inode primitive
     available here) and cannot be eliminated, only disclosed; it is reachable ONLY when an operator or peer
-    violates the documented release-only-when-no-run-is-live reconciliation (spec 5.7). It is vastly smaller
-    than the prior ownership-blind unlink and never-seizes under any non-adversarial-mid-window sequence."""
+    violates the documented release-only-when-no-run-is-live reconciliation (spec 5.7). Concurrent
+    RECOVERIES cannot occupy the window: acquire_lease_for_recovery examines, releases, and re-claims under
+    one exclusive examination lock (_exclusive_examination), so the recovery path is serialized and that
+    operator-or-peer violation stays the only reachability, within the locking boundary that lock
+    discloses (one kernel's flock arbitration; spec section 17). It is vastly smaller than the prior
+    ownership-blind unlink and never-seizes under any non-adversarial-mid-window sequence."""
     on_disk = read_lease_payload(pfd, name)
     if on_disk != expected_payload:
         # FIX3: distinguish a genuine ABSENCE (the lease was deleted, not replaced) from a REPLACEMENT (a
@@ -1177,3 +1203,209 @@ def release_lease(root_fd, machine_rel, expected_payload, verb):
         os.fsync(pfd)
     finally:
         _opf_store._close_fd_exc_safe(pfd)
+
+
+# --- the recovery claim: the spec 5.7 live-holder rule over a leftover lease ----------------------------
+
+# The holder identity acquire_lease stamps (lease_holder): "opf-<verb>:<host>:<pid>". The verb is a
+# lowercase token, so its first ':' ends it and is captured for the verb binding below, and the pid is the
+# LAST colon-separated field, so a host name that itself carries ':' still parses; the pid is bounded and
+# canonical (digits, no leading zero), so an overlong or padded value never reaches os.kill.
+_LEASE_HOLDER_RE = re.compile(r"opf-([a-z][a-z0-9-]*):(.+):([1-9][0-9]{0,9})\Z")
+
+
+def _closed_lease_model(raw):
+    """The parsed model of a COMPLETE well-formed single-writer lease (the closed spec 5.7 shape C-LEASE
+    validates: exactly the closed keys, the supported schema, a non-empty holder and operation, an RFC
+    3339 UTC acquired_at), or None. The COMPLETE closed schema is validated FIRST (the
+    _opf_oplock._validate_recovery_lease model), so a malformed or foreign-shape lease and an unparseable
+    payload each refuse upstream rather than ever reaching the holder comparison."""
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or set(data) != set(_opf_check.LEASE_TOP_KEYS):
+        return None
+    if type(data.get("schema")) is not int or data["schema"] != _opf_schema.SUPPORTED_SCHEMA:
+        return None
+    for key in ("holder", "operation", "acquired_at"):
+        if type(data.get(key)) is not str or not data[key]:
+            return None
+    if not _opf_check._valid_timestamp(data["acquired_at"]):
+        return None
+    return data
+
+
+def _holder_names_this_host(host):
+    """True when the examined holder's host part names THIS host. A cross-host holder always reads
+    possibly-live (never seized): liveness is observable only where the probe runs."""
+    return host == socket.gethostname()
+
+
+def _examined_leftover_holder(raw, verb):
+    """(holder, pid) when `raw` is a COMPLETE well-formed single-writer lease (_closed_lease_model)
+    whose holder is the exact identity acquire_lease stamps for THIS verb and whose host part names THIS
+    host; None otherwise, and None always reads possibly-live (never seized). The verb is bound twice
+    (the operation key and the holder's verb field both equal `verb`): a dead run of ANOTHER opf verb
+    left writes this verb's reconciliation does nothing to reconcile, so its leftover lease stays the
+    operator's own reconciliation step, exactly as before this rule existed. A cross-host holder refuses
+    via _holder_names_this_host."""
+    data = _closed_lease_model(raw)
+    if data is None:
+        return None
+    match = _LEASE_HOLDER_RE.fullmatch(data["holder"])
+    if match is None or match.group(1) != verb or data["operation"] != verb:
+        return None
+    if not _holder_names_this_host(match.group(2)):
+        return None
+    return data["holder"], int(match.group(3))
+
+
+def _lease_holder_confirmed_dead(pid):
+    """True ONLY on positive evidence that the holder process is dead on THIS host: os.kill(pid, 0) raises
+    ProcessLookupError (the journal's possibly-live-never-seized model, _journal.owner_confirmed_dead, on
+    its no-start-time leg: the spec 5.7 lease payload records no process start time). A live pid, EPERM (a
+    live foreign-uid holder), an out-of-range pid, or any other outcome reads as possibly-live, never
+    seized. DISCLOSED RESIDUALS, each shared with the journal-lock owner model where no start time is
+    readable: a dead holder whose pid was REUSED by a live process reads possibly-live and still refuses
+    (the operator remedy stands, fail-closed); a live holder in another PID namespace that shares this
+    hostname and store can read dead, exactly as a recorded pid absent from the prober's namespace reads
+    there."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except Exception:  # noqa: BLE001  EPERM, OverflowError, or anything else: possibly-live, never seized
+        return False
+    return False
+
+
+def _exclusive_examination(pfd, lease_rel, verb):
+    """Serialize the WHOLE leftover-lease reconciliation (examine, release, re-claim) across concurrent
+    recoveries: one EXCLUSIVE non-blocking flock on the lease's parent directory, taken through the open
+    `pfd` and released by its close (the kernel releases it when the holder dies, so a killed recoverer
+    leaves nothing of it to reconcile, and no new on-disk name is ever created). Without this lock two
+    recoveries could BOTH read the same dead-holder bytes, BOTH pass the bound-to-exact-bytes release
+    compare, and the slower unlink would then remove the faster recoverer's freshly created LIVE lease
+    (the QA round 1 blocker: both writers then recover under one pathname), so the examined-bytes binding
+    alone cannot close that window; only serialization of the full examine-release-reclaim span can. A
+    HELD lock (EWOULDBLOCK/EAGAIN) refuses fail-closed and never blocks (matching the O_NONBLOCK lease
+    reads), naming the concurrent reconciliation; ANY OTHER flock failure (ENOLCK, ENOTSUP, EINVAL, EBADF,
+    or any other errno: a filesystem that cannot lock this directory) also refuses, with its own message
+    naming the lock failure, never a concurrent reconciliation that need not exist (QA round 2); a
+    platform without POSIX fcntl refuses rather than racing (the _journal stale-lock arbitration posture).
+
+    DISCLOSED LOCKING BOUNDARY (spec section 17): a SUCCESSFUL flock serializes only recoveries whose locks
+    one kernel arbitrates (one host, containers sharing it, and killed recoverers, whose lock that kernel
+    drops). Where the store sits on NFS or another filesystem whose flock is local to each client kernel,
+    two hosts sharing the store under one hostname can both take the lock and race the release, and the
+    examined-bytes binding alone does not close that race; where flock is unsupported or fails, every
+    dead-run release refuses here and stays the operator's reconciliation step."""
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise WriteGuardError(
+            "reconciling the leftover {} lease {} needs the POSIX fcntl serialization primitive (absent "
+            "on this platform: {}); the lease is never examined or removed without it "
+            "(fail-closed)".format(verb, lease_rel, exc)) from exc
+    try:
+        fcntl.flock(pfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+            raise WriteGuardError(
+                "another reconciliation is concurrently examining the {} lease {} ({}); this run refuses "
+                "rather than race it (at most one recoverer ever examines, releases, and re-claims the "
+                "lease), and no lease was examined or removed by this run. Re-run opf {} once that "
+                "reconciliation finishes.".format(verb, lease_rel, exc, verb)) from exc
+        raise WriteGuardError(
+            "the examination lock that serializes reconciling the leftover {} lease {} could not be taken "
+            "({}): the store's filesystem does not support or refused the directory lock, which is a lock "
+            "failure, not a concurrent reconciliation. This run refuses rather than examine without it, and "
+            "no lease was examined or removed by this run. If you have confirmed NO opf run is live, release "
+            "the leftover lease as your own reconciliation step (spec 5.7), then re-run opf {}.".format(
+                verb, lease_rel, exc, verb)) from exc
+
+
+def _claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released):
+    """After the examined leftover lease was UNLINKED: make that release durable and retry the atomic claim
+    once, returning the claimed payload. EVERY failure from here on carries `released` (the release
+    report), whatever its type (QA round 2: a JournalError reopening the parent, or an EMFILE or EACCES
+    from the O_EXCL create, escaped without it): a WriteGuardError keeps its text with the report
+    appended, any other ordinary exception is surfaced as a WriteGuardError naming it with the report
+    appended, and a KeyboardInterrupt or SystemExit propagates as itself, the report attached as a note."""
+    try:
+        os.fsync(pfd)
+    except Exception as exc:  # noqa: BLE001  any ordinary failure after the release carries its report
+        raise WriteGuardError(
+            "the release of the leftover {} lease {} could not be made durable ({}); re-run opf "
+            "{} once the store volume is healthy. Before that failure, {}.".format(
+                verb, lease_rel, exc, verb, released)) from exc
+    except BaseException as exc:
+        exc.add_note("Before that interruption, {}.".format(released))
+        raise
+    try:
+        return acquire_lease(root_fd, machine_rel, verb)
+    except WriteGuardError as exc:
+        raise WriteGuardError("{} Before that claim, {}.".format(exc, released)) from exc
+    except Exception as exc:  # noqa: BLE001  any ordinary failure after the release carries its report
+        raise WriteGuardError(
+            "the {} lease claim retried after that release failed ({!r}) (fail-closed); re-run opf {} once "
+            "the cause is cleared. Before that claim, {}.".format(verb, exc, verb, released)) from exc
+    except BaseException as exc:
+        exc.add_note("Before that interruption, {}.".format(released))
+        raise
+
+
+def acquire_lease_for_recovery(root_fd, machine_rel, verb):
+    """Claim the single-writer lease for a RECONCILIATION write (spec 5.7, 8.8 item 1, 16.1): the ordinary
+    ATOMIC claim first and, exactly when it refuses because a lease is PRESENT, the spec 5.7 live-holder
+    rule under a per-store EXCLUSIVE EXAMINATION LOCK (_exclusive_examination, held from before the
+    leftover is read until after the retried claim): a leftover lease whose complete well-formed payload
+    names THIS verb's holder on THIS host CONFIRMED DEAD (positive evidence only) is released THROUGH
+    this reconciliation, bound to the exact bytes examined (a lease replaced in the interval is never
+    removed), and the atomic claim is retried ONCE under the same lock, so at most one of any number of
+    concurrent recoveries whose locks one kernel arbitrates ever examines, releases, and re-claims, and
+    such a recoverer can never remove a peer recoverer's freshly created live lease; every other present
+    lease (a live or possibly-live holder, a cross-host holder, another verb's holder, a malformed,
+    oversized or foreign-shape payload, an unreadable or non-regular entry) refuses exactly as
+    acquire_lease does and is never seized. Returns (payload, released): the exact lease bytes this run
+    wrote, and None, or the one-line report of the leftover lease this reconciliation released, which the
+    caller MUST surface; every failure raised AFTER that release carries the report, whatever its type
+    (_claim_after_release), the release's durability fsync included, so no failure reads as
+    written-nothing over the released lease. The serialization holds only within the locking boundary
+    _exclusive_examination discloses (one kernel's flock arbitration). Spec 5.7: a lease is present only
+    while held, MUST NOT be seized from a live holder, and a leftover lease from a dead run MUST be
+    released only through the resume-or-close reconciliation; spec 8.8 item 1 grants this reconciliation
+    exactly that release; spec 16.1: after resolving the store, a command reconciles a leftover lease and
+    its own writer's interrupted journal, as sections 5.7 and 8.8 require, before its admission check.
+    Ordinary (non-recovery) acquisition keeps the unexamined present-is-held refusal, so a lone leftover
+    with no interrupted journal behind it stays the operator's reconciliation step, matching the homes-2
+    refusal of a lone lease with no paired active record."""
+    journal = _opf_store._journal
+    try:
+        return acquire_lease(root_fd, machine_rel, verb), None
+    except LeaseHeldError as held:
+        lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
+        pfd, name = journal._open_parent(root_fd, lease_rel)
+        try:
+            _exclusive_examination(pfd, lease_rel, verb)
+            raw = read_lease_payload(pfd, name)
+            examined = _examined_leftover_holder(raw, verb) if raw is not None else None
+            if examined is None or not _lease_holder_confirmed_dead(examined[1]):
+                raise held
+            holder = examined[0]
+            try:
+                unlink_owned_lease(pfd, name, lease_rel, raw, verb)
+            except WriteGuardError as exc:
+                raise WriteGuardError(
+                    "the leftover {} lease {} of confirmed-dead holder {!r} could not be released by this "
+                    "reconciliation ({}); nothing was removed beyond what that release itself reports, and "
+                    "no lease this reconciliation cannot prove is that examined leftover is ever removed "
+                    "(never-seize, spec 5.7)".format(verb, lease_rel, holder, exc)) from exc
+            released = ("the leftover single-writer lease {} of confirmed-dead holder {!r} was released "
+                        "through this reconciliation (spec 5.7: a lease is never seized from a live "
+                        "holder, and a leftover lease from a dead run is released only through this "
+                        "reconciliation)".format(lease_rel, holder))
+            return _claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released), released
+        finally:
+            _opf_store._close_fd_exc_safe(pfd)
