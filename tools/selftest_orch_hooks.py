@@ -376,8 +376,18 @@ def _rdp_cases(tmp):
     check("rdp/unknown-target-denies", _rdp_kind(f.dispatch(f.brief(["Review-target: tip"]))), "deny")
     check("rdp/duplicate-target-unverifiable", _rdp_kind(f.dispatch(f.brief(
         ["Review-target: revision", "Review-target: working-tree"]))), "unverifiable")
-    check("rdp/working-tree-target-notes", _rdp_kind(f.dispatch(f.brief(["Review-target: working-tree"]))),
-          "warn")
+    events = f.briefs / "state" / "guard-events.jsonl"
+
+    def _event_rows():
+        try:
+            return [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines() if line]
+        except OSError:
+            return []
+    rows_before = len(_event_rows())
+    wt_kind = _rdp_kind(f.dispatch(f.brief(["Review-target: working-tree"])))
+    new_rows = _event_rows()[rows_before:]
+    check("rdp/working-tree-target-notes", (wt_kind, [(r.get("kind"), r.get("decision")) for r in new_rows]),
+          ("warn", [("review-dispatch-pin", "allow-declared-target")]))
     check("rdp/branch-only-brief-denies", _rdp_kind(f.dispatch(branch_only)), "deny")
     check("rdp/short-sha-denies", _rdp_kind(f.dispatch(f.good(pin=f.pin[:12]))), "deny")
     check("rdp/ref-name-as-pin-denies", [_rdp_kind(f.dispatch(f.good(pin=p))) for p in ("HEAD", "main")],
@@ -440,6 +450,24 @@ def _rdp_cases(tmp):
     check("rdp/wrapper-prefixed-dispatch-recognized", [_rdp_kind(f.run(c + branch_only)) for c in (
         "env FOO=1 nice -n 5 orch-dispatch --brief ", "command /usr/local/bin/orch-dispatch --brief=",
         "true && nohup orch-dispatch --brief ")], ["deny", "deny", "deny"])
+    import signal as _signal
+
+    class _Blocked(BaseException):
+        """Raised by the alarm; not an OSError, so no handler under test can swallow it."""
+
+    def _alarm(_sig, _frame):
+        raise _Blocked()
+
+    def _bounded(fn):
+        old = _signal.signal(_signal.SIGALRM, _alarm)
+        _signal.alarm(5)
+        try:
+            return fn()
+        except _Blocked:
+            return "blocked"
+        finally:
+            _signal.alarm(0)
+            _signal.signal(_signal.SIGALRM, old)
     oversize = f.briefs / "oversize.txt"
     oversize.write_text("Review-target: working-tree\n" + "x" * 5000 + "\n", encoding="utf-8")
     bad_utf8 = f.briefs / "bad-utf8.txt"
@@ -453,7 +481,7 @@ def _rdp_cases(tmp):
     unreadable.chmod(0)
     fifo = f.briefs / "fifo.txt"
     os.mkfifo(str(fifo))
-    got = [_rdp_kind(f.dispatch(str(p))) for p in (
+    got = [_bounded(lambda p=p: _rdp_kind(f.dispatch(str(p)))) for p in (
         f.briefs / "missing.txt", f.briefs, fifo, oversize, bad_utf8, nul, sep)]
     # A privileged run reads a mode-0 file anyway, so that one leg is judged only where it can bite.
     got.append(_rdp_kind(f.dispatch(str(unreadable))) if os.geteuid() != 0 else "unverifiable")
@@ -466,6 +494,8 @@ def _rdp_cases(tmp):
     st = RdpFixture(base, "staged")
     (st.root / "src" / "b.py").write_text("b = 2\n", encoding="utf-8")
     _rdp_git(st.root, "add", "src/b.py")
+    # The working tree goes back to the pinned content, so only the staged-state check sees the change.
+    (st.root / "src" / "b.py").write_text("b = 1\n", encoding="utf-8")
     check("rdp/staged-only-change-denies", _rdp_kind(st.dispatch(st.good())), "deny")
     un = RdpFixture(base, "untracked")
     (un.root / ".git" / "info" / "exclude").write_text("old.txt\n", encoding="utf-8")
@@ -502,12 +532,18 @@ def _rdp_cases(tmp):
 
     rp = RdpFixture(base, "replace")
     _rdp_git(rp.root, "replace", "--graft", rp.pin)
+    rp_parent = aiqt_hooks._review_git(str(rp.root), "rev-parse", "--verify", rp.pin + "^")
     check("rdp/replace-ref-ignored", ("parent " in _rdp_git(rp.root, "cat-file", "commit", rp.pin),
-                                      _rdp_kind(rp.dispatch(rp.good()))), (False, "allow"))
+                                      _rdp_kind(rp.dispatch(rp.good())),
+                                      rp_parent.stdout.decode().strip() if rp_parent else None),
+          (False, "allow", rp.seed))
     gf = RdpFixture(base, "grafts")
     (gf.root / ".git" / "info" / "grafts").write_text(gf.pin + "\n", encoding="utf-8")
+    gf_parent = aiqt_hooks._review_git(str(gf.root), "rev-parse", "--verify", gf.pin + "^")
     check("rdp/grafts-file-ignored", (_rdp_git(gf.root, "log", "-1", "--format=%P", gf.pin),
-                                      _rdp_kind(gf.dispatch(gf.good()))), ("", "allow"))
+                                      _rdp_kind(gf.dispatch(gf.good())),
+                                      gf_parent.stdout.decode().strip() if gf_parent else None),
+          ("", "allow", gf.seed))
 
     seen = []
     real_run = subprocess.run
@@ -578,8 +614,27 @@ def _rdp_cases(tmp):
         "env --chdir=src orch-dispatch --brief brief.txt", "env -iCsrc FOO=1 orch-dispatch --brief brief.txt",
         "env --ch src orch-dispatch --brief brief.txt", "env -C src orch-dispatch --brief ../brief.txt",
         "env -C " + str(ec.briefs) + " orch-dispatch --brief " + ec.good(),
-        "env -S 'orch-dispatch --brief brief.txt' orch-dispatch")],
-        ["allow", "deny", "deny", "deny", "deny", "allow", "unverifiable", "unverifiable"])
+        "env -S '-C src' orch-dispatch --brief brief.txt")],
+        ["allow", "deny", "deny", "deny", "deny", "allow", "unverifiable", "deny"])
+    # src/brief.txt pins nothing: a dispatch of it that is followed is a plain deny (no pin), while one the
+    # hook could not follow would be UNVERIFIABLE, and brief.txt is the reconciled brief (allow).
+    check("rdp/env-split-string-followed", [_rdp_kind(ec.run(c)) for c in (
+        "env -Sorch-dispatch --brief src/brief.txt", "env -S 'orch-dispatch --brief src/brief.txt'",
+        "env --split-string='orch-dispatch --brief src/brief.txt'",
+        "env --split-string 'orch-dispatch --brief src/brief.txt'",
+        "env -iS'orch-dispatch --brief src/brief.txt'", "env --sp='-C src orch-dispatch --brief brief.txt'",
+        "env -S'env -Sorch-dispatch' --brief src/brief.txt", "env -S \"orch-dispatch '--brief' src/brief.txt\"",
+        "env -Sorch-dispatch --brief brief.txt", "env -S 'orch-dispatch --brief brief.txt'")],
+        ["deny"] * 8 + ["allow", "allow"])
+    check("rdp/env-form-not-read-exactly-unverifiable", [_rdp_kind(ec.run(c)) for c in (
+        "env -S'orch-dispatch --brief brief.txt #'", "env -S'orch-dispatch --brief ${B}'",
+        "env -S'orch-dispatch --brief \"brief.txt'", "env -S'orch-dispatch\\_--brief brief.txt'",
+        "env --default-signal orch-dispatch --brief brief.txt", "timeout --frobnicate 5 ls",
+        "sudo env -Sorch-dispatch --brief src/brief.txt", "env -S'ls -l' /tmp")],
+        ["unverifiable"] * 7 + ["allow"])
+    check("rdp/env-dash-and-assignments-exact", [_rdp_kind(ec.run(c)) for c in (
+        "env - FOO=1 orch-dispatch --brief src/brief.txt", "env ./x=y orch-dispatch --brief src/brief.txt",
+        "env -- - orch-dispatch --brief src/brief.txt")], ["deny", "deny", "deny"])
     check("rdp/cd-then-absolute-brief-unverifiable",
           _rdp_kind(f.run("cd " + str(f.root / "src") + " && orch-dispatch --brief " + f.good())), "unverifiable")
     good = f.good()
@@ -594,24 +649,6 @@ def _rdp_cases(tmp):
     check("rdp/unrelated-descriptor-redirect", [_rdp_kind(f.run("orch-dispatch --brief " + good + c)) for c in (
         " 3</dev/null", " 0<" + good, " <&3")], ["allow", "deny", "deny"])
 
-    import signal as _signal
-
-    class _Blocked(BaseException):
-        """Raised by the alarm; not an OSError, so no handler under test can swallow it."""
-
-    def _alarm(_sig, _frame):
-        raise _Blocked()
-
-    def _bounded(fn):
-        old = _signal.signal(_signal.SIGALRM, _alarm)
-        _signal.alarm(5)
-        try:
-            return fn()
-        except _Blocked:
-            return "blocked"
-        finally:
-            _signal.alarm(0)
-            _signal.signal(_signal.SIGALRM, old)
     ff = RdpFixture(base, "fifos")
     fifo_brief = ff.briefs / "fifo-brief.txt"
     os.mkfifo(str(fifo_brief))
@@ -691,6 +728,59 @@ def _rdp_cases(tmp):
         f.authority(f.pin + "\n")
     check("rdp/deadline-bounds-the-decision", (budget_kind, aiqt_hooks.time.monotonic() - started < 2.5),
           ("unverifiable", True))
+    # Each content read and git probe refuses to start once the deadline has passed: a past deadline is set
+    # directly, then each reader is called (a symlink entry exercises the walk without the blob hash).
+    (f.root / "rdp-link").symlink_to("seed.txt")
+    probes = []
+    fd = os.open(str(f.root / "seed.txt"), os.O_RDONLY)
+    try:
+        for name, call in (
+                ("blob", lambda: aiqt_hooks._rdp_blob_id("sha1", 5, fd)),
+                ("read", lambda: aiqt_hooks._rdp_read_fd(fd, 10)),
+                ("entry", lambda: aiqt_hooks._rdp_worktree_entry(str(f.root), b"rdp-link", "sha1")),
+                ("git", lambda: aiqt_hooks._review_git(str(f.root), "rev-parse", "HEAD"))):
+            aiqt_hooks._RDP_DEADLINE[0] = aiqt_hooks.time.monotonic() - 1
+            try:
+                probes.append((name, "returned" if call() is not None else "none"))
+            except TimeoutError:
+                probes.append((name, "timeout"))
+            finally:
+                aiqt_hooks._RDP_DEADLINE[0] = None
+    finally:
+        os.close(fd)
+    (f.root / "rdp-link").unlink()
+    check("rdp/content-read-past-deadline-refused", probes,
+          [("blob", "timeout"), ("read", "timeout"), ("entry", "timeout"), ("git", "none")])
+    # The reported reproduction: a declared file's hash starts after the budget is spent (here the deadline
+    # is moved into the past instead of sleeping), and the decision must not allow.
+    real_blob = aiqt_hooks._rdp_blob_id
+
+    def _late_blob(fmt, header_size, fd):
+        aiqt_hooks._RDP_DEADLINE[0] = aiqt_hooks.time.monotonic() - 1
+        return real_blob(fmt, header_size, fd)
+    aiqt_hooks._rdp_blob_id = _late_blob
+    try:
+        late = [_rdp_kind(f.dispatch(f.good()))]
+    finally:
+        aiqt_hooks._rdp_blob_id = real_blob
+    # An overrun anywhere else (here after the whole reconciliation returned allow) is a cannot-evaluate too.
+    real_reconcile = aiqt_hooks._rdp_reconcile
+
+    def _late_reconcile(*args):
+        out = real_reconcile(*args)
+        aiqt_hooks._RDP_DEADLINE[0] = aiqt_hooks.time.monotonic() - 1
+        return out
+    aiqt_hooks._rdp_reconcile = _late_reconcile
+    try:
+        late.append(_rdp_kind(f.dispatch(f.good())))
+    finally:
+        aiqt_hooks._rdp_reconcile = real_reconcile
+    late.append(_rdp_kind(f.dispatch(f.good())))
+    check("rdp/overdue-read-never-allows", late, ["unverifiable", "unverifiable", "allow"])
+    f.write_registry(dict(f.binding, brief_option="-b"))
+    check("rdp/attached-short-second-brief-denies", [_rdp_kind(f.run("orch-dispatch -b " + good + c)) for c in (
+        "", " -b" + branch_only)], ["allow", "deny"])
+    f.write_registry(f.binding)
     mf = RdpFixture(base, "mutants")
     check("rdp/duplicate-repo-or-branch-unverifiable", [_rdp_kind(mf.dispatch(mf.good(extra=[
         lab + " " + v, lab + " " + v]))) for lab, v in (("Review-repo:", str(mf.root)), ("Review-branch:", "main"))],

@@ -172,17 +172,23 @@ malformed.
   with the brief's absolute path appended, and it must print exactly one full commit id: the
   authoritative task revision. `authority.timeout` is in seconds, from 1 to 8 (default 5). The whole
   check, git reads and authority included, runs within 8 seconds, under the 10-second hook timeout;
-  when that budget runs out the dispatch is withheld as `UNVERIFIABLE:`.
+  when that budget runs out the dispatch is withheld as `UNVERIFIABLE:`. Every file read checks the
+  budget before each read, and a result reached after the budget has run out is never an allow.
 - `max_brief_bytes` caps the brief size (default 1048576).
 
 The hook sees a Bash call when the command word, after leading modifier wrappers (`command`, `env`,
 `nohup`, `nice`, `stdbuf`, `time`, `timeout`, `exec`, `builtin`), is one of `commands`. `env` and
 `timeout` are read with their exact option grammar. An `env -C DIR` or `env --chdir=DIR` directory is
 followed: the dispatch runs there, a relative brief path resolves there, and the default repository
-is the one git resolves there. An `env` or `timeout` option the hook does not model (such as
-`env -S`) withholds the dispatch. So does a segment whose command is not a declared one but which
-names a declared command as a word of its own (`setsid`, `sudo`, `xargs` or `ionice` before it, but
-also `grep orch-dispatch`, a disclosed false refusal). The brief must be one file argument, given
+is the one git resolves there. An `env -S STRING` or `env --split-string=STRING` value, attached or
+separate, is split into words, and env's options are read again from those words, as env itself
+does. The hook splits on whitespace and removes single and double quotes; a string that holds a
+backslash, a `$` or a `#`, or has an unterminated quote, is not split. Any `env` or `timeout` form the
+hook does not read exactly (such a string, a signal option, an unknown option) withholds the call
+whether or not a declared command is visible in it. So does a segment whose command is not a declared
+one but which names a declared command as a word of its own, or through an `env -S` string anywhere
+in it (`setsid`, `sudo`, `xargs` or `ionice` before it, but also `grep orch-dispatch`, a disclosed
+false refusal). The brief must be one file argument, given
 as `--brief PATH`, `--brief=PATH` or an abbreviation such as `--brie PATH`. A second brief in any
 of these forms is refused. A brief read from standard input (a pipe, a heredoc, a here-string, a
 process substitution, or a redirect of descriptor 0) is refused; a redirect of another descriptor
