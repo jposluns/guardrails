@@ -1324,6 +1324,99 @@ def _main_isolated(report_path=None):
             aiqt_hooks.os.fstat = saved_fstat
             aiqt_hooks._orch_walk_recheck = saved_recheck
         check("trunc/walk-self-bind-mount-sim-finds-registry-above", bind_res, ("found", None))
+        # ROUND 5, FAIL-CLOSED BRANCHES PINNED: each branch below keeps main's deny where the scope read
+        # cannot be completed, and each row is red when its branch is turned into a clean miss (an allow).
+        # The cwd carries no registry, so without the fault the call allows; the deny can come only from
+        # the faulted branch. The union leg: git names a toplevel this probe cannot open as a directory (a
+        # regular file, ENOTDIR on any uid) must read IN SCOPE, as main's registry lstat fault did. The
+        # recheck seams are installed only while _orch_walk_recheck runs, so the walk itself is unfaulted:
+        # a realpath fault, an open fault on a textual chain path, and an fstat fault each deny naming the
+        # recheck step that failed.
+        fcb = tmp / "fail-closed"
+        (fcb / "cwd" / "sub").mkdir(parents=True)
+        (fcb / "top-file").write_text("not a directory", encoding="utf-8")
+        fcb_cwd = str(fcb / "cwd" / "sub")
+        saved_top = aiqt_hooks._recovery_toplevel
+        try:
+            aiqt_hooks._recovery_toplevel = lambda _cwd: str(fcb / "top-file")
+            cv, cw = _cwd_case(fcb_cwd)
+        finally:
+            aiqt_hooks._recovery_toplevel = saved_top
+        check("trunc/union-unopenable-toplevel-detach-denies", (cv, "detaches a child" in cw),
+              ("deny", True))
+        saved_recheck_fc = aiqt_hooks._orch_walk_recheck
+        saved_realpath = aiqt_hooks.os.path.realpath
+        saved_open_fc = aiqt_hooks.os.open
+        saved_fstat_fc = aiqt_hooks.os.fstat
+        _fcb_parent = os.path.realpath(str(fcb / "cwd"))
+
+        def _realpath_fault(path, *a, **k):
+            raise OSError(40, "Too many levels of symbolic links", path)
+
+        def _open_fault(path, flags, *a, **k):
+            if path == _fcb_parent and k.get("dir_fd") is None:
+                raise PermissionError(13, "Permission denied", path)
+            return saved_open_fc(path, flags, *a, **k)
+
+        def _fstat_fault(fd):
+            raise PermissionError(13, "Permission denied")
+
+        def _recheck_under(attr, fake):
+            target = aiqt_hooks.os.path if attr == "realpath" else aiqt_hooks.os
+            saved = getattr(target, attr)
+
+            def _faulted(cwd, chain):
+                setattr(target, attr, fake)
+                try:
+                    return saved_recheck_fc(cwd, chain)
+                finally:
+                    setattr(target, attr, saved)
+            return _faulted
+        recheck_faults = (("realpath", _realpath_fault, "could not be re-resolved after the registry walk",
+                           "trunc/walk-recheck-realpath-fault-denies"),
+                          ("open", _open_fault, "recheck cannot re-resolve (PermissionError)",
+                           "trunc/walk-recheck-open-fault-denies"),
+                          ("fstat", _fstat_fault, "recheck cannot examine (PermissionError)",
+                           "trunc/walk-recheck-fstat-fault-denies"))
+        for attr, fake, why, row in recheck_faults:
+            try:
+                aiqt_hooks._orch_walk_recheck = _recheck_under(attr, fake)
+                cv, cw = _cwd_case(fcb_cwd)
+            finally:
+                aiqt_hooks._orch_walk_recheck = saved_recheck_fc
+                aiqt_hooks.os.path.realpath = saved_realpath
+                aiqt_hooks.os.open = saved_open_fc
+                aiqt_hooks.os.fstat = saved_fstat_fc
+            check(row, (cv, why in cw), ("deny", True))
+        # The walk's own fault branches, pinned the same way: an open fault on the cwd itself (after its
+        # stat and access checks pass) and an fstat fault on an opened ancestor each deny naming the walk
+        # step that failed, never reading the chain as registry-free.
+        _fcb_parent_ino = os.stat(_fcb_parent).st_ino
+
+        def _walk_open_fault(path, flags, *a, **k):
+            if path == fcb_cwd and k.get("dir_fd") is None:
+                raise PermissionError(13, "Permission denied", path)
+            return saved_open_fc(path, flags, *a, **k)
+
+        def _walk_fstat_fault(fd):
+            st = saved_fstat_fc(fd)
+            if st.st_ino == _fcb_parent_ino:
+                raise PermissionError(13, "Permission denied")
+            return st
+        walk_faults = (("open", _walk_open_fault,
+                        "could not be opened for the registry walk (PermissionError)",
+                        "trunc/walk-cwd-open-fault-denies"),
+                       ("fstat", _walk_fstat_fault,
+                        "ancestor directory this walk cannot examine (PermissionError)",
+                        "trunc/walk-ancestor-fstat-fault-denies"))
+        for attr, fake, why, row in walk_faults:
+            try:
+                setattr(aiqt_hooks.os, attr, fake)
+                cv, cw = _cwd_case(fcb_cwd)
+            finally:
+                aiqt_hooks.os.open = saved_open_fc
+                aiqt_hooks.os.fstat = saved_fstat_fc
+            check(row, (cv, why in cw), ("deny", True))
         # The shared dispatcher fails closed on ANY exception while reading stdin: deeply nested JSON raises
         # RecursionError and a read can raise MemoryError, which the old narrow except let escape as a
         # traceback with exit 1 (non-blocking). A PreToolUse hook now exits 2 naming the exception; a Stop

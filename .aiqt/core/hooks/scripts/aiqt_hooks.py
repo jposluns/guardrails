@@ -8101,9 +8101,12 @@ def _orch_registry_walk(cwd):
     the walk additionally reaches a registry above a nested repository or a filesystem boundary (git
     discovery stops at a mount point; this walk does not) and decides scope even where git cannot run or
     answer, which the rev-parse scoping turned into a blanket deny (the round-3 lockout, withdrawn). The
-    walk-and-recheck is still not atomic with the Bash call it gates: a chain or registry that changes
-    after the recheck returns is out of view (the inherent pre-execution TOCTOU bound, disclosed in the
-    residue)."""
+    walk-and-recheck is not atomic, neither with itself nor with the Bash call it gates, and two windows
+    stay out of view (disclosed in the residue, see _orch_walk_recheck): a concurrent rename of an
+    ancestor directory timed against BOTH the walk and the recheck can hide a registry, and any change
+    after the recheck returns is unseen. Both lie outside this guard's threat model, which is ACCIDENTAL
+    truncation in an orchestrated tree, not a party able to rename this host's ancestor directories
+    concurrently with the hook."""
     if "\x00" in cwd:
         return ("fail", ("contains a NUL character",
                          "Re-issue the call with a cwd carrying no control characters."))
@@ -8182,9 +8185,18 @@ def _orch_walk_recheck(cwd, chain):
     ancestor moved while the walk read the chain, so the clean not-present result cannot be trusted:
     ('fail', (detail, fix)), a deny, never an allow; a recheck step that cannot be carried out fails the
     same way (deny-safe). Only when every probe stays a clean not-present AND the two independently
-    resolved chains agree does ('none', None) stand. The recheck is itself a point-in-time read: agreement
-    means the out-of-scope read matches the chain as the recheck resolved it, and a change AFTER the
-    recheck returns is out of view (the inherent pre-execution TOCTOU bound, disclosed in the residue)."""
+    resolved chains agree does ('none', None) stand. RACE LIMIT (disclosed in the residue): the recheck is
+    NOT a point-in-time read but a sequence of lookups, as the walk is, so agreement means only that the
+    two sequences of observations matched. (1) A concurrent rename of an ancestor directory timed against
+    the walk AND the recheck can hide a registry: a registry relocated within the chain so it is never
+    where either pass probes, or a sibling directory swapped in under a textual chain path during the
+    recheck so it reports the same dev/ino the redirected walk recorded, leaves every probe a clean
+    not-present with the chains agreeing, and the call is allowed. (2) Any change AFTER the recheck
+    returns, including a registry that appears only then, is out of view (the inherent pre-execution
+    TOCTOU bound). Both are outside this guard's threat model: it stops ACCIDENTAL truncation in an
+    orchestrated tree, and a party able to rename this host's ancestor directories concurrently with the
+    hook is not that case. A mid-walk rename that is not also timed against the recheck is caught (a
+    found or a deny, pinned by the raced-ancestor rows); no further race machinery is added."""
     try:
         path = os.path.realpath(cwd)
     except (OSError, ValueError):
