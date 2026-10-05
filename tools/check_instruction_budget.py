@@ -1446,6 +1446,16 @@ def _mutant(tmp, old, new, *more):
 POISON_INTERRUPT = "instruction-budget-self-test-poisoned-mutant"
 
 
+def _is_interrupt(exc, sent):
+    """True only for an exact KeyboardInterrupt whose args are exactly (sent,), read through exact built-in
+    types alone, so a recorder never runs code from the caught instance (an args property or an argument's
+    __eq__ that raises SystemExit 0, for example); any other KeyboardInterrupt propagates."""
+    if type(exc) is not KeyboardInterrupt:
+        return False
+    args = exc.args
+    return len(args) == 1 and type(args[0]) is str and args[0] == sent
+
+
 def _escape_of(fn, *args):
     """The exit status of `fn(*args)`, or the escaping exception's class name, with every output discarded;
     "returned" when it returns. Only POISON_INTERRUPT is recorded as "KeyboardInterrupt"."""
@@ -1453,9 +1463,12 @@ def _escape_of(fn, *args):
         with contextlib.redirect_stderr(io.StringIO()):
             _quiet(fn, *args)
     except SystemExit as exc:
-        return exc.code
+        # Only an exact SystemExit's int or None code is returned; a subclass (whose code could be a property)
+        # or another code is recorded as "SystemExit", so the recorder runs no code from the caught instance.
+        code = exc.code if type(exc) is SystemExit else "SystemExit"
+        return code if code is None or type(code) is int else "SystemExit"
     except KeyboardInterrupt as exc:
-        if exc.args != (POISON_INTERRUPT,):
+        if not _is_interrupt(exc, POISON_INTERRUPT):
             raise
         return "KeyboardInterrupt"
     except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
@@ -1499,17 +1512,22 @@ def _files(*pairs):
 def _blocks(read, fifo):
     """True when `read(fifo, where)` is still blocked after a second; a blocked read is then released by
     opening the FIFO for writing, so the self-test never hangs. The read runs in a worker thread, where an
-    exit (a guarded mutant's harness error, exit 2, included) ends only that thread: when anything but an
-    Exception ends the read, _blocks itself exits 2 in the calling thread once the worker is released, as the
-    harness error the read's guard reports, never the self-test's own status."""
+    exit (a guarded mutant's harness error, exit 2, included) ends only that thread: when a KeyboardInterrupt
+    ends the read, _blocks re-raises that same KeyboardInterrupt in the calling thread once the worker is
+    released, so it reaches the caller as an interrupt; when anything else but an Exception ends it, _blocks
+    itself exits 2 in the calling thread, as the harness error the read's guard reports, never the
+    self-test's own status. Neither path reads the caught instance."""
     import threading
     ended = []
+    interrupted = []
 
     def _attempt():
         try:
             read(fifo, "fifo")
         except Exception:  # the mutant module carries its own GateError class
             pass
+        except KeyboardInterrupt as exc:  # ends only this thread; _blocks re-raises it in the calling thread
+            interrupted.append(exc)
         except BaseException:  # noqa: BLE001  ends only this thread; _blocks exits 2 for it
             ended.append(True)
     worker = threading.Thread(target=_attempt, daemon=True)
@@ -1526,6 +1544,8 @@ def _blocks(read, fifo):
             continue
         worker.join(5)
         os.close(writer)
+    if interrupted:
+        raise interrupted[0]
     if ended:
         print("SELF-TEST HARNESS ERROR: a read in _blocks' worker thread ended the process; fail-closed",
               file=sys.stderr)
@@ -2171,6 +2191,14 @@ def self_test(report_path=None):
                               "\ndef read_text(path, where):\n    raise SystemExit(0)\n")
         check("harness/mutant-call-in-worker-thread-exit-2",
               _escape_of(_blocks, thread_exit.read_text, tmp / "worker-thread-read"), 2)
+        # A KeyboardInterrupt ending that call in the worker thread reaches the caller as a KeyboardInterrupt.
+        # Red if _blocks turns it into its exit 2 (or drops it).
+        thread_interrupt = _mutant(tmp, "\ndef read_text(path, where):\n",
+                                   "\ndef read_text(path, where):\n    raise KeyboardInterrupt({!r})\n".format(
+                                       POISON_INTERRUPT))
+        check("harness/mutant-call-in-worker-thread-keyboardinterrupt-propagates",
+              _escape_of(_blocks, thread_interrupt.read_text, tmp / "worker-thread-read-interrupt"),
+              "KeyboardInterrupt")
         # Any KeyboardInterrupt but POISON_INTERRUPT (here one carrying another value, standing in for a real
         # Ctrl-C) propagates out of the recorder, at load and in a call. Red if the recorder records it.
         other = POISON_INTERRUPT + "-other"
@@ -2182,7 +2210,7 @@ def self_test(report_path=None):
             try:
                 run_vector()
             except KeyboardInterrupt as exc:
-                if exc.args != (other,):
+                if not _is_interrupt(exc, other):
                     raise
                 propagated = True
             else:

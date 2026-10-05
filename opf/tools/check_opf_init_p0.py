@@ -271,6 +271,17 @@ REVERSIONS = (
 )
 
 
+def _names_identity(exc, identity):
+    """True only when exc is an exact AssertionError whose args are exactly (identity,). Only exact built-in
+    types are read (type(exc), the args tuple of an exact AssertionError and an exact str in it), so no code
+    from the caught instance runs (no __str__, __eq__, __class__ or args property of a subclass or of an
+    argument), and the comparison cannot itself end the process."""
+    if type(exc) is not AssertionError:
+        return False
+    args = exc.args
+    return len(args) == 1 and type(args[0]) is str and args[0] == identity
+
+
 def red_on_revert(source, f):
     cases = {c[0]: c for c in vectors(f)}
     expanded = []
@@ -299,6 +310,9 @@ def red_on_revert(source, f):
         # The reverted source is loaded and called in this process: a process ending from it (SystemExit 0
         # or None, GeneratorExit, any other BaseException) is a harness failure, CANNOT-EVALUATE (exit 2) in
         # main, never this gate's status; a KeyboardInterrupt propagates so an operator's Ctrl-C stops the run.
+        # No handler here runs code from the caught instance: an AssertionError subclass from the reverted
+        # source (whose __str__ could raise SystemExit 0) is cannot-evaluate with a fixed message, and an
+        # exact AssertionError is compared through _names_identity alone.
         try:
             exec(compile(source.replace(old, new), module.__file__, "exec"), module.__dict__)
         except (Exception, KeyboardInterrupt):
@@ -310,7 +324,10 @@ def red_on_revert(source, f):
         try:
             run_case(module, cases[identity], f)
         except AssertionError as exc:
-            check(str(exc) == identity, "revert/" + guard + "/wrong-assertion")
+            if type(exc) is not AssertionError:
+                raise RuntimeError("revert/" + guard + ": the reverted source raised an AssertionError subclass "
+                                   "in a call; fail-closed") from None
+            check(_names_identity(exc, identity), "revert/" + guard + "/wrong-assertion")
         except (Exception, KeyboardInterrupt):
             raise
         except BaseException:  # noqa: BLE001  a process ending in a call is cannot-evaluate, never a pass
@@ -328,13 +345,23 @@ def red_on_revert(source, f):
 LOADED_EXIT_INTERRUPT = "opf-init-p0-self-test-poisoned-revert"
 
 
+def _is_interrupt(exc, sent):
+    """True only for an exact KeyboardInterrupt whose args are exactly (sent,), read through exact built-in
+    types alone, so a recorder never runs code from the caught instance (an args property or an argument's
+    __eq__ that raises SystemExit 0, for example); any other KeyboardInterrupt propagates."""
+    if type(exc) is not KeyboardInterrupt:
+        return False
+    args = exc.args
+    return len(args) == 1 and type(args[0]) is str and args[0] == sent
+
+
 def _loaded_exit_outcome(source, body, f):
     """The class of what escapes red_on_revert over `source` with `body` appended, or None. Only
     LOADED_EXIT_INTERRUPT is recorded as KeyboardInterrupt; any other KeyboardInterrupt propagates."""
     try:
         red_on_revert(source + "\n" + body, f)
     except KeyboardInterrupt as exc:
-        if exc.args != (LOADED_EXIT_INTERRUPT,):
+        if not _is_interrupt(exc, LOADED_EXIT_INTERRUPT):
             raise
         return KeyboardInterrupt
     except BaseException as exc:  # noqa: BLE001  any other escape is recorded, never this test's own end
@@ -361,13 +388,60 @@ def red_on_revert_loaded_exit(source, f):
     try:
         _loaded_exit_outcome(source, "raise KeyboardInterrupt({!r})\n".format(other), f)
     except KeyboardInterrupt as exc:
-        if exc.args != (other,):
+        if not _is_interrupt(exc, other):
             raise
         propagated = True
     else:
         propagated = False
     check(propagated, "revert/loaded-exit/other-interrupt-not-recorded")
     print("PASS revert/loaded-exit/other-interrupt-not-recorded")
+
+
+# Appended to a reverted source: every public function the reverted module defines is replaced by one that
+# raises an exception, of the base class formatted in, whose __str__ (and so format and repr) raises
+# SystemExit(0). A handler that stringifies or formats the caught instance then ends the gate with status 0.
+HOSTILE_STR_BODY = (
+    "class _StrExits({}):\n"
+    "    def __str__(self):\n"
+    "        raise SystemExit(0)\n"
+    "\n"
+    "    __repr__ = __str__\n"
+    "\n\n"
+    "def _raise_str_exits(*args, **kwargs):\n"
+    "    raise _StrExits()\n"
+    "\n\n"
+    "for _n, _v in list(globals().items()):\n"
+    "    if type(_v) is type(_raise_str_exits) and _v.__module__ == __name__ and not _n.startswith('_'):\n"
+    "        globals()[_n] = _raise_str_exits\n")
+
+
+def red_on_revert_hostile_str(source, f):
+    """An exception whose __str__ raises SystemExit(0), raised from a call into the reverted source, is a
+    harness failure (exit 2 from _failure_status, main's handler), never exit 0 from a handler that
+    stringifies, formats or compares the caught instance: as an AssertionError subclass red_on_revert raises
+    its fixed RuntimeError, and as an Exception subclass it reaches _failure_status, which gives 2 without
+    reading it. Red if red_on_revert or _failure_status runs code from the caught instance."""
+    import contextlib
+    import io
+    for base in ("AssertionError", "Exception"):
+        try:
+            red_on_revert(source + "\n" + HOSTILE_STR_BODY.format(base), f)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    got = _failure_status(exc)
+            except KeyboardInterrupt:
+                raise
+            except BaseException as escaped:  # noqa: BLE001  recorded, never this test's own end
+                got = type(escaped)
+        except BaseException as exc:  # noqa: BLE001  recorded, never this test's own end
+            got = type(exc)
+        else:
+            got = None
+        check(type(got) is int and got == 2, "revert/hostile-str/" + base)
+        print("PASS revert/hostile-str/" + base)
 
 
 # Prefixed to the runner text in place of a python3 shell function. A
@@ -1064,6 +1138,26 @@ def runner_red_checks(expected):
     _runner_non_readable_fd_checks()
 
 
+def _failure_status(exc):
+    """main's status for an Exception escaping the harness, with its stderr line: 1 (SELF-TEST FAIL) for an
+    exact AssertionError, 2 (CANNOT-EVALUATE) for any other. The line carries this harness's own text only
+    when exc is an exact AssertionError or RuntimeError (what this module raises) whose one argument is an
+    exact str; any other exception, a subclass of either included, gets a fixed line. So no code from the
+    caught instance runs (no __str__, __repr__, __format__, __class__ or args property of a subclass or of an
+    argument), and an exception whose __str__ raises SystemExit 0 is exit 2, never 0."""
+    kind = type(exc)
+    args = exc.args if kind is AssertionError or kind is RuntimeError else ()
+    text = args[0] if len(args) == 1 and type(args[0]) is str else None
+    if kind is AssertionError:
+        print("SELF-TEST FAIL " + (text if text is not None else "(an assertion without a harness identity)"),
+              file=sys.stderr)
+        return 1
+    print("CANNOT-EVALUATE P0 harness: " + (text if text is not None else
+                                           "an exception other than this harness's own; fail-closed"),
+          file=sys.stderr)
+    return 2
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
@@ -1076,6 +1170,7 @@ def main():
         if not args.vectors_only:
             if args.red_on_revert:
                 red_on_revert_loaded_exit(Path(p0.__file__).read_text(encoding="utf-8"), f)
+                red_on_revert_hostile_str(Path(p0.__file__).read_text(encoding="utf-8"), f)
                 red_on_revert(Path(p0.__file__).read_text(encoding="utf-8"), f)
             runner_check(ids)
             print("PASS runner/declared-test-executes")
@@ -1098,12 +1193,8 @@ def main():
                 print("RED own-dispatch -> runner/declared-test-executes/pass-lines")
                 runner_red_checks(ids)
         return 0
-    except AssertionError as exc:
-        print("SELF-TEST FAIL " + str(exc), file=sys.stderr)
-        return 1
     except Exception as exc:
-        print("CANNOT-EVALUATE P0 harness: {}".format(exc), file=sys.stderr)
-        return 2
+        return _failure_status(exc)
 
 
 if __name__ == "__main__":

@@ -298,6 +298,16 @@ def _close_vectors_guarded(base):
 # _poisoned_close_outcome; any other KeyboardInterrupt, such as an operator's real Ctrl-C, propagates.
 CLOSE_POISON_INTERRUPT = "check-footer-self-test-poisoned-close-selftest"
 
+
+def _is_interrupt(exc, sent):
+    """True only for an exact KeyboardInterrupt whose args are exactly (sent,), read through exact built-in
+    types alone, so a recorder never runs code from the caught instance (an args property or an argument's
+    __eq__ that raises SystemExit 0, for example); any other KeyboardInterrupt propagates."""
+    if type(exc) is not KeyboardInterrupt:
+        return False
+    args = exc.args
+    return len(args) == 1 and type(args[0]) is str and args[0] == sent
+
 # An exception whose __class__ property raises SystemExit(0): a guard that inspects the caught instance
 # (isinstance included) runs that property and ends the process with status 0 from its own handler.
 CLOSE_DESCRIPTOR_EXIT = ("class _ClassExits(BaseException):\n    @property\n    def __class__(self):\n"
@@ -319,7 +329,7 @@ def _poisoned_close_outcome(base, tag, body):
         with contextlib.redirect_stderr(io.StringIO()):
             return _close_vectors_guarded(poison)
     except KeyboardInterrupt as exc:
-        if exc.args != (CLOSE_POISON_INTERRUPT,):
+        if not _is_interrupt(exc, CLOSE_POISON_INTERRUPT):
             raise
         return "KeyboardInterrupt"
     except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
@@ -369,7 +379,7 @@ def _close_guard_vectors(base):
         try:
             got = _poisoned_close_outcome(base, "other-" + label.replace(" ", "-"), body)
         except KeyboardInterrupt as exc:
-            if exc.args != (other,):
+            if not _is_interrupt(exc, other):
                 raise
         else:
             failures.append("another KeyboardInterrupt at {} was recorded as {!r}, not propagated".format(

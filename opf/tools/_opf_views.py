@@ -77,12 +77,18 @@ the gate's own status, ONLY at these guarded sites (cannot-evaluate, exit 2, at 
 scan_bytes call made directly by this module's self-test ends it with the ViewsError's traceback, exit 1):
 this module's byte-canon authority, its load and every scan_bytes call through it; _opf_emit._backstop (the
 self_test of _opf_emit and of _opf_init); check_opf_init_contract._in_loaded; the self-test backstops of
-check_opf_init_observe and check_opf_prompt_pack; check_opf_init_p0.red_on_revert (load and call);
-tools/check_instruction_budget._mutant (load and every later call into the mutant, the one made in _blocks'
-worker thread included); and tools/check_footer._close_vectors_guarded (the lazy _close_selftest import, its
-later calls and the reverted body). A KeyboardInterrupt propagates at each. No guard inspects the caught
-instance to build its diagnostic: each names the family from its except clause or from type(exc) alone, so
-an exception whose __class__ property raises SystemExit 0 is cannot-evaluate there too. No gate entry is
+check_opf_init_observe and check_opf_prompt_pack; check_opf_init_p0.red_on_revert (load and call, with
+the main handler that reports what it raises); tools/check_instruction_budget._mutant (load and every later
+call into the mutant, the one made in _blocks' worker thread included); and
+tools/check_footer._close_vectors_guarded (the lazy _close_selftest import, its later calls and the reverted
+body). A KeyboardInterrupt propagates at each; the one ending _blocks' worker thread is re-raised in the
+calling thread once the worker is released. No guard inspects the caught instance to build its diagnostic:
+each names the family from its except clause or from type(exc) alone, and check_opf_init_p0 reads only the
+one exact-str argument of an exact AssertionError or RuntimeError (any other is a fixed message), so an
+exception whose __class__ property or __str__ raises SystemExit 0 is cannot-evaluate there too. The vectors'
+recorders read a KeyboardInterrupt's argument or a SystemExit's code only from the exact built-in class and
+an exact str, int or None; a recorder that names an escape by type(exc).__name__ still reads that class's
+metaclass (not closed here). No gate entry is
 wrapped: the `__main__` entry of every script that .github/workflows/quality.yml, tools/run_all_checks.sh or
 opf/tools/run_all_checks.sh launches, those of the files named above included, remains unwrapped, so outside
 the sites above such an exit ends the gate with the exception's own status (exit 0 for SystemExit 0 or None).
@@ -1653,9 +1659,15 @@ def _render_resolved_store(product_root, res, check, capture=None):
 class _ByteCanonAuthority:
     """The loaded byte-canon authority, exposing its one entry, scan_bytes, under the same guard as its load:
     a call that ends the process or faults (SystemExit 0 or None, GeneratorExit, any other BaseException or
-    Exception) is a ViewsError. plan_views' callers (the render and the drift check) map it to CANNOT-EVALUATE
-    (exit 2), so a drifted store is never read as clean because the authority's call exited; a scan_bytes call
-    this module's self-test makes directly ends that self-test with the ViewsError's traceback (exit 1). A
+    Exception) is a ViewsError, raised out of plan_views. Its production callers map it to a failure, never
+    to clean: _render_resolved here (render and render --check, CANNOT-EVALUATE, exit 2),
+    _opf_check._validate_opened_store (C-VIEW-DRIFT, cannot-evaluate), _opf_adopt_apply._planned_views
+    (AdoptApplyError, cannot-evaluate) and _opf_init_operation.plan_init_views (InitOperationError,
+    CANNOT_EVALUATE). Its other callers are self-test and fixture code: check_opf_drift._self_test_isolated,
+    check_opf_homes.boundary_self_test, check_opf_doctor._self_test_isolated, _opf_check.self_test (twice),
+    _opf_init_operation._expected_views, _opf_worklog_regressions (_manifest_readers and one regression) and
+    opf._retained_close_offpath_self_test. A scan_bytes call this module's self-test makes directly ends that
+    self-test with the ViewsError's traceback (exit 1). A
     KeyboardInterrupt propagates unchanged. The diagnostic is fixed by the except clause that caught the
     exception and never inspects or formats the escaping object (no isinstance, attribute, repr or str of it),
     so a hostile exception (one whose __class__ property raises SystemExit 0, for example) cannot run code
@@ -1682,9 +1694,9 @@ class _ByteCanonAuthority:
 def _byte_canon_authority():
     """The authoritative byte-canon leg (_byte_canon), imported lazily and returned as a _ByteCanonAuthority,
     so every later scan_bytes call is guarded as the load is. A load that ends the process or faults
-    (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception) is a ViewsError. plan_views'
-    callers (the render and the drift check) map it to CANNOT-EVALUATE (exit 2), so neither reads a load that
-    exits as clean; a load this module's self-test makes directly ends that self-test with the ViewsError's
+    (SystemExit 0 or None, GeneratorExit, any other BaseException or Exception) is a ViewsError, raised out
+    of plan_views to the callers _ByteCanonAuthority names (each production caller maps it to a failure,
+    never to clean); a load this module's self-test makes directly ends that self-test with the ViewsError's
     traceback (exit 1). A KeyboardInterrupt propagates unchanged, so an operator's Ctrl-C stops the run. As in
     _ByteCanonAuthority, the diagnostic never inspects or formats the escaping object."""
     try:
@@ -2154,6 +2166,16 @@ def _gfm_autolinks(markdown):
             if email is not None:
                 found.append(email)
     return found
+
+
+def _is_interrupt(exc, sent):
+    """True only for an exact KeyboardInterrupt whose args are exactly (sent,), read through exact built-in
+    types alone, so a recorder never runs code from the caught instance (an args property or an argument's
+    __eq__ that raises SystemExit 0, for example); any other KeyboardInterrupt propagates."""
+    if type(exc) is not KeyboardInterrupt:
+        return False
+    args = exc.args
+    return len(args) == 1 and type(args[0]) is str and args[0] == sent
 
 
 def self_test():
@@ -3791,7 +3813,7 @@ def self_test():
                 with contextlib.redirect_stderr(io.StringIO()):
                     return render_write(_proot)
             except KeyboardInterrupt as exc:
-                if exc.args != (_psent,):
+                if not _is_interrupt(exc, _psent):
                     raise
                 return "KeyboardInterrupt"
             except BaseException as exc:  # noqa: BLE001  recorded, never the self-test's own end
@@ -3829,7 +3851,7 @@ def self_test():
             try:
                 _poisoned_render("ctrl-c-{}".format(_plabel), _pbody)
             except KeyboardInterrupt as exc:
-                if exc.args != (_pother,):
+                if not _is_interrupt(exc, _pother):
                     raise
                 _ppropagated = True
             else:

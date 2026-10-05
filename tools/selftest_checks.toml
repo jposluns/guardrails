@@ -756,6 +756,7 @@ expected-check-ids = [
   "harness/mutant-call-exception-propagates",
   "harness/mutant-call-keyboardinterrupt-propagates",
   "harness/mutant-call-in-worker-thread-exit-2",
+  "harness/mutant-call-in-worker-thread-keyboardinterrupt-propagates",
   "harness/mutant-load-other-interrupt-not-recorded",
   "harness/mutant-call-other-interrupt-not-recorded",
   "revert/character-set-red",
