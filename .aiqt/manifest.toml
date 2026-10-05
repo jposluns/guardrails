@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c19148a7d222fed84109e8a599c810dcfaea2dabb97f5e0d7cde8b0205637e27"
+tree-sha256 = "315c64fe7111cafbad28665919b8fdd18cd632456b41922f46568e1376d8854e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 250108
-sha256 = "2cc547ad23356ff017905268190f8bb0f8e08f0883c1f916b111f7678841cba1"
+bytes = 250976
+sha256 = "80aab848d3697b883631accb677ba5e099df5947bd56b33cbdef851cfcd39bf3"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2431,13 +2431,13 @@ sha256 = "0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
-bytes = 5363
-sha256 = "4096ee998b40883466d42cdaaef9925af6a74407203f4593aa6c0c9227d8b5c0"
+bytes = 8614
+sha256 = "e8f349c5b3e0d73394d1b96b60f5bc3d64344736166c7cffde8ebd3a3f810112"
 
 [[sources]]
 path = "opf/enforcement/precommit/pre-commit"
-bytes = 8187
-sha256 = "25f51f5038710ece5a89a1e3bac19a88a84ccbaeaea4190f3d2888d4c64d2232"
+bytes = 10609
+sha256 = "85aa9c77ee90112f19778defdb839c420a911096f89c9b1f8825318e6f4aafd0"
 
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
@@ -2876,8 +2876,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 104145
-sha256 = "fef2afd32159e70da0d4983cd60ace3d5d66dd60ffb7d96915a4c9c4fbcced9e"
+bytes = 115878
+sha256 = "8cf2b6201c1840b47ba4a4fad4e97d6492e8f069f87ae564939ac64e28005c65"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"

@@ -83,12 +83,19 @@ hand-built), the same construction _opf_check's own self-test proves VALID. Offl
 launched isolated (-I -B). The tempdir is removed in a finally (test-hermeticity). When git is not on PATH the
 self-test SKIPs clean (a committed HEAD is required for the tracked/prior observations).
 
-The pre-commit floor (opf/enforcement/precommit: the staged-snapshot hook and its per-clone core.hooksPath
-installer) rides fixtures of the same kind, each holding a copy of the pack at its pack path. The installer
-sets core.hooksPath to the pack directory relative to the top level, and a rerun is a no-op; it refuses
-(2, configuration unchanged) a core.hooksPath already set to another value, a hook present in the hooks
-directory it would silently stop, and a hook git could not execute, and an inherited GIT_DIR naming another
-repository cannot redirect it. Through real `git commit` runs over an installed fixture: a clean staged
+The pre-commit floor (opf/enforcement/precommit: the staged-snapshot hook and its per-clone installer, which
+writes a pre-commit stub into the clone's untracked hooks directory and never sets core.hooksPath) rides
+fixtures of the same kind, each holding a copy of the pack at its pack path. The installer writes the stub,
+a rerun is a no-op, and other hooks are kept; it refuses (2, nothing changed) any core.hooksPath, the
+tracked pack directory included, an existing pre-commit hook, an unreadable pack hook or hooks directory
+(unprivileged user only) and a hooks path that is not a directory; an inherited GIT_DIR naming another
+repository cannot redirect it, and a missing dirname run from another repository's pack directory installs
+nowhere (2). Inherited GIT_TRACE and GIT_TRACE2 destinations naming another repository's tracked file leave
+it unchanged, for the installer and for the hook. A stub that does not read back (no cat) is removed, with
+the hooks directory the run created. A post-checkout and a post-merge a branch commits in the pack directory
+do not run on checkout or merge. From a linked worktree under a path with spaces the stub lands in the
+common hooks directory and the worktree's commits are checked; the stub refuses a commit whose working tree
+lacks the pack hook. Through real `git commit` runs over an installed fixture: a clean staged
 change commits; a staged tamper of an immutable record body is refused by doctor's resurrection finding over
 the snapshot (the hook output must carry that finding, so a refusal for another reason does not satisfy the
 vector), with HEAD unmoved, while the same commit in a clone without the hook succeeds; the staged snapshot,
@@ -100,12 +107,14 @@ run by hand: exact order and arguments (doctor --require-store, then render --ch
 under TMPDIR), each launched -I -B; the clone left unchanged over the read-only snapshot described above; a doctor
 finding stopping before render, a render error forwarded, an out-of-vocabulary status normalized to 2 and a
 surplus operand a usage 2 with no step run; and every snapshot directory removed on exit. Fail closed, each a
-named 2: the installer refuses a hooks directory it cannot list (run only for an unprivileged user, as root
-reads any directory) or that is not a directory, and a git below the 2.32 floor; it writes the local
+named 2: the installer refuses a hooks directory it cannot read (run only for an unprivileged user, as root
+reads any directory) or that is not a directory, and a git below the 2.32 floor; it writes the stub and no
 configuration when core.hooksPath is supplied only by the environment; the hook stops before any step under a
 git below the floor or when the GIT_ variable names cannot be read from the environment (no sed), and exits 2
-when the snapshot removal fails (no rm). The disclosed CI residual is held as behaviour and text: a staged
-tamper the hook refuses, committed with --no-verify, passes the CI recipe, and the shipped files say so.
+when the snapshot removal fails (no rm), and a missing dirname stops the hook before any step. The disclosed
+CI residual is held as behaviour and text: a staged tamper the hook refuses, committed with --no-verify,
+passes the CI recipe, and the shipped files say so; git cherry-pick records the same tamper with the stub
+installed and no hook run, and the shipped files name the operations git commits without the hook.
 """
 import sys
 
@@ -1165,7 +1174,19 @@ def _self_test_isolated():
             return proc.stdout.decode("utf-8", "replace").strip() if proc.returncode == 0 else None
 
         def _hookspath(root):
-            return _git_out(root, "config", "--local", "--get", "core.hooksPath")
+            return _git_out(root, "config", "--get", "core.hooksPath")
+
+        def _stub(root):
+            # The text of the installed pre-commit stub in the clone's untracked hooks directory, or None.
+            path = root / ".git" / "hooks" / "pre-commit"
+            if not path.is_file() or not os.access(str(path), os.X_OK):
+                return None
+            return path.read_text(encoding="utf-8")
+
+        def _stub_ok(root):
+            # True when the stub is installed and names the pack hook at its pack path.
+            text = _stub(root)
+            return text is not None and ("hook='./" + rel + "/pre-commit'") in text
 
         def _head(root):
             return _git_out(root, "rev-parse", "-q", "--verify", "HEAD")
@@ -1216,11 +1237,16 @@ def _self_test_isolated():
         os.chmod(str(old_bin / "git"), 0o755)
         old_git_env = dict(PATH=str(old_bin) + os.pathsep + _env().get("PATH", os.defpath), OPF_REAL_GIT=git)
 
-        def _path_without(missing):
-            # A PATH holding only the external commands the hook runs, less `missing`.
-            tools = base / ("bin-without-" + missing)
+        hook_tools = ("git", "dirname", "mktemp", "env", "sed", "mkdir", "rm")
+        # ls is not run by the installer; it is here so an installer that still lists the hooks directory
+        # with it is judged on the command a vector removes, not on a missing ls.
+        install_tools = ("git", "dirname", "env", "sed", "cat", "chmod", "rm", "rmdir", "mkdir", "ls")
+
+        def _path_without(missing, needed=hook_tools, tag="hook"):
+            # A PATH holding only the external commands the script runs (`needed`), less `missing`.
+            tools = base / ("bin-" + tag + "-without-" + missing)
             tools.mkdir()
-            for tool in ("git", "dirname", "mktemp", "env", "sed", "mkdir", "rm"):
+            for tool in needed:
                 if tool == missing:
                     continue
                 found = shutil.which(tool)
@@ -1230,65 +1256,151 @@ def _self_test_isolated():
             return dict(PATH=str(tools))
 
         try:
-            # --- The installer. It sets core.hooksPath to the pack directory relative to the top level
-            # (0), and a rerun is a no-op (0). ---
+            # --- The installer. It writes the pre-commit stub into the clone's untracked hooks directory and
+            # sets no core.hooksPath (0); a rerun is a no-op (0). ---
             inst = _fixture("install")
-            expect("install-sets-hookspath", (_install(inst), _hookspath(inst)), (EXIT_OK, rel))
-            expect("install-rerun-no-op", (_install(inst), _hookspath(inst)), (EXIT_OK, rel))
-            # A core.hooksPath already set to another value is refused (2) and left as it was.
+            expect("install-writes-stub", (_install(inst), _stub_ok(inst), _hookspath(inst)), (EXIT_OK, True, None))
+            first = _stub(inst)
+            expect("install-rerun-no-op", (_install(inst), _stub(inst) == first), (EXIT_OK, True))
+            # A core.hooksPath set to any value (git would run no hook from the hooks directory) is refused
+            # (2) and left as it was, including the tracked pack directory a former install set.
             other = _fixture("install-other")
             _git(other, home, "config", "core.hooksPath", "elsewhere")
-            expect("install-refuses-other-hookspath", (_install(other), _hookspath(other)),
-                   (EXIT_ERROR, "elsewhere"))
-            # A hook in the current hooks directory, which core.hooksPath would silently stop, is refused.
+            expect("install-refuses-other-hookspath", (_install(other), _hookspath(other), _stub(other)),
+                   (EXIT_ERROR, "elsewhere", None))
+            former = _fixture("install-former")
+            _git(former, home, "config", "core.hooksPath", rel)
+            expect("install-refuses-pack-hookspath", (_install(former), _hookspath(former), _stub(former)),
+                   (EXIT_ERROR, rel, None))
+            # A pre-commit hook already in the hooks directory, which the stub would replace, is refused and
+            # left as it was; any other hook there is kept and the stub installs beside it.
             planted = _fixture("install-planted")
             (planted / ".git" / "hooks").mkdir(exist_ok=True)
             (planted / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            expect("install-refuses-existing-hook", (_install(planted), _hookspath(planted)),
-                   (EXIT_ERROR, None))
-            # A hook git could not execute (git skips it with a warning and commits) is refused.
-            noexec = _fixture("install-noexec")
-            os.chmod(str(noexec / rel / "pre-commit"), 0o644)
-            expect("install-refuses-non-executable-hook", (_install(noexec), _hookspath(noexec)),
-                   (EXIT_ERROR, None))
+            expect("install-refuses-existing-hook",
+                   (_install(planted), (planted / ".git" / "hooks" / "pre-commit").read_text(encoding="utf-8")),
+                   (EXIT_ERROR, "#!/bin/sh\nexit 0\n"))
+            kept = _fixture("install-kept")
+            (kept / ".git" / "hooks").mkdir(exist_ok=True)
+            (kept / ".git" / "hooks" / "post-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            expect("install-keeps-other-hooks",
+                   (_install(kept), _stub_ok(kept),
+                    (kept / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")),
+                   (EXIT_OK, True, "#!/bin/sh\nexit 0\n"))
             # An inherited GIT_DIR naming another repository cannot redirect the install: it lands in the
             # clone that holds the installer, and the other repository is untouched.
             target = _fixture("install-target")
             decoy = _fixture("install-decoy")
             expect("install-ignores-ambient-git-dir",
-                   (_install(target, {"GIT_DIR": str(decoy / ".git")}), _hookspath(target),
-                    _hookspath(decoy)), (EXIT_OK, rel, None))
+                   (_install(target, dict(GIT_DIR=str(decoy / ".git"))), _stub_ok(target), _stub(decoy)),
+                   (EXIT_OK, True, None))
             # A surplus operand is a usage error.
             expect("install-usage", _run([str(inst / rel / "install.sh"), "x"], base), EXIT_ERROR)
-            # A hooks directory that cannot be listed is never read as empty: the hook it holds would be
-            # silently stopped, so the installer refuses (2) with core.hooksPath unset. Root reads any
-            # directory, so this vector runs only for an unprivileged user.
+            # Root reads any file and directory, so the two unreadable vectors run only for an unprivileged
+            # user. A pack hook the stub could not read is refused with no stub written; a hooks directory
+            # that cannot be read is refused and the hook in it left as it was.
             if hasattr(os, "geteuid") and os.geteuid() != 0:
+                unread_pack = _fixture("install-unreadable-pack-hook")
+                os.chmod(str(unread_pack / rel / "pre-commit"), 0o311)
+                try:
+                    expect("install-refuses-unreadable-pack-hook", (_install(unread_pack), _stub(unread_pack)),
+                           (EXIT_ERROR, None))
+                finally:
+                    os.chmod(str(unread_pack / rel / "pre-commit"), 0o755)
                 unread = _fixture("install-unreadable-hooks")
                 unread_hooks = unread / ".git" / "hooks"
                 unread_hooks.mkdir(exist_ok=True)
                 (unread_hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
                 os.chmod(str(unread_hooks), 0o111)
                 try:
-                    expect("install-refuses-unreadable-hooks-dir", (_install(unread), _hookspath(unread)),
-                           (EXIT_ERROR, None))
+                    rc = _install(unread)
                 finally:
                     os.chmod(str(unread_hooks), 0o755)
-            # A hooks path that is not a directory cannot be listed either, and is refused.
+                expect("install-refuses-unreadable-hooks-dir",
+                       (rc, (unread_hooks / "pre-commit").read_text(encoding="utf-8")),
+                       (EXIT_ERROR, "#!/bin/sh\nexit 1\n"))
+            # A hooks path that is not a directory is refused and left as it was.
             notdir = _fixture("install-hooks-not-dir")
             shutil.rmtree(str(notdir / ".git" / "hooks"), ignore_errors=True)
             (notdir / ".git" / "hooks").write_text("", encoding="utf-8")
-            expect("install-refuses-hooks-not-dir", (_install(notdir), _hookspath(notdir)), (EXIT_ERROR, None))
-            # A core.hooksPath supplied only by the environment (a `git -c` or alias caller) does not read
-            # as installed: the installer writes the local configuration.
+            expect("install-refuses-hooks-not-dir", (_install(notdir), (notdir / ".git" / "hooks").is_file()),
+                   (EXIT_ERROR, True))
+            # A core.hooksPath supplied only by the environment (a `git -c` or alias caller) is dropped, not
+            # read as configuration: the stub installs and no configuration is written.
             envcfg = _fixture("install-env-config")
             env_only = dict(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath", GIT_CONFIG_VALUE_0=rel)
-            expect("install-ignores-env-config", (_install(envcfg, env_only), _hookspath(envcfg)), (EXIT_OK, rel))
-            # A git older than the 2.32 floor is refused (2) with core.hooksPath unset.
+            expect("install-ignores-env-config", (_install(envcfg, env_only), _stub_ok(envcfg), _hookspath(envcfg)),
+                   (EXIT_OK, True, None))
+            # A git older than the 2.32 floor is refused (2) with no stub written.
             oldgit = _fixture("install-old-git")
-            expect("install-refuses-old-git", (_install(oldgit, old_git_env), _hookspath(oldgit)),
-                   (EXIT_ERROR, None))
-
+            expect("install-refuses-old-git", (_install(oldgit, old_git_env), _stub(oldgit)), (EXIT_ERROR, None))
+            # A missing dirname fails closed (2): run from inside another repository's pack directory, the
+            # installer neither installs there nor in its own clone.
+            nodir = _fixture("install-no-dirname")
+            nodir_cwd = _fixture("install-no-dirname-cwd")
+            rc = _run([str(nodir / rel / "install.sh")], nodir_cwd / rel,
+                      _path_without("dirname", install_tools, "install"))
+            expect("install-dirname-missing-refused",
+                   (rc, _stub(nodir), _stub(nodir_cwd), _hookspath(nodir_cwd)), (EXIT_ERROR, None, None, None))
+            # Inherited git trace destinations are dropped before the first git call: a trace file that is
+            # another repository's tracked file is left byte for byte as it was, on a first install and on
+            # the already-installed rerun.
+            traced = _fixture("install-trace-target")
+            (traced / "TRACED.md").write_text("traced\n", encoding="utf-8")
+            _git(traced, home, "add", "TRACED.md")
+            _git(traced, home, "commit", "-q", "--no-verify", "-m", "traced")
+            trace_file = str(traced / "TRACED.md")
+            trace_env = dict(GIT_TRACE=trace_file, GIT_TRACE_SETUP=trace_file, GIT_TRACE_PERFORMANCE=trace_file,
+                             GIT_TRACE2=trace_file, GIT_TRACE2_EVENT=trace_file, GIT_TRACE2_PERF=trace_file)
+            tracing = _fixture("install-traced")
+            expect("install-git-trace-scrubbed",
+                   (_install(tracing, trace_env), _install(tracing, trace_env), _stub_ok(tracing),
+                    (traced / "TRACED.md").read_text(encoding="utf-8")),
+                   (EXIT_OK, EXIT_OK, True, "traced\n"))
+            # A stub that does not read back (no cat) is rolled back: the stub is removed, and so is the
+            # hooks directory when this run created it.
+            readback = _fixture("install-readback")
+            expect("install-readback-failure-rolls-back",
+                   (_install(readback, _path_without("cat", install_tools, "install")),
+                    (readback / ".git" / "hooks" / "pre-commit").exists(), _hookspath(readback)),
+                   (EXIT_ERROR, False, None))
+            readback_dir = _fixture("install-readback-dir")
+            shutil.rmtree(str(readback_dir / ".git" / "hooks"))
+            expect("install-readback-failure-removes-created-dir",
+                   (_install(readback_dir, _path_without("cat", install_tools, "install-dir")),
+                    (readback_dir / ".git" / "hooks").exists()),
+                   (EXIT_ERROR, False))
+            # A branch cannot add a hook: a post-checkout and a post-merge committed in the pack directory on
+            # another branch do not run on checkout or merge, since no tracked directory is a hooks path.
+            branchy = _fixture("branch-hooks")
+            expect("branch-hooks-install", _install(branchy), EXIT_OK)
+            marker = base / "branch-hook-ran"
+            _git(branchy, home, "checkout", "-q", "-b", "evil")
+            for name in ("post-checkout", "post-merge"):
+                (branchy / rel / name).write_text(
+                    "#!/bin/sh\necho " + name + " >> '" + str(marker) + "'\n", encoding="utf-8")
+                os.chmod(str(branchy / rel / name), 0o755)
+                _git(branchy, home, "add", rel + "/" + name)
+            _git(branchy, home, "commit", "-q", "--no-verify", "-m", "branch hooks")
+            _git(branchy, home, "checkout", "-q", "main")
+            _git(branchy, home, "checkout", "-q", "evil")
+            _git(branchy, home, "checkout", "-q", "main")
+            _git(branchy, home, "merge", "-q", "--ff-only", "evil")
+            expect("branch-added-hooks-not-run", marker.exists(), False)
+            # A linked worktree under a path with spaces: the stub lands in the common hooks directory, no
+            # configuration is written, and commits in the worktree are checked.
+            linked = _fixture("linked repo")
+            linked_wt = base / "linked wt"
+            _git(linked, home, "worktree", "add", "-q", "-b", "side", str(linked_wt))
+            expect("linked-install", (_install(linked_wt), _stub_ok(linked), _hookspath(linked_wt),
+                                      (linked / ".git" / "config.worktree").exists()),
+                   (EXIT_OK, True, None, False))
+            (linked_wt / "README.md").write_text("readme\n", encoding="utf-8")
+            _git(linked_wt, home, "add", "README.md")
+            expect("linked-commit-clean-passes", _committed(linked_wt), (EXIT_OK, True))
+            _tamper(linked_wt)
+            _git(linked_wt, home, "add", done_rel)
+            expect("linked-commit-tamper-refused", _refused(linked_wt), (True, True, True))
             # --- End to end through git commit, over the installed fixture. A clean staged change commits.
             (inst / "README.md").write_text("readme\n", encoding="utf-8")
             _git(inst, home, "add", "README.md")
@@ -1332,6 +1444,15 @@ def _self_test_isolated():
             (remote / "README.md").write_text("readme\n", encoding="utf-8")
             _git(remote, home, "add", "README.md")
             expect("commit-remote-sync-target-passes", _committed(remote), (EXIT_OK, True))
+            # The stub fails closed when the working tree being committed has no pack hook (a branch that
+            # predates the pack, say): the commit is refused rather than passing silently.
+            nopack = _fixture("stub-no-pack")
+            expect("stub-no-pack-install", _install(nopack), EXIT_OK)
+            os.remove(str(nopack / rel / "pre-commit"))
+            (nopack / "README.md").write_text("readme\n", encoding="utf-8")
+            _git(nopack, home, "add", "README.md")
+            rc, moved = _committed(nopack)
+            expect("stub-missing-pack-hook-refused", (rc != EXIT_OK, moved), (True, False))
             # The disclosed CI residual, held as behaviour and as text: a history violation the hook refuses,
             # committed past it with --no-verify, passes the CI recipe (doctor's prior there is that same
             # commit), and the shipped files say so rather than calling CI the floor for it.
@@ -1342,19 +1463,47 @@ def _self_test_isolated():
             expect("bypass-hook-refuses", _refused(bypass), (True, True, True))
             expect("bypass-no-verify-commits", _committed(bypass, "--no-verify"), (EXIT_OK, True))
             expect("bypass-ci-recipe-misses-history", _run_ci_recipe(bypass), EXIT_OK)
+            # The disclosed operations residual, held as behaviour: with the stub installed, git cherry-pick
+            # records the same history violation without running any pre-commit hook.
+            picked = _fixture("cherry-pick")
+            expect("cherry-pick-install", _install(picked), EXIT_OK)
+            _git(picked, home, "checkout", "-q", "-b", "side")
+            _tamper(picked)
+            _git(picked, home, "add", done_rel)
+            _git(picked, home, "commit", "-q", "--no-verify", "-m", "tamper")
+            _git(picked, home, "checkout", "-q", "main")
+            before = _head(picked)
+            try:
+                proc = subprocess.run([git, "--no-replace-objects", "-C", str(picked),
+                                       "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
+                                       "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
+                                       "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                                       "cherry-pick", "side"],
+                                      env=_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                      timeout=300)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise OSError("could not run git cherry-pick in {} ({})".format(picked, exc))
+            expect("cherry-pick-skips-hook", (proc.returncode, _head(picked) != before), (EXIT_OK, True))
             hook_text = " ".join((pack / "pre-commit").read_text(encoding="utf-8").replace("#", " ").split())
             inst_text = " ".join((pack / "install.sh").read_text(encoding="utf-8").replace("#", " ").split())
             expect("residuals-disclosed", (
                 "CI does not catch a history violation committed past this hook" in hook_text,
                 "C-HISTORY-RESURRECTION, C-HISTORY-APPEND-ONLY, C-HISTORY-COUNTERS" in hook_text,
                 "The hook runs checked-out code" in hook_text,
-                "A missing hook is silent" in hook_text,
+                "Operations git commits without running any pre-commit hook: cherry-pick, revert, rebase"
+                in hook_text,
+                "no pre-commit hook for cherry-pick, revert, rebase, am or a merge that commits without stopping"
+                in inst_text,
+                "so a missing hook is never silent" in hook_text,
+                "It never sets core.hooksPath" in inst_text,
                 "Requires git 2.32 or later" in hook_text,
                 "CI (../ci/opf-ci.sh) does not close these for the history checks" in inst_text,
+                "runs this hook before each commit" in hook_text,
+                "A missing hook is silent" in hook_text,
                 "CI stays the shared floor" in hook_text,
                 "is the floor that every change meets" in inst_text,
                 "CI is the shared floor" in inst_text),
-                (True, True, True, True, True, True, False, False, False))
+                (True, True, True, True, True, True, True, True, True, False, False, False, False, False))
 
             # --- The hook's contract, run by hand under a recording stub tool. ---
             serial = [0]
@@ -1406,6 +1555,16 @@ def _self_test_isolated():
             expect("hook-old-git-refused", (rc, calls), (EXIT_ERROR, []))
             rc, calls, _f = _stubbed(stubbed, extra=_path_without("sed"))
             expect("hook-env-enumeration-failure-refused", (rc, calls), (EXIT_ERROR, []))
+            # A missing dirname fails closed (2) before any step, rather than resolving to the launching
+            # directory.
+            rc, calls, _f = _stubbed(stubbed, extra=_path_without("dirname"))
+            expect("hook-dirname-missing-refused", (rc, calls), (EXIT_ERROR, []))
+            # Inherited git trace destinations are dropped before the first git call: another repository's
+            # tracked file they name is left as it was, and both steps run.
+            rc, calls, _f = _stubbed(stubbed, extra=trace_env)
+            expect("hook-git-trace-scrubbed",
+                   (rc, [c[0] for c in calls], (traced / "TRACED.md").read_text(encoding="utf-8")),
+                   (EXIT_OK, ["doctor", "render"], "traced\n"))
             # A snapshot removal that fails (no rm) exits 2 after passing steps; the directory it names is
             # then removed here.
             rc, calls, _f = _stubbed(stubbed, extra=_path_without("rm"))
@@ -1469,14 +1628,18 @@ def _self_test_isolated():
               "child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
               "relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "
-              "status contract 1=assertion 2=harness; pre-commit floor: installer sets a relative "
-              "core.hooksPath and refuses another hooksPath, a shadowed hook, a non-executable hook and an "
-              "ambient GIT_DIR redirect; git commit over the staged snapshot refuses a staged tamper by "
+              "status contract 1=assertion 2=harness; pre-commit floor: installer writes a stub in the "
+              "untracked hooks directory, sets no core.hooksPath, keeps other hooks, and refuses any "
+              "hooksPath, an existing pre-commit hook, an unreadable pack hook and an ambient GIT_DIR "
+              "redirect; no dirname, inherited GIT_TRACE*, read-back rollback, branch-added hooks not run, "
+              "linked worktree with spaces, stub refuses a missing pack hook, cherry-pick residual held; "
+              "git commit over the staged snapshot refuses a staged tamper by "
               "doctor's finding, ignores an unstaged one, checks GIT_INDEX_FILE for commit PATH and -a, "
               "passes an unborn branch and a remote sync target; stubbed hook order, -I -B, read-only, "
-              "propagation, normalization, usage and snapshot cleanup; fail closed on an unlistable hooks "
-              "directory, an environment-only hooksPath, git below 2.32, an unreadable environment and a "
-              "failed cleanup; the --no-verify history bypass CI misses is disclosed and held)")
+              "propagation, normalization, usage and snapshot cleanup; fail closed on an unreadable hooks "
+              "directory, an environment-only hooksPath, git below 2.32, an unreadable environment, a "
+              "missing dirname and a failed cleanup; the --no-verify history bypass CI misses is disclosed "
+              "and held)")
     return rc
 
 
