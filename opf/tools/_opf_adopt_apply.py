@@ -130,10 +130,14 @@ exits: one landing between a C call's return and the binding of the descriptor i
 helper's return and the handoff of the descriptors it returned to the owning list (journal_state's
 transaction directory descriptors, bound to txns before held.extend has taken them all); between a
 descriptor's pop and its close inside a close-out (every close-out loop in this module runs through
-_close_held, which still closes the rest of its list, and _close_held_chain the lists after it,
-re-raising the first exception, so only a descriptor popped and then interrupted before its close stays
-open); or an asynchronous interrupt landing at _close_held's or _close_held_chain's own loop boundary or
-in its handler, outside the per-descriptor try (what that loop has not reached stays open); or inside a
+_close_held_into, which still closes the rest of its list and records every exception it meets;
+_close_held re-raises the first, each later one noted on it, and the transaction's final close-out runs
+it over each of its three lists in turn and names every exception beside the run's own outcome, never in
+its place, so only a descriptor popped and then interrupted before its close stays open); or an
+asynchronous interrupt landing at _close_held_into's own loop boundary or in its handler, outside the
+per-descriptor try (what that loop has not reached stays open), or between the final close-out's calls
+or in the outcome report after them (what was not reached stays open, and that interrupt then
+propagates in place of the run's own outcome); or inside a
 _journal helper (acquire_lock's lock descriptor among them, and the rest of a _journal close-out loop,
 in _open_parent, ensure_journal_dirs, _open_dir_contained or _journal_txn_dirs, once one of its closes
 raises anything but OSError).
@@ -221,8 +225,9 @@ class AdoptApplyError(Exception):
 
 class AdoptCommittedLockError(AdoptApplyError):
     """NOT a refusal: the transaction `txn` COMMITTED, so its product-tree changes LANDED and are not rolled
-    back, but its journal lock release left the lock or may not be durable. A subclass of AdoptApplyError,
-    so the CLI's exit mapping is unchanged."""
+    back, but its journal lock release left the lock or may not be durable, or its final descriptor
+    close-out raised (each such exception named in the message and the first chained as the cause, never
+    in place of the commit). A subclass of AdoptApplyError, so the CLI's exit mapping is unchanged."""
 
     def __init__(self, txn, note):
         super().__init__("the adoption transaction {} COMMITTED: its product-tree changes LANDED and are not "
@@ -1109,9 +1114,10 @@ def _journal_listing(root_fd, keep=None):
     interrupted before that append (a synchronous raise) is adopted by the close-out: with a `keep` it
     joins the kept descriptors (keyed ""), which the caller closes, and with no `keep` every descriptor
     is closed here through _close_held, each popped before its one close, the rest still closed when one
-    close raises (the first exception re-raised). An asynchronous interrupt (SIGINT, SIGTERM) that lands
-    between a C call's return and the binding of the descriptor it returned, between a pop and its close
-    in the close-out (that one descriptor), or at _close_held's own loop boundary, can leave a descriptor
+    close raises (the first exception re-raised, each later one noted on it). An asynchronous interrupt
+    (SIGINT, SIGTERM) that lands between a C call's return and the binding of the descriptor it returned,
+    between a pop and its close in the close-out (that one descriptor), or at _close_held_into's own loop
+    boundary, can leave a descriptor
     open until the process exits: a disclosed residual (module docstring), never a second close."""
     found = {}
 
@@ -1358,39 +1364,51 @@ def _lock_identity(jr_fd, keep=None):
             _journal._close_fd_quietly(lfd)
 
 
-def _close_held(fds):
+def _close_held_into(fds, raised):
     """Close every descriptor a caller HOLDS in the list `fds` (each a bare fd or a (rel, fd) pair),
-    emptying it. Each is taken out of the list BEFORE its one close, so a later pass over the same list
-    (an outer finally) never closes a number again: an exception raised between the two (an interrupt or
-    an injected exception) can at worst leave that one descriptor open until the process exits (a
-    disclosed residual, module docstring), never closed twice (a second close can shut another thread's
-    reused number, man 2 close). Such an exception never abandons the rest: every descriptor still in
-    the list is closed, and the FIRST exception is re-raised once the list is empty."""
-    first = None
+    emptying it, and append EVERY exception raised on the way (an interrupt or an injected exception) to
+    the list `raised`, in order, raising none itself. Each descriptor is taken out of the list BEFORE its
+    one close, so a later pass over the same list (an outer finally) never closes a number again: an
+    exception raised between the two can at worst leave that one descriptor open until the process exits
+    (a disclosed residual, module docstring), never closed twice (a second close can shut another
+    thread's reused number, man 2 close). Such an exception never abandons the rest: every descriptor
+    still in the list is closed."""
     while fds:
         try:
             item = fds.pop()
             _journal._close_fd_quietly(item[1] if isinstance(item, tuple) else item)
-        except BaseException as exc:    # noqa: BLE001  keep closing; the first is re-raised below
-            if first is None:
-                first = exc
-    if first is not None:
+        except BaseException as exc:    # noqa: BLE001  keep closing; the caller reports every one
+            raised.append(exc)
+
+
+def _close_raised(raised):
+    """Re-raise the FIRST exception of a close-out (`raised`, in the order they were raised), each later
+    one recorded on it as a note naming it, so none is discarded without trace; nothing when it is
+    empty."""
+    if raised:
+        first = raised[0]
+        for later in raised[1:]:
+            first.add_note("a later close-out exception, recorded here and not re-raised: {!r}".format(later))
         raise first
 
 
-def _close_held_chain(*lists):
-    """Run _close_held over EACH list in order, every later call even when an earlier one raised (an
-    interrupt or an injected exception), so one failing close-out never abandons the lists after it; the
-    FIRST exception is the one re-raised, a later one never replacing it."""
-    first = None
-    for fds in lists:
-        try:
-            _close_held(fds)
-        except BaseException as exc:    # noqa: BLE001  keep closing; the first is re-raised below
-            if first is None:
-                first = exc
-    if first is not None:
-        raise first
+def _close_held(fds):
+    """Close every descriptor held in the list `fds` through _close_held_into, every one even when a close
+    raises, then re-raise the FIRST exception it met, each later one noted on it (_close_raised)."""
+    raised = []
+    _close_held_into(fds, raised)
+    _close_raised(raised)
+
+
+def _close_out_said(raised):
+    """The clause naming EVERY exception the transaction's final close-out raised (`raised`, in order), or
+    None when it raised none. It is reported BESIDE the run's own outcome, never in its place."""
+    if not raised:
+        return None
+    return ("the run's final descriptor close-out RAISED {} after that outcome was fixed (a descriptor it "
+            "had popped may stay open until the process exits): {}".format(
+                "an exception" if len(raised) == 1 else "{} exceptions, in order".format(len(raised)),
+                "; then ".join(repr(exc) for exc in raised)))
 
 
 def _release_outcome(jr_fd, journal_root, mine):
@@ -1565,13 +1583,16 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     twice; an asynchronous interrupt (SIGINT, SIGTERM, delivered through any thread), or any exception
     raised between a descriptor's pop and its close, can still leave a descriptor open until the process
     exits, here or inside a _journal helper, a disclosed residual (module docstring), so no leak-freedom
-    under interrupt is claimed; the final close-out is chained, so one such exception never abandons the
-    descriptors after it. A leftover only the
+    under interrupt is claimed; the final close-out closes each list in turn and records every exception
+    it meets, so one such exception never abandons the descriptors after it, and none replaces the run's
+    own outcome: a commit still raises AdoptCommittedLockError (COMMITTED, its changes LANDED), a refusal
+    still refuses, and an exception still propagates as itself, each naming every close-out exception
+    beside it. A leftover only the
     reconcile-first discipline clears is left to it rather than to hand removal, and one no sanctioned
     path clears is named as such. The lock release is read back by identity (the inode and content this
     run's acquire wrote, _lock_identity), never by process identity; at the end of a committed transaction
-    a release that leaves the lock or may not be durable raises AdoptCommittedLockError, whose changes
-    LANDED. An interrupt (any BaseException but a refusal), one raised inside the release included,
+    a release that leaves the lock or may not be durable, or a final close-out that raised, raises
+    AdoptCommittedLockError, whose changes LANDED. An interrupt (any BaseException but a refusal), one raised inside the release included,
     propagates as itself, with the transaction state and the observed outcome attached as a note.
     Disclosed too: a concurrent run that
     prepared the journal but has not yet taken its lock can find the directory removed by that cleanup,
@@ -1717,6 +1738,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
         failure = exc
         raise
     finally:
+        closeout, teardown = [], None
         try:
             observed = said = None      # inside the teardown-protected try from its first statement on
             ours = True
@@ -1760,21 +1782,33 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                 unbound = _journal_unbound(jr_fd, jr_id, after)
                 ours = ours or bool(said) or unbound is not None
                 observed = said + ([unbound] if unbound else []) + delta
+        except BaseException as exc:    # noqa: BLE001  the observation failed: re-raised below, as before
+            teardown = exc
         finally:
             # every descriptor the run still holds is owned by one of these three LIVE lists:
             # held_components and (on any outcome but a confirmed-gone lock) mine_held, both HELD through
             # the closing comparison, and anchors, whose jr_fd is held through the closing observation so
             # its identity stays this run's, then root_fd. Each list is emptied pop-before-close, so no
-            # number is closed twice. The three are CHAINED: an exception raised between a pop and its
-            # close (an interrupt or an injected exception) leaves that one descriptor open until the
-            # process exits, never the rest of its list or the lists after it, and the first exception is
-            # the one that propagates; an interrupt at a close-out's own loop boundary can still leave
-            # what that loop has not reached open (the disclosed residual, module docstring). mine_held:
-            # any still held, a stay, a retained lock, or no release reached
-            _close_held_chain(held_components, mine_held, anchors)
+            # number is closed twice, and each close-out RECORDS every exception it meets in `closeout`
+            # and raises none: an exception raised between a pop and its close (an interrupt or an
+            # injected exception) leaves that one descriptor open until the process exits, never the rest
+            # of its list or the lists after it, and it never replaces the run's own outcome: below, a
+            # commit still reports COMMITTED, a refusal still refuses and a propagating exception still
+            # propagates, each with every close-out exception named beside it. An interrupt at a
+            # close-out's own loop boundary, or between these calls, can still leave what was not reached
+            # open and propagate in place of that outcome (the disclosed residual, module docstring).
+            # mine_held: any still held, a stay, a retained lock, or no release reached
+            _close_held_into(held_components, closeout)
+            _close_held_into(mine_held, closeout)
+            _close_held_into(anchors, closeout)
+        closed_said = _close_out_said(closeout)
+        if teardown is not None:
+            if closed_said:
+                teardown.add_note(closed_said)
+            raise teardown
         if failure is not None and (not isinstance(failure, Exception) or failure is interrupted):
             # an interrupt still propagates as itself, with the transaction state and the outcome named
-            if failure is interrupted or observed:
+            if failure is interrupted or observed or closed_said:
                 if done:
                     phase_said = "the adoption transaction {} COMMITTED: its product-tree changes LANDED".format(txn)
                 elif entered:
@@ -1784,18 +1818,24 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                     phase_said = "the adoption transaction {} did not open".format(txn)
                 lock_said = _lock_said(lock_state, lock_note)
                 failure.add_note("; ".join([phase_said] + ([] if lock_said in (observed or []) else [lock_said])
-                                           + (observed or [])) + " (fail-closed)")
+                                           + (observed or []) + ([closed_said] if closed_said else []))
+                                 + " (fail-closed)")
         elif failure is None:
-            if lock_note:
-                raise AdoptCommittedLockError(txn, lock_note)
+            # the transaction COMMITTED: that result stands, with a close-out exception named beside it
+            if lock_note or closed_said:
+                raise AdoptCommittedLockError(txn, "; ".join(n for n in (lock_note, closed_said) if n)) \
+                    from (closeout[0] if closeout else None)
         elif isinstance(failure, AdoptApplyError):
-            text = _refusal_text(str(failure), observed, ours)
+            # the refusal stands, with every close-out exception added to it
+            text = _refusal_text(str(failure), observed, ours) + ("; " + closed_said if closed_said else "")
             if text != str(failure):
                 raise AdoptApplyError(text) from failure
         elif said:
-            raise AdoptApplyError(_refusal_text(str(failure), observed, ours)) from failure
-        elif observed:
-            failure.add_note("; ".join(observed) + " (fail-closed)")   # not a refusal: it propagates as itself
+            raise AdoptApplyError(_refusal_text(str(failure), observed, ours)
+                                  + ("; " + closed_said if closed_said else "")) from failure
+        elif observed or closed_said:
+            failure.add_note("; ".join((observed or []) + ([closed_said] if closed_said else []))
+                             + " (fail-closed)")   # not a refusal: it propagates as itself
 
 
 # --- the finish ops: plant-governance, render-views, record-adoption (slice 5) --------------------------
@@ -3618,12 +3658,16 @@ def _self_test_checks():
     handoff_legs = (("descriptor-handoff-interrupt-lock-identity", _lock_identity, False),
                     ("descriptor-handoff-interrupt-failed-lock-state", _lock_identity, True),
                     ("descriptor-handoff-interrupt-journal-listing", _journal_listing, False))
-    final_close_legs = (("final-close-out-injected-fault-closes-the-rest", ("held_components",)),
-                        ("final-close-out-two-faults-first-propagates", ("held_components", "anchors")))
+    final_close_legs = (("final-close-out-injected-fault-closes-the-rest", ("held_components",), "refused"),
+                        ("final-close-out-two-faults-every-fault-named", ("held_components", "anchors"),
+                         "refused"),
+                        ("final-close-out-fault-commit-stands-committed", ("anchors",), "committed"),
+                        ("final-close-out-fault-interrupt-propagates-as-itself", ("held_components",),
+                         "interrupted"))
     if not census:
         for name, _target, _failing in handoff_legs:
             skipped.append((name, no_census))
-        for name, _targets in final_close_legs:
+        for name, _targets, _kind in final_close_legs:
             skipped.append((name, no_census))
         skipped.append(("journal-listing-close-out-injected-fault-closes-the-rest", no_census))
     else:
@@ -3752,23 +3796,31 @@ def _self_test_checks():
                       and control[0] == "refused" and not control[1] and not control[2],
                       observed="boundaries={} control={!r} failed (boundary, line, outcome, closed twice, "
                                "leaked, lock stays)={!r}".format(boundary - 1, control, bad[:6]))
-        # 6a'''b3c: the run's final close-out is chained. An exception injected between a descriptor's
-        # pop and its close (the patched close-out raises instead of closing) at the FIRST close of
-        # held_components, the journal path components the first listing holds, leaves exactly that
-        # popped descriptor open: every OTHER descriptor the run holds (the rest of held_components,
-        # mine_held, and anchors' jr_fd and root_fd) is still closed, and the injected exception
-        # propagates. With a second injection at the first close of anchors, exactly the two popped
-        # descriptors stay open and the FIRST exception is the one that propagates. A refusal with no
-        # injection is the control (red against sequential close-outs or a _close_held that stops at its
-        # first failure: every descriptor after the injection leaks; and against a later exception
-        # replacing the first).
+        # 6a'''b3c: the run's final close-out closes each list in turn and never replaces the run's own
+        # outcome. An exception injected between a descriptor's pop and its close (the patched close-out
+        # raises instead of closing) at the FIRST close of held_components, the journal path components
+        # the first listing holds, leaves exactly that popped descriptor open: every OTHER descriptor the
+        # run holds (the rest of held_components, mine_held, and anchors' jr_fd and root_fd) is still
+        # closed, and the run's own refusal still propagates, naming the injected exception. With a
+        # second injection at the first close of anchors, exactly the two popped descriptors stay open
+        # and the refusal names BOTH, in the order they were raised. A committed run whose close-out is
+        # injected at anchors (the last list, so only root_fd closes after it) still reports COMMITTED (AdoptCommittedLockError, the injected exception
+        # named and chained as its cause, the transaction complete), and an interrupt raised by compose
+        # still propagates as itself, the injected exception named in its note. A refusal and a commit
+        # with no injection are the controls (red against sequential close-outs or a close-out that stops
+        # at its first failure: every descriptor after the injection leaks; against a close-out exception
+        # replacing the run's own outcome, which is what the pre-fix chain did; and against a later
+        # exception discarded without trace).
         class _InjectedCloseFault(RuntimeError):
             pass
-        held_code, txn_code = _close_held.__code__, run_adopt_transaction.__code__
+        held_code, txn_code = _close_held_into.__code__, run_adopt_transaction.__code__
 
-        def _final_close_run(root, targets):
-            """One refused transaction whose final close-out is injected at the first close of each list
-            named in `targets`: (exception, popped descriptors, descriptors closed after the first
+        def compose_interrupted_here(ops):
+            raise KeyboardInterrupt("an injected compose interrupt")
+
+        def _final_close_run(root, targets, compose):
+            """One transaction over `compose` whose final close-out is injected at the first close of each
+            list named in `targets`: (exception, popped descriptors, descriptors closed after the first
             injection, descriptors leaked)."""
             real_quiet = _journal._close_fd_quietly
             armed, popped, after = list(targets), [], []
@@ -3794,34 +3846,61 @@ def _self_test_checks():
             try:
                 with mock.patch.object(_journal, "_close_fd_quietly", faulting_quiet):
                     try:
-                        run_adopt_transaction(root, rid, compose_refused_here)
-                    except (AdoptApplyError, _InjectedCloseFault) as exc:
+                        run_adopt_transaction(root, rid, compose)
+                    except (AdoptApplyError, _InjectedCloseFault, KeyboardInterrupt) as exc:
                         raised = exc
                 leaked = _fds_open() - baseline
             finally:
                 _close_held(list(popped))   # a copy: the caller reads popped
             return raised, popped, after, sorted(leaked)
-        for name, targets in final_close_legs:
-            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
-                saved_umask = os.umask(0o022)
-                control = got = None
-                try:
-                    root, files = fixture(temp)
-                    os.makedirs(root / JOURNAL_REL)
-                    control = _final_close_run(root, ())
-                    got = _final_close_run(root, targets)
-                finally:
-                    os.umask(saved_umask)
-                raised, popped, after, leaked = got if got is not None else (None, [], [], [])
-                check(name, control is not None and isinstance(control[0], AdoptApplyError)
-                      and not control[1] and not control[3]
-                      and isinstance(raised, _InjectedCloseFault) and str(raised) == targets[0]
-                      and len(popped) == len(targets) and leaked == sorted(popped)
-                      and len(after) >= 2 + len(targets) - 1,
-                      observed="control (exception, leaked)={!r} exception={!r} popped={!r} closed after "
-                               "the first injection={!r} leaked={!r}".format(
-                                   None if control is None else (control[0], control[3]), raised, popped,
-                                   after, leaked))
+        for name, targets, kind in final_close_legs:
+            control = got = None
+            committed = None
+            for injected in ((), targets):
+                with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                    saved_umask = os.umask(0o022)
+                    try:
+                        root, files = fixture(temp)
+                        if kind == "committed":
+                            compose = compose_full(files)
+                        else:
+                            os.makedirs(root / JOURNAL_REL)
+                            compose = compose_refused_here
+                            if kind == "interrupted" and injected:
+                                compose = compose_interrupted_here
+                        outcome = _final_close_run(root, injected, compose)
+                        if injected:
+                            got = outcome
+                            committed = txn_state(root, rid) if kind == "committed" else None
+                        else:
+                            control = outcome
+                    finally:
+                        os.umask(saved_umask)
+            raised, popped, after, leaked = got if got is not None else (None, [], [], [])
+            named = [repr(_InjectedCloseFault(target)) for target in targets]
+            text = (" ".join(getattr(raised, "__notes__", [])) if kind == "interrupted"
+                    else str(raised))
+            at = [text.find(each) for each in named]
+            if kind == "committed":
+                stands = (control is not None and control[0] is None
+                          and isinstance(raised, AdoptCommittedLockError) and raised.txn == rid
+                          and "COMMITTED" in text and "LANDED" in text and committed == "complete"
+                          and isinstance(raised.__cause__, _InjectedCloseFault))
+            elif kind == "interrupted":
+                stands = (isinstance(raised, KeyboardInterrupt)
+                          and str(raised) == "an injected compose interrupt" and "did not open" in text)
+            else:
+                stands = (type(raised) is AdoptApplyError and "an injected compose refusal" in text)
+            check(name, (kind == "committed" or (control is not None
+                                                  and isinstance(control[0], AdoptApplyError)))
+                  and control is not None and not control[1] and not control[3] and stands
+                  and "final descriptor close-out RAISED" in text and -1 not in at and at == sorted(at)
+                  and len(popped) == len(targets) and leaked == sorted(popped)
+                  and len(after) >= (1 if kind == "committed" else 2 + len(targets) - 1),
+                  observed="control (exception, leaked)={!r} exception={!r} text={!r} popped={!r} closed "
+                           "after the first injection={!r} leaked={!r} state={!r}".format(
+                               None if control is None else (control[0], control[3]), raised, text[-400:],
+                               popped, after, leaked, committed))
         # 6a'''b3d: _journal_listing's own close-out (no `keep`: the closing listing of a refused run) runs
         # through _close_held too. An exception injected between a journal path component descriptor's
         # pop and its close (the patched close-out raises instead of closing) at the FIRST such close
@@ -3888,6 +3967,47 @@ def _self_test_checks():
                            "component closes after the injection={!r} leaked={!r}".format(
                                None if control is None else (control[0], control[2], control[3]), raised,
                                popped, after, leaked))
+    # 6a'''b3e: within ONE list, _close_held re-raises the FIRST exception its close-out met, each later
+    # one recorded on it as a note, and still closes every other descriptor. Three closes of a five
+    # descriptor list are injected (the patched close-out raises instead of closing): the first is the
+    # one raised, the second and third are each named in a note in that order, and the two others are
+    # closed (red against a close-out keeping the last exception, and against one that drops a later
+    # exception without trace).
+    class _ListCloseFault(RuntimeError):
+        pass
+    list_fds, list_popped, list_raised = [], [], None
+    real_quiet = _journal._close_fd_quietly
+
+    def list_faulting_quiet(fd):
+        if len(list_popped) < 3:
+            list_popped.append(fd)
+            raise _ListCloseFault(len(list_popped))
+        return real_quiet(fd)
+    try:
+        for _ in range(5):
+            list_fds.append(os.open(os.devnull, os.O_RDONLY))
+        held_list = list(list_fds)
+        with mock.patch.object(_journal, "_close_fd_quietly", list_faulting_quiet):
+            try:
+                _close_held(held_list)
+            except _ListCloseFault as exc:
+                list_raised = exc
+        list_notes = getattr(list_raised, "__notes__", [])
+        list_open = []
+        for fd in list_fds:
+            try:
+                _real_fstat(fd)
+            except OSError:
+                continue
+            list_open.append(fd)
+    finally:
+        _close_held(list(list_popped))
+    check("close-held-first-exception-raised-later-noted",
+          list_raised is not None and list_raised.args == (1,) and not held_list
+          and len(list_notes) == 2 and repr(_ListCloseFault(2)) in list_notes[0]
+          and repr(_ListCloseFault(3)) in list_notes[1] and sorted(list_open) == sorted(list_popped),
+          observed="raised={!r} notes={!r} still open={!r} popped={!r}".format(
+              list_raised, list_notes, list_open, list_popped))
     # 6a'''b4: an NFS product root, modelled: a file unlinked while this process still holds it open is
     # renamed to .nfsXXXX (the client's silly-rename) and removed at its last close. The run closes the
     # lock descriptor it holds right after the release's read-back, before the cleanup and the closing
