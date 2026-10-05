@@ -82,6 +82,19 @@ real. The clean store is built through the OPF helpers' own canonical emitters a
 hand-built), the same construction _opf_check's own self-test proves VALID. Offline, stdlib only, fail-closed,
 launched isolated (-I -B). The tempdir is removed in a finally (test-hermeticity). When git is not on PATH the
 self-test SKIPs clean (a committed HEAD is required for the tracked/prior observations).
+
+A SECOND, git-independent self-test leg verifies the enforcement pack's Claude Code deny hook
+(OPF-ENFORCE-PACK slice (b)): the shipped opf/enforcement/claude/pretooluse_deny.py is launched as a
+child (python -I, the doc-confirmed PreToolUse stdin/stdout contract) over throwaway store fixtures,
+and the deny matrix is asserted END TO END: a direct Write/Edit/NotebookEdit into the store tree, the
+adoption archive, a plan-frozen old file, a declared view, a traversal-relative and a symlinked
+spelling each DENY with a structured decision; a pristine opf invocation (an opf record call
+included), a read-only Bash reference, a store-safe git form, a non-write tool, an unrelated write
+and the still-writerless imported-series leaves each ALLOW; a Bash store/frozen/view reference
+outside the pristine allowances DENIES; a malformed payload, a mis-wired hook event and a missing
+target field FAIL CLOSED (a blocking exit 2 or a structured deny); and an unparseable adoption plan
+fails closed for every write under its root. Every vector fails without the hook, so the leg proves
+the shipped file, not a model of it.
 """
 import sys
 
@@ -163,13 +176,17 @@ def _run_doctor(root, capture, extra=()):
 
 
 def _self_test():
-    """Isolate fixture configuration and restore the caller even on failure."""
+    """Isolate fixture configuration and restore the caller even on failure. Runs the doctor suite,
+    then the enforcement-pack Claude deny-hook suite (git-independent, so it runs even where the
+    doctor suite SKIPs); the WORSE status of the two is the verdict (2 over 1 over 0), so neither
+    leg can mask the other."""
     import tempfile
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
                         GIT_CONFIG_NOSYSTEM="1"):
-            return _self_test_isolated()
+            rc = _self_test_isolated()
+    return max(rc, _claude_hook_self_test())
 
 
 def _self_test_isolated():
@@ -1114,6 +1131,223 @@ def _self_test_isolated():
               "git executable absolutized (relative which() -> absolute argv[0]); "
               "status contract 1=assertion 2=harness)")
     return rc
+
+
+def _claude_hook_self_test():
+    """The enforcement-pack Claude Code deny-hook leg (OPF-ENFORCE-PACK slice (b); spec 14.1: a verified
+    deny hook, the frozen plan-enumerated old files, the adoption-archive denial, and store/counters/
+    views/evidence protection). The shipped hook opf/enforcement/claude/pretooluse_deny.py is launched as
+    a CHILD exactly as the registration launches it (this interpreter, -I, the JSON payload on stdin,
+    the doc-confirmed PreToolUse contract: deny = exit 0 plus a hookSpecificOutput permissionDecision
+    "deny"; allow = exit 0 silent; exit 2 = blocking error) over throwaway live-tree fixtures, so every
+    vector FAILS WITHOUT THE HOOK: a missing, inert or allow-everything hook yields no deny decision and
+    reds the suite. git-independent (the hook reads only the live tree; nothing is committed), offline,
+    hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
+    assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
+    cannot be launched)."""
+    import json
+    import tempfile
+
+    import _opf_store  # noqa: E402  the store-tree / machine-store name constants
+
+    hook = Path(__file__).resolve().parent.parent / "enforcement" / "claude" / "pretooluse_deny.py"
+    if not hook.is_file():
+        print("check_opf_doctor claude-hook self-test: cannot evaluate: the shipped deny hook is "
+              "missing at " + str(hook), file=sys.stderr)
+        return EXIT_ERROR
+    failures = []
+
+    def expect(label, got, want):
+        if got != want:
+            failures.append("claude-hook " + label + ": got " + repr(got) + ", expected " + repr(want))
+
+    def run_hook(payload=None, raw=None):
+        """One hook child. Returns (exit status, decision, reason, stderr text): decision is None for a
+        silent allow (no stdout), the permissionDecision string for a structured decision, or the label
+        "malformed-output" for stdout that is not the documented decision shape."""
+        data = raw if raw is not None else json.dumps(payload).encode("utf-8")
+        try:
+            proc = subprocess.run([sys.executable, "-I", str(hook)], input=data,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OSError("could not run the deny hook " + str(hook) + " (" + repr(exc) + ")")
+        out = proc.stdout.decode("utf-8", "replace").strip()
+        err = proc.stderr.decode("utf-8", "replace")
+        if not out:
+            return proc.returncode, None, "", err
+        decision, reason = "malformed-output", ""
+        try:
+            spec = json.loads(out).get("hookSpecificOutput")
+            if isinstance(spec, dict) and spec.get("hookEventName") == "PreToolUse":
+                decision = spec.get("permissionDecision")
+                reason = spec.get("permissionDecisionReason") or ""
+        except ValueError:
+            pass
+        return proc.returncode, decision, reason, err
+
+    def payload(tool, tool_input, cwd):
+        return dict(hook_event_name="PreToolUse", tool_name=tool, tool_input=tool_input, cwd=cwd)
+
+    def deny(label, p, needle):
+        rc, decision, reason, _err = run_hook(p)
+        expect(label, (rc, decision), (0, "deny"))
+        if decision == "deny" and needle not in reason:
+            failures.append("claude-hook " + label + ": the deny reason does not name " + repr(needle)
+                            + " (got " + repr(reason) + ")")
+
+    def allow(label, p):
+        rc, decision, _reason, _err = run_hook(p)
+        expect(label, (rc, decision), (0, None))
+
+    RUN_ID = "adopt-20260101T000000Z-0123456789abcdef"
+    try:
+        with tempfile.TemporaryDirectory(prefix="opf-claude-hook-selftest-") as basestr:
+            root = os.path.join(basestr, "product")
+            machine = os.path.join(root, _opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+            evidence = os.path.join(root, _opf_store.WORKING_DIRNAME, "imported", "adoption", RUN_ID)
+            archive = os.path.join(root, _opf_store.WORKING_DIRNAME, "archive", "adoption", RUN_ID)
+            for d in (machine, evidence, archive, os.path.join(root, "docs")):
+                os.makedirs(d)
+            with open(os.path.join(machine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write('[views.todo]\nkind = "deterministic"\nsources = ["worklog"]\n'
+                         'target = "TODO.md"\n')
+            with open(os.path.join(machine, "counters.toml"), "w", encoding="utf-8") as fh:
+                fh.write("schema = 1\n")
+            plan_text = ('format = "opf.adoption.plan/v2"\n\n[[sources]]\npath = "LEGACY.md"\n'
+                         'digest = "sha256:' + "0" * 64 + '"\ndisposition = "retire"\n'
+                         'occupying = false\n')
+            with open(os.path.join(evidence, "plan.toml"), "w", encoding="utf-8") as fh:
+                fh.write(plan_text)
+            for rel in ("LEGACY.md", "TODO.md"):
+                with open(os.path.join(root, rel), "w", encoding="utf-8") as fh:
+                    fh.write("fixture\n")
+
+            counters = os.path.join(machine, "counters.toml")
+            # R1: a direct Write into the store (counters) denies, naming the sanctioned writer.
+            deny("write-store-denied", payload("Write", dict(file_path=counters, content="x"), root),
+                 "sanctioned writer")
+            # R2: a write under the adoption archive denies with the archive sentence.
+            deny("write-archive-denied",
+                 payload("Write", dict(file_path=os.path.join(archive, "x.md"), content="x"), root),
+                 "archive/adoption")
+            # R1 evidence home: a write under .working/imported/ denies as evidence.
+            deny("write-evidence-denied",
+                 payload("Write", dict(file_path=os.path.join(evidence, "extra.toml"), content="x"),
+                         root), "evidence")
+            # R3: an Edit of the plan-frozen old file denies, naming the freeze.
+            deny("edit-frozen-denied",
+                 payload("Edit", dict(file_path=os.path.join(root, "LEGACY.md"), old_string="a",
+                                      new_string="b"), root), "frozen")
+            # R4: a Write of the declared view denies, naming opf render.
+            deny("write-view-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "TODO.md"), content="x"), root),
+                 "opf render")
+            # R1 via NotebookEdit's own target field.
+            deny("notebook-store-denied",
+                 payload("NotebookEdit", dict(notebook_path=os.path.join(
+                     machine, "backlog_item.index.toml")), root), "sanctioned writer")
+            # R1 via a traversal-relative spelling resolved against the session cwd.
+            deny("relative-traversal-denied",
+                 payload("Write", dict(file_path="sub/../.working/toml/counters.toml", content="x"),
+                         root), "sanctioned writer")
+            # R1 via a symlink: the realpath candidate resolves into the store.
+            os.symlink(counters, os.path.join(root, "alias.md"))
+            deny("symlink-store-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "alias.md"), content="x"), root),
+                 "sanctioned writer")
+            # R6: a missing target field fails closed as a structured deny.
+            deny("missing-target-denied", payload("Write", dict(), root), "failing closed")
+            # An unrelated write under the same root allows silently.
+            allow("write-unrelated-allowed",
+                  payload("Write", dict(file_path=os.path.join(root, "docs", "notes.md"),
+                                        content="x"), root))
+            # A non-write tool allows silently even over a store path (match-all registration).
+            allow("read-tool-allowed", payload("Read", dict(file_path=counters), root))
+            # The imported-series leaves stay writer-less and EXEMPT until the import writer ships
+            # (spec 14.1: enforcement must not force an operation the writer cannot perform).
+            allow("imported-leaf-allowed",
+                  payload("Write", dict(file_path=os.path.join(machine, "worklog.imported.toml"),
+                                        content="x"), root))
+            allow("imported-index-allowed",
+                  payload("Write", dict(file_path=os.path.join(
+                      machine, "backlog_item.imported.index.toml"), content="x"), root))
+            # A1: an opf record call is the sanctioned writer and allows, protected mention included.
+            allow("bash-opf-record-allowed",
+                  payload("Bash", dict(command="python3 -I -B opf/tools/opf.py record backlog_item "
+                                               "--title x"), root))
+            allow("bash-opf-store-arg-allowed",
+                  payload("Bash", dict(command="opf doctor --root .working/.."), root))
+            # A2 / A3: read-only and store-safe git references allow.
+            allow("bash-grep-store-allowed",
+                  payload("Bash", dict(command="grep -n x .working/toml/counters.toml"), root))
+            allow("bash-git-add-view-allowed", payload("Bash", dict(command="git add TODO.md"), root))
+            # R5: visible Bash writes and unproven references deny.
+            deny("bash-sed-store-denied",
+                 payload("Bash", dict(command="sed -i s/a/b/ .working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-redirect-store-denied",
+                 payload("Bash", dict(command="echo x > .working/toml/counters.toml"), root),
+                 "lexical hook")
+            deny("bash-touch-frozen-denied", payload("Bash", dict(command="touch LEGACY.md"), root),
+                 "LEGACY.md")
+            deny("bash-view-append-denied", payload("Bash", dict(command="echo x >> TODO.md"), root),
+                 "TODO.md")
+            deny("bash-git-checkout-frozen-denied",
+                 payload("Bash", dict(command="git checkout -- LEGACY.md"), root), "LEGACY.md")
+            # A Bash command with no protected reference allows.
+            allow("bash-free-allowed", payload("Bash", dict(command="echo hello"), root))
+
+            # Envelope fail-closed: a malformed payload and a mis-wired event each exit 2 (blocking
+            # error) with a located stderr message and NO structured decision.
+            rc, decision, _reason, err = run_hook(raw=b"this is not json")
+            expect("malformed-payload-exit", (rc, decision), (2, None))
+            if "cannot evaluate" not in err:
+                failures.append("claude-hook malformed-payload-stderr: no located cannot-evaluate "
+                                "message (got " + repr(err) + ")")
+            rc, decision, _reason, _err = run_hook(
+                dict(hook_event_name="PostToolUse", tool_name="Write",
+                     tool_input=dict(file_path=counters), cwd=root))
+            expect("mis-wired-event-exit", (rc, decision), (2, None))
+
+            # R6 roster fail-closed: once the adoption plan is unparseable, EVERY write under that
+            # root denies (the frozen roster cannot be computed), while A1 stays open for repair.
+            with open(os.path.join(evidence, "plan.toml"), "w", encoding="utf-8") as fh:
+                fh.write("this is not valid toml [[[\n")
+            deny("unreadable-plan-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root, "docs", "notes.md"),
+                                       content="x"), root), "failing closed")
+            deny("unreadable-plan-bash-fails-closed",
+                 payload("Bash", dict(command="touch docs/notes.md LEGACY.md"), root),
+                 "failing closed")
+            allow("unreadable-plan-opf-still-allowed",
+                  payload("Bash", dict(command="python3 -I opf/tools/opf.py adopt status"), root))
+            with open(os.path.join(evidence, "plan.toml"), "w", encoding="utf-8") as fh:
+                fh.write(plan_text)
+            # R6 manifest fail-closed: an unparseable machine-store manifest denies writes under the
+            # root the same way.
+            with open(os.path.join(machine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write("this is not valid toml [[[\n")
+            deny("unreadable-manifest-fails-closed",
+                 payload("Write", dict(file_path=os.path.join(root, "docs", "notes.md"),
+                                       content="x"), root), "failing closed")
+    except OSError as exc:
+        print("check_opf_doctor claude-hook self-test: harness error: " + str(exc), file=sys.stderr)
+        return EXIT_ERROR
+    if failures:
+        for f in failures:
+            print("check_opf_doctor claude-hook self-test: FAIL: " + f, file=sys.stderr)
+        return EXIT_FINDING
+    print("check_opf_doctor claude-hook self-test: PASS (the shipped PreToolUse deny hook, launched "
+          "python -I on the doc-confirmed stdin/stdout contract, denies a direct store Write, an "
+          "adoption-archive write, an evidence-home write, a plan-frozen old-file Edit, a "
+          "declared-view Write, a NotebookEdit store target, a traversal-relative and a symlinked "
+          "spelling, a missing target field, and the visible Bash store/frozen/view references; "
+          "allows an opf record call and the other pristine opf invocations (under a broken roster "
+          "too), read-only and store-safe git references, a non-write tool, an unrelated write, a "
+          "reference-free Bash command, and the still-writerless imported-series leaves; exits 2 "
+          "blocking on a malformed payload and a mis-wired event; and fails closed on an unparseable "
+          "adoption plan or machine-store manifest for every write under that root)")
+    return EXIT_OK
 
 
 # A per-git-call runtime bound (SECA resource-bounds): a hung or pathological git probe fails SAFE to a

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d20c601995afe8fccc957776ae85a5ff1c783fa65c7dd0c5ca93db69e7e9f9f5"
+tree-sha256 = "a25392d08162d60189fc0b66090e658dfd8f361795e8508bae40359c0e0afea8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2241,8 +2241,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41348
-sha256 = "9a2460e8b8dcc3a17fabe9fbabbb785a92839037aded1e2f3cd92177d9b82461"
+bytes = 41402
+sha256 = "ca6a1d91c45d365fb9e15c7b68524f3d26323829f3804f78fb0f8ff53635d22b"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2428,6 +2428,11 @@ sha256 = "f19ac5603f3b391295c64abde679843b29e20746f3d85d5b2e092ad210a52fe5"
 path = "opf/enforcement/ci/opf-ci.sh"
 bytes = 2178
 sha256 = "0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104"
+
+[[sources]]
+path = "opf/enforcement/claude/pretooluse_deny.py"
+bytes = 26002
+sha256 = "4c3b0c08cf0d80cb050a32742df688423653253afd61880581e35cd804d77aad"
 
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
@@ -2871,8 +2876,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 79931
-sha256 = "6856f6c6529f1533b0344fe3c6ff13aef3f9b5c723990c3822a9750e04edb06e"
+bytes = 95377
+sha256 = "5e5fcc7f834ab9facc95496e5085ba90e80c96294357edf277b667ba59de05d3"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"
