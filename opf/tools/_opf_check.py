@@ -615,9 +615,19 @@ def _list_contained(root_fd, reldir):
                                      "entry; fail-closed)".format(reldir, entry))
             return subdirs, files
         finally:
-            _close_fd_quietly(dfd)
+            # quiet for an OSError; any other exception goes through the one first-interrupt selection,
+            # so an interrupt in flight here keeps propagating as itself (_journal._yield_close_exceptions)
+            listing_inflight = _journal._in_flight_in(sys._getframe())
+            try:
+                _close_fd_quietly(dfd)
+            except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+                _journal._yield_close_exceptions(listing_inflight, [exc])
     finally:
-        _close_fd_quietly(pfd)
+        parent_inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_quietly(pfd)
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(parent_inflight, [exc])
 
 
 def _list_dir(root_fd, reldir, rep):
@@ -2670,9 +2680,19 @@ def validate_store(resolution, supported_profiles=None, *, observations=None, an
     finally:
         # The store verdict is already computed by the barrier above; a descriptor close that raises
         # (EINTR / EIO / an invalid fd) during teardown must not crash the validator (S4-F3, outside B6).
-        _close_fd_quietly(root_fd)
+        # Any other exception a close raises never abandons the other close, and goes through the one
+        # first-interrupt selection, so an interrupt in flight here keeps propagating as itself.
+        inflight, raised = _journal._in_flight_in(sys._getframe()), []
+        try:
+            _close_fd_quietly(root_fd)
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            raised.append(exc)
         if product_root_fd is not None:
-            _close_fd_quietly(product_root_fd)
+            try:
+                _close_fd_quietly(product_root_fd)
+            except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+                raised.append(exc)
+        _journal._yield_close_exceptions(inflight, raised)
     return rep.result(evaluated_profiles, unevaluated_profiles)
 
 

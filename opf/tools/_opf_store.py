@@ -617,12 +617,18 @@ def _open_dir_nofollow(abspath):
             _journal._close_fd_propagating(held.pop(-2))
         return held.pop()
     except BaseException as exc:
+        closing = []    # what a close raised that is not an OSError: resolved against `exc` below
         while held:
             try:
                 _journal._close_fd_propagating(held.pop())
             except OSError as cexc:
                 exc.add_note("additionally the no-follow walk descriptor could not be closed ({})".format(
                     cexc))
+            except BaseException as cexc:   # noqa: BLE001  keep closing; resolved below, never dropped
+                closing.append(cexc)
+        # the one first-interrupt selection: an interrupt in flight keeps propagating as itself, each
+        # close exception noted on it, and none replaces it (_journal._yield_close_exceptions)
+        _journal._yield_close_exceptions(exc, closing)
         raise
 
 
@@ -736,7 +742,13 @@ def _immediate_subdirs(store_root_fd, working_rel):
     try:
         return _list_real_subdirs(wfd, working_rel)
     finally:
-        _close_fd_exc_safe(wfd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(wfd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
 
 def _open_working_dir_fd(store_root_fd, working_rel):
@@ -769,12 +781,15 @@ def _open_working_dir_fd(store_root_fd, working_rel):
         # is _close_fd_exc_safe's single os.close (P1: a raising close has released its number, close(2),
         # and it is never touched again), and its close error propagates fail-closed unless an exception is
         # already in flight here, which then keeps propagating in its place.
+        inflight = _journal._in_flight_in(sys._getframe())
         try:
             _close_fd_exc_safe(pfd)
         except OSError:
             if wfd is not None:
                 _journal._close_fd_quietly(wfd)
             raise
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
     return wfd
 
 
@@ -861,7 +876,13 @@ def discover_machine_store_fd(store_root_fd, accept_tokens=None):
         status, machine_dir, detail = _discovery_result(matches, legacy)
         return status, machine_dir, detail, (raws.get(machine_dir) if status == "one" else None)
     finally:
-        _close_fd_exc_safe(wfd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(wfd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
 
 def _classify_working_names(names, load, accept):
@@ -1045,7 +1066,13 @@ def resolve_store(product_root, accept_tokens=None):
         except StoreError as exc:
             return Resolution(CANNOT_EVALUATE, str(exc))
     finally:
-        _close_fd_exc_safe(product_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(product_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
     if local is not None or committed is not None:
         # A pointer named the store: the override wins wholesale, else it completes with the committed
@@ -1103,7 +1130,13 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
             return Resolution(CANNOT_EVALUATE, str(exc), store_root=store_root, target=target,
                               pointer_source=source)
     finally:
-        _close_fd_exc_safe(store_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(store_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
 
     if status == "one":
         return Resolution(RESOLVED, detail, store_root=store_root, machine_dir=machine_dir,
@@ -1955,7 +1988,13 @@ def load_manifest(resolution, supported_profiles=None):
     except StoreError as exc:
         return ManifestValidation(CANNOT_EVALUATE, [str(exc)])
     finally:
-        _close_fd_exc_safe(store_root_fd)
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(store_root_fd)   # in THIS frame: the #377 frame test sees what is in flight
+        except OSError:
+            raise                       # #377: raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
     if data is None:
         # Discovery already read this file, so its disappearance now is a race/fail-closed error.
         return ManifestValidation(CANNOT_EVALUATE, ["{} vanished after discovery".format(manifest_rel)])

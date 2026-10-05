@@ -203,6 +203,15 @@ def _exc_said(exc):
     return repr(exc) if not notes else "{!r} [recorded on it: {}]".format(exc, " | ".join(notes))
 
 
+def _first_interrupt(excs):
+    """The FIRST interrupt (a BaseException that is not an Exception) among `excs`, taken in the order
+    they were raised, else None: the one first-interrupt selection every close of the adoption
+    transaction resolves through (_yield_close_exceptions, the transaction's close-outs and its outcome
+    report), so the first interrupt always propagates as itself, never demoted to a note on a later
+    exception."""
+    return next((exc for exc in excs if not isinstance(exc, Exception)), None)
+
+
 def _yield_close_exceptions(inflight, raised):
     """The rule for every exception a close raised that is not an OSError (`raised`, in order). An
     INTERRUPT in flight (a BaseException that is not an Exception, `inflight`) keeps propagating as itself,
@@ -219,7 +228,9 @@ def _yield_close_exceptions(inflight, raised):
             inflight.add_note("a close raised {} while this interrupt was in flight: recorded here, never "
                               "raised in its place".format(_exc_said(exc)))
         return
-    stop = next((exc for exc in raised if not isinstance(exc, Exception)), raised[0])
+    stop = _first_interrupt(raised)
+    if stop is None:
+        stop = raised[0]
     if inflight is not None:
         stop.add_note("raised by a close while {} was in flight (this exception's context), which is "
                       "recorded here".format(_exc_said(inflight)))
@@ -512,8 +523,8 @@ def ensure_journal_dirs(root_fd, journal_rel):
             opened.append(nfd)
             cur = nfd
     finally:
-        for fd in opened:
-            _close_fd_quietly(fd)                         # guarded: a raising close never aborts the rest
+        # a raising close never aborts the rest, nor replaces an interrupt in flight here
+        _close_fds_yielding(opened, sys._getframe(0))
 
 
 def _open_dir_contained(root_fd, relpath):
@@ -540,8 +551,8 @@ def _open_dir_contained(root_fd, relpath):
             cur = nfd
         result = os.dup(cur)
     finally:
-        for fd in opened:
-            _close_fd_quietly(fd)                         # guarded: a raising close never aborts the rest
+        # a raising close never aborts the rest, nor replaces an interrupt in flight here
+        _close_fds_yielding(opened, sys._getframe(0))
     return result
 
 
@@ -1162,8 +1173,8 @@ def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
                                    "skipped; fail-closed)".format(name))
     except BaseException:
         if hold:
-            for _path, tfd in out:
-                _close_fd_quietly(tfd)
+            # a raising close never aborts the rest, nor replaces an interrupt in flight here
+            _close_fds_yielding([tfd for _path, tfd in out], sys._getframe(0))
         raise
     return out
 
