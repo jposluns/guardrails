@@ -3512,6 +3512,57 @@ def self_test():
         check("deep-toml-recursion-parse-locus-viewserror",
               deep_reader == "cannot parse finding.index.toml (injected parser overflow)")
 
+        # --- the parse locus's OWN decode mapping: an undecodable index (UnicodeDecodeError) and a malformed
+        # one (TOMLDecodeError) are each refused AT _read_raw_and_parsed as "cannot parse <file> (<error>)".
+        # Both are ValueError subclasses, so the render backstop's ValueError catch also exits 2 and prints the
+        # bare error, which would hide a dropped mapping: pin the parse locus's diagnostic (it names the file)
+        # and call the reader directly, requiring its ViewsError. The expected error text is taken from the
+        # same decode step, so the pin holds across interpreter message wording. Dropping the matching decode
+        # class (with the ValueError that subsumes it) from _read_raw_and_parsed alone turns each pair red ---
+        def parse_locus_refusal(body):
+            proot = new_root()
+            write_toml(proot, "manifest.toml", manifest)
+            empty_indexes(proot)
+            (proot / WORKING_DIRNAME / "toml" / "finding.index.toml").write_bytes(body)
+            perr = io.StringIO()
+            with contextlib.redirect_stderr(perr):
+                prc = render_write(proot)
+            pfd = os.open(str(proot / WORKING_DIRNAME / "toml"), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _read_raw_and_parsed(pfd, "finding.index.toml")
+                preader = "ACCEPTED"
+            except ViewsError as exc:
+                preader = str(exc)
+            except ValueError as exc:
+                preader = "escaped " + type(exc).__name__
+            finally:
+                os.close(pfd)
+            return prc, perr.getvalue(), preader
+
+        undecodable = b"schema = 1\n# \xff\n"
+        try:
+            undecodable.decode("utf-8")
+            undecodable_why = None
+        except UnicodeDecodeError as exc:
+            undecodable_why = "finding.index.toml ({})".format(exc)
+        ud_rc, ud_err, ud_reader = parse_locus_refusal(undecodable)
+        check("undecodable-toml-cannot-eval", undecodable_why is not None and ud_rc == EXIT_CANNOT_EVALUATE
+              and "cannot evaluate: cannot parse " in ud_err and undecodable_why in ud_err)
+        check("undecodable-toml-parse-locus-viewserror",
+              undecodable_why is not None and ud_reader == "cannot parse " + undecodable_why)
+
+        malformed = b"schema = 1\n[unterminated\n"
+        try:
+            tomllib.loads(malformed.decode("utf-8"))
+            malformed_why = None
+        except tomllib.TOMLDecodeError as exc:
+            malformed_why = "finding.index.toml ({})".format(exc)
+        mf_rc, mf_err, mf_reader = parse_locus_refusal(malformed)
+        check("malformed-toml-cannot-eval", malformed_why is not None and mf_rc == EXIT_CANNOT_EVALUATE
+              and "cannot evaluate: cannot parse " in mf_err and malformed_why in mf_err)
+        check("malformed-toml-parse-locus-viewserror",
+              malformed_why is not None and mf_reader == "cannot parse " + malformed_why)
+
         # --- a non-UTF-8 machine-dir name is rejected fail-closed UNIVERSALLY, even for a header-exempt
         # VERSION-only store. Before render()'s explicit early machine_rel UTF-8 check this store rendered
         # exit 0: the VERSION deliverable is header-exempt, so _source_set_digest never encoded the bad
