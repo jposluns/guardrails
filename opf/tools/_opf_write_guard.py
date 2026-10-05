@@ -15,6 +15,7 @@ calling verb maps to exit 2. Nothing here stages or commits anything.
 """
 import datetime
 import os
+import re
 import socket
 import stat
 import sys
@@ -32,6 +33,13 @@ import _opf_views    # noqa: E402
 
 class WriteGuardError(Exception):
     """A fail-closed pre-mutation or lease refusal carrying the operator-facing reason (mapped to exit 2)."""
+
+
+class LeaseHeldError(WriteGuardError):
+    """acquire_lease's held-lease refusal, exactly the EEXIST present-is-held case (spec 5.7). A distinct
+    type so the RECOVERY claim (acquire_lease_for_recovery) can apply the spec 5.7 live-holder rule to
+    exactly this case; every other acquisition failure stays a plain WriteGuardError and is never examined
+    for release."""
 
 
 # --- write scope: the operation's store files plus every declared render destination ------------------
@@ -1058,7 +1066,7 @@ def acquire_lease(root_fd, machine_rel, verb):
         try:
             fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
         except FileExistsError:
-            raise WriteGuardError(lease_held_message(pfd, name, lease_rel, verb))
+            raise LeaseHeldError(lease_held_message(pfd, name, lease_rel, verb))
         try:
             try:
                 journal._write_all(fd, payload)
@@ -1177,3 +1185,108 @@ def release_lease(root_fd, machine_rel, expected_payload, verb):
         os.fsync(pfd)
     finally:
         _opf_store._close_fd_exc_safe(pfd)
+
+
+# --- the recovery claim: the spec 5.7 live-holder rule over a leftover lease ----------------------------
+
+# The holder identity acquire_lease stamps (lease_holder): "opf-<verb>:<host>:<pid>". The verb is a
+# lowercase token, so its first ':' ends it, and the pid is the LAST colon-separated field, so a host name
+# that itself carries ':' still parses; the pid is bounded and canonical (digits, no leading zero), so an
+# overlong or padded value never reaches os.kill.
+_LEASE_HOLDER_RE = re.compile(r"opf-[a-z][a-z0-9-]*:(.+):([1-9][0-9]{0,9})\Z")
+
+
+def _examined_leftover_holder(raw):
+    """(holder, pid) when `raw` is a COMPLETE well-formed single-writer lease (the closed spec 5.7 shape
+    C-LEASE validates: exactly the closed keys, the supported schema, a non-empty holder and operation, an
+    RFC 3339 UTC acquired_at) whose holder is the exact identity acquire_lease stamps and whose host part
+    names THIS host; None otherwise, and None always reads possibly-live (never seized). The COMPLETE
+    closed schema is validated FIRST (the _opf_oplock._validate_recovery_lease model), so a malformed or
+    foreign-shape lease, a cross-host holder, and an unparseable payload each refuse upstream rather than
+    ever comparing equal to a dead holder."""
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or set(data) != set(_opf_check.LEASE_TOP_KEYS):
+        return None
+    if type(data.get("schema")) is not int or data["schema"] != _opf_schema.SUPPORTED_SCHEMA:
+        return None
+    for key in ("holder", "operation", "acquired_at"):
+        if type(data.get(key)) is not str or not data[key]:
+            return None
+    if not _opf_check._valid_timestamp(data["acquired_at"]):
+        return None
+    match = _LEASE_HOLDER_RE.fullmatch(data["holder"])
+    if match is None or match.group(1) != socket.gethostname():
+        return None
+    return data["holder"], int(match.group(2))
+
+
+def _lease_holder_confirmed_dead(pid):
+    """True ONLY on positive evidence that the holder process is dead on THIS host: os.kill(pid, 0) raises
+    ProcessLookupError (the journal's possibly-live-never-seized model, _journal.owner_confirmed_dead, on
+    its no-start-time leg: the spec 5.7 lease payload records no process start time). A live pid, EPERM (a
+    live foreign-uid holder), an out-of-range pid, or any other outcome reads as possibly-live, never
+    seized. DISCLOSED RESIDUALS, each shared with the journal-lock owner model where no start time is
+    readable: a dead holder whose pid was REUSED by a live process reads possibly-live and still refuses
+    (the operator remedy stands, fail-closed); a live holder in another PID namespace that shares this
+    hostname and store can read dead, exactly as a recorded pid absent from the prober's namespace reads
+    there."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except Exception:  # noqa: BLE001  EPERM, OverflowError, or anything else: possibly-live, never seized
+        return False
+    return False
+
+
+def acquire_lease_for_recovery(root_fd, machine_rel, verb):
+    """Claim the single-writer lease for a RECONCILIATION write (spec 5.7, 8.8 item 1, 16.1): the ordinary
+    ATOMIC claim first and, exactly when it refuses because a lease is PRESENT, the spec 5.7 live-holder
+    rule: a leftover lease whose complete well-formed payload names a holder on THIS host CONFIRMED DEAD
+    (positive evidence only) is released THROUGH this reconciliation, bound to the exact bytes examined (a
+    lease replaced in the interval is never removed), and the atomic claim is retried ONCE; every other
+    present lease (a live or possibly-live holder, a cross-host holder, a malformed or foreign-shape
+    payload, an unreadable or non-regular entry) refuses exactly as acquire_lease does and is never
+    seized. Returns (payload, released): the exact lease bytes this run wrote, and None, or the one-line
+    report of the leftover lease this reconciliation released, which the caller MUST surface. Spec 5.7: a
+    lease is present only while held, MUST NOT be seized from a live holder, and a leftover lease from a
+    dead run MUST be released only through the resume-or-close reconciliation; spec 16.1: after resolving
+    the store, a command reconciles a leftover lease and its own writer's interrupted journal, as sections
+    5.7 and 8.8 require, before its admission check. Ordinary (non-recovery) acquisition keeps the
+    unexamined present-is-held refusal, so a lone leftover with no interrupted journal behind it stays the
+    operator's reconciliation step, matching the homes-2 refusal of a lone lease with no paired active
+    record."""
+    journal = _opf_store._journal
+    try:
+        return acquire_lease(root_fd, machine_rel, verb), None
+    except LeaseHeldError as held:
+        lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
+        pfd, name = journal._open_parent(root_fd, lease_rel)
+        try:
+            raw = read_lease_payload(pfd, name)
+            examined = _examined_leftover_holder(raw) if raw is not None else None
+            if examined is None or not _lease_holder_confirmed_dead(examined[1]):
+                raise held
+            holder = examined[0]
+            try:
+                unlink_owned_lease(pfd, name, lease_rel, raw, verb)
+            except WriteGuardError as exc:
+                raise WriteGuardError(
+                    "the leftover {} lease {} of confirmed-dead holder {!r} could not be released by this "
+                    "reconciliation ({}); nothing was removed beyond what that release itself reports, and "
+                    "no lease this reconciliation cannot prove is that examined leftover is ever removed "
+                    "(never-seize, spec 5.7)".format(verb, lease_rel, holder, exc)) from exc
+            os.fsync(pfd)
+        finally:
+            _opf_store._close_fd_exc_safe(pfd)
+        released = ("the leftover single-writer lease {} of confirmed-dead holder {!r} was released through "
+                    "this reconciliation (spec 5.7: a lease is never seized from a live holder, and a "
+                    "leftover lease from a dead run is released only through this reconciliation)".format(
+                        lease_rel, holder))
+        try:
+            return acquire_lease(root_fd, machine_rel, verb), released
+        except LeaseHeldError as exc:
+            raise WriteGuardError("{} Before that claim, {}.".format(exc, released)) from exc

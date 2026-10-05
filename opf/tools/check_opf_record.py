@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T73)
+  check_opf_record.py --self-test                    the fixture suite (T1-T74)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -23,10 +23,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
       known-complete proof)
   T5  a kill at each journal step of create and of an assistant transition (three operands: counters,
       index, worklog) and of a maintainer done-with-receipt (four operands: counters, backlog index, done
-      index, worklog) leaves the killed run's lease, which refuses the next run before any recovery write;
-      once the operator releases it, reconciliation leaves the operands exactly the prestate or exactly the
-      poststate, the poststate iff the transaction is COMPLETE, and no killed run reports an id (flip: write
-      counters outside the journaled transaction)
+      index, worklog) leaves the killed run's lease; the next run releases that confirmed-dead holder's
+      leftover lease through its own reconciliation (spec 5.7, the T74 live-holder rule) and reconciles,
+      leaving the operands exactly the prestate or exactly the poststate, the poststate iff the transaction
+      is COMPLETE, and no killed run reports an id (flip: write counters outside the journaled transaction)
   T6  an assistant `transition BI done` lands done/proposed with zero receipts; an assistant
       done-with-receipt refuses before the store is resolved, and a maintainer `transition BI done`
       refuses, both with every byte untouched; a maintainer done-with-receipt (ratifying done/proposed, or
@@ -343,6 +343,12 @@ Each case runs on its own copy of that template; the root is removed in a finall
       refused by the planner's own record validation, so the labelled step assertion turns red: the
       planner writes no delivery bundle, so the send is refused; the rejection of sent/proposed keeps
       the bundle; the rejection of acknowledged/proposed keeps the receipt keys)
+  T74 recovery applies the spec 5.7 live-holder rule: a leftover lease whose holder is confirmed dead on
+      this host is released through the reconciliation itself, in the same run, and the outcome names it;
+      a cross-host holder reads possibly-live and refuses before any recovery write with the lease intact
+      (never seized); and a refusal recovery raises after that release still carries the released-lease
+      report beside the scoped no-journal-no-operand sentence (flips: the plain atomic recovery claim,
+      under which any present lease refuses; the unscoped nothing-written sentence)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -804,15 +810,15 @@ def _t5_matrix(fx, label, base, args, operands):
         proc = child(env, root, args, kill=hook, flip=flip)
         assert proc.returncode == 137, ("T5 the child is killed at", point, proc.returncode, proc.stderr[-800:])
         assert '"event": "recorded"' not in proc.stdout, ("T5 a killed run reports no id", point)
-        # The killed run leaves its lease, and a held lease refuses the next run before any recovery write.
+        # The killed run leaves its lease; its holder is confirmed dead, so the next run releases that
+        # leftover through its own reconciliation (the T74 live-holder rule, spec 5.7) and reconciles.
         assert (Path(root) / LEASE).exists(), ("T5 the killed run leaves its lease", point)
-        held = snapshot(root)
-        refused(record_cli(env, root, CREATE), "runs only under the single-writer lease")
-        assert snapshot(root) == held, ("T5 a held lease refuses before any recovery write", point)
-        # The operator's explicit reconciliation step (no opf run is live): release the leftover lease.
-        (Path(root) / LEASE).unlink()
-        refused(record_cli(env, root, CREATE), "was reconciled")
-        assert not (Path(root) / LEASE).exists(), ("T5 recovery releases the lease it took", point)
+        result = record_cli(env, root, CREATE)
+        refused(result, "was reconciled")
+        assert "leftover single-writer lease" in result[2], ("T5 the released leftover lease is named",
+                                                             point, result[2][-1200:])
+        assert not (Path(root) / LEASE).exists(), ("T5 the leftover lease and recovery's own are released",
+                                                   point)
         states = journal_states(root)
         assert not any(s == "open" for s in states.values()), ("T5 every transaction terminal", point, states)
         assert not (Path(root) / record.JOURNAL_REL / "lock").exists(), ("T5 the journal lock released", point)
@@ -5295,6 +5301,80 @@ def flip_t71():
 
 # --- the runner ------------------------------------------------------------------------------------------------
 
+# --- T74: recovery applies the live-holder rule to a leftover lease (spec 5.7) ---------------------------
+
+FOREIGN_HOST_LEASE = (b'acquired_at = "2026-09-27T00:00:00Z"\nholder = "opf-record:no-such-host.invalid:1"\n'
+                      b'operation = "record"\nschema = 1\n')
+T74_UNSCOPED = "Nothing was written;"
+T74_SCOPED = "Nothing was written to the journal or to any operand; both are left exactly as found"
+
+
+def _t74_interrupted(fx, name):
+    """A store whose create was killed mid-apply, the dead run's lease LEFT in place (unlike
+    _interrupted, which models the operator's own release)."""
+    root = fx.case(name)
+    proc = child(fx.env, root, CREATE, kill="after-apply-0")
+    assert proc.returncode == 137, ("T74 the child is killed", proc.returncode, proc.stderr[-800:])
+    assert (Path(root) / LEASE).exists(), "T74 the killed run leaves its lease"
+    return root
+
+
+def t74_live_holder_rule(fx):
+    """Recovery applies the spec 5.7 live-holder rule: a leftover lease whose holder is confirmed dead on
+    this host is released through the reconciliation itself, in the same run, with the outcome naming the
+    released lease and its holder; a cross-host holder reads possibly-live and refuses before any recovery
+    write with the lease intact (never seized); and a refusal recovery raises after that release (an
+    intervening edit) still carries the released-lease report beside the scoped no-journal-no-operand
+    sentence, never the unscoped nothing-written reading."""
+    env = fx.env
+    root = _t74_interrupted(fx, "t74-dead-holder")
+    result = record_cli(env, root, CREATE)
+    refused(result, "was reconciled")
+    err = result[2]
+    assert "leftover single-writer lease" in err and "confirmed-dead holder" in err, (
+        "T74 the outcome names the released lease and its holder", err[-1200:])
+    assert not (Path(root) / LEASE).exists(), "T74 the leftover lease and recovery's own are released"
+    assert not any(s == "open" for s in journal_states(root).values()), "T74 the journal is reconciled"
+    root = _t74_interrupted(fx, "t74-cross-host")
+    (Path(root) / LEASE).write_bytes(FOREIGN_HOST_LEASE)
+    before = snapshot(root)
+    refused(record_cli(env, root, CREATE), "runs only under the single-writer lease")
+    assert snapshot(root) == before, "T74 a cross-host holder refuses with every byte untouched"
+    root = _t74_interrupted(fx, "t74-released-then-refused")
+    original = read(root, BI_INDEX)
+    edited = original + b"# an edit after the interruption\n"
+    (Path(root) / BI_INDEX).write_bytes(edited)
+    result = record_cli(env, root, CREATE)
+    refused(result, "an intervening edit")
+    err = result[2]
+    assert "Before that refusal," in err and "leftover single-writer lease" in err, (
+        "T74 the refusal carries the released-lease report", err[-1600:])
+    assert T74_SCOPED in err and T74_UNSCOPED not in err, (
+        "T74 the no-write sentence is scoped to the journal and operands", err[-1600:])
+    assert not (Path(root) / LEASE).exists(), "T74 recovery's own lease is released on the refusal path"
+    assert read(root, BI_INDEX) == edited, "T74 the intervening edit is never overwritten"
+
+
+def flip_t74_claim():
+    """The pre-fix recovery claim: the plain atomic acquisition, under which ANY present lease refuses
+    (the unqualified reading of spec 8.8 item 1) and a dead run's leftover waits for the operator."""
+    return patch.object(guard, "acquire_lease_for_recovery",
+                        lambda root_fd, machine_rel, verb: (guard.acquire_lease(root_fd, machine_rel, verb),
+                                                            None))
+
+
+def flip_t74_unscoped():
+    """Refuse the intervening edit with the reviewed head's unscoped nothing-written sentence."""
+    fixed = record.RecordError
+
+    class Unscoped(fixed):
+        def __init__(self, *args):
+            super().__init__(*(a.replace(T74_SCOPED, "Nothing was written; the journal and every operand "
+                                         "are left exactly as found") if isinstance(a, str) else a
+                               for a in args))
+    return patch.object(record, "RecordError", Unscoped)
+
+
 TESTS = (
     ("T1-precondition-byte-reproduction", t1_precondition, flip_t1),
     ("T2-round-trip-emit-checked", t2_round_trip, flip_t2),
@@ -5405,6 +5485,7 @@ TESTS = (
     ("T72-register-assistant-ruling", t72_assistant_ruling, flip_t72_trust),
     ("T73-contribution-delivery-bundle", t73_contribution_delivery, (flip_t73_delivery, flip_t73_rejection,
                                                                     flip_t73_receipt)),
+    ("T74-recovery-live-holder-rule", t74_live_holder_rule, (flip_t74_claim, flip_t74_unscoped)),
 )
 
 
