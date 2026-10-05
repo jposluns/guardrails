@@ -1382,13 +1382,14 @@ def _main_isolated(report_path=None):
                 finally:
                     setattr(target, attr, saved)
             return _faulted
-        recheck_faults = (("realpath", _realpath_fault, "could not be re-resolved after the registry walk",
-                           "trunc/walk-recheck-realpath-fault-denies"),
-                          ("open", _open_fault, "recheck cannot re-resolve (PermissionError)",
-                           "trunc/walk-recheck-open-fault-denies"),
-                          ("fstat", _fstat_fault, "recheck cannot examine (PermissionError)",
-                           "trunc/walk-recheck-fstat-fault-denies"))
-        for attr, fake, why, row in recheck_faults:
+        # The fault rows sit literally in the for header so the execution-set gate resolves each id.
+        for attr, fake, why, row in (("realpath", _realpath_fault,
+                                      "could not be re-resolved after the registry walk",
+                                      "trunc/walk-recheck-realpath-fault-denies"),
+                                     ("open", _open_fault, "recheck cannot re-resolve (PermissionError)",
+                                      "trunc/walk-recheck-open-fault-denies"),
+                                     ("fstat", _fstat_fault, "recheck cannot examine (PermissionError)",
+                                      "trunc/walk-recheck-fstat-fault-denies")):
             try:
                 aiqt_hooks._orch_walk_recheck = _recheck_under(attr, fake)
                 cv, cw = _cwd_case(fcb_cwd)
@@ -1413,13 +1414,12 @@ def _main_isolated(report_path=None):
             if st.st_ino == _fcb_parent_ino:
                 raise PermissionError(13, "Permission denied")
             return st
-        walk_faults = (("open", _walk_open_fault,
-                        "could not be opened for the registry walk (PermissionError)",
-                        "trunc/walk-cwd-open-fault-denies"),
-                       ("fstat", _walk_fstat_fault,
-                        "ancestor directory this walk cannot examine (PermissionError)",
-                        "trunc/walk-ancestor-fstat-fault-denies"))
-        for attr, fake, why, row in walk_faults:
+        for attr, fake, why, row in (("open", _walk_open_fault,
+                                      "could not be opened for the registry walk (PermissionError)",
+                                      "trunc/walk-cwd-open-fault-denies"),
+                                     ("fstat", _walk_fstat_fault,
+                                      "ancestor directory this walk cannot examine (PermissionError)",
+                                      "trunc/walk-ancestor-fstat-fault-denies")):
             try:
                 setattr(aiqt_hooks.os, attr, fake)
                 cv, cw = _cwd_case(fcb_cwd)
