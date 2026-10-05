@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "b4f30a342f2528d9ac5da90ba46010d3ebc3fc8899f4d769799575aa1350061b"
+tree-sha256 = "a6cda284a34420ca53d84fde0ded628d76c3e09e9a02a6f0b23cd25546d64ddd"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2431,13 +2431,13 @@ sha256 = "0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104"
 
 [[sources]]
 path = "opf/prompt-pack/flow/SKILL.md"
-bytes = 90995
-sha256 = "0591c553fdef868fac324b9a863ca18c2e8ddc882bda5b1432c01419a787dd05"
+bytes = 78799
+sha256 = "310c81af15b66610cc526c76480768f5621268b2de532621d112090fd9dbe34e"
 
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
 bytes = 1239
-sha256 = "a072c3e2da3b12ef2293f7a4d346946203194dcc525007384b210c000bbc3ba6"
+sha256 = "a678f82fd330f25e4fa4bf927b840f80a4d753f8135c04fdb7ca3be536e8f0c0"
 
 [[sources]]
 path = "opf/site/_redirects"
