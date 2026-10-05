@@ -92,7 +92,14 @@ tracked pack directory included, an existing pre-commit hook, an unreadable pack
 repository cannot redirect it, and a missing dirname run from another repository's pack directory installs
 nowhere (2). Inherited GIT_TRACE and GIT_TRACE2 destinations naming another repository's tracked file leave
 it unchanged, for the installer and for the hook. A stub that does not read back (no cat) is removed, with
-the hooks directory the run created. A post-checkout and a post-merge a branch commits in the pack directory
+the hooks directory the run created. The destination is confined to the clone's common git directory: a
+hooks directory that is a symbolic link (to another repository's hooks directory, or to a tracked directory
+of the working tree) and a git directory inside the working tree under no .git component are refused with
+nothing written there. A core.hooksPath only another linked worktree reads (its config.worktree, or an
+includeIf onbranch: for its branch) is refused. The existing stub is compared byte for byte: one more
+trailing newline, or a symbolic link to the exact text, is refused. A write that fails partway (a zero
+file-size limit) leaves no stub and no temporary file, and a trace2 target the kept global configuration
+names writes nothing. A post-checkout and a post-merge a branch commits in the pack directory
 do not run on checkout or merge. From a linked worktree under a path with spaces the stub lands in the
 common hooks directory and the worktree's commits are checked; the stub refuses a commit whose working tree
 lacks the pack hook. Through real `git commit` runs over an installed fixture: a clean staged
@@ -1240,7 +1247,7 @@ def _self_test_isolated():
         hook_tools = ("git", "dirname", "mktemp", "env", "sed", "mkdir", "rm")
         # ls is not run by the installer; it is here so an installer that still lists the hooks directory
         # with it is judged on the command a vector removes, not on a missing ls.
-        install_tools = ("git", "dirname", "env", "sed", "cat", "chmod", "rm", "rmdir", "mkdir", "ls")
+        install_tools = ("git", "dirname", "env", "sed", "cmp", "chmod", "ln", "rm", "rmdir", "mkdir", "ls")
 
         def _path_without(missing, needed=hook_tools, tag="hook"):
             # A PATH holding only the external commands the script runs (`needed`), less `missing`.
@@ -1357,19 +1364,94 @@ def _self_test_isolated():
                    (_install(tracing, trace_env), _install(tracing, trace_env), _stub_ok(tracing),
                     (traced / "TRACED.md").read_text(encoding="utf-8")),
                    (EXIT_OK, EXIT_OK, True, "traced\n"))
-            # A stub that does not read back (no cat) is rolled back: the stub is removed, and so is the
+            # A stub that does not read back (no cmp) is rolled back: the stub is removed, and so is the
             # hooks directory when this run created it.
             readback = _fixture("install-readback")
             expect("install-readback-failure-rolls-back",
-                   (_install(readback, _path_without("cat", install_tools, "install")),
+                   (_install(readback, _path_without("cmp", install_tools, "install")),
                     (readback / ".git" / "hooks" / "pre-commit").exists(), _hookspath(readback)),
                    (EXIT_ERROR, False, None))
             readback_dir = _fixture("install-readback-dir")
             shutil.rmtree(str(readback_dir / ".git" / "hooks"))
             expect("install-readback-failure-removes-created-dir",
-                   (_install(readback_dir, _path_without("cat", install_tools, "install-dir")),
+                   (_install(readback_dir, _path_without("cmp", install_tools, "install-dir")),
                     (readback_dir / ".git" / "hooks").exists()),
                    (EXIT_ERROR, False))
+            # The destination is confined to the clone's own common git directory. A hooks directory that is
+            # a symbolic link is refused (2) with nothing written through it: one naming another repository's
+            # hooks directory, and one naming a tracked directory of the clone's own working tree.
+            via = _fixture("install-hooks-link-other")
+            via_target = _fixture("install-hooks-link-target")
+            (via_target / ".git" / "hooks").mkdir(exist_ok=True)
+            shutil.rmtree(str(via / ".git" / "hooks"), ignore_errors=True)
+            os.symlink(str(via_target / ".git" / "hooks"), str(via / ".git" / "hooks"))
+            expect("install-refuses-hooks-link-to-other-repo",
+                   (_install(via), (via_target / ".git" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            tracked = _fixture("install-hooks-link-tracked")
+            (tracked / "hookdir").mkdir()
+            (tracked / "hookdir" / "README.md").write_text("tracked\n", encoding="utf-8")
+            _git(tracked, home, "add", "hookdir")
+            _git(tracked, home, "commit", "-q", "--no-verify", "-m", "tracked hook directory")
+            shutil.rmtree(str(tracked / ".git" / "hooks"), ignore_errors=True)
+            os.symlink(str(tracked / "hookdir"), str(tracked / ".git" / "hooks"))
+            expect("install-refuses-hooks-link-to-tracked-dir",
+                   (_install(tracked), (tracked / "hookdir" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A git directory inside the working tree under no .git component (git tracks its files) is
+            # refused with no stub written there.
+            inner = _fixture("install-inner-gitdir")
+            os.rename(str(inner / ".git"), str(inner / "gd"))
+            (inner / ".git").write_text("gitdir: " + str(inner / "gd") + "\n", encoding="utf-8")
+            expect("install-refuses-gitdir-in-worktree",
+                   (_install(inner), (inner / "gd" / "hooks" / "pre-commit").exists()), (EXIT_ERROR, False))
+            # A core.hooksPath that only another linked worktree reads is refused (2), with no stub written:
+            # its own config.worktree under extensions.worktreeConfig, and an includeIf onbranch: for the
+            # branch it has checked out.
+            scoped = _fixture("install-wt-scoped")
+            _git(scoped, home, "config", "extensions.worktreeConfig", "true")
+            _git(scoped, home, "worktree", "add", "-q", "-b", "side", str(base / "install wt scoped"))
+            _git(base / "install wt scoped", home, "config", "--worktree", "core.hooksPath", str(base / "elsewhere"))
+            expect("install-refuses-other-worktree-hookspath", (_install(scoped), _stub(scoped)), (EXIT_ERROR, None))
+            onbranch = _fixture("install-wt-onbranch")
+            (base / "onbranch.inc").write_text("[core]\n\thooksPath = elsewhere\n", encoding="utf-8")
+            _git(onbranch, home, "config", "includeIf.onbranch:side.path", str(base / "onbranch.inc"))
+            _git(onbranch, home, "worktree", "add", "-q", "-b", "side", str(base / "install wt onbranch"))
+            expect("install-refuses-onbranch-worktree-hookspath", (_install(onbranch), _stub(onbranch)),
+                   (EXIT_ERROR, None))
+            # The existing hook is compared byte for byte: a stub with one more trailing newline, and a
+            # symbolic link to a file holding the exact stub text, are not taken as installed (2, kept).
+            trailing = _fixture("install-trailing-newline")
+            expect("install-trailing-first", _install(trailing), EXIT_OK)
+            trailing_hook = trailing / ".git" / "hooks" / "pre-commit"
+            trailing_hook.write_text(_stub(trailing) + "\n", encoding="utf-8")
+            trailing_text = trailing_hook.read_text(encoding="utf-8")
+            expect("install-refuses-stub-with-extra-newline",
+                   (_install(trailing), trailing_hook.read_text(encoding="utf-8")), (EXIT_ERROR, trailing_text))
+            linkstub = _fixture("install-stub-link")
+            expect("install-stub-link-first", _install(linkstub), EXIT_OK)
+            linkstub_hook = linkstub / ".git" / "hooks" / "pre-commit"
+            (linkstub / "STUB.sh").write_text(_stub(linkstub), encoding="utf-8")
+            os.chmod(str(linkstub / "STUB.sh"), 0o755)
+            os.remove(str(linkstub_hook))
+            os.symlink(str(linkstub / "STUB.sh"), str(linkstub_hook))
+            expect("install-refuses-stub-symlink", (_install(linkstub), os.path.islink(str(linkstub_hook))),
+                   (EXIT_ERROR, True))
+            # A stub write that fails partway leaves nothing behind (a zero file-size limit makes the write
+            # fail): no pre-commit, no temporary file.
+            partial = _fixture("install-partial-write")
+            rc = _run(["-c", 'ulimit -f 0 && sh "$0"', str(partial / rel / "install.sh")], base)
+            expect("install-partial-write-leaves-nothing",
+                   (rc, sorted(n for n in os.listdir(str(partial / ".git" / "hooks"))
+                               if n == "pre-commit" or n.startswith(".opf-"))), (EXIT_ERROR, []))
+            # A trace2 target the kept global configuration names is overridden: another repository's
+            # tracked file is left byte for byte as it was.
+            trace_cfg = base / "trace2.gitconfig"
+            trace_cfg.write_text("[trace2]\n\teventTarget = " + trace_file + "\n\tnormalTarget = " + trace_file
+                                 + "\n\tperfTarget = " + trace_file + "\n", encoding="utf-8")
+            cfg_traced = _fixture("install-config-traced")
+            expect("install-config-trace2-overridden",
+                   (_install(cfg_traced, dict(GIT_CONFIG_GLOBAL=str(trace_cfg))), _stub_ok(cfg_traced),
+                    (traced / "TRACED.md").read_text(encoding="utf-8")),
+                   (EXIT_OK, True, "traced\n"))
             # A branch cannot add a hook: a post-checkout and a post-merge committed in the pack directory on
             # another branch do not run on checkout or merge, since no tracked directory is a hooks path.
             branchy = _fixture("branch-hooks")
@@ -1502,8 +1584,9 @@ def _self_test_isolated():
                 "A missing hook is silent" in hook_text,
                 "CI stays the shared floor" in hook_text,
                 "is the floor that every change meets" in inst_text,
-                "CI is the shared floor" in inst_text),
-                (True, True, True, True, True, True, True, True, True, False, False, False, False, False))
+                "CI is the shared floor" in inst_text,
+                "or an includeIf onbranch: for a branch checked out later) is not seen" in inst_text),
+                (True, True, True, True, True, True, True, True, True, False, False, False, False, False, True))
 
             # --- The hook's contract, run by hand under a recording stub tool. ---
             serial = [0]
@@ -1630,8 +1713,11 @@ def _self_test_isolated():
               "git executable absolutized (relative which() -> absolute argv[0]); "
               "status contract 1=assertion 2=harness; pre-commit floor: installer writes a stub in the "
               "untracked hooks directory, sets no core.hooksPath, keeps other hooks, and refuses any "
-              "hooksPath, an existing pre-commit hook, an unreadable pack hook and an ambient GIT_DIR "
-              "redirect; no dirname, inherited GIT_TRACE*, read-back rollback, branch-added hooks not run, "
+              "hooksPath (another linked worktree's included), an existing pre-commit hook (compared byte "
+              "for byte, never through a symlink), a symlinked or in-worktree hooks destination, an "
+              "unreadable pack hook and an ambient GIT_DIR redirect; no dirname, inherited GIT_TRACE*, a "
+              "configured trace2 target, read-back rollback, a partial write left nowhere, "
+              "branch-added hooks not run, "
               "linked worktree with spaces, stub refuses a missing pack hook, cherry-pick residual held; "
               "git commit over the staged snapshot refuses a staged tamper by "
               "doctor's finding, ignores an unstaged one, checks GIT_INDEX_FILE for commit PATH and -a, "
