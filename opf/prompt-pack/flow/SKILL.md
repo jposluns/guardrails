@@ -11,7 +11,7 @@ description: The OPF operating loop for an AI development assistant. Read the ad
   verification is never shortened for speed.
 ---
 
-<!-- OPF-FLOW: release=0.3.0 template-sha256=9a4a9ae18894985ad0fce41d364f3bf70eb545f6b64b6678fc8f96f5b94e03b0 -->
+<!-- OPF-FLOW: release=0.3.0 template-sha256=6e80c8ee47aa113f5b553b105a7c5fc16dd15682224c2605aaf2c2ae5618f00a -->
 
 # /flow: the OPF operating loop
 
@@ -80,38 +80,39 @@ Three rules govern everything else:
    memory. Natural re-anchor points: after a merge, after a plan is verified, and when the queue
    composition changed. Every anchor also runs the parent close check (step 2).
 2. **SELECT.** Finish the unit already in hand before starting a new one; two units
-   simultaneously in hand in one stream is an integrity defect to resolve, not a license to pick
-   either, and a parked unit (step 8) is not in hand. Otherwise choose the next unit from the
-   actionable set: clean backlog items authored by non-importer actors, in state `open` or
-   `active`, not scoped by a clean, unqualified `active` block authored by a non-importer actor
-   (the actionability join, section 8.5). Imported history is never selected as work (section
-   8.6). Order within the actionable set is the adopter's recorded priority order where one
-   exists, else ascending ID order. A unit is exactly one backlog item: work tracked on its own
-   (its own branch, scope, tier, rounds, park, or completion) is its own item, so every flow
-   fact stays keyed by the one item it concerns (section 5). Where an item holds independent
-   units, each unit is created as a new backlog item (`opf record create`, section 8.8) linking
-   `derives_from` to that parent item, the relation OPF-SPEC.md section 8.6 defines:
-   "`derives_from`: the source record was derived from the linked record; directional, usable by
-   any type." A parent item, one with any clean derived backlog item authored by a non-importer
-   actor, whatever that unit's state, is worked only through its units: selection never starts a
-   new stream on the parent itself, though a stream it already carries runs to its end as one
-   unit (its merge leaves the parent's state unchanged, section 7), and further work the parent
-   needs is created as a further derived unit. A unit counts as closed only at unqualified
-   `done` or `dropped`, read among clean records authored by non-importer actors; a unit at
-   `done/proposed` or `dropped/proposed` is awaiting ratification (step 6) and keeps its parent
-   open. The parent close check runs at every anchor (step 1) and after every merge rotation
-   (section 7), with no new stream, no flow `start`, and no planned row (section 5), and reads
-   the parent's own state first: a parent at unqualified `done` or `dropped` is left as it is; a
-   parent at `done/proposed` or `dropped/proposed` is reported awaiting ratification and nothing
-   is written; and a parent in `open` or `active` whose every derived unit is closed, whose own
-   stream, where it carries one (above), is neither live nor parked (its latest flow entry,
-   section 5, is a `finish`), and whose own completion evidence holds has its completion
-   proposed in that same sweep: an `open` parent is first moved to `active` through step 3,
-   since OPF-SPEC.md section 8.5 reaches `done` only from `active`, and the parent then lands
-   `done/proposed` through step 6, awaiting the maintainer's ratification, not yet closed. A
-   parent has no file scope of its own at this check, so its completion evidence is its derived
-   units' ratified receipts (the clean `done` record linking `receipt_of` to each unit at
-   unqualified `done`, OPF-SPEC.md section 8.5) plus the acceptance criteria its own record
+   simultaneously in hand in one advancement or hardening lane, a maintainer's `unpark` the run
+   has not yet taken up (section 3, step 5) apart, is an integrity defect to resolve, not a
+   license to pick either, and a parked unit (step 8) is not in hand. Otherwise choose the next
+   unit from the actionable set: clean backlog items authored by non-importer actors, in state
+   `open` or `active`, not scoped by a clean, unqualified `active` block authored by a
+   non-importer actor (the actionability join, section 8.5). Imported history is never selected
+   as work (section 8.6). Order within the actionable set is the adopter's recorded priority
+   order where one exists, else ascending ID order. A unit is exactly one backlog item: work
+   tracked on its own (its own branch, scope, tier, rounds, park, or completion) is its own
+   item, so every flow fact stays keyed by the one item it concerns (section 5). Where an item
+   holds independent units, each unit is created as a new backlog item (`opf record create`,
+   section 8.8) linking `derives_from` to that parent item, the relation OPF-SPEC.md section 8.6
+   defines: "`derives_from`: the source record was derived from the linked record; directional,
+   usable by any type." A parent item, one with any clean derived backlog item authored by a
+   non-importer actor, whatever that unit's state, is worked only through its units: selection
+   never starts a new stream on the parent itself, though a stream it already carries runs to
+   its end as one unit (its merge leaves the parent's state unchanged, section 7), and further
+   work the parent needs is created as a further derived unit. A unit counts as closed only at
+   unqualified `done` or `dropped`, read among clean records authored by non-importer actors; a
+   unit at `done/proposed` or `dropped/proposed` is awaiting ratification (step 6) and keeps its
+   parent open. The parent close check runs at every anchor (step 1) and after every merge
+   rotation (section 7), with no new stream, no flow `start`, and no planned row (section 5),
+   and reads the parent's own state first: a parent at unqualified `done` or `dropped` is left
+   as it is; a parent at `done/proposed` or `dropped/proposed` is reported awaiting ratification
+   and nothing is written; and a parent in `open` or `active` whose every derived unit is
+   closed, whose own stream, where it carries one (above), is neither live nor parked (its
+   latest flow entry, section 5, is a `finish`), and whose own completion evidence holds has its
+   completion proposed in that same sweep: an `open` parent is first moved to `active` through
+   step 3, since OPF-SPEC.md section 8.5 reaches `done` only from `active`, and the parent then
+   lands `done/proposed` through step 6, awaiting the maintainer's ratification, not yet closed.
+   A parent has no file scope of its own at this check, so its completion evidence is its
+   derived units' ratified receipts (the clean `done` record linking `receipt_of` to each unit
+   at unqualified `done`, OPF-SPEC.md section 8.5) plus the acceptance criteria its own record
    states in its `summary` field, each criterion met by a receipt or by the merged work of a
    stream the parent itself carried (the `finish` entry the run's merge rotation wrote for that
    stream once its merge landed, section 7, never one the maintainer wrote); a parent with no
@@ -144,12 +145,18 @@ Three rules govern everything else:
    the maintainer writes (section 7), never on that decision's state: a decision landed,
    superseded, or withdrawn moves nothing by itself, and a `/proposed` landing, the only landing
    open to an assistant or automation actor under section 8.4, is in any case a proposal. A step
-   parked behind an overlapping stream, whose trigger is that stream's backlog item, moves once
-   that stream merges, finishes, or parks (section 3, step 5). A stream the maintainer ended
-   with a `finish` entry stays ended: selection never starts a new stream on an item whose
-   latest flow entry (section 5) is a `finish` the maintainer wrote, and only a further record
-   the maintainer writes moves that item. A unit being structurally ready (a verified plan
-   exists) is never by itself authorization to implement it.
+   parked behind an overlapping stream, whose trigger is that stream's backlog item, is
+   re-checked once that stream merges, finishes, or parks, and moves only where that re-check
+   (section 3, step 5) finds it disjoint, its lane free, and the rate open. A stream the
+   maintainer ended with a `finish` entry stays ended: selection never starts a new stream on an
+   item whose latest flow entry (section 5) is a `finish` the maintainer wrote, and only a
+   further record the maintainer writes moves that item. The ordering rule: once the store shows
+   such a `finish`, mid-run included (section 4), the run writes no flow entry for that item and
+   takes no further step on its stream until a later flow entry of the maintainer's own moves
+   it, and no entry the run wrote counts as later than that `finish` (the section 5 selector),
+   so no run entry, even one the store's sync numbers above it, hides it, and the next run start
+   honors it. A unit being structurally ready (a verified plan exists) is never by itself
+   authorization to implement it.
 3. **ACTIVATE.** Move the item `open` to `active` through `opf record transition` (section 8.8).
    `active` is an ungated working state, so an assistant lands it unqualified (section 8.4). The
    transition appends its own worklog entry and re-renders the declared views in the same act
@@ -208,9 +215,15 @@ Three rules govern everything else:
    run reaches the section 8 closing handoff only when this enumeration shows no item with any
    step that can proceed, every remaining `open` or `active` item accounted for by a ratified
    block that scopes it, by steps parked on recorded triggers, by a stream the maintainer ended
-   (step 2), or, for a parent item, by its derived units, each closed, awaiting ratification, or
-   itself accounted for in one of these ways, a parked or blocked unit included, and it carries
-   the enumeration there; a turn never ends on a bare stop.
+   (step 2), or, for a parent item, by its derived units, each in a state OPF-SPEC.md section
+   8.5 gives a backlog item and accounted for in it: closed at unqualified `done` or `dropped`;
+   awaiting ratification at `done/proposed` or `dropped/proposed`; or, at `open` or `active`, a
+   unit whose proposal the maintainer rejected included (a rejection restores its pre-proposal
+   state, section 8.4), itself accounted for in one of these ways, a parked or blocked unit
+   included; the specification gives a backlog item no `deferred` or `rejected` state, so a unit
+   read in one, or in any other state, is an integrity defect (section 0, step 3), accounted for
+   by being enumerated as one; and it carries the enumeration there; a turn never ends on a bare
+   stop.
 
 Turn discipline, at every step: never end a turn "waiting" while any stream or the plan buffer
 can advance; and never end a turn on a stated intention ("reviews are running, I will collect
@@ -430,9 +443,13 @@ viability advice above. Then, by mode:
    taken up on a maintainer's `unpark` nor unparked by the run: it stays parked, through a new
    `park` entry under the section 7 park rule on a `pending_decision` naming that lane's holder
    or the rate, the `park` entry's `next` line saying which, so the table (section 5) reports
-   why, and the maintainer unparks it again later. So no unpark or take-up ever runs more
-   advancement streams than the recorded rate or two streams in one advancement or hardening
-   lane.
+   why, and the maintainer unparks it again later. At a run start the run takes up the
+   maintainer's `unpark` entries it reads, in ascending `WL` order, before any new stream
+   starts, so those units claim their lanes and count against the rate ahead of new streams; one
+   whose lane a carried-over live stream still holds, or that the rate cannot fit, is refused as
+   above, and a later `unpark` succeeds only once that lane is free or the maintainer raises the
+   rate or names a free lane within it. So no unpark or take-up ever runs more advancement
+   streams than the recorded rate or two streams in one advancement or hardening lane.
 
 ## 4. Store writes under parallel streams
 
@@ -441,18 +458,19 @@ not the maintainer: a record the maintainer writes (section 7) is the maintainer
 never one the session makes, and the run reads it from the store as it stands at the next run
 start (a bare `/flow` is one), the store being brought current by its own sync procedure
 (OPF-SPEC.md section 5.7, by store pattern); one the store already shows mid-run renders in the
-table as it stands but is taken up only then, and the session never commits a store change it
-did not make: finding one, it stops and reports it, since the writer refuses over it (below).
-All the run's record writes happen serially, in the integration checkout, under the
-single-writer lease (section 5.7). Stream worktrees carry product changes only and never write
-the store: parallel branches of an in-repo store would otherwise allocate the same record IDs
-from the same committed counters, and store files are never hand-merged (section 5.7). Workers
-never write the store or the repository at all (section 9). The writer leaves each change
-uncommitted in the working tree (section 8.8, operation sequence step 8), and its cleanliness
-gate refuses the next operation over tracked dirt at the planned destinations (step 5: "the
-planned destinations MUST be clean"), so the cadence is one writer operation, one commit: the
-session commits each store change in the integration checkout before the next writer call,
-including the write pairs a single trigger produces (an ACTIVATE and its `flow start`, a
+table as it stands but is taken up only then, save that a maintainer's `finish` stops the run's
+flow entries for its item at once (section 1, step 2, the ordering rule), and the session never
+commits a store change it did not make: finding one, it stops and reports it, since the writer
+refuses over it (below). All the run's record writes happen serially, in the integration
+checkout, under the single-writer lease (section 5.7). Stream worktrees carry product changes
+only and never write the store: parallel branches of an in-repo store would otherwise allocate
+the same record IDs from the same committed counters, and store files are never hand-merged
+(section 5.7). Workers never write the store or the repository at all (section 9). The writer
+leaves each change uncommitted in the working tree (section 8.8, operation sequence step 8), and
+its cleanliness gate refuses the next operation over tracked dirt at the planned destinations
+(step 5: "the planned destinations MUST be clean"), so the cadence is one writer operation, one
+commit: the session commits each store change in the integration checkout before the next writer
+call, including the write pairs a single trigger produces (an ACTIVATE and its `flow start`, a
 post-merge rotation and its flow entry), and syncs the store back to its target, where it has
 one, in the same session (section 5.7), so a stream branch never carries a store write and the
 store is never left ahead on one system.
@@ -467,12 +485,16 @@ The default in-repo store "rides the product repository, whose own version-contr
 (branch and merge on green) is the consistency mechanism" (section 5.7), so the merge lane
 carries the store branch to integration on its serial merge path. The store branch's change
 holds writer output only, which the adopter's validator checks (section 0, step 3), so it is
-graded at the light tier (section 7) unless its content warrants a heavier one. A store branch
-is never written while it is under review; writes made during that review go on a successor
-store branch cut from the revision under review, which merges after it. In both cases every
-stream is cut from the remote integration branch's tip (section 6), never from a local branch
-carrying unmerged store commits, so no stream inherits a store write, and the lease plus the
-clean-state check still guard every write.
+graded at the light tier (section 7) unless its content warrants a heavier one. Where carrying a
+store branch to integration redoes one of the run's writes because a maintainer's record on the
+integration branch claimed its ID (the redo section 5.7 requires), `WL` order no longer shows
+which came first, so the run reports that maintainer record at the next attended boundary, for
+the maintainer to write it again where it answers the redone write. A store branch is never
+written while it is under review; writes made during that review go on a successor store branch
+cut from the revision under review, which merges after it. In both cases every stream is cut
+from the remote integration branch's tip (section 6), never from a local branch carrying
+unmerged store commits, so no stream inherits a store write, and the lease plus the clean-state
+check still guard every write.
 
 ## 5. The active-workstream table
 
@@ -550,25 +572,28 @@ in the `WL` series authored by non-importer actors: every current-state join eva
 records (the section 8.6 firewall), so an `imported:WL` entry, or any importer-authored entry,
 is history whose `detail` is never read as a live stream even when it opens with the flow
 grammar. The latest flow entry for an item is, among those, the one with the highest `WL` number
-(section 8.2) whose `detail` opens with the flow grammar and whose `relates` links that item.
-One row per stream, and since a stream is one unit and a unit is one backlog item (section 1,
-step 2), every row and every per-stream fact (scope, tier, rounds, park) is keyed by that item.
-The row set is derived over clean backlog items authored by non-importer actors in state
-`active`: each such item whose latest flow entry carries a status other than `done`, plus each
-with no flow entry yet, a planned row (an activation whose `flow start` is not yet written, for
-example on resume between the two commits). A parent item (section 1, step 2) that has no flow
-entry of its own gets no planned row, because no stream starts on it; its units carry the rows,
-and its completion is proposed through the section 1, step 2 parent close check. A parent whose
-own stream merges while it stays `active` (section 7) gets that stream's `finish` entry in the
-rotation, so its row leaves the table as any finished row does. An item that leaves `active`
-(its merge rotation, or a maintainer dropping it, a parked item included) leaves the row set
-with no flow entry needed, so no row lingers and no false `finish` is written; the one exception
-is the re-render a `finish` entry triggers, which still shows the finishing row, status `done`,
-one last time, and the row leaves the table at the next trigger. An item a maintainer moves back
-to `active` after its merge rotation landed it `done/proposed` gets its stream's `finish` entry
-from the run at the next anchor, since that merge landed, so its row never lingers at `merging`
-and selection may start a new stream on it. Every column reads a declared field, and a planned
-row, which has no flow entry, renders fixed values:
+(section 8.2) whose `detail` opens with the flow grammar and whose `relates` links that item,
+passing over each entry the run wrote whose nearest lower-numbered flow entry of the
+maintainer's own on that item is a `finish`, so no run entry hides a maintainer's `finish` (the
+section 1, step 2 ordering rule). One row per stream, and since a stream is one unit and a unit
+is one backlog item (section 1, step 2), every row and every per-stream fact (scope, tier,
+rounds, park) is keyed by that item. The row set is derived over clean backlog items authored by
+non-importer actors in state `active`: each such item whose latest flow entry carries a status
+other than `done`, plus each with no flow entry yet, a planned row (an activation whose `flow
+start` is not yet written, for example on resume between the two commits). A parent item
+(section 1, step 2) that has no flow entry of its own gets no planned row, because no stream
+starts on it; its units carry the rows, and its completion is proposed through the section 1,
+step 2 parent close check. A parent whose own stream merges while it stays `active` (section 7)
+gets that stream's `finish` entry in the rotation, so its row leaves the table as any finished
+row does. An item that leaves `active` (its merge rotation, or a maintainer dropping it, a
+parked item included) leaves the row set with no flow entry needed, so no row lingers and no
+false `finish` is written; the one exception is the re-render a `finish` entry triggers, which
+still shows the finishing row, status `done`, one last time, and the row leaves the table at the
+next trigger. An item a maintainer moves back to `active` after its merge rotation landed it
+`done/proposed` gets its stream's `finish` entry from the run at the next anchor, since that
+merge landed, so its row never lingers at `merging` and selection may start a new stream on it.
+Every column reads a declared field, and a planned row, which has no flow entry, renders fixed
+values:
 
 - Lane: the `lane=` field of the item's latest flow entry carrying one, except that a `merge`
   there, where the item's latest flow entry whose status is not `parked` carries `drafting`,
@@ -691,24 +716,26 @@ light panel writes the `converge` entry that takes the unit to `lane=merge`.
   park, section 3, step 5, is the run's own, and the run's own `unpark` ends it): an `unpark`
   flow entry, whose `status=` is the status the unit resumes at and whose `next` line names the
   action it takes up; a `finish` flow entry, which ends the stream and leaves the item in its
-  state (section 1, step 2); or a transition of the unit's item. The `next` line directs the
-  work only within the grants the run already holds and is never itself a recorded decision or a
-  grant: an `unpark` whose `next` line names an action outside them (a de-escalation, accepting
-  a residual, dropping a family, or anything section 8 defers at a timeout) or an action the run
-  cannot tell is within them, or whose `lane=` is `merge` at a status before `converged`, does
-  not move the unit: the run parks it again under this rule, on a `pending_decision` naming that
-  `unpark`, and reports it, never acting on it. A unit an `unpark` returns from the merge lane
-  to a status before `converged` resumes in the lane its `lane=` names, else in the lane its
-  `start` entry set, which the run's next flow entry for it re-declares, since the merge lane
-  authors no product changes (section 2). The session never writes, scribes, or proposes, for
-  any actor, a record that moves a unit parked on a decision, so no timer, standing grant,
-  decision landing, or console reply moves one. The run reads those records from the store at
-  its next run start (section 4), through the section 5 selector, as it reads every flow entry;
-  a maintainer's `unpark` widens no grant (section 0, step 5), and before the run takes the unit
-  up it checks the `next` line against those grants (above) first, then runs the section 3, step
-  5 re-check. A `park` entry is written only on a unit whose `flow start` entry exists, so a
-  decision that surfaces before that entry waits for it, the write that follows the activation
-  at once (section 4), and every parked unit has a lane, a scope, and a status to resume from. A
+  state (section 1, step 2); or a transition of the unit's item recorded after its `park` entry
+  (a higher `WL` number, section 8.8). The `next` line directs the work only within the grants
+  the run already holds and is never itself a recorded decision or a grant: an `unpark` whose
+  `next` line names an action outside them (a de-escalation, accepting a residual, dropping a
+  family, or anything section 8 defers at a timeout) or an action the run cannot tell is within
+  them, or whose `lane=` is `merge` at a status before `converged`, does not move the unit: the
+  run parks it again under this rule, on a `pending_decision` naming that `unpark`, and reports
+  it, never acting on it. A unit an `unpark` returns from the merge lane to a status before
+  `converged` resumes in the lane its `lane=` names, else in the lane its `start` entry set,
+  which the run's next flow entry for it re-declares, since the merge lane authors no product
+  changes (section 2). The session never writes, scribes, or proposes, for any actor, a record
+  that moves a unit parked on a decision, so no timer, standing grant, decision landing, or
+  console reply moves one. The run reads those records from the store at its next run start
+  (section 4), through the section 5 selector, as it reads every flow entry, save that a
+  maintainer's `finish` stops its flow entries at once (section 1, step 2); a maintainer's
+  `unpark` widens no grant (section 0, step 5), and before the run takes the unit up it checks
+  the `next` line against those grants (above) first, then runs the section 3, step 5 re-check.
+  A `park` entry is written only on a unit whose `flow start` entry exists, so a decision that
+  surfaces before that entry waits for it, the write that follows the activation at once
+  (section 4), and every parked unit has a lane, a scope, and a status to resume from. A
   decision that surfaces on an item with no activation under way (its plan production, section
   1, step 7) links `relates` to that item and parks both that item's plan production and its
   activation, with no `park` entry, as a gap parks a parent's close (section 1, step 2). The
@@ -716,8 +743,11 @@ light panel writes the `converge` entry that takes the unit to `lane=merge`.
   maintainer's own transition of the item, recorded after it (a higher `WL` number, section
   8.8), the one record that moves it and resumes both; until then selection neither resumes that
   plan production nor activates the item, and the run reads no answer to that decision, while
-  every other item advances. No such record is convergence, and none takes a unit past the merge
-  gate below. Until one lands, the unit stays parked, the run moves to the next step that can
+  every other item advances. No record moves plan production apart from activation, so the two
+  resume together or not at all, and for an item already `active`, whose only onward transitions
+  under section 8.5 close it, that transition ends both: the maintainer files any work it still
+  wants as a new item. No such record is convergence, and none takes a unit past the merge gate
+  below. Until one lands, the unit stays parked, the run moves to the next step that can
   proceed, plan production included, and the park is reported as section 1, step 8 defines:
   parked awaiting the maintainer, never blocked, since a park is not a block record.
 
@@ -795,31 +825,30 @@ convergence rule.
   proposed, and attended it is also surfaced at once, stating that no console reply moves it and
   naming the records that do (section 7: the maintainer's own `unpark`, with its `status=`,
   `next` line, and optional `lane=`, a `finish`, or a transition of the unit's item) and that
-  the run reads such a record at its next run start, which a bare `/flow` is (section 4); a
-  section 1, step 2 gap decision, which parks only a parent's close, and a section 7 decision on
-  an item with no activation under way, which parks only that item's plan production and
-  activation, write no `park` entry and are likewise never blocking. Only when the section 1,
-  step 8 enumeration shows no item with any step that can proceed, every remaining `open` or
-  `active` item accounted for by a ratified block that scopes it, by steps parked on recorded
-  triggers, by a stream the maintainer ended, or, for a parent item (section 1, step 2), by its
-  derived units, each closed, awaiting ratification, or itself accounted for in one of these
-  ways, a parked or blocked unit included, does the run execute the adopter's closing handoff:
-  that enumeration, the pending-decisions queue in full, and a `handoff` record. OPF-SPEC.md
-  section 8.5 requires that posting a new handoff "MUST supersede the previous in the same act",
-  so the closing handoff requires a writer that supersedes the previous `current` handoff in the
-  posting operation itself; where no clean `current` handoff authored by a non-importer actor
-  exists, the new one supersedes nothing and any writer may post it. The reference writer lacks
-  that capability: it documents that "posting a new handoff does not supersede the previous one
-  in the same act" (`opf record`), and a `create` followed by a separate `transition` of the old
-  handoff is two acts, not one, so the run never composes the two. Where the writer in use lacks
-  it, as the reference writer does, and such a `current` handoff exists, the run records the
-  enumeration and the pending-decisions queue in full (every `open` `pending_decision` ID) in
-  one `infra` worklog entry whose `detail` opens with the single line `flow handoff-deferred`
-  and which links with `relates` the `current` handoff it could not supersede, tying the newer
-  state to that handoff by record, posts no `handoff` record, since a second one would leave two
-  live handoffs, and surfaces the gap, a writer capability the adopter must supply, in its
-  report and at the next attended boundary. The handoff rests on that enumerated fact, not on
-  OPF actionability: an item awaiting a decision stays actionable in the section 8.5 sense, its
+  the run reads such a record at its next run start, which a bare `/flow` is (section 4), a
+  `finish` also stopping its flow entries at once (section 1, step 2); a section 1, step 2 gap
+  decision, which parks only a parent's close, and a section 7 decision on an item with no
+  activation under way, which parks only that item's plan production and activation, write no
+  `park` entry and are likewise never blocking. Only when the section 1, step 8 enumeration
+  shows no item with any step that can proceed and every remaining `open` or `active` item
+  accounted for as that step states, a parent item by its derived units in every state that step
+  names, does the run execute the adopter's closing handoff: that enumeration, the
+  pending-decisions queue in full, and a `handoff` record. OPF-SPEC.md section 8.5 requires that
+  posting a new handoff "MUST supersede the previous in the same act", so the closing handoff
+  requires a writer that supersedes the previous `current` handoff in the posting operation
+  itself; where no clean `current` handoff authored by a non-importer actor exists, the new one
+  supersedes nothing and any writer may post it. The reference writer lacks that capability: it
+  documents that "posting a new handoff does not supersede the previous one in the same act"
+  (`opf record`), and a `create` followed by a separate `transition` of the old handoff is two
+  acts, not one, so the run never composes the two. Where the writer in use lacks it, as the
+  reference writer does, and such a `current` handoff exists, the run records the enumeration
+  and the pending-decisions queue in full (every `open` `pending_decision` ID) in one `infra`
+  worklog entry whose `detail` opens with the single line `flow handoff-deferred` and which
+  links with `relates` the `current` handoff it could not supersede, tying the newer state to
+  that handoff by record, posts no `handoff` record, since a second one would leave two live
+  handoffs, and surfaces the gap, a writer capability the adopter must supply, in its report and
+  at the next attended boundary. The handoff rests on that enumerated fact, not on OPF
+  actionability: an item awaiting a decision stays actionable in the section 8.5 sense, its
   parked steps wait on their triggers, and the next run takes up the first step that can proceed
   (section 1, step 2); no proposal is thereby treated as ratified, and no stop is granted by
   one. A non-blocking decision is appended to the pending-decisions queue (`pending_decision`
