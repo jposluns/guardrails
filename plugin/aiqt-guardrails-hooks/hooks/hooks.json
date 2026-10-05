@@ -93,6 +93,22 @@
         ]
       },
       {
+        "matcher": "Write|Edit|MultiEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "-S",
+              "-B",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/future-stamp-write.py"
+            ],
+            "timeout": 30
+          }
+        ]
+      },
+      {
         "matcher": "Bash",
         "hooks": [
           {
@@ -289,6 +305,22 @@
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "-S",
+              "-B",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/clock-inject.py"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
       {
         "matcher": "Bash|TaskOutput",
         "hooks": [
