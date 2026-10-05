@@ -2144,6 +2144,112 @@ def _main_isolated(monitor):
         finally:
             aiqt_hooks._record_recovery = _orig_npnc_rec
 
+        # === F-DISCARD-NONPRISTINE-NOCWD round 2: (1) a WRAPPED standalone-'git' discard resolves like a
+        # === literal one, so a resolved target elsewhere never masks an unsnapshottable session-cwd discard
+        # === and a cd'd-into target is snapshotted; (2) a QUOTED heredoc body fed to a shell/interpreter is
+        # === scanned; (3) a non-cosmetic ambient GIT_* override denies an actionable non-pristine discard;
+        # === (4) the no-cwd no-target deny requires an actual work-losing discard, so safe commands stay
+        # === allowed. Each npn2 expectation below flips without its fix (the safe-* rows denied, the wrap-*
+        # === nocwd rows allowed with 0 or a wrong-repo snapshot, the hd-* rows were silent boundary allows,
+        # === and the amb-* rows allow-noted snapshots of repos the override points git away from).
+        _npn2_c = _init_repo(tmp / "npnocwd-clean2")   # a provably-clean resolved target (the masking probe)
+        _npn2_c_s = shlex.quote(str(_npn2_c))
+        _npn2_cases = (
+            # (label, command, nocwd decision, nocwd snapshots, dirty-cwd decision, dirty-cwd snapshots)
+            # -- codex blocker 1 / claude blocker 1: a wrapped discard beside a resolved target
+            ("wrap-env", "git -C {} reset --hard ; env git reset --hard".format(_npnc_t_s), "deny", 0,
+             "allow-note", 2),
+            ("wrap-env-clean-mask", "git -C {} reset --hard ; env git reset --hard".format(_npn2_c_s),
+             "deny", 0, "allow-note", 1),
+            ("wrap-command", "git -C {} reset --hard ; command git reset --hard".format(_npnc_t_s),
+             "deny", 0, "allow-note", 2),
+            ("wrap-reserved", "git -C {} reset --hard ; if true; then git reset --hard; fi"
+             .format(_npnc_t_s), "deny", 0, "allow-note", 2),
+            ("wrap-brace", "git -C {} reset --hard ; {{ git reset --hard; }}".format(_npnc_t_s),
+             "deny", 0, "allow-note", 2),
+            ("wrap-stash", "git -C {} reset --hard ; env git stash clear".format(_npnc_t_s), "deny", 0,
+             "allow-note", 2),
+            # -- claude medium 2: the cd'd-into target of a WRAPPED discard is snapshotted (T, not only the
+            #    session cwd); without the fix the nocwd row denied and the cwd row snapshotted 1 (the cwd)
+            ("wrap-cd-target", "cd {} && env git reset --hard".format(_npnc_t_s), "allow-note", 1,
+             "allow-note", 2),
+            # -- codex medium 3 / claude minor 4: safe non-pristine commands with no cwd stay allowed (each
+            #    row denied without the fix); the dirty-cwd snapshot is the pre-existing inert catch-all
+            ("safe-clean-dry", "git clean -nd ; true", "allow-note", 0, "allow-note", 1),
+            ("safe-reset-soft", "git reset --soft HEAD ; true", "allow-note", 0, "allow-note", 1),
+            ("safe-log-pipe", "git log --oneline | grep reset", "allow-note", 0, "allow-note", 1),
+            ("safe-switch-pull", "git switch main && git pull", "allow-note", 0, "allow-note", 1),
+            ("safe-checkout-b", "git checkout -b npn2-feat ; true", "allow-note", 0, "allow-note", 1),
+            ("safe-stash-pop", "git stash pop && git status", "allow-note", 0, "allow-note", 1),
+            ("safe-echo-quoted", "echo \"git reset --hard\" ; true", "allow-note", 0, "allow-note", 1),
+            # -- codex major 2: a QUOTED heredoc body fed to a shell/interpreter is EXECUTED, so a lossy git
+            #    verb inside it is a real session-cwd discard: snapshot-backed with a cwd, DENIED with none
+            ("hd-bash", "bash <<'EOF'\ngit reset --hard\nEOF", "deny", 0, "allow-note", 1),
+            ("hd-sh-dquote", 'sh <<"EOF"\ngit clean -fd\nEOF', "deny", 0, "allow-note", 1),
+            ("hd-python", "python3 <<'EOF'\nimport subprocess\nsubprocess.run([\"git\", \"checkout\", "
+             "\"-f\"])\nEOF", "deny", 0, "allow-note", 1),
+            # a body carrying its own target redirect denies even WITH a cwd (no session snapshot captures it)
+            ("hd-redirect-body", "bash <<'EOF'\ngit -C /elsewhere reset --hard\nEOF", "deny", 0, "deny", 0),
+            # false-positive controls: a non-interpreter consumer (cat) and a non-lossy body stay the silent
+            # boundary allow, with or without a cwd
+            ("hd-cat-control", "cat <<'EOF'\ngit reset --hard\nEOF", "allow", 0, "allow", 0),
+            ("hd-safe-body", "bash <<'EOF'\ngit status\nEOF", "allow", 0, "allow", 0),
+        )
+        aiqt_hooks._record_recovery = _npnc_count
+        try:
+            for _lab, _cmd, _w_nc, _n_nc, _w_c, _n_c in _npn2_cases:
+                _got_nc = _npnc_run(_cmd, None)
+                if (_got_nc[0], _got_nc[2]) != (_w_nc, _n_nc):
+                    failures.append("(npn2-{}-nocwd) {!r} with no session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_nc, _n_nc,
+                                                                      _got_nc[0], _got_nc[2]))
+                elif (_w_nc == "deny" and "working directory the hook can see" not in _got_nc[1]
+                        and "heredoc" not in _got_nc[1]):
+                    failures.append("(npn2-{}-route) the no-cwd deny must name the safe route or the "
+                                    "heredoc cause, got {!r}".format(_lab, _got_nc[1]))
+                _got_c = _npnc_run(_cmd, str(_npnc))
+                if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
+                    failures.append("(npn2-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
+                                                                      _got_c[0], _got_c[2]))
+            # claude medium 3 (pre-existing): a NON-COSMETIC ambient GIT_* override on the NON-PRISTINE path
+            # denies an actionable discard (the override can point every git in the command at a different
+            # repository than any resolved target: the snapshots would miss the repo actually reset); a safe
+            # non-pristine command under the same override keeps its allow-note (and its inert cwd snapshot).
+            # Without the fix the amb-mixed rows allow-noted with snapshots of the -C target / session cwd.
+            _npn2_amb = (
+                ("amb-mixed-nocwd", "git -C {} reset --hard ; true".format(_npnc_t_s), None, "deny", 0),
+                ("amb-mixed-cwd", "git -C {} reset --hard ; true".format(_npnc_t_s), str(_npnc), "deny", 0),
+                ("amb-wrapped-cwd", "env git reset --hard", str(_npnc), "deny", 0),
+                ("amb-heredoc-cwd", "bash <<'EOF'\ngit reset --hard\nEOF", str(_npnc), "deny", 0),
+                ("amb-safe-control", "git clean -n ; true", str(_npnc), "allow-note", 1),
+            )
+            os.environ["GIT_DIR"] = str(tmp / "npn2-ambient" / ".git")
+            try:
+                for _lab, _cmd, _cwd, _w, _n in _npn2_amb:
+                    _got = _npnc_run(_cmd, _cwd)
+                    if (_got[0], _got[2]) != (_w, _n):
+                        failures.append("(npn2-{}) {!r} under an ambient GIT_DIR override: expected {} "
+                                        "with {} snapshot(s), got {} with {}"
+                                        .format(_lab, _cmd, _w, _n, _got[0], _got[2]))
+                    elif _w == "deny" and "GIT_*" not in _got[1]:
+                        failures.append("(npn2-{}-wording) the ambient-override deny must name the GIT_* "
+                                        "cause, got {!r}".format(_lab, _got[1]))
+            finally:
+                os.environ.pop("GIT_DIR", None)
+            # gemini round-1 Q3 probe (already closed at this base, pinned): an unresolvable ("opaque") -C
+            # target on a destructive form DENIES with no snapshot attempt, on the pristine view-override
+            # path (its opaque branch) and on the non-pristine walk (unresolved) alike; a regression toward
+            # treating the sentinel as a snapshot path fails here.
+            for _lab, _cmd in (("opaque-pristine", "git -C rel reset --hard"),
+                               ("opaque-nonpristine", "git -C rel reset --hard ; true")):
+                _got = _npnc_run(_cmd, None)
+                if (_got[0], _got[2]) != ("deny", 0):
+                    failures.append("(npn2-{}-nocwd) {!r}: an unresolvable -C target must deny with 0 "
+                                    "snapshots, got {} with {}".format(_lab, _cmd, _got[0], _got[2]))
+        finally:
+            aiqt_hooks._record_recovery = _orig_npnc_rec
+
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file allows with a note on dirty tree",
                "git restore --pathspec-from-file=paths.txt", "allow-note", cwd=rp)
