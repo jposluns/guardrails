@@ -429,6 +429,15 @@ jobs:
       - name: Hooks preview
         run: python3 -I -B tools/check_hooks_preview.py
 
+      # Hook-scripts gate: the pack's standalone hook scripts (clock-inject.py, future-stamp-write.py)
+      # pass their self-tests, stay warn-only on fixtures run through the rendered hooks.json launcher,
+      # ignore the worker markers, are not also published in .preview/, and keep the code they share
+      # with .preview/stamp-truth-stop.py identical.
+      - name: Hook scripts self-test
+        run: python3 -I -B tools/check_hook_scripts.py --self-test
+      - name: Hook scripts
+        run: python3 -I -B tools/check_hook_scripts.py
+
       - name: Selftest-execution gate self-test
         run: python3 -I -B tools/check_selftest_execution.py --self-test
 
