@@ -92,16 +92,24 @@ SCRIPT_ARGS_PREFIX = ("-I", "-S", "-B")
 # the file with runpy and exits 0 when the script ends with code 0 or None and 1 on anything else (a
 # missing, unreadable, unparsable or crashing file, or any other exit code, 2 included), writing the
 # reason to stderr. A script that ends the process itself (os._exit) bypasses it; the hook-scripts gate
-# checks the shipped scripts' exit codes on its fixtures.
+# checks the shipped scripts' exit codes on its fixtures. The script path is sys.argv[1], a position this
+# generator fixes: Python sets sys.argv[0] to "-c" and puts the next arg, the rendered path, at [1], so an
+# argument a host appended after it is ignored rather than taken as the script (the gate's leg (l) runs
+# one such launch). It reaches the launcher as one argv element only if the host runs command and args
+# without a shell; that rests on the repository's reading of the host hook documentation recorded in
+# render_hooks_json (2026-08-17), not re-checked or probed for this launcher. A host that joined them into
+# one shell string would hit a shell syntax error on this program's quotes and line breaks, and sh exits 2.
 SCRIPT_LAUNCHER = (
     "import sys\n"
-    "p = sys.argv[-1]\n"
+    "p = sys.argv[1] if len(sys.argv) > 1 else ''\n"
     "r = 1\n"
+    "m = 'was given no script path'\n"
     "try:\n"
-    "    import runpy\n"
-    "    sys.argv = [p]\n"
-    "    runpy.run_path(p, run_name='__main__')\n"
-    "    r = 0\n"
+    "    if p:\n"
+    "        import runpy\n"
+    "        sys.argv = [p]\n"
+    "        runpy.run_path(p, run_name='__main__')\n"
+    "        r = 0\n"
     "except SystemExit as e:\n"
     "    r = 0 if e.code is None or e.code == 0 else 1\n"
     "    m = 'exited %r' % (e.code,)\n"
@@ -278,7 +286,8 @@ def render_hooks_json(hooks):
     """The plugin hooks.json, deterministic: events in KNOWN_EVENTS order, entries sorted by id,
     json.dumps(indent=2) plus a trailing newline. Shape per the doc-confirmed plugin schema:
     {description, hooks: {<Event>: [{matcher?, hooks: [{type, command, args, timeout}]}]}}; the command
-    is python3 with the script path and handler as args (no shell string, so nothing is shell-quoted);
+    is python3 with the script path and handler as args (no shell string, so nothing is shell-quoted;
+    read from code.claude.com/docs/en/hooks on 2026-08-17, the contract date in aiqt_hooks.py);
     matcher is omitted for non-tool events. A standalone `script` control runs as python3 -I -S -B -c
     SCRIPT_LAUNCHER with its own copied file as the last arg and no handler. Every launcher runs
     isolated: args[0] is "-I" (Python's isolated mode), placed before the script path, so a file

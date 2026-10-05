@@ -108,12 +108,18 @@ What changed in the pack copies:
   gets no clock line.
 - The plugin does not run `python3 -I -S -B <file>` directly. It runs a short fixed launcher,
   `python3 -I -S -B -c <launcher> <file>`, which runs the file and exits 1 with the reason on stderr if
-  the file is missing, cannot be read or parsed, raises an error, or exits with any code other than 0.
-  Run directly, Python exits 2 on a missing file, and exit 2 on `PreToolUse` blocks the call. Exit 1 is
-  a non-blocking hook error (from the host hook documentation, not a live probe). Two launch paths remain.
-  A `python3` older than 3.4 rejects `-I` and exits 2. A standard stream that is a directory makes Python
-  exit 1 at startup, before the hook can fail open, because the plugin does not use the `[ -d ... ]`
-  launch guard this page uses.
+  the file is missing, cannot be read or parsed, raises an error, or exits with any code other than 0
+  through `sys.exit` or by returning. Run directly, Python exits 2 on a missing file, and exit 2 on
+  `PreToolUse` blocks the call. Exit 1 is a non-blocking hook error (from the host hook documentation,
+  not a live probe). Five cases fall outside the launcher. A `python3` older than 3.4 rejects `-I` and
+  exits 2. A `python3` that cannot be found or started gets whatever outcome the host gives it (not
+  verified). A script that ends the process with `os._exit(2)` exits 2; the shipped scripts call
+  `os._exit` only with 0. A standard stream that is a directory makes Python exit 1 at startup, before
+  the hook can fail open, because the plugin does not use the `[ -d ... ]` launch guard this page uses. A
+  run past its timeout (30 seconds for `future-stamp-write.py`, 10 for `clock-inject.py`) is ended by
+  the host, which its documentation describes as non-blocking (not verified here). The launcher also
+  relies on the host passing `args` without a shell (the repository's reading of the host
+  documentation, not re-checked for the launcher).
 
 A copy kept from this page keeps the older behaviour: the preview `future-stamp-write.py` denies, and both
 preview copies keep the worker skip and the `ORCH_` fallback. `stamp-truth-stop.py` stays here, still
