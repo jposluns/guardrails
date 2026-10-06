@@ -26,11 +26,19 @@ Exit convention (matches the repo's gates):
      vectors, a git failure, a stale or unused allowance, or a capability probe contradicting a
      supported-platform claim), fail-closed
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_byte_canon.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import base64
 import hashlib
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

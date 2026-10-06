@@ -35,10 +35,18 @@ closed (exit 2) exactly like the sibling generators, never a silent clean.
   gen_gensrc.py --check    fail (exit 1) on drift; exit 2 on a bad declaration or a read/write error
   gen_gensrc.py --self-test  build synthetic trees and assert the generator's own fail-closed invariants
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: gen_gensrc.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import ast
 import json
 import os
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

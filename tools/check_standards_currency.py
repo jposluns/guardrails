@@ -23,6 +23,14 @@ locally in `--warn-only` mode. Only its deterministic `--self-test` is wired int
 CW-3 synthesis, sections 2 and 4.
 """
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_standards_currency.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 from datetime import date, datetime, timezone
 from pathlib import Path
 

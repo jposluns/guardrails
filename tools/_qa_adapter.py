@@ -32,18 +32,29 @@ distinct from an OPTIONAL-disabled SKIP.
 stdlib only (Python 3.14 or newer). `--self-test` proves the discriminating property: the adapter
 returns UNVERIFIABLE (never PASS) on a missing REQUIRED surface, so deleting that guard fails the test.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _qa_adapter.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import os
 import shutil
 import stat
 import subprocess
-import sys
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: _qa_adapter.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: _qa_adapter.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 # --- the shared result contract ---------------------------------------------------------------------
 PASS = "PASS"
