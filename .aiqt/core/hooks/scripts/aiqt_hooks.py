@@ -168,9 +168,13 @@ import sys
 
 # PYTHON-FLOOR guard (the hook form of tools/check_python_floor.py). It runs before HANDLER_EVENT exists, so
 # it carries its own literal of the fail-open modes, which selftest_aiqt_hooks.py holds equal to the
-# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS. On an older interpreter such a mode WARNS on
-# exit 0 and never blocks (a Stop block here would re-fire with no cap); every other mode, PreToolUse and
-# an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
+# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS. On an older interpreter that can start this file
+# such a mode WARNS on exit 0 and never blocks (a Stop block here would re-fire with no cap); every other
+# mode, PreToolUse and an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
+# An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
+# first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file exits
+# 1, a non-blocking error, so a PreToolUse call goes ahead unchecked; one that predates the -I option every
+# hook entry passes exits 2, which denies a PreToolUse call and blocks a Stop.
 FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
                          "orch_stop_guard", "orch_teammate_idle")
 

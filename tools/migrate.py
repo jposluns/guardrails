@@ -8,7 +8,9 @@
   migrate.py --self-test                                  the MANDATORY crash-injection gate (9.3)
 
 Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition. An
-interpreter older than Python 3.14 is refused at exit 2 before anything runs.
+interpreter older than Python 3.14 that can start this file is refused at exit 2 before anything runs. One
+that cannot start it fails with Python's own error first, and that exit is Python's: 1 for a compile
+failure, which reads as a finding, or 2 for an interpreter predating -I when run with it.
 
 The engine consumes two interfaces owed by the adopter-experience spec and refuses without their evidence
 (fail-closed, never a silent proceed): QUIESCENCE of the effective tree (a `quiescence.ok` marker the
