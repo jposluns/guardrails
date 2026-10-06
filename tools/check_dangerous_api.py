@@ -32,11 +32,16 @@ never importing or running the file, and reports:
                context skips certificate checks (each builds ssl._create_stdlib_context, which
                is CERT_NONE, when given none): smtplib.SMTP_SSL, poplib.POP3_SSL and
                ftplib.FTP_TLS without a context=, imaplib.IMAP4_SSL without an ssl_context=,
-               ssl.get_server_certificate without ca_certs (keyword or third positional), any
-               method named starttls or stls (smtplib, imaplib, poplib; whatever object it is
-               called on) without a context, each given as literal None or hidden by a spread
-               counting as none, a logging.handlers.SMTPHandler whose secure= (sixth positional)
+               any method named starttls or stls (smtplib, imaplib, poplib; whatever object it is
+               called on; called on a class, as in smtplib.SMTP.starttls(server), its first
+               positional argument is self) without a context, each given as literal None, a
+               name every binding of which in its scope is literal None (a None default
+               parameter never rebound, or ctx = None), or hidden by a spread counting as none,
+               any ssl.get_server_certificate (it never checks the hostname, whatever ca_certs
+               it is given), a logging.handlers.SMTPHandler whose secure= (sixth positional)
                is set or a spread hides, and any of these referenced without a call (an alias);
+               and a server_hostname= that is an empty literal (asyncio then turns the hostname
+               check off);
   shell        a subprocess run/call/check_call/check_output/Popen whose shell is on, or cannot
                be seen (a ** spread that is not a literal dict, a * spread, or a ninth
                positional argument that is not literal False), over a non-literal command;
@@ -46,8 +51,13 @@ never importing or running the file, and reports:
                spread hides; and any of these referenced without a call (an alias);
   code         any reference to eval or exec (builtins included),
                types.FunctionType, and the runpy, timeit, cProfile, profile, pdb and code
-               runners, and any call of a method named exec_module or load_module (an importlib
-               loader running a module's code, whatever object it is called on).
+               runners, and any call of, or reference to, a method named exec_module or
+               load_module (an importlib loader running a module's code, whatever object it is
+               called on).
+
+A method judged by its name alone (starttls, stls, subprocess_shell, exec_module, load_module)
+is called as x.name(...) or getattr(x, "name")(...) with a literal name; x.name or that getattr
+not called, or x followed by the literal name as below, is an alias and a finding.
 
 Names resolve PER SCOPE as Python binds them: a binding in a function is local to it (unless
 declared global or nonlocal), a nested function sees its enclosing functions but not a class
@@ -105,26 +115,30 @@ __setattr__, object.__setattr__, __dict__).
 
 Residuals (not seen): dynamic dispatch (getattr with a non-literal name on an object that is
 not a sink module, setattr with a non-literal name, globals() or vars() lookups); a numpy.load
-reached through an alias and given allow_pickle positionally; an attribute chain
-whose base is not an import binding (a parameter, self, a call result or a subscript, so
-self.os.system and sys.modules["os"].system are not resolved), and a sink module re-exported
-under a name other than its own (a module that binds pickle as _p, reached as mod._p.loads);
-a sink function (not module) obtained from such an object or from a call; a method run on a
-profiler, debugger or trace object (cProfile.Profile().run, bdb.Bdb.run); a shell launched
-through an argv list naming a shell (["sh", "-c", text]), an executable= override, or os.exec*,
-os.spawn* or pty.spawn of a shell; a verify= or ssl= value hidden in a ** spread that is not a
-literal dict (only the subprocess shell switch and the command, Loader, protocol, context
-and secure= of the judged sinks are denied when unseen); the context given to a
-standard-library client is not traced (any value other than literal None passes, so how it
-was built is judged only where it is built), and a client configured from data
-(logging.config) is not seen; TLS verification disabled inside a third-party library's
-own defaults, through a library option this scan does not name, or through environment
-variables (PYTHONHTTPSVERIFY, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE); a deserializer outside the
-named set; a star import from a module outside STAR_MODULES; literalness is judged, not data
-flow, so a literal command or a non-false verify can still be attacker-shaped; and code
-outside the scanned roots (the vendored opf/tools/_vendor tree, .github, .preview, site, and
-Python embedded in a non-.py file). The class and comprehension scopes only widen the
-candidate set (they fall through to the outer scope), so their own bindings never hide a sink.
+reached through an alias and given allow_pickle positionally; an attribute chain whose base is
+not an import binding (a parameter, self, a call result or a subscript, so self.os.system and
+sys.modules["os"].system are not resolved), and a sink module re-exported under a name other
+than its own (a module that binds pickle as _p, reached as mod._p.loads); a sink function (not
+module) obtained from such an object or from a call; a method run on a profiler, debugger or
+trace object (cProfile.Profile().run, bdb.Bdb.run); a shell launched through an argv list
+naming a shell (["sh", "-c", text]), an executable= override, or os.exec*, os.spawn* or
+pty.spawn of a shell; a verify= or ssl= value hidden in a ** spread that is not a literal dict
+(only the subprocess shell switch and the command, Loader, protocol, context and secure= of the
+judged sinks are denied when unseen); the context given to a standard-library client is not
+traced beyond its own scope (a name that may hold anything but literal None there passes, so
+ctx = None rebound under a condition, or a None passed in by a caller through a parameter
+without a None default, is not seen; a built context is judged only where it is built), a
+starttls or stls called on a class reached other than through an import binding or a class this
+file defines is read as bound (its first positional argument as the context), and a client
+configured from data (logging.config) is not seen; TLS verification disabled inside a
+third-party library's own defaults, through a library option this scan does not name, or
+through environment variables (PYTHONHTTPSVERIFY, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE); a
+deserializer outside the named set; a star import from a module outside STAR_MODULES;
+literalness is judged, not data flow, so a literal command or a non-false verify can still be
+attacker-shaped; and code outside the scanned roots (the vendored opf/tools/_vendor tree,
+.github, .preview, site, and Python embedded in a non-.py file). The class and comprehension
+scopes only widen the candidate set (they fall through to the outer scope), so their own
+bindings never hide a sink.
 """
 import argparse
 import ast
@@ -177,8 +191,11 @@ SSL_CONTEXT = "ssl.SSLContext"
 # (keyword, positional index or None) of the argument that supplies a verifying context.
 STDLIB_UNVERIFIED = {"smtplib.SMTP_SSL": ("context", None), "poplib.POP3_SSL": ("context", None),
                      "ftplib.FTP_TLS": ("context", None),
-                     "imaplib.IMAP4_SSL": ("ssl_context", None),
-                     "ssl.get_server_certificate": ("ca_certs", 2)}
+                     "imaplib.IMAP4_SSL": ("ssl_context", None)}
+# ssl.get_server_certificate always builds ssl._create_stdlib_context, whose check_hostname is
+# False: a ca_certs turns chain verification on but never the hostname check, so any call is
+# a finding.
+NO_HOSTNAME_CHECK = frozenset({"ssl.get_server_certificate"})
 # smtplib.SMTP.starttls, imaplib.IMAP4.starttls and poplib.POP3.stls do the same; the receiver
 # is an object the scan cannot name, so the method name alone is judged.
 STARTTLS_METHODS = frozenset({"starttls", "stls"})
@@ -200,10 +217,14 @@ CODE_SINKS = frozenset({"eval", "exec", "builtins.eval", "builtins.exec", "types
 # A loader method that runs a module's code (spec.loader.exec_module(m), loader.load_module()):
 # its receiver is an object the scan cannot name, so the method name alone is the finding.
 LOADER_METHODS = frozenset({"exec_module", "load_module"})
+# Every method judged by its name alone, with the (kind, check) of a reference to it uncalled.
+METHOD_SINKS = {"starttls": ("tls", "tls-context"), "stls": ("tls", "tls-context"),
+                "subprocess_shell": ("shell", "shell-always"),
+                "exec_module": ("code", "code-loader"), "load_module": ("code", "code-loader")}
 # The callables whose call site is judged (shell switch, command, Loader, protocol): any other
 # reference to them is an alias the call-site check cannot follow, so it is a finding.
 CALL_JUDGED = (YAML_LOAD | SUBPROCESS_FUNCS | ALWAYS_SHELL | {SSL_CONTEXT, SMTP_HANDLER}
-               | frozenset(STDLIB_UNVERIFIED))
+               | frozenset(STDLIB_UNVERIFIED) | NO_HOSTNAME_CHECK)
 # A star import from a sink module makes its sinks bare names; the same module object, bound
 # to another name or passed to getattr with a non-literal name, is an alias it cannot follow.
 STAR_MODULES = {"pickle": "deserialize", "_pickle": "deserialize", "cPickle": "deserialize",
@@ -482,6 +503,10 @@ class _Scope:
         self.bindings = {}
         self.globals = set()
         self.nonlocals = set()
+        # Names bound to literal None (an assignment, a parameter default) and names bound to
+        # anything else: a name in nones and not in rebound can only be None in this scope.
+        self.nones = set()
+        self.rebound = set()
 
 
 class _Binder(ast.NodeVisitor):
@@ -492,8 +517,10 @@ class _Binder(ast.NodeVisitor):
         self.module = _Scope("module", None)
         self.current = self.module
         self.scope_of = {}
+        self.classes = set()
+        self.none_targets = set()
 
-    def bind(self, name, value):
+    def bind(self, name, value, none=False):
         scope = self.current
         if name in scope.globals:
             scope = self.module
@@ -503,22 +530,35 @@ class _Binder(ast.NodeVisitor):
             scope = scope.parent
             while scope.parent is not None:
                 if scope.kind == "function":
-                    scope.bindings.setdefault(name, set()).add(value)
+                    self._record(scope, name, value, none)
                 scope = scope.parent
             return
+        self._record(scope, name, value, none)
+
+    @staticmethod
+    def _record(scope, name, value, none):
         scope.bindings.setdefault(name, set()).add(value)
+        (scope.nones if none else scope.rebound).add(name)
 
     def _enter(self, node):
         kind, outer, inner = _scope_parts(node)
         if not isinstance(node, ast.Lambda) and hasattr(node, "name"):
             self.bind(node.name, None)
+        if isinstance(node, ast.ClassDef):
+            self.classes.add(node.name)
         for child in outer:
             self.visit(child)
         saved = self.current
         self.current = self.scope_of[id(node)] = _Scope(kind, saved)
         if kind == "function":
-            for arg in _all_args(node.args):
-                self.bind(arg.arg, None)
+            a = node.args
+            positional = a.posonlyargs + a.args
+            defaults = dict(zip([x.arg for x in positional[len(positional) - len(a.defaults):]],
+                                a.defaults))
+            defaults.update((x.arg, d) for x, d in zip(a.kwonlyargs, a.kw_defaults)
+                            if d is not None)
+            for arg in _all_args(a):
+                self.bind(arg.arg, None, arg.arg in defaults and _is_none(defaults[arg.arg]))
         for child in inner:
             self.visit(child)
         self.current = saved
@@ -548,7 +588,17 @@ class _Binder(ast.NodeVisitor):
 
     def visit_Name(self, node):
         if not isinstance(node.ctx, ast.Load):
-            self.bind(node.id, None)
+            self.bind(node.id, None, id(node) in self.none_targets)
+
+    def visit_Assign(self, node):
+        if _is_none(node.value):
+            self.none_targets.update(id(t) for t in node.targets if isinstance(t, ast.Name))
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node):
+        if node.value is not None and _is_none(node.value):
+            self.none_targets.add(id(node.target))
+        self.generic_visit(node)
 
     def visit_NamedExpr(self, node):
         saved = self.current
@@ -598,6 +648,7 @@ class _Scanner(ast.NodeVisitor):
         self.called = set()
         self.based = set()
         self.stored = set()
+        self.method_targets = set()
 
     def on(self, check):
         return check not in self.disabled
@@ -655,6 +706,45 @@ class _Scanner(ast.NodeVisitor):
         return [".".join(parts[i:]) for i in range(1, len(parts))
                 if parts[i] in STAR_MODULES and parts[i] != parts[i - 1]]
 
+    def none_valued(self, node):
+        """Literal None, or a name every binding of which in the scope that binds it is literal
+        None (a None default parameter never rebound, or name = None)."""
+        if _is_none(node):
+            return True
+        if not isinstance(node, ast.Name):
+            return False
+        start = scope = self.binder.module if node.id in self.scope.globals else self.scope
+        while scope is not None:
+            if (scope.kind != "class" or scope is start) and node.id in scope.bindings:
+                return node.id in scope.nones and node.id not in scope.rebound
+            scope = scope.parent
+        return False
+
+    def _method(self, func):
+        """(name, receiver) of a method call x.name(...) or getattr(x, "name")(...)."""
+        if isinstance(func, ast.Attribute):
+            return func.attr, func.value
+        if isinstance(func, ast.Call) and self.resolve(func.func) & _GETATTR:
+            target, attr = _positional(func, 0), _positional(func, 1)
+            if isinstance(attr, ast.Constant) and isinstance(attr.value, str) \
+                    and target is not None:
+                return attr.value, target
+        return None, None
+
+    def _self_index(self, receiver):
+        """1 when the method is called on a class (an import binding, or a class this file
+        defines), so its first positional argument is self; else 0."""
+        if self.resolve(receiver) or (isinstance(receiver, ast.Name)
+                                      and receiver.id in self.binder.classes):
+            return 1
+        return 0
+
+    def _method_alias(self, node, name):
+        if name in METHOD_SINKS:
+            kind, check = METHOD_SINKS[name]
+            if self.on(check):
+                self.add(node, kind, check, name + " referenced without a call (an alias)")
+
     def proves(self, node, allowed):
         """True only when every value the node may hold is a name in allowed (or a chain to one);
         an absent node, an expression, or any binding the scan cannot name proves nothing."""
@@ -697,6 +787,8 @@ class _Scanner(ast.NodeVisitor):
                 for base in sorted(self.resolve(first)):
                     self._reference_name(first, base + "." + second.value, False)
                 self._tls_ref(first, {second.value})
+                if id(first) not in self.method_targets:
+                    self._method_alias(first, second.value)
 
     def visit_Tuple(self, node):
         self._pairs(node.elts)
@@ -713,20 +805,20 @@ class _Scanner(ast.NodeVisitor):
             self._pairs(node.args)
         for name in sorted(names):
             self._judge_call(node, name, pairs)
-        func = node.func
-        if isinstance(func, ast.Attribute) and func.attr in LOADER_METHODS \
-                and self.on("code-loader"):
-            self.add(node, "code", "code-loader", func.attr + " runs a loaded module's code")
-        if isinstance(func, ast.Attribute) and func.attr in STARTTLS_METHODS \
-                and self.on("tls-context"):
+        method, receiver = self._method(node.func)
+        if method is not None and not isinstance(node.func, ast.Attribute):
+            # getattr(x, "name")(...) is the call itself, not an alias of the method.
+            self.method_targets.add(id(receiver))
+        if method in LOADER_METHODS and self.on("code-loader"):
+            self.add(node, "code", "code-loader", method + " runs a loaded module's code")
+        if method in STARTTLS_METHODS and self.on("tls-context"):
             context = _first(_kw(pairs, "context"), _kw(pairs, "ssl_context"),
-                             _positional(node, 0))
-            if context is None or _is_none(context):
+                             _positional(node, self._self_index(receiver)))
+            if context is None or self.none_valued(context):
                 self.add(node, "tls", "tls-context",
-                         func.attr + " without a context (the default skips certificate checks)")
-        if isinstance(func, ast.Attribute) and func.attr == "subprocess_shell" \
-                and self.on("shell-always"):
-            command = _first(_positional(node, 1), _kw(pairs, "cmd"))
+                         method + " without a context (the default skips certificate checks)")
+        if method == "subprocess_shell" and self.on("shell-always"):
+            command = _first(_positional(node, 1 + self._self_index(receiver)), _kw(pairs, "cmd"))
             if command is None or not _literal_command(command):
                 self.add(node, "shell", "shell-always",
                          "subprocess_shell over a non-literal command")
@@ -770,9 +862,12 @@ class _Scanner(ast.NodeVisitor):
         if name in STDLIB_UNVERIFIED and self.on("tls-context"):
             key, index = STDLIB_UNVERIFIED[name]
             context = _first(_kw(pairs, key), None if index is None else _positional(node, index))
-            if context is None or _is_none(context):
+            if context is None or self.none_valued(context):
                 self.add(node, "tls", "tls-context",
                          name + " without " + key + "= (the default skips certificate checks)")
+        if name in NO_HOSTNAME_CHECK and self.on("tls-context"):
+            self.add(node, "tls", "tls-context",
+                     name + " never checks the hostname, whatever ca_certs it is given")
         if name == SMTP_HANDLER and self.on("tls-context"):
             secure = _first(_kw(pairs, "secure"), _positional(node, 5))
             unseen = (any(key is None for key, _value in pairs)
@@ -814,6 +909,10 @@ class _Scanner(ast.NodeVisitor):
             value = _kw(pairs, "check_hostname")
             if value is not None and not _is_true(value):
                 self.add(node, "tls", "tls-hostname", "check_hostname= is not True")
+            value = _kw(pairs, "server_hostname")
+            if isinstance(value, ast.Constant) and value.value is not None and not value.value:
+                self.add(node, "tls", "tls-hostname",
+                         "server_hostname= is an empty literal (the hostname check is turned off)")
         if self.on("tls-verify-mode"):
             for key in ("verify_mode", "cert_reqs"):
                 value = _kw(pairs, key)
@@ -879,6 +978,8 @@ class _Scanner(ast.NodeVisitor):
         if isinstance(node.ctx, ast.Load):
             names = self._reference(node, node.attr)
             self._escape(node, names)
+            if id(node) not in self.called:
+                self._method_alias(node, node.attr)
         self._store(node, node.attr, True)
         self.generic_visit(node)
 
@@ -924,7 +1025,8 @@ class _Scanner(ast.NodeVisitor):
             return
         if name in YAML_LOAD:
             kind, check = "deserialize", "dsz-yaml"
-        elif name == SSL_CONTEXT or name == SMTP_HANDLER or name in STDLIB_UNVERIFIED:
+        elif name == SSL_CONTEXT or name == SMTP_HANDLER or name in STDLIB_UNVERIFIED \
+                or name in NO_HOSTNAME_CHECK:
             kind, check = "tls", "tls-context"
         elif name in SUBPROCESS_FUNCS:
             kind, check = "shell", "shell-subprocess"
@@ -1218,6 +1320,26 @@ POSITIVE_VECTORS = (
     ("imap.starttls(ssl_context=None)\n", ("tls-context",)),
     ("pop.stls(*args)\n", ("tls-context",)),
     ("import ssl\npem = ssl.get_server_certificate((host, 443))\n", ("tls-context",)),
+    # A ca_certs verifies the chain but never the hostname (check_hostname stays False).
+    ("import ssl\npem = ssl.get_server_certificate(addr, ca_certs='/ca.pem')\n", ("tls-context",)),
+    ("import ssl\nssl.get_server_certificate(addr, ssl.PROTOCOL_TLS_CLIENT, '/ca.pem')\n",
+     ("tls-context",)),
+    # Called on a class, the first positional argument is self, not a context.
+    ("import smtplib\nserver = smtplib.SMTP()\nsmtplib.SMTP.starttls(server)\n", ("tls-context",)),
+    ("from imaplib import IMAP4\nIMAP4.starttls(imap)\n", ("tls-context",)),
+    ("import smtplib\nclass Mail(smtplib.SMTP):\n    pass\nMail.starttls(server)\n",
+     ("tls-context",)),
+    ("getattr(server, 'starttls')()\n", ("tls-context",)),
+    ("upgrade = server.starttls\nupgrade()\n", ("tls-context",)),
+    ("upgrade = getattr(pop, 'stls')\n", ("tls-context",)),
+    # A context name that can only be None in its scope is none.
+    ("import smtplib\ndef connect(host, context=None):\n"
+     "    return smtplib.SMTP_SSL(host, context=context)\n", ("tls-context",)),
+    ("import smtplib\nctx = None\nsmtplib.SMTP_SSL(host, context=ctx)\n", ("tls-context",)),
+    ("import poplib\nctx: object = None\npoplib.POP3_SSL(host, context=ctx)\n", ("tls-context",)),
+    ("def tls(server, *, ctx=None):\n    server.starttls(context=ctx)\n", ("tls-context",)),
+    ("import asyncio\nasyncio.open_connection(host, 443, ssl=True, server_hostname='')\n",
+     ("tls-hostname",)),
     ("import ssl\nssl.get_server_certificate(addr, ssl.PROTOCOL_TLS_CLIENT, None)\n",
      ("tls-context",)),
     ("import logging.handlers\nlogging.handlers.SMTPHandler(host, a, b, s, creds, ())\n",
@@ -1271,6 +1393,9 @@ POSITIVE_VECTORS = (
     ("import os\nlaunch = os.system\n", ("shell-always",)),
     ("from os import system\nsystem(cmd)\n", ("alias", "shell-always")),
     ("loop.subprocess_shell(factory, cmd)\n", ("shell-always",)),
+    ("import asyncio\nasyncio.BaseEventLoop.subprocess_shell(loop, factory, cmd)\n",
+     ("shell-always",)),
+    ("launch = loop.subprocess_shell\n", ("shell-always",)),
     ("import shutil\nshutil.os.system(cmd)\n", ("chain", "shell-always")),
     ("import posix\nposix.system(cmd)\n", ("shell-always",)),
     ("from asyncio.subprocess import create_subprocess_shell as s\ns(cmd)\n",
@@ -1284,6 +1409,8 @@ POSITIVE_VECTORS = (
     ("import pydoc\npydoc.builtins.exec(text)\n", ("chain", "code-ref")),
     ("spec.loader.exec_module(module)\n", ("code-loader",)),
     ("loader.load_module()\n", ("code-loader",)),
+    ("run = spec.loader.exec_module\n", ("code-loader",)),
+    ("getattr(spec.loader, 'exec_module')(module)\n", ("code-loader",)),
     ("from logging.handlers import pickle\npickle.loads(data)\n", ("chain", "dsz-ref")),
     ("from pickle import *\nloads(b'')\n", ("star-import",)),
     ("import subprocess\nm = subprocess\nm.run(cmd, shell=True)\n", ("module-escape",)),
@@ -1360,8 +1487,23 @@ NEGATIVE_VECTORS = (
     "smtplib.SMTP_SSL(host, context=ctx)\nimaplib.IMAP4_SSL(host, ssl_context=ctx)\n"
     "poplib.POP3_SSL(host, context=ctx)\nftplib.FTP_TLS(host, context=ctx)\n"
     "server = smtplib.SMTP(host)\nserver.starttls(context=ctx)\nimap.starttls(ssl_context=ctx)\n"
-    "pop.stls(ctx)\nssl.get_server_certificate(addr, ca_certs='/ca.pem')\n"
-    "ssl.get_server_certificate(addr, ssl.PROTOCOL_TLS_CLIENT, '/ca.pem')\nftplib.FTP(host)\n",
+    "pop.stls(ctx)\nftplib.FTP(host)\n",
+    # Called on a class, the context is the second positional argument (the first is self).
+    "import imaplib, smtplib\nsmtplib.SMTP.starttls(server, context=ctx)\n"
+    "imaplib.IMAP4.starttls(imap, ctx)\ngetattr(server, 'starttls')(context=ctx)\n"
+    "ok = hasattr(server, 'starttls')\n",
+    # A false context is not None (the client fails to wrap the socket, never connecting).
+    "import smtplib\nsmtplib.SMTP_SSL(host, context=False)\n",
+    # A None default rebound before use is not None there; None leaves asyncio's default host.
+    "import smtplib, ssl\ndef connect(host, context=None):\n"
+    "    context = context or ssl.create_default_context()\n"
+    "    return smtplib.SMTP_SSL(host, context=context)\n"
+    "def tls(server, ctx=None):\n    server.starttls(context=ctx or make())\n"
+    "def outer():\n    ctx = None\n    def inner():\n        nonlocal ctx\n        ctx = make()\n"
+    "    inner()\n    return smtplib.SMTP_SSL(host, context=ctx)\n",
+    "import asyncio\nasyncio.BaseEventLoop.subprocess_shell(loop, factory, 'ls -l')\n"
+    "asyncio.open_connection(host, 443, ssl=True, server_hostname=None)\n"
+    "asyncio.open_connection(host, 443, ssl=True, server_hostname=host)\n",
     "import logging.handlers\nlogging.handlers.SMTPHandler(host, a, b, s)\n"
     "logging.handlers.SMTPHandler(host, a, b, s, creds, None)\n"
     "logging.handlers.SMTPHandler(host, a, b, s, secure=None)\n",
@@ -1435,7 +1577,8 @@ def _roster_drift():
     """The sets that no longer equal their pinned roster line."""
     sets = {"dsz-ref": DESERIALIZE_SINKS, "code-ref": CODE_SINKS, "shell-always": ALWAYS_SHELL,
             "shell-subprocess": SUBPROCESS_FUNCS, "dsz-yaml": YAML_LOAD,
-            "tls-context": frozenset([SSL_CONTEXT, SMTP_HANDLER]) | frozenset(STDLIB_UNVERIFIED),
+            "tls-context": (frozenset([SSL_CONTEXT, SMTP_HANDLER]) | frozenset(STDLIB_UNVERIFIED)
+                            | NO_HOSTNAME_CHECK),
             "tls-ref": frozenset("ssl." + attr for attr in TLS_ATTRS),
             "star-import": frozenset(STAR_MODULES)}
     return sorted(check for check, names in _ROSTER if frozenset(names) != frozenset(sets[check]))
