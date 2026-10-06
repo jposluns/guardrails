@@ -226,10 +226,12 @@ detected as env AIQT_HOOKS_WORKER=1 (legacy spellings are also accepted, see _is
 carrying agent_id (a subagent's stop). The worker skip writes one warning line to stderr (round 24; never to
 stdout, so worker output is not distorted, and on exit 0 stderr reaches only the host's debug log, so the
 skip is logged, not shown); that line is at most 100 characters. The one exception to exit 0 is an
-interpreter older than Python 3.14: the guard at the top of this file reads no input, writes one
-`error: stamp-truth-stop.py requires Python 3.14 or newer` line to stderr and exits 1, which the Stop
-event treats as a non-blocking error, so the stop goes ahead unchecked. It does not exit 2: on a Stop
-exit 2 blocks, and the guard runs before the BLOCK CAP, so every stop would be blocked with no cap.
+interpreter older than Python 3.14 that can start the hook: the guard at the top of this file reads no input,
+writes one line beginning `error: stamp-truth-stop.py requires Python 3.14 or newer` to stderr and exits 1,
+which the Stop event treats as a non-blocking error, so the stop goes ahead unchecked. It does not exit 2: on
+a Stop exit 2 blocks, and the guard runs before the BLOCK CAP, so every stop would be blocked with no cap. An
+older interpreter that cannot start the hook never reaches the guard and fails with Python's own error first,
+so this exit 1 does not hold for it; .preview/README.md (Installing a hook, step 4) describes those cases.
 
 MESSAGES (round 33; round 34; round 35; round 36; round 37). Every message is ONE physical line: no newline
 and no carriage return. The block reason's CORE is never shortened and never dropped: BLOCK_PREFIX unchanged
