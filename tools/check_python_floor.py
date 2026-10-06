@@ -105,12 +105,11 @@ Legs, in order:
                  run (no flag, the first patched version) with each FLOOR_FAIL_OPEN_MODES mode, which
                  must exit 0 with the exact warning on stdout and the refusal on stderr, and with
                  DENY_PROBE_MODE, a mode outside the literal, which must refuse with exit 2.
-  completeness   OFF until the source sets completeness-check = true (the unit that guards the last
-                 shipped entrypoint switches it on); until then an unlisted entrypoint is not a
-                 finding. The core-hook, preview-hook and adopter-tool units are listed, but
-                 tools/check_entry_guard.py is not guarded or listed yet, so it stays false. Once
-                 on, every shipped entrypoint, a .py file outside EXCLUDED_TREES with a module-level
-                 `if __name__ == "__main__":`, must be listed in guarded-surfaces.
+  completeness   ON when the source sets completeness-check = true, as it does since the unit that
+                 guarded tools/check_entry_guard.py, the last shipped entrypoint, switched it on (off,
+                 an unlisted entrypoint is not a finding). On, every shipped entrypoint, a .py file
+                 outside EXCLUDED_TREES with a module-level `if __name__ == "__main__":`, must be
+                 listed in guarded-surfaces.
   documentation  ON (documentation-check = true, held by the switch leg): each DECLARATION_FILES entry
                  must contain "Python <floor> or newer" as many times as DECLARATION_COPIES says
                  (once by default), and each "Python <floor> or|and <word>" in it must be that phrase,

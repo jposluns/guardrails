@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "270084c117fba8758d661fbdd407c1fd62389d0b743a1b0deb1a54b403fa98ec"
+tree-sha256 = "7deaaa448c7546abf0617567544535d455f8816f1ed632fcb195c95ce54ba6b7"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 257151
-sha256 = "17979e5cdb527085cb44cdb60c968ee623e6b18245d21b1573c5444bcd585f82"
+bytes = 257035
+sha256 = "e59bb3bc79d27e0a38877ebaa21a8e8d71c2c23fc4b35492390e66d9510dce9b"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -111,8 +111,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 7067
-sha256 = "b32d53beba878d51c37b5b1fcf3e97fa6660f519b9ab422915b0d6f8ec4621cc"
+bytes = 7027
+sha256 = "08db54cb6ee346c5ff980f8e93242c65b56346ed3ac3e9e98ddc1b838797c3be"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -3241,8 +3241,8 @@ sha256 = "ef0dab933755581f208c508f8f558ca9115f086564876425024daf0b6584dd81"
 
 [[sources]]
 path = "tools/check_entry_guard.py"
-bytes = 42222
-sha256 = "9787ee614932e6a34d6296330ef5f06cdc04abb28c0e779c1bbbc6f7daf347ae"
+bytes = 42667
+sha256 = "3b672fdffd0ac3b172cc66a9c8cea767f42277ce6e3b72b315e026f9bb37c4cb"
 
 [[sources]]
 path = "tools/check_footer.py"
@@ -3341,8 +3341,8 @@ sha256 = "5726920d74948592dd12b8cf3f115fc16f74f854d1a26cbe7384ec94520a7e20"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 130228
-sha256 = "026ff4f293a62f4288451d40247f1737f3d8f19ddb0d045526c07700dd281f92"
+bytes = 130102
+sha256 = "c7d13f8d4660bc99e1de352af21953d40b676ac7271add06241489655d5aeb57"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -3391,8 +3391,8 @@ sha256 = "45fe251ed39535d03f3e839be6b097e300fbe03d8b81ea2c465929c211af487b"
 
 [[sources]]
 path = "tools/check_selftest_execution.py"
-bytes = 112868
-sha256 = "f317b936b546678f9279734c14d6bf9504e66b4e7bde930268646bab27af2ae4"
+bytes = 112889
+sha256 = "5408afb78734807abca1192bc558b522b3638ce5e4ca32fa6c2db2dc393b4495"
 
 [[sources]]
 path = "tools/check_site.py"

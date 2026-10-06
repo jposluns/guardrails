@@ -41,7 +41,8 @@ launched or registered is a finding. The gate does not read a diff.
   check_entry_guard.py              check the repository
   check_entry_guard.py --self-test  assert the gate's own vectors, and that each vector is discriminating
   check_entry_guard.py [--self-test] --execution-report ABS_PATH
-                                    the self-test, writing its execution report (as the execution gate runs it)
+                                    the self-test, also writing its execution report, finalized at interpreter
+                                    exit (tools/_selftest_exit_report.py), as the execution gate runs it
 Exit: 0 every script passes; 1 findings, each failing script named with one reason; 2 cannot evaluate (the
 roster or registry is missing, not a regular file, unreadable, malformed or schema-invalid, the roster loader
 reports a diagnostic, the roster launches no Python script, or a listed script is missing, not a regular file,
@@ -68,22 +69,30 @@ each vector discriminating against its own table of single-check removal mutants
 regression, and the execution gate accounts for its checks by family (every vector, every mutant, each launch
 leg), not per vector.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_entry_guard.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import ast
 import contextlib
 import errno
 import importlib.util
 import io
-import json
 import os
 import signal
 import stat
 import subprocess
-import sys
 import tempfile
 import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
 import check_ci_parity  # noqa: E402  (the validated roster loader)
 import check_selftest_execution  # noqa: E402  (the authoritative registry schema)
 
@@ -445,13 +454,14 @@ def _launch(path, *args, cwd=None):
     return result.returncode, result.stdout + result.stderr
 
 
-OWN_ENTRY = '\n\nif __name__ == "__main__":\n    sys.exit(main())\n'
+OWN_ENTRY = '\n\nif __name__ == "__main__":\n    _selftest_exit_report.exit_with(main())\n'
 OWN_REL = "tools/" + Path(__file__).name
 
 
 def _guardless_copy(base):
     """A scratch repository holding this checker with its own entry deleted, beside the execution gate, the
-    roster loader and the real registry, or None when this file does not end in its own entry."""
+    report finalizer, the roster loader and the real registry, or None when this file does not end in its own
+    entry."""
     head, entry, tail = Path(__file__).read_text(encoding="utf-8").rpartition(OWN_ENTRY)
     if not entry or tail:
         return None
@@ -459,7 +469,8 @@ def _guardless_copy(base):
     (root / "tools").mkdir(parents=True)
     (root / ".git").write_text("gitdir: absent\n", encoding="ascii")
     (root / OWN_REL).write_text(head + "\n", encoding="utf-8")
-    for rel in ("tools/check_selftest_execution.py", "tools/check_ci_parity.py", REGISTRY_REL):
+    for rel in ("tools/check_selftest_execution.py", "tools/_selftest_exit_report.py", "tools/check_ci_parity.py",
+                REGISTRY_REL):
         (root / rel).write_bytes((ROOT / rel).read_bytes())
     return root
 
@@ -684,9 +695,15 @@ def _load_mutant(source, directory, number):
 
 def self_test(report_path=None):
     results = []
+    executed = []
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit, after this run's cleanup
+        # (tools/_selftest_exit_report.py); nothing writes it in band.
+        _selftest_exit_report.arm(report_path, SUITE_ID, executed)
 
     def check(check_id, ok, detail=""):
         results.append((check_id, bool(ok), detail))
+        executed.append(check_id)
 
     this = sys.modules[__name__]
     with tempfile.TemporaryDirectory(prefix="entry-guard-selftest-") as base:
@@ -754,7 +771,6 @@ def self_test(report_path=None):
         marker, count), (code, output))
 
     # the in-run self-guard: the executed set is exactly this suite's registered set
-    executed = [check_id for check_id, _ok, _detail in results]
     expected, problem = _registered_check_ids()
     harness = []
     if problem is not None:
@@ -762,15 +778,6 @@ def self_test(report_path=None):
     elif len(set(executed)) != len(executed) or set(executed) != expected:
         harness.append(("execution-set/reconciled", dict(missing=sorted(expected - set(executed)),
                                                          extra=sorted(set(executed) - expected))))
-    if report_path is not None:
-        try:
-            with open(report_path, "w", encoding="utf-8") as handle:
-                json.dump(dict(format_version=1, suite=SUITE_ID, check_ids=executed), handle)
-                handle.write("\n")
-        except OSError as exc:
-            print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(report_path, exc),
-                  file=sys.stderr)
-            return 2
 
     failed = [(check_id, detail) for check_id, ok, detail in results if not ok] + harness
     if failed:
@@ -800,4 +807,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _selftest_exit_report.exit_with(main())
