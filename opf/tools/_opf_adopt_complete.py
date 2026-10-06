@@ -119,11 +119,23 @@ PLANNING_INVENTORY_FORMAT = "opf.adoption.planning-inventory/v1"
 CI_STORE_ASSERTION = b"--require-store"
 _WIRING_NOTE = ("check 5 (wiring) is not evaluated by this slice: its enforcement probes spawn processes; "
                 "the roster is incomplete until it runs (never a pass)")
-# A block-mapping entry of the CI workflow subset: a plain key, a colon, and the rest of the line.
-_YAML_KEY_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_.-]*) *:(?: +(.*))?$")
+# YAML's in-line white space (s-white): every separator, indicator and comment-start test of the reader
+# treats a tab as a space, and the reader then refuses that tab (_Workflow._no_tab).
+_YAML_WHITE = " \t"
+# A block-mapping entry of the CI workflow subset: a plain key, a colon, white space and the rest of the line.
+_YAML_KEY_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_.-]*)[ \t]*:(?:[ \t]+(.*))?$")
 # Characters the YAML reader refuses anywhere (CANNOT-EVALUATE): the C0 controls except tab, LF and CR (a
-# CR is refused on its own), DEL, the C1 controls, a byte-order mark and the two noncharacters.
-_YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufeff\ufffe\uffff]")
+# CR is refused on its own), DEL, the C1 controls, a byte-order mark, the two noncharacters, and the line
+# and paragraph separators (U+2028, U+2029), which YAML 1.1 reads as line breaks.
+_YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff]")
+# The plain scalars YAML 1.1 or the 1.2 core schema resolves to a null, bool, int or float, for key identity.
+_YAML_NULL_RE = re.compile(r"~|null|Null|NULL")
+_YAML_BOOL = {word: value for value, words in ((True, "y Y yes Yes YES true True TRUE on On ON"),
+                                               (False, "n N no No NO false False FALSE off Off OFF"))
+              for word in words.split()}
+_YAML_INT_RE = re.compile(r"([-+]?)(?:0b([01_]+)|0o?([0-7_]+)|0x([0-9a-fA-F_]+)|([0-9][0-9_]*))")
+_YAML_FLOAT_RE = re.compile(r"[-+]?(?:[0-9][0-9_]*(?:\.[0-9_]*)?|\.[0-9_]+)(?:[eE][-+]?[0-9]+)?")
+_YAML_SPECIAL_RE = re.compile(r"([-+]?)\.(?:(inf|Inf|INF)|nan|NaN|NAN)")
 # A plain scalar inside a flow collection: no indicator, comma, bracket, colon or hash anywhere.
 _FLOW_PLAIN_RE = re.compile(r"[A-Za-z0-9_./+~][A-Za-z0-9_./+~*@-]*(?: +[A-Za-z0-9_./+~*@-]+)*")
 # The planning inventory's closed entry-kind vocabulary (_opf_adopt_plan's observation rows).
@@ -463,8 +475,9 @@ class _Workflow:
     """A reader for the block-YAML subset CI workflows are written in: block mappings with plain keys,
     block sequences, plain and quoted single-line scalars, literal and folded block scalars, and single-line
     flow collections of plain and quoted scalars, parsed in full and kept opaque. Anything outside it (a
-    control character, a tab in the indentation, a CR, an anchor, alias or tag, a quoted or duplicate key, a
-    multi-line plain or quoted scalar, a document marker, a flow collection with an empty or trailing entry,
+    control character, a tab outside a quoted scalar, block-scalar content or a comment (in the indentation
+    or as a separator), a CR, an anchor, alias or tag, a quoted key, a duplicate key in any block or flow
+    mapping (_key_identities), a multi-line plain or quoted scalar, a document marker, a flow collection with an empty or trailing entry,
     a flow pair outside a flow mapping) raises Unevaluable: CI this check cannot parse is CANNOT-EVALUATE,
     never a pass and never a silent refusal."""
 
@@ -486,6 +499,19 @@ class _Workflow:
         raise Unevaluable("CI workflow {!r} line {}: {}, outside the YAML subset this check parses".format(
             self.label, self.i + 1, why))
 
+    def _no_tab(self, separator):
+        """Refuse a tab in `separator`, white space the reader has just read as a separator (YAML allows a
+        tab there; this subset, like the strict reference parser, does not)."""
+        if "\t" in separator:
+            self.fail("a tab as a separator")
+
+    def _unique(self, seen, key):
+        """Record `key` in `seen`, the identities of the keys of one mapping; a duplicate fails."""
+        identities = _key_identities(key)
+        if identities & seen:
+            self.fail("duplicate key {!r}".format(key))
+        seen |= identities
+
     def _next(self):
         while self.i < len(self.lines) and (not self.lines[self.i][1] or self.lines[self.i][1][0] == "#"):
             self.i += 1
@@ -502,14 +528,14 @@ class _Workflow:
         line = self._next()
         if line is None or line[0] < indent:
             return None
-        if line[1] == "-" or line[1].startswith("- "):
+        if _is_entry(line[1]):
             return self._sequence(line[0])
         if _YAML_KEY_RE.match(line[1]):
             return self._mapping(line[0])
         return self.fail("a block-level scalar or an unsupported construct")
 
     def _mapping(self, indent):
-        out = {}
+        out, seen = {}, set()
         while True:
             line = self._next()
             if line is None or line[0] < indent:
@@ -517,8 +543,8 @@ class _Workflow:
             key = _YAML_KEY_RE.match(line[1]) if line[0] == indent else None
             if key is None:
                 self.fail("a mapping line that is not `key: value` at the mapping's indentation")
-            if key.group(1) in out:
-                self.fail("duplicate key {!r}".format(key.group(1)))
+            self._no_tab(line[1][:key.start(2) if key.start(2) >= 0 else key.end()])
+            self._unique(seen, key.group(1))
             out[key.group(1)] = self._value(indent, key.group(2) or "")
 
     def _sequence(self, indent):
@@ -527,14 +553,15 @@ class _Workflow:
             line = self._next()
             if line is None or line[0] < indent:
                 return out
-            if line[0] > indent or not (line[1] == "-" or line[1].startswith("- ")):
+            if line[0] > indent or not _is_entry(line[1]):
                 self.fail("a block-sequence line that is not `- item` at the sequence's indentation")
             rest = line[1][1:]
-            item = rest.lstrip(" ")
+            item = rest.lstrip(_YAML_WHITE)
+            self._no_tab(rest[:len(rest) - len(item)])
             if not item or item[0] == "#":
                 self.i += 1
                 out.append(self._node(indent + 1))
-            elif item.startswith("- "):
+            elif _is_entry(item):
                 self.fail("a nested inline sequence")
             elif _YAML_KEY_RE.match(item):
                 # `- key: value` opens a mapping whose keys align with this first key's column.
@@ -549,10 +576,11 @@ class _Workflow:
         plain = _strip_plain_comment(rest)
         if not plain:
             line = self._next()
-            if line is not None and line[0] == indent and (line[1] == "-" or line[1].startswith("- ")):
+            if line is not None and line[0] == indent and _is_entry(line[1]):
                 return self._sequence(indent)
             return self._node(indent + 1)
         if re.fullmatch(r"[|>](?:[+-]?[1-9]?|[1-9][+-])", plain):
+            self._no_tab(rest[:_comment_start(rest)])
             return self._block(indent, plain)
         value = self._scalar(rest, plain)
         line = self._next()
@@ -581,13 +609,18 @@ class _Workflow:
                     j += 1
             if j >= len(rest) or _strip_plain_comment(rest[j + 1:]):
                 self.fail("an unterminated quoted scalar or content after its closing quote")
+            self._no_tab(rest[j + 1:j + 1 + _comment_start(rest[j + 1:])])
             return "".join(text)
+        body = rest[:_comment_start(rest)]
         if head in "[{":
-            if self._flow_node(plain, 0, 0) != len(plain):
+            end = self._flow_node(body, 0, 0)
+            if body[end:].strip(_YAML_WHITE):
                 self.fail("content after a flow collection")
+            self._no_tab(body[end:])
             return _Flow(plain)
-        if (head in "&*!%@`|>,]}" or plain[:2] in ("- ", "? ", ": ") or plain in ("-", "?", ":")
-                or ": " in plain or plain.endswith(":")):
+        self._no_tab(body)
+        if (head in "&*!%@`|>,]}" or re.match(r"[-?:](?:[ \t]|$)", plain)
+                or re.search(r":(?:[ \t]|$)", plain)):
             self.fail("an anchor, alias, tag, reserved indicator or nested mapping in a plain scalar")
         return plain
 
@@ -595,16 +628,14 @@ class _Workflow:
         """The index just past the flow node at text[j] (after spaces): a flow sequence or mapping, a
         single- or double-quoted scalar, or a plain scalar of _FLOW_PLAIN_RE. Every entry is checked, so an
         empty entry (`[a,,b]`), a trailing comma, a missing separator or a bracket left open fails."""
-        while text[j:j + 1] == " ":
-            j += 1
+        j = self._white(text, j)
         head = text[j:j + 1]
         if depth > 16:
             self.fail("a flow collection nested too deeply")
         if head in ("[", "{"):
-            closer, j, first = "]" if head == "[" else "}", j + 1, True
+            closer, j, first, seen = "]" if head == "[" else "}", j + 1, True, set()
             while True:
-                while text[j:j + 1] == " ":
-                    j += 1
+                j = self._white(text, j)
                 if text[j:j + 1] == closer and first:
                     return j + 1
                 if not first:
@@ -612,15 +643,15 @@ class _Workflow:
                         return j + 1
                     if text[j:j + 1] != ",":
                         self.fail("a flow collection entry not followed by `,` or its closing bracket")
-                    j += 1
-                    while text[j:j + 1] == " ":
-                        j += 1
+                    j = self._white(text, j + 1)
                 first = False
                 if head == "{":
                     key = _FLOW_PLAIN_RE.match(text, j)
-                    if key is None or text[key.end():key.end() + 2] != ": ":
+                    if key is None or text[key.end():key.end() + 1] != ":" or \
+                            text[key.end() + 1:key.end() + 2] not in tuple(_YAML_WHITE):
                         self.fail("a flow mapping entry that is not `key: value`")
-                    j = key.end() + 2
+                    self._unique(seen, key.group())
+                    j = key.end() + 1
                 j = self._flow_node(text, j, depth + 1)
         if head == "'":
             j += 1
@@ -645,6 +676,14 @@ class _Workflow:
             self.fail("a flow collection entry outside the subset (empty, an indicator or a flow pair)")
         return plain.end()
 
+    def _white(self, text, j):
+        """The index past the white space at text[j] in a flow collection; a tab there fails."""
+        start = j
+        while text[j:j + 1] in tuple(_YAML_WHITE):
+            j += 1
+        self._no_tab(text[start:j])
+        return j
+
     def _block(self, indent, indicator):
         raw = []
         while self.i < len(self.lines) and (not self.lines[self.i][1] or self.lines[self.i][0] > indent):
@@ -657,14 +696,16 @@ class _Workflow:
         width = indent + int(digits[0]) if digits else content[0][0]
         if any(line[0] < width for line in content):
             self.fail("a block-scalar line indented less than its content")
+        if not digits and any(len(line[2]) > width for line in raw[:raw.index(content[0])]):
+            self.fail("a leading blank line of a block scalar indented more than its content")
         lines = [line[2][width:] for line in raw]
         if indicator[0] == "|":
             return "\n".join(lines)
-        if any(line[0] > width for line in content):
-            self.fail("a more-indented line in a folded block scalar")
+        if any(line[0] > width or (not line[1] and len(line[2]) > width) for line in raw) or not raw[0][1]:
+            self.fail("a more-indented or leading blank line in a folded block scalar")
         paragraphs, current = [], []
         for line in lines:
-            if line.strip():
+            if line.strip(" "):
                 current.append(line)
             elif current:
                 paragraphs.append(" ".join(current))
@@ -672,12 +713,54 @@ class _Workflow:
         return "\n".join(paragraphs + ([" ".join(current)] if current else []))
 
 
-def _strip_plain_comment(rest):
-    """`rest` with a trailing YAML comment (a `#` at its start or after whitespace) removed, stripped."""
+def _is_entry(body):
+    """Whether a line body opens a block-sequence entry: `-` alone or followed by white space."""
+    return body[:1] == "-" and body[1:2] in ("", " ", "\t")
+
+
+def _comment_start(rest):
+    """The index of the YAML comment in `rest` (a `#` at its start or after white space), else len(rest)."""
     for i, ch in enumerate(rest):
-        if ch == "#" and (i == 0 or rest[i - 1] in " \t"):
-            return rest[:i].strip()
-    return rest.strip()
+        if ch == "#" and (i == 0 or rest[i - 1] in _YAML_WHITE):
+            return i
+    return len(rest)
+
+
+def _strip_plain_comment(rest):
+    """`rest` with a trailing YAML comment removed, stripped of YAML white space (space and tab) only: a
+    no-break space or another Unicode space is content, never a separator."""
+    return rest[:_comment_start(rest)].strip(_YAML_WHITE)
+
+
+def _key_identities(key):
+    """The nodes a plain mapping key can denote: itself as a string, and its YAML 1.1 or 1.2 core
+    resolution as a null, bool, int or float (`on` and `true`, `1`, `01`, `0x1` and `1.0` each denote one
+    node under some schema). Two keys of one mapping whose identities meet are a duplicate: an ambiguous
+    mapping is CANNOT-EVALUATE whichever schema a consumer reads it with."""
+    out = {("str", key)}
+    if _YAML_NULL_RE.fullmatch(key):
+        out.add(("value", None))
+    if key in _YAML_BOOL:
+        out.add(("value", _YAML_BOOL[key]))
+    number = _YAML_INT_RE.fullmatch(key)
+    if number is not None:
+        sign, digits = -1 if number.group(1) == "-" else 1, None
+        for group, base in ((2, 2), (3, 8), (4, 16), (5, 10)):
+            if number.group(group) is not None:
+                digits = number.group(group).replace("_", "")
+                if group == 3 and not key.lstrip("+-").startswith("0o"):
+                    out.add(("value", sign * int(key.lstrip("+-").replace("_", "") or "0", 10)))
+                if digits:
+                    out.add(("value", sign * int(digits, base)))
+    if _YAML_FLOAT_RE.fullmatch(key) and any(ch.isdigit() for ch in key):
+        try:
+            out.add(("value", float(key.replace("_", ""))))
+        except ValueError:
+            out.add(("value", key))
+    special = _YAML_SPECIAL_RE.fullmatch(key)
+    if special is not None:
+        out.add(("value", ("-" if special.group(1) == "-" else "+") + "inf" if special.group(2) else "nan"))
+    return out
 
 
 # The canonical CI assertion (spec 14.1 check 4). Adoption writes the CI step itself, so a step counts only
@@ -1452,8 +1535,8 @@ def self_test():
         # scalar or a suffixed flag configures nothing (INVALID); every step that mentions the assertion in a
         # non-canonical form is CANNOT-EVALUATE, never VALID and never INVALID (unreachable after `exit 0` or
         # `set -n`, an `|| exit 256` or `|| exit "$ZERO"` handler, an interpreter option, an and-list, an
-        # echo, a quoted hash); malformed YAML (an empty flow entry, a NUL byte) and undecodable or
-        # unparseable CI are CANNOT-EVALUATE.
+        # echo, a quoted hash); malformed YAML (an empty flow entry, a NUL byte, a colon and tab inside a plain
+        # scalar, a duplicate flow-mapping key) and undecodable or unparseable CI are CANNOT-EVALUATE.
         def _run_step(script):
             return _CI_BYTES.replace(b"        run: python3 -I -B opf/tools/opf.py doctor --require-store\n",
                                      b"        run: |\n" + b"".join(b"          " + line + b"\n"
@@ -1480,7 +1563,10 @@ def self_test():
                 ("and-list", _run_step(b"opf doctor --require-store && true"), CANNOT_EVALUATE),
                 ("flow-empty-entry", b"env: [a,,b]\n" + _CI_BYTES, CANNOT_EVALUATE),
                 ("flow-empty-entry-on", _CI_BYTES.replace(b"[main]", b"[main,,b]"), CANNOT_EVALUATE),
-                ("nul-byte", _CI_BYTES.replace(b"name: OPF", b"name: O\x00PF"), CANNOT_EVALUATE)):
+                ("nul-byte", _CI_BYTES.replace(b"name: OPF", b"name: O\x00PF"), CANNOT_EVALUATE),
+                ("plain-colon-tab", b"description: x:\ty\n" + _CI_BYTES, CANNOT_EVALUATE),
+                ("flow-duplicate-key", b"permissions: {contents: read, contents: write}\n" + _CI_BYTES,
+                 CANNOT_EVALUATE)):
             with mock.patch.object(here, "_CI_BYTES", ci_bytes):
                 got = _case()
             check("check-4-ci-" + label, _only(got, {} if want == VALID else _red(OPERATIONAL, want))
@@ -1690,6 +1776,34 @@ def self_test():
                             ("plain-head-comma", b"name: ,x\n" + good),
                             ("plain-head-closer", b"name: ]x\n" + good),
                             ("plain-sequence-entry", b"name: - x\n" + good),
+                            ("plain-tab", good.replace(b"runs-on: x", b"runs-on: x\ty")),
+                            ("plain-colon-tab", b"name: x:\ty\n" + good),
+                            ("plain-colon-tab-end", b"name: x:\t\n" + good),
+                            ("key-colon-tab", b"name:\tx\n" + good),
+                            ("key-tab-colon", b"name\t: x\n" + good),
+                            ("key-tab-empty", b"name:\t\n" + good),
+                            ("entry-tab", steps + b"      -\trun: opf doctor --require-store\n"),
+                            ("entry-space-tab", steps + b"      - \trun: opf doctor --require-store\n"),
+                            ("tab-before-comment", b"name: x\t# c\n" + good),
+                            ("block-indicator-tab", steps + b"      - run: |\t\n          opf doctor --require-store\n"),
+                            ("quote-tail-tab", b'name: "x"\t# c\n' + good),
+                            ("flow-tab-separator", b"on: [a,\tb]\n" + good),
+                            ("flow-tab-before-comma", b"on: [a\t, b]\n" + good),
+                            ("flow-tab-after", b"on: [a]\t# c\n" + good),
+                            ("flow-key-colon-tab", b"on: {a:\tb}\n" + good),
+                            ("flow-duplicate-key", b"on: {a: x, a: y}\n" + good),
+                            ("flow-duplicate-nested", b"on: [{a: x, b: [{c: 1, c: 2}]}]\n" + good),
+                            ("flow-duplicate-bool", b"on: {true: a, on: b}\n" + good),
+                            ("flow-duplicate-number", b"on: {1: a, 1.0: b}\n" + good),
+                            ("flow-duplicate-null", b"on: {~: a, null: b}\n" + good),
+                            ("block-duplicate-number", b"1: a\n01: b\n" + good),
+                            ("block-duplicate-hex", b"16: a\n0x10: b\n" + good),
+                            ("block-duplicate-deep", b"x:\n  a:\n    - b: 1\n      b: 2\n" + good),
+                            ("no-break-space-tail", good.replace(b"--require-store\n", "--require-store\u00a0\n".encode())),
+                            ("line-separator", good.replace(b"runs-on: x", "runs-on: x\u2028".encode())),
+                            ("block-leading-blank-deeper", steps + b"      - run: |\n            \n"
+                                                           b"          opf doctor --require-store\n"),
+                            ("folded-leading-blank", steps + b"      - run: >\n\n          opf doctor --require-store\n"),
                             ("jobs-flow", b"jobs: {}\n"),
                             ("jobs-scalar", b"jobs: x\n"),
                             ("block-less-indented", steps + b"      - run: |\n            opf doctor --require-store\n"
@@ -1698,7 +1812,9 @@ def self_test():
         # The reader vectors above are load-bearing: each carrier key alone leaves the canonical step VALID.
         check("ci-reader-carriers-valid", ci(b"on: [a, b]\n" + good) == VALID
               and ci(b"on: " + b"[" * 16 + b"]" * 16 + b"\n" + good) == VALID
-              and ci(good.replace(b"runs-on: x", b"runs-on: x\ty")) == VALID and ci(b"name: x\n" + good) == VALID)
+              and ci(good.replace(b"runs-on: x", b'runs-on: "x\ty"')) == VALID and ci(b"name: x\n" + good) == VALID
+              and ci(b"name: x #\tc\n" + good) == VALID and ci(b"on: {a: x, b: [{c: 1, d: 2}]}\n" + good) == VALID
+              and ci(b"x:\n  a:\n    - b: 1\n      c: 2\n1: a\n2: b\n" + good) == VALID)
         # Check 3: archive preservation, bundle claims, the move source, and the restore exercise.
         corrupt = _case(lambda r, i: _put(r, apply.archive_rel(_RUN, "legacy/RULES.md"), b"other\n"))
         check("check-3-preimage-corrupted", _only(corrupt, _red(PRESERVATION))
