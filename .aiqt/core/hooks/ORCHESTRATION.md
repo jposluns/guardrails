@@ -263,13 +263,21 @@ or the `.aiqt` directory is refused unless its command word only reads (`cat`, `
 `ls`, `stat`, `grep`, `jq`, `cmp`, `diff`). A git command whose allowlisted subcommand can write or
 remove work-tree files or the index (`add`, `rm`, `mv`, `stash`, `switch`, `checkout`, `restore`,
 `reset`, `merge`, `rebase`, `cherry-pick`, `revert`, `worktree`, `clone`) is judged by the registry
-files' git state, read at hook time: it is refused while either registry file is tracked or not
-ignored, so keep `.aiqt/orchestration.local.json` and `.aiqt/orchestration.json` untracked and listed
-in `.gitignore` or `.git/info/exclude`. With both untracked and ignored, only the forms that reach an
-ignored file are refused (`add --force`, `stash --all`, `worktree move` and `remove`, `mv` while the
-registry is below the top level, and a subcommand that writes a commit's tree into the work tree
-while a commit reachable from a ref, a reflog or `FETCH_HEAD` tracks a registry path, since git
-overwrites an ignored file such a tree tracks). A dangling commit named by its id is not searched. A
+files' git state, read at hook time, for each registry file that exists or is tracked (an absent,
+untracked file cannot be overwritten in place). It is refused while a registry file exists untracked
+and not ignored, so keep `.aiqt/orchestration.local.json` untracked and listed in `.gitignore` or
+`.git/info/exclude`; the committed `.aiqt/orchestration.json` may stay tracked. Otherwise only the forms
+that can reach a registry file are refused: `add --force` and `stash --all` while one is ignored,
+`worktree move` and `remove`, `add` and `rm` whose pathspec matches a tracked registry file or a
+directory above it (with no pathspec the whole tree is meant, and `--pathspec-from-file` is refused), `mv`
+whose pathspec matches any registry file or a directory above it, and a subcommand that writes a commit's
+tree into the work tree (`stash`, `switch`, `checkout`, `restore`, `reset`, `merge`, `rebase`,
+`cherry-pick`, `revert`) while a registry file differs from `HEAD` in the index or the work tree, or while
+a commit reachable from a ref, a reflog or `FETCH_HEAD` differs from `HEAD` at a registry path or holds a
+file, a symlink or a gitlink where a directory above one is (git writes such a tree over an ignored
+registry, or in place of its directory). A tracked registry left unchanged is so open to an ordinary
+`git add`, `commit`, and a checkout of a branch holding the same registry blob. `git am` and `git apply`
+are off the allowlist. A dangling commit named by its id is not searched. A
 command other than git that changes the registry without naming it (the removal of a parent
 directory, a script) is not seen and switches the hook off. When git cannot resolve the session
 repository (a broken configuration, a refused ownership check, a deleted cwd), or resolves one with

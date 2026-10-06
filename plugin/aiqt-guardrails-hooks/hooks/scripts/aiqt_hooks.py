@@ -11697,7 +11697,9 @@ def _rdp_moves_repository(words):
 # --pathspec-from-file names it in a file), so _rdp_git_tree_write judges them by the git state of the
 # registry files, read at hook time. Of them, _RDP_GIT_TREE_CHECKOUTS can write another commit's tree into
 # the work tree, and git 2.53 then overwrites an ignored untracked file whose path that tree tracks
-# (checkout, switch, reset --hard and --keep, restore --source, merge and cherry-pick, each confirmed).
+# (checkout, switch, reset --hard and --keep, restore --source, merge and cherry-pick, each confirmed), and
+# removes the directory holding it when that tree tracks a file in its place (reset --hard, checkout -f and
+# switch -f, each confirmed). git am and git apply are off _RDP_GIT_ALLOWED, so they are refused before.
 _RDP_GIT_TREE_WRITERS = frozenset(("add", "rm", "mv", "stash", "switch", "checkout", "restore", "reset", "merge",
                                    "rebase", "cherry-pick", "revert", "worktree", "clone"))
 _RDP_GIT_TREE_CHECKOUTS = frozenset(("stash", "switch", "checkout", "restore", "reset", "merge", "rebase",
@@ -11706,6 +11708,8 @@ _RDP_GIT_TREE_CHECKOUTS = frozenset(("stash", "switch", "checkout", "restore", "
 _RDP_GIT_ELSEWHERE = frozenset(("-C", "--git-dir", "--work-tree"))
 # The largest FETCH_HEAD the history search reads.
 _RDP_MAX_FETCH_HEAD = 1048576
+# The most commits the registry history search compares; a longer history cannot be judged.
+_RDP_MAX_HISTORY = 100000
 
 
 def _rdp_git_sets_option(args, letter, long_name, valued=""):
@@ -11727,34 +11731,74 @@ def _rdp_git_sets_option(args, letter, long_name, valued=""):
 
 
 def _rdp_registry_git_state(reg_dir):
-    """The git state of the registry files at reg_dir, read at hook time: (prefix, problems), prefix the
-    path of reg_dir inside its work tree ("" at the top level) and problems each registry file that is
-    tracked (in the index: git ls-files --error-unmatch) or not ignored (git check-ignore -q, which counts
-    a tracked file as not ignored), written "PATH (tracked)" or "PATH (not ignored)", an absent file
-    included; None when git cannot say (no repository, a failed or timed-out probe)."""
+    """The git state of the registry files at reg_dir, read at hook time: (prefix, files), prefix the path
+    of reg_dir inside its work tree ("" at the top level) and files a (path, state) pair for each registry
+    file that exists or is tracked, state "tracked" (in the index: git ls-files --error-unmatch), "ignored"
+    (untracked, git check-ignore -q) or "not ignored"; an absent untracked file is left out, since no git
+    command overwrites it in place (a checkout that would create it is judged by _rdp_registry_drift).
+    None when git or the file system cannot say (no repository, a failed or timed-out probe)."""
     p = _review_git(reg_dir, "rev-parse", "--show-prefix")
     if p is None or p.returncode != 0:
         return None
     prefix = p.stdout.decode("utf-8", "surrogateescape").rstrip("\n")
-    problems = []
+    files = []
     for rel in _ORCH_REGISTRY_FILES:
         listed = _review_git(reg_dir, "ls-files", "--error-unmatch", "--", rel)
-        ignored = _review_git(reg_dir, "check-ignore", "-q", "--", rel, literal=False)
-        if listed is None or ignored is None or listed.returncode not in (0, 1) or \
-                ignored.returncode not in (0, 1):
+        if listed is None or listed.returncode not in (0, 1):
             return None
         if listed.returncode == 0:
-            problems.append("{} (tracked)".format(rel))
-        elif ignored.returncode == 1:
-            problems.append("{} (not ignored)".format(rel))
-    return (prefix, problems)
+            files.append((rel, "tracked"))
+            continue
+        try:
+            os.lstat(os.path.join(reg_dir, rel))
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except (OSError, ValueError):
+            return None
+        ignored = _review_git(reg_dir, "check-ignore", "-q", "--", rel, literal=False)
+        if ignored is None or ignored.returncode not in (0, 1):
+            return None
+        files.append((rel, "ignored" if ignored.returncode == 0 else "not ignored"))
+    return (prefix, files)
 
 
-def _rdp_registry_in_history(reg_dir, prefix):
+def _rdp_path_ancestors(paths):
+    """Every directory above each of paths, inside the work tree ("a/b/c" gives "a" and "a/b")."""
+    out = set()
+    for path in paths:
+        parts = path.split("/")
+        out.update("/".join(parts[:k]) for k in range(1, len(parts)))
+    return sorted(out)
+
+
+def _rdp_tree_entries(reg_dir, revs, paths):
+    """The entry of each of paths in the tree of each of revs, one git cat-file --batch-check: a list per
+    rev of one string per path, "OID TYPE MODE" ("OID submodule" for a gitlink) or "" when the tree holds
+    no such path; None when git cannot say."""
+    if any(ch in path for path in paths for ch in "\n\r\0"):
+        return None
+    stdin = "".join("{}:{}\n".format(rev, path) for rev in revs for path in paths).encode("utf-8",
+                                                                                       "surrogateescape")
+    q = _review_git(reg_dir, "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectmode)",
+                    stdin=stdin)
+    if q is None or q.returncode != 0:
+        return None
+    lines = q.stdout.decode("utf-8", "surrogateescape").split("\n")[:-1]
+    if len(lines) != len(revs) * len(paths):
+        return None
+    entries = ["" if line.endswith(" missing") else line for line in lines]
+    return [entries[k * len(paths):(k + 1) * len(paths)] for k in range(len(revs))]
+
+
+def _rdp_registry_drift(reg_dir, prefix):
     """The id of a commit the repository reaches (from a ref, a reflog, the HEAD of any worktree, or a
-    FETCH_HEAD line) whose tree tracks a registry path, at reg_dir or at the top level, every parent
-    followed (--full-history); "" when none does; None when git cannot say. A commit reachable from none
-    of them (dangling, named by its id) is not searched."""
+    FETCH_HEAD line) whose tree differs from HEAD's at a registry path, at reg_dir or at the top level (a
+    blob, mode or gitlink there that HEAD's tree does not hold, or none where HEAD holds one), or holds a
+    non-directory (a file, a symlink, a gitlink) at a directory above one, which a checkout writes in
+    place of the directory and its ignored registry; every parent followed (--full-history). "" when none
+    does; None when git cannot say. The commits searched are those git rev-list names for those paths and
+    directories, each of whose state at them was introduced by a commit it names. A commit reachable from
+    none of them (dangling, named by its id) is not searched."""
     p = _review_git(reg_dir, "rev-parse", "--git-path", "FETCH_HEAD")
     if p is None or p.returncode != 0:
         return None
@@ -11778,26 +11822,126 @@ def _rdp_registry_in_history(reg_dir, prefix):
         if len(blob) > _RDP_MAX_FETCH_HEAD:
             return None
         heads = b"".join(line.split(b"\t", 1)[0] + b"\n" for line in blob.splitlines() if line.strip())
-    paths = sorted({prefix + rel for rel in _ORCH_REGISTRY_FILES} | set(_ORCH_REGISTRY_FILES))
-    q = _review_git(reg_dir, "rev-list", "--all", "--reflog", "--full-history", "--max-count=1", "--stdin",
-                    "--", *paths, stdin=heads)
+    files = sorted({prefix + rel for rel in _ORCH_REGISTRY_FILES} | set(_ORCH_REGISTRY_FILES))
+    dirs = _rdp_path_ancestors(files)
+    # Each path is named from the top level (top) and literally, since git reads a pathspec from the cwd.
+    q = _review_git(reg_dir, "rev-list", "--all", "--reflog", "--full-history", "--stdin", "--",
+                    *(":(top,literal)" + path for path in files + dirs), stdin=heads, literal=False)
     if q is None or q.returncode != 0:
         return None
-    return q.stdout.decode("ascii", "replace").strip()
+    commits = q.stdout.decode("ascii", "replace").split()
+    if len(commits) > _RDP_MAX_HISTORY:
+        return None
+    if not commits:
+        return ""
+    got = _rdp_tree_entries(reg_dir, ["HEAD"] + commits, files + dirs)
+    if got is None:
+        return None
+    head = got[0][:len(files)]
+    for commit, entries in zip(commits, got[1:]):
+        if entries[:len(files)] != head or any(e and e.split(" ")[1] != "tree" for e in entries[len(files):]):
+            return commit
+    return ""
 
 
-def _rdp_git_tree_write(words, reg_dir):
+def _rdp_registry_uncommitted(reg_dir, prefix):
+    """The first registry file at reg_dir whose index entry or work-tree file differs from HEAD's tree (a
+    staged or unstaged change, a conflict, a staged removal), which a reset, checkout, restore or stash
+    would discard; "" when none does; None when git or the file system cannot say. The work-tree file is
+    hashed without filters (git hash-object --no-filters), so a filtered file counts as changed."""
+    head = _rdp_tree_entries(reg_dir, ["HEAD"], [prefix + rel for rel in _ORCH_REGISTRY_FILES])
+    if head is None:
+        return None
+    for rel, entry in zip(_ORCH_REGISTRY_FILES, head[0]):
+        q = _review_git(reg_dir, "ls-files", "-s", "-z", "--", rel)
+        if q is None or q.returncode != 0:
+            return None
+        staged = [item for item in q.stdout.split(b"\0") if item]
+        if not staged:
+            if entry:
+                return rel
+            continue
+        fields = staged[0].split(b"\t", 1)[0].decode("ascii", "replace").split(" ")
+        if len(staged) != 1 or len(fields) != 3 or fields[2] != "0":
+            return rel
+        mode, oid = fields[0], fields[1]
+        if not entry or entry.split(" ") != [oid, "blob", mode]:
+            return rel
+        try:
+            st = os.lstat(os.path.join(reg_dir, rel))
+        except (FileNotFoundError, NotADirectoryError):
+            return rel
+        except (OSError, ValueError):
+            return None
+        if not stat.S_ISREG(st.st_mode) or mode != ("100755" if st.st_mode & 0o100 else "100644"):
+            return rel
+        h = _review_git(reg_dir, "hash-object", "--no-filters", "--", rel)
+        if h is None or h.returncode != 0:
+            return None
+        if h.stdout.decode("ascii", "replace").strip() != oid:
+            return rel
+    return ""
+
+
+def _rdp_pathspec_reaches(sub, args, cwd, reg_dir, rels):
+    """The first word of the arguments of git add, rm or mv whose pathspec matches a registry file of rels
+    at reg_dir or a directory above it; None when none does. Literal paths are compared, without regard
+    to case, after resolving them against the session cwd; a pathspec holding glob or magic characters is
+    matched by git ls-files from the cwd (the matching git add and rm use, confirmed with git 2.53 on
+    tracked files), and refused outright for mv. With no pathspec the whole tree is meant (git add -A,
+    git add -u). --pathspec-from-file, a cwd this hook cannot resolve, and a failed ls-files are a match."""
+    if not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return "(an unresolved cwd)"
+    here = os.path.realpath(cwd)
+    targets = [os.path.join(os.path.realpath(reg_dir), rel).casefold() for rel in rels]
+    operands, done = [], False
+    for word in args:
+        name = word.split("=", 1)[0]
+        if done or not word.startswith("-") or word == "-":
+            operands.append(word)
+        elif word == "--":
+            done = True
+        elif len(name) > 2 and "--pathspec-from-file".startswith(name):
+            return word
+    if not operands:
+        return "(no pathspec: the whole tree)"
+    globs = []
+    for word in operands:
+        if word.startswith(":") or any(ch in word for ch in "*?[\\"):
+            if sub == "mv":
+                return word
+            globs.append(word)
+            continue
+        spot = os.path.normpath(os.path.join(here, word)).casefold()
+        if any(t == spot or t.startswith(spot.rstrip("/") + "/") for t in targets):
+            return word
+    if globs:
+        q = _review_git(here, "ls-files", "-z", "--", *globs, literal=False)
+        if q is None or q.returncode != 0:
+            return globs[0]
+        listed = {os.path.normpath(os.path.join(here, item.decode("utf-8", "surrogateescape"))).casefold()
+                  for item in q.stdout.split(b"\0") if item}
+        if listed & set(targets):
+            return globs[0]
+    return None
+
+
+def _rdp_git_tree_write(words, reg_dir, cwd=None):
     """The refusal for a plain git command whose allowlisted subcommand can write or remove work-tree files
-    or the index (_RDP_GIT_TREE_WRITERS), judged by the git state of the registry files at reg_dir; None
-    when the command is no such git command, or the state and its form leave the registry out of reach.
-    Such a command is refused when it runs elsewhere (-C, --git-dir, --work-tree, or a git variable in the
-    environment), when git cannot read the state, and when a registry file is tracked or not ignored.
-    With every registry file untracked and ignored, git leaves it alone (git add -A skips it, git add
-    --pathspec-from-file refuses it, git rm removes only what the index holds, git stash -u, reset --hard,
-    checkout -- . and restore . keep it), so only the forms reaching an ignored file are refused: add
-    --force (-f), stash --all (-a), worktree move and remove (a whole work tree with its ignored files), mv
-    when the registry is not at the top level (a directory moved carries its ignored files), and a
-    subcommand of _RDP_GIT_TREE_CHECKOUTS while a commit the repository reaches tracks a registry path."""
+    or the index (_RDP_GIT_TREE_WRITERS), judged by the git state of the registry files at reg_dir that
+    exist or are tracked (_rdp_registry_git_state); None when the command is no such git command, or the
+    state and its form leave the registry out of reach. Such a command is refused when it runs elsewhere
+    (-C, --git-dir, --work-tree, or a git variable in the environment), when git cannot read the state,
+    and when a registry file exists untracked and not ignored (git add -A then git rm -rf . removes it).
+    Otherwise it is refused only where it can reach a registry file: add --force (-f) and stash --all (-a)
+    while one is ignored (they reach ignored files); worktree move and remove (a whole work tree);
+    add and rm whose pathspec matches a tracked registry file or a directory above it, and mv whose
+    pathspec matches any registry file or a directory above it (a directory moved carries its ignored
+    files) (_rdp_pathspec_reaches); and a subcommand of _RDP_GIT_TREE_CHECKOUTS while a registry file has
+    uncommitted changes it would discard (_rdp_registry_uncommitted) or a commit the repository reaches
+    differs from HEAD at a registry path or holds a non-directory above one (_rdp_registry_drift). A
+    tracked registry, unchanged, is so left to ordinary git add, commit and checkout of a branch holding
+    the same registry blob."""
     if _rdp_basename(words[0]).casefold() != "git":
         return None
     at, _configured = _rdp_git_subcommand(words)
@@ -11815,37 +11959,56 @@ def _rdp_git_tree_write(words, reg_dir):
     if state is None:
         return ("{}, and git cannot say whether the orchestration registry at {} is tracked or ignored, so "
                 "whether it reaches the registry is unknown".format(lead, reg_dir))
-    prefix, problems = state
-    if problems:
+    prefix, files = state
+    loose = ["{} (not ignored)".format(rel) for rel, how in files if how == "not ignored"]
+    if loose:
         return ("{}, and the orchestration registry that binds review dispatch is {} in {}, so such a command "
-                "can remove or rewrite it (git add -A then git rm -rf ., git rm --pathspec-from-file) and "
-                "switch this check off; an operator untracks each registry file (git rm --cached PATH) and "
-                "ignores it (.gitignore or .git/info/exclude) outside the session, after which these "
-                "subcommands are allowed".format(lead, ", ".join(problems), reg_dir))
-    if sub == "add":
+                "can remove or rewrite it (git add -A then git rm -rf ., git stash -u) and switch this check "
+                "off; an operator either ignores it (.gitignore or .git/info/exclude) or commits it, and for "
+                "a machine-local file untracks each registry file (git rm --cached PATH) and ignores it, "
+                "outside the session".format(lead, ", ".join(loose), reg_dir))
+    tracked = [rel for rel, how in files if how == "tracked"]
+    form = None
+    if sub == "add" and len(tracked) < len(files):
         form = _rdp_git_sets_option(args, "f", "--force")
-    elif sub == "stash":
+    elif sub == "stash" and len(tracked) < len(files):
         form = _rdp_git_sets_option(args, "a", "--all", "m")
-    elif sub == "worktree":
+    elif sub == "worktree" and files:
         form = next((w for w in args if w in ("move", "remove")), None)
-    else:
-        form = sub if sub == "mv" and prefix else None
     if form is not None:
-        return ("{}, and its form ({}) reaches an ignored file, the orchestration registry at {} among them "
-                "(add --force stages one, stash --all removes them, worktree move and remove carry or delete "
-                "a work tree's, and mv of a directory carries those inside it when the registry is not at the "
-                "top level), so an operator runs it outside the session".format(lead, form, reg_dir))
+        return ("{}, and its form ({}) reaches an ignored file or a whole work tree, the orchestration "
+                "registry at {} among them (add --force stages one, stash --all removes them, worktree move "
+                "and remove carry or delete a work tree's), so an operator runs it outside the "
+                "session".format(lead, form, reg_dir))
+    if sub in ("add", "rm", "mv"):
+        rels = [rel for rel, _how in files] if sub == "mv" else tracked
+        hit = _rdp_pathspec_reaches(sub, args, cwd, reg_dir, rels) if rels else None
+        if hit is not None:
+            return ("{}, and its pathspec ({}) matches the orchestration registry at {} or a directory above "
+                    "it, so it can stage, remove or move the registry and switch this check off; name the "
+                    "files meant instead, or an operator runs it outside the session".format(lead, hit,
+                                                                                            reg_dir))
+        return None
     if sub not in _RDP_GIT_TREE_CHECKOUTS:
         return None
-    found = _rdp_registry_in_history(reg_dir, prefix)
+    changed = _rdp_registry_uncommitted(reg_dir, prefix) if files else ""
+    if changed is None:
+        return ("{}, and git cannot say whether the orchestration registry at {} has uncommitted changes, so "
+                "whether it discards them is unknown".format(lead, reg_dir))
+    if changed:
+        return ("{} and can discard uncommitted changes, and the registry file {} at {} differs from HEAD "
+                "(in the index or the work tree), so the registry can be rewritten and this check switched "
+                "off; an operator commits or restores it outside the session".format(lead, changed, reg_dir))
+    found = _rdp_registry_drift(reg_dir, prefix)
     if found is None:
-        return ("{}, and git cannot say whether a commit the repository reaches tracks a registry path, so "
-                "whether it overwrites the ignored registry at {} is unknown".format(lead, reg_dir))
+        return ("{}, and git cannot say whether a commit the repository reaches differs from HEAD at a "
+                "registry path, so whether it rewrites the registry at {} is unknown".format(lead, reg_dir))
     if found:
-        return ("{} and can write a commit's tree into it, and the commit {} the repository reaches tracks a "
-                "registry path; git overwrites an ignored untracked file whose path such a tree tracks, so "
-                "the registry at {} can be rewritten and this check switched off, and an operator runs it "
-                "outside the session".format(lead, found, reg_dir))
+        return ("{} and can write a commit's tree into it, and the commit {} the repository reaches differs "
+                "from HEAD at a registry path or holds a file where a directory above one is; git writes "
+                "such a tree over the registry (an ignored untracked file included) or over its directory, "
+                "so the registry at {} can be rewritten or removed and this check switched off, and an "
+                "operator runs it outside the session".format(lead, found, reg_dir))
     return None
 
 
@@ -11976,7 +12139,7 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
                 "separated git directories outside the session".format(moved))
     # A git command that can write or remove work-tree files or the index is judged by the registry's git
     # state, not by its words, which do not say what it reaches.
-    tree = None if reads else _rdp_git_tree_write(words, reg_dir)
+    tree = None if reads else _rdp_git_tree_write(words, reg_dir, data.get("cwd"))
     if tree is not None:
         return ("deny", tree)
     word = _rdp_basename(words[0])
