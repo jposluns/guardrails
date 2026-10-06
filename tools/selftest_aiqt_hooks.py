@@ -1859,10 +1859,14 @@ def _main_isolated(monitor):
                "git --git-dir={}/.git reset --hard".format(rp), "allow-note", cwd=rp)
         expect("(dir-f) --work-tree global option not-certain allows with a note",
                "git --work-tree={0} --git-dir={0}/.git reset --hard".format(rp), "allow-note", cwd=rp)
-        expect("(dir-g) GIT_WORK_TREE= env not-certain allows with a note (F-62.3)", "GIT_WORK_TREE=sub git reset --hard",
-               "allow-note", cwd=rp)
-        expect("(dir-h) GIT_DIR= env not-certain allows with a note (F-62.3/F-66.4)", "GIT_DIR=.git git reset --hard",
-               "allow-note", cwd=rp)
+        # Round 7 UPDATED dir-g/dir-h: ANY GIT_* assignment anywhere in a git-naming command now
+        # DENIES outright (the flat round-7 rule; an inline GIT_WORK_TREE=/GIT_DIR= redirects the
+        # repository view, and the per-position screens kept missing spellings), replacing the old
+        # inline-redirect allow-note.
+        expect("(dir-g) GIT_WORK_TREE= env assignment denies (round-7 GIT_* rule)", "GIT_WORK_TREE=sub git reset --hard",
+               "deny", cwd=rp)
+        expect("(dir-h) GIT_DIR= env assignment denies (round-7 GIT_* rule)", "GIT_DIR=.git git reset --hard",
+               "deny", cwd=rp)
 
         # === the opt-out is a LEADING assignment on the git command only (F-65.F3, blocker 4) =
         # The same string buried in an argument (echo) does NOT disable the guard; the command is compound,
@@ -1894,8 +1898,8 @@ def _main_isolated(monitor):
         # view cannot be proven to be the session cwd, so the early view-uncertainty gate ASKS for ALL forms
         # BEFORE the role logic - including genuinely non-destructive ALLOW forms (reset --soft, plain switch)
         # that previously slipped through to a silent ALLOW.
-        expect("(r13-3a) inline GIT_DIR= on reset --soft (allow form) now allows with a note",
-               "GIT_DIR=/tmp git reset --soft", "allow-note", cwd=rp)
+        expect("(r13-3a) inline GIT_DIR= on reset --soft denies (round-7 GIT_* rule supersedes the "
+               "round-13 view-uncertainty allow-note)", "GIT_DIR=/tmp git reset --soft", "deny", cwd=rp)
         expect("(r13-3b) -C on a plain switch (allow form) now allows with a note",
                "git -C /tmp switch other", "allow-note", cwd=rp)
         # ROUND-6 FINDING 5 (supersedes the round-13 view-uncertainty ASK for this case): a DESTRUCTIVE
@@ -2325,11 +2329,11 @@ def _main_isolated(monitor):
              "deny", 0, "allow-note", 2),
             ("subst-dq-mask", 'echo "$(git reset --hard)" ; git -C {} reset --hard'.format(_npnc_t_s),
              "deny", 0, "allow-note", 2),
-            # codex r2 finding 5 / claude r2 major 4 sibling: GIT_DIR exported in the SAME command - the
-            # no-cwd arm denies; the cwd arm keeps the session snapshot, which may land on a repository
-            # other than the one changed: the DISCLOSED, not chased residual
+            # codex r2 finding 5 / claude r2 major 4 sibling, round 7 UPDATED: a GIT_* exported in the
+            # SAME command is now CHASED by the flat GIT_* rule, so BOTH arms deny (the old cwd arm
+            # kept a session snapshot that could land on the wrong repository)
             ("export-gitdir", "export GIT_DIR={0}/.git GIT_WORK_TREE={0} ; git -C {2} reset --hard"
-             .format(_npnc_t_s, None, _npn2_c_s), "deny", 0, "allow-note", 1),
+             .format(_npnc_t_s, None, _npn2_c_s), "deny", 0, "deny", 0),
             # claude r2 minor 7 / gemini r2 Q2: wrapped and literal ref-level force forms agree with no cwd
             ("wrap-branch-D", "env git branch -D npn3-other ; true", "deny", 0, "allow-note", 1),
         )
@@ -2447,15 +2451,17 @@ def _main_isolated(monitor):
             aiqt_hooks._record_recovery = _orig_npnc_rec
 
         # === D-DISCARD-ALLOWLIST: the top gate is an allowlist. Each non-plain shell form below hides a
-        # === discard from the raw text scan (the pinned bytes allowed every one with no snapshot); it is
-        # === not provably plain, so it denies with no cwd and snapshot-then-allows with a dirty one. The
-        # === plain-status row is a provably plain READ-ONLY command that keeps the exact handling's
-        # === allow; the log/diff rows are round-6 UPDATED (log and diff left the allowlist with the
+        # === discard from the raw text scan (the pinned bytes allowed every one with no snapshot); it
+        # === denies with no cwd and snapshot-then-allows with a dirty one. Round 7 UPDATED the
+        # === plain-status row: the provably-plain read-only fast path is REMOVED (every round found
+        # === another way a "plain" command is not harmless), so even git status is possibly
+        # === discarding now - deny with no cwd, snapshot-then-allow with one. The log/diff rows are
+        # === round-6 UPDATED (log and diff left the allowlist with the
         # === whole argument-screened family, and a --git-dir redirect on a possibly-discarding
         # === command now denies); the commit-msg row is round-5 UPDATED (commit/push left the read-only allowlist, so
         # === a commit message naming a lossy verb is again possibly discarding, a disclosed
         # === over-refusal); the stray-* rows put a git word outside a git command-word position, which
-        # === is never provably plain.
+        # === is never judged plain.
         _np5_cases = (
             ("continuation", "git merge \\\n--abort", "deny", 0, "allow-note", 1),
             ("ansi-c", "git $'\\x72eset' --hard", "deny", 0, "allow-note", 1),
@@ -2466,7 +2472,7 @@ def _main_isolated(monitor):
             ("eval", "v=set; eval git re$v --hard", "deny", 0, "allow-note", 1),
             ("sh-c", "sh -c 'git re$0 --hard' set", "deny", 0, "allow-note", 1),
             ("fragment", "g'i't merge --abort", "deny", 0, "allow-note", 1),
-            ("plain-status", "git status --short", "allow", 0, "allow", 0),
+            ("plain-status", "git status --short", "deny", 0, "allow-note", 1),
             ("plain-log-grep", "git log --oneline | grep reset", "deny", 0, "allow-note", 1),
             ("plain-commit-msg", 'git commit -m "reset the clock" && git push', "deny", 0, "allow-note", 1),
             ("plain-diff-gitdir", "git --git-dir=.git diff HEAD -- file.txt", "deny", 0, "deny", 0),
@@ -2489,17 +2495,8 @@ def _main_isolated(monitor):
                                                                       _got_c[0], _got_c[2]))
         finally:
             aiqt_hooks._record_recovery = _orig_npnc_rec
-        for _lab, _cmd, _w in (
-                ("plain-allowlist", "git status", True), ("plain-bare", "git --version", True),
-                ("plain-gitdir-opt", "git --git-dir=T/.git log", False),
-                ("plain-gitdir-status", "git --git-dir=T/.git status", True),
-                ("not-plain-reset", "git reset --hard", False), ("not-plain-merge", "git merge --abort", False),
-                ("not-plain-alias", "git -c alias.x=status x", False),
-                ("not-plain-path-git", "/usr/bin/git reset --hard", False),
-                ("not-plain-upper", "GIT reset --hard", False)):
-            _pp = getattr(aiqt_hooks, "_provably_plain", None)
-            if _pp is None or _pp(_cmd) is not _w:
-                failures.append("(np5-{}) _provably_plain({!r}) must be {}".format(_lab, _cmd, _w))
+        # Round 7: the _provably_plain fast path is REMOVED; its probe rows are replaced by the
+        # structural assertion below (np8-plain-removed) and by the np8 decision rows.
 
         # === Round 5 (np6): the allowlist admits ONLY subcommand FORMS provably read-only in every
         # === option. Each mutating-form row below was admitted as plain by the pinned bytes (allow,
@@ -2564,20 +2561,6 @@ def _main_isolated(monitor):
                                                                       _got_c[0], _got_c[2]))
         finally:
             aiqt_hooks._record_recovery = _orig_npnc_rec
-        for _lab, _cmd, _w in (
-                ("np6-pp-reflog", "git reflog", False), ("np6-pp-gc", "git gc", False),
-                ("np6-pp-diff-output", "git diff --output=x.txt", False),
-                ("np6-pp-diff-output-sep", "git log --output x.txt", False),
-                ("np6-pp-tag-d", "git tag -d v1", False), ("np6-pp-tag-create", "git tag v1", False),
-                ("np6-pp-add", "git add .", False), ("np6-pp-commit", "git commit -m x", False),
-                ("np6-pp-push", "git push", False), ("np6-pp-fsck", "git fsck", False),
-                ("np6-pp-grep-O", "git grep -O cat TODO", False),
-                ("np6-pp-diff", "git diff HEAD", False), ("np6-pp-tag-list", "git tag -l", False),
-                ("np6-pp-tag-bare", "git tag", False), ("np6-pp-branch-list", "git branch -a", False),
-                ("np6-pp-grep", "git grep -n TODO", False), ("np6-pp-status", "git status", True)):
-            _pp = getattr(aiqt_hooks, "_provably_plain", None)
-            if _pp is None or _pp(_cmd) is not _w:
-                failures.append("({}) _provably_plain({!r}) must be {}".format(_lab, _cmd, _w))
 
         # === Round 6 (np7): the allowlist admits ONLY subcommands with NO destructive or
         # === external-command mode under ANY option, under INERT globals, with NO leading
@@ -2621,19 +2604,6 @@ def _main_isolated(monitor):
                                                                       _got_c[0], _got_c[2]))
         finally:
             aiqt_hooks._record_recovery = _orig_npnc_rec
-        for _lab, _cmd, _w in (
-                ("np7-pp-log", "git log --oneline", False),
-                ("np7-pp-help", "git help status", False),
-                ("np7-pp-lsremote", "git ls-remote .", False),
-                ("np7-pp-config-c", "git -c core.abbrev=12 status", False),
-                ("np7-pp-envassign", "FOO=bar git status", False),
-                ("np7-pp-paginate", "git -p status", False),
-                ("np7-pp-gitdir-status", "git --git-dir=T/.git status", True),
-                ("np7-pp-nopager", "git --no-pager status", True),
-                ("np7-pp-C-status", "git -C /anywhere status", True)):
-            _pp = getattr(aiqt_hooks, "_provably_plain", None)
-            if _pp is None or _pp(_cmd) is not _w:
-                failures.append("({}) _provably_plain({!r}) must be {}".format(_lab, _cmd, _w))
 
         # === Round 6 (np7-stash): the recovery of EVERY possibly-discarding command ALWAYS preserves
         # === the stash entries (refs/stash and its reflog) under durable recovery refs FIRST - NOT
@@ -2674,6 +2644,91 @@ def _main_isolated(monitor):
         finally:
             aiqt_hooks._record_stash_recovery = _orig_np7_pres
             aiqt_hooks._record_recovery = _orig_npnc_rec
+
+        # === Round 7 (np8): the provably-plain READ-ONLY fast path is REMOVED (every round found
+        # === another way a "plain" command is not harmless: blame/annotate/rev-list accept the diff
+        # === machinery's --output, which truncates a caller-named file even on a usage error, and an
+        # === exported GIT_CONFIG_* in an EARLIER statement injects configuration that makes git
+        # === status run a command - the round-7 QA blockers). Every git-naming command outside the
+        # === exact lossy-verb handling is possibly discarding: deny with no cwd, snapshot-then-allow
+        # === with one. ANY GIT_* assignment or export anywhere in a git-naming command denies, as
+        # === does a glob/brace character in a command word (/usr/bin/g[i]t spells a git discard
+        # === without naming git) and an attached parent-escaping option path (-o../victim). Each row
+        # === flips on the round-6 bytes.
+        for _gone in ("_provably_plain", "_plain_git_segment", "_PLAIN_GIT_SUBCOMMANDS",
+                      "_PLAIN_GIT_GLOBAL_FLAGS", "_PLAIN_GIT_GLOBAL_VALUE_OPTS"):
+            if hasattr(aiqt_hooks, _gone):
+                failures.append("(np8-plain-removed) the round-7 rescope removed the plain fast path; "
+                                "{} must no longer exist on the module".format(_gone))
+        _np8_cases = (
+            ("blame-output", "git blame --output=victim tracked", "deny", 0, "allow-note", 1),
+            ("annotate-output", "git annotate --output victim tracked", "deny", 0, "allow-note", 1),
+            ("revlist-output", "git rev-list --output=victim HEAD", "deny", 0, "allow-note", 1),
+            ("status-plain", "git status --short", "deny", 0, "allow-note", 1),
+            ("revparse-plain", "git rev-parse HEAD", "deny", 0, "allow-note", 1),
+            ("lsfiles-plain", "git ls-files -z", "deny", 0, "allow-note", 1),
+            ("version-bare", "git --version", "deny", 0, "allow-note", 1),
+            ("export-config-inject",
+             'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor "GIT_CONFIG_VALUE_0=np8mon" '
+             '; git status --short', "deny", 0, "deny", 0),
+            ("export-bare-name", "export GIT_DIR ; git status", "deny", 0, "deny", 0),
+            ("inline-cosmetic-assign", "GIT_PAGER=cat git status", "deny", 0, "deny", 0),
+            ("t-archive-attached-o", "git archive -o{}/np8-victim HEAD".format(_npnc_t_s), "deny", 0,
+             "allow-note", 2),
+            ("t-attached-parent-escape", "git archive -o../np8-victim HEAD", "deny", 0, "deny", 0),
+            ("glob-command-word", "/usr/bin/g[i]t checkout -- file.txt", "deny", 0, "deny", 0),
+            ("glob-command-word-noverb", "/usr/bin/g[i]t blame --output=file.txt file.txt",
+             "deny", 0, "deny", 0),
+        )
+        aiqt_hooks._record_recovery = _npnc_count
+        try:
+            for _lab, _cmd, _w_nc, _n_nc, _w_c, _n_c in _np8_cases:
+                _got_nc = _npnc_run(_cmd, None)
+                if (_got_nc[0], _got_nc[2]) != (_w_nc, _n_nc):
+                    failures.append("(np8-{}-nocwd) {!r} with no session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_nc, _n_nc,
+                                                                      _got_nc[0], _got_nc[2]))
+                _got_c = _npnc_run(_cmd, str(_npnc))
+                if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
+                    failures.append("(np8-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
+                                                                      _got_c[0], _got_c[2]))
+            # the round-7 codex blocker 2 shape: a NON-COSMETIC ambient GIT_* (config injection) now
+            # denies even a bare git status - the removed plain path skipped the ambient check entirely
+            os.environ["GIT_CONFIG_COUNT"] = "1"
+            try:
+                _got_amb8 = _npnc_run("git status --short", str(_npnc))
+            finally:
+                os.environ.pop("GIT_CONFIG_COUNT", None)
+            if (_got_amb8[0], _got_amb8[2]) != ("deny", 0) or "GIT_*" not in _got_amb8[1]:
+                failures.append("(np8-ambient-config) 'git status --short' under an ambient "
+                                "GIT_CONFIG_COUNT must deny naming the GIT_* cause with 0 snapshots, "
+                                "got {} with {} ({!r})".format(_got_amb8[0], _got_amb8[2],
+                                                               _got_amb8[1][:120]))
+        finally:
+            aiqt_hooks._record_recovery = _orig_npnc_rec
+
+        # === Round 7 (np8-stash): an existing refs/stash TIP whose reflog was EXPIRED (git reflog
+        # === expire --expire=now refs/stash leaves the ref resolvable with an EMPTY reflog) is still
+        # === a live stash commit; preservation now records the resolved tip INDEPENDENTLY of the
+        # === reflog. On the round-6 bytes preservation returned 'none', the clear allow-noted with no
+        # === stash recovery ref, and the tip became unreachable.
+        _np8s = _init_repo(tmp / "np8stash")
+        (_np8s / "file.txt").write_text("committed line\nnp8 stashed\n", encoding="utf-8")
+        _git(_np8s, "stash", "push", "-m", "np8s", env_identity=True)
+        _git(_np8s, "reflog", "expire", "--expire=now", "refs/stash")
+        _np8_tip = subprocess.run(["git", "-C", str(_np8s), "rev-parse", "--verify", "refs/stash"],
+                                  capture_output=True, text=True, timeout=30, env=git_fixture_env())
+        if _np8_tip.returncode != 0:
+            failures.append("(np8-stash-fixture) refs/stash must still resolve after the reflog expiry")
+        _np8_before = len([_r for _r in _recovery_refs(_np8s) if "-stash" in _r])
+        _got_np8s = _npnc_run("git stash clear", str(_np8s))
+        _np8_after = len([_r for _r in _recovery_refs(_np8s) if "-stash" in _r])
+        if _got_np8s[0] != "allow-note" or _np8_after <= _np8_before:
+            failures.append("(np8-stash-emptyreflog) 'git stash clear' on a resolvable refs/stash tip "
+                            "with an EMPTY reflog must preserve the tip under a durable ref then allow "
+                            "with a note; got {} with {} -> {} stash recovery refs"
+                            .format(_got_np8s[0], _np8_before, _np8_after))
 
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file allows with a note on dirty tree",
@@ -8953,10 +9008,12 @@ def _main_isolated(monitor):
           "expbnd (git_explicit_binding) ALLOWS with a note an ambient git target or a relocated whole-tree "
           "breadth op, and DENIES-and-educates a whole-tree breadth stage paired with a publish in one "
           "command (finding 11). prsunc "
-          "(git_discard) recovers-then-allows behind a defensive allowlist: a PROVABLY PLAIN command "
-          "(every git segment an unconditionally read-only subcommand under inert globals with no "
-          "leading assignment) allows untouched; every other command naming git is possibly "
-          "discarding - a recoverable discard first has the stash entries of every snapshot base "
+          "(git_discard) recovers-then-allows behind a defensive allowlist with NO read-only fast "
+          "path (round 7): every command naming git is possibly discarding (a non-git command is the "
+          "true boundary and allows; a glob or brace character in a command word denies, as does ANY "
+          "GIT_* assignment or export anywhere in a git-naming command) - a recoverable discard "
+          "first has the stash entries of every snapshot base, including a resolvable refs/stash tip "
+          "whose reflog is empty, "
           "preserved under durable refs (not keyed on any word in the command) and is then "
           "snapshotted and ALLOWED with a recovery-pointer note "
           "(an unparseable in-scope command WITH a usable cwd snapshots the session cwd then allows, "

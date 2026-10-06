@@ -4400,6 +4400,13 @@ def _record_stash_recovery(repo):
         if listing.returncode != 0:
             return ("fail", "the stash reflog could not be enumerated (rc={})".format(listing.returncode))
         shas = [ln.strip() for ln in listing.stdout.splitlines() if ln.strip()]
+        # ROUND-7 (codex major): a reflog expiry (git reflog expire --expire=now refs/stash) can leave
+        # refs/stash RESOLVABLE while its reflog is EMPTY; that tip is still a live stash commit a
+        # clear/gc/prune would destroy, so the resolved tip is preserved INDEPENDENTLY of its reflog
+        # (never a false 'none' while refs/stash resolves).
+        tip = verify.stdout.strip().splitlines()[0].strip()
+        if tip and tip not in shas:
+            shas.insert(0, tip)
         if not shas:
             return ("none", None)
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -4926,75 +4933,48 @@ def _nonpristine_discard_actions(segments, cwd):
             "cd_unfollowed": cd_unfollowed, "saw_subshell_cd": saw_subshell_cd, "unproven": unproven}
 
 
-_PLAIN_GIT_SUBCOMMANDS = frozenset((
-    "status", "rev-parse", "rev-list", "for-each-ref", "show-ref", "cat-file", "ls-files", "ls-tree",
-    "describe", "blame", "annotate", "merge-base", "cherry", "version", "name-rev", "var",
-    "check-ignore", "check-attr", "check-mailmap", "show-branch", "stripspace", "column",
-    "count-objects", "verify-commit", "verify-tag", "verify-pack"))
-"""Explicit allowlist of git subcommands admitted as PLAIN: ONLY a subcommand with NO destructive and
-NO external-command mode under ANY option is a member (round-6 QA: the round-5 ARGUMENT SCREENING is
-GONE - a per-option screen is an option denylist in disguise, and git accepts bundled short options
-(grep -nO<cmd>) and abbreviated long options (grep --open-files=<cmd>), so no screen over option
-spellings is sound). Every subcommand with even ONE destructive or external-command option form is
-DELIBERATELY ABSENT and routes to the possibly-discarding branch (deny with no session cwd,
-snapshot-then-allow with one), the safe direction: log/show/diff/diff-tree/diff-index/diff-files/
-whatchanged/range-diff/shortlog (the shared diff machinery option --output creates or truncates an
-arbitrary file), grep (-O/--open-files-in-pager runs a command on the matched files, reachable bundled
-and abbreviated), tag and branch (create/delete/annotate/force/rename forms; a pristine bare listing
-keeps its exact-handling allow), help (--web/--man/--info launch an external viewer), ls-remote
-(--upload-pack names a command git executes itself for a local-path remote), reflog and notes
-(expire/delete/drop/remove/prune destroy reflog entries - including the stash reflog - and notes),
-gc/prune/repack/pack-refs/maintenance (expire reflogs and prune unreachable objects, the very recovery
-data this hook creates), init and clone, add/commit/commit-tree/write-tree/mktree/mktag/hash-object/
-pack-objects, fetch/pull/push/remote/config/symbolic-ref/credential, format-patch/archive/bundle/
-fast-export, interpret-trailers/rerere/fsck, the discarding verbs checkout/switch/restore/reset/clean/
-rm, stash, merge/rebase/cherry-pick/revert/bisect/submodule/worktree/mv/update-index/update-ref, and
-every UNRECOGNISED subcommand (a typo, an alias name, checkout-index, read-tree). A subcommand not
-listed is treated conservatively until reviewed and added."""
+_GLOB_WORD_CHARS = ("*", "?", "[", "{")
+_GLOB_WORD_EXEMPT = frozenset(("[", "[[", "{", "}"))
 
 
-_PLAIN_GIT_GLOBAL_FLAGS = frozenset((
-    "--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs",
-    "--version", "--html-path", "--man-path", "--info-path"))
-_PLAIN_GIT_GLOBAL_VALUE_OPTS = frozenset(("-C", "--git-dir", "--work-tree", "--namespace"))
-_PLAIN_GIT_GLOBAL_EQ_PREFIXES = ("--git-dir=", "--work-tree=", "--namespace=")
-"""The INERT git global options a PLAIN segment may carry: location/view selectors and UI-off flags
-that cannot make a read-only subcommand destructive or run a command. A WHITELIST (an unknown, new or
-abbreviated global is never assumed inert): -c and --config-env are absent because command-line
-configuration injection can make even git status execute a command (core.fsmonitor; core.pager and
-diff.external on other members) - the round-6 claude finding; --exec-path=<dir> redirects which git
-programs run; -p/--paginate forces the configured pager to run."""
-
-
-def _plain_git_segment(tokens):
-    """True when ONE git segment is PROVABLY READ-ONLY in EVERY option form: NO leading environment
-    assignment (GIT_CONFIG_COUNT=/GIT_CONFIG_KEY_0=... inject configuration exactly as -c does, and a
-    whitelist of harmless variable names would be unsound against new ones), every pre-subcommand
-    GLOBAL option on the recognized inert whitelist, and the subcommand on the unconditional read-only
-    allowlist (or absent: a bare git --version). Anything else is NOT plain and routes to the
-    possibly-discarding branch, the safe direction."""
-    if _command_word_index(tokens) != 0:
+def _glob_command_word(tokens):
+    """ROUND-7 QA (claude medium): True when a segment COMMAND WORD carries a shell glob or brace
+    character (* ? [ {). Bash expands such a word against the filesystem (or brace-assembles it)
+    BEFORE execution, so the program that actually runs is assembled at run time and no raw-text scan
+    can see it: /usr/bin/g[i]t checkout -- f expands to a git discard while the text never spells
+    git. The test-builtin words [ and [[ and the group words { and } are shell syntax, not patterns,
+    and are exempt. Judged on the DECODED token, so a QUOTED "g[i]t" (which bash would NOT expand)
+    matches too: a deliberate over-refusal, the safe direction."""
+    idx = _command_word_index(tokens)
+    if idx >= len(tokens):
         return False
-    i = 1
-    n = len(tokens)
-    while i < n:
-        t = tokens[i]
-        if not t.startswith("-"):
-            return t in _PLAIN_GIT_SUBCOMMANDS
-        if t in _PLAIN_GIT_GLOBAL_VALUE_OPTS:
-            i += 2
-            continue
-        if t in _PLAIN_GIT_GLOBAL_FLAGS or t.startswith(_PLAIN_GIT_GLOBAL_EQ_PREFIXES):
-            i += 1
-            continue
+    t = tokens[idx]
+    if t in _GLOB_WORD_EXEMPT:
         return False
-    return True
+    return any(c in t for c in _GLOB_WORD_CHARS)
+
+
+_GIT_ENV_ASSIGN_RE = re.compile(r"\bGIT_[A-Za-z0-9_]*\+?=")
+_GIT_ENV_EXPORT_RE = re.compile(
+    r"\b(?:export|declare|typeset|readonly|local|setenv)\b[^;|&\n]*\bGIT_[A-Za-z0-9_]*")
+"""ROUND-7 RESCOPE: ANY GIT_* assignment (FOO= or FOO+=, inline, wrapped, quoted, or in another
+statement of the same command) or any export/declare/typeset/readonly/local/setenv statement naming a
+GIT_* variable DENIES a git-naming command outright. GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/
+GIT_CONFIG_VALUE_n inject configuration exactly as -c does (core.fsmonitor makes even git status run a
+command), GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE redirect the repository view, and an export in an
+EARLIER statement reaches the git segment exactly like an inline assignment (the round-7 QA blocker),
+so no per-variable or per-position screen is sound. Both regexes are scanned over the raw text AND the
+de-quoted rendering (quote fragmentation cannot hide the name); matching prose that merely mentions a
+GIT_* assignment (a commit message, an echoed string) is a deliberate over-refusal, the safe
+direction. Case-sensitive: git's environment names are uppercase, and --git-dir=/.gitignore spellings
+stay out of scope."""
+
 
 _NONPLAIN_WORDS = frozenset(_WRAPPER_WORDS) | frozenset((
     "eval", "source", ".", "python", "python2", "python3", "perl", "ruby", "node", "zsh", "dash",
     "ksh", "fish", "csh", "tcsh", "find", "awk", "ssh", "su", "setsid", "stdbuf", "doas", "chroot",
     "unshare", "script", "watch", "flock", "alias", "parallel"))
-"""Command words that make a command NOT provably plain: an eval, a shell/interpreter whose -c/script
+"""Command words that make a command NOT lexically plain: an eval, a shell/interpreter whose -c/script
 string this guard will not parse, or a wrapper that can hide a git invocation. Any segment led by one of
 these routes the whole command to the possibly-discarding branch."""
 
@@ -5049,8 +5029,8 @@ def _names_git_program(token):
 
 def _lexically_plain_git_segs(command):
     """The TOKEN LISTS of the git segments of a LEXICALLY PLAIN command, in segment order, or None
-    when the command is not lexically plain (round 6: the plainness judgment needs the whole segment -
-    leading assignments and global options included - not just the subcommand and its arguments).
+    when the command is not lexically plain (round 7: used ONLY to decide whether the exact handling
+    can trust the segmentation - the read-only plain fast path this judgment once fed is REMOVED).
     Lexically plain: the hook lexer parses
     the ENTIRE text into plain words (no heredoc, here-string, process substitution, unbalanced
     quote/escape, NUL, or other unsupported construct); quoting is simple single or double quotes around
@@ -5062,7 +5042,7 @@ def _lexically_plain_git_segs(command):
     segment. That
     last rule keeps a git invocation the segment scan does not see as a git segment (a word after a
     reserved word such as then/do, an xargs or runner argument, quoted text piped to a shell, an echo of
-    a git command) out of the plain set: each such command routes to the possibly-discarding branch."""
+    a git command) out of the exact handling: each such command routes to the possibly-discarding branch."""
     try:
         segs = _lex_command(command)
     except ValueError:
@@ -5089,21 +5069,8 @@ def _lexically_plain_git_segs(command):
     return subs
 
 
-def _provably_plain(command):
-    """Decide whether command is PROVABLY PLAIN, the allowlist condition at the top of git_discard: it is
-    lexically plain (_lexically_plain_git_segs) and every git segment is PROVABLY READ-ONLY in every
-    option form (_plain_git_segment: an unconditionally read-only subcommand under inert globals with
-    no leading assignment, or a bare 'git --version'). A provably plain command is read-only under
-    every option spelling this guard admits, so it keeps the existing exact handling (which allows
-    it); what pre-existing on-disk configuration makes git run (a pager, textconv, fsmonitor) is a
-    disclosed residual, not something the plain set screens. Anything else is NOT provably plain."""
-    segs = _lexically_plain_git_segs(command)
-    if segs is None:
-        return False
-    return all(_plain_git_segment(_t) for _t in segs)
-
-
 _PATH_PARENT_ESCAPE_RE = re.compile(r"(?:^|/)\.\.(?:/|$)")
+_OPT_PARENT_ESCAPE_RE = re.compile(r"\.\.(?:/|$)")
 
 
 def _possibly_discarding_targets(segments, base):
@@ -5206,7 +5173,22 @@ def _possibly_discarding_targets(segments, base):
                 elif idx == 0 and action in ("remove", "move"):
                     return "deny"
         for t in gtoks[_command_word_index(gtoks) + 1:]:
-            cands = (t, t.split("=", 1)[1]) if "=" in t else (t,)
+            if "=" in t:
+                cands = (t, t.split("=", 1)[1])
+            elif t.startswith("-"):
+                # ROUND-7 (codex major): an ATTACHED short-option path (git archive -o/victim/f) never
+                # became a path candidate. The option letters cannot be split from the value with
+                # certainty, so the tail from the FIRST slash is the candidate when that tail is a
+                # path, and an attached parent-escaping value (-o../victim) DENIES outright: it names
+                # a location outside every snapshotted base that this guard cannot pin. A relative
+                # attached value with no slash and no parent escape (-ovictim) stays inside the
+                # snapshotted session base.
+                if _OPT_PARENT_ESCAPE_RE.search(t):
+                    return "deny"
+                _sl = t.find("/")
+                cands = (t, t[_sl:]) if _sl > 0 else (t,)
+            else:
+                cands = (t,)
             for c in cands:
                 if not c or not (c.startswith("/") or _PATH_PARENT_ESCAPE_RE.search(c)):
                     # a tilde operand is NOT a candidate: the shell expands a word-leading tilde
@@ -5275,14 +5257,16 @@ def _snapshot_bases_then_allow(bases, kind):
             if snap is None and _s[0] == "ok":
                 snap = _s
     return _discard_recovery_result(
-        kind, "is not a provably plain git command (it carries shell structure, a wrapped or obfuscated "
-              "form, or a discarding subcommand); a recovery snapshot targets the session directory and "
-              "every worktree this guard resolved before allowing", snap, _OPTOUT_REISSUE)
+        kind, "names git (round 7: every git-naming command outside the exact lossy-verb handling is "
+              "treated as possibly discarding - no read-only fast path remains); a recovery snapshot "
+              "targets the session directory and every worktree this guard resolved before allowing",
+        snap, _OPTOUT_REISSUE)
 
 
 def _possibly_discarding(command, cwd):
-    """The POSSIBLY-DISCARDING branch of the allowlist gate: a command that is NOT provably plain but
-    whose text names git. ALLOWED (snapshot-then-allow) ONLY with a usable session cwd, no non-cosmetic
+    """The POSSIBLY-DISCARDING branch of the allowlist gate (round 7: the DEFAULT branch): EVERY
+    command whose text names git and that does not take the exact lossy-verb handling - no read-only
+    fast path remains. ALLOWED (snapshot-then-allow) ONLY with a usable session cwd, no non-cosmetic
     ambient GIT_* override, no env --chdir/-C wrapper override, every target it resolves resolvable, and
     a successful recovery snapshot of the session cwd AND every resolved target; otherwise it DENIES with
     a clear reason (when the hook is unsure, it refuses). Rounds 5 and 6: a segment that NAMES another
@@ -5296,11 +5280,11 @@ def _possibly_discarding(command, cwd):
     verb, every wrapped/obfuscated form, and a command that merely MENTIONS a lossy git verb such as an
     echo, a heredoc body, or piped grep text denies with no cwd and snapshots-then-allows with one) are
     pinned by vectors and recorded in the manifest residue."""
-    kind = "a command that is not provably plain and names a git work-losing verb"
+    kind = "a command that names git and is treated as possibly discarding"
     if _ambient_repo_view_override():
         return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): this command is not a provably plain git "
-            "command and the environment carries a non-cosmetic ambient GIT_* variable (e.g. GIT_DIR/"
+            "AIQT rule prsunc (preserve-uncommitted-work): this command names git, so it is treated as "
+            "possibly discarding, and the environment carries a non-cosmetic ambient GIT_* variable (e.g. GIT_DIR/"
             "GIT_WORK_TREE), which can point every git it runs at a DIFFERENT repository than any "
             "worktree this guard resolves, so no snapshot it takes provably contains the state the "
             "command would discard; denied rather than run on a possibly unrecoverable discard. Unset the "
@@ -5311,8 +5295,8 @@ def _possibly_discarding(command, cwd):
     base = cwd if isinstance(cwd, str) and cwd else None
     if base is None:
         return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): this command is not a provably plain git "
-            "command and the hook payload carries no session working directory, so this guard has no "
+            "AIQT rule prsunc (preserve-uncommitted-work): this command names git, so it is treated as "
+            "possibly discarding, and the hook payload carries no session working directory, so this guard has no "
             "worktree to snapshot for a discard that may act on it; denied rather than allowed with no "
             "recovery point. Run it from a working directory the hook can see, or commit or stash your "
             "work first. {}".format(_DISCARD_ALTS),
@@ -5348,8 +5332,8 @@ def _possibly_discarding(command, cwd):
     except ValueError:
         if _RAW_TARGET_REDIRECT_RE.search(command) or _RAW_TARGET_REDIRECT_RE.search(_dequote_render(command)):
             return _deny(
-                "AIQT rule prsunc (preserve-uncommitted-work): this command is not a provably plain git "
-                "command, the shell lexer cannot parse it, and its text carries a target redirect or "
+                "AIQT rule prsunc (preserve-uncommitted-work): this command names git, so it is treated as "
+                "possibly discarding, the shell lexer cannot parse it, and its text carries a target redirect or "
                 "directory change (-C/--chdir/--git-dir/--work-tree, a GIT_DIR=/GIT_WORK_TREE= assignment, "
                 "or a cd/pushd), so this guard cannot resolve which worktree or repository it acts on and a "
                 "snapshot of the session directory would not provably contain the state it would discard; "
@@ -5400,8 +5384,8 @@ def _possibly_discarding(command, cwd):
     extra_targets = _possibly_discarding_targets(segments, base)
     if extra_targets == "deny":
         return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): this command is not a provably plain git "
-            "command and names another repository or worktree this guard cannot pin to snapshot (a "
+            "AIQT rule prsunc (preserve-uncommitted-work): this command names git, is treated as possibly "
+            "discarding, and names another repository, worktree or path target this guard cannot pin to snapshot (a "
             "--git-dir/GIT_DIR= redirect, an opaque -C/--work-tree target, or a git worktree "
             "remove/move whose path does not resolve to a directory), so no snapshot it takes provably "
             "contains the state the command would discard; denied rather than run on a possibly "
@@ -5512,56 +5496,93 @@ def git_discard(data):
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
         return _allow()  # boundary: unreadable/malformed command container
-    # ALLOWLIST GATE (D-DISCARD-ALLOWLIST). Recognising a discarding command by its text is incomplete,
-    # so the gate is an allowlist: when the guard is unsure, it refuses. A PROVABLY PLAIN command (every
-    # git segment provably READ-ONLY in every option form, _plain_git_segment) keeps the exact handling below,
-    # which allows it. Every other command whose raw or de-quoted
-    # text names git is possibly discarding. A LEXICALLY plain one whose git segments are all
-    # provably read-only or recognized lossy verbs (or whose text the raw scan flags, so an unrecognized
-    # checkout-index/read-tree keeps its F-97 deny) is fully parsed, so after the cwd and ambient GIT_*
-    # preconditions (which the opt-out does not lift) it takes the existing exact handling, keeping its
-    # stricter decisions (the dirty whole-tree clobber deny, the redirect denies, stash preservation);
-    # on that path a git segment NEITHER plain NOR a recognized verb additionally gets the round-6
-    # named-target scan and the unconditional stash preservation (the round-5 raw-lossy scanner bypass:
-    # an unrelated lossy word elsewhere in the text routed a git -C /victim mv -f form around
-    # _possibly_discarding and its target scan entirely).
-    # Anything else (a non-plain shell form, an unflagged unrecognized subcommand such as merge --abort
-    # or worktree remove -f) takes _possibly_discarding.
+    # ALLOWLIST GATE (D-DISCARD-ALLOWLIST; ROUND-7 RESCOPE under D-DISCARD-SOUND-RULE: the
+    # provably-plain READ-ONLY fast path is REMOVED). Recognising a discarding command by its text is
+    # incomplete, so the gate is an allowlist: when the guard is unsure, it refuses. Every round of QA
+    # found another way a "plain" command is not harmless (--output on the revision machinery of
+    # blame/annotate/rev-list, an exported GIT_CONFIG_* from an EARLIER statement of the same
+    # command), so NO git-naming command is exempt from the recover-then-allow treatment any more:
+    # there is no read-only fast path left to probe for. Gate order: (1) a segment command word
+    # carrying a glob/brace character DENIES (bash can assemble a git program name from it:
+    # /usr/bin/g[i]t checkout; checked BEFORE the git-name boundary, which such a spelling is built to
+    # evade); (2) a command with NO git in its raw or de-quoted text is the true boundary and ALLOWS;
+    # (3) any GIT_* assignment or export anywhere in the command DENIES (configuration injection makes
+    # even git status execute a command, and an export in an earlier statement reaches the git segment
+    # exactly like an inline assignment - the round-7 QA blockers); (4) a LEXICALLY plain command
+    # whose git segments all resolve to recognized lossy verbs (or whose text the raw scan flags, so
+    # an unrecognized checkout-index/read-tree keeps its F-97 deny) is fully parsed, so after the cwd
+    # and ambient GIT_* preconditions (which the opt-out does not lift) it keeps the existing exact
+    # handling and its stricter decisions (the dirty whole-tree clobber deny, the redirect denies,
+    # stash preservation); on that path a git segment that is NOT a recognized verb additionally gets
+    # the named-target scan and the unconditional stash preservation; (5) anything else takes
+    # _possibly_discarding: DENY with no usable session cwd, snapshot the session cwd and every
+    # resolvable target then allow with one.
+    try:
+        _gate_segs = _segments(command)
+    except ValueError:
+        _gate_segs = None
+    if _gate_segs is not None:
+        for _gtoks, _gsep in _gate_segs:
+            if _glob_command_word(_gtoks):
+                return _deny(
+                    "AIQT rule prsunc (preserve-uncommitted-work): a command word of this command "
+                    "carries a shell glob or brace character, which bash expands against the "
+                    "filesystem (or brace-assembles) before execution, so the program that would "
+                    "actually run is assembled at run time and this guard cannot prove it is not a "
+                    "git discard (/usr/bin/g[i]t spells one without naming git); denied rather than "
+                    "run a command it cannot classify. Re-issue it with the program name spelled "
+                    "literally. {}".format(_DISCARD_ALTS),
+                    "AIQT guardrail: denied a command whose command word carries a glob or brace "
+                    "character this guard cannot resolve to a program (rule prsunc); spell the "
+                    "program name literally.")
+    if not (_RAW_GIT_RE.search(command) or _RAW_GIT_RE.search(_dequote_render(command))):
+        return _allow()  # the true boundary: no git anywhere in the raw or de-quoted text
+    _dq_render = _dequote_render(command)
+    if (_GIT_ENV_ASSIGN_RE.search(command) or _GIT_ENV_ASSIGN_RE.search(_dq_render)
+            or _GIT_ENV_EXPORT_RE.search(command) or _GIT_ENV_EXPORT_RE.search(_dq_render)):
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command names git and its text "
+            "carries a GIT_* assignment or export (inline, in another statement, or quoted). A GIT_* "
+            "variable can redirect the repository view of every git the shell runs (GIT_DIR/"
+            "GIT_WORK_TREE/GIT_INDEX_FILE) or inject configuration that makes even a read-only git "
+            "subcommand execute a command (GIT_CONFIG_COUNT/KEY/VALUE naming core.fsmonitor), so no "
+            "snapshot this guard takes provably contains the state the command could discard; denied "
+            "rather than run on a possibly unrecoverable discard. Re-issue the git command WITHOUT "
+            "any GIT_* assignment or export, or commit or stash your work first. {}"
+            .format(_DISCARD_ALTS),
+            "AIQT guardrail: denied a git command carrying a GIT_* assignment or export this guard "
+            "cannot resolve to snapshot (rule prsunc); re-issue it without the GIT_* assignment, or "
+            "commit or stash first.")
     plain_segs = _lexically_plain_git_segs(command)
-    plain = plain_segs is not None and all(_plain_git_segment(_t) for _t in plain_segs)
-    if not plain:
-        if not (_RAW_GIT_RE.search(command) or _RAW_GIT_RE.search(_dequote_render(command))):
-            return _allow()  # not provably plain, but no git anywhere: the true boundary
-        if plain_segs is None or not (_raw_lossy_anywhere(command) or all(
-                _plain_git_segment(_t) or _git_sub_and_args(_t)[0] in _RECOGNIZED_VERBS
-                for _t in plain_segs)):
-            return _possibly_discarding(command, data.get("cwd"))  # not plain, names git
-        if _ambient_repo_view_override():
-            return _deny(
-                "AIQT rule prsunc (preserve-uncommitted-work): this command runs a git work-losing verb "
-                "and the environment carries a non-cosmetic ambient GIT_* variable (e.g. GIT_DIR/"
-                "GIT_WORK_TREE), which can point every git it runs at a DIFFERENT repository than any "
-                "worktree this guard resolves, so no snapshot it takes provably contains the state the "
-                "command would discard; denied rather than run on a possibly unrecoverable discard (a "
-                "leading GUARDRAIL_ALLOW_DISCARD=1 does not lift this precondition). Unset the GIT_* "
-                "override, or commit or stash your work first. {}".format(_DISCARD_ALTS),
-                "AIQT guardrail: denied a git discard under an ambient GIT_* repository-view override "
-                "this guard cannot resolve to snapshot (rule prsunc); unset the override, or commit or "
-                "stash first.")
-        _gate_cwd = data.get("cwd")
-        if not (isinstance(_gate_cwd, str) and _gate_cwd):
-            return _deny(
-                "AIQT rule prsunc (preserve-uncommitted-work): this command runs a git work-losing verb "
-                "and the hook payload carries no session working directory, so this guard has no "
-                "worktree to snapshot for a discard that may act on it; denied rather than allowed with "
-                "no recovery point (a leading GUARDRAIL_ALLOW_DISCARD=1 does not lift this "
-                "precondition). Run it from a working directory the hook can see, or commit or stash "
-                "your work first. {}".format(_DISCARD_ALTS),
-                "AIQT guardrail: denied a git discard with no session directory to snapshot (rule "
-                "prsunc); run it from a working directory the hook can see, or commit or stash first.")
-    # A provably plain command is out of scope (never a raw lossy hit); a lexically plain command with
-    # a recognized lossy verb keeps the raw signal the exact handling below was written against.
-    raw_lossy = (not plain) and _raw_lossy_anywhere(command)
+    if plain_segs is None or not (_raw_lossy_anywhere(command) or all(
+            _git_sub_and_args(_t)[0] in _RECOGNIZED_VERBS for _t in plain_segs)):
+        return _possibly_discarding(command, data.get("cwd"))  # names git: possibly discarding
+    if _ambient_repo_view_override():
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command runs a git work-losing verb "
+            "and the environment carries a non-cosmetic ambient GIT_* variable (e.g. GIT_DIR/"
+            "GIT_WORK_TREE), which can point every git it runs at a DIFFERENT repository than any "
+            "worktree this guard resolves, so no snapshot it takes provably contains the state the "
+            "command would discard; denied rather than run on a possibly unrecoverable discard (a "
+            "leading GUARDRAIL_ALLOW_DISCARD=1 does not lift this precondition). Unset the GIT_* "
+            "override, or commit or stash your work first. {}".format(_DISCARD_ALTS),
+            "AIQT guardrail: denied a git discard under an ambient GIT_* repository-view override "
+            "this guard cannot resolve to snapshot (rule prsunc); unset the override, or commit or "
+            "stash first.")
+    _gate_cwd = data.get("cwd")
+    if not (isinstance(_gate_cwd, str) and _gate_cwd):
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command runs a git work-losing verb "
+            "and the hook payload carries no session working directory, so this guard has no "
+            "worktree to snapshot for a discard that may act on it; denied rather than allowed with "
+            "no recovery point (a leading GUARDRAIL_ALLOW_DISCARD=1 does not lift this "
+            "precondition). Run it from a working directory the hook can see, or commit or stash "
+            "your work first. {}".format(_DISCARD_ALTS),
+            "AIQT guardrail: denied a git discard with no session directory to snapshot (rule "
+            "prsunc); run it from a working directory the hook can see, or commit or stash first.")
+    # Round 7: every command reaching the exact handling names git beside a recognized lossy verb or a
+    # raw-scan hit; the plain fast path is gone, so the raw signal is computed unconditionally.
+    raw_lossy = _raw_lossy_anywhere(command)
     segments = _segments(command)  # lexically plain: _lexically_plain_git_segs already parsed it
 
     # Precisely-identified lossy git segments (the clean-parse signal). A git command-word segment whose
@@ -5741,14 +5762,14 @@ def git_discard(data):
                 "this guard cannot prove non-destructive (rule prsunc); commit or stash first, or "
                 "re-issue in a recognized form.")
         # ROUND-6 (codex major, the raw-lossy scanner bypass): this exact-handling branch also receives
-        # a command flagged ONLY by the raw whole-text scan while some git segment is NEITHER provably
-        # plain NOR a recognized lossy verb (git -C /victim mv -f src dest ; echo reset): the walker
+        # a command flagged ONLY by the raw whole-text scan while some git segment is NOT a recognized
+        # lossy verb (git -C /victim mv -f src dest ; echo reset): the walker
         # above resolves targets only for recognized verbs, so the named victim was never snapshotted.
         # Run the same named-target scan as the possibly-discarding branch: snapshot every resolved
         # target or deny, never neither. (A wrapped git never reaches this branch: a wrapper word makes
         # the command non-lexically-plain, routing it to _possibly_discarding, which always scans.)
-        if any(_command_word(_toks) == "git" and not (
-                _plain_git_segment(_toks) or _git_sub_and_args(_toks)[0] in _RECOGNIZED_VERBS)
+        if any(_command_word(_toks) == "git"
+               and _git_sub_and_args(_toks)[0] not in _RECOGNIZED_VERBS
                for _toks, _sep2 in segments):
             _np_extra = _possibly_discarding_targets(segments, np_base)
             if _np_extra == "deny":
