@@ -924,7 +924,6 @@ def _main_isolated(report_path=None):
                  "git commit -F - <<'EOF'\nDon't vendor the SDK; pin it.\nEOF"),
                 ("trunc/fg-h2-heredoc-amp-body-allows", "gh pr create --title t --body-file - <<'EOF'\nRe-pin A & B\nEOF"),
                 ("trunc/fg-h3-heredoc-apostrophe-file-allows", "cat > /tmp/brief.md <<'EOF'\nthe worker's deliverable\nEOF"),
-                ("trunc/fg-h4-heredoc-amp-python-allows", "python3 - <<'PY'\nmask = GENERATED & {1,2}\nPY"),
                 ("trunc/fg-h5-commit-template-quoted-amp-allows",
                  "git commit -m \"$(cat <<'EOF'\nRe-pin \"A & B\" to main\nEOF\n)\""),
                 ("trunc/fg-h7-unquoted-delim-apostrophe-allows", "cat <<EOF > /tmp/x.txt\nit's $HOME\nEOF"),
@@ -945,13 +944,21 @@ def _main_isolated(report_path=None):
                 ("trunc/fg-simple-delim-underscore-digit-allows", "cat <<END_1\nx & y\nEND_1"),
                 ("trunc/fg-quoted-heredoc-backslash-body-allows", "cat <<'EOF'\nC:\\path & \\\\\nEOF"),
                 ("trunc/fg-heredoc-redirect-and-chain-allows",
-                 "cat <<'EOF' 2>&1 >> /tmp/n.md && wc -l /tmp/n.md\nit's A & B\nEOF")):
+                 "cat <<'EOF' 2>&1 >> /tmp/n.md && wc -l /tmp/n.md\nit's A & B\nEOF"),
+                # QA round 13 grammars: each accepted git and gh spelling, and a pipeline of two owners.
+                ("trunc/heredoc-grammar-git-tag-file-allows", "git tag -a v1 -F - <<'EOF'\nRe-pin A & B\nEOF"),
+                ("trunc/heredoc-grammar-git-notes-add-allows", "git notes add --file=- <<'EOF'\nit's A & B\nEOF"),
+                ("trunc/heredoc-grammar-git-commit-file-space-allows",
+                 "git commit --file - <<'EOF'\nit's A & B\nEOF"),
+                ("trunc/heredoc-grammar-gh-issue-create-allows",
+                 "gh issue create --title 'Re-pin' -F - <<'EOF'\nit's A & B\nEOF"),
+                ("trunc/heredoc-grammar-pipe-cat-gh-allows",
+                 "cat <<'EOF' | gh pr edit 7 --body-file -\nit's A & B\nEOF")):
             check(name, _verdict(bg(cmd, rib=False)), "allow")
         # The H-cases that main's scan DENIES are allowed only through the allowance (proven True).
         check("trunc/heredoc-allowance-h-cases-proven", [aiqt_hooks._orch_heredoc_data_proven(c) for c in (
             "git commit -F - <<'EOF'\nDon't vendor the SDK; pin it.\nEOF",
-            "python3 - <<'PY'\nmask = GENERATED & {1,2}\nPY",
-            "git commit -m \"$(cat <<'EOF'\nRe-pin \"A & B\" to main\nEOF\n)\"")], [True, True, True])
+            "git commit -m \"$(cat <<'EOF'\nRe-pin \"A & B\" to main\nEOF\n)\"")], [True, True])
         check("trunc/heredoc-allowance-main-denies-h-cases", [aiqt_hooks._orch_foreground_detach_kind(c) for c in (
             "git commit -F - <<'EOF'\nDon't vendor the SDK; pin it.\nEOF",
             "python3 - <<'PY'\nmask = GENERATED & {1,2}\nPY")], ["unbalanced", "detach"])
@@ -1060,10 +1067,50 @@ def _main_isolated(report_path=None):
                 ("trunc/heredoc-allowance-commit-not-cat-denies",
                  "git commit -m \"$(bash <<'EOF'\nA \" & B\nEOF\n)\""),
                 ("trunc/heredoc-allowance-commit-same-line-heredoc-denies",
-                 "git commit -m \"$(cat <<'EOF'\nA \" & B\nEOF\n)\" -F - <<'X'\nm\nX")):
+                 "git commit -m \"$(cat <<'EOF'\nA \" & B\nEOF\n)\" -F - <<'X'\nm\nX"),
+                # QA round 13 BLOCKER: a git alias runs its standard input as shell (each ALLOWED at
+                # ec06271f; bash printed the child pid), directly or fed by a cat pipeline.
+                ("trunc/fg-r13-git-alias-stdin-shell-denies",
+                 "git -c alias.qa='!bash /dev/stdin' qa <<'EOF'\ntrue &\necho CHILD=$!\nwait\nEOF"),
+                ("trunc/fg-r13-pipe-git-alias-stdin-shell-denies",
+                 "cat <<'EOF' | git -c alias.qa='!bash /dev/stdin' qa\ntrue &\necho CHILD=$!\nwait\nEOF"),
+                # python3, python, and node are no longer owners: a body with '&' gets main's verdict (H4
+                # included, an allow at ec06271f).
+                ("trunc/fg-h4-heredoc-amp-python-main-verdict-denies",
+                 "python3 - <<'PY'\nmask = GENERATED & {1,2}\nPY"),
+                ("trunc/fg-r13-python-amp-body-denies", "python - <<'PY'\nx = 1 & 2\nPY"),
+                ("trunc/fg-r13-node-amp-body-denies", "node - <<'JS'\nconst x = 1 & 2;\nJS"),
+                # QA round 13 MINOR: no redirection before a command word, the owner included.
+                ("trunc/heredoc-allowance-redirect-before-owner-denies", "</dev/null cat " + r12_body),
+                ("trunc/heredoc-allowance-fd-redirect-before-owner-denies", "2>/dev/null cat " + r12_body),
+                ("trunc/heredoc-allowance-redirect-before-later-word-denies",
+                 "cat " + r12_body + "\n>/dev/null ls"),
+                # Per-owner grammars: git is only commit, tag, or notes add straight after the command word,
+                # reading standard input; gh is only issue or pr create, comment, or edit with --body-file -
+                # or -F -; the other owners take plain words only; and no '$' in a git or gh argument.
+                ("trunc/heredoc-grammar-git-unknown-subcommand-denies", "git ci -F - " + r12_body),
+                ("trunc/heredoc-grammar-git-other-subcommand-denies", "git apply -F - " + r12_body),
+                ("trunc/heredoc-grammar-git-no-stdin-option-denies", "git commit -m x " + r12_body),
+                ("trunc/heredoc-grammar-git-notes-ref-option-denies", "git notes --ref=x add -F - " + r12_body),
+                ("trunc/heredoc-grammar-git-quoted-subcommand-denies", "git 'commit' -F - " + r12_body),
+                ("trunc/heredoc-grammar-git-dollar-argument-denies", "git commit $X -F - " + r12_body),
+                ("trunc/heredoc-grammar-pipe-git-add-denies", "cat <<'EOF' | git add -F -\nA & it's\nEOF"),
+                ("trunc/heredoc-grammar-gh-alias-denies", "gh co --body-file - " + r12_body),
+                ("trunc/heredoc-grammar-gh-extension-denies", "gh myext issue create -F - " + r12_body),
+                ("trunc/heredoc-grammar-gh-other-subcommand-denies", "gh api -F - " + r12_body),
+                ("trunc/heredoc-grammar-gh-no-body-file-denies", "gh pr comment 7 --body x " + r12_body),
+                ("trunc/heredoc-grammar-cat-quoted-argument-denies", "cat 'a b' " + r12_body),
+                ("trunc/heredoc-grammar-orch-send-dollar-argument-denies", "orch-send $X " + r12_body),
+                ("trunc/heredoc-grammar-pipe-jq-quoted-program-denies", "cat <<'EOF' | jq '.a'\nA & it's\nEOF")):
             check(name, (aiqt_hooks._orch_foreground_detach_kind(cmd) is not None,
                          aiqt_hooks._orch_heredoc_data_proven(cmd), _verdict(bg(cmd, rib=False))),
                   (True, False, "deny"))
+        # Each git global option before the subcommand is refused, so git keeps main's verdict.
+        check("trunc/heredoc-grammar-git-global-options-deny", [
+            (aiqt_hooks._orch_heredoc_data_proven(c), _verdict(bg(c, rib=False))) for c in (
+                "git " + opt + " commit -F - " + r12_body for opt in (
+                    "-c x=y", "--config-env=x=Y", "--exec-path=/tmp", "-C /tmp", "--git-dir=/tmp",
+                    "--work-tree=/tmp", "-p"))], [(False, "deny")] * 7)
         # Three earlier-round reproductions are main's OWN disclosed false allows (residuals (1) and (5) of
         # _orch_foreground_detach: an '&' inside a double-quoted substitution, and body quotes that rebalance
         # the scan). Main's scan allows each, so the guard returns main's verdict (allow), as before PR 451.
@@ -2534,7 +2581,8 @@ def _main_isolated(report_path=None):
           "producer's full output and exit status) and a "
           "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment, "
           "keeping main's scan verdict except that a deny becomes an allow only when the here-document data "
-          "allowance proves the whole command safe (listed data-consumer owners, plain outside text, no other "
+          "allowance proves the whole command safe (listed data-consumer owners, each command held to its "
+          "own argument grammar, plain outside text, no other "
           "'&'; every codex reproduction main denies stays denied), and failing a "
           "scan that ends inside an "
           "open quote toward a deny with its own reason (a quote the scan misreads in mid-string, such as "

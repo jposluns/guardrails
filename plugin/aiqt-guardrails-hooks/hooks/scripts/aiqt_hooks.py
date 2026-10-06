@@ -9760,10 +9760,25 @@ def _orch_foreground_detach(command):
 # that reading is withdrawn. The guard now turns a deny of the scan into an allow ONLY when
 # _orch_heredoc_data_proven proves the whole command safe; any command it cannot prove is judged EXACTLY as
 # main judges it (the scan above on the full command), and it never turns an allow into a deny.
-# Every here-document's owning command word is a bare literal on this closed list of data consumers; none runs
-# its standard input as shell code (python3, python, and node run it as their own language: disclosed).
+# Every here-document's owning command word is a bare literal on this closed list of data consumers, and EVERY
+# simple command whose command word is on it, owner or not and in a pipeline or not, must match that word's own
+# argument grammar (_orch_heredoc_grammar_ok), so none can run its standard input or a command it is handed
+# (QA round 13: git -c alias.x='!bash /dev/stdin' x ran its body as shell). python3, python, and node are NOT
+# listed anywhere: a body they read is a program that can start a detached process.
 _ORCH_HEREDOC_DATA_OWNERS = frozenset((
-    "cat", "tee", "git", "gh", "python3", "python", "node", "jq", "inbox-send", "orch-send", "orch-verify"))
+    "cat", "tee", "git", "gh", "jq", "inbox-send", "orch-send", "orch-verify"))
+# Owners whose every argument must be a plain word (unquoted word characters only: no quote, no expansion).
+_ORCH_HEREDOC_PLAIN_ARG_OWNERS = frozenset(("cat", "tee", "jq", "inbox-send", "orch-send", "orch-verify"))
+# git and gh are accepted only as these subcommands, written as plain words straight after the command word
+# (so no global option, alias, or extension), reading the message from standard input with one of these
+# option spellings (for git, a recognised commit-form argument instead also satisfies this).
+_ORCH_HEREDOC_SUBCOMMANDS = {
+    "git": (("commit",), ("tag",), ("notes", "add")),
+    "gh": (("issue", "create"), ("issue", "comment"), ("issue", "edit"),
+           ("pr", "create"), ("pr", "comment"), ("pr", "edit"))}
+_ORCH_HEREDOC_STDIN_OPTIONS = {
+    "git": (("-F", "-"), ("--file=-",), ("--file", "-")),
+    "gh": (("--body-file", "-"), ("-F", "-"))}
 # Programs that cannot run another program (the shared plain-command classifier's list, without git and opf,
 # plus tee and jq). Every command word that is not a here-document owner must be one of these or an owner.
 _ORCH_HEREDOC_NO_EXEC_WORDS = frozenset((
@@ -9786,9 +9801,14 @@ _ORCH_HEREDOC_SINKS = frozenset(("/dev/null", "/dev/stdout", "/dev/stderr"))
 # The allowance as one sentence, shared by the deny reasons.
 _ORCH_HEREDOC_ALLOWANCE = (
     "a here-document body is read as data ONLY when the whole command is provably safe: every "
-    "here-document belongs to a bare cat, tee, git, gh, python3, python, node, jq, inbox-send, orch-send, or "
-    "orch-verify with no word before it; every other command word is one of those or a program that cannot "
-    "run another (ls, echo, printf, grep, head, cp, and the like); the text outside the bodies holds only "
+    "here-document belongs to a bare cat, tee, git, gh, jq, inbox-send, orch-send, or orch-verify with no "
+    "word or redirection before it (python3, python, and node are not accepted); every other command word is "
+    "one of those or a program that cannot run another (ls, echo, printf, grep, head, cp, and the like), and "
+    "no redirection precedes any command word; cat, tee, jq, inbox-send, orch-send, and orch-verify take "
+    "plain unquoted words only; git is only git commit, git tag, or git notes add straight after the command "
+    "word, reading -F -, --file=-, or --file - (or the commit form below), and gh is only gh issue or gh pr "
+    "with create, comment, or edit, reading --body-file - or -F -, each with no '$' in its arguments, and "
+    "every command of a pipeline is held to its own rule; the text outside the bodies holds only "
     "plain words, single-quoted text, double-quoted text, a simple $NAME after the command word, the "
     "operators &&, ||, |, and ;, and redirections, with no other '&', backslash, '#', glob, brace, bracket, "
     "or substitution, except one double-quoted \"$(cat <<'EOF' ... EOF\\n)\" argument; an unquoted "
@@ -9821,13 +9841,43 @@ def _orch_heredoc_body_end(command, i, delim, quoted, strip_tabs):
     return -1
 
 
+def _orch_heredoc_grammar_ok(cmd, args):
+    """True when one simple command's arguments match the grammar of its command word `cmd` (None for an
+    empty command). `args` lists each argument word after the command word, redirection targets excluded, as
+    (kind, text): kind "plain" (unquoted word characters only), "quoted" (a single- or double-quoted part,
+    no expansion), "expand" (a simple $NAME), or "commit" (the recognised commit form). A word on
+    _ORCH_HEREDOC_PLAIN_ARG_OWNERS takes plain words only. git and gh take no "expand" word, must start with
+    a subcommand on _ORCH_HEREDOC_SUBCOMMANDS written as plain words straight after the command word (so no
+    global option such as -c, --config-env, --exec-path, -C, --git-dir, --work-tree, or -p, and no alias,
+    extension, or unknown subcommand), and must read standard input with a spelling on
+    _ORCH_HEREDOC_STDIN_OPTIONS (plain words) or, for git only, carry a commit-form argument; gh takes no
+    commit-form argument. Any other word (a program on _ORCH_HEREDOC_NO_EXEC_WORDS) passes."""
+    if cmd in _ORCH_HEREDOC_PLAIN_ARG_OWNERS:
+        return all(kind == "plain" for kind, _ in args)
+    if cmd not in _ORCH_HEREDOC_SUBCOMMANDS:
+        return True
+    kinds = [kind for kind, _ in args]
+    if "expand" in kinds or (cmd == "gh" and "commit" in kinds):
+        return False
+    plain = [text if kind == "plain" else None for kind, text in args]
+    sub = next((s for s in _ORCH_HEREDOC_SUBCOMMANDS[cmd] if tuple(plain[:len(s)]) == s), None)
+    if sub is None:
+        return False
+    rest = plain[len(sub):]
+    return (cmd == "git" and "commit" in kinds) or any(
+        tuple(rest[k:k + len(spelling)]) == spelling
+        for spelling in _ORCH_HEREDOC_STDIN_OPTIONS[cmd] for k in range(len(rest)))
+
+
 def _orch_heredoc_data_proven(command):
     """The HERE-DOCUMENT DATA ALLOWANCE (_ORCH_HEREDOC_ALLOWANCE): True only when `command` holds at least
     one here-document and is PROVABLY SAFE to run with every body read as data, so a deny of main's scan
     there was caused by body text alone. A strict lexer reads the text outside the bodies and returns False
     at the first thing it does not accept: (a) each `<<WORD` or `<<-WORD` (WORD letters, digits, and
     underscores, optionally wrapped whole in one pair of quotes) follows a command word on
-    _ORCH_HEREDOC_DATA_OWNERS in the same simple command; (b) that outside text is plain under the shared
+    _ORCH_HEREDOC_DATA_OWNERS in the same simple command, no redirection comes before any command word, and
+    every simple command (each command of a pipeline included) matches its command word's argument grammar
+    (_orch_heredoc_grammar_ok); (b) that outside text is plain under the shared
     classifier's rules 1 to 3 (printable ASCII and newlines only; plain unquoted word characters; single-quoted
     text holding no $, backtick, backslash, [, or ]; double-quoted text holding no rule-2 character; a
     simple $NAME only after the command word; every command word a bare literal on
@@ -9841,7 +9891,8 @@ def _orch_heredoc_data_proven(command):
     _ORCH_HEREDOC_NO_EXEC_WORDS, so a body written to a file is not run later in the same call."""
     n = len(command)
     words, outside, pending = [], [], []
-    st = {"cmd": None, "word": None, "plain": True, "redirect": None, "writes": False}
+    st = {"cmd": None, "args": [], "word": None, "plain": True, "expand": False, "commit": False,
+          "redirect": None, "writes": False}
     seg, i = 0, 0
     seen = line_heredoc = line_commit = False
 
@@ -9849,7 +9900,8 @@ def _orch_heredoc_data_proven(command):
         word, redirect = st["word"], st["redirect"]
         if word is None:
             return True
-        st["word"], st["plain"], plain = None, True, st["plain"]
+        plain, expand, commit = st["plain"], st["expand"], st["commit"]
+        st["word"], st["plain"], st["expand"], st["commit"] = None, True, False, False
         if redirect is not None:
             st["redirect"] = None
             if redirect in (">", ">>", "&>", "&>>") and not (plain and word in _ORCH_HEREDOC_SINKS):
@@ -9860,6 +9912,16 @@ def _orch_heredoc_data_proven(command):
                 return False
             st["cmd"] = word
             words.append(word)
+        else:
+            st["args"].append(("commit" if commit else "expand" if expand else "plain" if plain else "quoted",
+                               word))
+        return True
+
+    def end_command():
+        # One simple command ends: its arguments must match its command word's grammar.
+        if not end_word() or st["redirect"] is not None or not _orch_heredoc_grammar_ok(st["cmd"], st["args"]):
+            return False
+        st["cmd"], st["args"] = None, []
         return True
 
     while i < n:
@@ -9869,9 +9931,9 @@ def _orch_heredoc_data_proven(command):
                 return False
             i += 1
         elif c == "\n":
-            if not end_word() or st["redirect"] is not None:
+            if not end_command():
                 return False
-            st["cmd"], line_heredoc, line_commit = None, False, False
+            line_heredoc = line_commit = False
             i += 1
             for delim, quoted, strip_tabs in pending:
                 end = _orch_heredoc_body_end(command, i, delim, quoted, strip_tabs)
@@ -9882,16 +9944,15 @@ def _orch_heredoc_data_proven(command):
             del pending[:]
         elif c in ";|" or command.startswith("&&", i):
             op = command[i:i + 2] if command[i:i + 2] in ("&&", "||") else c
-            if not end_word() or st["redirect"] is not None or st["cmd"] is None:
+            if not end_word() or st["cmd"] is None or not end_command():
                 return False
-            st["cmd"] = None
             i += len(op)
         elif c in "<>&":
             if c in "<>" and st["word"] is not None and st["plain"] and len(st["word"]) == 1 \
                     and st["word"].isdigit():
                 st["word"] = None  # a file-descriptor prefix such as 2>
-            if not end_word() or st["redirect"] is not None:
-                return False
+            if not end_word() or st["redirect"] is not None or st["cmd"] is None:
+                return False  # no redirection (here-documents included) before the command word
             if command.startswith("<<", i):
                 if command.startswith("<<<", i) or st["cmd"] not in _ORCH_HEREDOC_DATA_OWNERS or line_commit:
                     return False
@@ -9938,7 +9999,7 @@ def _orch_heredoc_data_proven(command):
                 return False
             outside.append(command[seg:start])
             seg = end + 1
-            st["word"], st["plain"] = "\"\"", False
+            st["word"], st["plain"], st["commit"] = "\"\"", False, True
             seen = line_commit = True
             i = end + 3
         elif c == '"':
@@ -9947,6 +10008,7 @@ def _orch_heredoc_data_proven(command):
                 ch = command[j]
                 if ch == "$" and st["cmd"] is not None and _ORCH_HEREDOC_NAME_RE.match(command, j + 1):
                     j = _ORCH_HEREDOC_NAME_RE.match(command, j + 1).end()
+                    st["expand"] = True
                     continue
                 if not " " <= ch <= "~" or ch in _ORCH_HEREDOC_DQ_BANNED:
                     return False
@@ -9957,16 +10019,16 @@ def _orch_heredoc_data_proven(command):
             i = j + 1
         elif c == "$":
             m = _ORCH_HEREDOC_NAME_RE.match(command, i + 1)
-            if m is None or (st["cmd"] is None and st["redirect"] is None):
+            if m is None or st["cmd"] is None:
                 return False
-            st["word"], st["plain"] = (st["word"] or "") + command[i:m.end()], False
+            st["word"], st["plain"], st["expand"] = (st["word"] or "") + command[i:m.end()], False, True
             i = m.end()
         elif c in _ORCH_HEREDOC_WORD_CHARS:
             st["word"] = (st["word"] or "") + c
             i += 1
         else:
             return False
-    if not end_word() or st["redirect"] is not None or pending or not seen:
+    if not end_command() or pending or not seen:
         return False
     if (st["writes"] or "tee" in words) and not all(w in _ORCH_HEREDOC_NO_EXEC_WORDS for w in words):
         return False
@@ -10102,13 +10164,14 @@ def orch_truncation_guard(data):
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
     and wait); every other foreground call remains out of scope (the harness returns its output directly).
-    The detach scan reads a HERE-DOCUMENT BODY under a simple delimiter word as DATA (no quote balancing or '&' detection sees it; for
-    an unquoted delimiter only the body's command/backtick substitution spans are re-scanned as code, and an
-    unquoted body holding any backslash is scanned as code and denied, a disclosed over-refusal) and
-    recognises a here-document only under a simple delimiter word (letters, digits, underscores,
-    optionally wrapped whole in quotes) and reads arithmetic as code, as on main; a foreground command whose scan ends inside
-    an open quote, or with a here-document still awaiting its terminator line, DENIES with a reason naming
-    that defect (fail-toward-deny, never a silent allow).
+    The foreground verdict is main's detach scan (_orch_foreground_detach_kind) on the full command,
+    unchanged: it reads a here-document body as CODE and reads arithmetic as code, and a command whose scan
+    ends inside an open quote DENIES with a reason naming that defect. Its one exception is the
+    HERE-DOCUMENT DATA ALLOWANCE (_orch_foreground_verdict, _orch_heredoc_data_proven): a deny of that scan
+    becomes an allow only when the whole command is proven safe with every body read as data; any command it
+    cannot prove keeps main's verdict exactly, and an allow is never turned into a deny. A here-document
+    still awaiting its terminator line is not itself denied: the allowance never applies to it, so it gets
+    main's verdict (an unterminated `cat <<EOF` with a plain body ALLOWS, as on main).
 
     MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
     not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
