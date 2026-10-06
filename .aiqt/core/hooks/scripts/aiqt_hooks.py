@@ -10834,26 +10834,26 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
 # character); (2) no character of _RDP_PLAIN_FORBIDDEN appears outside a single-quoted segment; (3) a
 # single-quoted segment is literal, a double-quoted segment holds no character of _RDP_PLAIN_FORBIDDEN, and
 # an unterminated quote is not plain; (4) words are separated by spaces only, and the first word, the
-# command, is a bare name or path of _RDP_COMMAND_WORD_CHARS (so it is unquoted and no assignment leads)
-# that is not a shell, an interpreter or a wrapper (_RDP_WRAPPERS). Rules 1 and 2 exclude every expansion,
-# substitution, glob, redirection, operator, comment and escape, so a plain command is exactly one simple
-# command whose words are its literal text.
+# command, is a bare name of _RDP_COMMAND_WORD_CHARS (so it is unquoted and no assignment leads), or an
+# absolute path whose directory is one of _RDP_PLAIN_DIRS, naming a program of the allowlist
+# _RDP_PLAIN_COMMANDS (or, for this hook, a declared dispatch command, which the pin check judges). Rules 1
+# and 2 exclude every expansion, substitution, glob, redirection, operator, comment and escape, so a plain
+# command is exactly one simple command whose words are its literal text.
 _RDP_PLAIN_FORBIDDEN = frozenset("$`\\;&|<>(){}[]*?!#~")
 _RDP_COMMAND_WORD_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-")
-# The command words that run another command, or text, as a command: shells, interpreters, and the
-# builtins and wrappers that run their arguments. Compared without regard to case, and again with a
-# trailing version removed (python3.12, perl5.36). An explicit list is sound here only because rules 1 and
-# 2 already exclude every expansion, so the command word is exactly the text written.
-_RDP_WRAPPERS = frozenset((
-    "sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", "mksh", "pdksh", "oksh", "yash", "fish", "csh",
-    "tcsh", "busybox", "toybox", "python", "pypy", "perl", "ruby", "irb", "node", "nodejs", "deno", "bun",
-    "php", "lua", "luajit", "tclsh", "wish", "expect", "awk", "gawk", "mawk", "nawk", "osascript", "pwsh",
-    "powershell", "rscript", "julia", "guile", "racket", "groovy", "jshell", "ghci", "runghc", "eval",
-    "exec", "source", ".", "env", "command", "builtin", "xargs", "nohup", "timeout", "sudo", "doas", "su",
-    "runuser", "nice", "ionice", "chrt", "taskset", "setsid", "setpriv", "stdbuf", "unbuffer", "time",
-    "watch", "flock", "chroot", "unshare", "nsenter", "systemd-run", "script", "strace", "ltrace", "gdb",
-    "valgrind", "parallel", "fakeroot", "proot", "firejail", "bwrap", "caffeinate", "rlwrap", "entr", "ssh",
-    "find", "sed", "make", "coproc", "trap", "alias", "function"))
+# Rule 4's allowlist of command words, compared exactly: git and opf, which can run other programs and so
+# are judged by each hook's own semantic check, and programs that cannot run another program. A list of
+# the programs that do run others was bypassed by a versioned interpreter path, so every other command
+# word (a shell, an interpreter at any version, awk, sed, find, xargs, env, tar, make, sort, whose
+# --compress-program runs a program, an editor, a wrapper) is not plain. Membership never makes a command
+# safe by itself.
+_RDP_PLAIN_COMMANDS = frozenset((
+    "git", "opf", "ls", "cat", "echo", "printf", "pwd", "true", "false", "test", "head", "tail", "wc", "grep",
+    "egrep", "fgrep", "diff", "cmp", "stat", "du", "df", "date", "basename", "dirname", "realpath", "readlink",
+    "uniq", "cut", "tr", "mkdir", "rmdir", "touch", "cp", "mv", "rm", "ln", "chmod"))
+# The only directories a command word written as a path may name; any other path (relative, ./ls,
+# /tmp/x/ls) is not plain.
+_RDP_PLAIN_DIRS = frozenset(("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin"))
 # The shared vector table every implementation of the specification carries as self-test rows: (command,
 # whether it is provably plain). `git log --output=f` is plain: an output option is each hook's own
 # semantic check, not lexing.
@@ -10863,7 +10863,10 @@ _RDP_PLAIN_VECTORS = (
     ("git status; rm x", False), ("git $'re\\x00set'", False), ('git commit -m "$(id)"', False),
     ("python3 -c 'print(1)'", False), ("env GIT_DIR=x git log", False), ("GIT_DIR=x git log", False),
     ("git st*", False), ("git log \\\n", False), ("git log \u0661", False), ("bash -c 'x'", False),
-    ("xargs git reset", False))
+    ("xargs git reset", False), ("/usr/bin/python3.14 -c 'x'", False), ("python3.14 -c 'x'", False),
+    ("awk -f p", False), ("sed -n p f", False), ("find . -delete", False), ("tar -xf a", False),
+    ("sort -S 4K --compress-program=bash f", False), ("./ls", False), ("/tmp/x/ls", False),
+    ("nodejs -e x", False), ("/usr/bin/ls docs", True), ("rm notes.txt", True))
 
 
 def _rdp_basename(word):
@@ -10871,17 +10874,22 @@ def _rdp_basename(word):
     return word.rsplit("/", 1)[-1]
 
 
-def _rdp_is_wrapper(word):
-    """Whether the command word word runs another command (_RDP_WRAPPERS)."""
-    name = _rdp_basename(word).casefold()
-    return name in _RDP_WRAPPERS or name.rstrip("0123456789.") in _RDP_WRAPPERS
+def _rdp_plain_command(word, declared=()):
+    """Whether the command word word is plain under rule 4: a bare name, or a path whose directory is one of
+    _RDP_PLAIN_DIRS, naming a program of _RDP_PLAIN_COMMANDS (compared exactly) or one of the dispatch
+    commands declared (compared without regard to case)."""
+    directory, slash, name = word.rpartition("/")
+    if slash and directory not in _RDP_PLAIN_DIRS:
+        return False
+    return name in _RDP_PLAIN_COMMANDS or name.casefold() in {d.casefold() for d in declared}
 
 
-def _rdp_plain_words(command):
+def _rdp_plain_words(command, declared=()):
     """(words, None) when command is provably plain under the shared specification above, words being the
     literal word values with the quotes removed; otherwise (None, reason). The verdict is taken on the raw
     characters: nothing is decoded and no escape or expansion is interpreted, and anything the
-    specification does not name as plain is not plain."""
+    specification does not name as plain is not plain. declared names the dispatch commands this hook
+    also admits as command words, since the pin check is their semantic check."""
     if not isinstance(command, str):
         return (None, "the command is not a string")
     for ch in command:
@@ -10919,8 +10927,8 @@ def _rdp_plain_words(command):
     head = command.lstrip(" ").split(" ", 1)[0]
     if not head or any(ch not in _RDP_COMMAND_WORD_CHARS for ch in head):
         return (None, "a command word that is not a bare name or path")
-    if _rdp_is_wrapper(head):
-        return (None, "the command word {!r} runs another command".format(head))
+    if not _rdp_plain_command(head, declared):
+        return (None, "the command word {!r} is not on the allowlist of plain programs".format(head))
     return (words, None)
 
 
@@ -11233,8 +11241,9 @@ def _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign):
 
 
 # The commands a plain call may run on a registry file or the .aiqt directory, because they only read
-# (no option of theirs writes a file); a bare command word, compared without regard to case.
-_RDP_REGISTRY_READERS = frozenset(("cat", "head", "tail", "wc", "ls", "stat", "grep", "jq", "cmp", "diff"))
+# (no option of theirs writes a file): programs of rule 4's allowlist (_RDP_PLAIN_COMMANDS), named by the
+# command word's last component.
+_RDP_REGISTRY_READERS = frozenset(("cat", "head", "tail", "wc", "ls", "stat", "grep", "cmp", "diff"))
 
 
 def _rdp_word_values(folded):
@@ -11264,7 +11273,7 @@ def _rdp_names_registry(words, cwd=None):
     is .aiqt or a glob matching it or a registry file; and by a word entering a .aiqt directory (-C
     .aiqt/core) in a command that also climbs with .., which can then reach it. A Bash call that writes,
     moves or removes the registry would switch the hook off for every later call."""
-    if words[0].casefold() in _RDP_REGISTRY_READERS:
+    if _rdp_basename(words[0]) in _RDP_REGISTRY_READERS:
         return None
     names = tuple(rel.rsplit("/", 1)[-1].casefold() for rel in _ORCH_REGISTRY_FILES)
     targets = names + (".aiqt",)
@@ -11295,26 +11304,125 @@ def _rdp_names_registry(words, cwd=None):
 # set either. A separated git directory (--separate-git-dir) moves the repository the same way. Each would
 # point git's top level away from the registry that binds the session.
 _RDP_REPOSITORY_KEYS = ("core.worktree", "core.bare", "include.path", "includeif.", "--separate-git-dir")
-_RDP_GIT_CONFIG_READS = frozenset(("--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list",
-                                   "get", "list"))
-_RDP_GIT_CONFIG_WRITES = frozenset(("--add", "--replace-all", "--unset", "--unset-all", "--rename-section",
-                                    "--remove-section", "-e", "--edit", "set", "unset", "edit",
-                                    "rename-section", "remove-section"))
+# The git subcommands that only read: a plain git command running one of them (matched exactly, as git runs
+# a built-in only under its exact name and an alias never hides one) treats every word as data, so neither
+# a registry name nor a repository key in it is refused (git log -S core.worktree, git ls-files '*').
+_RDP_GIT_READS = frozenset(("status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "grep",
+                            "cat-file"))
+# git's global options before the subcommand: those taking the next word as their value (or, written
+# long, a value after =), and those taking none. Any other leaves the subcommand unknown.
+_RDP_GIT_GLOBAL_VALUED = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"))
+_RDP_GIT_GLOBAL_FLAGS = frozenset(("-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--bare",
+                                   "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+                                   "--icase-pathspecs", "--no-optional-locks"))
+# The git config read actions, each with the least and most operands it takes, and the options that may
+# precede one without changing what it does (--show-origin only before a list).
+_RDP_GIT_CONFIG_READS = {"--get": (1, 2), "--get-all": (1, 2), "--get-regexp": (1, 2), "--list": (0, 0),
+                         "-l": (0, 0)}
+_RDP_GIT_CONFIG_MODIFIERS = frozenset(("--local", "--global", "--system", "--worktree", "--show-scope", "-z",
+                                       "--null", "--name-only", "--includes", "--no-includes", "--bool",
+                                       "--int", "--bool-or-int", "--path", "--expiry-date", "--fixed-value"))
+
+
+def _rdp_git_subcommand(words):
+    """(index, configured) for a plain git command: the index in words of its subcommand, None when a
+    global option this hook does not know comes first or no subcommand follows; and whether a global
+    option sets configuration for the call (-c, --config-env), which can make any subcommand run a
+    program."""
+    configured = False
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if not word.startswith("-"):
+            return (i, configured)
+        name = word.split("=", 1)[0]
+        configured = configured or name in ("-c", "--config-env")
+        if word in _RDP_GIT_GLOBAL_VALUED:
+            i += 2
+        elif word in _RDP_GIT_GLOBAL_FLAGS or (name in _RDP_GIT_GLOBAL_VALUED and name.startswith("--") and
+                                               name != word):
+            i += 1
+        else:
+            return (None, configured)
+    return (None, configured)
+
+
+def _rdp_git_reads(words):
+    """Whether a plain command is a git command that only reads: its subcommand is on _RDP_GIT_READS, no
+    global option sets configuration, and no word is an --output option (abbreviated or not), which writes
+    a file, or, for grep, an -O or --open-files-in-pager option, which runs a program on the matches."""
+    if _rdp_basename(words[0]) != "git":
+        return False
+    at, configured = _rdp_git_subcommand(words)
+    if at is None or configured or words[at] not in _RDP_GIT_READS:
+        return False
+    for word in words[at + 1:]:
+        name = word.split("=", 1)[0]
+        if len(name) > 2 and "--output".startswith(name):
+            return False
+        if words[at] == "grep" and ((len(name) > 3 and "--open-files-in-pager".startswith(name)) or
+                                    (name.startswith("-") and not name.startswith("--") and "O" in name)):
+            return False
+    return True
+
+
+def _rdp_git_config_reads(args):
+    """Whether the words after git config only read, judged by position: exactly one key (no option, and
+    holding a dot, so no subcommand such as edit), the implicit read; or a read action of
+    _RDP_GIT_CONFIG_READS after modifiers only, followed by the number of operands it takes, none an
+    option. Every other form may write: a trailing word is a value there, so git config core.worktree get
+    sets core.worktree to get."""
+    if len(args) == 1:
+        return not args[0].startswith("-") and "." in args[0]
+    i = 0
+    while i < len(args) and (args[i] in _RDP_GIT_CONFIG_MODIFIERS or args[i] == "--show-origin" or
+                             args[i].startswith("--type=")):
+        i += 1
+    if i == len(args) or args[i] not in _RDP_GIT_CONFIG_READS:
+        return False
+    if "--show-origin" in args[:i] and args[i] not in ("--list", "-l"):
+        return False
+    least, most = _RDP_GIT_CONFIG_READS[args[i]]
+    operands = args[i + 1:]
+    return least <= len(operands) <= most and not any(word.startswith("-") for word in operands)
+
+
+def _rdp_config_names_repository(word):
+    """Whether a word of a git config call that may write names repository configuration: a key or option
+    of _RDP_REPOSITORY_KEYS, the core, include or includeIf section (a --rename-section target), or an edit
+    action, whose editor can set any key (compared without regard to case)."""
+    low = word.casefold()
+    name = low.split("=", 1)[0]
+    return any(key in low for key in _RDP_REPOSITORY_KEYS) or low in ("core", "include", "edit") or \
+        low.startswith("includeif") or (len(name) > 3 and "--edit".startswith(name)) or \
+        (low.startswith("-") and not low.startswith("--") and "e" in low)
 
 
 def _rdp_moves_repository(words):
-    """The first word of a plain git command that names a configuration key or option of
-    _RDP_REPOSITORY_KEYS (compared without regard to case, anywhere in the word, so -c core.bare=true and
-    --separate-git-dir=PATH are found); None when the command is no git command, names none, or is a
-    git config call that only reads (a read action and no write action)."""
+    """The first word of a plain git command that may change where the repository or its work tree is; None
+    when the command is no git command or changes neither. A git config call is judged by position: a read
+    (_rdp_git_config_reads) changes nothing, and any other form naming repository configuration
+    (_rdp_config_names_repository), or a -c or --config-env global naming a repository key, does. Any other
+    subcommand does when a word names a key or option of _RDP_REPOSITORY_KEYS (compared without regard to
+    case, anywhere in the word, so -c core.bare=true and --separate-git-dir=PATH are found). A git command
+    that only reads (_rdp_git_reads) is not judged here."""
     if _rdp_basename(words[0]).casefold() != "git":
         return None
-    folded = [word.casefold() for word in words[1:]]
-    if "config" in folded and any(w in _RDP_GIT_CONFIG_READS for w in folded) and \
-            not any(w in _RDP_GIT_CONFIG_WRITES for w in folded):
-        return None
-    for word, low in zip(words[1:], folded):
-        if any(key in low for key in _RDP_REPOSITORY_KEYS):
+    at, _configured = _rdp_git_subcommand(words)
+    if at is None and "config" in [word.casefold() for word in words[1:]]:
+        # A subcommand behind a global option this hook does not know may be config: every word is judged
+        # as a word of a config call that may write.
+        return next((word for word in words[1:] if _rdp_config_names_repository(word)), None)
+    if at is not None and words[at].casefold() == "config":
+        for word in words[1:at]:
+            if any(key in word.casefold() for key in _RDP_REPOSITORY_KEYS):
+                return word
+        args = words[at + 1:]
+        if _rdp_git_config_reads(args):
+            return None
+        return next((word for word in args if _rdp_config_names_repository(word)), None)
+    for word in words[1:]:
+        if any(key in word.casefold() for key in _RDP_REPOSITORY_KEYS):
             return word
     return None
 
@@ -11325,9 +11433,10 @@ def _rdp_not_plain(cfg, names, why):
     name = names[0] if names else sorted(cfg["commands"])[0]
     return ("unverifiable", "the command {} ({}), so the hook cannot tell whether it runs a review dispatch, "
             "which brief it reads or where; in a session whose registry binds review dispatch, every Bash "
-            "call must be one plain command: literal printable ASCII words only (a single-quoted segment, or "
-            "a double-quoted one holding no shell character, may appear inside a word), no wrapper, "
-            "variable, glob, operator, redirection or second command; split the work into plain calls, and "
+            "call must be one plain command: a command word on the allowlist of plain programs, literal "
+            "printable ASCII words only (a single-quoted segment, or a double-quoted one holding no shell "
+            "character, may appear inside a word), no variable, glob, operator, redirection or second "
+            "command; split the work into plain calls, and "
             "write a dispatch as {} [OPTIONS] {} PATH with the brief option last".format(
                 "names the declared dispatch command " + name + " other than as a plain dispatch" if names
                 else "is not plain", why, name, cfg["brief_option"]))
@@ -11345,16 +11454,19 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
     if not isinstance(command, str):
         return ("unverifiable", "the Bash tool_input carries no command string")
     commands = cfg["commands"]
-    words, why = _rdp_plain_words(command)
+    words, why = _rdp_plain_words(command, commands)
     if words is None:
         return _rdp_not_plain(cfg, _rdp_mentions(command, commands), why)
-    touched = _rdp_names_registry(words, data.get("cwd"))
+    # A git command that only reads treats every word as data: it neither writes the registry nor moves
+    # the repository, whatever its words name.
+    reads = _rdp_git_reads(words)
+    touched = None if reads else _rdp_names_registry(words, data.get("cwd"))
     if touched is not None:
         return ("deny", "the command names the orchestration registry ({}) that binds review dispatch in "
                 "this session; a Bash call that may write, move or remove it would switch this check off, so "
                 "only a read ({}) may name it, and an operator changes the registry outside the "
                 "session".format(touched, ", ".join(sorted(_RDP_REGISTRY_READERS))))
-    moved = _rdp_moves_repository(words)
+    moved = None if reads else _rdp_moves_repository(words)
     if moved is not None:
         return ("deny", "the git command changes where the repository or its work tree is ({}); in a session "
                 "whose registry binds review dispatch, a moved top level would be checked against another "
@@ -11437,8 +11549,10 @@ def review_dispatch_pin(data):
     immutable, authoritative revision whose changed set is the declared review set and whose declared
     paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
     dispatch runs. Inert without a review_dispatch binding; in a session a binding scopes, a Bash call that
-    is not one provably plain command is withheld, a plain one naming the registry is refused unless it only
-    reads, and a malformed registry or binding, or a linked worktree whose main worktree cannot be located,
+    is not one provably plain command (its command word on the allowlist, or a declared dispatch command)
+    is withheld, a plain one naming the registry is refused unless it only reads, a plain git command that
+    may move the repository is refused (git config judged by position, a read-only git subcommand's words
+    taken as data), and a malformed registry or binding, or a linked worktree whose main worktree cannot be located,
     withholds every Bash call.
     A refusal denies and names its reason; a cannot-evaluate denies with an UNVERIFIABLE: prefix; a
     declared non-revision target, or a branch label that does not resolve to the pin, is allowed with a

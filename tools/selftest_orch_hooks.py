@@ -371,7 +371,9 @@ def _rdp_cases(tmp):
     f = RdpFixture(base, "main")
     branch_only = f.brief(["Review-target: revision", "Review-branch: main"], "branch-only.txt")
     check("rdp/reconciled-allows", _rdp_kind(f.dispatch(f.good())), "allow")
-    check("rdp/undeclared-command-allows", _rdp_kind(f.run("other-dispatch --brief " + branch_only)), "allow")
+    # An undeclared command off rule 4's allowlist is not plain, so a bound session withholds it.
+    check("rdp/undeclared-command-not-plain-unverifiable",
+          _rdp_kind(f.run("other-dispatch --brief " + branch_only)), "unverifiable")
     check("rdp/missing-target-denies", _rdp_kind(f.dispatch(f.brief(["Reviewed-revision: " + f.pin]))), "deny")
     check("rdp/unknown-target-denies", _rdp_kind(f.dispatch(f.brief(["Review-target: tip"]))), "deny")
     check("rdp/duplicate-target-unverifiable", _rdp_kind(f.dispatch(f.brief(
@@ -626,12 +628,12 @@ def _rdp_cases(tmp):
         "sudo -u me orch-dispatch --brief brief.txt", "xargs orch-dispatch --brief brief.txt",
         "ionice -c3 orch-dispatch --brief brief.txt", "bash -c 'orch-dispatch --brief src/brief.txt'")],
         ["allow"] + ["unverifiable"] * 16)
-    # Every command that is not plain is withheld, whatever it names; a plain one that names no declared
-    # command is allowed.
+    # Every command that is not plain is withheld, whatever it names (an undeclared command off the
+    # allowlist too); a plain one that names no declared command is allowed.
     check("rdp/non-plain-command-unverifiable", [_rdp_kind(ec.run(c)) for c in (
         "timeout --frobnicate 5 ls", "env -S'ls -l' /tmp", "ls -la && git log --oneline | head -3",
         "echo $HOME > /dev/null", "other-dispatch --brief src/brief.txt", "ls -la src")],
-        ["unverifiable"] * 4 + ["allow"] * 2)
+        ["unverifiable"] * 5 + ["allow"])
     check("rdp/cd-then-absolute-brief-unverifiable",
           _rdp_kind(f.run("cd " + str(f.root / "src") + " && orch-dispatch --brief " + f.good())), "unverifiable")
     good = f.good()
@@ -1152,7 +1154,12 @@ def _rdp_cases(tmp):
         "git -c 'alias.r=!ORCH-Dispatch --brief " + as_bad + "' r")], ["unverifiable"] * 2)
     # Each rule of the plain-command specification on its own: every forbidden character, bare or in a
     # double-quoted segment (but literal in a single-quoted one), a tab or a line break, an unterminated
-    # quote, and every wrapper command word, also in another case.
+    # quote, every wrapper command word, also in another case, and rule 4's allowlist: each allowed program,
+    # bare or under one of its four directories, is plain, and any other command word, an allowed one in
+    # another case, or one under another directory or a relative path is not.
+    allowed = (
+        "git opf ls cat echo printf pwd true false test head tail wc grep egrep fgrep diff cmp stat du df date "
+        "basename dirname realpath readlink uniq cut tr mkdir rmdir touch cp mv rm ln chmod").split()
     forbidden = "$`\\;&|<>(){}[]*?!#~"
     wrappers = (
         ". alias ash awk bash builtin bun busybox bwrap caffeinate chroot chrt command coproc csh dash "
@@ -1168,7 +1175,13 @@ def _rdp_cases(tmp):
         ("git\tstatus", False), ("git status\n", False), ("git status\r", False), ("git log 'x", False),
         ('git log "x', False), ("git log x'", False)] + \
         [(w + " x", False) for w in wrappers] + [(w.upper() + " x", False) for w in wrappers] + \
-        [("/usr/bin/" + w + " x", False) for w in wrappers]
+        [("/usr/bin/" + w + " x", False) for w in wrappers] + \
+        [(w + " x", True) for w in allowed] + [(d + "/" + w + " x", True) for w in allowed for d in (
+            "/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin")] + [(w.upper() + " x", False) for w in allowed] + \
+        [(c + " x", False) for c in (
+            "sort", "cd", "jq", "tar", "python3.14", "/usr/bin/python3.14", "./ls", "/tmp/x/ls", "bin/ls",
+            "../bin/ls", "/usr//bin/ls", "/usr/bin/../bin/ls", "/ls", "/usr/bin/", "nodejs", "tee", "dd",
+            "install", "rsync", "vim", "less", "orch-dispatch")]
     check("rdp/plain-spec-each-rule", [(c, aiqt_hooks._rdp_plain_words(c)[0] is not None) for c, _p in rule_rows],
           rule_rows)
     check("rdp/plain-words-literal", aiqt_hooks._rdp_plain_words("git commit -m 'fix: a; b' x\"y\"z"),
@@ -1259,14 +1272,14 @@ def _rdp_scope_cases(base, plain):
     (rg.root / ".aiqt" / "core").mkdir()
     check("rdp/plain-registry-indirect-name-denies", [_rdp_kind(rg.run(c)) for c in (
         "git rm -rfq '.aiq*'", "git clean -fdxq '.aiq*'", "git -C .aiqt/core rm -rfq ..",
-        "cp -rt.aiqt " + str(rg.briefs) + "/.", "tar -C.aiqt -xf x.tar", "git rm -rq ':/.aiqt'",
+        "cp -rt.aiqt " + str(rg.briefs) + "/.", "mv -ft.aiqt x", "git rm -rq ':/.aiqt'",
         "git rm -rq ':(icase).AIQT'", "git rm -rq '.aiqt/orch*'", "git rm -rq '.a?qt/'")] + [
         _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
             hook_event_name="PreToolUse", cwd=str(rg.root / ".aiqt" / "core"), session_id="s1", tool_name="Bash",
             tool_input=dict(command=c, run_in_background=False)))) for c in ("rm -rf ..", "git rm -rq -C..")],
         ["deny"] * 11)
     check("rdp/plain-aiqt-subpath-and-glob-prose-allow", [_rdp_kind(rg.run(c)) for c in (
-        "git add .aiqt/core/x.toml", "git commit -m 'why?'", "cd .aiqt/core", "git rm -q '*.py'")],
+        "git add .aiqt/core/x.toml", "git commit -m 'why?'", "touch .aiqt/core/x.toml", "git rm -q '*.py'")],
         ["allow"] * 4)
     # A plain git command that moves the repository or its work tree off the bound registry (core.worktree,
     # core.bare, a configuration include, a separated git directory) is refused; a read of the key is not.
@@ -1277,8 +1290,59 @@ def _rdp_scope_cases(base, plain):
         "git init -q --separate-git-dir=" + str(base / "regdisarm-meta"), "git -c core.worktree=/x config x y",
         "git -c core.bare=true branch --list")],
         ["deny"] * 10)
-    check("rdp/plain-git-repository-read-allows", [_rdp_kind(rg.run(c)) for c in (
-        "git config --get core.worktree", "git config --list", "git config get core.bare")], ["allow"] * 3)
+    # git config is judged by position: only --get, --get-all, --get-regexp, --list or -l (after modifiers,
+    # --show-origin only before a list), with the operands each takes, or one key alone, reads.
+    reads = ("git config --get core.worktree", "git config --list", "git config core.bare",
+             "git config --show-origin --list", "git config --global --get-all core.worktree",
+             "git config --get core.worktree get")
+    check("rdp/plain-git-repository-read-allows", [_rdp_kind(rg.run(c)) for c in reads], ["allow"] * len(reads))
+    # Any other git config form naming repository configuration is a write: a word after the key is its
+    # value (git config core.worktree get sets core.worktree to get), a rename into the core or include
+    # section moves a key there, an edit action opens an editor that can set any key, and a subcommand
+    # behind an unknown global option is judged the same way.
+    writes = ("git config core.worktree get", "git config core.bare true list", "git config get core.bare",
+              "git config --worktree core.worktree /x get", "git config --show-origin core.worktree",
+              "git config core.worktree --get", "git config --worktree --rename-section x core",
+              "git config --rename-section x Include", "git config rename-section x includeIf.gitdir:/x/",
+              "git config --edit", "git config -e", "git config edit", "git config --ed",
+              "git --exec-path=/x config core.worktree get", "git --exec-path=/x config --rename-section x core",
+              "git -c core.worktree=/x config --list", "git --config-env=core.bare=V config --list")
+    check("rdp/plain-git-config-judged-by-position", [_rdp_kind(rg.run(c)) for c in writes],
+          ["deny"] * len(writes))
+    # A git subcommand that only reads (status, log, diff, show, rev-parse, ls-files, blame, grep, cat-file)
+    # treats every word as data: a repository key, a registry name or a glob in it is no move and no write.
+    data = ("git log -S core.worktree --oneline", "git log -1 --format='tformat:*'", "git ls-files '*'",
+            "git grep core.worktree", "git log --grep=core.bare", "git log -S include.path", "git diff -- '*'",
+            "git show HEAD:.aiqt/orchestration.local.json", "git -C .aiqt/core log -- ..",
+            "git blame -- .aiqt/orchestration.local.json", "git cat-file -p HEAD:seed.txt",
+            "git rev-parse --git-path core.worktree", "git status -- .aiqt", "git --no-pager log -- '.aiq*'")
+    check("rdp/plain-git-read-words-are-data", [_rdp_kind(rg.run(c)) for c in data], ["allow"] * len(data))
+    # A read subcommand that writes a file (--output, abbreviated or not), runs a program on its matches
+    # (grep -O, --open-files-in-pager) or takes configuration from a -c or --config-env global is judged as
+    # any other git command; so is a subcommand off the read list, or one not written exactly.
+    judged = ("git log -1 --format=%B --output=.aiqt/orchestration.local.json",
+              "git diff --outp=.aiqt/orchestration.local.json", "git show --output .aiqt/orchestration.json",
+              "git grep -O/bin/rm -l review .aiqt", "git grep -lO/bin/rm review .aiqt",
+              "git grep --open-files-in-pager=/bin/rm -l review .aiqt", "git -c core.pager=x log -- '.aiq*'",
+              "git -c x.y=z log -S core.worktree", "git LOG -S core.worktree", "git checkout -- '*'",
+              "git commit -m 'document core.worktree handling'", "git init -q --separate-git-dir=/tmp/x")
+    check("rdp/plain-git-read-that-writes-or-runs-judged", [_rdp_kind(rg.run(c)) for c in judged],
+          ["deny"] * len(judged))
+    # A linked worktree beside a main worktree whose git directory is separated (core.worktree naming the
+    # main worktree): a dispatch is withheld, and the two calls that would point core.worktree at an empty
+    # directory META/get, and so unscope the session, end at the config write, whose trailing word is a
+    # value and no read action.
+    cv = RdpFixture(base, "cfgvalue")
+    cv_meta = base / "cfgvalue-meta"
+    _rdp_git(cv.root, "init", "-q", "--separate-git-dir=" + str(cv_meta))
+    _rdp_git(cv.root, "config", "core.worktree", str(cv.root))
+    cv_wt = base / "cfgvalue-beside"
+    _rdp_git(cv.root, "worktree", "add", "-q", "--detach", str(cv_wt), cv.pin)
+    check("rdp/config-value-word-cannot-unscope-linked-worktree", [_rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(cv_wt), session_id="s1", tool_name="Bash",
+        tool_input=dict(command=c, run_in_background=False)))) for c in (
+            "orch-dispatch --brief /missing", "mkdir " + str(cv_meta / "get"), "git config core.worktree get")],
+        ["unverifiable", "allow", "deny"])
     # core.worktree moved onto ANOTHER bound tree: the binding above the session cwd still governs, and a
     # dispatch either binding declares is withheld, never checked against the other repository (before,
     # the redirected tree's binding decided and the cwd's dispatcher went undeclared, so it was allowed).
