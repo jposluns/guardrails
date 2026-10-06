@@ -31,7 +31,9 @@ Check ownership, so one mutation flips one check (the canonical single-mutation 
 Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the division of labour is:
   1 authority-freshness: the frozen plan re-proves and names this run, the bundle's approval binds it
     (approval_findings), the receipt core validates and binds the run, product, plan and inventory digests,
-    store root, release manifest and the approval itself, each receipt file row names a plan source with its
+    store root and release manifest and records both release anchor flags (independent_anchor_observed,
+    anchor_agreement) True (the apply shell's own receipt_binding_refusals, the rule adoption_record
+    refuses by), it records the approval itself, each receipt file row names a plan source with its
     disposition and before_digest, the live preimages of the sources the plan leaves live and no other
     check owns (keep, and non-occupying migrate) still equal their plan digests, and every planned
     destination apply has already written and no other check owns (init-store and non-CI install-pack
@@ -43,13 +45,18 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     compared by content in the receipt leg, because outcome events append to its file.
   2 discovery-accounting: the planning inventory re-seals to the plan's inventory_digest; every candidate,
     empty directory and inventoried file entry, wherever it lies, has a plan disposition or lies under a
-    recorded exclusion (the store control area counts as one, spec 14.2); a duplicate-path, non-table,
-    alien-kind or non-string-path entry row is ambiguous or malformed accounting input, refused as
-    CANNOT-EVALUATE, never a pass; every entry, exclusion, candidate and empty-directory path must pass the
-    planner's own path validator (_opf_adopt_plan._path), so containment is tested on canonical paths
-    only and a traversing or non-canonical path is CANNOT-EVALUATE naming it; an entry recorded
-    kind="excluded" must lie under a recorded exclusion by the planner's own matching rule
-    (_opf_adopt_plan._under), else it is a contradictory record, CANNOT-EVALUATE, never skipped; every plan
+    recorded exclusion (the store control area counts as one, spec 14.2); every entry row must be one the
+    planner records, by the planner's own row rule (_opf_adopt_plan.entry_row_problem, which _inventory
+    calls on every row it walks: a canonical path by _opf_adopt_plan._path, a kind in its vocabulary,
+    exactly that kind's fields, a file row's size a byte count and its digest well formed, kind="excluded"
+    exactly under a recorded exclusion by _opf_adopt_plan._under), and a duplicate-path row is ambiguous;
+    either is CANNOT-EVALUATE naming the row, never a pass; every exclusion, candidate and empty-directory
+    path must pass _opf_adopt_plan._path too; the recorded source roots must be as the planner records
+    them (_opf_adopt_plan._roots); and the redundant candidates and empty_directories lists are RE-DERIVED
+    from the entries by the planner's own derivations (_opf_adopt_plan.candidate_files and
+    empty_directories): each recorded path must be one the derivation yields over every root, and under the
+    candidate roots the inventory itself fixes (the source roots and .working) the recorded list must EQUAL
+    the derivation, so an omitted candidate or empty directory is CANNOT-EVALUATE, never green; every plan
     source is an observed file whose digest equals its plan digest.
   3 preservation-restore: the run's evidence bundle verifies from disk (_opf_adopt_apply.verify_bundle, the
     homes-1 evidence digest verification: every inventory and every payload it lists), and the bundle
@@ -89,7 +96,11 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
 
 DISCLOSED RESIDUALS: the receipt core schema requires a null after_digest for retire and move rows, which
 TOML cannot spell, so check 1 compares only the receipt rows present and cannot require one row per source;
-check 2 trusts the planning inventory the caller supplies once it re-seals to the plan's bound digest;
+check 2 trusts the planning inventory the caller supplies once it re-seals to the plan's bound digest, and
+re-derives the candidates and empty directories exactly only under the source roots and .working: the
+deliverable destinations, the other candidate roots, come from the store manifest, which the inventory does
+not record, so outside those roots a recorded path must be derivable from the entries but an omission is
+not seen there (every file entry and every recorded empty directory is accounted wherever it lies);
 check 4 is CANNOT-EVALUATE until U25 ships the CI store-identity assertion (U25_CI_IDENTITY_ASSERTED), so
 the roster cannot be green in this release on check 4 alone either; the reference digests authenticate
 the CI floor files against this module's own embedded constants, so they are only as trustworthy as this
@@ -139,8 +150,8 @@ EVALUATED = (AUTHORITY, DISCOVERY, PRESERVATION, OPERATIONAL, RETIREMENT)
 PLANNING_INVENTORY_FORMAT = "opf.adoption.planning-inventory/v1"
 _WIRING_NOTE = ("check 5 (wiring) is not evaluated by this slice: its enforcement probes spawn processes; "
                 "the roster is incomplete until it runs (never a pass)")
-# The planning inventory's closed entry-kind vocabulary (_opf_adopt_plan's observation rows).
-ENTRY_KINDS = ("absent", "directory", "excluded", "file")
+# The planning inventory's closed entry-kind vocabulary: the planner's own (_opf_adopt_plan's observation rows).
+ENTRY_KINDS = planner.ENTRY_KINDS
 
 
 class Unevaluable(Exception):
@@ -213,7 +224,7 @@ def _planned_destinations(ev):
         if op["op"] in ("create-file", "plant-governance"):
             wanted[op["path"]] = op["content_digest"]
         elif op["op"] in ("init-store", "install-pack"):
-            member_root = op["store_root" if op["op"] == "init-store" else "target"]
+            member_root = op[schema._MEMBER_ROOTS[op["op"]]]
             for member in op["members"]:
                 dest = schema._compose(member_root, member["path"])
                 if dest not in ci:
@@ -279,17 +290,13 @@ def _check_authority(ev, rep):
 
 
 def _receipt_binding(ev, rep, receipt, approval):
-    """Check 1's receipt leg: the receipt core binds this run and the approved plan, and records its
-    approval and the plan's sources as the plan binds them."""
+    """Check 1's receipt leg: the receipt core binds this run and the approved plan and records both
+    release anchor flags True, by the apply shell's own rule (receipt_binding_refusals,
+    the refusals adoption_record raises), and records its approval and the plan's sources as the plan binds
+    them."""
     plan = ev.plan
-    want = dict(run_id=ev.run_id, product=plan["product"], plan_digest=plan["plan_digest"],
-                inventory_digest=plan["inventory_digest"], store_root=plan["store"]["store_root"])
-    for key in sorted(want):
-        if receipt[key] != want[key]:
-            rep.finding("receipt {} {!r} does not match the approved plan's {!r}".format(
-                key, receipt[key], want[key]))
-    if receipt["release"]["manifest_sha256"] != plan["release"]["manifest_sha256"]:
-        rep.finding("receipt release manifest_sha256 does not match the approved plan's release")
+    for refusal in apply.receipt_binding_refusals(ev.run_id, plan, receipt):
+        rep.finding("receipt: " + refusal + " (adoption_record refuses it)")
     if approval is not None and receipt["approval"] != approval:
         rep.finding("the receipt's approval is not the run's recorded approval")
     by_path = dict((row["path"], row) for row in _sources(ev))
@@ -324,7 +331,9 @@ def _check_discovery(ev, rep):
     (_inventory_path), so the containment test below only ever sees canonical contained paths, and an
     entry recorded excluded must lie under a recorded exclusion by the planner's own matching rule
     (_opf_adopt_plan._under: the producer records kind="excluded" exactly for such a path), so a
-    contradictory excluded entry is CANNOT-EVALUATE, never skipped."""
+    contradictory excluded entry is CANNOT-EVALUATE, never skipped. The whole row rule is the planner's
+    (_opf_adopt_plan.entry_row_problem), and the redundant candidates and empty_directories lists are
+    re-derived from the entries by the planner's own derivations and must agree (module docstring, check 2)."""
     if ev.planning_inventory is None:
         raise Unevaluable("the planning inventory was not supplied; discovery accounting needs its entries")
     doc = _canonical(ev.planning_inventory, "the planning inventory")
@@ -343,7 +352,7 @@ def _check_discovery(ev, rep):
         rep.finding("the planning inventory {!r} is not the one the approved plan binds ({!r})".format(
             claimed, ev.plan["inventory_digest"]))
     obs = doc.get("observation")
-    lists = ("exclusions", "entries", "candidates", "empty_directories")
+    lists = ("exclusions", "entries", "candidates", "empty_directories", "sources")
     if not (isinstance(obs, dict) and all(isinstance(obs.get(k), list) for k in lists)):
         raise Unevaluable("the planning inventory's observation lacks {}".format(", ".join(lists)))
     try:
@@ -352,24 +361,49 @@ def _check_discovery(ev, rep):
         raise Unevaluable("the planning inventory's exclusions are malformed ({!r})".format(exc))
     entries = {}
     for i, row in enumerate(obs["entries"]):
-        # Ambiguous or malformed accounting input never grades: it is CANNOT-EVALUATE, never a pass.
-        if not (isinstance(row, dict) and isinstance(row.get("path"), str) and row["path"]
-                and row.get("kind") in ENTRY_KINDS):
-            raise Unevaluable("planning inventory entry [{}] is malformed (a table with a non-empty string "
-                              "path and a kind in {} is required)".format(i, "/".join(ENTRY_KINDS)))
-        _inventory_path(row["path"], "entry")
-        if row["kind"] == "excluded" and not any(planner._under(row["path"], e) for e in excluded):
-            raise Unevaluable("planning inventory entry {!r} is recorded excluded but lies under no recorded "
-                              "exclusion: a contradictory record, never skipped".format(row["path"]))
-        if row["kind"] == "file" and not schema._is_digest(row.get("digest")):
-            raise Unevaluable("planning inventory file entry {!r} carries no well-formed digest".format(
-                row["path"]))
+        # Ambiguous, malformed or contradictory accounting input never grades: it is CANNOT-EVALUATE, never
+        # a pass. The row rule is the planner's own, the one _inventory holds every row it records to.
+        problem = planner.entry_row_problem(row, obs["exclusions"])
+        if problem is not None:
+            raise Unevaluable("planning inventory entry [{}]: {}; the planner never records such a row "
+                              "(a malformed or contradictory record, never skipped)".format(i, problem))
         if row["path"] in entries:
             raise Unevaluable("planning inventory entry {!r} is duplicated: the accounting is "
                               "ambiguous".format(row["path"]))
         entries[row["path"]] = row
-    needing = {_inventory_path(p, "candidate") for p in obs["candidates"]}
-    needing |= {_inventory_path(p, "empty directory") for p in obs["empty_directories"]}
+    rows = list(entries.values())
+    try:
+        roots = planner._roots(obs["sources"])
+    except (planner.PlanError, TypeError, ValueError) as exc:
+        raise Unevaluable("the planning inventory's source roots are not roots the planner records ({})".format(
+            exc))
+    if roots != obs["sources"]:
+        raise Unevaluable("the planning inventory's source roots are not recorded sorted, as the planner "
+                          "records them")
+    # The planner's candidate roots are the source roots, .working and the deliverable destinations; the
+    # last come from the store manifest, which the inventory does not record, so the re-derivation is exact
+    # under the first two only (a disclosed residual).
+    roots = roots + [".working"]
+    recorded = {}
+    for label, derive in (("candidates", planner.candidate_files),
+                          ("empty_directories", planner.empty_directories)):
+        listed = [_inventory_path(p, label.replace("_", " ")) for p in obs[label]]
+        if listed != sorted(set(listed)):
+            raise Unevaluable("the planning inventory's {} are not sorted and duplicate-free, as the "
+                              "planner records them".format(label))
+        stray = sorted(set(listed) - set(derive(rows, None)))
+        if stray:
+            raise Unevaluable("the planning inventory's {} name {}, which the planner's derivation from "
+                              "its entries never yields: a contradictory record".format(label, stray))
+        derived = derive(rows, roots)
+        within = [p for p in listed if any(planner._under(p, root) for root in roots)]
+        if within != derived:
+            raise Unevaluable("the planning inventory's {} omit {}, which the planner derives from its "
+                              "entries under the candidate roots {}: a redundant list that disagrees with "
+                              "the entries it is derived from is never trusted".format(
+                                  label, sorted(set(derived) - set(within)), roots))
+        recorded[label] = listed
+    needing = set(recorded["candidates"]) | set(recorded["empty_directories"])
     needing |= {p for p, row in entries.items() if row["kind"] == "file"}
     disposed = {row["path"] for row in _sources(ev)}
     for path in sorted(needing):
@@ -640,7 +674,7 @@ def _check_operational(ev, rep):
     for op in plan["ops"]:
         if op["op"] == "render-views":
             for member in op["members"]:
-                dest = schema._compose(op["store_root"], member["path"])
+                dest = schema._compose(op[schema._MEMBER_ROOTS[op["op"]]], member["path"])
                 data = _read(ev, dest)
                 if data is None:
                     rep.finding("planned view {!r} is missing".format(dest))
@@ -760,6 +794,11 @@ _CI_RECIPE_BYTES = None
 # Extra planning inventory entry rows a vector adds to the fixture; the fixture seals and binds them (its plan,
 # approval, receipt and bundle inventory), so no seal or binding failure can stand in for the check graded.
 _EXTRA_ENTRIES = ()
+# Extra empty_directories paths, and (path, changes) edits to existing entry rows, sealed and bound alike.
+_EXTRA_EMPTY = ()
+_ENTRY_EDITS = ()
+# The planner's recorded source roots for the fixture (sorted, non-overlapping, as _opf_adopt_plan._roots).
+_SOURCE_ROOTS = ["adopter", "legacy", "notes"]
 _CI_PATH = ".github/workflows/opf.yml"
 _RENDERED = b"rendered todo view\n"
 _MOVE_DEST = ".working/archive/moved/adopter/MOVE.md"
@@ -843,13 +882,19 @@ def _fixture(root):
                  new_digest=_digest(_CONSUMER_NEW)),
             init, render, schema.enforcement_install_op(bindings["enforcement"])]
     entries = [dict(path=p, kind="file", size=len(_LIVE[p]), digest=_digest(_LIVE[p])) for p in sorted(_LIVE)]
-    entries.append(dict(path=_CONSUMER, kind="file", size=len(_CONSUMER_OLD), digest=_digest(_CONSUMER_OLD)))
+    # The consumer lies under a recorded exclusion, so the planner records it excluded and never reads it.
+    entries.append(dict(path=_CONSUMER, kind="excluded"))
     entries += [dict(row) for row in _EXTRA_ENTRIES]
+    for path, changes in _ENTRY_EDITS:
+        for row in entries:
+            if row["path"] == path:
+                row.update(changes)
     entries.sort(key=lambda row: row["path"])
     inventory = _sealed(dict(format=PLANNING_INVENTORY_FORMAT, decisions=[], observation=dict(
         exclusions=[dict(path=".working/toml", reason="machine-store"),
                     dict(path="consumer", reason="adopter-owned consumers, repointed by the plan")],
-        entries=entries, candidates=sorted(_LIVE), empty_directories=[])), "inventory_digest")
+        entries=entries, candidates=sorted(_LIVE), empty_directories=sorted(_EXTRA_EMPTY),
+        sources=list(_SOURCE_ROOTS))), "inventory_digest")
     plan = dict(format=schema.PLAN_FORMAT, schema=schema.SCHEMA_VERSION, product="aiqt",
                 inventory_digest=inventory["inventory_digest"], run_id=_RUN, revision=bindings["revision"],
                 store=dict(store_root=".", machine_rel=".working/toml", adoption="first-adoption"),
@@ -998,8 +1043,18 @@ def _flip_1(root, inv):
     _put(root, "notes/old.md", b"edited notes\n")
 
 
+# An unaccounted file under a recorded source root, recorded as the planner would: a file entry and a candidate.
+_STRAY = dict(path="legacy/stray.md", kind="file", size=6, digest=_digest(b"stray\n"))
+
+
+def _strayed(inv, entries=(), candidates=()):
+    """The planning inventory with _STRAY (and any further entry rows and candidates) recorded, resealed."""
+    return _reseal_inventory(inv, entries=_entries(inv) + [_STRAY] + list(entries),
+                             candidates=sorted(sorted(_LIVE) + [_STRAY["path"]] + list(candidates)))
+
+
 def _flip_2(root, inv):
-    return dict(planning_inventory=_reseal_inventory(inv, candidates=sorted(_LIVE) + ["stray.md"]))
+    return dict(planning_inventory=_strayed(inv))
 
 
 def _flip_3(root, inv):
@@ -1100,7 +1155,7 @@ def self_test():
         for name, flip in _FLIPS:
             check("flip-" + name + "-red-only", _only(_case(flip), _red(name)))
         check("flip-1-names-live-preimage", _says(_case(_flip_1), AUTHORITY, "live preimage 'notes/old.md'"))
-        check("flip-2-names-unaccounted", _says(_case(_flip_2), DISCOVERY, "'stray.md' has neither"))
+        check("flip-2-names-unaccounted", _says(_case(_flip_2), DISCOVERY, "'legacy/stray.md' has neither"))
         check("flip-3-names-missing-preimage", _says(_case(_flip_3), PRESERVATION, "missing from the adoption"))
         check("flip-4-names-unplanned", _says(_case(_flip_4), OPERATIONAL, "does not account"))
         check("flip-6-names-changed", _says(_case(_flip_6), RETIREMENT, "MUST NOT be retired"))
@@ -1115,7 +1170,7 @@ def self_test():
         rebound = _case(lambda r, i: _retoml(r, apply.receipt_rel(_RUN), lambda d: d.update(
             run_id="adopt-20260917T120000Z-aaaaaaaaaaaaaaaa")))
         check("check-1-receipt-unbound-red", rebound[AUTHORITY].status == INVALID
-              and _says(rebound, AUTHORITY, "does not match the approved plan's"))
+              and _says(rebound, AUTHORITY, "name different adoption runs"))
         # One vector per receipt-binding comparison: each key, the release manifest, the approval, and the
         # file rows (a foreign path, a changed disposition, a changed before_digest). The receipt core's own
         # approval must agree with its plan and inventory digests, so those tampers move both together.
@@ -1128,11 +1183,11 @@ def self_test():
                     d["approval"][key] = value
             got = _case(lambda r, i, f=_bind: _rereceipt(r, f))
             check("check-1-receipt-{}-bound".format(key), _only(got, _red(AUTHORITY))
-                  and _says(got, AUTHORITY, "receipt {} ".format(key)))
+                  and _says(got, AUTHORITY, "does not bind the approved plan's {}".format(key)))
         released = _case(lambda r, i: _rereceipt(r, lambda d: d["release"].update(
             manifest_sha256=other)))
         check("check-1-receipt-release-bound", _only(released, _red(AUTHORITY))
-              and _says(released, AUTHORITY, "receipt release manifest_sha256"))
+              and _says(released, AUTHORITY, "does not bind the approved plan's release.manifest_sha256"))
         reapproved = _case(lambda r, i: _rereceipt(r, lambda d: d["approval"].update(
             actor="someone-else")))
         check("check-1-receipt-approval-bound", _only(reapproved, _red(AUTHORITY))
@@ -1162,12 +1217,12 @@ def self_test():
         check("check-1-manifest-drift-red", _only(drifted, _red(AUTHORITY))
               and _says(drifted, AUTHORITY, "planned destination '.working/toml/manifest.toml'"))
         # Check 2: the seal and binding legs, whole-tree accounting, ambiguous or malformed entries.
-        excluded = _case(lambda r, i: dict(planning_inventory=_reseal_inventory(
-            i, candidates=sorted(_LIVE) + [".working/toml/x.toml", "stray.md"])))
-        check("check-2-excluded-entry-accounted", _says(excluded, DISCOVERY, "'stray.md' has neither")
+        excluded = _case(lambda r, i: dict(planning_inventory=_strayed(
+            i, entries=[dict(path=".working/toml/x.toml", kind="excluded")])))
+        check("check-2-excluded-entry-accounted", _says(excluded, DISCOVERY, "'legacy/stray.md' has neither")
               and not _says(excluded, DISCOVERY, "x.toml' has neither"))
         rekeyed = _case(lambda r, i: dict(planning_inventory=_reseal_inventory(
-            i, exclusions=[dict(path=".working/toml", reason="machine")])))
+            i, exclusions=[dict(path=".working/toml", reason="machine"), dict(path="consumer", reason="other")])))
         check("check-2-unbound-inventory-red", rekeyed[DISCOVERY].status == INVALID
               and _says(rekeyed, DISCOVERY, "not the one the approved plan binds"))
 
@@ -1180,14 +1235,15 @@ def self_test():
         check("check-2-tampered-seal-red", _says(_case(lambda r, i: dict(planning_inventory=_tamper_seal(i))),
                                                  DISCOVERY, "does not seal its own bytes"))
         uninv = _case(lambda r, i: dict(planning_inventory=_reseal_inventory(
-            i, entries=[row for row in _entries(i) if row["path"] != "legacy/RULES.md"])))
+            i, entries=[row for row in _entries(i) if row["path"] != "legacy/RULES.md"],
+            candidates=[p for p in sorted(_LIVE) if p != "legacy/RULES.md"])))
         check("check-2-source-not-inventoried-red",
               _says(uninv, DISCOVERY, "'legacy/RULES.md' is not an inventoried file"))
-        stray_entry = dict(path="legacy/unaccounted.md", kind="file", size=2, digest="sha256:" + "b" * 64)
+        stray_entry = dict(path="elsewhere/unaccounted.md", kind="file", size=2, digest="sha256:" + "b" * 64)
         anywhere = _case(lambda r, i: dict(planning_inventory=_reseal_inventory(
             i, entries=_entries(i) + [stray_entry])))
         check("check-2-inventoried-file-outside-working-red", _only(anywhere, _red(DISCOVERY))
-              and _says(anywhere, DISCOVERY, "'legacy/unaccounted.md' has neither"))
+              and _says(anywhere, DISCOVERY, "'elsewhere/unaccounted.md' has neither"))
         dup_entry = dict(path="legacy/RULES.md", kind="file", size=1, digest="sha256:" + "a" * 64)
         check("closed-duplicate-entry", _only(_case(lambda r, i: dict(planning_inventory=_reseal_inventory(
             i, entries=_entries(i) + [dup_entry]))), _red(DISCOVERY, CANNOT_EVALUATE)))
@@ -1217,6 +1273,71 @@ def self_test():
               and _says(escaping, DISCOVERY, "entry path 'consumer/../foreign.md'"))
         check("check-2-excluded-under-exclusion-valid", _only(_with_entries(dict(
             path=".working/toml/x.toml", kind="excluded")), {}))
+        # Round 13: each producer invariant is re-checked by calling the producer's own function. Check 1:
+        # a receipt whose release anchor flags are not both True is refused by adoption_record, and check 1
+        # now says so through the same receipt_binding_refusals; the genuine receipt passes both.
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        def _record(mutate=None):
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+                _fixture(root)
+                if mutate is not None:
+                    _rereceipt(root, mutate)
+                plan_doc = _toml_file(root, apply.plan_rel(_RUN))
+                receipt_doc = _toml_file(root, apply.receipt_rel(_RUN))
+            try:
+                apply.adoption_record(_RUN, plan_doc, receipt_doc, now)
+            except apply.AdoptApplyError as exc:
+                return str(exc)
+            return None
+
+        check("check-1-r13-genuine-receipt-producer-accepts", _record() is None)
+        anchorless = "the receipt records no observed, agreeing"
+        for flag in ("independent_anchor_observed", "anchor_agreement"):
+            def _unanchor(d, flag=flag):
+                d["release"][flag] = False
+            got = _case(lambda r, i, f=_unanchor: _rereceipt(r, f))
+            check("check-1-r13-anchor-" + flag + "-red", _only(got, _red(AUTHORITY))
+                  and _says(got, AUTHORITY, anchorless) and anchorless in (_record(_unanchor) or ""))
+            with mock.patch.object(apply, "receipt_binding_refusals", lambda *a: []):
+                check("check-1-r13-anchor-" + flag + "-load-bearing",
+                      _only(_case(lambda r, i, f=_unanchor: _rereceipt(r, f)), {}))
+        # Check 2: an empty directory omitted from empty_directories (the r12 reproduction) is
+        # CANNOT-EVALUATE, the redundant list re-derived from the entries by the planner's own derivation;
+        # the discriminating control records it and is INVALID, unaccounted.
+        hollow = dict(path=".working/unaccounted-empty", kind="directory")
+        omitted = _with_entries(hollow)
+        check("check-2-r13-omitted-empty-directory-cannot", _only(omitted, _red(DISCOVERY, CANNOT_EVALUATE))
+              and _says(omitted, DISCOVERY, "empty_directories omit ['.working/unaccounted-empty']"))
+        with mock.patch.object(here, "_EXTRA_EMPTY", (hollow["path"],)):
+            recorded = _with_entries(hollow)
+        check("check-2-r13-recorded-empty-directory-control-red", _only(recorded, _red(DISCOVERY))
+              and _says(recorded, DISCOVERY, "'.working/unaccounted-empty' has neither"))
+        with mock.patch.object(planner, "empty_directories", lambda rows, roots: []):
+            check("check-2-r13-empty-derivation-load-bearing", _only(_with_entries(hollow), {}))
+        # Check 2: a file row is held to the planner's own row rule (entry_row_problem): the r12
+        # reproduction (size -1) and each other row the planner never records are CANNOT-EVALUATE.
+        def _edited(path, **changes):
+            with mock.patch.object(here, "_ENTRY_EDITS", ((path, changes),)):
+                return _case()
+
+        for label, path, changes, text in (
+                ("size-negative", "legacy/RULES.md", dict(size=-1), "size -1"),
+                ("size-bool", "legacy/RULES.md", dict(size=True), "size True"),
+                ("size-over-bound", "legacy/RULES.md", dict(size=planner.MAX_FILE_BYTES + 1),
+                 "is not the byte count"),
+                ("size-string", "legacy/RULES.md", dict(size="10"), "is not the byte count"),
+                ("extra-field", "legacy/RULES.md", dict(note="x"), "records fields"),
+                ("excluded-with-digest", _CONSUMER, dict(digest=_digest(b"x")), "records fields")):
+            got = _edited(path, **changes)
+            check("check-2-r13-entry-" + label + "-cannot", _only(got, _red(DISCOVERY, CANNOT_EVALUATE))
+                  and _says(got, DISCOVERY, text))
+        under = _with_entries(dict(path="consumer/other.md", kind="file", size=1, digest=_digest(b"x")))
+        check("check-2-r13-file-under-exclusion-cannot", _only(under, _red(DISCOVERY, CANNOT_EVALUATE))
+              and _says(under, DISCOVERY, "lies under a recorded exclusion"))
+        with mock.patch.object(planner, "entry_row_problem", lambda row, exclusions: None):
+            check("check-2-r13-row-rule-load-bearing", _only(_edited("legacy/RULES.md", size=-1), {}))
         # Check 4: the formerly occupied destination, the doctor contract, store identity, CI and views.
         occ = _case(_occupied)
         check("check-4-old-occupant-red", _only(occ, _red(OPERATIONAL)))
@@ -1510,7 +1631,7 @@ def self_test():
                 check("check-4-no-ci-row-red",
                       any("binds no CI enforcement row" in f for f in direct.findings))
                 import tomllib
-                inv2 = _reseal_inventory(inv, candidates=sorted(_LIVE) + ["stray.md"])
+                inv2 = _strayed(inv)
                 ev.planning_inventory = inv2
                 ev.plan = dict(plan, inventory_digest=tomllib.loads(
                     inv2.decode("utf-8"))["inventory_digest"])
@@ -1531,10 +1652,11 @@ def self_test():
                         return None
                     return report.findings
 
-                check("check-2-empty-directory-accounted", _discovery(empty_directories=["empty/dir"]) == [
+                check("check-2-empty-directory-accounted", _discovery(entries=_entries(inv) + [dict(
+                    path="empty/dir", kind="directory")], empty_directories=["empty/dir"]) == [
                     "inventory entry 'empty/dir' has neither a disposition nor a recorded exclusion"])
-                check("check-2-control-area-exempt", _discovery(
-                    candidates=sorted(_LIVE) + [".working/imports/x.md"]) == [])
+                check("check-2-control-area-exempt", _discovery(entries=_entries(inv) + [dict(
+                    path=".working/imports/x.md", kind="file", size=1, digest=_digest(b"x"))]) == [])
                 check("check-2-alien-kind-cannot", _discovery(entries=_entries(inv) + [dict(
                     path="legacy/odd.md", kind="symlink")]) is None)
                 redigested = [dict(row, digest="sha256:" + "c" * 64) if row["path"] == "legacy/RULES.md" else row
@@ -1550,6 +1672,46 @@ def self_test():
                 check("check-2-git-candidate-cannot", _discovery(candidates=sorted(_LIVE) + [".git/config"]) is None)
                 check("check-2-noncanonical-empty-directory-cannot", _discovery(
                     empty_directories=["empty//dir"]) is None)
+
+                # Round 13: the redundant lists re-derived by the planner's own derivations, and the source
+                # roots held to the planner's own _roots; each disagreement is CANNOT-EVALUATE naming it.
+                def _refused(**changes):
+                    resealed = _reseal_inventory(inv, **changes)
+                    ev.planning_inventory = resealed
+                    ev.plan = dict(plan, inventory_digest=tomllib.loads(resealed.decode("utf-8"))["inventory_digest"])
+                    try:
+                        _check_discovery(ev, _Report())
+                    except Unevaluable as exc:
+                        return str(exc)
+                    return ""
+
+                ghost = dict(path="legacy/ghost.md", kind="file", size=1, digest=_digest(b"g"))
+                hollow_dir = dict(path="legacy/hollow", kind="directory")
+                for label, changes, text in (
+                        ("candidate-without-entry", dict(candidates=sorted(sorted(_LIVE) + ["legacy/ghost.md"])),
+                         "candidates name ['legacy/ghost.md']"),
+                        ("candidate-omitted-under-root", dict(entries=_entries(inv) + [ghost]),
+                         "candidates omit ['legacy/ghost.md']"),
+                        ("candidates-unsorted", dict(candidates=sorted(_LIVE, reverse=True)), "not sorted"),
+                        ("candidates-duplicated", dict(candidates=sorted(sorted(_LIVE) + ["legacy/RULES.md"])),
+                         "duplicate-free"),
+                        ("empty-directory-without-entry", dict(empty_directories=["legacy/hollow"]),
+                         "empty_directories name ['legacy/hollow']"),
+                        ("empty-directory-with-descendant", dict(entries=_entries(inv) + [dict(
+                            path="legacy", kind="directory")], empty_directories=["legacy"]),
+                         "empty_directories name ['legacy']"),
+                        ("empty-directory-omitted-under-root", dict(entries=_entries(inv) + [hollow_dir]),
+                         "empty_directories omit ['legacy/hollow']"),
+                        ("sources-overlapping", dict(sources=["legacy", "legacy/sub"]), "overlapping"),
+                        ("sources-unsorted", dict(sources=["notes", "legacy", "adopter"]), "recorded sorted"),
+                        ("sources-noncanonical", dict(sources=["legacy/../notes"]), "source roots"),
+                        ("sources-not-list", dict(sources="legacy"), "lacks")):
+                    check("check-2-r13-" + label + "-cannot", text in _refused(**changes))
+                # The controls: the same rows recorded as the planner records them grade, never refuse.
+                check("check-2-r13-candidate-recorded-control", _refused(
+                    entries=_entries(inv) + [ghost], candidates=sorted(sorted(_LIVE) + [ghost["path"]])) == "")
+                check("check-2-r13-empty-directory-recorded-control", _refused(
+                    entries=_entries(inv) + [hollow_dir], empty_directories=["legacy/hollow"]) == "")
                 # Check 1's destination sweep over every op kind it owns (the fixture plants none of these).
                 extra = [dict(op="create-file", path="docs/NEW.md", content_digest="sha256:" + "1" * 64),
                          dict(op="plant-governance", path="CLAUDE.md", content_digest="sha256:" + "2" * 64),

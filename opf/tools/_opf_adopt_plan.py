@@ -157,6 +157,77 @@ def _under(path, parent):
     return path == parent or path.startswith(parent + "/")
 
 
+# The observation's closed entry-kind vocabulary, and the exact fields _inventory records for each kind.
+ENTRY_KINDS = ("absent", "directory", "excluded", "file")
+_ENTRY_FIELDS = {"file": ("digest", "kind", "path", "size")}
+
+
+def entry_row_problem(row, exclusions):
+    """Why `row` is not an observation entry row _inventory records, or None when it is one. _inventory calls
+    it on every row it walks and the completion evaluator on every row it accounts, so both hold one rule:
+    a table whose path passes _path, whose kind is in ENTRY_KINDS and whose fields are exactly the ones that
+    kind records; a file row records its byte size (len of the bytes read, 0 to MAX_FILE_BYTES, never a
+    bool) and a well-formed digest; a row under a recorded exclusion (`exclusions`, the observation's
+    exclusion rows) is recorded excluded and never read, so a directory or file row there, or an excluded
+    row under no exclusion, is a contradictory record. An absent row records only that stat found nothing."""
+    if not (isinstance(row, dict) and isinstance(row.get("path"), str) and row["path"]):
+        return "entry is not a table with a non-empty string path"
+    path = row["path"]
+    try:
+        _path(path)
+    except (PlanError, TypeError, ValueError) as exc:
+        return "entry path {!r} is not a path the planner records ({})".format(path, exc)
+    kind = row.get("kind")
+    if kind not in ENTRY_KINDS:
+        return "entry {!r} kind {!r} is not one of {}".format(path, kind, "/".join(ENTRY_KINDS))
+    fields = _ENTRY_FIELDS.get(kind, ("kind", "path"))
+    if tuple(sorted(map(str, row))) != fields:
+        return "entry {!r} ({}) records fields {} where the planner records exactly {}".format(
+            path, kind, ", ".join(sorted(map(str, row))), ", ".join(fields))
+    if kind == "file":
+        if type(row["size"]) is not int or not 0 <= row["size"] <= MAX_FILE_BYTES:
+            return "file entry {!r} size {!r} is not the byte count of a file the planner reads (0 to {})".format(
+                path, row["size"], MAX_FILE_BYTES)
+        if not schema._is_digest(row["digest"]):
+            return "file entry {!r} carries no well-formed digest".format(path)
+    under = any(_under(path, item["path"]) for item in exclusions)
+    if kind == "excluded" and not under:
+        return "entry {!r} is recorded excluded but lies under no recorded exclusion".format(path)
+    if kind in ("directory", "file") and under:
+        return ("entry {!r} is recorded {} but lies under a recorded exclusion, where the planner records "
+                "excluded and reads nothing".format(path, kind))
+    return None
+
+
+def _require_entry(row, exclusions):
+    problem = entry_row_problem(row, exclusions)
+    if problem is not None:
+        raise PlanError(problem)
+
+
+def candidate_files(rows, roots):
+    """The observation's candidates, derived from its entry rows (_inventory and the completion evaluator
+    both call this): every file row under a candidate root (`roots`; None for every root) outside the store
+    control area, sorted."""
+    return sorted(row["path"] for row in rows
+                  if row["kind"] == "file"
+                  and (roots is None or any(_under(row["path"], prefix) for prefix in roots))
+                  and not schema._in_control_area(row["path"]))
+
+
+def empty_directories(rows, roots):
+    """The observation's empty directories, derived from its entry rows (_inventory and the completion
+    evaluator both call this): every directory row other than .working under a candidate root (`roots`;
+    None for every root), outside the store control area, that no other row lies beneath, sorted."""
+    rows = list(rows)
+    paths = [row["path"] for row in rows]
+    return sorted(row["path"] for row in rows
+                  if row["kind"] == "directory" and row["path"] != ".working"
+                  and (roots is None or any(_under(row["path"], prefix) for prefix in roots))
+                  and not schema._in_control_area(row["path"])
+                  and not any(p.startswith(row["path"] + "/") for p in paths))
+
+
 def _stamp(st):
     return (st.st_dev, st.st_ino, st.st_mode, st.st_nlink, st.st_size,
             st.st_mtime_ns, st.st_ctime_ns)
@@ -322,6 +393,7 @@ def _inventory(root, sources, targets):
             row = {"path": path, "kind": "excluded"}
             entries[path] = row
             if any(_under(path, item["path"]) for item in exclusions):
+                _require_entry(row, exclusions)
                 return
             if stat.S_ISDIR(before.st_mode):
                 child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -342,6 +414,7 @@ def _inventory(root, sources, targets):
                         raise PlanError("directory changed during enumeration")
                     if _stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _stamp(before):
                         raise PlanError("directory name changed during enumeration")
+                    _require_entry(row, exclusions)
                 finally:
                     store._journal._close_fd_propagating(child)
             elif stat.S_ISREG(before.st_mode):
@@ -353,6 +426,7 @@ def _inventory(root, sources, targets):
                     raise PlanError("unresolved store manifest requires repair before investigation")
                 data = _read(parent, name, before, budget)
                 row.update(kind="file", size=len(data), digest=_digest(data))
+                _require_entry(row, exclusions)
             else:
                 raise PlanError("symlink or special entry refused: {!r}".format(path))
 
@@ -385,20 +459,9 @@ def _inventory(root, sources, targets):
         # 14.2): its entries stay in the inventory with their digests, as OPF control area, and are
         # never candidates.
         candidate_roots = sources + [".working"] + deliverables
-        candidates = [
-            row["path"] for row in entries.values()
-            if row["kind"] == "file"
-            and any(_under(row["path"], prefix) for prefix in candidate_roots)
-            and not schema._in_control_area(row["path"])
-        ]
+        candidates = candidate_files(entries.values(), candidate_roots)
         # Empty directories are surfaced separately. They are not file operands.
-        empty = [
-            row["path"] for row in entries.values()
-            if row["kind"] == "directory" and row["path"] != ".working"
-            and any(_under(row["path"], prefix) for prefix in candidate_roots)
-            and not schema._in_control_area(row["path"])
-            and not any(p.startswith(row["path"] + "/") for p in entries)
-        ]
+        empty = empty_directories(entries.values(), candidate_roots)
         check_fd = store._open_dir_nofollow(root)
         try:
             if _stamp(os.fstat(check_fd)) != _stamp(root_stat):

@@ -2394,22 +2394,15 @@ def event_digest(event):
         raise AdoptApplyError("the outcome event cannot be emitted canonically ({}); fail-closed".format(exc))
 
 
-def adoption_record(run_id, plan, receipt, now):
-    """(receipt core bytes, genesis event bytes) of one adoption run (spec 14, 14.1), pure. The receipt core
-    the stage driver assembles must validate through the shipped validate_receipt_core, which also enforces
-    that the embedded approval attests the receipt's own plan_digest and inventory_digest; it must bind this
-    run and the approved plan's product, plan_digest, inventory_digest, store root and release manifest, and
-    record an observed, agreeing independent anchor. The genesis `applied` event chains from the sha256 of
-    the canonical core bytes; its event_digest is the named event_digest helper's (the sha256 of its own
-    canonical bytes without that key), required to RECOMPUTE from the emitted bytes before anything returns;
-    the one-event chain must validate through the shipped validate_event_chain. `now` is the injected,
-    aware-UTC recorded_at instant. Raises AdoptApplyError on any refusal."""
-    checked = schema.validate_receipt_core(receipt)
-    if checked.status != store.VALID:
-        raise AdoptApplyError("the receipt core is refused ({}): {}".format(
-            checked.status, "; ".join(checked.findings)))
+def receipt_binding_refusals(run_id, plan, receipt):
+    """The refusals, in adoption_record's order, of a receipt core that already validates through
+    validate_receipt_core: it must name this run as the plan does, bind the approved plan's product,
+    plan_digest, inventory_digest, store root and release manifest, and record an observed, agreeing
+    independent release anchor. [] when it does. adoption_record raises the first; the completion evaluator
+    (_opf_adopt_complete, check 1) reports every one, so the evaluator holds the producer's own rule."""
+    refusals = []
     if receipt["run_id"] != run_id or plan.get("run_id") != run_id:
-        raise AdoptApplyError("the receipt core, the plan and the transaction name different adoption runs")
+        refusals.append("the receipt core, the plan and the transaction name different adoption runs")
     unbound = [key for key in ("product", "plan_digest", "inventory_digest") if receipt[key] != plan.get(key)]
     frozen, release = plan.get("store"), plan.get("release")
     if not (isinstance(frozen, dict) and receipt["store_root"] == frozen.get("store_root")):
@@ -2418,11 +2411,31 @@ def adoption_record(run_id, plan, receipt, now):
             and receipt["release"]["manifest_sha256"] == release.get("manifest_sha256")):
         unbound.append("release.manifest_sha256")
     if unbound:
-        raise AdoptApplyError("the receipt core does not bind the approved plan's {}".format(
-            ", ".join(unbound)))
+        refusals.append("the receipt core does not bind the approved plan's {}".format(", ".join(unbound)))
     anchor = receipt["release"]
     if anchor["independent_anchor_observed"] is not True or anchor["anchor_agreement"] is not True:
-        raise AdoptApplyError("the receipt records no observed, agreeing independent release anchor")
+        refusals.append("the receipt records no observed, agreeing independent release anchor")
+    return refusals
+
+
+def adoption_record(run_id, plan, receipt, now):
+    """(receipt core bytes, genesis event bytes) of one adoption run (spec 14, 14.1), pure. The receipt core
+    the stage driver assembles must validate through the shipped validate_receipt_core, which also enforces
+    that the embedded approval attests the receipt's own plan_digest and inventory_digest; it must bind this
+    run and the approved plan's product, plan_digest, inventory_digest, store root and release manifest, and
+    record an observed, agreeing independent anchor (receipt_binding_refusals, the one rule the completion
+    evaluator's check 1 calls too). The genesis `applied` event chains from the sha256 of
+    the canonical core bytes; its event_digest is the named event_digest helper's (the sha256 of its own
+    canonical bytes without that key), required to RECOMPUTE from the emitted bytes before anything returns;
+    the one-event chain must validate through the shipped validate_event_chain. `now` is the injected,
+    aware-UTC recorded_at instant. Raises AdoptApplyError on any refusal."""
+    checked = schema.validate_receipt_core(receipt)
+    if checked.status != store.VALID:
+        raise AdoptApplyError("the receipt core is refused ({}): {}".format(
+            checked.status, "; ".join(checked.findings)))
+    refusals = receipt_binding_refusals(run_id, plan, receipt)
+    if refusals:
+        raise AdoptApplyError(refusals[0])
     if (type(now) is not datetime.datetime or type(now.tzinfo) is not datetime.timezone
             or now.utcoffset() != datetime.timedelta(0)):
         raise AdoptApplyError("now must be a clock-derived aware UTC datetime")
