@@ -50,14 +50,17 @@ cannot be observed; a start is threading's own only when its target is exactly a
 whose function is threading.Thread._bootstrap and whose instance is a threading.Thread, read through
 the method type's own slots, so no attribute the target supplies is trusted), every thread started
 after the exit-time thread join (it is never joined), every trace, profile or monitoring callback
-installed (the audit events sys.settrace, sys.setprofile and sys.monitoring.register_callback, which
-threading.settrace, threading.setprofile and their _all_threads forms raise as well; such a callback
-also runs in a thread's last frames, outside run(), in Thread._delete and at the return of
-_bootstrap_inner, where a SystemExit it raises escapes to _thread, which drops it silently, so
-threading.excepthook never sees it; the event is a fault even when the callback is None or never
-raises), and the creation or use of another interpreter: every hook here is per-interpreter, so
-code in another interpreter is invisible to all of them, and creating or driving one is therefore
-itself the fault. That is refused in three layers. (1) THE ACT:
+installed (the audit events sys.settrace, sys.setprofile and sys.monitoring.register_callback;
+threading.settrace_all_threads and threading.setprofile_all_threads raise sys.settrace or
+sys.setprofile at the call, while threading.settrace and threading.setprofile raise no event: they
+only store the callback, and each thread started afterwards raises sys.settrace or sys.setprofile
+when it installs that stored callback, which is then refused (a stored None is never installed, so
+it raises nothing); such a callback also runs in a thread's last frames, outside run(), in
+Thread._delete and at the return of _bootstrap_inner, where a SystemExit it raises escapes to
+_thread, which drops it silently, so threading.excepthook never sees it; the event is a fault even
+when the callback is None or never raises), and the creation or use of another interpreter: every
+hook here is per-interpreter, so code in another interpreter is invisible to all of them, and
+creating or driving one is therefore itself the fault. That is refused in three layers. (1) THE ACT:
 the audit event cpython.PyInterpreterState_New, which CPython documents for the creation of an
 interpreter, is a fault whenever this interpreter's hook receives it. MEASURED on CPython 3.14.4,
 creating an interpreter through _interpreters.create(), concurrent.interpreters.create() or

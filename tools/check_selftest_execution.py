@@ -192,8 +192,9 @@ REPORT_FORMAT_VERSION = 2
 # is a verdict; a suite with no entry must leave the stream empty, and any other byte is a fault, never
 # a pass. Measured through this gate on a passing run: orch-behaviour-selftest,
 # ci-status-behaviour-selftest, instruction-budget-selftest and python-floor-selftest each write 0
-# stderr bytes. git-fixture-env-selftest was not measured to completion, so its empty allowance is the
-# fail-closed default (any byte it writes refuses the run with 2), not a measurement.
+# stderr bytes, and git-fixture-env-selftest, run to completion through this gate at revision
+# 585b70dac112e24d252b1e3b4b9e966a171a6b82 with the empty allowance (gate exit 0), wrote 0 stderr
+# bytes too, so all five suites were measured at 0 stderr bytes.
 DECLARED_STDERR = {}
 
 
