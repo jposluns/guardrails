@@ -11615,8 +11615,10 @@ _RDP_GIT_INFO_OPTIONS = frozenset(("--version", "--exec-path", "--html-path", "-
 # --patch, add and commit --interactive); and commit and tag --trailer, which run trailer commands. The
 # other allowlisted subcommands have no such option of their own (status, log, diff, show, rev-parse,
 # ls-files, ls-tree, blame, grep, describe, shortlog, merge-base, rev-list, for-each-ref, show-ref, branch,
-# remote, config, rm, mv, fetch, switch, worktree); git runs the editor by default (git commit without -m,
-# git revert), so an option asking for it is not counted, as configuration is not.
+# remote, config, rm, mv, fetch, switch, worktree), though a value of one can run gpg.program: a signature
+# placeholder or atom in a format (--format, --pretty, shortlog --group) or a sort key (for-each-ref, branch
+# and tag --sort), judged by _rdp_git_signature_value. git runs the editor by default (git commit without
+# -m, git revert), so an option asking for it is not counted, as configuration is not.
 _RDP_GIT_PROGRAM_OPTIONS = ("--ext-diff", "--textconv", "--show-signature", "--open-files-in-pager", "--exec",
                             "--extcmd", "--upload-pack", "--receive-pack", "--exec-path", "--sendmail-cmd",
                             "--to-cmd", "--cc-cmd", "--header-cmd", "--smtp-server")
@@ -11888,6 +11890,36 @@ def _rdp_git_may_take(sub, word):
 # placeholder of its own, so the signature one keeps its %), or a ref-filter signature atom, also of the
 # commit a tag points to (%(signature), %(*signature:grade)): each makes git run gpg.program.
 _RDP_GIT_SIGNATURE_FORMAT = re.compile(r"%[-+ ]?G|%\(\*?signature")
+# A ref-filter sort key naming the signature atom, which git computes to sort by, running gpg.program:
+# signature with git's prefixes (a leading - reverses, version: or v: sorts as versions, * reads the commit a
+# tag points to) and modifiers (signature:grade, -v:*signature:signer). It is matched anywhere in the key, so
+# a key only holding the word (contents:signature, which runs none) is refused too.
+_RDP_GIT_SIGNATURE_SORT = re.compile(r"signature")
+# The options, beyond --format and --pretty (a pretty format for log, show, rev-list, shortlog, blame and
+# stash list, a ref-filter format for for-each-ref, branch and tag), whose value git reads as a format or a
+# sort key, by subcommand, each with the pattern a value running gpg.program matches: the --sort of
+# for-each-ref, branch and tag (a ref-filter sort key, given once per key), and shortlog --group, whose
+# value git reads as a pretty format when it holds a % (also written format:FORMAT). Read from git SUB -h
+# (git 2.53) for every allowlisted subcommand (log, show, diff and rev-list list none there; their format
+# options are the revision options --format and --pretty) and run on git 2.53 with a gpg.program leaving a
+# marker: the other format options take formats with no signature
+# placeholder or atom (ls-files and ls-tree --format, cat-file --batch, --batch-check and --batch-command,
+# each refusing %(signature) on git 2.53 and printing %G as written; log --date=format: is a strftime
+# format), and clone --ref-format names a ref storage format.
+_RDP_GIT_SIGNATURE_VALUES = {
+    "for-each-ref": (("--sort",), _RDP_GIT_SIGNATURE_SORT), "branch": (("--sort",), _RDP_GIT_SIGNATURE_SORT),
+    "tag": (("--sort",), _RDP_GIT_SIGNATURE_SORT), "shortlog": (("--group",), _RDP_GIT_SIGNATURE_FORMAT)}
+
+
+def _rdp_git_signature_value(sub, name):
+    """The pattern a value of the option name (the part of a word before any =, abbreviated or not) given to
+    the git subcommand sub matches when it makes git run gpg.program: _RDP_GIT_SIGNATURE_FORMAT for --format,
+    --pretty and shortlog --group, _RDP_GIT_SIGNATURE_SORT for a --sort of _RDP_GIT_SIGNATURE_VALUES; None
+    when git reads its value as no format or sort key."""
+    if _rdp_long_option(name, ("--format", "--pretty")):
+        return _RDP_GIT_SIGNATURE_FORMAT
+    options, pattern = _RDP_GIT_SIGNATURE_VALUES.get(sub, ((), None))
+    return pattern if _rdp_long_option(name, options) else None
 
 
 def _rdp_git_program_under(sub, before, after):
@@ -11903,9 +11935,12 @@ def _rdp_git_program_under(sub, before, after):
     letters, valued, _nexts = _RDP_GIT_PROGRAM_LETTERS.get(sub, ("", "", ""))
     # held: the word may be an option's value; data: it surely is one (the word before it, itself surely
     # free, surely takes it or stops git, _rdp_git_waits). A -- ends the options only when reached neither.
-    skip = form = ended = held = data = False
+    # form: the pattern a word matches when, as the value of the format or sort option before it
+    # (_rdp_git_signature_value), it runs gpg.program; judged before the word is skipped as that value.
+    skip = ended = held = data = False
+    form = None
     for word in after:
-        if form and _RDP_GIT_SIGNATURE_FORMAT.search(word):
+        if form is not None and form.search(word):
             return word
         name = word.split("=", 1)[0]
         if sub in _RDP_GIT_TRANSPORTS and _rdp_git_helper_url(word):
@@ -11930,12 +11965,13 @@ def _rdp_git_program_under(sub, before, after):
         if skip:
             # An option's operand is data, a format-looking one included (git log --grep --format=%G
             # searches for --format=%G); a URL operand was judged above, since git still reaches it.
-            skip = form = False
+            skip = False
+            form = None
             continue
-        form = _rdp_long_option(name, ("--format", "--pretty"))
-        if form and _RDP_GIT_SIGNATURE_FORMAT.search(word):
+        form = _rdp_git_signature_value(sub, name)
+        if form is not None and form.search(word):
             return word
-        form = form and name == word
+        form = form if name == word else None
         if word == "--help":
             return word
         if name.startswith("--") and name not in _RDP_GIT_NOT_PROGRAM_OPTIONS and word != "--exec-path" and (
@@ -11979,9 +12015,11 @@ def _rdp_git_runs_program(words):
     """The first word of a plain git command that makes it run a program, named in it or configured; None
     when the command is no git command or runs none that way: a global -p or --paginate (the pager), an
     option of _RDP_GIT_PROGRAM_OPTIONS or of the subcommand's _RDP_GIT_SUB_PROGRAM_OPTIONS (abbreviated or
-    not), a signature placeholder or atom in a --format or --pretty value (_RDP_GIT_SIGNATURE_FORMAT,
-    gpg.program), a short option of _RDP_GIT_PROGRAM_LETTERS (grep -O, rebase and difftool -x, clone -u
-    and -c, commit -S and -p, tag -s, -u and -v), a --help after the subcommand (git help's viewer), a
+    not), a signature placeholder or atom in a --format, --pretty or shortlog --group value
+    (_RDP_GIT_SIGNATURE_FORMAT) or a signature sort key in a for-each-ref, branch or tag --sort value
+    (_RDP_GIT_SIGNATURE_SORT), each running gpg.program, a short option of _RDP_GIT_PROGRAM_LETTERS (grep -O,
+    rebase and difftool -x, clone -u and -c, commit -S and -p, tag -s, -u and -v), a --help after the
+    subcommand (git help's viewer), a
     TRANSPORT::ADDRESS URL for a subcommand of _RDP_GIT_TRANSPORTS, or a subcommand of
     _RDP_GIT_PROGRAM_SUBCOMMANDS. Options are read with their operands first: a word taken as the value of
     an option before it (attached, or the

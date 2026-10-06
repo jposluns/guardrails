@@ -1435,7 +1435,19 @@ def _rdp_scope_cases(base, plain):
                 "git log --oneline --default --grep --ext-diff", "git log -1 --format=%-GG",
                 "git show -s --pretty=tformat:%+GK", "git log -1 --format='% GT' -- .aiqt",
                 "git log --pretty tformat:%-GS", "git log --format='%<(9)% GF'",
-                "git for-each-ref --format='%(*signature)'", "git tag -l --format '%(*signature:grade)'")
+                "git for-each-ref --format='%(*signature)'", "git tag -l --format '%(*signature:grade)'",
+                "git for-each-ref --sort=signature", "git for-each-ref --sort=signature:grade",
+                "git for-each-ref --sort=-signature", "git for-each-ref --sort='*signature'",
+                "git for-each-ref --sort='-*signature:signer'", "git for-each-ref --sort=v:signature",
+                "git for-each-ref --sort=version:signature:key", "git for-each-ref --so=signature",
+                "git for-each-ref --sor signature", "git for-each-ref --sort=refname --sort=signature",
+                "git for-each-ref --sort refname --sort -signature", "git for-each-ref --no-sort --sort=signature",
+                "git branch --sort=signature", "git branch --so=signature:grade", "git tag --sort='*signature'",
+                "git tag -l --sor '*signature'", "git for-each-ref --sort=contents:signature",
+                "git shortlog --group=%GG HEAD", "git shortlog --gr=%GG HEAD", "git shortlog --g='%G?' HEAD",
+                "git shortlog --group %GG HEAD", "git shortlog --group --format=%GG HEAD",
+                "git shortlog --group=format:%GS HEAD", "git shortlog --group=committer --group=%GK HEAD",
+                "git shortlog -c --group %-GG HEAD")
     pr_got = []
     for c in programs:
         result = go.run(c)
@@ -1465,7 +1477,10 @@ def _rdp_scope_cases(base, plain):
                 "git log -S -n -- --ext-diff", "git log -S-n -- --ext-diff", "git commit --mess --mess -- -S",
                 "git blame -n -- --ext-diff", "git blame -L 1,2 -- --ext-diff", "git shortlog -n -- --ext-diff",
                 "git blame -G -G -- --ext-diff", "git commit --mess --gpg-sign", "git shortlog -G -G -- --ext-diff",
-                "git blame -I -O -- --ext-diff")
+                "git blame -I -O -- --ext-diff", "git for-each-ref --sort=refname", "git for-each-ref --sort refname",
+                "git branch --sort=-committerdate", "git tag -l --sort=v:refname", "git shortlog --group=author HEAD",
+                "git shortlog --group author --group=trailer:x HEAD", "git shortlog --group=%an HEAD",
+                "git shortlog --grep %GG HEAD", "git log --grep signature", "git tag -m signature v1")
     check("rdp/plain-git-option-operands-parsed", [_rdp_kind(go.run(c)) for c in operands],
           ["allow"] * len(operands))
     patches = ("git log -Sx -p -- .aiqt", "git log -pSconfig -- .aiqt", "git log -cS x -- .aiqt",
