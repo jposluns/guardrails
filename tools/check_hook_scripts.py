@@ -50,10 +50,12 @@ reviewed edit here. Six legs:
       [sys.executable, "-I", "-S", "-B", <this file>, "--parity-child", ...] that loads both files with
       importlib. The child writes its structured result at interpreter shutdown, AFTER the loaded
       files' own cleanup (non-daemon threads joined, their atexit hooks run, pending cyclic-garbage
-      finalizers collected REPEATEDLY until a pass frees nothing, within _GC_PASS_BOUND passes,
-      past which the child refuses by name -- merge train 2 QA r4, codex MEDIUM: a collected
-      finalizer may create NEW cyclic cleanup work, which one collection left for the ending
-      os._exit to skip), and then ends ITSELF with os._exit, so no interpreter finalization
+      finalizers collected REPEATEDLY until a pass frees nothing and leaves no more objects
+      tracked than before it, within _GC_PASS_BOUND passes, past which the child refuses by
+      name -- merge train 2 QA r4, codex MEDIUM: a collected finalizer may create NEW cyclic
+      cleanup work, which one collection left for the ending os._exit to skip; QA r5, codex
+      MEDIUM: a finalizer that resurrects its object while creating that work makes a pass
+      free nothing), and then ends ITSELF with os._exit, so no interpreter finalization
       runs after the result (merge train 2 QA r3); a fault the loaded code reports into a replaced
       or silenced reporting machinery is seen by an audit hook and makes the child exit 2, and
       reporting machinery left replaced is put back and refused the same way. The parent accepts
@@ -93,12 +95,19 @@ DISCLOSED RESIDUALS (what this gate does not catch):
     a residual (merge train 2 QA r2, claude MINOR).
   - Leg (p): the r2 finalization residual is closed (merge train 2 QA r3: pending finalizers run
     before the result and the child ends with os._exit at it, so a finalizer that ends the child
-    silently leaves no result). What remains: a THREAD's uncaught exception reaches
-    threading.excepthook with no audit event before it, so a thread fault reported through
-    sys.stderr or threading.excepthook that loaded code replaced and then put back before the
-    result is written is not seen (a replacement still in place then is refused); and an object
-    still reachable at the result is never finalized (os._exit), so its finalizer neither runs
-    nor faults.
+    silently leaves no result). What remains: a fault reported through a path that raises no
+    audit event, into a stream or hook that loaded code replaced and then put back before the
+    result is written, is not seen (a replacement still in place then is refused). Two such
+    paths exist: a THREAD's uncaught exception reaches threading.excepthook with no audit event
+    before it; and while loaded code has DELETED sys.unraisablehook, CPython reports an
+    unraisable fault (an exit handler's exception, a finalizer's) by writing it to sys.stderr
+    with no audit event, so loaded code that deletes that hook, replaces sys.stderr and
+    restores both before the result hides such a fault (merge train 2 QA r5, codex MEDIUM,
+    reproduced). An object still reachable at the result is never finalized (os._exit), so its
+    finalizer neither runs nor faults; and the repeated collection settles on a pass that
+    frees nothing and leaves no more objects tracked than before it, so a finalizer in that
+    pass that creates new cyclic garbage while releasing at least as many other tracked
+    objects is not collected again.
   - The scripts run under this gate's interpreter (sys.executable), not the host's `python3` lookup.
     Not exercised: a python3 too old to accept -I (before 3.4), which exits 2 with a usage error before
     the launcher runs; a python3 that cannot be found or started (the outcome is the host's); and a
@@ -173,11 +182,13 @@ ABSENT_IN_PACK = ("_is_worker", "_sibling_or_skip")
 # Leg (p): the parity child's completeness terminator, written after the JSON result line at
 # the child's shutdown; a result without it was cut short by the loaded code's cleanup (secfcl).
 PARITY_COMPLETE = "AIQT-PARITY-RESULT-COMPLETE"
-# How many garbage-collection passes the parity child's emit may make before one frees nothing
-# (merge train 2 QA r4, codex MEDIUM: a collected finalizer may CREATE new cyclic cleanup work,
-# which the r3 single collection left for the ending os._exit to skip); a run that never
-# settles inside this bound is refused by name, never a result over cleanup work that cannot be
-# shown complete.
+# How many garbage-collection passes the parity child's emit may make before one SETTLES: frees
+# nothing AND leaves no more objects tracked than before it (merge train 2 QA r4, codex MEDIUM: a
+# collected finalizer may CREATE new cyclic cleanup work, which the r3 single collection left
+# for the ending os._exit to skip; QA r5, codex MEDIUM: a finalizer that resurrects its own
+# object, which a pass then does not count as freed, can still create that work); a run that
+# never settles inside this bound is refused by name, never a result over cleanup work that
+# cannot be shown complete.
 _GC_PASS_BOUND = 10
 
 
@@ -663,7 +674,9 @@ def parity_child(spec):
     on a clean exit). Merge train 2 QA r3 closes that finalizer: emit collects the cyclic garbage
     BEFORE the result, so pending finalizers run first -- r4 collects REPEATEDLY, until a pass
     frees nothing, within _GC_PASS_BOUND passes, past which emit refuses by name (codex MEDIUM:
-    a collected finalizer that creates new cyclic cleanup work needs more than one pass) -- and
+    a collected finalizer that creates new cyclic cleanup work needs more than one pass), and
+    r5 also requires that settling pass to leave no more objects tracked than before it (codex
+    MEDIUM: a finalizer that resurrects its object while creating that work frees nothing) -- and
     then ends the child ITSELF with os._exit(0), so no interpreter finalization runs after the
     result (codex MEDIUM). The
     reporting machinery is guarded (claude MINOR 2): an audit hook armed before either file loads
@@ -698,15 +711,19 @@ def parity_child(spec):
         if not outcome:
             return
         restore()
-        # Collect REPEATEDLY until a pass frees nothing (merge train 2 QA r4, codex MEDIUM: a
-        # collected finalizer may create NEW cyclic cleanup work, which a single collection left
-        # for the os._exit below to skip); exceeding _GC_PASS_BOUND fails closed.
+        # Collect REPEATEDLY until a pass SETTLES: frees nothing and leaves no more objects
+        # tracked than before it (merge train 2 QA r4, codex MEDIUM: a collected finalizer may
+        # create NEW cyclic cleanup work, which a single collection left for the os._exit below
+        # to skip; QA r5, codex MEDIUM: a finalizer that resurrects its own object frees nothing
+        # in that pass, so the count of freed objects alone missed the new work it created);
+        # exceeding _GC_PASS_BOUND fails closed.
         for _ in range(_GC_PASS_BOUND):
-            if gc.collect() == 0:
+            tracked = len(gc.get_objects())
+            if gc.collect() == 0 and len(gc.get_objects()) <= tracked:
                 break
         else:
-            faults.append("garbage collection still freed objects after %d passes, so cleanup "
-                          "work finalizers keep creating cannot be shown complete"
+            faults.append("garbage collection still freed or created objects after %d passes, "
+                          "so cleanup work finalizers keep creating cannot be shown complete"
                           % _GC_PASS_BOUND)
         restore()
         if faults:
@@ -1222,7 +1239,34 @@ def self_test_main():
                  "                self.make(self.depth - 1)\n"
                  "\n    _SeededLink(depth)\n"
                  "\n\n_seeded_atexit.register(_seeded_make_link, 12)\n",
-                 "still freed objects after"),
+                 "still freed or created objects after"),
+                # Merge train 2 QA r5 (codex MEDIUM): an Outer finalizer that RESURRECTS its
+                # object while building a cyclic Inner whose finalizer faults made the first pass
+                # free nothing, and the r4 loop emitted a result over the Inner's pending cleanup;
+                # automatic collection is disabled so the Outer is still pending at emit.
+                ("finalizer-resurrecting-fault", "\n\nimport atexit as _seeded_atexit\n"
+                 "import gc as _seeded_gc\nimport os as _seeded_os\n"
+                 "_seeded_held = []\n"
+                 "\n\nclass _SeededResurrectInner:\n"
+                 "    def __init__(self):\n"
+                 "        self.cycle = self\n"
+                 "        self.remove = _seeded_os.remove\n"
+                 "\n    def __del__(self):\n"
+                 "        self.remove('/nonexistent-aiqt-parity-selftest-resurrect')\n"
+                 "\n\nclass _SeededResurrectOuter:\n"
+                 "    def __init__(self):\n"
+                 "        self.cycle = self\n"
+                 "        self.held = _seeded_held\n"
+                 "        self.inner = _SeededResurrectInner\n"
+                 "\n    def __del__(self):\n"
+                 "        self.held.append(self)\n"
+                 "        self.inner()\n"
+                 "\n\ndef _seeded_setup():\n"
+                 "    _seeded_gc.collect()\n"
+                 "    _seeded_gc.disable()\n"
+                 "    _SeededResurrectOuter()\n"
+                 "\n\n_seeded_atexit.register(_seeded_setup)\n",
+                 "Exception ignored"),
         ):
             root = fresh("p-" + name)
             _patch(root / STOP_REL, "", "", append)
@@ -1256,7 +1300,8 @@ def self_test_main():
           "fault under a replaced sys.stderr or a silenced sys.unraisablehook, a seeded replaced "
           "sys.excepthook, a seeded finalizer whose newly created cyclic cleanup work faults "
           "under the repeated collection, a seeded finalizer chain outlasting the bounded "
-          "collection, and a seeded cleanup exit that cuts "
+          "collection, a seeded resurrecting finalizer whose newly created cyclic cleanup work "
+          "faults, and a seeded cleanup exit that cuts "
           "off its shutdown-written result are cannot-evaluate (secfcl)")
     return 0
 
