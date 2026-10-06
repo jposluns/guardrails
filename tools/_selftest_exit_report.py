@@ -60,6 +60,16 @@ description (an exception's repr, a thread's name) inside a guard whose own fail
 too, so a raising __repr__ or code property cannot erase the fault; a thread's end is classified
 without running such code (by the exception's real type and SystemExit's own code slot).
 
+THE HOOKS OUTLIVE THE MODULE'S GLOBALS: interpreter teardown clears module globals (setting them
+to None) while the audit hook is still installed and late destructors still run, so a hook that
+looked a global up at call time would itself fault there, and its "Exception ignored" would refuse
+a run whose late code was clean (for example a destructor that opens a file or audits an event).
+Every hook and the finalizer (_audit, _genuine_bootstrap, _thread_hook, _clean_status,
+_SuiteExit.code, the _shutdown wrapper, _harness_error, _finalize) therefore binds, when it is
+defined, every object it reads, builtins included, as a keyword-only default (the _shutdown wrapper
+reads its factory's through its closure), and looks up no global or builtin name at call time; a
+faulting late destructor still reaches stderr through sys.unraisablehook and is still refused.
+
 At exit the interpreter joins every non-daemon thread (a thread fault reaches stderr through
 threading.excepthook, and the wrapper above records it), runs every atexit callback registered after
 arm (a callback fault reaches stderr as an ignored exception), and only then runs the finalizer, which
@@ -130,16 +140,17 @@ class _SuiteExit(SystemExit):
     exit pass the gate's exit_code reconcile."""
 
     @property
-    def code(self):
+    def code(self, *, _getframe=sys._getframe, _get_ident=threading.get_ident, _STATE=_STATE,
+             _SYSTEM_EXIT_CODE=_SYSTEM_EXIT_CODE, SystemExit=SystemExit, ValueError=ValueError):
         try:
-            sys._getframe(1)
+            _getframe(1)
         except ValueError:
-            if not _STATE["joined"] and threading.get_ident() == _STATE["main_ident"]:
+            if not _STATE["joined"] and _get_ident() == _STATE["main_ident"]:
                 _STATE["confirmed"] = self
         return _SYSTEM_EXIT_CODE.__get__(self, SystemExit)
 
 
-def _harness_error(message):
+def _harness_error(message, *, print=print, sys=sys, BaseException=BaseException):
     try:
         print("SELF-TEST HARNESS ERROR: {}".format(message), file=sys.stderr)
         sys.stderr.flush()
@@ -147,11 +158,13 @@ def _harness_error(message):
         pass
 
 
-def _clean_status(code):
+def _clean_status(code, *, type=type, int=int):
     return code is None or (type(code) is int and code == 0)
 
 
-def _thread_hook(args):
+def _thread_hook(args, *, _STATE=_STATE, _SYSTEM_EXIT_CODE=_SYSTEM_EXIT_CODE,
+                 _clean_status=_clean_status, issubclass=issubclass, type=type,
+                 SystemExit=SystemExit, BaseException=BaseException):
     """threading.excepthook while installed: record every thread exception except a clean SystemExit,
     then defer to the hook it replaced (which still writes the traceback to stderr). The end is
     classified by the exception's real type and SystemExit's own code slot, so no code the exception
@@ -174,16 +187,19 @@ def _thread_hook(args):
     _STATE["thread_hook"](args)
 
 
-def _genuine_bootstrap(target):
+def _genuine_bootstrap(target, *, _BOOTSTRAP=_BOOTSTRAP, _MethodType=types.MethodType,
+                       _Thread=threading.Thread, issubclass=issubclass, type=type):
     """Whether a thread-start target is threading's own: exactly a bound method (its type, never an
     attribute the target supplies) whose function is threading.Thread._bootstrap itself and whose
     instance's real type is a threading.Thread. Every read is a slot of the exact method type or a
     real type, so no code the target controls runs."""
-    return (type(target) is types.MethodType and target.__func__ is _BOOTSTRAP
-            and issubclass(type(target.__self__), threading.Thread))
+    return (type(target) is _MethodType and target.__func__ is _BOOTSTRAP
+            and issubclass(type(target.__self__), _Thread))
 
 
-def _audit(event, args):
+def _audit(event, args, *, _STATE=_STATE, _THREAD_START_EVENTS=_THREAD_START_EVENTS,
+           _SUBINTERP_MODULES=_SUBINTERP_MODULES, _genuine_bootstrap=_genuine_bootstrap,
+           _exact_str=str.__str__, BaseException=BaseException):
     """The audit hook from installation on: record, as a fault, a thread started outside threading
     or after the exit-time join, and an import of a module able to create another interpreter
     (whose code no hook of this interpreter can see; the event fires for the import attempt, so a
@@ -193,7 +209,7 @@ def _audit(event, args):
         if event == "import":
             # the exact str of the name: a str subclass's own __hash__ or __eq__ would otherwise
             # decide the membership test (a name that is not a str is unclassifiable, so a fault)
-            name = str.__str__(args[0])
+            name = _exact_str(args[0])
             if name in _SUBINTERP_MODULES:
                 _STATE["faults"].append(
                     "the interpreter-creating module {} was imported; code in another interpreter "
@@ -211,7 +227,7 @@ def _audit(event, args):
         _STATE["faults"].append("an audited event ({}) could not be classified".format(event))
 
 
-def _wrap_shutdown(original):
+def _wrap_shutdown(original, *, _STATE=_STATE, _ncallbacks=atexit._ncallbacks):
     """threading._shutdown while installed: the interpreter's exit-time join of non-daemon threads.
     Once it has finished, a status read confirms nothing and a new thread or atexit registration is a
     fault."""
@@ -220,7 +236,7 @@ def _wrap_shutdown(original):
             return original()
         finally:
             _STATE["joined"] = True
-            _STATE["callbacks_at_join"] = atexit._ncallbacks()
+            _STATE["callbacks_at_join"] = _ncallbacks()
     return _shutdown
 
 
@@ -266,17 +282,21 @@ def _bootstrap_main():
     loader.exec_module(main)
 
 
-def _finalize(report_path, suite_id, executed):
+def _finalize(report_path, suite_id, executed, *, _STATE=_STATE, _collect=gc.collect,
+              _ncallbacks=atexit._ncallbacks, _dump=json.dump, _exit=os._exit, sys=sys,
+              _harness_error=_harness_error, open=open, list=list, range=range,
+              BaseException=BaseException, GC_PASSES=GC_PASSES, HARNESS_ERROR=HARNESS_ERROR,
+              FORMAT_VERSION=FORMAT_VERSION):
     """The exit handler: every refusing path ends the process immediately with os._exit(2) and no
     report; the reporting path writes the report and RETURNS, deferring to the interpreter's own
     exit status, which the gate reconciles against the report's exit_code."""
     status = HARNESS_ERROR
     try:
         for _ in range(GC_PASSES):
-            if gc.collect() == 0:
+            if _collect() == 0:
                 break
         code = _STATE["code"]
-        if _STATE["joined"] and atexit._ncallbacks() > _STATE["callbacks_at_join"]:
+        if _STATE["joined"] and _ncallbacks() > _STATE["callbacks_at_join"]:
             _STATE["faults"].append("an atexit callback was registered after the exit-time thread "
                                     "join, so it never runs")
         sys.stdout.flush()
@@ -294,9 +314,9 @@ def _finalize(report_path, suite_id, executed):
                            "exited with (its exit was caught); no execution report is written")
         else:
             with open(report_path, "x", encoding="utf-8") as handle:
-                json.dump({"format_version": FORMAT_VERSION, "suite": suite_id,
-                           "check_ids": list(executed), "exit_code": code, "finalized": True},
-                          handle)
+                _dump({"format_version": FORMAT_VERSION, "suite": suite_id,
+                       "check_ids": list(executed), "exit_code": code, "finalized": True},
+                      handle)
                 handle.write("\n")
             status = None   # defer to the interpreter's own exit status
     except BaseException as exc:
@@ -310,7 +330,7 @@ def _finalize(report_path, suite_id, executed):
             _harness_error("the finalizer's failure could not be described")
     finally:
         if status is not None:
-            os._exit(status)
+            _exit(status)
 
 
 def arm(report_path, suite_id, executed):

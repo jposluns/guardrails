@@ -142,7 +142,9 @@ so the channel is closed only by the suite's own source being reviewed and pinne
 """
 import ast
 import contextlib
+import dis
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -151,6 +153,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 try:
@@ -689,6 +692,35 @@ TWIN_ATEXIT = "import atexit\natexit.register(int)\n"
 TWIN_DESTRUCTOR = ("class _Quiet:\n    def __del__(self):\n        pass\n"
                    "_cycle = _Quiet()\n_cycle.self = _cycle\ndel _cycle\n")
 TWIN_THREAD = "import threading\nthreading.Thread(target=int).start()\n"
+# A destructor of an object the runner's module still holds runs at interpreter TEARDOWN, after the
+# report is written and after module globals are cleared, while the audit hook is still installed;
+# each binds what it uses, so only the helper's own hooks could fault there. A clean one that opens
+# a file (the open audit event) or calls a captured sys.audit must pass; its faulting twin must not.
+TEARDOWN_OPEN = ("class _LateOpen:\n    def __del__(self, op=open, dn=os.devnull):\n"
+                 "        with op(dn, 'w') as f:\n            f.write('ok')\n"
+                 "_late = _LateOpen()\n")
+TEARDOWN_AUDIT = ("class _LateAudit:\n    def __del__(self, au=sys.audit):\n"
+                  "        au('qa.clean')\n_late = _LateAudit()\n")
+TEARDOWN_FAULT = ("class _LateFault:\n"
+                  "    def __del__(self, op=open, dn=os.devnull, err=RuntimeError):\n"
+                  "        with op(dn, 'w') as f:\n            f.write('ok')\n"
+                  "        raise err('ST_TEARDOWN_FAULT')\n_late = _LateFault()\n")
+# The opcodes that read (or write) a name through the module globals or the builtins at call time.
+_GLOBAL_NAME_OPS = frozenset(("LOAD_GLOBAL", "LOAD_NAME", "LOAD_FROM_DICT_OR_GLOBALS",
+                              "STORE_GLOBAL", "DELETE_GLOBAL", "STORE_NAME", "DELETE_NAME"))
+
+
+def _global_name_reads(function):
+    """The names a function's code (nested code objects included) reads or writes through the
+    module globals or the builtins at call time, as sorted (code name, opcode, name) triples."""
+    found, stack = set(), [function.__code__]
+    while stack:
+        code = stack.pop()
+        for instruction in dis.get_instructions(code):
+            if instruction.opname in _GLOBAL_NAME_OPS:
+                found.add((code.co_name, instruction.opname, str(instruction.argval)))
+        stack.extend(const for const in code.co_consts if isinstance(const, types.CodeType))
+    return sorted(found)
 
 
 def _thread_exit(arg):
@@ -1355,6 +1387,34 @@ def self_test():
             "        raise RuntimeError('ST_MAIN_LOST')\n"
             "atexit.register(_late)\n"))))
         expect("st/main-module-at-exit-passes", (code, err), (0, ""))
+        # 25e (round 5): every hook and the finalizer keep, through interpreter teardown, what they
+        # read: teardown clears module globals while the audit hook is still installed, so a hook
+        # that read a global then faulted and refused a clean run. A retained clean destructor that
+        # opens a file, and one that calls a captured sys.audit, run at teardown and pass; their
+        # faulting twin is still refused through the error stream; and
+        # no hook or finalizer looks up a global or builtin name at call time (a static witness
+        # over every one, including those no teardown vector reaches)
+        for label, vector in (("open", TEARDOWN_OPEN), ("captured-audit", TEARDOWN_AUDIT)):
+            code, _out, err = run(build(_manifest_text(),
+                                        _report_body(GOOD_IDS, 0, before_exit=vector)))
+            expect("st/teardown-clean-{}-passes".format(label), (code, err), (0, ""))
+        code, _out, err = run(build(_manifest_text(),
+                                    _report_body(GOOD_IDS, 0, before_exit=TEARDOWN_FAULT)))
+        expect("st/teardown-fault-2", code, 2)
+        expect("st/teardown-fault-named",
+               ("ST_TEARDOWN_FAULT" in err, "error stream carries a fault" in err), (True, True))
+        spec = importlib.util.spec_from_file_location(
+            "_selftest_exit_report_probe",
+            str(Path(__file__).resolve().parent / "_selftest_exit_report.py"))
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        for label, function in (
+                ("audit", probe._audit), ("genuine-bootstrap", probe._genuine_bootstrap),
+                ("thread-hook", probe._thread_hook), ("clean-status", probe._clean_status),
+                ("suite-exit-code", probe._SuiteExit.code.fget),
+                ("shutdown-wrapper", probe._wrap_shutdown(int)),
+                ("harness-error", probe._harness_error), ("finalize", probe._finalize)):
+            expect("st/teardown-bound-{}".format(label), _global_name_reads(function), [])
 
         # 26: the declared stderr allowance is byte-exact over the WHOLE stream: the declared bytes
         # pass, and a repetition, a line-separator variant (CRLF, vertical tab, file separator), a
@@ -1444,7 +1504,10 @@ def self_test():
           "treats unavailable temp storage as "
           "cannot-evaluate, refuses to guess its repo root when run outside a checkout, and catches the "
           "near-miss (a green child that never executed a registered check) while its complete-report "
-          "twin passes, and keeps the runner's module as __main__ for its exit handlers")
+          "twin passes, keeps the runner's module as __main__ for its exit handlers, and passes a "
+          "clean destructor run at interpreter teardown (a file open or a captured sys.audit) while "
+          "refusing its faulting twin, every hook and the finalizer reading no module global or "
+          "builtin at call time")
     return 0
 
 
