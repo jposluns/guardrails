@@ -65,13 +65,19 @@ true, and the exit_code that must equal the child's real exit status. A fault th
 atexit callback, a destructor, a thread) therefore refuses the verdict when it reaches the error
 stream, which a destructor fault at late interpreter teardown can fail to do (disclosed below); a
 thread that ends in a failure SystemExit, which writes nothing to stderr, a thread started through
-_thread directly at any moment from process start (whose SystemExit _thread ignores silently), a
+_thread directly at any moment from process start (whose SystemExit _thread ignores silently), an
+installed trace, profile or monitoring callback (the audit events sys.settrace, sys.setprofile and
+sys.monitoring.register_callback; such a callback runs in a thread's frames after run(), where a
+SystemExit it raises is dropped silently by _thread), a
 delivered interpreter-creation audit event (cpython.PyInterpreterState_New; measured on CPython
-3.14.4 as never delivered to an in-process hook) and a load of an interpreter-creating extension
+3.14.4 as never delivered to an in-process hook), a call of an _interpreters function that creates,
+runs code in, or destroys an interpreter (the bootstrap imports _interpreters first and replaces
+those functions with refusals, so the import itself, which CPython 3.14's concurrent.futures and so
+asyncio make at module level, is no fault), and a fresh load of an interpreter-creating extension
 module (_interpreters, _xxsubinterpreters, _testcapi, _testinternalcapi), identified by the
 extension FILE it loads from, by identity or content, under any module name, or by its exact plain
 name (every in-process hook is per-interpreter, so code in another interpreter is unobservable and
-loading the machinery is itself the fault; an interpreter created through any other C extension or
+creating or driving one is itself the fault; an interpreter created through any other C extension or
 ctypes is the disclosed C-extension tier), a thread started or an atexit callback
 registered after the exit-time thread join (neither is ever joined or run), and a status recorded
 through exit_with that the interpreter's own exit did not confirm (its exit was caught before the
@@ -89,8 +95,8 @@ exit status contradicts the report (refused here) or the process really exited w
 status (nothing was hidden). The
 child-side teardown residual (a daemon thread is killed, post-report teardown destructor effects and
 faults, a late atexit registration masked by an atexit.unregister under the finalizer's count
-comparison, an execution context created below the audited Python surface by a C extension) is
-disclosed in that module. A report that is missing, truncated, malformed,
+comparison, an execution context created or an asynchronous exception injected below the audited
+Python surface by a C extension or ctypes) is disclosed in that module. A report that is missing, truncated, malformed,
 wrong-suite, non-regular, or carrying a duplicate or wrong-typed entry is CANNOT-EVALUATE, never a
 pass, whatever the child's exit code; completeness is never inferred from output volume or from the
 absence of a reported problem.
@@ -1317,7 +1323,7 @@ def self_test():
         # 25c (round 3): the observation hooks the gate's bootstrap installs BEFORE any suite code
         # close the remaining thread-class routes through the one mechanism: a raw thread started
         # before arm is recorded at its start, whenever that is; a failing threading.Thread joined
-        # before arm is recorded by the already-installed excepthook wrapper; an import of
+        # before arm is recorded by the already-installed excepthook wrapper; a fresh import of
         # subinterpreter machinery is itself the fault (code in another interpreter is invisible to
         # every per-interpreter hook); and a caught exit_with whose code a C weakref callback
         # re-reads with no frame on the stack no longer decides anything, because the finalizer
@@ -1338,8 +1344,8 @@ def self_test():
                                "_t = threading.Thread(target=sys.exit, args=(1,))\n"
                                "_t.start()\n_t.join()\n"
                                + arm_line + "_selftest_exit_report.exit_with(0)\n")
-        subinterp_import = ("try:\n    import _interpreters\nexcept ImportError:\n"
-                            "    import _xxsubinterpreters\n"
+        subinterp_import = ("import _interpreters\ndel sys.modules['_interpreters']\n"
+                            "import _interpreters\n"
                             + arm_line + "_selftest_exit_report.exit_with(0)\n")
         weakref_confirm = (arm_line
                            + "import functools, weakref\n"
@@ -1353,10 +1359,75 @@ def self_test():
         for label, body, named in (
                 ("pre-arm-raw-thread-exit-1", pre_arm_raw, unobserved),
                 ("pre-arm-thread-exit-1", pre_arm_thread_exit, "ended with SystemExit(1)"),
-                ("subinterp-import", subinterp_import, "cannot be observed from this one")):
+                ("subinterp-fresh-import", subinterp_import, "cannot be observed from this one")):
             code, _out, err = run(build(_manifest_text(), body))
             expect("st/finalizer-{}-2".format(label), code, 2)
             expect("st/finalizer-{}-named".format(label), named in err, True)
+        # 25c1 (round 10): importing _interpreters is no fault (CPython 3.14's concurrent.futures, and
+        # so asyncio, imports it at module level); the bootstrap imports it first and replaces its
+        # interpreter-creating and code-running functions with refusals, so a clean
+        # concurrent.futures pool and a clean asyncio.run pass, while creating an interpreter, through
+        # _interpreters (the refusal's RuntimeError caught, so only the recorded fault refuses) or
+        # through concurrent.interpreters, and a reload that tries to restore the functions, are
+        # refused
+        create_named = "_interpreters.create was called"
+        for label, body, named in (
+                ("subinterp-create", "import _interpreters\ntry:\n    _interpreters.create()\n"
+                 "except RuntimeError:\n    pass\n"
+                 + arm_line + "_selftest_exit_report.exit_with(0)\n", create_named),
+                ("subinterp-concurrent-interpreters-create", "import concurrent.interpreters\n"
+                 "try:\n    concurrent.interpreters.create()\nexcept RuntimeError:\n    pass\n"
+                 + arm_line + "_selftest_exit_report.exit_with(0)\n", create_named),
+                ("subinterp-reload-create", "import importlib, _interpreters\n"
+                 "importlib.reload(_interpreters)\n"
+                 "try:\n    _interpreters.create()\nexcept RuntimeError:\n    pass\n"
+                 + arm_line + "_selftest_exit_report.exit_with(0)\n", create_named)):
+            code, _out, err = run(build(_manifest_text(), body))
+            expect("st/finalizer-{}-2".format(label), code, 2)
+            expect("st/finalizer-{}-named".format(label), named in err, True)
+        for label, body in (
+                ("concurrent-futures-pool", "from concurrent.futures import ThreadPoolExecutor\n"
+                 "with ThreadPoolExecutor(max_workers=2) as _pool:\n"
+                 "    _got = list(_pool.map(abs, (-1, -2, -3)))\n"
+                 "assert _got == [1, 2, 3], _got\n"),
+                ("asyncio-run", "import asyncio\nasync def _main():\n"
+                 "    await asyncio.sleep(0)\n    return 7\n"
+                 "assert asyncio.run(_main()) == 7\n")):
+            code, _out, err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0,
+                                                                      before_exit=body)))
+            expect("st/finalizer-{}-twin-passes".format(label), (code, err), (0, ""))
+        # 25c3 (round 10): a trace, profile or sys.monitoring callback runs in a thread's frames after
+        # run(), and a SystemExit(1) it raises there (in Thread._delete, or at the return of
+        # _bootstrap_inner) escapes to _thread, which drops it silently, so threading.excepthook
+        # never sees it; each passed the gate before installing such a callback was itself refused
+        installed = "callback was installed"
+        for label, vector in (
+                ("settrace-delete", "import threading\n"
+                 "def _tracer(frame, event, arg):\n"
+                 "    if event == 'call' and frame.f_code.co_name == '_delete':\n"
+                 "        raise SystemExit(1)\n"
+                 "    return None\n"
+                 "def _worker():\n    sys.settrace(_tracer)\n"
+                 "_t = threading.Thread(target=_worker)\n_t.start()\n_t.join()\n"),
+                ("setprofile-bootstrap-return", "import threading\n"
+                 "def _prof(frame, event, arg):\n"
+                 "    if event == 'return' and frame.f_code.co_name == '_bootstrap_inner':\n"
+                 "        raise SystemExit(1)\n"
+                 "threading.setprofile(_prof)\n"
+                 "_t = threading.Thread(target=int)\n_t.start()\n_t.join()\n"
+                 "threading.setprofile(None)\n"),
+                ("monitoring-delete", "import threading\n_mon = sys.monitoring\n"
+                 "_mon.use_tool_id(3, 'st')\n"
+                 "def _start(code, offset):\n"
+                 "    if code.co_name == '_delete':\n        raise SystemExit(1)\n"
+                 "_mon.register_callback(3, _mon.events.PY_START, _start)\n"
+                 "_mon.set_events(3, _mon.events.PY_START)\n"
+                 "_t = threading.Thread(target=int)\n_t.start()\n_t.join()\n"
+                 "_mon.set_events(3, 0)\n")):
+            code, _out, err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0,
+                                                                      before_exit=vector)))
+            expect("st/finalizer-thread-end-{}-2".format(label), code, 2)
+            expect("st/finalizer-thread-end-{}-named".format(label), installed in err, True)
         # 25c2 (round 9): the interpreter-creating machinery is identified by its extension FILE, not
         # by the name it is loaded under: the _interpreters extension loaded as qa._interpreters
         # (a qualified alias through spec_from_file_location) creates a subinterpreter whose fault no
@@ -1503,6 +1574,7 @@ def self_test():
                 ("thread-hook", probe._thread_hook), ("clean-status", probe._clean_status),
                 ("suite-exit-code", probe._SuiteExit.code.fget),
                 ("shutdown-wrapper", probe._wrap_shutdown(int)),
+                ("interpreters-refusal", probe._refuse_interp_entry("create")),
                 ("harness-error", probe._harness_error), ("finalize", probe._finalize)):
             expect("st/teardown-bound-{}".format(label), _global_name_reads(function), [])
         # 25f (round 7): the static witness names an import at call time (IMPORT_NAME, and
@@ -1616,9 +1688,13 @@ def self_test():
           "silent failure SystemExit in a non-daemon thread, a thread fault whose repr or code "
           "property raises, a thread started through _thread directly at any moment from process "
           "start (a forged or non-Thread bootstrap target included), a thread or atexit callback "
-          "added after the exit-time join, a load of subinterpreter machinery (a str-subclass "
-          "name, a qualified alias of its extension file, and a copy of that file included), a "
-          "delivered interpreter-creation audit event, a finalizer failure whose repr raises, "
+          "added after the exit-time join, a trace, profile or monitoring callback (each "
+          "raising SystemExit(1) in a thread after run()), an interpreter created through "
+          "_interpreters (after a reload too) or concurrent.interpreters, a fresh load of "
+          "subinterpreter machinery (a str-subclass name, a qualified alias of its extension file, "
+          "and a copy of that file included), a delivered interpreter-creation audit event, a "
+          "finalizer failure whose repr raises, while a clean concurrent.futures pool and a clean "
+          "asyncio.run pass, "
           "and an armed child whose "
           "observation hooks were not installed at process start, refuses an armed "
           "child whose status or report bypassed the exit finalizer, whose recorded status the "

@@ -49,15 +49,30 @@ including a C callable: _thread ignores such a thread's SystemExit silently, so 
 cannot be observed; a start is threading's own only when its target is exactly a bound method
 whose function is threading.Thread._bootstrap and whose instance is a threading.Thread, read through
 the method type's own slots, so no attribute the target supplies is trusted), every thread started
-after the exit-time thread join (it is never joined), and the means of creating another
-interpreter: every hook here is per-interpreter, so code in another interpreter is invisible to all
-of them, and creating one is therefore itself the fault. That is refused in two layers. (1) THE ACT:
+after the exit-time thread join (it is never joined), every trace, profile or monitoring callback
+installed (the audit events sys.settrace, sys.setprofile and sys.monitoring.register_callback, which
+threading.settrace, threading.setprofile and their _all_threads forms raise as well; such a callback
+also runs in a thread's last frames, outside run(), in Thread._delete and at the return of
+_bootstrap_inner, where a SystemExit it raises escapes to _thread, which drops it silently, so
+threading.excepthook never sees it; the event is a fault even when the callback is None or never
+raises), and the creation or use of another interpreter: every hook here is per-interpreter, so
+code in another interpreter is invisible to all of them, and creating or driving one is therefore
+itself the fault. That is refused in three layers. (1) THE ACT:
 the audit event cpython.PyInterpreterState_New, which CPython documents for the creation of an
 interpreter, is a fault whenever this interpreter's hook receives it. MEASURED on CPython 3.14.4,
 creating an interpreter through _interpreters.create(), concurrent.interpreters.create() or
 _testcapi.run_in_subinterp delivers that event to no hook added with sys.addaudithook (nor to a
 runtime-level hook added with PySys_AddAuditHook; _xxsubinterpreters is absent there), so on that
-version this layer refuses nothing and layer (2) is the guard. (2) THE MACHINERY, identified by its
+version this layer refuses nothing and layers (2) and (3) are the guard. (2) THE ENTRY POINTS:
+importing _interpreters is NOT a fault (CPython 3.14's concurrent.futures imports it at module level,
+so every import of concurrent.futures or asyncio loads it). Instead _install imports _interpreters
+itself, before the audit hook is added, and replaces every function of that module object except
+the read-only queries in _INTERP_QUERIES with a refusal that records a fault and raises
+RuntimeError, so creating an interpreter, running code in one or destroying one through it
+(directly, or through concurrent.interpreters or InterpreterPoolExecutor, which call it) is refused
+when it is attempted. A later import of the name finds sys.modules and raises no import event; the
+replaced functions are not kept, so nothing can reach them; and importlib.reload of the module was
+measured on CPython 3.14.4 to leave the refusals in place. (3) THE MACHINERY, identified by its
 FILE, not by the name it is imported under: at installation, each interpreter-creating extension
 module (_interpreters, _xxsubinterpreters, _testcapi, _testinternalcapi) present as a file is found
 through importlib.util.find_spec without being imported, and its spec origin is recorded by
@@ -66,9 +81,13 @@ link all match) and by content (size and sha256, so a byte copy at another path 
 extension load raises an import audit event that carries the file the loader is about to open (its
 spec origin), and that file is compared with the record, so a load under a qualified alias (for
 example importlib.util.spec_from_file_location("qa._interpreters", origin)) or from a copied file
-is refused exactly as the plain import is. The plain name is refused as well, compared as an exact
+is refused exactly as the plain import is (such a load of _interpreters is a FRESH module whose
+functions layer (2) never replaced). The plain name is refused as well, compared as an exact
 str (a str subclass's own hashing or equality cannot hide it): it is the only route to such a module
-built into the interpreter, whose import carries no file. Both checks run when the load is
+built into the interpreter, whose import carries no file; for _interpreters, which _install has
+already imported, the event fires only for a load that misses sys.modules (after its entry is
+removed, or under a str subclass whose hashing misses it), that is, a fresh module. Both checks
+run when the load is
 attempted, so a failed load is refused the same way, and a file that cannot be examined is
 recorded as an unclassifiable event (a fault). NOT refused: an interpreter created through an
 extension file that is none of the recorded ones (a rebuilt or third-party C extension, or ctypes),
@@ -84,9 +103,10 @@ to None) while the audit hook is still installed and late destructors still run,
 looked a global up at call time would itself fault there, and its "Exception ignored" would refuse
 a run whose late code was clean (for example a destructor that opens a file or audits an event).
 Every hook and the finalizer (_audit, _file_digest, _genuine_bootstrap, _thread_hook, _clean_status,
-_SuiteExit.code, the _shutdown wrapper, _harness_error, _finalize) therefore binds, when it is
-defined, every object it reads, builtins included, as a keyword-only default (the _shutdown wrapper
-reads its factory's through its closure), and looks up no global or builtin name and imports nothing
+_SuiteExit.code, the _shutdown wrapper, the _interpreters refusal, _harness_error, _finalize)
+therefore binds, when it is defined, every object it reads, builtins included, as a keyword-only
+default (the _shutdown wrapper and the _interpreters refusal read their factory's through its
+closure), and looks up no global or builtin name and imports nothing
 at call time (an import at teardown fails once sys.meta_path is cleared). A faulting late
 destructor reaches stderr through sys.unraisablehook, and is refused, only while sys.stderr still
 exists: CPython drops sys.stderr (and sys.__stderr__) before it clears some interpreter-level state,
@@ -141,7 +161,10 @@ finalizer's count comparison lets an atexit.unregister made after the exit-time 
 registration (above). A silent effect of such late code (rewriting the report, calling os._exit
 itself) is the same tier as loaded code replacing the reporting machinery; and an execution context
 created below the audited Python surface (a C extension or ctypes creating an interpreter or an OS
-thread directly) is that same tier. Loaded code replacing the reporting machinery (including
+thread directly), or an asynchronous exception injected into a thread from below it (ctypes calling
+PyThreadState_SetAsyncExc, which delivers no audit event, measured on CPython 3.14.4, so a SystemExit
+timed to land in Thread._delete is dropped by _thread as a trace callback's is), is that same
+tier. Loaded code replacing the reporting machinery (including
 this module's state, threading._shutdown, threading.Thread._bootstrap, or the private per-thread
 run machinery _bootstrap calls, such as a threading.Thread subclass overriding _bootstrap_inner or a
 replaced _invoke_excepthook) is the gate's loaded-code residual, disclosed there.
@@ -163,14 +186,24 @@ HARNESS_ERROR = 2
 _THREAD_START_EVENTS = ("_thread.start_new_thread", "_thread.start_joinable_thread")
 # The audit event CPython documents for the creation of an interpreter. Receiving it is a fault; on
 # CPython 3.14.4 interpreter creation was measured to deliver it to no sys.addaudithook hook, so there
-# the extension-file record below is what refuses (module docstring, layers (1) and (2)).
+# the _interpreters refusals and the extension-file record below are what refuse (module docstring,
+# layers (1) to (3)).
 _INTERP_NEW_EVENT = "cpython.PyInterpreterState_New"
+# The audit events of installing a trace, profile or sys.monitoring callback: such a callback runs in
+# a thread's frames after run(), where a SystemExit it raises is dropped silently by _thread, so
+# installing one is itself a fault (module docstring).
+_TRACE_EVENTS = ("sys.settrace", "sys.setprofile", "sys.monitoring.register_callback")
 # The stdlib modules able to create or drive another interpreter from Python: _interpreters (3.13+)
 # and _xxsubinterpreters (its older name), and the C-API test modules whose run_in_subinterp does
-# the same. Loading one is itself a fault: every hook this module installs is per-interpreter, so
-# code in another interpreter is unobservable from this one.
+# the same. Loading one after installation is itself a fault (for _interpreters, which _install
+# imports first, only a fresh load raises the event): every hook this module installs is
+# per-interpreter, so code in another interpreter is unobservable from this one.
 _SUBINTERP_MODULES = frozenset(
     ("_interpreters", "_xxsubinterpreters", "_testcapi", "_testinternalcapi"))
+# The functions of _interpreters that _install leaves in place: read-only queries that create, run
+# code in, or destroy no interpreter. Every other function of the module is replaced by a refusal.
+_INTERP_QUERIES = frozenset(("get_config", "get_current", "get_main", "is_running", "is_shareable",
+                             "list_all", "new_config", "whence"))
 # The files those modules load from, filled by _install before the audit hook is added: their
 # identities (st_dev, st_ino), sizes, and (size, sha256) contents.
 _SUBINTERP_FILES = {"identities": set(), "sizes": set(), "digests": set()}
@@ -257,7 +290,8 @@ def _file_digest(path, *, open=open, _sha256=hashlib.sha256):
 
 def _audit(event, args, *, _STATE=_STATE, _THREAD_START_EVENTS=_THREAD_START_EVENTS,
            _SUBINTERP_MODULES=_SUBINTERP_MODULES, _SUBINTERP_FILES=_SUBINTERP_FILES,
-           _INTERP_NEW_EVENT=_INTERP_NEW_EVENT, _genuine_bootstrap=_genuine_bootstrap,
+           _INTERP_NEW_EVENT=_INTERP_NEW_EVENT, _TRACE_EVENTS=_TRACE_EVENTS,
+           _genuine_bootstrap=_genuine_bootstrap,
            _file_digest=_file_digest, _stat=os.stat, _exact_str=str.__str__,
            BaseException=BaseException):
     """The audit hook from installation on: record, as a fault, a thread started outside threading
@@ -265,7 +299,8 @@ def _audit(event, args, *, _STATE=_STATE, _THREAD_START_EVENTS=_THREAD_START_EVE
     interpreter can see) when its event is delivered, and the load of an interpreter-creating
     module, identified by the extension FILE it loads from whatever name it is loaded under, or by
     its exact plain name (the event fires for the load attempt, so a probing failed load is recorded
-    the same way). It never raises (a raising hook would abort the audited operation instead)."""
+    the same way), and the installation of a trace, profile or monitoring callback. It never raises
+    (a raising hook would abort the audited operation instead)."""
     try:
         if event == "import":
             # the exact str of the name: a str subclass's own __hash__ or __eq__ would otherwise
@@ -292,6 +327,11 @@ def _audit(event, args, *, _STATE=_STATE, _THREAD_START_EVENTS=_THREAD_START_EVE
             _STATE["faults"].append("another interpreter was created; code in another interpreter "
                                     "cannot be observed from this one")
             return
+        if event in _TRACE_EVENTS:
+            _STATE["faults"].append(
+                "a trace, profile or monitoring callback was installed ({}); a SystemExit it raises "
+                "in a thread after run() is dropped silently by _thread".format(event))
+            return
         if event not in _THREAD_START_EVENTS:
             return
         if _STATE["joined"]:
@@ -317,6 +357,34 @@ def _wrap_shutdown(original, *, _STATE=_STATE, _ncallbacks=atexit._ncallbacks):
     return _shutdown
 
 
+def _refuse_interp_entry(name, *, _STATE=_STATE, RuntimeError=RuntimeError):
+    """The replacement for an _interpreters function that creates, runs code in, or destroys an
+    interpreter: record the fault FIRST (a caught RuntimeError still refuses the run), then raise
+    before anything reaches another interpreter."""
+    message = ("_interpreters.{} was called; code in another interpreter cannot be observed from "
+               "this one".format(name))
+
+    def _refused(*args, **kwargs):
+        _STATE["faults"].append(message)
+        raise RuntimeError(message)
+    return _refused
+
+
+def _refuse_interp_entries():
+    """Import _interpreters (before the audit hook is added, so neither this import nor a later one
+    that finds sys.modules raises an event) and replace, on the module object every importer then
+    receives, each of its functions outside _INTERP_QUERIES with a refusal. The originals are not
+    kept. Absent the module (a build without it), an attempt to import it stays a fault (_audit)."""
+    try:
+        import _interpreters
+    except ImportError:
+        return
+    for name in sorted(vars(_interpreters)):
+        if (not name.startswith("_") and name not in _INTERP_QUERIES
+                and isinstance(getattr(_interpreters, name), types.BuiltinFunctionType)):
+            setattr(_interpreters, name, _refuse_interp_entry(name))
+
+
 def _record_subinterp_files():
     """Record, into _SUBINTERP_FILES, the file each interpreter-creating extension module loads
     from, found without importing it (a top-level find_spec runs no module code); a module built
@@ -339,6 +407,7 @@ def _install():
     if _STATE["installed"]:
         return
     _record_subinterp_files()
+    _refuse_interp_entries()
     _STATE["installed"] = True
     _STATE["main_ident"] = threading.main_thread().ident
     _STATE["thread_hook"] = threading.excepthook
