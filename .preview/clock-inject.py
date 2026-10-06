@@ -49,8 +49,14 @@ process zone.
 
 Contract: context = hookSpecificOutput {hookEventName, additionalContext} JSON on stdout, exit 0. This hook
 NEVER fails the tool: any error at all exits 0, including an argument, stdin, or JSON error before the
-payload is evaluated. The payload is read as BYTES and parsed by json.loads, so its decoding does not depend
-on the process locale. Unparseable hook input still emits the clock line under PostToolUse (the clock does not
+payload is evaluated. The one exception to exit 0 is an interpreter older than Python 3.14 that can start the
+hook: the guard at the top of this file reads no input, writes one line beginning
+`error: clock-inject.py requires Python 3.14 or newer` to stderr and exits 2. Under PostToolUse and
+PostToolUseFailure the tool call has already run, so that exit blocks nothing: the line reaches the assistant
+and no clock line is added. An older interpreter that cannot start the hook never reaches the guard and fails
+with Python's own error first; .preview/README.md (Installing a hook, step 4) describes those cases. The
+payload is read as BYTES and parsed by json.loads, so its decoding does not depend on the process locale.
+Unparseable hook input still emits the clock line under PostToolUse (the clock does not
 depend on the payload). An error writing the output (a closed or full stdout) is swallowed and the hook
 still exits 0 (round 24); if the stream cannot even be pointed at /dev/null, the hook ends at once with
 os._exit(0), so no exit-time flush can fail it. Kill-switch: a subordinate worker process, detected as env
