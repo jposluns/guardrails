@@ -1177,7 +1177,9 @@ def _self_test_main_isolated():
                 fsmon_marker = tmp / "precheck-fsmon-invocations"
                 fsmon_marker.write_bytes(b"")
                 fsmon_hook = tmp / "precheck-fsmon.sh"
-                fsmon_hook.write_text("#!/bin/sh\n: >> " + _shlex_fsm.quote(str(fsmon_marker))
+                # The hook APPENDS a byte (merge train 3 QA round 2, codex MINOR: `: >>` wrote
+                # none, so the size test below could never see the hook run).
+                fsmon_hook.write_text("#!/bin/sh\nprintf x >> " + _shlex_fsm.quote(str(fsmon_marker))
                                       + "\nexit 1\n", encoding="utf-8")
                 fsmon_hook.chmod(0o755)
 
@@ -1201,7 +1203,12 @@ def _self_test_main_isolated():
                     fsmon_marker.write_bytes(b"")
                     _entry_expect("a repository-local core.fsmonitor hook", fsmon_tree, "gen", 0)
                     _entry_expect("a repository-local core.fsmonitor hook", fsmon_tree, "opf", 0)
-                    if fsmon_fired and os.stat(fsmon_marker).st_size != 0:
+                    if not fsmon_fired:
+                        failures.append("(r) the control did not fire: plain git never ran the "
+                                        "repository-local core.fsmonitor hook, so this vector "
+                                        "cannot tell a pinned funnel from an unpinned one; "
+                                        "coverage that did not run fails, never a silent pass")
+                    elif os.stat(fsmon_marker).st_size != 0:
                         failures.append("(r) the repository-local core.fsmonitor hook RAN under "
                                         "a --precheck entry; the _git_lines repository-config "
                                         "pins are not effective (merge train 3 QA, claude "

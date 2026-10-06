@@ -74,7 +74,8 @@ def _git_lines(root, args):
     configuration pinned away, so on that root the caller's core.fsmonitor does not run and the
     caller's global ignore file cannot hide a path from the walk. That holds ONLY on such a root. On
     a root another uid owns, or whose owner cannot be read, the caller's global and system
-    configuration still apply, its core.fsmonitor and global ignore file included: a disclosed
+    configuration still apply, its global ignore file included (its core.fsmonitor does not run:
+    the argv pin below outranks every configuration file): a disclosed
     residual, which tools/selftest_git_fixture_env.py reports as config exposure for any self-test
     that reaches it. On an owned root, a refusal git reports as dubious ownership (its git dir
     belongs to another uid) is a named refusal, exit 2, never None, so the root cross-check is never
@@ -101,8 +102,9 @@ def _git_lines(root, args):
     # untranslated for the ownership test below). On such a root a caller's core.fsmonitor does not
     # run in this query and a caller's global ignore file cannot hide a path from the walk (fewer
     # ignored paths, so more refusals, never fewer). On a root another uid owns, or whose owner
-    # cannot be read, the caller's configuration still applies, fsmonitor and global ignore file
-    # included; the fixture-env observer reports that exposure. This stays a disclosed residual
+    # cannot be read, the caller's configuration still applies, its global ignore file included
+    # (its core.fsmonitor does not run: the argv pins core.fsmonitor=false, which outranks every
+    # configuration file); the fixture-env observer reports that exposure. This stays a disclosed residual
     # rather than being narrowed: git refuses such a checkout as dubious ownership unless the
     # caller's own global or system configuration trusts it (the caller_env_without_git stance), and
     # trusting the root here instead (a command-scope safe.directory for this one root) would make

@@ -594,7 +594,8 @@ _RAW_READ_HOOK_SCRIPT_DIRS = (".aiqt/core/hooks/scripts", "plugin/aiqt-guardrail
 _RAW_READ_HOOK_SCRIPT_RE = re.compile(r"[a-z0-9][a-z0-9-]*\.py")
 # OPTIONAL third-party imports: module -> the importers allowed to name it. An import of one of
 # these resolves only when it is (1) made by a listed importer and (2) a direct statement of a
-# try body INSIDE A FUNCTION whose every ImportError / ModuleNotFoundError handler is exactly a
+# try body INSIDE A FUNCTION, with no `finally`, whose every handler (one of them catching
+# ImportError) is exactly a
 # plain `return` (or `return None`) that never touches the module, so on the module's absence the
 # importer PROVABLY returns without it (merge train 3 QA, codex MEDIUM: the earlier handler-name
 # test also accepted `except ImportError: raise`, a required dependency); any other spelling
@@ -604,16 +605,21 @@ _RAW_READ_HOOK_SCRIPT_RE = re.compile(r"[a-z0-9][a-z0-9-]*\.py")
 # PyYAML is absent; no gate, generator run or workflow step installs or requires it.
 _RAW_READ_OPTIONAL_IMPORTS = {"yaml": ("tools/gen_rules.py",)}
 _RAW_READ_IMPORT_ERRORS = ("ImportError", "ModuleNotFoundError")
+# The handler names that catch an ImportError: the two above and their bases.
+_RAW_READ_IMPORT_CATCHERS = _RAW_READ_IMPORT_ERRORS + ("Exception", "BaseException")
 
 
 def _raw_read_guarded_imports(tree):
     """ids of the Import / ImportFrom nodes the optional-import exemption may cover: each is a
-    direct statement of a try body INSIDE a function, and EVERY handler of that try naming
-    ImportError or ModuleNotFoundError (alone or in a tuple) is exactly one plain `return` or
-    `return None`, so on the module's absence the importer provably returns without using (or
-    binding a fallback for) the module. A module-level try (whose handler cannot return), a
-    handler that re-raises, falls through, binds a substitute or touches any name, or a mixed
-    handler set makes the import a REQUIRED dependency and it stays outside the exemption
+    direct statement of a try body INSIDE a function whose try has no `finally`, EVERY handler
+    of that try (whatever it names, in any position) is exactly one plain `return` or `return
+    None`, and at least one handler catches ImportError (it names ImportError,
+    ModuleNotFoundError, Exception or BaseException, alone or in a tuple, or is bare), so on the
+    module's absence the importer provably returns without using (or binding a fallback for) the
+    module. A module-level try (whose handler cannot return), a `finally`, any handler that
+    re-raises, falls through, binds a substitute or touches any name (a broader handler placed
+    before the ImportError one included), or no handler catching ImportError makes the import a
+    REQUIRED dependency and it stays outside the exemption
     (merge train 3 QA, codex MEDIUM: `except ImportError: raise` passed the handler-name test
     while making the module mandatory)."""
     guarded = set()
@@ -621,15 +627,16 @@ def _raw_read_guarded_imports(tree):
         if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for node in ast.walk(scope):
-            if not isinstance(node, ast.Try):
+            if not isinstance(node, ast.Try) or node.finalbody:
+                # A `finally` runs on the absence path too and may raise or use the module
+                # (merge train 3 QA round 2, codex MEDIUM): no exemption.
                 continue
+            # EVERY handler, whatever it names, must be a bare return: a broader or bare handler
+            # (Exception, BaseException, `except:`) placed before the ImportError one catches the
+            # absence first, whatever the later handler does (merge train 3 QA round 2, codex
+            # MEDIUM / claude MINOR 1); at least one handler must catch ImportError.
             caught = False
             for handler in node.handlers:
-                kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) \
-                    else [handler.type]
-                if not any(isinstance(kind, ast.Name) and kind.id in _RAW_READ_IMPORT_ERRORS
-                           for kind in kinds):
-                    continue
                 returns_bare = (len(handler.body) == 1
                                 and isinstance(handler.body[0], ast.Return)
                                 and (handler.body[0].value is None
@@ -638,7 +645,12 @@ def _raw_read_guarded_imports(tree):
                 if not returns_bare:
                     caught = False
                     break
-                caught = True
+                kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) \
+                    else [handler.type]
+                if handler.type is None or any(
+                        isinstance(kind, ast.Name) and kind.id in _RAW_READ_IMPORT_CATCHERS
+                        for kind in kinds):
+                    caught = True
             if caught:
                 guarded.update(id(stmt) for stmt in node.body
                                if isinstance(stmt, (ast.Import, ast.ImportFrom)))
@@ -3862,8 +3874,9 @@ def _self_test_isolated(red_on_revert):
             # INSIDE A FUNCTION with an ImportError handler that is exactly a plain `return`
             # (`return None`); unguarded, at module level, under a handler that re-raises or
             # binds a fallback or returns the module, under a handler that does not catch
-            # ImportError, from another importer, or of an unlisted module, it still fails by
-            # name (merge train 3 QA, codex MEDIUM).
+            # ImportError, behind a broader or bare handler that does not return, beside a
+            # `finally`, from another importer, or of an unlisted module, it still fails by
+            # name (merge train 3 QA, codex MEDIUM; round 2).
             (lint_root / "tools" / "run_all_checks.sh").write_text(
                 "python3 -I -B tools/gen_rules.py\npython3 -I -B tools/entry_c.py\n",
                 encoding="utf-8")
@@ -3881,6 +3894,20 @@ def _self_test_isolated(red_on_revert):
                 ("handler-uses-module", "def f():\n    try:\n        import yaml\n"
                  "    except ImportError:\n        return yaml\n", "x = 1\n", ("'yaml'",)),
                 ("unguarded", "import yaml\n", "x = 1\n", ("'yaml'",)),
+                # merge train 3 QA round 2 (codex MEDIUM / claude MINOR 1): a broader handler
+                # BEFORE the bare-return ImportError one, and a `finally`, run on the absence path.
+                ("broader-handler-first-reraise", "def f():\n    try:\n        import yaml\n"
+                 "    except Exception:\n        raise\n"
+                 "    except ImportError:\n        return None\n", "x = 1\n", ("'yaml'",)),
+                ("broader-handler-first-fallback", "def f():\n    try:\n        import yaml\n"
+                 "    except Exception:\n        yaml = None\n"
+                 "    except ImportError:\n        return None\n", "x = 1\n", ("'yaml'",)),
+                ("bare-handler-first-pass", "def f():\n    try:\n        import yaml\n"
+                 "    except:\n        pass\n"
+                 "    except ImportError:\n        return None\n", "x = 1\n", ("'yaml'",)),
+                ("raising-finally", "def f():\n    try:\n        import yaml\n"
+                 "    except ImportError:\n        return None\n"
+                 "    finally:\n        raise RuntimeError('x')\n", "x = 1\n", ("'yaml'",)),
                 ("wrong-handler", "try:\n    import yaml\nexcept ValueError:\n    pass\n",
                  "x = 1\n", ("'yaml'",)),
                 ("unlisted-module", "try:\n    import tomlkit\nexcept ImportError:\n    pass\n",
