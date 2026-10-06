@@ -163,6 +163,15 @@ _bootstrap_inner, a replaced _invoke_excepthook), os._exit, the atexit registrat
 so the channel is closed only by the suite's own source being reviewed and pinned. The child runs un-timed
 (parity with the roster's other selftest steps; the CI job timeout is the outer bound).
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_selftest_execution.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import ast
 import contextlib
 import dis
@@ -174,15 +183,17 @@ import os
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import types
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: check_selftest_execution.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: check_selftest_execution.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 MANIFEST_TOP_KEYS = {"format-version", "suite"}
 SUITE_ROW_KEYS = {"id", "runner", "expected-check-ids"}
@@ -233,6 +244,13 @@ def _manifest_suites(manifest_path):
     except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         _cannot("expectation manifest {} is not valid TOML: {}".format(manifest_path, exc))
         return None
+    return _manifest_rows(data, manifest_path)
+
+
+def _manifest_rows(data, manifest_path):
+    """The strictly validated [[suite]] rows of an already-parsed expectation manifest, or None after
+    printing the violation (the caller exits 2). Shared with the entry-guard gate, so both gates hold the
+    registry to one schema."""
     if set(data) != MANIFEST_TOP_KEYS:
         _cannot("{}: top-level keys must be exactly {} (got {})".format(
             manifest_path, sorted(MANIFEST_TOP_KEYS), sorted(data)))

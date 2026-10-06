@@ -106,6 +106,15 @@ floor synthesized in-tree, removed in the finally.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: selftest_aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import ast
 import collections
 import contextlib
@@ -117,7 +126,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -267,7 +275,10 @@ def _note_constructor_shape_failures(path=None):
     assembled at run time ("system" + "Message", an f-string, a join, a decode, a dict built from a
     variable key), a constructor or note reached through getattr, globals(), vars(), importlib or another
     module's copy of the hook source, or a patched json.dumps, print or sys.stdout, for example). Review,
-    not this check, closes those."""
+    not this check, closes those.
+    Exempt: the PYTHON-FLOOR prelude, the one top-level `if` right after the FLOOR_FAIL_OPEN_MODES
+    assignment. It runs before any constructor exists, so it writes its own fail-open note, and
+    tools/check_python_floor.py pins that statement to its HOOK_GUARD_TEMPLATE by AST."""
     path = Path(path or aiqt_hooks.__file__)
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     out = []
@@ -328,6 +339,13 @@ def _note_constructor_shape_failures(path=None):
             out.append("(note-shape-deny-note-{}) the deny constructor {} returns a note constructor's call; "
                        "declare it in NOTE_CONSTRUCTORS so its callers are inventoried".format(name, name))
     docs = _docstring_ids(tree)
+    floor_guard = set()
+    for before, node in zip(tree.body, tree.body[1:]):
+        if (isinstance(before, ast.Assign) and len(before.targets) == 1
+                and isinstance(before.targets[0], ast.Name) and before.targets[0].id == "FLOOR_FAIL_OPEN_MODES"
+                and isinstance(node, ast.If)):
+            floor_guard.update(id(child) for child in ast.walk(node))
+            break
     deny_ok = set()
     for name in deny_names & leaves:
         for node in ast.walk(bodies[name]):
@@ -345,7 +363,7 @@ def _note_constructor_shape_failures(path=None):
             key_text = "attribute"
         elif isinstance(node, ast.Name) and node.id == "systemMessage":
             key_text = "name"
-        if key_text == "keyword" and id(node) in inside_leaf:
+        if key_text == "keyword" and id(node) in inside_leaf or id(node) in floor_guard:
             continue
         if key_text is None or inside_leaf.get(id(node)) in names or id(node) in deny_ok:
             continue
@@ -1485,10 +1503,6 @@ def main():
 
 
 def _main_with_recorder():
-    if sys.version_info < (3, 12):
-        print("SELF-TEST ERROR: the note-site coverage monitor needs sys.monitoring, which requires Python "
-              "3.12 or later; this interpreter is {}.{}".format(*sys.version_info[:2]), file=sys.stderr)
-        return 2
     monitor = _NoteSiteMonitor()
     monitor.start()
     try:
@@ -7469,6 +7483,15 @@ def _main_isolated(monitor):
         if (aiqt_hooks.HANDLERS.get("git_explicit_binding") is not aiqt_hooks.git_explicit_binding or
                 aiqt_hooks.HANDLER_EVENT.get("git_explicit_binding") != "PreToolUse"):
             failures.append("(eb-e22) git_explicit_binding handler/event wiring is missing or wrong")
+
+        # (pf-modes) PYTHON-FLOOR: the floor guard runs before HANDLER_EVENT exists, so it carries its own
+        # FLOOR_FAIL_OPEN_MODES literal; it must name exactly the handlers whose event is fail-open, or an
+        # older interpreter would block a Stop-type event (or wave a PreToolUse one through).
+        _pf_want = tuple(sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
+                                if event in aiqt_hooks.FAIL_OPEN_EVENTS))
+        if aiqt_hooks.FLOOR_FAIL_OPEN_MODES != _pf_want:
+            failures.append("(pf-modes) FLOOR_FAIL_OPEN_MODES {!r} differs from the fail-open handlers in "
+                            "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
         _test_note_literal_sites(failures, tmp)

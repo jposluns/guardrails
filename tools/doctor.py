@@ -19,14 +19,23 @@ valid chain), and NOT splice-proof (a full-access writer can insert a genuine ol
 suffix), so it proves NOTHING and authorizes NOTHING on its own. The doctor's chain messages disclose this
 limit rather than implying proof.
 
-Exit convention: 0 clean/NA, 1 finding, 2 malformed input or read error. Total absence of all pin/adoption
+Exit convention: 0 clean/NA, 1 finding, 2 malformed input or read error, or an interpreter older than
+Python 3.14 (refused before anything runs). Total absence of all pin/adoption
 state is NA ("not adopted"); PARTIAL state (a pin without history, history without a pin absent a terminal
 un-adopt row, a missing referenced preimage, anything unreadable) is exit 2 MALFORMED, never NA.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: doctor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import os
 import stat
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

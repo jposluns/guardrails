@@ -20,7 +20,8 @@ rule that a current timestamp is read from the clock, never recalled or guessed
 ([the rule text](../.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md)). The other hooks guard completion
 records, background polling loops, and existing working-record files. Each one is a discipline
 guard against accidental drift, not a security boundary, and each one fails open: if the hook hits an
-error or input it cannot evaluate, it gets out of the way rather than blocking your work. Each file states
+error or input it cannot evaluate, it gets out of the way rather than blocking your work. The one
+exception is an interpreter older than Python 3.14, described with the launch line below. Each file states
 what it does not catch in a section headed `RESIDUAL COVERAGE` in its opening docstring; that section is
 the authority, and the summary further down this page only points to it.
 
@@ -71,12 +72,12 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `clock-inject.py` | `65fe1cae733f72d2f82b884b9bb710310b0b6ad0dcccd8c874c5f2bdd2e25386` | [clock-inject.py](clock-inject.py) |
-| `future-stamp-write.py` | `77d4f32496bde3593845aba73f84dc1498c2ece83c380d491e642885f211c5e9` | [future-stamp-write.py](future-stamp-write.py) |
-| `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
-| `stamp-truth-stop.py` | `92ad7d0b93ddb1a5eefa57b1534ac8cc405ebb0df8f4b892b3754403d2b55e4d` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
+| `clock-inject.py` | `c29c3849bee5a3d2e3a6ea4fdaf453fba08ed8c71c64a933b216947f9156074a` | [clock-inject.py](clock-inject.py) |
+| `future-stamp-write.py` | `4a33429f732bb2319f3c0f579b8f6d633d503103d4fef0e07d283b902a399a5a` | [future-stamp-write.py](future-stamp-write.py) |
+| `record-remove-check.py` | `0fb0a63d0635441d079a477ed5840a61ec5fc91726eb6ab223648df282dd0382` | [record-remove-check.py](record-remove-check.py) |
+| `stamp-truth-stop.py` | `662c8dd6e0a0faf0297c25b804d0b1389ab5e14573432350b3772c04ffc070d0` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `unbounded-wait.py` | `2b41eaf1281d049bbd9fa3b8670bc4f28c861f7d86bd248438bd639cb0ecef8f` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `0d56b109d885260d38332f36cd451b4d46488daea0c82e6976cbae1fca862c2b` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -154,7 +155,15 @@ fails and report it; do not work around a failed check.
      a `REGISTRATION` constant; use this same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
-     on the `PATH` that Claude Code runs hook commands with.
+     on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer;
+     check that `python3` with `python3 --version` before step 3. On an older interpreter each hook reads
+     no input, writes one `error: <file> requires Python 3.14 or newer` line to standard error, and
+     exits. Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
+     `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
+     assistant and nothing is blocked; for the four `PreToolUse` hooks the exit is 2 and every matching
+     tool call is denied; for `stamp-truth-stop.py` (`Stop`) the exit is 1, a non-blocking error, so
+     every stop goes ahead unchecked (exit 2 would block every stop with no block cap, since the hook
+     stops before its loop guard runs). If you see that line, upgrade Python or remove the hook's entry.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
