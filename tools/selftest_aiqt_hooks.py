@@ -2900,6 +2900,68 @@ def _main_isolated(monitor):
         finally:
             aiqt_hooks._record_recovery = _orig_npnc_rec
 
+        # === Round 12 (np12): the round-11 QA blocker and major. The GIT_* assignment/export deny was
+        # === gated on _command_names_git over the raw text, which reads quotes as word breaks, so an
+        # === export GIT_DIR/GIT_WORK_TREE in an earlier statement followed by a git spelled g""it,
+        # === /usr/bin/g'i't, ${x}it or $(printf gi)t reset ANOTHER repository with only the session cwd
+        # === snapshotted (bash 5.3.9, git 2.53.0). The gate is dropped: every such row now denies,
+        # === with or without a session cwd (snapshot the named target or deny, never neither). The
+        # === two-step PATH plant (ln -s /usr/bin/g""it <dir>/cat, then cat reset --hard) was allowed at
+        # === the plant step; _command_names_git now also reads the words with quotes REMOVED, so the
+        # === plant step is git-naming and possibly discarding. On the round-11 bytes every row below
+        # === except the three marked controls allowed (with a cwd: allow-note with 1 snapshot, the
+        # === other repository 0; the plant rows: a silent allow with no snapshot).
+        _np12_o = str(_npnc_t)
+        _np12_ex = "export GIT_DIR={0}/.git GIT_WORK_TREE={0}".format(_np12_o)
+        _np12_cases = (
+            ("export-dq", _np12_ex + '; g""it reset --hard', "deny", 0, "deny", 0),
+            ("export-abs-sq", _np12_ex + "; /usr/bin/g'i't reset --hard", "deny", 0, "deny", 0),
+            ("export-and-checkout", _np12_ex + ' && g""it checkout -- .', "deny", 0, "deny", 0),
+            ("declare-x", "declare -x GIT_DIR={0}/.git GIT_WORK_TREE={0}; g\"\"it reset --hard"
+             .format(_np12_o), "deny", 0, "deny", 0),
+            ("assign-then-export",
+             "GIT_DIR={0}/.git; GIT_WORK_TREE={0}; export GIT_DIR GIT_WORK_TREE; g\"\"it reset --hard"
+             .format(_np12_o), "deny", 0, "deny", 0),
+            ("export-worktree-only", "export GIT_WORK_TREE={0}; g\"\"it checkout -- f".format(_np12_o),
+             "deny", 0, "deny", 0),
+            ("export-gitdir-stash", "export GIT_DIR={0}/.git; g\"\"it stash drop".format(_np12_o),
+             "deny", 0, "deny", 0),
+            ("var-spelling", _np12_ex + "; x=g; ${x}it reset --hard", "deny", 0, "deny", 0),
+            ("cmdsub-spelling", _np12_ex + "; $(printf gi)t reset --hard", "deny", 0, "deny", 0),
+            # the disclosed over-refusal of the dropped gate: a non-git command that is not plain
+            ("nongit-assign", "make GIT_X=1", "deny", 0, "deny", 0),
+            # the plant step, quoted either way: git-naming, so possibly discarding
+            ("plant-dq", 'ln -s /usr/bin/g""it bin/cat', "deny", 0, "allow-note", 1),
+            ("plant-sq", "ln -s /usr/bin/g'i't bin/cat", "deny", 0, "allow-note", 1),
+            # controls (unchanged from round 11): the literal git spellings, and the plain run step of
+            # a plant, which is the disclosed PATH residue (an allowlisted name resolving elsewhere)
+            ("control-literal", _np12_ex + "; git reset --hard", "deny", 0, "deny", 0),
+            ("control-plant-literal", "ln -s /usr/bin/git bin/cat", "deny", 0, "allow-note", 1),
+            ("control-plant-run-residue", "cat reset --hard", "allow", 0, "allow", 0),
+        )
+        for _nm_cmd, _nm_want in (('ln -s /usr/bin/g""it bin/cat', True),
+                                  ("ln -s /usr/bin/g'i't bin/cat", True),
+                                  ("echo 'x'git", True), ("ls -la docs", False),
+                                  ("cat .gitignore", False)):
+            if aiqt_hooks._command_names_git(_nm_cmd) is not _nm_want:
+                failures.append("(np12-names-git) _command_names_git({!r}): expected {}".format(
+                    _nm_cmd, _nm_want))
+        aiqt_hooks._record_recovery = _npnc_count
+        try:
+            for _lab, _cmd, _w_nc, _n_nc, _w_c, _n_c in _np12_cases:
+                _got_nc = _npnc_run(_cmd, None)
+                if (_got_nc[0], _got_nc[2]) != (_w_nc, _n_nc):
+                    failures.append("(np12-{}-nocwd) {!r} with no session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_nc, _n_nc,
+                                                                      _got_nc[0], _got_nc[2]))
+                _got_c = _npnc_run(_cmd, str(_npnc))
+                if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
+                    failures.append("(np12-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
+                                                                      _got_c[0], _got_c[2]))
+        finally:
+            aiqt_hooks._record_recovery = _orig_npnc_rec
+
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file allows with a note on dirty tree",
                "git restore --pathspec-from-file=paths.txt", "allow-note", cwd=rp)
@@ -9180,7 +9242,7 @@ def _main_isolated(monitor):
           "expbnd (git_explicit_binding) ALLOWS with a note an ambient git target or a relocated whole-tree "
           "breadth op, and DENIES-and-educates a whole-tree breadth stage paired with a publish in one "
           "command (finding 11). prsunc "
-          "(git_discard) recovers-then-allows behind a defensive ALLOWLIST (round 8, D-RESCOPES-B): the trigger no longer depends on the text spelling git. A command is handled exactly (ALLOWED to run) only when it is PROVABLY PLAIN under the shared classifier (decided on the raw bytes before lexing) AND names no git program in any word; EVERY other command (not plain, or plain and naming git) is POSSIBLY DISCARDING: with a usable session cwd it preserves the stash entries of every snapshot base (including a resolvable refs/stash tip whose reflog is empty), snapshots the session cwd AND every target it resolves (each -C/--work-tree target, a cd target, an absolute or parent-escaping path operand or option value, and the absolute value of an attached option even one containing an equals sign), then ALLOWS with a recovery-pointer note, and with NO session cwd it DENIES naming the safe route. There is no read-only fast path and no standalone glob-command-word deny: a glob or brace command word is not provably plain, so it snapshot-then-allows with a cwd (the snapshot recovers its effect) and denies without one. It DENIES-and-educates when a warranted recovery snapshot cannot be made (a forced, over-cap or bad-path snapshot failure, a temp dir inside the repo, a ref collision, an embedded-NUL cwd), when the effect a snapshot cannot recover (a git submodule foreach, whose submodule content the superproject snapshot cannot capture), or when the command cannot be pinned or classified (a GIT_* assignment or export in a git-naming command, a non-cosmetic ambient GIT_* view-override, an env --chdir/-C override, a -c/--config-env value carrying a repository-view redirect, a named repository, worktree or path target that cannot be pinned, an unrecognized flagged subcommand such as checkout-index or read-tree on a redirect, or an inline -c alias); a provably-clean target ALLOWS with a note and no snapshot. stash/branch are ref-level assets a worktree snapshot cannot capture, but a git-naming stash/branch command still snapshots the session cwd and preserves the stash. allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
+          "(git_discard) recovers-then-allows behind a defensive ALLOWLIST (round 8, D-RESCOPES-B): the trigger no longer depends on the text spelling git. A command is handled exactly (ALLOWED to run) only when it is PROVABLY PLAIN under the shared classifier (decided on the raw bytes before lexing) AND names no git program in any word (quotes read as word breaks and quotes removed) AND cannot run another program by this hook's semantic check (_plain_command_runs_program: an opf command, or a printf carrying a -v option); EVERY other command (not plain, or plain and naming git or able to run a program) is POSSIBLY DISCARDING: with a usable session cwd it preserves the stash entries of every snapshot base (including a resolvable refs/stash tip whose reflog is empty), snapshots the session cwd AND every target it resolves (each -C/--work-tree target, a cd target, an absolute or parent-escaping path operand or option value, and the absolute value of an attached option even one containing an equals sign), then ALLOWS with a recovery-pointer note, and with NO session cwd it DENIES naming the safe route. There is no read-only fast path and no standalone glob-command-word deny: a glob or brace command word is not provably plain, so it snapshot-then-allows with a cwd (the snapshot recovers its effect) and denies without one. It DENIES-and-educates when a warranted recovery snapshot cannot be made (a forced, over-cap or bad-path snapshot failure, a temp dir inside the repo, a ref collision, an embedded-NUL cwd), when the effect a snapshot cannot recover (a git submodule foreach, whose submodule content the superproject snapshot cannot capture), or when the command cannot be pinned or classified (a GIT_* assignment or export in any possibly-discarding command, git spelled or not, a non-cosmetic ambient GIT_* view-override, an env --chdir/-C override, a -c/--config-env value carrying a repository-view redirect, a named repository, worktree or path target that cannot be pinned, an unrecognized flagged subcommand such as checkout-index or read-tree on a redirect, or an inline -c alias); a provably-clean target ALLOWS with a note and no snapshot. stash/branch are ref-level assets a worktree snapshot cannot capture, but a git-naming stash/branch command still snapshots the session cwd and preserves the stash. allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
           "deletion, DENIES fail-safe a push it cannot prove misses the protected line (a "
           "--mirror/--all/wildcard/prune sweep) and an unparseable apparent force-push/delete, DENIES a "
           "recognized or apparent direct commit without an A/B/C non-protected local-branch proof "

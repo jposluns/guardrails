@@ -5344,24 +5344,27 @@ def _possibly_discarding(command, cwd):
             "AIQT guardrail: denied a possibly-discarding command with no session directory to "
             "snapshot (rule prsunc); run it from a working directory the hook can see, or commit or stash "
             "first.")
-    # ROUND-7/8: ANY GIT_* assignment or export in a GIT-NAMING command denies (GIT_CONFIG_* inject
-    # configuration that makes even git status run a command; GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE
-    # redirect the repository view), scanned over the raw text AND its de-quoted rendering. Gated on
-    # _command_names_git so an ordinary non-git command carrying a GIT_-prefixed token is not caught.
+    # ROUND-7/8: ANY GIT_* assignment or export in a possibly-discarding command denies (GIT_CONFIG_*
+    # inject configuration that makes even git status run a command; GIT_DIR/GIT_WORK_TREE/
+    # GIT_INDEX_FILE redirect the repository view), scanned over the raw text AND its de-quoted
+    # rendering. Round 12: NOT gated on _command_names_git. A git spelled without the literal word
+    # (g""it, /usr/bin/g'i't, ${x}it, $(printf gi)t) after an export GIT_DIR/GIT_WORK_TREE in an
+    # earlier statement discarded ANOTHER repository with only the session cwd snapshotted. Only a
+    # command that is not plain, names git, or can run a program reaches this branch, so the extra
+    # refusals are limited to such commands carrying a GIT_ assignment or export (disclosed).
     _dq_cmd = _dequote_render(command)
-    if _command_names_git(command) and (
-            _GIT_ENV_ASSIGN_RE.search(command) or _GIT_ENV_ASSIGN_RE.search(_dq_cmd)
+    if (_GIT_ENV_ASSIGN_RE.search(command) or _GIT_ENV_ASSIGN_RE.search(_dq_cmd)
             or _GIT_ENV_EXPORT_RE.search(command) or _GIT_ENV_EXPORT_RE.search(_dq_cmd)):
         return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): this command names git and its text carries "
-            "a GIT_* assignment or export (inline, in another statement, or quoted). A GIT_* variable "
+            "AIQT rule prsunc (preserve-uncommitted-work): this command is possibly discarding and its "
+            "text carries a GIT_* assignment or export (inline, in another statement, or quoted). A GIT_* variable "
             "can redirect the repository view of every git the shell runs (GIT_DIR/GIT_WORK_TREE/"
             "GIT_INDEX_FILE) or inject configuration that makes even a read-only git subcommand execute "
             "a command (GIT_CONFIG_COUNT/KEY/VALUE naming core.fsmonitor), so no snapshot this guard "
             "takes provably contains the state the command could discard; denied rather than run on a "
             "possibly unrecoverable discard. Re-issue the git command WITHOUT any GIT_* assignment or "
             "export, or commit or stash your work first. {}".format(_DISCARD_ALTS),
-            "AIQT guardrail: denied a git command carrying a GIT_* assignment or export this guard "
+            "AIQT guardrail: denied a possibly-discarding command carrying a GIT_* assignment or export this guard "
             "cannot resolve to snapshot (rule prsunc); re-issue it without the GIT_* assignment, or "
             "commit or stash first.")
     if _RAW_ENV_CHDIR_RE.search(command) or _RAW_ENV_CHDIR_RE.search(_dequote_render(command)):
@@ -5603,14 +5606,18 @@ def _plain_command_runs_program(command):
 
 
 def _command_names_git(command):
-    """True when any whitespace/quote-delimited word of command names the git program
-    (_names_git_program: a bare git, an absolute /usr/bin/git, git.exe, or a git-<verb>). Used by the
-    D-RESCOPES-B gate to decide whether a PROVABLY-PLAIN command is nonetheless git-naming (so
-    possibly discarding) and, in _possibly_discarding, to gate the GIT_* assignment/export deny to
-    git-naming commands."""
-    for word in command.replace("'", " ").replace('"', " ").split():
-        if _names_git_program(word):
-            return True
+    """True when any word of command names the git program (_names_git_program: a bare git, an
+    absolute /usr/bin/git, git.exe, or a git-<verb>), in either of two renderings: quotes read as word
+    breaks, and quotes REMOVED. Round 12: the second rendering is the shell word of a plain command
+    (quotes are literal there), so a quote-split spelling such as ln -s /usr/bin/g""it <dir>/cat,
+    which planted git under an allowlisted name earlier on PATH, names git. Used by the D-RESCOPES-B
+    gate to decide whether a PROVABLY-PLAIN command is nonetheless git-naming (so possibly
+    discarding)."""
+    for rendering in (command.replace("'", " ").replace('"', " "),
+                      command.replace("'", "").replace('"', "")):
+        for word in rendering.split():
+            if _names_git_program(word):
+                return True
     return False
 
 
@@ -5633,9 +5640,9 @@ def git_discard(data):
     snapshot-then-allowed like any other possibly-discarding command, not denied.
 
     A POSSIBLY-DISCARDING command DENIES when: the environment carries a non-cosmetic ambient GIT_*
-    override; the payload carries no usable session cwd; a git-naming command carries any GIT_*
-    assignment or export (raw or de-quoted; a cosmetic GIT_PAGER=cat prefix is a disclosed
-    over-refusal); an env --chdir/-C override rides the text; a quoted heredoc names a lossy git verb
+    override; the payload carries no usable session cwd; the command carries any GIT_* assignment
+    or export, whether or not its text spells git (raw or de-quoted; a cosmetic GIT_PAGER=cat prefix,
+    and a non-git command that is not plain carrying a GIT_ assignment, are disclosed over-refusals); an env --chdir/-C override rides the text; a quoted heredoc names a lossy git verb
     beside a target redirect; an unparseable command carries a target redirect or directory change; a
     compound/redirected command has a target it cannot resolve, or a subshell-cd or wrapped git carries
     a target redirect; a flagged git segment whose subcommand is outside the recognized set rides a
@@ -5655,7 +5662,10 @@ def git_discard(data):
     cannot capture assume-unchanged/skip-worktree content, submodule.<name>.ignore content, or ignored
     files; pre-existing on-disk git configuration that runs a program is outside command-text
     screening; an allowlisted name the shell resolves to something else (an alias or shell function
-    the shell already carries, or an earlier PATH entry) is not seen; a non-git file operation by a
+    the shell already carries, or any program placed in an earlier PATH entry) is not seen, including
+    a plant written by a tool other than Bash and made executable (the Write tool writing a copy of
+    git or a script into a user-writable PATH directory, then a plain chmod +x, then cat reset
+    --hard: neither the write nor the chmod names git, and the allowlisted cat runs the plant); a non-git file operation by a
     plain allowlisted command (rm, mv, cp, ln, chmod, touch of a file holding uncommitted work) is
     outside this guard's scope and is allowed; a discard performed outside the Bash tool is not
     seen."""
