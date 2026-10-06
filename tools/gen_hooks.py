@@ -6,6 +6,9 @@ The pack's mechanical-enforcement controls are declared in .aiqt/core/hooks/mani
 This tool renders them into the shipped, NESTED plugin surface under plugin/aiqt-guardrails-hooks/:
   plugin/aiqt-guardrails-hooks/hooks/hooks.json             the plugin hook config
   plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py  the dispatcher, copied byte-identical
+  plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks_launch.py
+                                                            the launcher every hooks.json entry runs,
+                                                            copied byte-identical
   plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json   the plugin manifest
 The plugin is nested (not the whole repo) so an adopter installs only the plugin, never the authoring
 repo. The .aiqt/core/hooks/ tree is the single edit point; the generated surface is always
@@ -51,9 +54,16 @@ HOOKS_JSON_REL = PLUGIN_ROOT_REL + "/hooks/hooks.json"
 SCRIPT_REL = PLUGIN_ROOT_REL + "/hooks/scripts/aiqt_hooks.py"
 PLUGIN_JSON_REL = PLUGIN_ROOT_REL + "/.claude-plugin/plugin.json"
 SCRIPT_NAME = "aiqt_hooks.py"
+# The launcher every rendered entry runs: written in syntax every Python 3 that accepts -I compiles, it
+# refuses below the floor with the event's exit (2 denies a PreToolUse call) before handing control to
+# the dispatcher in the same process, so an interpreter too old to compile the dispatcher never turns
+# its SyntaxError (exit 1, non-blocking) into a fail-open PreToolUse call.
+LAUNCHER_NAME = "aiqt_hooks_launch.py"
+LAUNCHER_REL = PLUGIN_ROOT_REL + "/hooks/scripts/" + LAUNCHER_NAME
 # ${CLAUDE_PLUGIN_ROOT} resolves to the installed plugin dir, so the script path is relative to it
 # regardless of where the plugin is nested in this authoring repo.
 SCRIPT_PLUGIN_PATH = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/" + SCRIPT_NAME
+LAUNCHER_PLUGIN_PATH = SCRIPT_PLUGIN_PATH.rsplit("/", 1)[0] + "/" + LAUNCHER_NAME
 
 # The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17; SessionStart
 # and TeammateIdle re-confirmed against the hooks reference 2026-08-29). A typo'd event must fail
@@ -88,7 +98,8 @@ TIMEOUT = 10  # seconds; every control is a lexical scan, far under this
 # only, it does not affect what this generator produces.
 GENSRC_OUTPUTS = (
     {"target": "plugin/aiqt-guardrails-hooks/hooks/", "kind": "tree",
-     "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py"),
+     "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+                 ".aiqt/core/hooks/scripts/aiqt_hooks_launch.py"),
      "regenerate": "python3 tools/gen_hooks.py"},
     {"target": "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json", "kind": "file",
      "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py"),
@@ -222,10 +233,12 @@ def render_hooks_json(hooks):
     """The plugin hooks.json, deterministic: events in KNOWN_EVENTS order, entries sorted by id,
     json.dumps(indent=2) plus a trailing newline. Shape per the doc-confirmed plugin schema:
     {description, hooks: {<Event>: [{matcher?, hooks: [{type, command, args, timeout}]}]}}; the command
-    is python3 with the script path and handler as args (no shell string, so nothing is shell-quoted);
+    is python3 with the launcher path and handler as args (no shell string, so nothing is shell-quoted);
     matcher is omitted for non-tool events. Every launcher runs isolated: args[0] is "-I" (Python's
     isolated mode), placed before the script path, so a file written beside the dispatcher cannot
-    shadow a standard-library import and silently neuter the hook. The generator asserts this invariant
+    shadow a standard-library import and silently neuter the hook. The path is the launcher
+    (LAUNCHER_NAME), never the dispatcher itself, so an interpreter below the floor refuses with the
+    event's exit instead of failing to compile the dispatcher. The generator asserts this invariant
     in its --self-test, and the check_python_launcher_isolation gate re-checks the rendered surface."""
     events = {}
     for hook in sorted(hooks, key=lambda h: (KNOWN_EVENTS.index(h["event"]), h["id"])):
@@ -234,7 +247,7 @@ def render_hooks_json(hooks):
             entry["matcher"] = hook["matcher"]
         entry["hooks"] = [{"type": "command",
                            "command": "python3",
-                           "args": ["-I", SCRIPT_PLUGIN_PATH, hook["handler"]],
+                           "args": ["-I", LAUNCHER_PLUGIN_PATH, hook["handler"]],
                            "timeout": TIMEOUT}]
         events.setdefault(hook["event"], []).append(entry)
     obj = {"description": "AIQT Guardrails mechanical-enforcement hooks, generated from "
@@ -269,8 +282,13 @@ def build_desired(root, src_dir):
     if not script_text.strip():
         raise ValueError("{} is empty".format(script_src))
     cross_check(hooks, corpus_ids, script_text, manifest_path.name)
+    launcher_src = src_dir / "scripts" / LAUNCHER_NAME
+    launcher_text = launcher_src.read_text(encoding="utf-8")  # FileNotFoundError -> OSError, fail-closed
+    if not launcher_text.strip():
+        raise ValueError("%s is empty" % launcher_src)
     return {HOOKS_JSON_REL: render_hooks_json(hooks),
             SCRIPT_REL: script_text,
+            LAUNCHER_REL: launcher_text,
             PLUGIN_JSON_REL: render_plugin_json(plugin)}
 
 
@@ -393,6 +411,10 @@ def test_handler(data):
     return (0, None, None)
 """
 
+_LAUNCHER = """#!/usr/bin/env python3
+# self-test launcher stub
+"""
+
 _MANIFEST = """[plugin]
 name = "aiqt-selftest-hooks"
 version = "0.1.0"
@@ -421,6 +443,7 @@ def _build_tree(base, cid="tsthk1", residue="A self-test control catches nothing
     (src / "rules" / "aiqt" / "selftest-hook-rule.md").write_text(_RULE, encoding="utf-8")
     (src / "hooks" / "scripts").mkdir(parents=True)
     (src / "hooks" / "scripts" / SCRIPT_NAME).write_text(_SCRIPT, encoding="utf-8")
+    (src / "hooks" / "scripts" / LAUNCHER_NAME).write_text(_LAUNCHER, encoding="utf-8")
     (src / "hooks" / "manifest.toml").write_text(
         _MANIFEST.format(cid=cid, residue=residue), encoding="utf-8")
 
@@ -460,7 +483,7 @@ def self_test_main():
             failures.append("conformant tree: generation expected exit 0")
         if run_quiet(good, check=True) != 0:
             failures.append("conformant tree: regeneration expected drift-clean exit 0")
-        for rel in (HOOKS_JSON_REL, SCRIPT_REL, PLUGIN_JSON_REL):
+        for rel in (HOOKS_JSON_REL, SCRIPT_REL, LAUNCHER_REL, PLUGIN_JSON_REL):
             if not (good / rel).is_file():
                 failures.append("conformant tree: expected generated file {}".format(rel))
 
@@ -473,6 +496,11 @@ def self_test_main():
             if not entries:
                 failures.append("isolation invariant: no rendered hook entries to check")
             for h in entries:
+                # 1c. Every entry runs the launcher, never the dispatcher directly: the dispatcher's
+                #     newer syntax would fail to compile on an old interpreter (exit 1, fail open).
+                if h.get("args", [None, None])[1:2] != [LAUNCHER_PLUGIN_PATH]:
+                    failures.append("launcher invariant: args[1] must be the launcher {!r}, got {!r}"
+                                    .format(LAUNCHER_PLUGIN_PATH, h.get("args")))
                 if h.get("args", [None])[0] != "-I":
                     failures.append("isolation invariant: launcher args[0] must be '-I', got {!r}"
                                     .format(h.get("args")))

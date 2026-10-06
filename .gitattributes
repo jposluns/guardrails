@@ -14,6 +14,7 @@
 .aiqt/core/hooks/ORCHESTRATION.md text eol=lf
 .aiqt/core/hooks/manifest.toml text eol=lf
 .aiqt/core/hooks/scripts/aiqt_hooks.py text eol=lf
+.aiqt/core/hooks/scripts/aiqt_hooks_launch.py text eol=lf
 .aiqt/core/id-history.toml text eol=lf
 .aiqt/core/instruction-budget.toml text eol=lf
 .aiqt/core/migration/crosswalk-schema.toml text eol=lf
@@ -455,6 +456,7 @@
 .preview/SHA256SUMS text eol=lf
 .preview/clock-inject.py text eol=lf
 .preview/future-stamp-write.py text eol=lf
+.preview/preview-launch.py text eol=lf
 .preview/record-remove-check.py text eol=lf
 .preview/stamp-truth-stop.py text eol=lf
 .preview/unbounded-wait.py text eol=lf
@@ -597,6 +599,7 @@ opf/tools/selftest_commonmark_headings.py text eol=lf
 plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json text eol=lf
 plugin/aiqt-guardrails-hooks/hooks/hooks.json text eol=lf
 plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py text eol=lf
+plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks_launch.py text eol=lf
 roadmap.toml text eol=lf
 site/404.html text eol=lf
 site/_redirects text eol=lf

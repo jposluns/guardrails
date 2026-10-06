@@ -12,9 +12,11 @@
 #                     in a child with a patched sys.version_info below the floor, it refuses with the exact
 #                     message and exit code). It grows unit by unit; the core-hook, preview-hook and
 #                     adopter-tool entrypoints are listed, and one shipped entrypoint,
-#                     tools/check_entry_guard.py, is not listed yet. The core hook and its plugin copy
-#                     carry the guard's hook form (HOOK_SURFACES in the gate): a fail-open event's mode
-#                     warns on exit 0 instead of refusing.
+#                     tools/check_entry_guard.py, is not listed yet. The core hook, its plugin copy and
+#                     the hook launchers carry the guard's hook form (HOOK_SURFACES in the gate): a
+#                     fail-open event's mode warns on exit 0 instead of refusing. Every hook registration
+#                     runs a launcher (LAUNCHERS in the gate), since a hook file in newer syntax cannot
+#                     reach its own guard on an interpreter too old to compile it.
 # nonblocking-surfaces the guarded-surfaces entries whose guard exits 1 instead of 2, sorted, unique and each
 #                     also listed above: a hook whose event reads exit 2 as a block (a Stop hook's exit 2
 #                     blocks the stop, and the guard runs before the hook's own block cap). Never a
@@ -30,8 +32,10 @@ format-version = 1
 python-floor = "3.14"
 guarded-surfaces = [
     ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+    ".aiqt/core/hooks/scripts/aiqt_hooks_launch.py",
     ".preview/clock-inject.py",
     ".preview/future-stamp-write.py",
+    ".preview/preview-launch.py",
     ".preview/record-remove-check.py",
     ".preview/stamp-truth-stop.py",
     ".preview/unbounded-wait.py",
@@ -76,6 +80,7 @@ guarded-surfaces = [
     "opf/tools/selftest_commonmark_conformance.py",
     "opf/tools/selftest_commonmark_headings.py",
     "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks_launch.py",
     "tools/_qa_adapter.py",
     "tools/aei_backlog_md.py",
     "tools/aiqt_corpus.py",

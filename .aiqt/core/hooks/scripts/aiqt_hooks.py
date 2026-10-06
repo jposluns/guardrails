@@ -170,7 +170,13 @@ import sys
 # it carries its own literal of the fail-open modes, which selftest_aiqt_hooks.py holds equal to the
 # HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS. On an older interpreter such a mode WARNS on
 # exit 0 and never blocks (a Stop block here would re-fire with no cap); every other mode, PreToolUse and
-# an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
+# an unknown mode alike, fails closed with exit 2, as main() does on its own error paths. This guard runs
+# only on an interpreter that compiles this whole file; an older one stops with a SyntaxError (exit 1,
+# which lets a PreToolUse call proceed). So no registration runs this file directly: each runs
+# aiqt_hooks_launch.py, which carries this guard and literal in syntax every Python 3 that accepts -I
+# compiles, and refuses there first. RESIDUAL the launcher cannot close: an interpreter that predates -I
+# (Python 2, or Python 3 before 3.4) rejects that option before it reads any file and exits 2 on every
+# event, so it blocks each UserPromptSubmit and Stop as well as each PreToolUse call.
 FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
                          "orch_stop_guard", "orch_teammate_idle")
 

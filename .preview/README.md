@@ -2,10 +2,11 @@
 
 This directory is a preview channel for AIQT Guardrails hooks that are not yet part of the pack's plugin.
 Each hook is one self-contained Python file that you can download, check, test, and switch on in Claude
-Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
+Code by hand; every hook runs through one shared launcher file, `preview-launch.py`, downloaded beside it. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
 
-Six hooks are published here, each listed with its checksum and link in the integrity table below.
+Six hooks and their launcher are published here, each listed with its checksum and link in the
+integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
 
 One document linked from this page is not a hook: [the OPF implementation prompt](../opf/spec/OPF-IMPLEMENTATION-PROMPT.md)
@@ -74,10 +75,11 @@ files are served from this repository's main branch; for a raw download, use
 |---|---|---|
 | `clock-inject.py` | `c29c3849bee5a3d2e3a6ea4fdaf453fba08ed8c71c64a933b216947f9156074a` | [clock-inject.py](clock-inject.py) |
 | `future-stamp-write.py` | `4a33429f732bb2319f3c0f579b8f6d633d503103d4fef0e07d283b902a399a5a` | [future-stamp-write.py](future-stamp-write.py) |
-| `record-remove-check.py` | `0fb0a63d0635441d079a477ed5840a61ec5fc91726eb6ab223648df282dd0382` | [record-remove-check.py](record-remove-check.py) |
+| `preview-launch.py` | `0074baa27ed3bb6c0cd6c2e7dc6e5852cac0529ceb3d7d64ce1d9e90e75c1f6d` | [preview-launch.py](preview-launch.py) |
+| `record-remove-check.py` | `449558d3549d581b6ae2177878857279bd0f04b1f9cc424637a56f321e5ac543` | [record-remove-check.py](record-remove-check.py) |
 | `stamp-truth-stop.py` | `662c8dd6e0a0faf0297c25b804d0b1389ab5e14573432350b3772c04ffc070d0` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `2b41eaf1281d049bbd9fa3b8670bc4f28c861f7d86bd248438bd639cb0ecef8f` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `0d56b109d885260d38332f36cd451b4d46488daea0c82e6976cbae1fca862c2b` | [ungated-record.py](ungated-record.py) |
+| `unbounded-wait.py` | `de4ae4e349e35e9f47d69eebe94b2caf89bcf503afbb425e391d1167d1dbe07a` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `526d6722a8c44ec3af55c5e10f7f8ec0bf180fd736bb5ea1247aab2ac12e3271` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -99,7 +101,8 @@ SHA256SUMS, and the files agree.
 
 These steps are for an AI coding assistant to carry out, one hook at a time. Replace `<file>` and
 `<checksum>` with the values from that hook's row in the integrity table. Stop at the first step that
-fails and report it; do not work around a failed check.
+fails and report it; do not work around a failed check. Before the first hook, carry out steps 1 to 3
+for `preview-launch.py` too, into the same directory: every hook entry runs it.
 
 1. Create the hooks directory and download the hook from the main branch:
 
@@ -141,29 +144,39 @@ fails and report it; do not work around a failed check.
    Use this launch line for each of the six hooks:
 
    ```sh
-   /bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B "/ABSOLUTE/PATH/TO/<file>"'
+   /bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B "/ABSOLUTE/PATH/TO/preview-launch.py" <mode>'
    ```
 
    - `-I` stops a stray file beside the hook, or a Python environment variable, from changing how Python
      loads it; `-S` skips site packages, which these hooks do not use; `-B` writes no bytecode cache.
    - The `[ -d ... ]` tests are a launch guard: if any standard stream is a directory, Python would fail
      before the hook's own code could fail open, so the guard skips the hook instead.
-   - For `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`, use this guard in place
-     of their docstrings' `REGISTRATION` line, which tests only stdin. This guard has a stricter launch
+   - For `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`, use this launch line in
+     place of their docstrings' `REGISTRATION` line, which tests only stdin and runs the hook file
+     directly. This guard has a stricter launch
      condition: it also skips directory stdout or stderr. When none of the streams is a directory, it
      runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks do not define
      a `REGISTRATION` constant; use this same guard for them.
-   - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
+   - Use the absolute path to the downloaded `preview-launch.py`. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
      on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer;
-     check that `python3` with `python3 --version` before step 3. On an older interpreter each hook reads
-     no input, writes one `error: <file> requires Python 3.14 or newer` line to standard error, and
-     exits. Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
-     `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
-     assistant and nothing is blocked; for the four `PreToolUse` hooks the exit is 2 and every matching
-     tool call is denied; for `stamp-truth-stop.py` (`Stop`) the exit is 1, a non-blocking error, so
-     every stop goes ahead unchecked (exit 2 would block every stop with no block cap, since the hook
-     stops before its loop guard runs). If you see that line, upgrade Python or remove the hook's entry.
+     check that `python3` with `python3 --version` before step 3. Every entry runs `preview-launch.py`,
+     downloaded beside the hooks, with the hook's mode: its file name without `.py`, each hyphen
+     written as an underscore (`stamp_truth_stop` runs `stamp-truth-stop.py`). Several hooks use syntax
+     an older interpreter cannot compile, and such a hook run directly would stop with a syntax
+     error and exit 1, which lets a `PreToolUse` call go ahead unchecked; the launcher compiles on
+     every interpreter that accepts `-I`. On an interpreter older than 3.14 that accepts `-I`, it
+     reads no input and writes one
+     `error: preview-launch.py requires Python 3.14 or newer` line to standard error. Claude Code
+     reads the exit by event: for the four `PreToolUse` hooks the exit is 2 and every matching tool
+     call is denied; for `clock_inject` (`PostToolUse`, `PostToolUseFailure`, where the tool has
+     already run) and `stamp_truth_stop` (`Stop`, where a block would hold every stop with no block
+     cap) the launcher deliberately does not block: it exits 0 with a `systemMessage` warning that
+     the check could not run, so nothing is blocked and every stop goes ahead unchecked. If you see
+     that line, upgrade Python or remove the hook's entry. One case the launcher cannot cover: an
+     interpreter so old that it does not accept `-I` rejects that option before it reads any file and
+     exits 2 for every hook, so it also blocks every stop. The `python3 --version` check above rules it
+     out.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
@@ -176,19 +189,19 @@ fails and report it; do not work around a failed check.
    {
      "hooks": {
        "PostToolUse": [
-         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] }
+         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/preview-launch.py\" clock_inject'" } ] }
        ],
        "PostToolUseFailure": [
-         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] }
+         { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/preview-launch.py\" clock_inject'" } ] }
        ],
        "Stop": [
-         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/stamp-truth-stop.py\"'" } ] }
+         { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/preview-launch.py\" stamp_truth_stop'" } ] }
        ],
        "PreToolUse": [
-         { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/future-stamp-write.py\"'" } ] },
-         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/ungated-record.py\"'" } ] },
-         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/unbounded-wait.py\"'" } ] },
-         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/record-remove-check.py\"'" } ] }
+         { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/preview-launch.py\" future_stamp_write'" } ] },
+         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/preview-launch.py\" ungated_record'" } ] },
+         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/preview-launch.py\" unbounded_wait'" } ] },
+         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/preview-launch.py\" record_remove_check'" } ] }
        ]
      }
    }
