@@ -1181,8 +1181,9 @@ guarantees:
    Reconciliation writes the store, so it MUST run only under the single-writer lease that
    publication uses: when a live or possibly-live holder holds that lease, reconciliation MUST
    refuse before any recovery write and MUST NOT seize the lease, and reconciliation MAY itself
-   release a leftover lease from a confirmed-dead run of the same verb, because section 5.7 requires
-   that a leftover lease from a dead run be released only through that reconciliation.
+   release a leftover lease from a confirmed-dead run of the same verb, since that release is the
+   reconciliation on resume through which section 5.7 requires a leftover lease from a dead run to be
+   released.
    When any other lease is present, a confirmed-dead leftover of another verb included,
    reconciliation MUST refuse before any recovery write and MUST NOT release that lease.
    An operand changed since the interruption, to bytes that are neither its journaled prestate nor its

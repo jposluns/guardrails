@@ -38,9 +38,9 @@ class WriteGuardError(Exception):
 
 class LeaseHeldError(WriteGuardError):
     """acquire_lease's held-lease refusal, exactly the EEXIST present-is-held case (spec 5.7). A distinct
-    type so the RECOVERY claim (acquire_lease_for_recovery) can apply the spec 5.7 live-holder rule to
-    exactly this case; every other acquisition failure stays a plain WriteGuardError and is never examined
-    for release."""
+    type so the RECOVERY claim (acquire_lease_for_recovery) can apply the spec 5.7 never-seize and
+    dead-run release clauses to exactly this case; every other acquisition failure stays a plain
+    WriteGuardError and is never examined for release."""
 
 
 # --- write scope: the operation's store files plus every declared render destination ------------------
@@ -1009,11 +1009,20 @@ def check_clean(res, write_scope, verb, scope_label):
 
 # --- the single-writer lease (spec 5.7) -----------------------------------------------------------------
 
+# The one case in which opf itself removes another run's lease (acquire_lease_for_recovery), stated
+# wherever a refusal tells the operator what opf does not remove, so no refusal claims it never does.
+FOREIGN_LEASE_SCOPE = ("opf removes another run's lease only while reconciling an interrupted run of the same "
+                       "verb, once that lease's holder is confirmed dead on this host")
+# Where the held-lease refusal's operator remedy begins: _lock_refusal drops that remedy under a
+# concurrently HELD examination lock (a live reconciliation is running, so its condition cannot hold).
+HELD_REMEDY = " If you have confirmed NO opf run is live,"
+
+
 def lease_held_message(pfd, name, lease_rel, verb):
     """Compose the EEXIST held-lease refusal, best-effort naming the existing holder/operation/acquired_at.
     A present-but-unreadable or malformed payload STILL refuses (present-is-held, matching C-LEASE); the
-    lease is never seized or overwritten (spec 5.7). Names the manual reconciliation remedy the tool never
-    performs itself."""
+    lease is never seized or overwritten (spec 5.7). Names the manual reconciliation remedy and the one case
+    in which opf itself releases another run's lease (FOREIGN_LEASE_SCOPE)."""
     detail = "a present lease with an unreadable payload"
     try:
         # O_NONBLOCK so a FIFO (or other special file) planted at lease.toml cannot BLOCK the open (an
@@ -1037,9 +1046,9 @@ def lease_held_message(pfd, name, lease_rel, verb):
             _opf_store._journal._close_fd_quietly(fd)
     except Exception:  # noqa: BLE001  a present-but-unreadable lease still refuses (present is held)
         pass
-    return ("another opf run holds the single-writer lease {}: {}. The lease is never seized (spec 5.7). "
-            "If you have confirmed NO opf run is live, release that lease as your own reconciliation step "
-            "(the tool never removes a foreign lease), then re-run opf {}.".format(lease_rel, detail, verb))
+    return ("another opf run holds the single-writer lease {}: {}. The lease is never seized (spec 5.7).{} "
+            "release that lease as your own reconciliation step (this run removed no lease; {}), then re-run "
+            "opf {}.".format(lease_rel, detail, HELD_REMEDY, FOREIGN_LEASE_SCOPE, verb))
 
 
 def lease_holder(verb):
@@ -1095,8 +1104,8 @@ def acquire_lease(root_fd, machine_rel, verb):
                 "{} lease acquisition failed after the lease {} was created ({}); the lease is LEFT in "
                 "place as a leftover from this failed {} and is never seized (spec 5.7). If you have "
                 "confirmed NO opf run is live, release the leftover lease as your own reconciliation step "
-                "(the tool never removes it), then re-run opf {}.".format(
-                    verb, lease_rel, exc, verb, verb)) from exc
+                "(this run never removes it; {}), then re-run opf {}.".format(
+                    verb, lease_rel, exc, verb, FOREIGN_LEASE_SCOPE, verb)) from exc
     finally:
         _opf_store._close_fd_exc_safe(pfd)
     return payload
@@ -1363,10 +1372,18 @@ def _exclusive_examination(pfd, lease_rel, verb):
 
 
 def _lock_refusal(exc, held):
-    """The examination-lock refusal with the held-lease refusal appended: the lock failed before the
-    lease was examined, so whether its holder is live is not known. The refusal names that holder (the
-    held-lease message, read when the claim met the lease) and never calls the lease leftover."""
-    return WriteGuardError("{} {}".format(exc, held))
+    """The examination-lock refusal with the held-lease refusal appended as its own sentence: the lock
+    failed before the lease was examined, so whether its holder is live is not known. The refusal names
+    that holder (the held-lease message, read when the claim met the lease) and never calls the lease
+    leftover. Under a concurrently HELD lock the held-lease remedy is dropped: a live reconciliation is
+    running, so its confirmed-no-run-is-live condition cannot hold."""
+    text = str(held)
+    cause = exc.__cause__
+    while cause is not None and not isinstance(cause, OSError):
+        cause = cause.__cause__
+    if cause is not None and cause.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+        text = text.split(HELD_REMEDY, 1)[0]
+    return WriteGuardError("{} {}{}".format(exc, text[:1].upper(), text[1:]))
 
 
 def _claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released):
@@ -1401,9 +1418,9 @@ def _claim_after_release(pfd, root_fd, machine_rel, verb, lease_rel, released):
 
 def acquire_lease_for_recovery(root_fd, machine_rel, verb):
     """Claim the single-writer lease for a RECONCILIATION write (spec 5.7, 8.8 item 1, 16.1): the ordinary
-    ATOMIC claim first and, exactly when it refuses because a lease is PRESENT, the spec 5.7 live-holder
-    rule under a per-store EXCLUSIVE EXAMINATION LOCK (_exclusive_examination, held from before the
-    leftover is read until after the retried claim): a leftover lease whose complete well-formed payload
+    ATOMIC claim first and, exactly when it refuses because a lease is PRESENT, the spec 5.7 never-seize
+    and dead-run release clauses under a per-store EXCLUSIVE EXAMINATION LOCK (_exclusive_examination,
+    held from before the leftover is read until after the retried claim): a leftover lease whose complete well-formed payload
     names THIS verb's holder on THIS host CONFIRMED DEAD (positive evidence only) is released THROUGH
     this reconciliation, bound to the exact bytes examined (a lease replaced in the interval is never
     removed), and the atomic claim is retried ONCE under the same lock, so at most one of any number of

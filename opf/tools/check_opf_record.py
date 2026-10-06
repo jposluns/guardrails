@@ -343,8 +343,9 @@ Each case runs on its own copy of that template; the root is removed in a finall
       refused by the planner's own record validation, so the labelled step assertion turns red: the
       planner writes no delivery bundle, so the send is refused; the rejection of sent/proposed keeps
       the bundle; the rejection of acknowledged/proposed keeps the receipt keys)
-  T74 recovery applies the spec 5.7 live-holder rule: a leftover lease whose holder is confirmed dead on
-      this host is released through the reconciliation itself, in the same run, and the outcome names it;
+  T74 recovery applies the spec 5.7 never-seize and dead-run release clauses: a leftover lease whose
+      holder is confirmed dead on this host is released through the reconciliation itself, in the same
+      run, and the outcome names it;
       a LIVE local holder, a confirmed-dead holder on another host, a dead holder under a non-closed
       payload schema, a malformed oversized payload with a valid 64 KiB prefix, an EPERM liveness probe,
       and another verb's dead holder each refuse before any recovery write with every byte intact (never
@@ -370,15 +371,23 @@ Each case runs on its own copy of that template; the root is removed in a finall
       durability fsync, then the retried claim's payload and directory fsyncs) carries the report too
       (flips: the round-2 retry; the durability fsync outside the reported window)
   T78 a failed examination lock over a LIVE holder's lease names that holder and never calls its lease
-      leftover, and the plain live-holder refusal does not either (flips: the lock refusal without the
+      leftover, and the plain live-holder refusal does not either, even when the holder's own host name
+      carries that word; the appended held-lease refusal opens its own sentence, a concurrently HELD lock
+      offers no confirmed-no-run-is-live remedy, and every remedy offered states the one case in which
+      opf removes another run's lease, never that it removes none (flips: the lock refusal without the
       held-lease refusal appended; the lock messages calling the unexamined lease leftover; the held-lease
-      remedy calling a live holder's lease leftover)
-  T79 a release that finds an oversized or non-regular replacement reports it as that, never as ABSENT,
-      and a held-lease refusal over an oversized payload reports it oversized, never naming a holder read
-      from its prefix (flips: the release's cause dropped; the single bounded prefix read restored)
-  T80 spec 8.8 item 1 makes reconciliation the agent that refuses and releases, and cites the section 5.7
-      clause by its text, which section 5.7 carries verbatim (flip: the earlier wording, under which the
-      lease refuses and the grant cites a 5.7 "live-holder rule" that 5.7 does not name)
+      remedy calling a live holder's lease leftover; the round-1 join, lowercase and with that remedy; the
+      held-lease refusal claiming the tool never removes a foreign lease)
+  T79 a release that finds an oversized, non-regular (a directory or a symlink) or unreadable
+      replacement reports it as that, never as ABSENT, and a held-lease refusal over an oversized payload
+      reports it oversized, never naming a holder read from its prefix (flips: the release's cause
+      dropped; the single bounded prefix read restored; a symlink's ELOOP read as unreadable; an
+      unreadable entry read as absent)
+  T80 spec 8.8 item 1 makes reconciliation the agent that refuses and releases, and grounds the release
+      in the section 5.7 clause, naming the reconciliation on resume that clause means, never "that
+      reconciliation" read against the transaction reconciliation beside it (flips: the earlier wording,
+      under which the lease refuses and the grant cites a 5.7 "live-holder rule" that 5.7 does not name;
+      the round-1 citation, whose "that reconciliation" points at the wrong reconciliation)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -399,6 +408,7 @@ import errno
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import stat
@@ -516,12 +526,24 @@ def assert_no_auto_maintenance(env, base):
                       " repository" % (spawned,))
 
 
+# A flip whose replacement no longer matches its caller's signature raises TypeError inside the CLI,
+# whose backstop turns it into an ordinary exit-2 refusal that a test's assertion then reads as red.
+# While discriminate runs a flip, cli records each such backstop, and discriminate refuses that red as
+# a harness fault, never a caught defect.
+_FLIP_ARITY = re.compile(r"cannot evaluate: unexpected error[^\n]*TypeError\([^\n]*"
+                         r"(?:positional argument|keyword argument)")
+_flip_faults = []
+_in_flip = [False]
+
+
 def cli(env, argv):
     """Run `opf <argv>` in-process under the scrubbed environment: (rc, stdout, stderr)."""
     out, err = io.StringIO(), io.StringIO()
     with patch.dict(os.environ, env.vars, clear=True), contextlib.redirect_stdout(out), \
             contextlib.redirect_stderr(err):
         rc = opf.main(list(argv))
+    if _in_flip[0] and _FLIP_ARITY.search(err.getvalue()):
+        _flip_faults.append(err.getvalue()[-600:])
     return rc, out.getvalue(), err.getvalue()
 
 
@@ -5383,7 +5405,7 @@ def _t74_refused_leg(fx, name, lease_bytes, needle=T74_HELD):
 
 
 def t74_live_holder_rule(fx):
-    """Recovery applies the spec 5.7 live-holder rule, each never-seize guard carrying its own
+    """Recovery applies the spec 5.7 never-seize and dead-run release clauses, each never-seize guard carrying its own
     discriminating leg: a leftover lease whose holder is confirmed dead on this host is released through
     the reconciliation itself, in the same run, with the outcome naming the released lease and its
     holder; a LIVE local holder refuses before any recovery write with every byte intact (the rule's
@@ -5451,8 +5473,8 @@ def t74_live_holder_rule(fx):
 
 def flip_t74_claim():
     """The pre-fix recovery claim: the plain atomic acquisition, under which ANY present lease refuses
-    (the pre-qualification reading of spec 8.8 item 1, which now grants the dead-run release through the
-    section 5.7 live-holder rule) and a dead run's leftover waits for the operator."""
+    (the pre-qualification reading of spec 8.8 item 1, which now grants the dead-run release, grounded in
+    the section 5.7 dead-run release clause) and a dead run's leftover waits for the operator."""
     return patch.object(guard, "acquire_lease_for_recovery",
                         lambda root_fd, machine_rel, verb: (guard.acquire_lease(root_fd, machine_rel, verb),
                                                             None))
@@ -5494,8 +5516,9 @@ def flip_t74_schema():
 
 
 def flip_t74_prefix():
-    """The pre-fix single bounded lease read: an oversized payload is judged by its first 64 KiB."""
-    def bounded(pfd, name):
+    """The pre-fix single bounded lease read: an oversized payload is judged by its first 64 KiB. It takes
+    the cause list its callers now pass and records no cause (the pre-fix read had none)."""
+    def bounded(pfd, name, why=None):
         try:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
         except OSError:
@@ -5879,6 +5902,12 @@ def flip_t77_fsync():
 
 # --- T78: a failed examination lock names the live holder, never calling its lease leftover (spec 5.7) --
 
+T78_HOST = "leftover.example"
+T78_REMEDY = "If you have confirmed NO opf run is live"
+T78_SCOPE = ("opf removes another run's lease only while reconciling an interrupted run of the same verb, once "
+             "that lease's holder is confirmed dead on this host")
+
+
 def _t78_holder():
     return "opf-record:{}:{}".format(socket.gethostname(), os.getpid())
 
@@ -5886,20 +5915,39 @@ def _t78_holder():
 def t78_lock_failure_names_holder(fx):
     """A LIVE holder's lease (this process) under a failed examination lock, held (EWOULDBLOCK) or failed
     (ENOLCK): the refusal names that holder and never calls its lease leftover, with every byte untouched;
-    with the lock taken, the plain live-holder refusal names the holder without calling it leftover."""
-    legs = ((errno.EWOULDBLOCK, T76_HELD_LOCK), (errno.ENOLCK, T76_LOCK_FAILURE), (None, T74_HELD))
-    for code, needle in legs:
-        name = "t78-" + ("lock-taken" if code is None else errno.errorcode[code].lower())
+    with the lock taken, the plain live-holder refusal names the holder without calling it leftover. The
+    word is judged in the refusal's own wording, never in the echoed holder identity, so a last leg runs
+    the held lock under a host named T78_HOST. The appended held-lease refusal opens its own sentence;
+    under a HELD lock (a live reconciliation is running) it offers no confirmed-no-run-is-live remedy;
+    and every remedy offered states the one case in which opf removes another run's lease (T78_SCOPE),
+    never that the tool removes none."""
+    legs = ((errno.EWOULDBLOCK, T76_HELD_LOCK, None), (errno.ENOLCK, T76_LOCK_FAILURE, None),
+            (None, T74_HELD, None), (errno.EWOULDBLOCK, T76_HELD_LOCK, T78_HOST))
+    for code, needle, host in legs:
+        name = "t78-" + ("lock-taken" if code is None else errno.errorcode[code].lower()) + (
+            "" if host is None else "-host")
         root = _t74_interrupted(fx, name)
-        (Path(root) / LEASE).write_bytes(t74_lease_bytes(os.getpid()))
-        before = snapshot(root)
-        with (contextlib.nullcontext() if code is None else _t76_flock_failing(code)):
+        with contextlib.ExitStack() as stack:
+            if host is not None:
+                stack.enter_context(patch.object(socket, "gethostname", lambda host=host: host))
+            holder = _t78_holder()
+            (Path(root) / LEASE).write_bytes(t74_lease_bytes(os.getpid()))
+            before = snapshot(root)
+            if code is not None:
+                stack.enter_context(_t76_flock_failing(code))
             result = record_cli(fx.env, root, CREATE)
         refused(result, needle)
         err = result[2]
-        assert _t78_holder() in err, ("T78 the refusal names the live holder", name, err[-1600:])
-        assert "leftover" not in err, ("T78 a live holder's lease is never called leftover", name,
-                                       err[-1600:])
+        assert holder in err, ("T78 the refusal names the live holder", name, err[-1600:])
+        assert "leftover" not in err.replace(holder, ""), (
+            "T78 a live holder's lease is never called leftover", name, err[-1600:])
+        assert ". another opf run" not in err, (
+            "T78 the appended held-lease refusal opens its own sentence", name, err[-1600:])
+        assert (T78_REMEDY in err) == (code != errno.EWOULDBLOCK), (
+            "T78 the confirmed-no-run remedy is offered exactly when no reconciliation holds the lock", name,
+            err[-1600:])
+        assert (T78_SCOPE in err) == (T78_REMEDY in err) and "never removes a foreign lease" not in err, (
+            "T78 the remedy states the one case opf removes another run's lease", name, err[-1600:])
         assert snapshot(root) == before, ("T78 refuses with every byte untouched", name)
 
 
@@ -5927,34 +5975,58 @@ def flip_t78_held():
         "release that lease", "release the leftover lease"))
 
 
+def flip_t78_join():
+    """The round-1 join: the held-lease refusal appended lowercase, its remedy kept under a held lock."""
+    return patch.object(guard, "_lock_refusal", lambda exc, held: guard.WriteGuardError(
+        "{} {}".format(exc, held)))
+
+
+def flip_t78_foreign():
+    """The held-lease refusal claiming the tool never removes a foreign lease."""
+    real = guard.lease_held_message
+    return patch.object(guard, "lease_held_message", lambda *args: real(*args).replace(
+        "this run removed no lease; " + T78_SCOPE, "the tool never removes a foreign lease"))
+
+
 # --- T79: an oversized or non-regular replacement is reported as what it is, never ABSENT (spec 5.7) ------
 
 T79_LEASE = "lease.toml"
 
 
+def _t79_read_fault(fd):
+    raise OSError(errno.EIO, "injected read failure")
+
+
 def t79_replacement_named(fx):
     """The ownership-verified release over an OVERSIZED replacement reports it oversized, over a
-    non-regular one reports it non-regular, and over a missing lease reports it ABSENT; neither
-    replacement is ever reported ABSENT, and each is left in place. The held-lease refusal over an
-    oversized payload whose first 64 KiB parse as a valid lease reports it oversized and names no holder
-    read from that prefix."""
+    non-regular one (a directory, or a symlink, which the no-follow open meets as ELOOP) reports it
+    non-regular, over an unreadable one (a read failure) reports it unreadable, and over a missing lease
+    reports it ABSENT; no replacement is ever reported ABSENT, and each is left in place. The held-lease
+    refusal over an oversized payload whose first 64 KiB parse as a valid lease reports it oversized and
+    names no holder read from that prefix."""
     base = tempfile.mkdtemp(prefix="t79-")
     pfd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
     try:
         path = os.path.join(base, T79_LEASE)
         valid = t74_lease_bytes(1)
         oversized = valid + b"#" * (65536 - len(valid) - 1) + b"\n" + b"schema = 1\n"
-        legs = (("oversized", lambda: Path(path).write_bytes(oversized), "OVERSIZED"),
-                ("non-regular", lambda: os.mkdir(path), "non-regular entry"),
-                ("absent", lambda: None, "ABSENT"))
-        for name, plant, needle in legs:
+        legs = (("oversized", lambda: Path(path).write_bytes(oversized), "OVERSIZED", None),
+                ("non-regular", lambda: os.mkdir(path), "non-regular entry", None),
+                ("symlink", lambda: os.symlink(T79_LEASE + ".elsewhere", path), "non-regular entry", None),
+                ("unreadable", lambda: Path(path).write_bytes(valid), "could not be read, unreadable (",
+                 _t79_read_fault),
+                ("absent", lambda: None, "ABSENT", None))
+        for name, plant, needle, read_fault in legs:
             plant()
-            try:
-                guard.unlink_owned_lease(pfd, T79_LEASE, "m/" + T79_LEASE, b"this run's own", "record")
-            except guard.WriteGuardError as exc:
-                message = str(exc)
-            else:
-                raise AssertionError("T79 the release refuses a lease that is not its own ({})".format(name))
+            with (contextlib.nullcontext() if read_fault is None else
+                  patch.object(guard, "_read_capped", read_fault)):
+                try:
+                    guard.unlink_owned_lease(pfd, T79_LEASE, "m/" + T79_LEASE, b"this run's own", "record")
+                except guard.WriteGuardError as exc:
+                    message = str(exc)
+                else:
+                    raise AssertionError("T79 the release refuses a lease that is not its own ({})".format(
+                        name))
             assert needle in message, ("T79 the release names the entry it found", name, message)
             if name != "absent":
                 assert "ABSENT" not in message, ("T79 a replacement is never reported ABSENT", name, message)
@@ -5963,9 +6035,10 @@ def t79_replacement_named(fx):
                 held = guard.lease_held_message(pfd, T79_LEASE, "m/" + T79_LEASE, "record")
                 assert "OVERSIZED" in held and "opf-record:" not in held, (
                     "T79 the held refusal reports the oversized payload, never its prefix's holder", held)
-                os.unlink(path)
-            elif name == "non-regular":
+            if name == "non-regular":
                 os.rmdir(path)
+            elif name != "absent":
+                os.unlink(path)
     finally:
         os.close(pfd)
         shutil.rmtree(base, ignore_errors=True)
@@ -5982,14 +6055,46 @@ def flip_t79_prefix():
     return patch.object(guard, "_read_capped", lambda fd: os.read(fd, 65536))
 
 
+def _t79_recause(pick):
+    """read_lease_payload with each recorded cause rewritten by pick(pfd, name, cause)."""
+    real = guard.read_lease_payload
+
+    def recaused(pfd, name, why=None):
+        found = []
+        raw = real(pfd, name, found)
+        if why is not None:
+            why.extend(pick(pfd, name, cause) for cause in found)
+        return raw
+    return patch.object(guard, "read_lease_payload", recaused)
+
+
+def flip_t79_eloop():
+    """A symlink's ELOOP read as unreadable, never non-regular."""
+    def pick(pfd, name, cause):
+        try:
+            link = stat.S_ISLNK(os.stat(name, dir_fd=pfd, follow_symlinks=False).st_mode)
+        except OSError:
+            link = False
+        return "unreadable (flipped)" if cause == "non-regular" and link else cause
+    return _t79_recause(pick)
+
+
+def flip_t79_unreadable():
+    """An unreadable entry read as absent, the reading before the release named its cause."""
+    return _t79_recause(lambda pfd, name, cause: "absent" if cause.startswith("unreadable") else cause)
+
+
 # --- T80: spec 8.8 item 1 names reconciliation as the agent and cites the real 5.7 clause ----------------
 
 T80_CLAUSE = "a leftover lease from a dead run MUST be released only through that reconciliation"
-T80_CITED = ("section 5.7 requires that a leftover lease from a dead run be released only through that "
-             "reconciliation")
+T80_CITED = ("the reconciliation on resume through which section 5.7 requires a leftover lease from a dead "
+             "run to be released")
+T80_ROUND1 = ("because section 5.7 requires that a leftover lease from a dead run be released only through "
+              "that reconciliation")
 T80_FIXED = ("when a live or possibly-live holder holds that lease, reconciliation MUST refuse before any recovery "
              "write and MUST NOT seize the lease, and reconciliation MAY itself release a leftover lease from a "
-             "confirmed-dead run of the same verb, because " + T80_CITED + ". When any other lease is present, a "
+             "confirmed-dead run of the same verb, since that release is " + T80_CITED + ". When any other "
+             "lease is present, a "
              "confirmed-dead leftover of another verb included, reconciliation MUST refuse before any recovery "
              "write and MUST NOT release that lease.")
 T80_EARLIER = ("a lease held by a live or possibly-live holder MUST refuse before any recovery write and MUST NOT "
@@ -6012,14 +6117,20 @@ def _t80_section(text, start, end):
 def t80_spec_item_1_wording(fx):
     """Spec 8.8 item 1: reconciliation, never the lease, refuses before any recovery write, under a live
     or possibly-live holder and under any other present lease; reconciliation itself may release a
-    confirmed-dead same-verb leftover; and the grant cites the section 5.7 clause by its text, which 5.7
-    carries verbatim, never a 5.7 "live-holder rule" that 5.7 does not name."""
+    confirmed-dead same-verb leftover; and the grant identifies that release as the reconciliation on
+    resume through which the section 5.7 clause releases a dead run's leftover, never a 5.7
+    "live-holder rule" that 5.7 does not name, and never "that reconciliation", which item 1 would read
+    against its own transaction reconciliation."""
     text = _t80_spec_text()
     item = _t80_section(text, "1. Resolve the store, then any interrupted authoring", " 2. Precondition:")
     s57 = _t80_section(text, "### 5.7 The store consistency contract", "### 5.8 ")
     assert T80_CLAUSE in s57, "T80 section 5.7 carries the dead-run release clause"
     assert T80_CITED in item, ("T80 item 1 cites the 5.7 clause by its text", item)
     assert "live-holder rule" not in item, ("T80 item 1 cites no unnamed 5.7 rule", item)
+    assert "only through that reconciliation" not in item, (
+        "T80 item 1 names the reconciliation the 5.7 clause means", item)
+    assert "reconciled against recorded state on resume or close" in s57, (
+        "T80 section 5.7 places that reconciliation on resume or close")
     assert item.count("reconciliation MUST refuse before any recovery write") == 2, (
         "T80 reconciliation is the agent of both refusals", item)
     assert "reconciliation MAY itself release" in item, ("T80 reconciliation is the releasing agent", item)
@@ -6034,6 +6145,16 @@ def flip_t80():
         raise Harness("T80 the flip found no fixed wording to revert")
     earlier = fixed.replace(T80_FIXED, T80_EARLIER)
     return patch.object(sys.modules[__name__], "_t80_spec_text", lambda: earlier)
+
+
+def flip_t80_round1():
+    """The round-1 citation: "that reconciliation", read against item 1's transaction reconciliation."""
+    fixed = _t80_spec_text()
+    current = "since that release is " + T80_CITED
+    if current not in fixed:
+        raise Harness("T80 the flip found no fixed citation to revert")
+    round1 = fixed.replace(current, T80_ROUND1)
+    return patch.object(sys.modules[__name__], "_t80_spec_text", lambda: round1)
 
 
 TESTS = (
@@ -6155,9 +6276,11 @@ TESTS = (
     ("T77-release-report-every-failure", t77_report_every_failure, flip_t77),
     ("T77-release-report-fsync-window", t77_fsync_window, (flip_t77, flip_t77_fsync)),
     ("T78-lock-failure-names-live-holder", t78_lock_failure_names_holder, (flip_t78_unnamed, flip_t78_leftover,
-                                                                          flip_t78_held)),
-    ("T79-replacement-named-not-absent", t79_replacement_named, (flip_t79_cause, flip_t79_prefix)),
-    ("T80-spec-8-8-item-1-wording", t80_spec_item_1_wording, flip_t80),
+                                                                          flip_t78_held, flip_t78_join,
+                                                                          flip_t78_foreign)),
+    ("T79-replacement-named-not-absent", t79_replacement_named, (flip_t79_cause, flip_t79_prefix,
+                                                                 flip_t79_eloop, flip_t79_unreadable)),
+    ("T80-spec-8-8-item-1-wording", t80_spec_item_1_wording, (flip_t80, flip_t80_round1)),
 )
 
 
@@ -6199,16 +6322,23 @@ def _self_test_isolated():
             failures.append("{}: {}".format(name, exc))
 
     def discriminate(name, test, flip):
-        """The flip must turn the test red with an assertion (never an unrelated harness fault), and the
-        unflipped test must stay green around it."""
+        """The flip must turn the test red with an assertion (never an unrelated harness fault, a flip
+        replacement the CLI backstop met with a signature TypeError included), and the unflipped test must
+        stay green around it."""
         test()
+        del _flip_faults[:]
+        _in_flip[0] = True
         try:
             with flip():
                 test()
         except AssertionError:
-            pass
+            if _flip_faults:
+                raise AssertionError("{} went red through a harness fault, its flip's replacement no longer "
+                                     "matching its caller: {}".format(name, _flip_faults[0])) from None
         else:
             raise AssertionError(name + " survived its flip")
+        finally:
+            _in_flip[0] = False
         test()
 
     base = Path(tempfile.mkdtemp(prefix="opf-record-gate-")).resolve()
