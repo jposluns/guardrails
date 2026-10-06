@@ -3582,7 +3582,10 @@ def _self_test():
     # carry os.open's dir_fd (the openat form), so a relative path is resolved from the working directory AND
     # from every open directory descriptor: a descriptor-relative open of a FIFO is refused too (conservatively,
     # a relative name that some other open directory resolves to a FIFO is refused as well: a false failure,
-    # never a false pass). Every FIFO is guarded, one the child creates after the guard is installed included.
+    # never a false pass). The open descriptors are enumerated through /dev/fd; where that fails, a relative
+    # open cannot be evaluated, so it is refused and recorded (a cannot-evaluate fails the test; a guessed
+    # descriptor range missed a directory descriptor above it and let a blocking open through). Every FIFO is
+    # guarded, one the child creates after the guard is installed included.
     # Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes).
     FIFO_GUARD = (
         "import os, stat, sys\n"
@@ -3592,8 +3595,10 @@ def _self_test():
         "    if not os.path.isabs(path):\n"
         "        try:\n"
         "            bases += [int(fd) for fd in os.listdir('/dev/fd')]\n"
-        "        except (OSError, ValueError):\n"
-        "            bases += list(range(3, 1024))\n"
+        "        except (OSError, ValueError) as e:\n"
+        "            _blocking.append(('cannot evaluate', path))\n"
+        "            raise AssertionError('the FIFO guard cannot evaluate %r: the open descriptors are not '\n"
+        "                                 'enumerable (%r)' % (path, e))\n"
         "    for fd in bases:\n"
         "        try:\n"
         "            if stat.S_ISFIFO(os.stat(path, dir_fd=fd).st_mode):\n"
@@ -3836,6 +3841,39 @@ def _self_test():
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
                                timeout=HANG_TIMEOUT)  # the hang guard
             self.assertEqual(r.stdout.split(), [str(len(FIFO_OPENERS))] * 2, r.stderr)
+
+        def test_fifo_guard_cannot_evaluate_without_descriptor_list(self):
+            # QA (codex MED): where /dev/fd could not be listed the guard tried descriptors 3 to 1023 only, so a
+            # blocking open relative to a directory descriptor above that range passed unrecorded. The listing
+            # now fails as a cannot-evaluate: the open is refused and recorded. The keeper descriptor means no
+            # open can block, so a missed refusal returns at once and the test fails on the printed counts
+            # (the directory descriptor is moved above 1023 where the hard limit allows)
+            fifo = os.path.join(self.tmp, "efifo")
+            os.mkfifo(fifo)
+            code = FIFO_GUARD + (
+                "import resource\n"
+                "soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
+                "high = 2048 if hard == resource.RLIM_INFINITY or hard > 2048 else hard - 1\n"
+                "resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, high + 1), hard))\n"
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "d = os.open(%r, os.O_RDONLY | os.O_DIRECTORY)\n"
+                "os.dup2(d, high)\n"
+                "os.close(d)\n"
+                "_listdir = os.listdir\n"
+                "def _no_fd_list(path='.'):\n"
+                "    if path == '/dev/fd':\n"
+                "        raise OSError('descriptor listing refused')\n"
+                "    return _listdir(path)\n"
+                "os.listdir = _no_fd_list\n"
+                "refused = 0\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY, dir_fd=high))\n"
+                "except AssertionError:\n"
+                "    refused += 1\n"
+                "print(refused, _blocking)\n") % (fifo, self.tmp, os.path.basename(fifo))
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.strip(), "1 [('cannot evaluate', 'efifo')]", r.stderr)
 
         def test_store_root_env_override(self):
             os.environ["AIQT_STORE_ROOT"] = self.tmp
@@ -4340,8 +4378,10 @@ def _self_test():
             # counter. The count at GROWTH * n over the count at n stays under 3 * GROWTH (24: linear about
             # GROWTH, quadratic about GROWTH squared) for the ten r7 shapes of bash_writes and for date_spans,
             # and the verdict is unchanged by the proxies. Work on DERIVED structures (word buffers, token lists,
-            # the frame stack) is not charged here; the CPU growth checks above cover it. Residual (disclosed): a
-            # failed match is charged one step, so regex backtracking is left to those CPU checks too.
+            # the frame stack) is not charged here; the CPU growth checks above cover the Python-level part of it.
+            # Residual (disclosed): C-level work on a plain str copy of the command (str(cmd), then a find from
+            # many offsets) escapes the proxies and, at these sizes, the CPU ratio too; a failed match is charged
+            # one step, so regex backtracking is left to those CPU checks.
             work = [0]
 
             def wrap(value):
@@ -5416,8 +5456,11 @@ def _self_test():
         def test_r26_item6_hang_guard_interrupts(self):
             # finding 6 (LOW): the growth test's ceiling was asserted only after every run returned, so it could
             # not interrupt a hang; timed runs now go through run_timed, which kills the child at its timeout.
-            # The verdict is the TimeoutExpired and the timeout run_timed hands on, never an elapsed time: without
-            # the timeout the child sleeps its minute and returns, and assertRaises fails
+            # The verdict is the TimeoutExpired and the timeout run_timed hands on, never an elapsed time. The child
+            # is held on an explicit signal that never comes (a read of its own pipe, whose write end it keeps
+            # open), so it cannot end of its own accord however late the parent resumes: without the timeout the
+            # run never returns. (QA: a child that slept a finite minute ended on its own when the parent resumed
+            # after it, and the test then failed on its output, not on the timeout.)
             seen, real_run = [], subprocess.run
 
             def recording_run(*args, **kwargs):
@@ -5426,7 +5469,7 @@ def _self_test():
             subprocess.run = recording_run
             try:
                 with self.assertRaises(subprocess.TimeoutExpired):
-                    run_timed("import time\ntime.sleep(60)\n", 1)
+                    run_timed("import os\nr, w = os.pipe()\nos.read(r, 1)\n", 1)
             finally:
                 subprocess.run = real_run
             self.assertEqual(seen, [1])

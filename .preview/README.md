@@ -61,7 +61,7 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
-| `stamp-truth-stop.py` | `91eee52c4eb0062fb9e189fe8ba337703151555e570265218c6bbb07803bb44d` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `e4880c56cb87081d11e10323efb5474811caac402899a1392d629845f00375a7` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
 

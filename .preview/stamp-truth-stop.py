@@ -2091,7 +2091,10 @@ def _self_test():
     # carry os.open's dir_fd (the openat form), so a relative path is resolved from the working directory AND
     # from every open directory descriptor: a descriptor-relative open of a FIFO is refused too (conservatively,
     # a relative name that some other open directory resolves to a FIFO is refused as well: a false failure,
-    # never a false pass). Every FIFO is guarded, one the child creates after the guard is installed included.
+    # never a false pass). The open descriptors are enumerated through /dev/fd; where that fails, a relative
+    # open cannot be evaluated, so it is refused and recorded (a cannot-evaluate fails the test; a guessed
+    # descriptor range missed a directory descriptor above it and let a blocking open through). Every FIFO is
+    # guarded, one the child creates after the guard is installed included.
     # Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes).
     FIFO_GUARD = (
         "import os, stat, sys\n"
@@ -2101,8 +2104,10 @@ def _self_test():
         "    if not os.path.isabs(path):\n"
         "        try:\n"
         "            bases += [int(fd) for fd in os.listdir('/dev/fd')]\n"
-        "        except (OSError, ValueError):\n"
-        "            bases += list(range(3, 1024))\n"
+        "        except (OSError, ValueError) as e:\n"
+        "            _blocking.append(('cannot evaluate', path))\n"
+        "            raise AssertionError('the FIFO guard cannot evaluate %r: the open descriptors are not '\n"
+        "                                 'enumerable (%r)' % (path, e))\n"
         "    for fd in bases:\n"
         "        try:\n"
         "            if stat.S_ISFIFO(os.stat(path, dir_fd=fd).st_mode):\n"
@@ -2136,24 +2141,33 @@ def _self_test():
                               capture_output=True, text=True, timeout=timeout).stdout.strip()
 
     class Park:
-        """A started thread parks at a chosen point (park()) until the test releases it. No wait has a deadline,
-        each is on a signal that every path sets (a 10 s bound once decided verdicts under load, and a thread
-        delayed past it changed the result): the thread signals when it parks AND when its target ends, so
-        reached() returns at once, true only for a park; release(), called in the test's finally, sets resume
-        and joins the released thread, which runs to its end. A hang is no worse than under a bounded join: a
-        non-daemon thread still alive keeps the interpreter from exiting either way. The main thread never
-        parks (it would wait on itself), so park() refuses there."""
+        """A started thread parks at a chosen point (park()) until the test releases it. Every wait is on a signal
+        that every path sets (a 10 s bound once decided verdicts under load, and a thread delayed past it changed
+        the result): the thread signals when it parks AND when its target ends, so reached() returns at once,
+        true only for a park; release(), called in the test's finally, sets resume and joins the released
+        thread, which runs to its end. HANG_TIMEOUT bounds each wait as a hang guard only, and an expired guard
+        is a FAILURE, never a pass: a park whose resume never comes (a lock regression that blocks the main
+        thread on the lock the parked thread holds) stops waiting, is recorded, and raises, so the parked
+        thread ends and frees what it holds. A failure of the started thread (its target raised, or its park
+        expired) is recorded and release() raises it, so a test cannot pass on a thread that died (QA: an
+        exception after the save left the result unset and the test still passed). The main thread never parks
+        (it would wait on itself), so park() refuses there."""
 
         def __init__(self):
             self.parked, self.signal, self.resume = threading.Event(), threading.Event(), threading.Event()
+            self.failures = []
 
         def start(self, name, target):
             for e in (self.parked, self.signal, self.resume):
                 e.clear()
+            self.failures = []
 
             def run():
                 try:
                     target()
+                except BaseException as e:  # recorded for release(), which raises it in the test's thread
+                    if not any(e is f for f in self.failures):  # an expired park recorded itself already
+                        self.failures.append(e)
                 finally:
                     self.signal.set()  # ended: reached() returns now, false unless it parked first
             t = threading.Thread(name=name, target=run)
@@ -2165,15 +2179,22 @@ def _self_test():
                 raise AssertionError("only a started thread parks")
             self.parked.set()
             self.signal.set()
-            self.resume.wait()
+            if not self.resume.wait(HANG_TIMEOUT):  # the hang guard: never resumed
+                self.failures.append(AssertionError("hang guard: the parked thread was never released"))
+                raise self.failures[-1]
 
         def reached(self):
-            self.signal.wait()
+            self.signal.wait(HANG_TIMEOUT)  # the hang guard: expired, the thread has not parked, so false
             return self.parked.is_set()
 
         def release(self, thread):
             self.resume.set()
-            thread.join()
+            thread.join(HANG_TIMEOUT)  # the hang guard
+            if thread.is_alive():
+                raise AssertionError("hang guard: the released thread %s did not end" % thread.name)
+            if self.failures:
+                raise AssertionError("the started thread %s failed: %r" % (thread.name, self.failures)) \
+                    from self.failures[0]
 
     # A timing verdict compares the same code with itself on the same host, never with a wall-clock figure (a
     # 2.0 s ceiling in a sibling hook's self-test failed at 2.53 s on a slower CI runner). A GROWTH check times,
@@ -3139,12 +3160,17 @@ def _self_test():
             self.assertIsNone(lease_file())  # a set-but-empty AIQT_ value still beats ORCH_: no lease
 
         def test_fifo_transcript_and_lease_do_not_block(self):
+            # the second evaluation is a stop_hook_active Stop, which also reads the transcript through
+            # block_cycles (QA: no FIFO test reached that open, so its O_NONBLOCK could be dropped unnoticed)
             fifo = os.path.join(self.tmp, "fifo")
             os.mkfifo(fifo)
             out = in_subprocess("(m.lease_start(%r), m.evaluate({'transcript_path':%r,'last_assistant_message':"
+                                "'[2099-01-01T00:00Z] x'}, datetime.datetime.now(UTC), None, %r) is not None, "
+                                "m.evaluate({'transcript_path':%r,'stop_hook_active':True,'last_assistant_message':"
                                 "'[2099-01-01T00:00Z] x'}, datetime.datetime.now(UTC), None, %r) is not None)"
-                                % (fifo, fifo, self.sdir), timeout=HANG_TIMEOUT, guarded=True)  # the hang guard
-            self.assertEqual(out.splitlines(), ["(None, True)", "[]"])  # FIFO_GUARD refused no open
+                                % (fifo, fifo, self.sdir, fifo, self.sdir), timeout=HANG_TIMEOUT,
+                                guarded=True)  # the hang guard
+            self.assertEqual(out.splitlines(), ["(None, True, True)", "[]"])  # FIFO_GUARD refused no open
 
         def test_fifo_guard_refuses_every_blocking_opener(self):
             # the guard's vector: each opener in FIFO_OPENERS, without O_NONBLOCK, is refused and recorded at once
@@ -3173,6 +3199,39 @@ def _self_test():
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
                                timeout=HANG_TIMEOUT)  # the hang guard
             self.assertEqual(r.stdout.split(), [str(len(FIFO_OPENERS))] * 2, r.stderr)
+
+        def test_fifo_guard_cannot_evaluate_without_descriptor_list(self):
+            # QA (codex MED): where /dev/fd could not be listed the guard tried descriptors 3 to 1023 only, so a
+            # blocking open relative to a directory descriptor above that range passed unrecorded. The listing
+            # now fails as a cannot-evaluate: the open is refused and recorded. The keeper descriptor means no
+            # open can block, so a missed refusal returns at once and the test fails on the printed counts
+            # (the directory descriptor is moved above 1023 where the hard limit allows)
+            fifo = os.path.join(self.tmp, "efifo")
+            os.mkfifo(fifo)
+            code = FIFO_GUARD + (
+                "import resource\n"
+                "soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
+                "high = 2048 if hard == resource.RLIM_INFINITY or hard > 2048 else hard - 1\n"
+                "resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, high + 1), hard))\n"
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "d = os.open(%r, os.O_RDONLY | os.O_DIRECTORY)\n"
+                "os.dup2(d, high)\n"
+                "os.close(d)\n"
+                "_listdir = os.listdir\n"
+                "def _no_fd_list(path='.'):\n"
+                "    if path == '/dev/fd':\n"
+                "        raise OSError('descriptor listing refused')\n"
+                "    return _listdir(path)\n"
+                "os.listdir = _no_fd_list\n"
+                "refused = 0\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY, dir_fd=high))\n"
+                "except AssertionError:\n"
+                "    refused += 1\n"
+                "print(refused, _blocking)\n") % (fifo, self.tmp, os.path.basename(fifo))
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.strip(), "1 [('cannot evaluate', 'efifo')]", r.stderr)
 
         def test_inactive_lease_never_reads_history(self):
             lease = os.path.join(self.tmp, "lease.md")
@@ -4061,6 +4120,37 @@ def _self_test():
             self.assertEqual(worst, BLOCK_CAP)  # the bound is reached, so the runs exercise it
 
         # -- round 28 (codex gpt-6-astra high QA of round 27) --
+        def test_park_failures_fail_the_test(self):
+            # QA (codex MED): an exception in a started thread went unnoticed, so a test passed on an absent
+            # result; QA (claude MED): a park never resumed waited forever, so a lock regression hung the suite.
+            # release() now raises a recorded failure of the started thread, and an expired park guard is
+            # recorded and raised. The expiry is injected (a resume event whose wait reports the guard expired),
+            # so no verdict here waits on a clock
+            park = Park()
+            a = park.start("A", lambda: [][0])
+            self.assertFalse(park.reached())  # it ended without parking
+            with self.assertRaises(AssertionError) as cm:
+                park.release(a)
+            self.assertIsInstance(cm.exception.__cause__, IndexError)
+
+            class Expired(threading.Event):
+                def wait(self, timeout=None):
+                    return False  # the hang guard expired
+
+            park, after = Park(), []
+            park.resume = Expired()
+            a = park.start("A", lambda: (park.park(), after.append("resumed")))
+            self.assertTrue(park.reached())
+            with self.assertRaises(AssertionError) as cm:
+                park.release(a)
+            self.assertEqual(after, [])  # the expired park raised: the thread did not run on as if released
+            self.assertIn("never released", str(cm.exception))
+            park, ran = Park(), []  # a clean park and release raise nothing
+            a = park.start("A", lambda: (park.park(), ran.append(1)))
+            self.assertTrue(park.reached())
+            park.release(a)
+            self.assertEqual(ran, [1])
+
         def test_r28_concurrent_stops_cannot_rearm_counter(self):
             # finding (codex MED): the bound assumed serialized Stops; two concurrent evaluations for one transcript
             # (a clean Stop A loads 1 and pauses before saving; a violating Stop B loads 1, saves 2, and blocks; A
@@ -4101,7 +4191,7 @@ def _self_test():
                     finally:
                         park.release(a)
                     self.assertFalse(a.is_alive())
-                    self.assertEqual((out.get("r"), out["notes"]), (None, []))  # A's clean pass, unaffected
+                    self.assertEqual((out["r"], out["notes"]), (None, []))  # A's clean pass, unaffected
                     counters.append(counter())
             finally:
                 globals()["save_state"] = real_save
@@ -4326,7 +4416,7 @@ def _self_test():
                     finally:
                         park.release(a)
                     self.assertFalse(a.is_alive())
-                    self.assertEqual((out.get("r"), out["notes"]), (None, []), (mode, i))  # A's clean pass
+                    self.assertEqual((out["r"], out["notes"]), (None, []), (mode, i))  # A's clean pass
                     counters.append(counter())
             finally:
                 globals()["save_state"] = real_save
