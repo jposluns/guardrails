@@ -21,9 +21,10 @@ every corpus-specific choice is passed in by the caller, never hardcoded here:
     in the head window and returns them, leaving the required-field list and
     per-field validity entirely to the caller.
 
-Stdlib-only, Python 3.11+. No third-party dependencies. Import mechanics: the
-pack ships this file under ``tools/``, so a consumer puts that directory on
-``sys.path`` and imports by module name, exactly as the pack's own gates do::
+Stdlib-only, Python 3.14 or newer, no third-party dependencies. Import
+mechanics: the pack ships this file under ``tools/``, so a consumer puts that
+directory on ``sys.path`` and imports by module name, exactly as the pack's
+own gates do::
 
     import sys
     from pathlib import Path
@@ -32,6 +33,15 @@ pack ships this file under ``tools/``, so a consumer puts that directory on
 """
 
 from __future__ import annotations
+
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: aiqt_corpus.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
 
 import datetime
 import re

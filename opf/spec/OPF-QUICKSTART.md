@@ -88,6 +88,8 @@ catches only what it lists, so legacy state the list omits, or that sits where t
 search, goes undetected. The reference tooling targets the upgrade-capable class, but its upgrade
 into base 1.3.0 is still a target it does not yet perform.
 
+The reference tooling requires Python 3.14 or newer.
+
 ---
 
 # Flags: contradictions found and interpretive additions

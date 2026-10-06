@@ -22,10 +22,18 @@ built to FAIL if its fix is reverted, so the selftest is the durable guard the f
 Every fixture is synthetic and assembled in a tempdir; opf_render.repo_root is redirected to it so no
 real file is read or written. Exit convention matches the repo's selftests: 0 pass, 1 fail, 2 error.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: selftest_opf_render.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import contextlib
 import io
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 

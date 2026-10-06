@@ -1201,6 +1201,16 @@ def _self_test_isolated():
         def _hookspath(root):
             return _git_out(root, "config", "--get", "core.hooksPath")
 
+        def _entry(path):
+            # Whether any directory entry is at path, a dangling symlink included (exists() follows the
+            # link and reads a dangling one as absent). Only a missing entry reads as absent; any other
+            # lstat error propagates as a harness error, never passing as absence.
+            try:
+                os.lstat(str(path))
+            except FileNotFoundError:
+                return False
+            return True
+
         def _stub(root):
             # The text of the installed pre-commit stub in the clone's untracked hooks directory, or None.
             path = root / ".git" / "hooks" / "pre-commit"
@@ -1880,9 +1890,25 @@ def _self_test_isolated():
             linked = _fixture("linked repo")
             linked_wt = base / "linked wt"
             _git(linked, home, "worktree", "add", "-q", "-b", "side", str(linked_wt))
+            linked_wt_cfg = _git_out(linked_wt, "rev-parse", "--path-format=absolute", "--git-path",
+                                     "config.worktree")
+            linked_cfg_before = (linked / ".git" / "config").read_bytes()
             expect("linked-install", (_install(linked_wt), _stub_ok(linked), _hookspath(linked_wt),
-                                      (linked / ".git" / "config.worktree").exists()),
-                   (EXIT_OK, True, None, False))
+                                      _entry(linked / ".git" / "config.worktree"),
+                                      linked_wt_cfg is None or _entry(linked_wt_cfg),
+                                      (linked / ".git" / "config").read_bytes() == linked_cfg_before),
+                   (EXIT_OK, True, None, False, False, True))
+            # The absence probe above must be able to fail: a dangling symlink planted at the worktree's
+            # config.worktree path (when nothing is there already) reads as present. The plant is removed
+            # before the worktree is used again.
+            planted = linked_wt_cfg is not None and not _entry(linked_wt_cfg)
+            if planted:
+                os.symlink(linked_wt_cfg + ".missing", linked_wt_cfg)
+            try:
+                expect("linked-install-probe-live", linked_wt_cfg is not None and _entry(linked_wt_cfg), True)
+            finally:
+                if planted:
+                    os.unlink(linked_wt_cfg)
             (linked_wt / "README.md").write_text("readme\n", encoding="utf-8")
             _git(linked_wt, home, "add", "README.md")
             expect("linked-commit-clean-passes", _committed(linked_wt), (EXIT_OK, True))

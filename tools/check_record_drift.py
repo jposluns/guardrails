@@ -21,11 +21,19 @@ the check_crosswalk precedent); the self-test carries the assurance in CI.
   check_record_drift.py              run the live leg
   check_record_drift.py --self-test  synthetic fixtures: detection and every fail-closed branch
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_record_drift.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
