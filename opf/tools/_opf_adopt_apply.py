@@ -8047,12 +8047,33 @@ def _self_test_checks():
             the close up to run_adopt_transaction (the close-site path, never the harness above it)."""
             name, compose_c, patches = scenario
             under = plan.get("under")
-            held = _fds_open()
+            # The descriptors this run owns: each one os.open, os.dup or os.pipe returns on this thread while
+            # the run's patches stand, with its identity (st_dev, st_ino) then, dropped when os.close is called
+            # on it. Another thread's descriptor (or one a run left a callback to keep) is never entered here.
+            owner, owned = threading.get_ident(), {}
+            real_open_c, real_dup_c, real_pipe_c = os.open, os.dup, os.pipe
+
+            def own(*fds):
+                if threading.get_ident() == owner:
+                    for fd in fds:
+                        st = _real_fstat(fd)
+                        owned[fd] = (st.st_dev, st.st_ino)
+                return fds
+
+            def owned_open(*args, **kwargs):
+                return own(real_open_c(*args, **kwargs))[0]
+
+            def owned_dup(fd):
+                return own(real_dup_c(fd))[0]
+
+            def owned_pipe():
+                return own(*real_pipe_c())
             with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
                 root, files = fixture(temp)
                 real_close_c, seen, fired = os.close, [0], []
 
                 def close_then_raise(fd):
+                    owned.pop(fd, None)
                     real_close_c(fd)
                     if under is not None:
                         frame = sys._getframe(1)
@@ -8075,6 +8096,10 @@ def _self_test_checks():
                     for attr, value in patches:
                         stack.enter_context(mock.patch.object(_journal, attr, value))
                     stack.enter_context(mock.patch.object(os, "close", close_then_raise))
+                    stack.enter_context(mock.patch.object(os, "open", owned_open))
+                    stack.enter_context(mock.patch.object(os, "supports_dir_fd", os.supports_dir_fd | {owned_open}))
+                    stack.enter_context(mock.patch.object(os, "dup", owned_dup))
+                    stack.enter_context(mock.patch.object(os, "pipe", owned_pipe))
                     if plan.get("fast"):
                         stack.enter_context(mock.patch.object(os, "fsync", lambda fd: None))
                     try:
@@ -8082,10 +8107,17 @@ def _self_test_checks():
                     except BaseException as exc:    # noqa: BLE001  every outcome is inspected below
                         raised = exc
             # An injection at a disclosed close window (the store's _open_working_dir_fd parent close among
-            # them; leak-freedom under interrupt is not claimed) leaves a descriptor open: reclaim each one
-            # this run left behind, so the sweep's runs never leave them to the modules tested after this one.
-            for fd in sorted(_fds_open() - held):
-                os.close(fd)
+            # them; leak-freedom under interrupt is not claimed) leaves a descriptor open: close each one this
+            # run itself opened and never closed, only while its number still names the file it opened (a
+            # number released some other way and reused elsewhere is left alone), so the sweep's runs never
+            # leave them to the modules tested after this one and never close a descriptor they do not own.
+            for fd, identity in sorted(owned.items()):
+                try:
+                    st = _real_fstat(fd)
+                except OSError:
+                    continue
+                if (st.st_dev, st.st_ino) == identity:
+                    os.close(fd)
             return seen[0], fired, raised
 
         def class_named(exc, raised):
@@ -8120,7 +8152,7 @@ def _self_test_checks():
                             chain.append(expr.attr)
                             expr = expr.value
                         if isinstance(expr, ast.Name):
-                            obj = vars(module).get(expr.id, getattr(builtins, expr.id, None))
+                            obj = vars(module).get(expr.id, builtins.__dict__.get(expr.id))
                             for attr in reversed(chain):
                                 obj = getattr(obj, attr, None)
                             if isinstance(obj, type) and issubclass(obj, BaseException):
@@ -8147,6 +8179,37 @@ def _self_test_checks():
         for scenario in class_scenarios:
             class_counts.append((class_run(scenario, dict(), class_sites)[0],
                                  class_run(scenario, dict(fast=True))[0]))
+        # The cleanup closes only what the run owns: a descriptor another thread opens while the run is in
+        # flight (here /dev/null, opened from inside the run's lock acquisition) is still open, and still
+        # names /dev/null, after class_run returns. Red against a census sweep that closes every descriptor
+        # opened during the run.
+        foreign = []
+
+        def foreign_open():
+            fd = os.open(os.devnull, os.O_RDONLY)
+            st = _real_fstat(fd)
+            foreign.append((fd, (st.st_dev, st.st_ino)))
+
+        def acquire_then_foreign_open(journal_root, session_id):
+            got = real_acquire_c(journal_root, session_id)
+            opener = threading.Thread(target=foreign_open)
+            opener.start()
+            opener.join()
+            return got
+        _n, _fired, foreign_raised = class_run(("foreign-open", None,
+                                                (("acquire_lock", acquire_then_foreign_open),)), dict())
+        foreign_kept = []
+        for fd, identity in foreign:
+            try:
+                st = _real_fstat(fd)
+            except OSError as exc:
+                foreign_kept.append((fd, exc.errno))
+                continue
+            foreign_kept.append((fd, (st.st_dev, st.st_ino) == identity))
+            os.close(fd)
+        check("class-run-leaves-a-foreign-thread-descriptor-open",
+              foreign_raised is None and len(foreign) == 1 and foreign_kept == [(foreign[0][0], True)],
+              observed=(foreign_raised, foreign_kept))
         class_set = sorted(close_site_classes(class_sites) | {_InjectedCloseFault, _InjectedCloseInterrupt},
                            key=lambda cls: (cls.__module__, cls.__qualname__))
         class_unmade = [cls.__qualname__ for cls in class_set if class_maker(cls, "probe") is None]
