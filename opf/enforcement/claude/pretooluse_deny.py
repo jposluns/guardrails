@@ -71,20 +71,31 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      takes the EXACT path check: the raw string and every dequoted word are scanned for the
      protected tokens (the .working store tree by any substring spelling, a session cwd inside a
      .working tree, and the frozen (R3) and declared-view (R4) paths matched with path boundaries),
-     the rosters bind from the product roots above the session cwd and every absolute operand, and
-     every dequoted word is resolved as a path exactly as a file-tool target would be (store, frozen,
-     view, the pack own files (R8) and the registration (R8)); a command referencing a protected
-     token is denied unless the WHOLE command is a single plain invocation of the sanctioned writer
-     (allowance A1 below), the only allowance. Any OTHER Bash command (one that is not provably plain)
-     is judged COARSELY: it DENIES when the session working directory, or any literal path word it
-     names, lies inside an OPF product root (a directory holding a .working entry) or lands on the
-     pack own tree (R8); from outside every product root it is allowed. This is fail-closed: an
-     obfuscated command can reach a protected path only through the product whose tree holds the
-     session or which a literal word names, and both deny; a protected path reached with neither (a
-     variable, a substitution, an escape, or an interpreter own language spelling an absolute path no
-     literal word carries) is the disclosed lexical-floor residual. Reference, not proven mutation,
-     is the trigger: a lexical hook cannot prove a referencing command read-only, so it fails closed
-     and names the allowed route.
+     the judged spellings are every dequoted word, every spelling an argument word carries inside
+     itself (round 8: a value glued to a short-option run, sort -oTODO.md or -o/abs/TODO.md, and the
+     text after each delimiter inside a word, of=alias or --target-directory=/abs/x) and every value
+     of an inherited git path variable (GIT_DIR, GIT_WORK_TREE and the others in GIT_PATH_ENV);
+     every spelling is resolved against the session cwd AND against every directory another
+     spelling names (git -C dir, --output-dir dir, an inherited GIT_WORK_TREE: a redirection of
+     authority), to a fixed point; the rosters bind from the product roots above the session cwd,
+     every absolute spelling and every resolved target; and every resolved target is judged exactly
+     as a file-tool target would be (store, frozen, view, the pack own files (R8) and the
+     registration (R8)). Past the derived-spelling, base or resolved-target budget the command
+     DENIES cannot-evaluate. A command referencing a protected token is denied unless the WHOLE
+     command is a single plain invocation of the sanctioned writer (allowance A1 below), the only
+     allowance. A git command under an inherited code-valued git variable (GIT_CODE_ENV, other than
+     an empty or known no-op or pager value) is judged as not plain. Any OTHER Bash command (one that
+     is not provably plain) is judged COARSELY: it DENIES when the session working directory lies
+     inside an OPF product root (a directory holding a .working entry), when the command text or an
+     inherited git path value spells the .working store token ANYWHERE (inside a word, an option
+     value or a quoted command string included), or when any literal word, any spelling derived
+     inside a word or any inherited git path value, resolved against the cwd and every named
+     directory as above, lies inside a product root or lands on the pack own tree (R8); otherwise it
+     is allowed. A protected path such a command reaches with none of these (a variable, a
+     substitution, an escape, or an interpreter own language spelling the path with no literal
+     text) is the disclosed lexical-floor residual. Reference, not proven mutation, is the trigger:
+     a lexical hook cannot prove a referencing command read-only, so it fails closed and names the
+     allowed route.
   R6 unreadable inputs fail closed. A missing or non-string target field, a control character in a
      target, a relative target with no readable session cwd, and every unreadable roster input DENY
      (the roster that would prove the operation safe cannot be computed), naming the unreadable input:
@@ -168,11 +179,10 @@ per-platform residual coverage carry the same list):
     words that resolve INTO a protected path, so an operand naming a product root or an ancestor of
     one (a recursive remove of the root, git clean from the root) reaches the store with no
     protected token.
-  - A relative protected spelling judged from outside the product tree: when the session cwd sits
-    outside every product root, only the ABSOLUTE spellings (raw or dequoted) bind the rosters; a
-    relative spelling of a frozen or view path that climbs into an unbound product tree resolves to
-    no bound roster and passes both the token scan and the word-resolution pass (the store tree
-    itself still denies by its `.working` component).
+  - A relative protected spelling past the word budget: a provably plain command binds the rosters
+    above every RESOLVED target (round 8), so a relative spelling that climbs into a product from
+    outside it denies; past MAX_RESOLVED_WORDS words only absolute spellings resolve (the budget
+    entry below), so such a relative spelling in a longer command binds nothing.
   - A protected file reached ONLY by its real path with the session outside its product: each
     roster entry carries its realpath spelling (a symlinked directory inside OR outside the
     product root included), so such a write denies whenever a roster is BOUND (a product root at
@@ -215,10 +225,20 @@ per-platform residual coverage carry the same list):
     directory or rewriting a roster) is not seen (a check-to-use race; same-user preparation, as
     spec 14.1 accepts).
   - A protected path an exotic (not provably plain) command reaches with neither the session cwd
-    nor any literal path word inside the product root: a path spelled only through a shell variable,
-    an alias or function, a command or process substitution, an escape the coarse scan does not
-    decode (ANSI-C or locale quoting), or an interpreter own language, where no literal word of the
-    command resolves into the product, is not seen. R5 is a lexical floor, not a sandbox.
+    nor any literal text inside the product root: a path spelled only through a shell variable, an
+    alias or function, a command or process substitution, an escape the coarse scan does not decode
+    (ANSI-C or locale quoting), or an interpreter own language, where no literal word, no spelling
+    inside a word and no inherited git path value resolves into the product and the .working token
+    is not spelled, is not seen. R5 is a lexical floor, not a sandbox.
+  - An inherited environment the hook cannot see or does not model: the hook judges the git
+    variables in ITS OWN environment (GIT_PATH_ENV values as spellings, GIT_CODE_ENV as code), so a
+    variable the Bash tool sets that the hook process does not inherit, a non-git program's own
+    configuration variable (PAGER, EDITOR, a build tool's), and git's user or system configuration
+    files themselves (an alias or hook path inside them) stay the same-user-preparation residual
+    named above.
+  - An R7 payload string is judged WHOLE: the option-glued and delimiter-embedded derivation of R5
+    applies to Bash words only, so an unknown tool string such as -o/abs/TODO.md binds no roster by
+    its glued spelling (its textual token scan still applies once a roster is bound).
   - Platform hook-startup failures may fall through to the platform's normal permission flow.
   - Shell or interpreter wrapping of the platform itself is outside the hook's reach.
   - Over-approximation is the accepted cost of the fail-closed posture. A provably plain command
@@ -238,13 +258,20 @@ per-platform residual coverage carry the same list):
     protected files through the Read tool, and change the store through the opf CLI. R8 denies
     rewriting the pack own files and the per-product registration through the gated tools, and the
     word-resolution pass of a plain command denies a command that merely names a protected or
-    pack-owned file as a resolvable argument. R6 denies every write under a root whose roster
+    pack-owned file as a resolvable argument. Round 8 widens both passes: a word whose glued option
+    suffix or post-delimiter suffix happens to name a protected path (a prose word such as
+    -xTODO.md, or key=LEGACY.md), a relative operand that names a protected path under ANY directory
+    the same command names (ls docs STATUS.md where docs/STATUS.md is a view), any not-plain command
+    that spells .working anywhere (grep .working from outside every product), a git command under a
+    non-trivial inherited GIT_PAGER, GIT_EXTERNAL_DIFF or similar, and a plain command naming more
+    than MAX_BASES directories, all deny. R6 denies every write under a root whose roster
     carries any unreadable or malformed entry, R3 keeps denying a frozen path even after its
     retirement is recorded, and a protected token inside prose (a commit message) still trips a
     plain command.
   - The word-resolution budget of a provably plain command (claude n1): past MAX_RESOLVED_WORDS
-    dequoted words only the ABSOLUTE words are resolved as paths (absolute words always resolve; the
-    raw and word token scan still covers every spelling), so a relative spelling that reaches a
+    dequoted words only the ABSOLUTE spellings are resolved as paths (absolute words and derived
+    absolute spellings always resolve; the raw, word and derived-spelling token scan still covers
+    every spelling), so a relative spelling that reaches a
     declared view or a frozen file only after normalization or symlink resolution, in a plain
     command past the budget, is not resolved (the store tree still denies by its .working
     component); a shorter command resolves it. This budget cliff is disclosed here.
@@ -295,6 +322,15 @@ MAX_ABS_PATHS = 512
 MAX_PAYLOAD_STRINGS = 4096
 MAX_RESOLVED_WORDS = 512
 MAX_PATH_CHARS = 4096
+# The embedded-spelling budgets (R5, round 8): an argument word can carry a path GLUED to an option
+# (sort -oTODO.md, tar -C/abs/root) or INSIDE the word after a delimiter (of=/abs/x, -Wl,-Map,x,
+# --target-directory=/abs/x, a command string carrying a redirection target), and a directory a word
+# names can become the base another relative word is resolved against (git -C dir, curl --output-dir
+# dir). Each derived spelling and each directory base is RESOLVED exactly; past either budget, or past
+# MAX_JUDGED_TARGETS resolved candidates, the command DENIES cannot-evaluate (never a partial judgment).
+MAX_DERIVED_SPELLINGS = 4096
+MAX_BASES = 64
+MAX_JUDGED_TARGETS = 16384
 
 WORKING = ".working"                      # the fixed store-tree name at a product root (spec 4.4)
 ADOPTION_ARCHIVE = ("archive", "adoption")  # .working/archive/adoption/<run-id>/ (spec 14.1, 14.2)
@@ -348,12 +384,16 @@ WRITER_VERBS = frozenset(("record", "render"))
 WORD_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
 # Absolute POSIX-path spellings inside a command or payload string (used to BIND rosters, never to
 # allow): best-effort over the raw text (a path with spaces binds its whole operand only through the
-# dequoted-word and payload-string passes). A match glued to a preceding letter or digit is the
-# inside of a relative spelling or of prose (and/or, a URL path), not an absolute operand, so it
-# neither binds nor counts against the discovery budget (an absolute operand in shell or JSON is
-# never glued to a word character); more matches than MAX_ABS_PATHS denies, never truncates.
+# dequoted-word and payload-string passes). A match glued to a preceding letter or digit (and/or, a
+# URL path, but ALSO an option letter: sort -o/abs/x) neither binds nor counts against the discovery
+# budget HERE; a Bash word's option-glued and delimiter-embedded absolute spellings are bound and
+# resolved instead through _derived_spellings (R5), while an R7 payload string is judged whole (the
+# disclosed R7 residual). More matches than MAX_ABS_PATHS denies, never truncates.
 ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9])/[A-Za-z0-9_./@%+,=~^-]+")
 _ASSIGNMENT_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*=")
+# A short-option run at the head of a word (-oTODO.md, -xvC/abs, +o): every suffix after one or more of
+# its letters may be the option's glued value, so each is a derived spelling (_derived_spellings).
+_OPTION_GLUE_RE = re.compile(r"\A[-+]+([A-Za-z0-9]*)")
 _PYTHON_RE = re.compile(r"\Apython(3(\.\d+)?)?\Z")
 _PYFLAGS_RE = re.compile(r"\A-[IBEsuPb]+\Z")
 # THE PROVABLY PLAIN CLASSIFIER (R5): the shared plain-command specification, decided on the raw
@@ -420,6 +460,19 @@ GIT_CODE_SUBCOMMANDS = frozenset(("config", "filter-branch", "bisect", "submodul
                                   "svn", "p4", "cvsimport", "archimport", "help", "web--browse"))
 GIT_CODE_OPTIONS = ("--exec", "--upload-pack", "--receive-pack", "--extcmd", "--tool",
                     "--open-files-in-pager", "-O")
+# The AMBIENT git environment (R5, round 8): the hook reads the environment the session launched it
+# with, which the Bash tool's git inherits. A path-valued variable redirects where git reads and writes
+# (the repository, the work tree, the index, the object store, a configuration file), so each value is
+# judged as one more spelling of every Bash command (token-scanned, resolved, bound and used as a base);
+# a code-valued variable names a command git runs, so a git command under one takes the coarse rule
+# unless its value is empty or a single known no-op or pager word (GIT_EDITOR=true, GIT_PAGER=cat).
+GIT_PATH_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG",
+                "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
+GIT_CODE_ENV = ("GIT_EXTERNAL_DIFF", "GIT_PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_SSH",
+                "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_EXEC_PATH", "GIT_PROXY_COMMAND",
+                "GIT_TEMPLATE_DIR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
+GIT_ENV_NOOPS = frozenset(("", "true", "cat", "less", "more", ":", "0"))
 
 SANCTIONED = ("OPF content changes only through the sanctioned writer: run the opf CLI (opf record, "
               "opf render, and the other opf verbs), or make the change outside the store's scope")
@@ -915,6 +968,12 @@ def _plain_runs_code(words):
                 return "an argument word carries a shell or interpreter command string"
     if "git" not in _command_names(words[0]):
         return None
+    for name in GIT_CODE_ENV:
+        value = os.environ.get(name)
+        if value is not None and value.strip(" ") not in GIT_ENV_NOOPS:
+            return "the inherited git environment variable %s names a command git may run" % (name,)
+    if any(k.startswith("GIT_CONFIG_KEY_") for k in os.environ):
+        return "an inherited GIT_CONFIG_KEY_* variable overrides git configuration"
     i = 1
     while i < len(words) and words[i].startswith("-"):
         opt = words[i]
@@ -1106,6 +1165,89 @@ def _literal_words(command):
     return words
 
 
+def _derived_spellings(words):
+    """The path spellings an argument word can carry besides its whole self (R5, round 8): (list,
+    None), or (None, reason) past MAX_DERIVED_SPELLINGS. A word headed by a short-option run (-oX,
+    -xvC/abs, +o) yields every suffix after one or more of the run's letters (a getopt-style option
+    takes its value glued: sort -oTODO.md writes TODO.md); and every word yields the suffix after
+    each character that is neither a path-word character nor a slash (of=/abs/x, -Wl,-Map,x,
+    host:/abs/x, a quoted command string's redirection target). A suffix longer than a platform path
+    cannot name a reachable file and is not derived."""
+    out, seen = [], set()
+    for word in words:
+        starts = []
+        m = _OPTION_GLUE_RE.match(word)
+        if m:
+            starts.extend(range(m.start(1) + 1, m.end(1) + 1))
+        for i in range(1, len(word)):
+            if word[i - 1] not in WORD_CHARS and word[i - 1] != os.sep:
+                starts.append(i)
+        for i in starts:
+            sub = word[i:]
+            if not sub or sub == word or len(sub) > MAX_PATH_CHARS or sub in seen:
+                continue
+            seen.add(sub)
+            out.append(sub)
+            if len(out) > MAX_DERIVED_SPELLINGS:
+                return None, ("the command's words carry more than %d option-glued or embedded path "
+                              "spellings, over the derived-spelling budget, so it cannot be fully "
+                              "examined; failing closed (R6)" % (MAX_DERIVED_SPELLINGS,))
+    return out, None
+
+
+def _ambient_git_spellings():
+    """The path values of the inherited git environment (GIT_PATH_ENV; a list-valued variable split
+    on the path separator): each is judged as one more spelling of the Bash command (R5, round 8)."""
+    out = []
+    for name in GIT_PATH_ENV:
+        value = os.environ.get(name)
+        if not value:
+            continue
+        parts = value.split(os.pathsep) if name == "GIT_ALTERNATE_OBJECT_DIRECTORIES" else [value]
+        out.extend(part for part in parts if part)
+    return out
+
+
+def _resolved_targets(spellings, cwd, relative=True):
+    """Every absolute target the spellings can reach (R5, round 8): (candidates, None), or (None,
+    reason) past MAX_BASES or MAX_JUDGED_TARGETS. A relative spelling is resolved against the session
+    cwd AND against every directory another spelling resolves to (a redirection of authority: git -C
+    dir, --work-tree=dir, curl --output-dir dir, an inherited GIT_WORK_TREE), to a fixed point, so a
+    relative operand is judged where the program may actually open it. Each candidate is the
+    lexical and the realpath spelling (_candidates). With `relative` false (past the word budget)
+    only absolute spellings resolve."""
+    bases, queue, cands, seen = [], [cwd], [], set()
+    absolutes_done = False
+    while queue:
+        base = queue.pop(0)
+        if base in bases:
+            continue
+        if len(bases) >= MAX_BASES:
+            return None, ("the command names more than %d directories a relative operand may be "
+                          "resolved against, over the base budget, so it cannot be fully examined; "
+                          "failing closed (R6)" % (MAX_BASES,))
+        bases.append(base)
+        for spelling in spellings:
+            if os.path.isabs(os.path.expanduser(spelling)):
+                if absolutes_done:
+                    continue
+            elif not relative:
+                continue
+            for cand in _candidates(spelling, base) or ():
+                if cand in seen:
+                    continue
+                seen.add(cand)
+                if len(seen) > MAX_JUDGED_TARGETS:
+                    return None, ("the command resolves to more than %d candidate targets, over the "
+                                  "resolution budget, so it cannot be fully examined; failing closed "
+                                  "(R6)" % (MAX_JUDGED_TARGETS,))
+                cands.append(cand)
+                if os.path.isdir(cand) and cand not in bases:
+                    queue.append(cand)
+        absolutes_done = True
+    return cands, None
+
+
 def _bound_roots(text, cwd, extras=()):
     """The product roots the rosters are resolved from (R5/R7): (roots, None); or (None, reason)
     when the absolute-path discovery budget is exceeded (a truncated scan could silently drop the
@@ -1223,11 +1365,16 @@ def _cwd_product_roots(cwd):
 
 def _exotic_bash_rule(command, cwd, tokens):
     """R5/R8 coarse pass for a Bash command that is NOT provably plain (module docstring): deny
-    when the session working directory, or any literal path word the command names, lies inside an
-    OPF product root (a directory holding a .working entry), or lands on the enforcement pack own
-    tree (R8); otherwise allow. A protected path reached with neither the cwd nor a literal word (a
-    variable, a substitution, an escape or an interpreter own language spelling a path no literal
-    word carries) is the disclosed lexical-floor residual."""
+    when the session working directory lies inside an OPF product root (a directory holding a
+    .working entry), when the command text or an inherited git path variable spells the .working
+    store token anywhere (inside a word, a command string or an option value included), or when any
+    resolved target lies inside a product root or lands on the enforcement pack own tree (R8). The
+    targets are every literal word, every option-glued or delimiter-embedded spelling inside a word
+    (_derived_spellings: of=/abs/x, --target-directory=/abs/x, -C/abs, the redirection target inside
+    a quoted command string) and every inherited git path value, each resolved against the cwd and
+    against every directory another of them names (_resolved_targets); otherwise allow. A protected
+    path reached with none of these (a variable, a substitution, an escape or an interpreter own
+    language spelling a path no literal text carries) is the disclosed lexical-floor residual."""
     roots, reason = _cwd_product_roots(cwd)
     if reason is not None:
         return reason + "; failing closed (R6)"
@@ -1236,6 +1383,12 @@ def _exotic_bash_rule(command, cwd, tokens):
                 "read-only, and the session working directory lies inside the OPF product root %r "
                 "(its store tree is protected); it is denied fail-closed (R5). %s."
                 % (roots[0], SANCTIONED))
+    ambient = _ambient_git_spellings()
+    if WORKING in command or any(WORKING in value for value in ambient):
+        return ("this Bash command is not provably plain and spells the %s store token (inside a "
+                "word, a command string, an option value or an inherited git path variable), so a "
+                "lexical hook cannot prove it leaves the store untouched; it is denied fail-closed "
+                "(R5). %s." % (WORKING, SANCTIONED))
     exempt = frozenset()
     if tokens and not _ASSIGNMENT_RE.match(tokens[0]) and os.sep not in tokens[0] \
             and _PYTHON_RE.match(tokens[0]):
@@ -1249,38 +1402,59 @@ def _exotic_bash_rule(command, cwd, tokens):
         return ("this Bash command is not provably plain and names more than %d words, over the "
                 "word-resolution budget, so it cannot be fully examined; failing closed (R6)"
                 % (MAX_RESOLVED_WORDS,))
-    seen = set()
-    for word in words:
-        for cand in _candidates(word, cwd) or ():
-            if cand in seen:
-                continue
-            seen.add(cand)
-            got, reason = _roots_above(cand)
+    derived, reason = _derived_spellings(words)
+    if reason is not None:
+        return reason
+    cands, reason = _resolved_targets(words + derived + ambient, cwd)
+    if reason is not None:
+        return reason
+    for cand in cands:
+        got, reason = _roots_above(cand)
+        if reason is not None:
+            return reason + "; failing closed (R6)"
+        if got:
+            return ("this Bash command is not provably plain, so a lexical hook cannot prove it "
+                    "read-only, and a path it names (%r) lies inside the OPF product root %r "
+                    "(its store tree is protected); it is denied fail-closed (R5). %s."
+                    % (cand, got[0], SANCTIONED))
+        if cand not in exempt:
+            reason = _guard_rule(cand)
             if reason is not None:
-                return reason + "; failing closed (R6)"
-            if got:
-                return ("this Bash command is not provably plain, so a lexical hook cannot prove it "
-                        "read-only, and a path it names (%r) lies inside the OPF product root %r "
-                        "(its store tree is protected); it is denied fail-closed (R5). %s."
-                        % (cand, got[0], SANCTIONED))
-            if cand not in exempt:
-                reason = _guard_rule(cand)
-                if reason is not None:
-                    return reason
+                return reason
     return None
 
 
 def _plain_bash_rule(command, words, cwd):
-    """R5, R6 and R8 for a PROVABLY PLAIN Bash command: the exact path check. The raw string and
-    every dequoted word are scanned for the protected tokens (boundary-matched), the rosters bind
-    from the product roots above the cwd and every absolute operand, and every dequoted word is
-    resolved as a path exactly as a file-tool target would be (store, frozen, view, the R8 guard and
-    the registration). Only a single plain sanctioned-writer invocation (A1, already allowed) may
-    reference a protected token."""
-    scan = command + chr(10) + chr(10).join(words)
-    roots, reason = _bound_roots(command, cwd, words)
+    """R5, R6 and R8 for a PROVABLY PLAIN Bash command: the exact path check. The judged spellings
+    are every dequoted word, every option-glued or delimiter-embedded spelling inside a word
+    (_derived_spellings: sort -oTODO.md, of=alias, -o/abs/TODO.md) and every inherited git path value
+    (_ambient_git_spellings). The raw string and every spelling are scanned for the protected tokens
+    (boundary-matched); every spelling is resolved against the session cwd and against every
+    directory another spelling names (_resolved_targets: git -C dir, --output-dir dir, an inherited
+    GIT_WORK_TREE); the rosters bind from the product roots above the cwd, every absolute spelling
+    AND every resolved target (so a relative spelling that climbs into a product from outside binds
+    that product's rosters); and every resolved target is judged exactly as a file-tool target would
+    be (store, frozen, view, the R8 guard and the registration). Only a single plain
+    sanctioned-writer invocation (A1, already allowed) may reference a protected token."""
+    derived, reason = _derived_spellings(words)
+    if reason is not None:
+        return reason
+    spellings = words + derived + _ambient_git_spellings()
+    scan = command + chr(10) + chr(10).join(spellings)
+    resolve_all = len(words) <= MAX_RESOLVED_WORDS
+    cands, reason = _resolved_targets(spellings, cwd, resolve_all)
+    if reason is not None:
+        return reason
+    roots, reason = _bound_roots(command, cwd, spellings)
     if reason is not None:
         return reason + "; failing closed (R6)"
+    for cand in cands:
+        got, reason = _roots_above(cand)
+        if reason is not None:
+            return reason + "; failing closed (R6)"
+        for root in got:
+            if root not in roots:
+                roots.append(root)
     frozen, views, reason = _rosters(roots)
     if reason is not None:
         return reason + "; failing closed (R6)"
@@ -1291,32 +1465,24 @@ def _plain_bash_rule(command, words, cwd):
                 "sanctioned writer (opf record or opf render): a lexical hook cannot prove any "
                 "other referencing command read-only, so it is denied fail-closed (R5). %s; read "
                 "protected files through the platform Read tool." % (kind, SANCTIONED))
-    resolve_all = len(words) <= MAX_RESOLVED_WORDS
-    seen = set()
-    for word in words:
-        if not resolve_all and not os.path.isabs(os.path.expanduser(word)):
-            continue
-        for cand in _candidates(word, cwd) or ():
-            if cand in seen:
-                continue
-            seen.add(cand)
-            if _store_rule(cand) is not None:
-                return ("a word of this Bash command resolves into the %s store tree and the "
-                        "command is not a single plain invocation of the sanctioned writer, so it "
-                        "is denied fail-closed (R5). %s." % (WORKING, SANCTIONED))
-            if cand in frozen[0]:
-                return ("a word of this Bash command resolves to the plan-frozen old file %r: it "
-                        "stays frozen, byte-identical, until its retirement is recorded (spec "
-                        "14.1)." % (cand,))
-            if cand in views[0]:
-                return ("a word of this Bash command resolves to the declared view %r: views "
-                        "change only through opf render (spec 5.8, 14.1)." % (cand,))
-            reason = _guard_rule(cand)
-            if reason is not None:
-                return reason
-            reason = _registration_rule(cand, reg_idents)
-            if reason is not None:
-                return reason
+    for cand in cands:
+        if _store_rule(cand) is not None:
+            return ("a word of this Bash command resolves into the %s store tree and the "
+                    "command is not a single plain invocation of the sanctioned writer, so it "
+                    "is denied fail-closed (R5). %s." % (WORKING, SANCTIONED))
+        if cand in frozen[0]:
+            return ("a word of this Bash command resolves to the plan-frozen old file %r: it "
+                    "stays frozen, byte-identical, until its retirement is recorded (spec "
+                    "14.1)." % (cand,))
+        if cand in views[0]:
+            return ("a word of this Bash command resolves to the declared view %r: views "
+                    "change only through opf render (spec 5.8, 14.1)." % (cand,))
+        reason = _guard_rule(cand)
+        if reason is not None:
+            return reason
+        reason = _registration_rule(cand, reg_idents)
+        if reason is not None:
+            return reason
     return None
 
 

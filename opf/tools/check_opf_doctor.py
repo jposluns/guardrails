@@ -90,9 +90,12 @@ and the deny matrix is asserted END TO END: a direct Write/Edit/NotebookEdit int
 adoption archive, a plan-frozen old file, a declared view, a traversal-relative and a symlinked
 spelling each DENY with a structured decision; a pristine sanctioned-writer invocation (an opf
 record call included), a known read-only tool, an unrelated write and the still-writerless
-imported-series leaves each ALLOW; EVERY other Bash command or unknown-tool payload that references
-or resolves to a protected token DENIES, read-only spellings (grep, git diff) included: the single
-writer allowance is the whole allowance surface; a malformed payload, a mis-wired hook event and a
+imported-series leaves each ALLOW; every other Bash command or unknown-tool payload that the hook SEES
+referencing or resolving to a protected token DENIES, read-only spellings (grep, git diff) included,
+and a Bash word's option-glued and delimiter-embedded spellings (sort -oTODO.md, dd of=/abs/x) are
+judged as such references (within the hook's disclosed lexical residuals: a variable, a substitution,
+an interpreter's own language, an R7 payload string judged whole): the single writer allowance is the
+whole allowance surface; a malformed payload, a mis-wired hook event and a
 missing target field FAIL CLOSED (a blocking exit 2 or a structured deny); and an unparseable
 adoption plan fails closed for every write under its root. Every vector fails without the hook, so the leg proves
 the shipped file, not a model of it.
@@ -1189,7 +1192,12 @@ def _claude_hook_self_test():
     own classifier, the four codex prefix reproductions (a leading redirection, command -p, env -i,
     exec -a before an inline-code interpreter) and a git alias override each deny from a product
     cwd and each FAIL on the predecessor pin, and the coarse double-quote escape decoder is pinned
-    by a vector that fails when that decoding is disabled.
+    by a vector that fails when that decoding is disabled. The round-8 change judges the spellings
+    a word carries inside itself (an option-glued value, the text after a delimiter), resolves
+    relative operands against every directory the command names, judges the inherited git
+    environment, and makes the coarse pass deny on the .working token anywhere; each round-8
+    reproduction FAILS on the predecessor pin, and one discriminating vector per coarse, git and
+    forbidden-character behaviour fails under a mutant removing that behaviour alone.
     git-independent (the hook reads only the live tree; nothing is committed), offline,
     hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
@@ -1217,9 +1225,11 @@ def _claude_hook_self_test():
         "malformed-output" for stdout that is not the documented decision shape. `env` overlays the
         child environment (the tilde vectors pin expanduser against a fixture HOME)."""
         data = raw if raw is not None else json.dumps(payload).encode("utf-8")
-        child_env = None
+        # The hook judges the git variables of its own environment (round 8), so every child runs
+        # with the ambient GIT_* variables scrubbed (a git-hook or CI context must not change a
+        # verdict); `env` then overlays the vector's own variables.
+        child_env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
         if env is not None:
-            child_env = dict(os.environ)
             child_env.update(env)
         try:
             proc = subprocess.run([sys.executable, "-I", str(hook)], input=data, env=child_env,
@@ -2061,7 +2071,8 @@ def _claude_hook_self_test():
                                               + chr(39)), root), "product root")
             # A provably-plain command from inside a product that touches nothing protected still
             # allows (the exact check); the same exotic forms from OUTSIDE every product allow too
-            # (nothing protected is in reach): the over-refusal is bounded to product trees.
+            # when no literal text of theirs reaches a product (round 8: the .working token
+            # anywhere, or a word or embedded spelling resolving into a product, still denies).
             allow("bash-plain-unprotected-in-product-allowed",
                   payload("Bash", dict(command="ls -la docs"), root))
             allow("bash-exotic-outside-product-allowed",
@@ -2145,6 +2156,79 @@ def _claude_hook_self_test():
             deny("bash-dq-escaped-quote-root-denied",
                  payload("Bash", dict(command="printf x > " + chr(34) + basestr + "/pq" + chr(92)
                                       + chr(34) + "r/f" + chr(34)), basestr), "product root")
+            # ROUND 8 (QA round 8): an argument word can carry a protected path INSIDE itself, glued
+            # to a short-option run (sort -oTODO.md, -o/abs/TODO.md) or after a delimiter
+            # (of=alias, --target-directory=/abs/.working/x, a quoted command string's redirection
+            # target, tar -C/abs/root), a directory a word names can be the base another relative
+            # word resolves against (git -C dir), and the inherited git environment can redirect
+            # git's authority (GIT_WORK_TREE, GIT_DIR) or name a command (GIT_EXTERNAL_DIFF). Each
+            # vector below ALLOWED on the predecessor pin 4bd02ca5 and denies now.
+            elsewhere = os.path.join(basestr, "elsewhere")
+            os.makedirs(elsewhere)
+            alias = os.path.join(root, "alias")
+            os.symlink(counters, alias)
+            deny("bash-r8-glued-view-in-product-denied",
+                 payload("Bash", dict(command="sort -oTODO.md /dev/null"), root), "declared view")
+            deny("bash-r8-glued-frozen-in-product-denied",
+                 payload("Bash", dict(command="sort -oLEGACY.md /dev/null"), root), "plan-frozen")
+            deny("bash-r8-glued-abs-view-outside-denied",
+                 payload("Bash", dict(command="sort -o" + os.path.join(root, "TODO.md")
+                                      + " /dev/null"), elsewhere), "declared view")
+            deny("bash-r8-delimited-store-alias-in-product-denied",
+                 payload("Bash", dict(command="dd if=/dev/zero of=alias bs=1 count=1"), root),
+                 "store tree")
+            deny("bash-r8-coarse-target-dir-store-outside-denied",
+                 payload("Bash", dict(command="cp /dev/null --target-directory=" + machine
+                                      + "; true"), elsewhere), "store token")
+            deny("bash-r8-coarse-cmdstring-store-outside-denied",
+                 payload("Bash", dict(command="bash -c " + chr(39) + "echo x > " + counters
+                                      + chr(39)), elsewhere), "store token")
+            deny("bash-r8-coarse-glued-root-outside-denied",
+                 payload("Bash", dict(command="tar -xf /dev/null -C" + root), elsewhere),
+                 "product root")
+            deny("bash-r8-git-C-base-view-outside-denied",
+                 payload("Bash", dict(command="git -C " + basestr
+                                      + " diff --output=product/TODO.md"), elsewhere),
+                 "declared view")
+            deny("bash-r8-relative-climb-view-outside-denied",
+                 payload("Bash", dict(command="cp /dev/null ../product/TODO.md"), elsewhere),
+                 "declared view")
+            deny("bash-r8-ambient-work-tree-view-outside-denied",
+                 payload("Bash", dict(command="git checkout -- product/TODO.md"), elsewhere),
+                 "declared view", env=dict(GIT_WORK_TREE=basestr))
+            deny("bash-r8-ambient-git-dir-store-outside-denied",
+                 payload("Bash", dict(command="git status"), elsewhere), "store tree",
+                 env=dict(GIT_DIR=os.path.join(root, _opf_store.WORKING_DIRNAME, "g")))
+            deny("bash-r8-ambient-external-diff-in-product-denied",
+                 payload("Bash", dict(command="git diff"), root), "product root",
+                 env=dict(GIT_EXTERNAL_DIFF="helper"))
+            allow("bash-r8-ambient-noop-editor-in-product-allowed",
+                  payload("Bash", dict(command="git status"), root),
+                  env=dict(GIT_EDITOR="true", GIT_PAGER="cat"))
+            os.remove(alias)
+            # ROUND 8 (QA round 8, claude medium 3 and codex medium 1): one DISCRIMINATING vector
+            # per pinned behaviour, each denied only by that behaviour (each was verified to ALLOW
+            # under a mutant of the hook with that behaviour alone removed): the coarse cwd rule
+            # (no word of the command reaches the product), the git -c override, a code-running git
+            # subcommand, each command-naming git option, the leading-exclamation and the
+            # interpreter command-string checks, the square-bracket, tilde, hash and exclamation
+            # entries of the forbidden set, and the deny list's case folding.
+            for label, cmd in (
+                    ("coarse-cwd-only", "/bin/echo </dev/null"),
+                    ("git-config-override", "git -c core.pager=cat status"),
+                    ("git-code-subcommand", "git config alias.x status"),
+                    ("git-upload-pack-option", "git fetch --upload-pack=helper origin"),
+                    ("git-rebase-exec", "git rebase -x helper main"),
+                    ("git-clone-upload-pack", "git clone -u helper src dst"),
+                    ("bang-command-string", "git log " + chr(39) + "--pretty=!helper x" + chr(39)),
+                    ("interp-command-string", "git commit -m " + chr(39) + "sh -c helper" + chr(39)),
+                    ("forbidden-brackets", "cp /dev/null TODO.m" + chr(91) + "d" + chr(93)),
+                    ("forbidden-tilde", "cp /dev/null " + chr(126) + "/notes"),
+                    ("forbidden-hash", "ls docs " + chr(35) + "x"),
+                    ("forbidden-bang", "ls docs x" + chr(33)),
+                    ("deny-list-case-fold", "PYTHON3 -c x")):
+                deny("bash-r8-discriminating-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), root), "product root")
             # claude n2: Skill and SlashCommand are no longer read-only-listed (their expansion
             # may run shell lines the platform does not route back through PreToolUse), so each
             # takes R7: a protected reference denies, a free one allows. Both FAIL on the pin.
@@ -2248,7 +2332,14 @@ def _claude_hook_self_test():
           "redirection, the command -p, env -i and exec -a prefixes and an unlisted wrapper "
           "before an interpreter each deny from a product cwd; a git alias override carrying inline "
           "code takes the coarse rule; any here-document denies from a product cwd; and the "
-          "coarse double-quote escape decoder is pinned by a quote-named product root)")
+          "coarse double-quote escape decoder is pinned by a quote-named product root. ROUND 8: "
+          "a value glued to a short option (sort -oTODO.md, -o/abs/TODO.md), a spelling after a "
+          "delimiter inside a word (of=alias through a store symlink, --target-directory= into "
+          "the store, a quoted command string's redirection target, tar -C glued to a root), a "
+          "relative operand resolved against a directory the command names (git -C) or climbing "
+          "into a product from outside, and an inherited GIT_WORK_TREE, GIT_DIR or "
+          "GIT_EXTERNAL_DIFF each deny, a no-op GIT_EDITOR and GIT_PAGER allow, and one "
+          "discriminating vector pins each coarse, git and forbidden-character behaviour)")
     return EXIT_OK
 
 
