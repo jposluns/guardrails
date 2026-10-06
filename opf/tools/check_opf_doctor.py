@@ -2864,7 +2864,19 @@ def _claude_hook_self_test():
             # synthetic pack repository's docs directory the same form truncated the hook. Every
             # GIT_NO_WORKTREE_WRITE member gets a bound output-bearing deny vector (the ./ spelling
             # from the src subdirectory), --output gets every abbreviation, and the hook-file case
-            # runs plain and not plain. On the pin 4136bd3a every -denied vector here ALLOWED.
+            # runs plain and not plain. Run against the pin 4136bd3a hook, 91 -denied vectors here
+            # ALLOWED and so detect the round-22 change: the 73 no-write vectors of the members
+            # outside GIT_OUTPUT_WRITERS other than help, the 12 blame abbreviation vectors and the
+            # 6 pack-hook vectors. The other 25 no-write vectors already denied on 4136bd3a and are
+            # retained regression coverage. 24 of them are GIT_OUTPUT_WRITERS members (archive,
+            # bugreport, bundle, clone, commit-graph, diagnose, diff, diff-files, diff-index,
+            # diff-pairs, diff-tree, fast-export, format-patch, gc, index-pack, log, mailsplit,
+            # multi-pack-index, pack-objects, range-diff, repack, show, unpack-file, whatchanged),
+            # which the round-16/17 output rule (_git_output_reason) already denied in a bound
+            # product by their output option word or constructed file name; the 25th is help, whose
+            # --output word is an option outside GIT_HELP_PRINT_OPTIONS, so git help is not plain
+            # and the coarse rule denies it from a product root. The allow vectors below allowed
+            # there too.
             for name in sorted(no_write):
                 deny("bash-r22-no-write-" + name + "-output-bound-denied",
                      payload("Bash", dict(command="git " + name + " --output=docs/./STATUS.md x"),

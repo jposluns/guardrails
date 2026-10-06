@@ -372,7 +372,19 @@ per-platform residual coverage carry the same list):
     output there). Only the exact three words git <subcommand> -h, which print usage and write
     nothing, are exempt; any other word sequence with -h (git clone -h x, git format-patch -h
     --stdout) takes the normal rule. A git configuration value naming an output location
-    (format.outputDirectory) is the configuration residual named above.
+    (format.outputDirectory) is the configuration residual named above. Round 22 scans EVERY git
+    subcommand for an output option word (git blame, annotate and pickaxe inherit --output from
+    the diff options): a GIT_OUTPUT_OPTIONS name or any abbreviation of one (_git_output_option),
+    judged by the option name alone, never by the option git itself resolves that word to on
+    the subcommand at hand. This is a disclosed over-refusal: an abbreviation of --output (or of
+    another GIT_OUTPUT_OPTIONS name) on a subcommand where git resolves it to a different option
+    is still read as an output option and refused, in a bound product whatever follows it (git
+    branch --o, which git 2.53 reads as --omit-empty and which writes no file). Only the prefixes
+    of the exact git 2.53 options in GIT_OUTPUT_SHADOWS (--index, --filter, --expire) are
+    excluded outside GIT_OUTPUT_WRITERS; no further per-subcommand or global exemption is made,
+    since one would widen what the output check must prove. Spell such an option in full (git
+    branch --omit-empty is no output option word) or run the command from outside every product
+    root.
   - Platform hook-startup failures may fall through to the platform's normal permission flow.
   - Shell or interpreter wrapping of the platform itself is outside the hook's reach.
   - Over-approximation is the accepted cost of the fail-closed posture. A provably plain command
@@ -966,6 +978,8 @@ GIT_OUTPUT_OPTIONS = ("--output", "--output-directory", "--export-marks", "--ind
 # revision and pretty option sets add --output alone (--output-indicator-* take a character).
 # An output value is resolved against the session cwd, every directory the command names AND the
 # repository top above each (git resolves --output from the top), after lexical normalization.
+# An abbreviation that git resolves to a different option of the subcommand (git branch --o is
+# --omit-empty) is still judged an output option: the disclosed over-refusal under RESIDUALS.
 GIT_OUTPUT_SHADOWS = ("--index", "--filter", "--expire")
 GIT_GENERATED_WRITERS = GIT_CWD_WRITERS | GIT_BASE_WRITERS | frozenset(("bundle", "clone",
                                                                        "mailsplit"))
