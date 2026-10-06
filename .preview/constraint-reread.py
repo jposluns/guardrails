@@ -43,7 +43,8 @@ THE DURABLE RECORD
     A re-read entry counts only when its time is AFTER the recorded compaction time and not more than
     CLOCK_SKEW seconds ahead of the clock: an entry dated in the future was composed, not read from the clock,
     so it is ignored. The hook only reads the record; the assistant writes the entry after re-reading it, with
-    the time taken from `date -u +%Y-%m-%dT%H:%M:%SZ`. At most RECORD_MAX_BYTES of the record are read.
+    the time taken from `date -u +%Y-%m-%dT%H:%M:%SZ`. At most RECORD_MAX_BYTES of the record are read; when
+    the record is longer, the line cut at that limit is dropped, so a cut line is never read as an entry.
 
 STATE
     The compaction time and the refusal count live in one JSON file per session, named by a SHA-256 of the
@@ -56,7 +57,11 @@ FAILURE DIRECTION
     cannot be read keeps the reminder on (it says the record could not be read and asks the assistant to hold
     and check), and a compaction whose state cannot be saved is still reminded once at SessionStart. A state
     file that exists but cannot be parsed is read as a compaction no earlier than the file's modification time,
-    so only an entry after that time clears it. The Stop event refuses while a re-read is outstanding, but its
+    so only an entry after that time clears it. A state path under a component that is not a directory is
+    read as no state (nothing can have been saved there). A state location that cannot be examined at all
+    (any other error) keeps the reminder on with the compaction time unknown, and its Stop is allowed with a
+    warning, since no entry can be dated against an unknown time. The Stop event refuses while a re-read is
+    outstanding, but its
     count is the loop bound: under stop_hook_active an unknown or unsaveable count allows with a warning rather
     than refusing again. Any error in the hook itself, an unreadable payload, or an unrecognized event exits 0
     with no output (fail open). A worker process (AIQT_HOOKS_WORKER=1, or a legacy spelling) is skipped.
@@ -151,9 +156,12 @@ def read_record(path):
         try:
             if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
                 return None, "it is not a regular file"
-            data = fh.read(RECORD_MAX_BYTES)
+            data = fh.read(RECORD_MAX_BYTES + 1)
         except OSError as exc:
             return None, "cannot read it: " + (exc.strerror or type(exc).__name__)
+    if len(data) > RECORD_MAX_BYTES:  # longer than the limit: drop the line the limit cuts
+        data = data[:RECORD_MAX_BYTES]
+        data = data[:data.rfind(b"\n") + 1]
     return data.decode("utf-8", "replace"), None
 
 
@@ -207,8 +215,8 @@ def load_state(path):
     bound is the file's modification time (no earlier than the last write), else None (unknown)."""
     try:
         st = os.lstat(path)
-    except FileNotFoundError:
-        return "absent", None, None
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent", None, None  # a path under a non-directory: no state can have been saved there
     except OSError:
         return "bad", None, None
     bound = datetime.datetime.fromtimestamp(int(st.st_mtime), _UTC)
@@ -315,13 +323,15 @@ def decide(payload, env, now):
     active = payload.get("stop_hook_active") is True
     blocks = st["blocks"] if active else 0
     allowed = "constraint-reread: turn end allowed without a post-compaction re-read entry in " + rpath
+    if st["since"] is None:  # no entry can be dated against an unknown compaction time: never hold on it
+        return dict(systemMessage=allowed + " (this hook's state could not be read)")
     if blocks is None or blocks >= BLOCK_CAP:
         return dict(systemMessage=allowed + (" (refusal count unknown)" if blocks is None else " (loop cap)"))
-    saved = save_state(spath, st["since"] if st["since"] is not None else now, blocks + 1)
+    saved = save_state(spath, st["since"], blocks + 1)
     if active and not saved:
         return dict(systemMessage=allowed + " (refusal count cannot be saved)")
-    when = stamp(st["since"]) if st["since"] is not None else "an unknown time"
-    return dict(decision="block", reason="constraint-reread: the context was compacted at " + when + " and "
+    return dict(decision="block", reason="constraint-reread: the context was compacted at " + stamp(st["since"])
+                + " and "
                 + rpath + " holds no `" + ENTRY_FIELD + ":` entry dated after it. Standing constraints do not "
                 "lapse with the context: re-read the record, append `" + ENTRY_FIELD + ": ` followed by the "
                 "output of `date -u +%Y-%m-%dT%H:%M:%SZ`, then end the turn (refusal " + str(blocks + 1)
@@ -513,6 +523,51 @@ def _self_test():
                 self.write(bad + stamp(at(5)) + "\n", "a")
             self.write("Constraints-reread: 2026-13-01T00:00:00Z\n", "a")
             self.assertEqual(self.call("Stop", 10, env=env)["decision"], "block")
+
+        def test_17_a_record_cut_at_the_limit_drops_the_cut_line(self):
+            head = open(self.rec, "rb").read()
+            line = ("Constraints-reread: " + stamp(at(1))).encode()
+            pad = RECORD_MAX_BYTES - len(head) - len(line) - 1
+            with open(self.rec, "wb") as fh:
+                fh.write(head + b"#" * pad + b"\n" + line + b"NOT-A-TIMESTAMP\n")
+            self.compact(0)
+            self.assertEqual(self.call("Stop", 2)["decision"], "block")
+            with open(self.rec, "wb") as fh:  # exactly at the limit and complete: the entry is read
+                fh.write(head + b"#" * (pad - 1) + b"\n" + line + b"\n")
+            self.assertIsNone(self.call("Stop", 3))
+
+        def test_18_a_state_dir_under_a_file_is_no_state(self):
+            blocker = os.path.join(self.tmp, "plain-file")
+            open(blocker, "w").close()
+            env = dict(self.env, AIQT_HOOK_STATE_DIR=blocker)
+            self.assertIsNone(self.call("SessionStart", 0, env=env, source="startup"))
+            self.assertIsNone(self.call("UserPromptSubmit", 1, env=env))
+            self.assertIsNone(self.call("Stop", 2, env=env))
+
+        def test_19_unexaminable_state_reminds_but_never_holds_the_stop(self):
+            self.compact()
+            d = os.path.dirname(self.spath())
+            os.chmod(d, 0)
+            try:
+                if os.access(d, os.X_OK):
+                    self.skipTest("SKIPPED, running with privileges that ignore directory modes")
+                out = self.call("UserPromptSubmit", 5)
+                self.assertIn("unknown time", out["hookSpecificOutput"]["additionalContext"])
+                out = self.call("Stop", 6)
+                self.assertNotIn("decision", out)
+                self.assertIn("could not be read", out["systemMessage"])
+            finally:
+                os.chmod(d, 0o700)
+
+        def test_20_a_non_regular_state_reads_as_a_compaction_at_its_mtime(self):
+            os.makedirs(self.spath())
+            mtime = int(at(50).timestamp())
+            os.utime(self.spath(), (mtime, mtime))
+            self.write("Constraints-reread: " + stamp(at(20)) + "\n", "a")
+            ctx = self.call("UserPromptSubmit", 60)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn(stamp(at(50)), ctx)
+            self.write("Constraints-reread: " + stamp(at(55)) + "\n", "a")
+            self.assertIsNone(self.call("UserPromptSubmit", 60))
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))

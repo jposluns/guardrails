@@ -7,24 +7,29 @@ WHAT IT DOES
     as conclusive verification (rerun-pass-is-still-failure). This hook watches for the two common shapes and
     keeps the earlier failure in view:
 
-    1. A CI RERUN. A shell command that reruns a CI run (`gh run rerun`, `glab ci retry`) is a rerun by
-       definition. After it runs, the hook adds a note to the assistant's context: the rerun's result does not
-       erase the earlier failure, which is to be recorded and investigated.
+    1. A CI RERUN. A shell command that reruns a CI run (`gh run rerun`, `glab ci retry`, at a command
+       position and outside quotes) is a rerun by definition. After it runs, the hook adds a note to the
+       assistant's context: the rerun's result does not erase the earlier failure, which is to be recorded and
+       investigated.
     2. A LOCAL RERUN. A recognized check command (CHECK_RE: a test runner, `make test` or `make check`, a
        `--self-test` or `--check` run) that failed and then, run again with the identical command text, passed,
        with no change recorded between the two runs. After the passing run, the hook adds the same note.
     3. AT TURN END (Stop), while such a rerun is outstanding, a final message that presents a pass as
-       conclusive (CONCLUSIVE_RE: "all tests pass", "CI is green", "verified", and similar) without naming the
-       earlier failure (DISCLOSED_RE: "flaky", "intermittent", "rerun", "earlier failure", and similar) is
-       refused once, with the reason. A final message that names it clears the outstanding reruns. A loop cap
-       bounds the refusals: inside one continuous stop_hook_active run at most BLOCK_CAP, then the stop is
-       allowed with a one-line warning.
+       conclusive (CONCLUSIVE_RE: "all tests pass", "CI is green", "verified", and similar, each not directly
+       after a negation such as "not", "n't", or "never") without naming the earlier failure (DISCLOSED_RE:
+       "flaky", "intermittent", "rerun", "earlier failure", and similar) is refused once, with the reason. A final
+       message that names it clears the outstanding reruns. A loop cap bounds the refusals: inside one
+       continuous stop_hook_active run at most BLOCK_CAP, then the stop is allowed with a one-line warning.
 
-    A CHANGE between two runs is any Write, Edit, MultiEdit, or NotebookEdit call, and any other shell command
-    that is not on the short read-only list (READ_ONLY: cat, ls, grep, git status, git diff, gh run view, and
-    similar), so an install, a checkout, or a sed between the runs counts as a deliberate change and no rerun
-    is flagged. A failed run is a PostToolUseFailure call, or a PostToolUse call whose tool_response reports
-    an interruption or a nonzero exit code field; any other PostToolUse call is a pass.
+    A CHANGE between two runs is any Write, Edit, MultiEdit, or NotebookEdit call that did not fail, and any
+    other shell command that did not fail, is not a CI rerun, and is not read-only. A read-only command has
+    every simple command start with a word on the short read-only list (READ_ONLY: cat, ls, grep, echo, git
+    status, git diff, gh run view, and similar; env only when no command follows it) and redirects output
+    only to /dev/null or another descriptor, so an install, a checkout, a sed, or an echo into a file between
+    the runs counts as a deliberate change and no rerun is flagged. A failed call is not a change, even one
+    that changed something before it failed, and a CI rerun changes nothing locally. A failed run is a
+    PostToolUseFailure call, or a PostToolUse call whose tool_response reports an interruption or a nonzero
+    exit code field; any other PostToolUse call is a pass.
 
     Events: PostToolUse and PostToolUseFailure (matcher Bash|Write|Edit|MultiEdit|NotebookEdit), and Stop.
     Output: nothing, or ONE line of JSON on stdout: a hookSpecificOutput additionalContext note (after a tool
@@ -38,18 +43,22 @@ FAILURE DIRECTION
     After a tool call the safe direction is to inform: a rerun the hook recognizes is noted even when its state
     cannot be saved. At Stop the safe direction is not to hold the session on a guess: with no readable state,
     no final message in the payload (last_assistant_message), or an unknown or unsaveable refusal count under
-    stop_hook_active, the stop is allowed. Any error, an unreadable payload, or an unrecognized event exits 0
+    stop_hook_active, the stop is allowed. A state file with a negative counter or a non-text flag is
+    malformed and read as no state. Any error, an unreadable payload, or an unrecognized event exits 0
     with no output. A worker process (AIQT_HOOKS_WORKER=1, or a legacy spelling) is skipped.
 
 RESIDUAL COVERAGE
     It recognizes only the listed CI rerun commands and check commands, run through the shell tool; a rerun
     through a web page, a pushed empty commit, a retry option of the runner itself (pytest --reruns, a CI
-    retry setting), a script that wraps the check, or a changed command line (an added flag, another order)
-    is not seen. A change made outside the tool calls it sees (by the user, another process, a background job)
+    retry setting), a script that wraps the check, a rerun command inside quotes or after a wrapper such as
+    sudo or sh -c, or a changed command line (an added flag, another order) is not seen. A failed call is
+    never a change, so a fix made by a command that then failed reads as no change (a false note). A change
+    made outside the tool calls it sees (by the user, another process, a background job)
     is not seen, so a fix applied that way reads as no change and the pass is flagged anyway (a false note); a
     read-only-looking command with a side effect reads as no change. The pass and fail reading rests on the
     event name and a few tool_response fields, not on the command's output. The Stop check reads only the
-    final message, by fixed phrase lists: a conclusive claim worded otherwise passes, and a message naming any
+    final message, by fixed phrase lists: a conclusive claim worded otherwise passes, a claim after an
+    unlisted negation is refused, and a message naming any
     disclosure word passes and clears the reruns, whether or not it records the failure. It does not record
     or investigate the failure itself. Concurrent hook runs in one session can lose a state update. State
     keeps at most MAX_CHECKS commands and MAX_FLAGS outstanding reruns.
@@ -72,7 +81,17 @@ MAX_CHECKS = 200
 MAX_FLAGS = 20
 MAX_SHOWN = 160  # characters of a command shown in a note
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
-CI_RERUN_RE = re.compile(r"(?:^|[\s;&|(])(?:gh\s+run\s+rerun|glab\s+ci\s+retry)\b")
+# A CI rerun at a command position (after optional NAME=VALUE assignments), matched on the command text with
+# its quoted strings blanked, so a rerun command named inside an echo or a message is not one.
+CI_RERUN_RE = re.compile(r"(?:^|[;&|(\n])[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*"
+                         r"(?:gh[ \t]+run[ \t]+rerun|glab[ \t]+ci[ \t]+retry)\b")
+_QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+# An output redirection and its target; a target of /dev/null or a descriptor (&1) writes no file.
+_REDIR_RE = re.compile(r"(?:[0-9]+|&)?>>?\|?[ \t]*(&[0-9-]|[^\s;&|()<>]*)")
+_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# A negation directly before a conclusive phrase ("not verified", "hasn't been verified", "never green").
+_NEGATED_RE = re.compile(r"(?:\bnot|n't|\bnever|\bno longer)(?:\s+(?:yet|been|be|fully|really|actually))*\s*$",
+                         re.I)
 CHECK_RE = re.compile(
     r"(?:^|[\s;&|(/])(?:pytest|py\.test|tox|nox|jest|vitest|mocha|ctest|phpunit|rspec)(?:\s|$)"
     r"|\bpython[0-9.]*\s+(?:-\S+\s+)*-m\s+(?:pytest|unittest)\b"
@@ -91,7 +110,7 @@ DISCLOSED_RE = re.compile(
     re.I)
 READ_ONLY = frozenset(("cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ls", "pwd",
                        "echo", "printf", "wc", "date", "sleep", "true", "file", "stat", "which", "type", "diff",
-                       "cmp", "sha256sum", "md5sum", "du", "df", "env", "id", "whoami", "uname", "jq", "tree"))
+                       "cmp", "sha256sum", "md5sum", "du", "df", "id", "whoami", "uname", "jq", "tree"))
 READ_ONLY_GIT = frozenset(("status", "log", "diff", "show", "rev-parse", "blame", "ls-files"))
 READ_ONLY_GH = (("run", "view"), ("run", "list"), ("run", "watch"), ("pr", "view"), ("pr", "checks"))
 
@@ -153,8 +172,10 @@ def load_state(path):
             if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
                 return new_state(), False
             obj = json.loads(fh.read(STATE_MAX_BYTES + 1)[:STATE_MAX_BYTES])
-        ok = (isinstance(obj, dict) and type(obj.get("change")) is int and isinstance(obj.get("checks"), dict)
-              and isinstance(obj.get("flags"), list) and type(obj.get("blocks")) is int)
+        ok = (isinstance(obj, dict) and type(obj.get("change")) is int and obj["change"] >= 0
+              and isinstance(obj.get("checks"), dict) and isinstance(obj.get("flags"), list)
+              and all(isinstance(f, str) for f in obj["flags"]) and type(obj.get("blocks")) is int
+              and obj["blocks"] >= 0)
         return (obj, True) if ok else (new_state(), False)
     except Exception:
         return new_state(), False
@@ -182,13 +203,28 @@ def save_state(path, state):
         return False
 
 
+def ci_rerun(cmd):
+    """True when `cmd` runs a CI rerun command at a command position, outside quotes."""
+    return CI_RERUN_RE.search(_QUOTED_RE.sub(" Q ", cmd)) is not None
+
+
 def read_only(cmd):
-    """True when every simple command in `cmd` starts with a word on the read-only list."""
-    for seg in re.split(r"[;&|\n()]+", cmd):
+    """True when every simple command in `cmd` starts with a word on the read-only list (env only with no
+    command after it) and no output redirection writes a file (a /dev/null or descriptor target is allowed)."""
+    text = _QUOTED_RE.sub(" Q ", cmd)
+    for m in _REDIR_RE.finditer(text):
+        if m.group(1) != "/dev/null" and not m.group(1).startswith("&"):
+            return False
+    for seg in re.split(r"[;&|\n()]+", _REDIR_RE.sub(" ", text)):
         words = seg.split()
         if not words:
             continue
         w = os.path.basename(words[0])
+        if w == "env":
+            words = [x for x in words[1:] if not x.startswith("-") and not _ASSIGN_RE.match(x)]
+            if not words:
+                continue  # env alone prints the environment
+            w = os.path.basename(words[0])
         if w in READ_ONLY:
             continue
         if w == "git" and len(words) > 1 and words[1] in READ_ONLY_GIT:
@@ -212,6 +248,14 @@ def failed(event, response):
     return False
 
 
+def conclusive(msg):
+    """True when `msg` holds a conclusive-pass phrase that is not directly after a negation."""
+    for m in CONCLUSIVE_RE.finditer(msg):
+        if not _NEGATED_RE.search(msg[max(0, m.start() - 40):m.start()]):
+            return True
+    return False
+
+
 def shown(cmd):
     one = " ".join(cmd.split())
     return one if len(one) <= MAX_SHOWN else one[:MAX_SHOWN] + "..."
@@ -227,8 +271,10 @@ def note(event, what):
 def after_tool(payload, state, event):
     """Update `state` for one finished tool call; return the note text, or None."""
     tool = payload.get("tool_name")
+    bad = failed(event, payload.get("tool_response"))
     if tool in EDIT_TOOLS:
-        state["change"] += 1
+        if not bad:  # a failed edit is not evidence of a change
+            state["change"] += 1
         return None
     if tool != "Bash":
         return None
@@ -236,15 +282,13 @@ def after_tool(payload, state, event):
     cmd = ti.get("command") if isinstance(ti, dict) else None
     if not isinstance(cmd, str) or not cmd.strip():
         return None
-    bad = failed(event, payload.get("tool_response"))
-    if CI_RERUN_RE.search(cmd):
-        state["change"] += 1
+    if ci_rerun(cmd):  # changes nothing locally, so it never separates two local runs
         if bad:
             return None
         state["flags"] = (state["flags"] + ["CI rerun: " + shown(cmd)])[-MAX_FLAGS:]
         return "a CI rerun was started (" + shown(cmd) + ")."
     if not CHECK_RE.search(cmd):
-        if not read_only(cmd):
+        if not bad and not read_only(cmd):
             state["change"] += 1
         return None
     key = " ".join(cmd.split())
@@ -274,7 +318,7 @@ def at_stop(payload, state, readable, path):
         state["blocks"] = 0
         save_state(path, state)
         return None
-    if not CONCLUSIVE_RE.search(msg):
+    if not conclusive(msg):
         return None
     active = payload.get("stop_hook_active") is True
     blocks = state["blocks"] if active else 0
@@ -285,7 +329,8 @@ def at_stop(payload, state, readable, path):
     if not save_state(path, state) and active:
         return dict(systemMessage=allowed + " (refusal count cannot be saved)")
     return dict(decision="block", reason="rerun-pass-check: your final message presents a pass as conclusive, "
-                "but this session saw a rerun pass after a failure (" + "; ".join(state["flags"][-3:]) + "). "
+                "but this session started a CI rerun or saw a check pass on a rerun after it failed ("
+                + "; ".join(state["flags"][-3:]) + "). "
                 "State the earlier failure and that it is unresolved (intermittent), and do not call the "
                 "later pass conclusive (refusal " + str(blocks + 1) + " of at most " + str(BLOCK_CAP) + ").")
 
@@ -443,6 +488,53 @@ def _self_test():
             self.assertFalse(read_only("ls; rm f"))
             self.assertTrue(CONCLUSIVE_RE.search("All the tests now pass."))
             self.assertFalse(CONCLUSIVE_RE.search("The tests still fail."))
+
+        def edit_failed(self):
+            return decide(dict(hook_event_name="PostToolUseFailure", session_id="s", tool_name="Edit",
+                               tool_input=dict(file_path="/x")), self.env)
+
+        def test_13_failed_operations_are_not_changes(self):
+            self.assertIsNone(self.bash("pytest -q", ok=False))
+            self.assertIsNone(self.bash("gh run rerun 7", ok=False))
+            self.assertIsNone(self.edit_failed())
+            self.assertIsNone(self.bash("sed -i s/a/b/ f.py", ok=False))
+            self.assertIn("CI rerun", self.bash("gh run rerun 8")["hookSpecificOutput"]["additionalContext"])
+            out = self.bash("pytest -q")
+            self.assertIn("failed earlier and passed on a rerun", out["hookSpecificOutput"]["additionalContext"])
+            self.assertEqual(self.stop("All tests pass.")["decision"], "block")
+
+        def test_14_negative_counters_and_odd_flags_are_malformed(self):
+            path = state_path(dict(session_id="s"), self.env)
+            os.makedirs(os.path.dirname(path))
+            for bad in (dict(blocks=-100), dict(change=-1), dict(flags=[7])):
+                seed = dict(change=0, checks=dict(), flags=["CI rerun: gh run rerun 1"], blocks=0)
+                seed.update(bad)
+                with open(path, "w", encoding="ascii") as fh:
+                    json.dump(seed, fh)
+                self.assertFalse(load_state(path)[1], bad)
+                for _ in range(5):
+                    self.assertIsNone(self.stop("All tests pass.", active=True), bad)
+
+        def test_15_redirection_env_quotes_and_negation(self):
+            self.assertFalse(read_only("echo 'TIMEOUT=30' > settings.py"))
+            self.assertFalse(read_only("cat a >> b"))
+            self.assertFalse(read_only("env PYTHONPATH=. python3 fix.py"))
+            self.assertTrue(read_only("env"))
+            self.assertTrue(read_only("env -0 X=1 cat f"))
+            self.assertTrue(read_only("grep x f 2>/dev/null; ls 2>&1 | head"))
+            self.assertTrue(read_only("echo 'a > b'"))
+            self.assertIsNone(self.bash("pytest -q", ok=False))
+            self.assertIsNone(self.bash("echo 'TIMEOUT=30' > settings.py"))
+            self.assertIsNone(self.bash("pytest -q"))
+            self.assertIsNone(self.stop("Fixed the timeout in settings.py; all tests pass."))
+            self.assertIsNone(self.bash('echo "use gh run rerun to retry"'))
+            self.assertTrue(ci_rerun("cd x && gh run rerun 3") and ci_rerun("ID=3 glab ci retry 3"))
+            self.assertIsNotNone(self.bash("gh run rerun 1"))
+            self.assertIsNone(self.stop("I have not verified the fix yet; waiting on CI."))
+            self.assertIsNone(self.stop("CI hasn't been verified and the build is not yet green."))
+            out = self.stop("The fix is verified.")
+            self.assertEqual(out["decision"], "block")
+            self.assertIn("started a CI rerun or saw a check pass on a rerun", out["reason"])
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))

@@ -1,22 +1,25 @@
 # .aiqt/core/hooks/preview.toml: the preview-channel hooks manifest (the ledger source for .preview/ hooks).
 #
-# One [[hook]] per hook published in the .preview/ channel that cites a rule. A preview hook is a standalone
+# One [[hook]] per .preview/ hook linked into the enforceability ledger. Not every published preview hook
+# that cites a rule has an entry (the three clock hooks, which cite timestamp-from-clock, have none), and
+# nothing checks that this list is complete. A preview hook is a standalone
 # file an adopter installs by hand (.preview/README.md); it is NOT rendered into the pack's plugin, so it has
 # no handler in .aiqt/core/hooks/scripts/aiqt_hooks.py and no row in manifest.toml beside this file.
 # tools/gen_enforceability.py reads this manifest, validates it fail-closed, and renders each entry into the
 # enforceability ledger .aiqt/enforceability.json as a hook row carrying "channel": "preview" and its "file",
 # so the ledger, the enforcement roadmap, and the register name the preview control without a second edit
-# point. When a preview hook is promoted into the plugin, its entry moves to manifest.toml.
+# point; the register shows a rule linked only to preview hooks as "Preview only", not as enforced. When a preview hook is promoted into the plugin, its entry moves to manifest.toml.
 #
 # Fields per [[hook]] (all REQUIRED except matcher):
 #   id       a stable, unique control identifier (kebab-case), unique across this file AND manifest.toml
-#   file     the repo-relative .preview/<name>.py the hook ships as (must exist on disk)
+#   file     the repo-relative .preview/<name>.py the hook ships as (a readable regular file on disk)
 #   rules    the corpus-id(s) the hook cites (non-empty; each must resolve to a real corpus-id)
 #   platform "claude-code"
 #   event    the event on which the hook enforces (one row per control; other events it uses are named in
 #            its residue)
 #   matcher  the tool-name pattern, REQUIRED for PreToolUse/PostToolUse, forbidden otherwise
-#   default  "block" or "warn"
+#   default  "block" or "warn" ("warn" on SessionStart and PreCompact, which cannot block; never "warn"
+#            on PreToolUse)
 #   class    "b" (hook-detectable) or "c" (partial); d is never authored on a control
 #   residue  REQUIRED, never empty: what the hook does NOT catch, in agreement with the RESIDUAL COVERAGE
 #            section of the hook's own docstring
@@ -29,7 +32,7 @@ platform = "claude-code"
 event = "Stop"
 default = "block"
 class = "b"
-residue = "PREVIEW CHANNEL ONLY: a standalone file installed by hand from .preview/, not part of the pack's plugin, and off until AIQT_CONSTRAINT_RECORD names the project's durable record. After a compaction reported by the platform's own markers (SessionStart with source compact, or PreCompact), it reminds the assistant of the record's Constraint lines on every user prompt and refuses each turn end until the record holds a Constraints-reread entry dated after the compaction and not in the future; refusals are capped per continuous stop_hook_active run, after which the stop is allowed with a warning. It proves only that an entry was written, not that the record was read or a constraint honoured; it names only constraints written in the record; a compaction without one of those markers (a host without the events, a hook not registered for them, a new session) is not seen; with no state location or no session key in the payload a compaction is reminded once and then forgotten; concurrent hook runs can lose a count update; an entry beyond the first MiB of the record is not seen; and the host clock is trusted."
+residue = "PREVIEW CHANNEL ONLY: a standalone file installed by hand from .preview/, not part of the pack's plugin, and off until AIQT_CONSTRAINT_RECORD names the project's durable record. After a compaction reported by the platform's own markers (SessionStart with source compact, or PreCompact), it reminds the assistant of the record's Constraint lines on every user prompt and refuses each turn end until the record holds a Constraints-reread entry dated after the compaction and no more than 60 seconds ahead of the hook's clock (an entry dated up to 60 seconds ahead counts); refusals are capped per continuous stop_hook_active run, after which the stop is allowed with a warning. It proves only that an entry was written, not that the record was read or a constraint honoured; it names only constraints written in the record; a compaction without one of those markers (a host without the events, a hook not registered for them, a new session) is not seen; with no state location or no session key in the payload a compaction is reminded once and then forgotten; if its state location exists but cannot be examined, it keeps reminding with the compaction time unknown and allows each turn end with a warning; concurrent hook runs can lose a count update; an entry beyond the first MiB of the record is not seen, and a line cut at that limit is dropped; and the host clock is trusted."
 
 [[hook]]
 id = "rerun-pass-check"
@@ -39,4 +42,4 @@ platform = "claude-code"
 event = "Stop"
 default = "block"
 class = "b"
-residue = "PREVIEW CHANNEL ONLY: a standalone file installed by hand from .preview/, not part of the pack's plugin. After a CI rerun command (gh run rerun, glab ci retry), or a recognized check command that failed and then passed with identical command text and no recorded change between, it adds a note after the tool call, and at turn end it refuses a final message that presents a pass as conclusive without naming the earlier failure, capped per continuous stop_hook_active run. It sees only those commands run through the shell tool: a rerun through a web page, a pushed empty commit, a runner or CI retry setting, a wrapping script, or a changed command line is not seen; a change made outside the tool calls it sees reads as no change (a false note), and a read-only-looking command with a side effect reads as no change; pass and fail are read from the event name and a few response fields, not the output; the Stop check reads only the final message against fixed phrase lists, so a claim worded otherwise passes and any disclosure word clears the reruns; it does not record or investigate the failure itself; with no readable state or no final message in the payload the stop is allowed; and concurrent hook runs can lose a state update."
+residue = "PREVIEW CHANNEL ONLY: a standalone file installed by hand from .preview/, not part of the pack's plugin. After a CI rerun command (gh run rerun, glab ci retry) at a command position outside quotes, or a recognized check command that failed and then passed with identical command text and no recorded change between, it adds a note after the tool call, and at turn end it refuses a final message that presents a pass as conclusive without naming the earlier failure, capped per continuous stop_hook_active run. It sees only those commands run through the shell tool: a rerun through a web page, a pushed empty commit, a runner or CI retry setting, a wrapping script, a rerun command inside quotes or after a wrapper such as sudo, or a changed command line is not seen; a failed call is never counted as a change, so a fix made by a command that then failed reads as no change (a false note); a change made outside the tool calls it sees reads as no change (a false note), and a read-only-looking command with a side effect reads as no change; pass and fail are read from the event name and a few response fields, not the output; the Stop check reads only the final message against fixed phrase lists, so a claim worded otherwise passes, a claim after an unlisted negation is refused, and any disclosure word clears the reruns; it does not record or investigate the failure itself; with no readable state or no final message in the payload the stop is allowed; and concurrent hook runs can lose a state update."

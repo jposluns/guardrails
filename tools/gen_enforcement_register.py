@@ -123,7 +123,9 @@ EXPLAINER = (
     "This register lists every rule and the shipped mechanical controls linked to it. An enforced status "
     "records linkage, not complete coverage: at least one shipped gate or hook cites the rule, and each "
     "mechanism's class and residual describe the boundary of what it checks. A linked mechanism may cover "
-    "only part of a rule's violation surface. A status of none means enforcement has not been built yet; "
+    "only part of a rule's violation surface. A status of preview only means every linked control is a "
+    "preview-channel hook: a standalone file under .preview/ that an adopter installs by hand, not part of "
+    "the plugin, so nothing runs for it unless it is installed. A status of none means enforcement has not been built yet; "
     "pending also means enforcement has not been built yet, and its description states the intended build. "
     "The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim "
     "and not summarized. The class letter is a maintainer assessment of the check's decision procedure, "
@@ -224,6 +226,14 @@ def load_ledger(root):
     return json.loads(fresh)
 
 
+def _hook_channel(hook):
+    """The Channel field of a hook: a preview-channel row (a standalone .preview/ file an adopter installs by
+    hand) names its file and that it is not in the plugin, so it is never shown like a plugin hook."""
+    if hook.get("channel") == "preview":
+        return "preview, installed by hand from " + hook["file"] + "; not in the plugin"
+    return "plugin"
+
+
 def ledger_index(ledger):
     """From the ledger build: cid -> entry, and ref -> control-display-info (deduped; a control cited by
     several rules is identical everywhere). Each rule's namespaced linkage is sorted(gate refs) then
@@ -240,7 +250,7 @@ def ledger_index(ledger):
             refs.append(ref)
             controls[ref] = {"kind": "gate", "id": gate["id"], "class": gate["class"],
                              "default": gate["default"], "platform": gate["platform"],
-                             "entry": gate["script"], "residue": gate["residue"]}
+                             "entry": gate["script"], "channel": "repository gate", "residue": gate["residue"]}
         for hook in entry["hooks"]:
             ref = "hook:" + hook["id"]
             refs.append(ref)
@@ -248,7 +258,8 @@ def ledger_index(ledger):
             entry_point = "{} on {}".format(hook["event"], matcher) if matcher else hook["event"]
             controls[ref] = {"kind": "hook", "id": hook["id"], "class": hook["class"],
                              "default": hook["default"], "platform": hook["platform"],
-                             "entry": entry_point, "residue": hook["residue"]}
+                             "entry": entry_point, "channel": _hook_channel(hook),
+                             "preview": hook.get("channel") == "preview", "residue": hook["residue"]}
         linkage[cid] = sorted(refs)
     return by_cid, controls, linkage
 
@@ -380,7 +391,25 @@ def rule_title(path):
 
 
 def _status_word(status):
-    return {"enforced": "Enforced", "pending": "Pending", "none": "None"}[status]
+    return {"enforced": "Enforced", "preview": "Preview only", "pending": "Pending", "none": "None"}[status]
+
+
+def _shown_status(row, controls):
+    """The register status of a roadmap row: an enforced row whose every mechanism is a preview-channel hook
+    (a standalone .preview/ file an adopter installs by hand, not in the plugin) is shown as preview, never
+    as enforced like a row with a plugin hook or a gate."""
+    if row["status"] == "enforced" and all(_is_preview(controls[ref]) for ref in row["mechanisms"]):
+        return "preview"
+    return row["status"]
+
+
+def _is_preview(ctrl):
+    return ctrl["kind"] == "hook" and ctrl["channel"] != "plugin"
+
+
+def _how_suffix(ctrl):
+    """The marker after a preview-channel mechanism in a How cell; empty for a plugin hook or a gate."""
+    return " (preview channel, installed by hand)" if _is_preview(ctrl) else ""
 
 
 def _classes_present(enforced_union, controls):
@@ -390,7 +419,7 @@ def _classes_present(enforced_union, controls):
 def _enforced_cell_md(mechanisms, controls):
     parts = []
     for ref in mechanisms:
-        parts.append("`{}`, class {}".format(ref, controls[ref]["class"]))
+        parts.append("`{}`{}, class {}".format(ref, _how_suffix(controls[ref]), controls[ref]["class"]))
     return "; ".join(parts)
 
 
@@ -406,16 +435,18 @@ _MECH_FIELDS = (
     ("Default", "default"),
     ("Entry point", "entry"),
     ("Class", "class"),
+    ("Channel", "channel"),
 )
 
 
 def render_md(rows, roadmap, controls, enforced_union):
-    counts = {"enforced": 0, "pending": 0, "none": 0}
+    counts = {"enforced": 0, "preview": 0, "pending": 0, "none": 0}
     for cid, _title, _fm in rows:
-        counts[roadmap[cid]["status"]] += 1
+        counts[_shown_status(roadmap[cid], controls)] += 1
     lines = ["# Guardrail Enforcement Register", "", GENERATED_NOTE, "", EXPLAINER, "",
              "## Summary", "", "| Status | Rules |", "|---|---:|",
              "| Enforced | {} |".format(counts["enforced"]),
+             "| Preview only | {} |".format(counts["preview"]),
              "| Pending | {} |".format(counts["pending"]),
              "| None | {} |".format(counts["none"]), "",
              "## Rules", "",
@@ -423,8 +454,8 @@ def render_md(rows, roadmap, controls, enforced_union):
              "|---|---|---|---|"]
     for cid, title, _fm in rows:
         row = roadmap[cid]
-        status = row["status"]
-        if status == "enforced":
+        status = _shown_status(row, controls)
+        if status in ("enforced", "preview"):
             how = _enforced_cell_md(row["mechanisms"], controls)
         elif status == "pending":
             how = row["description"]
@@ -461,15 +492,15 @@ def _a(value):   # HTML attribute value
 
 
 def render_html(rows, roadmap, controls, enforced_union):
-    counts = {"enforced": 0, "pending": 0, "none": 0}
+    counts = {"enforced": 0, "preview": 0, "pending": 0, "none": 0}
     for cid, _title, _fm in rows:
-        counts[roadmap[cid]["status"]] += 1
+        counts[_shown_status(roadmap[cid], controls)] += 1
     out = []
     out.append('        <p>{}</p>'.format(_t(EXPLAINER)))
     out.append('        <p class="lead">Summary: '
-               '<strong>{e}</strong> enforced, <strong>{p}</strong> pending, '
+               '<strong>{e}</strong> enforced, <strong>{v}</strong> preview only, <strong>{p}</strong> pending, '
                '<strong>{n}</strong> none.</p>'.format(
-                   e=counts["enforced"], p=counts["pending"], n=counts["none"]))
+                   e=counts["enforced"], v=counts["preview"], p=counts["pending"], n=counts["none"]))
     out.append('        <div class="tablewrap">')
     out.append('          <table class="dtable">')
     out.append('            <thead><tr><th>Rule</th><th>Corpus ID</th><th>Status</th>'
@@ -477,14 +508,14 @@ def render_html(rows, roadmap, controls, enforced_union):
     out.append('            <tbody>')
     for cid, title, _fm in rows:
         row = roadmap[cid]
-        status = row["status"]
-        if status == "enforced":
+        status = _shown_status(row, controls)
+        if status in ("enforced", "preview"):
             cells = []
             for ref in row["mechanisms"]:
                 ctrl = controls[ref]
-                cells.append('<a href="#mechanism-{anchor}"><code>{ref}</code></a>, class {cls}'
+                cells.append('<a href="#mechanism-{anchor}"><code>{ref}</code></a>{sfx}, class {cls}'
                              .format(anchor=_a("{}-{}".format(ctrl["kind"], ctrl["id"])),
-                                     ref=_t(ref), cls=_t(ctrl["class"])))
+                                     ref=_t(ref), sfx=_t(_how_suffix(ctrl)), cls=_t(ctrl["class"])))
             how = "; ".join(cells)
         elif status == "pending":
             how = _t(row["description"])

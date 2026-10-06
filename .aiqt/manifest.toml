@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "2bc6484c359ab977a92ea65fdbc7787ee4b4f53d94e3935b2d713244ed20d472"
+tree-sha256 = "cfb8b6b395b404717a0a2ac7f72ca72045e1949fef28f92ba7e26edc228b0401"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -46,8 +46,8 @@ sha256 = "566cdd353538798199eff9aef9aadb403e31ba9dda366b41d8abcc1ee560761c"
 
 [[sources]]
 path = ".aiqt/core/enforcement-roadmap.toml"
-bytes = 11550
-sha256 = "6c986f3e02d626d485cbaa7dabff980df9327961733d553a9dc56410dad5626e"
+bytes = 11819
+sha256 = "4cb5beb2a688a134de2f2053f07bce6c91499c19f4f4a9724846dff1712549dc"
 
 [[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
@@ -76,8 +76,8 @@ sha256 = "23ca96686fb42cb4e25b4667674f43b9f798521c7f0212461966cf09ede1e55c"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
-bytes = 4495
-sha256 = "6165080a1ead6d5c3b8f2ee611c150c1eec9365288b6ee81b3716165c357a923"
+bytes = 5416
+sha256 = "f0e0ba0ffbfee07b792439cc6fa4a54121c1207140e576d8c2f14200e60626b8"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
@@ -801,8 +801,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 334123
-sha256 = "b8c91fac18e0c4c7c2c109c1cb9574f11f47a57367cbc380919f504d33dd2d48"
+bytes = 334660
+sha256 = "19e83c4b86692d59a013695f2e8940fe7b313e3ab933571654358584a6a26b4e"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2256,13 +2256,13 @@ sha256 = "100ac19dceab9be4d4278453b880deba79a043839323cdf13d154cba0c8cdea1"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 29043
-sha256 = "0bfcc8511a1f352676c826b4943f4facf9de99300ba185b36070eda85d5f4851"
+bytes = 29155
+sha256 = "9a8a243f2a34661f489b757cd81b26b579fc88db5111578704e9e553f0755fe2"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 809
-sha256 = "eaf24ad676ae983a42a3bb6b50750856f8700d12b5a1a3a92b1fbfe23c81bd77"
+sha256 = "0e32e01002e23b04da3339111a6afb255854cb1e3644a40ca82b03e9005fb097"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -2271,8 +2271,8 @@ sha256 = "65fe1cae733f72d2f82b884b9bb710310b0b6ad0dcccd8c874c5f2bdd2e25386"
 
 [[sources]]
 path = ".preview/constraint-reread.py"
-bytes = 27381
-sha256 = "c64902ee55f0be0978e9d09117eee9a29b8f29e9002143d622fc35de2e1bea3f"
+bytes = 30640
+sha256 = "9e272623be35f5e58b5fbeea2b992735ca3ae4602ce909a7ad7a0b8b917b4208"
 
 [[sources]]
 path = ".preview/future-stamp-write.py"
@@ -2286,8 +2286,8 @@ sha256 = "815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f"
 
 [[sources]]
 path = ".preview/rerun-pass-check.py"
-bytes = 22855
-sha256 = "9730f856db56238d80499157ae1db4de7dd73e4412766c6de8b075ebaf18f354"
+bytes = 28789
+sha256 = "e288bfb1b876f4639d5cd42f774951a29303b309e06504235c4f0897a84177d9"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
@@ -2321,8 +2321,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 189235
-sha256 = "be412a7e51ec11320f74bae8225cef522c0b7e836062d6f54632e1001cbdb1d8"
+bytes = 191737
+sha256 = "23d33e6ee9c38ea618b048d8e3ac77aea18e3d1b97152960870a8bc5635a8747"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3071,8 +3071,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 237647
-sha256 = "cf13a517b82d5e4c8d349695880734dfcc1fca3227110190444924db4570ebe7"
+bytes = 242081
+sha256 = "cb4908dad2ebf556c7badb6a2309330a2e52d0fb106ebb2fcda041a6e848d21d"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3481,13 +3481,13 @@ sha256 = "f68d246fb296fa6f3bd5a09cbf321f059759f15cc7472d8c8937e1531f53de4a"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
-bytes = 49108
-sha256 = "bc44d13753d17935b57f4c18702c4081120e705f2fd6ffdb1676ab3dafef5bf6"
+bytes = 53582
+sha256 = "e9b847d43b8367f1ee99cb5c61a08da33590641da3e230a6868c109b2db9f989"
 
 [[sources]]
 path = "tools/gen_enforcement_register.py"
-bytes = 71268
-sha256 = "3f865d411bf0a2e54f6de982a4059924070f35e559b4a4350e4c5c0c3aeb92f1"
+bytes = 73142
+sha256 = "19bdf5aaf8d21e0dee7e4134133e1c5c517cf200bd735e786d8f20d6e2eb6af2"
 
 [[sources]]
 path = "tools/gen_gensrc.py"
