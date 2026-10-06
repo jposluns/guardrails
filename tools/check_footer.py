@@ -416,6 +416,45 @@ def _real_sigint_propagates(sent):
             and "KeyboardInterrupt" in child.stderr)
 
 
+# Run in a child by _propagation_kept: load the file named first by path and pass _propagate_interrupt a
+# KeyboardInterrupt subclass instance, then an exact KeyboardInterrupt; print "kept" only when the first
+# raises a fresh exact KeyboardInterrupt with its context suppressed and the second raises itself. The child
+# catches what each call raises; this process catches no KeyboardInterrupt here.
+_PROPAGATION_PROBE = """import importlib.util, os, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+spec = importlib.util.spec_from_file_location("_propagation_probe_target", sys.argv[1])
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+class Sub(KeyboardInterrupt):
+    pass
+def raised_by(exc):
+    try:
+        gate._propagate_interrupt(exc)
+    except BaseException as got:
+        return got
+    return None
+sub, own = Sub(), KeyboardInterrupt()
+fresh = raised_by(sub)
+same = raised_by(own)
+kept = type(fresh) is KeyboardInterrupt and fresh is not sub and fresh.__suppress_context__ is True
+if kept and same is own:
+    print("kept")
+"""
+
+
+def _propagation_kept():
+    """True when _propagate_interrupt, in a child (_PROPAGATION_PROBE), raises a fresh exact KeyboardInterrupt
+    for a subclass and an exact one unchanged. Red if it re-raises the caught instance (`raise exc`)."""
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="interrupt-propagation-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_PROPAGATION_PROBE, encoding="utf-8")
+        child = subprocess.run([sys.executable, "-I", "-B", str(probe), str(Path(__file__).resolve())],
+                               capture_output=True, text=True, timeout=120)
+    return child.returncode == 0 and child.stdout == "kept\n"
+
+
 # An exception whose __class__ property raises SystemExit(0): a guard that inspects the caught instance
 # (isinstance included) runs that property and ends the process with status 0 from its own handler.
 CLOSE_DESCRIPTOR_EXIT = ("class _ClassExits(BaseException):\n    @property\n    def __class__(self):\n"
@@ -508,7 +547,11 @@ def _close_guard_vectors(base):
     # A real SIGINT inside the interrupt filters ends the run as an interrupt. Red if a probe there catches it.
     if not _real_sigint_propagates(sent):
         failures.append("a real SIGINT inside the interrupt filters did not end the child as an interrupt")
-    return failures, len(cases) + len(other_cases) + 2
+    # _propagate_interrupt raises what _interrupt_to_raise selects. Red if it re-raises the caught instance.
+    if not _propagation_kept():
+        failures.append("_propagate_interrupt did not raise a fresh KeyboardInterrupt for a subclass and an "
+                        "exact one unchanged")
+    return failures, len(cases) + len(other_cases) + 3
 
 
 def _self_test():
@@ -648,11 +691,14 @@ def main():
 # process. _fail_closed_main installs the recorders BEFORE the gate's work (so before any in-process
 # load) and settles them AFTER it: a fault the interpreter reports only to stderr (a destructor, weakref
 # or similar callback through sys.unraisablehook; an unhandled exception ending a worker thread through
-# threading.excepthook) is recorded and forces exit 2 over a passing verdict, never a silent pass; the
-# verdict then ends the process with os._exit, so an atexit callback registered by loaded code can never
-# run after it (that channel is unreachable, not merely disclosed). Only a SystemExit with code None
-# or 0 ending a worker thread is the interpreter's normal SUCCESSFUL thread exit (default-hook parity)
-# and is not recorded; any other code is an unsuccessful exit a worker reported, so it is recorded.
+# threading.excepthook) is recorded and forces exit 2 over a passing verdict, never a silent pass. Before
+# a passing verdict the settle waits (_SETTLE_SECONDS in all) for every other thread still running, so a
+# worker's later fault is recorded instead of killed silently by the exit, and a thread still running at
+# the bound fails the verdict closed (exit 2). The verdict then ends the process with os._exit, so an
+# atexit callback registered by loaded code can never run after it (that channel is unreachable, not
+# merely disclosed). Only a SystemExit with code None or 0 ending a worker thread is the interpreter's
+# normal SUCCESSFUL thread exit (default-hook parity) and is not recorded; any other code is an
+# unsuccessful exit a worker reported, so it is recorded.
 # Each recorder chains to the hook it wrapped, so the usual traceback still reaches stderr after the
 # marker line. The settle re-checks the record after the exit flushes, so a fault recorded while a
 # flush was blocked on a full pipe still fails the verdict.
@@ -666,10 +712,12 @@ _FAULT_MARKER = "LOADED-CODE-FAULT"
 
 
 def _install_fault_hooks():
-    import threading
+    # A local alias: opf.py's close-lifecycle census reads an attribute store through the bare module name
+    # as shadowing that module.
+    import threading as _threads
 
     previous_unraisable = sys.unraisablehook
-    previous_thread = threading.excepthook
+    previous_thread = _threads.excepthook
 
     def _record(channel, chained, args):
         _LOADED_FAULTS.append(channel)
@@ -700,16 +748,24 @@ def _install_fault_hooks():
             _record("worker-thread", previous_thread, args)
 
     sys.unraisablehook = _record_unraisable
-    threading.excepthook = _record_thread
+    _threads.excepthook = _record_thread
+
+
+_SETTLE_SECONDS = 60.0
 
 
 def _gate_exit(code):
-    """Settle and END the process: force a recorded background fault to exit 2 over a passing verdict,
-    flush both streams, re-check the record AFTER the flushes (a fault recorded while a flush was blocked,
-    on a full pipe say, must still fail the verdict; its late marker is written straight to fd 2, past the
-    buffers), then os._exit, so no atexit callback registered by loaded code runs after the verdict (the
-    gate's own cleanup runs inside its work; this gate registers no atexit work of its own)."""
+    """Settle and END the process: before a passing verdict, wait (up to _SETTLE_SECONDS in all) for every
+    other thread still running, so a fault it raises later is recorded, never killed silently by the exit,
+    and fail closed (exit 2) if one still runs at the bound; force a recorded background fault to exit 2
+    over a passing verdict, flush both streams, re-check the record AFTER the flushes (a fault recorded
+    while a flush was blocked, on a full pipe say, must still fail the verdict; its late marker is written
+    straight to fd 2, past the buffers), then os._exit, so no atexit callback registered by loaded code
+    runs after the verdict (the gate's own cleanup runs inside its work; this gate registers no atexit work
+    of its own)."""
     import os
+    import threading as _threads
+    import time
     if type(code) is bool:
         code = 1 if code else 0
     elif code is None:
@@ -718,6 +774,20 @@ def _gate_exit(code):
         # The code object is never formatted: a loaded object's __str__ must not run here.
         sys.stderr.write("{}: a non-int SystemExit code at the gate entry; exit 1\n".format(_FAULT_MARKER))
         code = 1
+    if code == 0:
+        current = _threads.current_thread()
+        deadline = time.monotonic() + _SETTLE_SECONDS
+        while True:
+            running = [worker for worker in _threads.enumerate()
+                       if worker is not current and worker.is_alive()]
+            remaining = deadline - time.monotonic()
+            if not running or remaining <= 0:
+                break
+            running[0].join(min(remaining, 0.5))
+        if running:
+            sys.stderr.write("{}: a worker thread was still running at the verdict; fail-closed\n".format(
+                _FAULT_MARKER))
+            code = 2
     if code == 0 and (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False)):
         sys.stderr.write("{}: {} background fault(s) from loaded code over a passing verdict; "
                          "fail-closed\n".format(_FAULT_MARKER, len(_LOADED_FAULTS) or 1))
@@ -758,6 +828,7 @@ sys.path.insert(0, tool.rsplit("/", 1)[0])
 spec = importlib.util.spec_from_file_location("_fault_channel_probe_target", tool)
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
+gate._SETTLE_SECONDS = 2.0
 def load():
     case = importlib.util.spec_from_file_location("_fault_channel_fixture", fixture)
     module = importlib.util.module_from_spec(case)
@@ -798,22 +869,36 @@ _FAULT_CHANNEL_CASES = (
      "worker = threading.Thread(target=done)\n"
      "worker.start()\n"
      "worker.join()\n", 0, False, None),
+    ("finishing-thread", "import threading, time\n"
+     "threading.Thread(target=time.sleep, args=(0.3,)).start()\n", 0, False, None),
+    ("unjoined-thread", "import threading, time\n"
+     "def fault():\n"
+     "    time.sleep(0.5)\n"
+     "    raise RuntimeError('fault-fixture-unjoined-thread')\n"
+     "threading.Thread(target=fault).start()\n", 2, True, None),
+    ("unfinished-thread", "import threading\n"
+     "threading.Thread(target=threading.Event().wait, daemon=True).start()\n", 2, True, None),
 )
 
 
 # The flush-window channel: _gate_exit's fault decision must hold across the exit flushes. The fixture
 # fills the child's stdout pipe to its exact capacity (F_GETPIPE_SZ) and leaves one byte in the stream's
-# buffer, then starts a worker that faults after a delay, so the fault is recorded while the exit flush is
-# blocked on the full pipe; the parent drains stdout only after stderr shows the fault marker. Exit 2 with
-# the marker is required. Red when the fault decision runs only before the flushes: the child then ends 0
-# with the marker on stderr.
-_FLUSH_WINDOW_FIXTURE = """import fcntl, os, sys, threading, time
+# buffer, then arms a timer (SIGALRM unblocked: a caller's blocked mask is inherited) whose signal handler
+# drops an object with a faulting destructor, so the fault is recorded while the exit flush is blocked on
+# the full pipe (after the settle's thread wait, which a worker-thread fault would not outlast); the
+# parent drains stdout only after stderr shows the fault marker. Exit 2 with the marker is required. Red
+# when the fault decision runs only before the flushes: the child then ends 0 with the marker on stderr.
+_FLUSH_WINDOW_FIXTURE = """import fcntl, os, signal, sys
 os.write(1, b"x" * fcntl.fcntl(1, fcntl.F_GETPIPE_SZ))
 sys.stdout.write("y")
-def fault():
-    time.sleep(1.0)
-    raise RuntimeError("fault-fixture-flush-window")
-threading.Thread(target=fault).start()
+class Fault:
+    def __del__(self):
+        raise RuntimeError("fault-fixture-flush-window")
+def fault(signum, frame):
+    Fault()
+signal.signal(signal.SIGALRM, fault)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGALRM])
+signal.setitimer(signal.ITIMER_REAL, 1.0)
 """
 
 
