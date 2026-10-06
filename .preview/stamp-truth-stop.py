@@ -2084,28 +2084,96 @@ def _self_test():
                   "UTC=datetime.timezone.utc\n" % os.path.abspath(__file__))
 
     # The FIFO guard for a child: an audit hook (the `open` event fires for os.open, the builtin open, io.open
-    # and io.FileIO alike) refuses every open of a listed FIFO without O_NONBLOCK and records it in _blocking,
-    # so a blocking open fails the test at once, even where a fail-open handler swallows the refusal, and no
-    # opener can bypass it; the child's timeout stays a hang guard only. Paths compare absolute.
+    # and io.FileIO alike) refuses every open without O_NONBLOCK of a path that names a FIFO, and records it in
+    # _blocking, so a blocking open fails the test at once, even where a fail-open handler swallows the refusal;
+    # the child's timeout stays a hang guard only. A path is resolved by os.stat, which follows symlinks, so an
+    # alias (a symlink, a hard link, a `//` or `..` spelling, a PathLike) names the same FIFO. The event does not
+    # carry os.open's dir_fd (the openat form), so a relative path is resolved from the working directory AND
+    # from every open directory descriptor: a descriptor-relative open of a FIFO is refused too (conservatively,
+    # a relative name that some other open directory resolves to a FIFO is refused as well: a false failure,
+    # never a false pass). Every FIFO is guarded, one the child creates after the guard is installed included.
+    # Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes).
     FIFO_GUARD = (
-        "import os, sys\n"
-        "_fifos, _blocking = [os.path.abspath(p) for p in %r], []\n"
+        "import os, stat, sys\n"
+        "_blocking = []\n"
+        "def _names_fifo(path):\n"
+        "    bases = [None]\n"
+        "    if not os.path.isabs(path):\n"
+        "        try:\n"
+        "            bases += [int(fd) for fd in os.listdir('/dev/fd')]\n"
+        "        except (OSError, ValueError):\n"
+        "            bases += list(range(3, 1024))\n"
+        "    for fd in bases:\n"
+        "        try:\n"
+        "            if stat.S_ISFIFO(os.stat(path, dir_fd=fd).st_mode):\n"
+        "                return True\n"
+        "        except (OSError, ValueError, TypeError):\n"
+        "            pass\n"
+        "    return False\n"
         "def _fifo_guard(event, args):\n"
-        "    if event == 'open' and isinstance(args[0], (str, bytes)) and isinstance(args[2], int) and \\\n"
-        "            os.path.abspath(os.fsdecode(args[0])) in _fifos and not args[2] & os.O_NONBLOCK:\n"
+        "    if event != 'open' or not isinstance(args[2], int) or args[2] & os.O_NONBLOCK:\n"
+        "        return\n"
+        "    path = os.fspath(args[0]) if isinstance(args[0], os.PathLike) else args[0]\n"
+        "    if isinstance(path, (str, bytes)) and _names_fifo(path):\n"
         "        _blocking.append(args[0])\n"
-        "        raise AssertionError('a FIFO opened without O_NONBLOCK: %%r' %% (args,))\n"
+        "        raise AssertionError('a FIFO opened without O_NONBLOCK: %r' % (args,))\n"
         "sys.addaudithook(_fifo_guard)\n")
-    # every opener the guard covers, each tried once on the FIFO in a child (the guard's own vector)
+    # every opener and path spelling the guard covers, each tried once on the FIFO p in a child (the guard's own
+    # vector), with d an open descriptor of p's directory, and p + '.sym' and p + '.hard' a symlink and a hard
+    # link to p
     FIFO_OPENERS = ("lambda p: os.open(p, os.O_RDONLY)", "lambda p: open(p, 'rb')",
-                    "lambda p: __import__('io').open(p, 'rb')", "lambda p: __import__('io').FileIO(p, 'r')")
+                    "lambda p: __import__('io').open(p, 'rb')", "lambda p: __import__('io').FileIO(p, 'r')",
+                    "lambda p: os.open(os.path.basename(p), os.O_RDONLY, dir_fd=d)",
+                    "lambda p: os.open(p + '.sym', os.O_RDONLY)", "lambda p: open(p + '.hard', 'rb')",
+                    "lambda p: os.open('/' + p, os.O_RDONLY)", "lambda p: open(os.path.relpath(p), 'rb')",
+                    "lambda p: os.open(__import__('pathlib').Path(p), os.O_RDONLY)")
 
-    def in_subprocess(expr, timeout, fifos=()):
-        """Run `expr` (with module m loaded) in a fresh interpreter; return stdout, raising on timeout. With
-        `fifos`, FIFO_GUARD runs first and the output gains a last line, the repr of the refused opens."""
-        guard, tail = (FIFO_GUARD % (list(fifos),), "\nprint(repr(_blocking))") if fifos else ("", "")
+    def in_subprocess(expr, timeout, guarded=False):
+        """Run `expr` (with module m loaded) in a fresh interpreter; return stdout, raising on timeout. When
+        `guarded`, FIFO_GUARD runs first and the output gains a last line, the repr of the refused opens."""
+        guard, tail = (FIFO_GUARD, "\nprint(repr(_blocking))") if guarded else ("", "")
         return subprocess.run([sys.executable, "-I", "-B", "-c", guard + CHILD_HEAD + "print(%s)" % expr + tail],
                               capture_output=True, text=True, timeout=timeout).stdout.strip()
+
+    class Park:
+        """A started thread parks at a chosen point (park()) until the test releases it. No wait has a deadline,
+        each is on a signal that every path sets (a 10 s bound once decided verdicts under load, and a thread
+        delayed past it changed the result): the thread signals when it parks AND when its target ends, so
+        reached() returns at once, true only for a park; release(), called in the test's finally, sets resume
+        and joins the released thread, which runs to its end. A hang is no worse than under a bounded join: a
+        non-daemon thread still alive keeps the interpreter from exiting either way. The main thread never
+        parks (it would wait on itself), so park() refuses there."""
+
+        def __init__(self):
+            self.parked, self.signal, self.resume = threading.Event(), threading.Event(), threading.Event()
+
+        def start(self, name, target):
+            for e in (self.parked, self.signal, self.resume):
+                e.clear()
+
+            def run():
+                try:
+                    target()
+                finally:
+                    self.signal.set()  # ended: reached() returns now, false unless it parked first
+            t = threading.Thread(name=name, target=run)
+            t.start()
+            return t
+
+        def park(self):
+            if threading.current_thread() is threading.main_thread():
+                raise AssertionError("only a started thread parks")
+            self.parked.set()
+            self.signal.set()
+            self.resume.wait()
+
+        def reached(self):
+            self.signal.wait()
+            return self.parked.is_set()
+
+        def release(self, thread):
+            self.resume.set()
+            thread.join()
 
     # A timing verdict compares the same code with itself on the same host, never with a wall-clock figure (a
     # 2.0 s ceiling in a sibling hook's self-test failed at 2.53 s on a slower CI runner). A GROWTH check times,
@@ -3075,23 +3143,33 @@ def _self_test():
             os.mkfifo(fifo)
             out = in_subprocess("(m.lease_start(%r), m.evaluate({'transcript_path':%r,'last_assistant_message':"
                                 "'[2099-01-01T00:00Z] x'}, datetime.datetime.now(UTC), None, %r) is not None)"
-                                % (fifo, fifo, self.sdir), timeout=HANG_TIMEOUT, fifos=[fifo])  # the hang guard
+                                % (fifo, fifo, self.sdir), timeout=HANG_TIMEOUT, guarded=True)  # the hang guard
             self.assertEqual(out.splitlines(), ["(None, True)", "[]"])  # FIFO_GUARD refused no open
 
         def test_fifo_guard_refuses_every_blocking_opener(self):
             # the guard's vector: each opener in FIFO_OPENERS, without O_NONBLOCK, is refused and recorded at once
-            # (none blocks, so the hang guard is never reached); an O_NONBLOCK os.open passes and is not recorded
+            # (none blocks, so the hang guard is never reached); an O_NONBLOCK os.open passes and is not recorded.
+            # A reader and writer descriptor (keep) is held first, so no open can block even where the guard
+            # misses one: a missed opener returns, is counted short, and the test fails at once, never at the
+            # hang guard. A blocking open of a regular file through d stays allowed and unrecorded.
             fifo = os.path.join(self.tmp, "gfifo")
             os.mkfifo(fifo)
-            code = FIFO_GUARD % ([fifo],) + (
+            os.symlink(fifo, fifo + ".sym")
+            os.link(fifo, fifo + ".hard")
+            code = FIFO_GUARD + (
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "d = os.open(%r, os.O_RDONLY | os.O_DIRECTORY)\n"
                 "refused = 0\n"
                 "for opener in (%s,):\n"
                 "    try:\n"
-                "        opener(%r)\n"
+                "        got = opener(%r)\n"
                 "    except AssertionError:\n"
                 "        refused += 1\n"
+                "    else:\n"
+                "        os.close(got) if isinstance(got, int) else got.close()\n"
                 "os.close(os.open(%r, os.O_RDONLY | os.O_NONBLOCK))\n"
-                "print(refused, len(_blocking))\n") % (", ".join(FIFO_OPENERS), fifo, fifo)
+                "os.close(os.open('plain', os.O_RDONLY | os.O_CREAT, 0o600, dir_fd=d))\n"
+                "print(refused, len(_blocking))\n") % (fifo, self.tmp, ", ".join(FIFO_OPENERS), fifo, fifo)
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
                                timeout=HANG_TIMEOUT)  # the hang guard
             self.assertEqual(r.stdout.split(), [str(len(FIFO_OPENERS))] * 2, r.stderr)
@@ -3445,20 +3523,34 @@ def _self_test():
             for bad in (None, "", os.path.join(self.tmp, "absent.jsonl"), self.tmp, 42):
                 self.assertIsNone(transcript_start(bad), bad)
             # end to end through main(): the id-only lease plus the payload transcript gives the footer a start
-            # main() reads the real clock, so the transcript start is taken relative to it
+            # main() reads the real clock, so the transcript start is taken relative to it; the expected true
+            # elapsed comes from the clock reading main() itself handed to evaluate (recorded there), never from a
+            # window the run must finish within
             self.write([self.user("go", datetime.datetime.now(UTC) - datetime.timedelta(hours=2, minutes=5))])
             p = json.dumps({"transcript_path": self.tr, "last_assistant_message": "done (session: 9h 0m)"})
-            rc, out = run_main(p, {"AIQT_LEASE_FILE": self.lease(ids)})
+            real_evaluate, seen = evaluate, []
+
+            def recording_evaluate(*a, **k):
+                seen.append(a[1:3])  # main's (now, start)
+                return real_evaluate(*a, **k)
+            globals()["evaluate"] = recording_evaluate
+            try:
+                rc, out = run_main(p, {"AIQT_LEASE_FILE": self.lease(ids)})
+            finally:
+                globals()["evaluate"] = real_evaluate
             r = json.loads(out)["reason"]
             self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `(session: 9h 0m)`"), r)
-            self.assertIn(", true 02:0", r)
+            start = transcript_start(self.tr)
+            self.assertIsNotNone(start)
+            self.assertEqual([got for _now, got in seen], [start])  # the transcript fallback gave the start
+            self.assertIn(", true %s;" % fmt_elapsed_us(to_us(seen[0][0]) - to_us(start)), r)
 
         def test_r13_fifo_transcript_does_not_block(self):
             fifo = os.path.join(self.tmp, "tfifo")
             os.mkfifo(fifo)
             lease = self.lease("**Active-session:** sess-2026-09-23-opus55-r1\n")
             self.assertEqual(in_subprocess("(m.transcript_start(%r), m.lease_start(%r, %r))" % (fifo, lease, fifo),
-                                           timeout=HANG_TIMEOUT, fifos=[fifo]).splitlines(),
+                                           timeout=HANG_TIMEOUT, guarded=True).splitlines(),
                              ["(None, None)", "[]"])  # the hang guard; FIFO_GUARD refused no open
 
         def test_r13_inactive_lease_stays_unknown(self):
@@ -3977,12 +4069,11 @@ def _self_test():
             bad = "[2026-09-23T20:00Z] heartbeat"
             self.write([self.user("go"), self.asst(bad)])
             self.assertTrue(self.ev(last_assistant_message=bad).startswith(BLOCK_PREFIX))  # counter 1
-            real_save, paused, resume = save_state, threading.Event(), threading.Event()
+            real_save, park = save_state, Park()
 
             def parking_save(*a, **k):  # A parks after loading the counter, before saving it
                 if threading.current_thread().name == "A":
-                    paused.set()
-                    resume.wait(10)
+                    park.park()
                 return real_save(*a, **k)
 
             def counter():
@@ -3994,25 +4085,21 @@ def _self_test():
             globals()["save_state"] = parking_save
             try:
                 for _ in range(8):
-                    paused.clear()
-                    resume.clear()
                     out = {"notes": []}
 
                     def run_a(out=out):
                         out["r"] = evaluate({"transcript_path": self.tr, "stop_hook_active": True,
                                              "last_assistant_message": "Done."}, self.now, self.start, self.sdir,
                                             out["notes"])
-                    a = threading.Thread(name="A", target=run_a)
-                    a.start()
+                    a = park.start("A", run_a)
                     try:
-                        self.assertTrue(paused.wait(10))  # A has loaded the counter (and holds the lock)
+                        self.assertTrue(park.reached())  # A has loaded the counter (and holds the lock)
                         notes = []
                         r = evaluate({"transcript_path": self.tr, "stop_hook_active": True,
                                       "last_assistant_message": bad}, self.now, self.start, self.sdir, notes)
                         b_kinds.append("block" if r else notes[0] if notes else "pass")
                     finally:
-                        resume.set()
-                        a.join(10)
+                        park.release(a)
                     self.assertFalse(a.is_alive())
                     self.assertEqual((out.get("r"), out["notes"]), (None, []))  # A's clean pass, unaffected
                     counters.append(counter())
@@ -4059,7 +4146,7 @@ def _self_test():
                     self.assertEqual(f.read(), before)  # no state change, the counter included
             finally:
                 holder.stdin.close()
-                holder.wait(10)
+                holder.wait(timeout=HANG_TIMEOUT)  # it exits at its stdin's end: the hang guard only
                 holder.stdout.close()
             self.assertTrue(self.ev(last_assistant_message=bad).startswith(BLOCK_PREFIX))  # the lock is released
 
@@ -4187,12 +4274,11 @@ def _self_test():
             bad = "[2026-09-23T20:00Z] heartbeat"
             self.write([self.user("go"), self.asst(bad)])
             self.assertTrue(self.ev(last_assistant_message=bad).startswith(BLOCK_PREFIX))  # counter 1
-            real_save, paused, resume = save_state, threading.Event(), threading.Event()
+            real_save, park = save_state, Park()
 
             def parking_save(*a, **k):
                 if threading.current_thread().name == "A":
-                    paused.set()
-                    resume.wait(10)
+                    park.park()
                 return real_save(*a, **k)
 
             def counter():
@@ -4208,18 +4294,15 @@ def _self_test():
             globals()["save_state"] = parking_save
             try:
                 for i in range(n):
-                    paused.clear()
-                    resume.clear()
                     out = {"notes": []}
 
                     def run_a(out=out):
                         out["r"] = evaluate({"transcript_path": self.tr, "stop_hook_active": True,
                                              "last_assistant_message": "Done."}, self.now, self.start, self.sdir,
                                             out["notes"])
-                    a = threading.Thread(name="A", target=run_a)
-                    a.start()
+                    a = park.start("A", run_a)
                     try:
-                        self.assertTrue(paused.wait(10), (mode, i))  # A is past its final re-read
+                        self.assertTrue(park.reached(), (mode, i))  # A is past its final re-read
                         if mode == "unlink-lock":
                             for x in os.listdir(self.sdir):
                                 if x.endswith(".lock"):
@@ -4241,8 +4324,7 @@ def _self_test():
                         b_kinds.append(kind(r, notes))
                         active_blocks += bool(r)
                     finally:
-                        resume.set()
-                        a.join(10)
+                        park.release(a)
                     self.assertFalse(a.is_alive())
                     self.assertEqual((out.get("r"), out["notes"]), (None, []), (mode, i))  # A's clean pass
                     counters.append(counter())
@@ -4298,24 +4380,23 @@ def _self_test():
             bad = "[2026-09-23T20:00Z] heartbeat"
             self.write([self.user("go"), self.asst(bad)])
             self.assertTrue(self.ev(last_assistant_message=bad).startswith(BLOCK_PREFIX))
-            real_save, paused, resume, got = save_state, threading.Event(), threading.Event(), {}
+            real_save, park, got = save_state, Park(), {}
 
             def parking_save(*a, **k):
-                paused.set()
-                resume.wait(10)
+                park.park()
                 got["saved"] = real_save(*a, **k)
                 return got["saved"]
             globals()["save_state"] = parking_save
-            a = threading.Thread(target=lambda: got.setdefault("r", evaluate(
-                {"transcript_path": self.tr, "stop_hook_active": True, "last_assistant_message": bad},
-                self.now, self.start, self.sdir, got.setdefault("notes", []))))
+            a = None
             try:
-                a.start()
-                self.assertTrue(paused.wait(10))
+                a = park.start("A", lambda: got.setdefault("r", evaluate(
+                    {"transcript_path": self.tr, "stop_hook_active": True, "last_assistant_message": bad},
+                    self.now, self.start, self.sdir, got.setdefault("notes", []))))
+                self.assertTrue(park.reached())
                 shutil.rmtree(self.sdir)
             finally:
-                resume.set()
-                a.join(10)
+                if a is not None:
+                    park.release(a)
                 globals()["save_state"] = real_save
             self.assertIs(got["saved"], False)
             self.assertIsNone(got["r"])  # its block could not be recorded, so it failed open
@@ -4391,21 +4472,19 @@ def _self_test():
             tr1 = self.tr
             self.write([self.user("go"), self.asst(bad)])
             tr2 = self.tr
-            real_save, paused, resume = save_state, threading.Event(), threading.Event()
+            real_save, park = save_state, Park()
 
             def parking_save(*a, **k):  # A (transcript 1) parks inside its evaluation, holding its lock
                 if threading.current_thread().name == "A":
-                    paused.set()
-                    resume.wait(10)
+                    park.park()
                 return real_save(*a, **k)
             globals()["save_state"] = parking_save
-            out = {"notes": []}
-            a = threading.Thread(name="A", target=lambda: out.setdefault("r", evaluate(
-                {"transcript_path": tr1, "last_assistant_message": bad}, self.now, self.start, self.sdir,
-                out["notes"])))
+            out, a = {"notes": []}, None
             try:
-                a.start()
-                self.assertTrue(paused.wait(10))
+                a = park.start("A", lambda: out.setdefault("r", evaluate(
+                    {"transcript_path": tr1, "last_assistant_message": bad}, self.now, self.start, self.sdir,
+                    out["notes"])))
+                self.assertTrue(park.reached())
                 # a Stop of ANOTHER transcript is evaluated (it blocks), never skipped as busy
                 notes = []
                 r = evaluate({"transcript_path": tr2, "last_assistant_message": bad}, self.now, self.start,
@@ -4418,8 +4497,8 @@ def _self_test():
                                            self.start, self.sdir, notes))
                 self.assertIn("holds the state lock", notes[0])
             finally:
-                resume.set()
-                a.join(10)
+                if a is not None:
+                    park.release(a)
                 globals()["save_state"] = real_save
             self.assertFalse(a.is_alive())
             self.assertTrue(out["r"].startswith(BLOCK_PREFIX))
@@ -4446,7 +4525,7 @@ def _self_test():
                             self.assertTrue(r and r.startswith(BLOCK_PREFIX), (held, tp, r, notes))
                 finally:
                     holder.stdin.close()
-                    holder.wait(10)
+                    holder.wait(timeout=HANG_TIMEOUT)  # it exits at its stdin's end: the hang guard only
                     holder.stdout.close()
 
         def test_r30_prune_state_policy(self):
@@ -4878,7 +4957,8 @@ def _self_test():
             # a Stop that pruned past a whole window hung. The cursor is now written only through an exclusively
             # created regular temporary renamed over it. Run in a SUBPROCESS with a hard deadline, so a regression
             # fails the test instead of hanging the suite. A FIFO at the state file, and a directory at the
-            # cursor, are exercised too; no temporary file is ever left behind.
+            # cursor, are exercised too; no temporary file is ever left behind. FIFO_GUARD fails a blocking open
+            # of either FIFO at once, the descriptor-relative opens the production code makes included.
             child = (
                 "import datetime, hashlib, importlib.util, json, os, stat, sys, time\n"
                 "spec = importlib.util.spec_from_file_location('sts32', sys.argv[1])\n"
@@ -4912,8 +4992,10 @@ def _self_test():
                 "assert stat.S_ISREG(os.lstat(st).st_mode)\n"
                 "left = [n for d in (sdir, sub) for n in os.listdir(d) if n.endswith('.tmp')]\n"
                 "assert not left, left\n"
+                "assert not _blocking, _blocking  # FIFO_GUARD refused no open\n"
                 "print('R32-OK')\n")
-            p = subprocess.run([sys.executable, "-I", "-B", "-c", child, os.path.abspath(__file__), self.tmp],
+            p = subprocess.run([sys.executable, "-I", "-B", "-c", FIFO_GUARD + child, os.path.abspath(__file__),
+                                self.tmp],
                                capture_output=True, text=True, timeout=HANG_TIMEOUT)
             self.assertEqual((p.returncode, p.stdout.strip()), (0, "R32-OK"), p.stderr[-2000:])
             src = " ".join(inspect.getsource(_write_prune_cursor).split())
@@ -4946,17 +5028,66 @@ def _self_test():
                               "clock_gettime")]
                 found += [("from time import", n.lineno) for n in ast.walk(tree)
                           if isinstance(n, ast.ImportFrom) and n.module == "time"]
+                names = numbers(tree)
+                found += [(what, n.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                          for what in [positional_deadline(n, names)] if what]
                 return sorted(found, key=lambda item: item[1])
+
+            def numeric(v, names):  # a number literal, a name bound to one, or arithmetic over them
+                if isinstance(v, ast.UnaryOp):
+                    return numeric(v.operand, names)
+                if isinstance(v, ast.BinOp):
+                    return numeric(v.left, names) and numeric(v.right, names)
+                return (isinstance(v, ast.Constant) and type(v.value) in (int, float)) or (
+                    isinstance(v, ast.Name) and v.id in names)
+
+            def numbers(tree):
+                return {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign) and numeric(n.value, ())
+                        for t in n.targets if isinstance(t, ast.Name)}
+
+            def positional_deadline(call, names):
+                # a deadline passed by position, which the keyword scan above cannot see (QA: `paused.wait(10)`,
+                # `a.join(10)`, `holder.wait(10)` decided verdicts): the timeout slot of a wait, wait_for, result,
+                # exception or communicate (Event, Condition, Popen, Future) holding anything but HANG_TIMEOUT; a
+                # join given a number (a str or path join is never given one); a Lock acquire or Queue get whose
+                # first argument is a bool (their (block, timeout) form; a dict get takes a key); the timeout of
+                # select.select; and a timer (threading.Timer, signal.alarm, signal.setitimer)
+                f = call.func
+                name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+                if name in ("Timer", "alarm", "setitimer"):
+                    return name
+                slot = {"wait": 0, "wait_for": 1, "result": 0, "exception": 0, "communicate": 1, "join": 0,
+                        "acquire": 1, "get": 1, "select": 3}.get(name)
+                if slot is None or len(call.args) <= slot or not isinstance(f, ast.Attribute):
+                    return None
+                arg = call.args[slot]
+                if isinstance(arg, ast.Name) and arg.id in ("HANG_TIMEOUT", "timeout"):
+                    return None
+                if name == "join" and (not numeric(arg, names) or isinstance(f.value, ast.Constant)):
+                    return None
+                if name in ("acquire", "get") and not (isinstance(call.args[0], ast.Constant)
+                                                       and type(call.args[0].value) is bool):
+                    return None
+                return "positional " + name
 
             self.assertEqual(leftover(inspect.getsource(_self_test)), [])
             bad = ("def f():\n    subprocess.run(c, timeout=5)\n    p.wait(timeout=2.5)\n    t = time.monotonic()\n"
                    "    time.sleep(1)\n    import time as tm\n    tm.perf_counter_ns()\n"
                    "    from time import process_time\n    time.tzset()\n    run(c, timeout=HANG_TIMEOUT)\n"
                    "    t = time.time_ns()\n    time.clock_gettime(1)\n"
-                   "    s = 'time.sleep(60)'\n")
+                   "    s = 'time.sleep(60)'\n"
+                   "    paused.wait(10)\n    a.join(10)\n    holder.wait(2.5)\n    cv.wait_for(ok, 5)\n"
+                   "    q.get(True, 5)\n    lk.acquire(True, 1)\n    p.communicate(b'', 3)\n    n = 7\n"
+                   "    t.join(n)\n    ', '.join(parts)\n    os.path.join(a, b)\n    d.get('k', 0)\n    '-'.join(n * 2)\n"
+                   "    s.join([x] * n)\n"
+                   "    ev.wait()\n    ev.wait(HANG_TIMEOUT)\n    p.wait(timeout=HANG_TIMEOUT)\n"
+                   "    threading.Timer(1, f)\n    signal.alarm(3)\n    select.select(r, [], [], 0.5)\n")
             self.assertEqual([what for what, _line in leftover(bad)],
                              ["timeout", "timeout", "time.monotonic", "time.sleep", "time.perf_counter_ns",
-                              "from time import", "time.clock_gettime"])
+                              "from time import", "time.clock_gettime", "positional wait", "positional join",
+                              "positional wait", "positional wait_for", "positional get", "positional acquire",
+                              "positional communicate", "positional join", "Timer", "alarm",
+                              "positional select"])
 
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
         HANG_GUARD_TESTS = ()

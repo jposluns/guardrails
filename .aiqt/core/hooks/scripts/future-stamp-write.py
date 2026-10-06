@@ -3575,21 +3575,49 @@ def _self_test():
         return {k: v for k, v in os.environ.items() if not k.startswith("MALLOC_") and k != "GLIBC_TUNABLES"}
 
     # The FIFO guard for a child: an audit hook (the `open` event fires for os.open, the builtin open, io.open
-    # and io.FileIO alike) refuses every open of a listed FIFO without O_NONBLOCK and records it in _blocking,
-    # so a blocking open fails the test at once, even where a fail-open handler swallows the refusal, and no
-    # opener can bypass it; the child's timeout stays a hang guard only. Paths compare absolute.
+    # and io.FileIO alike) refuses every open without O_NONBLOCK of a path that names a FIFO, and records it in
+    # _blocking, so a blocking open fails the test at once, even where a fail-open handler swallows the refusal;
+    # the child's timeout stays a hang guard only. A path is resolved by os.stat, which follows symlinks, so an
+    # alias (a symlink, a hard link, a `//` or `..` spelling, a PathLike) names the same FIFO. The event does not
+    # carry os.open's dir_fd (the openat form), so a relative path is resolved from the working directory AND
+    # from every open directory descriptor: a descriptor-relative open of a FIFO is refused too (conservatively,
+    # a relative name that some other open directory resolves to a FIFO is refused as well: a false failure,
+    # never a false pass). Every FIFO is guarded, one the child creates after the guard is installed included.
+    # Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes).
     FIFO_GUARD = (
-        "import os, sys\n"
-        "_fifos, _blocking = [os.path.abspath(p) for p in %r], []\n"
+        "import os, stat, sys\n"
+        "_blocking = []\n"
+        "def _names_fifo(path):\n"
+        "    bases = [None]\n"
+        "    if not os.path.isabs(path):\n"
+        "        try:\n"
+        "            bases += [int(fd) for fd in os.listdir('/dev/fd')]\n"
+        "        except (OSError, ValueError):\n"
+        "            bases += list(range(3, 1024))\n"
+        "    for fd in bases:\n"
+        "        try:\n"
+        "            if stat.S_ISFIFO(os.stat(path, dir_fd=fd).st_mode):\n"
+        "                return True\n"
+        "        except (OSError, ValueError, TypeError):\n"
+        "            pass\n"
+        "    return False\n"
         "def _fifo_guard(event, args):\n"
-        "    if event == 'open' and isinstance(args[0], (str, bytes)) and isinstance(args[2], int) and \\\n"
-        "            os.path.abspath(os.fsdecode(args[0])) in _fifos and not args[2] & os.O_NONBLOCK:\n"
+        "    if event != 'open' or not isinstance(args[2], int) or args[2] & os.O_NONBLOCK:\n"
+        "        return\n"
+        "    path = os.fspath(args[0]) if isinstance(args[0], os.PathLike) else args[0]\n"
+        "    if isinstance(path, (str, bytes)) and _names_fifo(path):\n"
         "        _blocking.append(args[0])\n"
-        "        raise AssertionError('a FIFO opened without O_NONBLOCK: %%r' %% (args,))\n"
+        "        raise AssertionError('a FIFO opened without O_NONBLOCK: %r' % (args,))\n"
         "sys.addaudithook(_fifo_guard)\n")
-    # every opener the guard covers, each tried once on the FIFO in a child (the guard's own vector)
+    # every opener and path spelling the guard covers, each tried once on the FIFO p in a child (the guard's own
+    # vector), with d an open descriptor of p's directory, and p + '.sym' and p + '.hard' a symlink and a hard
+    # link to p
     FIFO_OPENERS = ("lambda p: os.open(p, os.O_RDONLY)", "lambda p: open(p, 'rb')",
-                    "lambda p: __import__('io').open(p, 'rb')", "lambda p: __import__('io').FileIO(p, 'r')")
+                    "lambda p: __import__('io').open(p, 'rb')", "lambda p: __import__('io').FileIO(p, 'r')",
+                    "lambda p: os.open(os.path.basename(p), os.O_RDONLY, dir_fd=d)",
+                    "lambda p: os.open(p + '.sym', os.O_RDONLY)", "lambda p: open(p + '.hard', 'rb')",
+                    "lambda p: os.open('/' + p, os.O_RDONLY)", "lambda p: open(os.path.relpath(p), 'rb')",
+                    "lambda p: os.open(__import__('pathlib').Path(p), os.O_RDONLY)")
 
     # the ten r7 command shapes of bash_writes and the date_spans shape, each a maker of size k: shared by the
     # operation-count check and the small-size CPU-scaling check
@@ -3773,7 +3801,7 @@ def _self_test():
             # guard only
             fifo = os.path.join(self.tmp, "fifo")
             os.mkfifo(fifo)
-            code = FIFO_GUARD % ([fifo],) + (
+            code = FIFO_GUARD + (
                 "import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                 "s.loader.exec_module(m);print(repr(m.read_existing(%r, 10)));print(repr(_blocking))"
                 % (os.path.abspath(__file__), fifo))
@@ -3783,18 +3811,28 @@ def _self_test():
 
         def test_fifo_guard_refuses_every_blocking_opener(self):
             # the guard's vector: each opener in FIFO_OPENERS, without O_NONBLOCK, is refused and recorded at once
-            # (none blocks, so the hang guard is never reached); an O_NONBLOCK os.open passes and is not recorded
+            # (none blocks, so the hang guard is never reached); an O_NONBLOCK os.open passes and is not recorded.
+            # A reader and writer descriptor (keep) is held first, so no open can block even where the guard
+            # misses one: a missed opener returns, is counted short, and the test fails at once, never at the
+            # hang guard. A blocking open of a regular file through d stays allowed and unrecorded.
             fifo = os.path.join(self.tmp, "gfifo")
             os.mkfifo(fifo)
-            code = FIFO_GUARD % ([fifo],) + (
+            os.symlink(fifo, fifo + ".sym")
+            os.link(fifo, fifo + ".hard")
+            code = FIFO_GUARD + (
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "d = os.open(%r, os.O_RDONLY | os.O_DIRECTORY)\n"
                 "refused = 0\n"
                 "for opener in (%s,):\n"
                 "    try:\n"
-                "        opener(%r)\n"
+                "        got = opener(%r)\n"
                 "    except AssertionError:\n"
                 "        refused += 1\n"
+                "    else:\n"
+                "        os.close(got) if isinstance(got, int) else got.close()\n"
                 "os.close(os.open(%r, os.O_RDONLY | os.O_NONBLOCK))\n"
-                "print(refused, len(_blocking))\n") % (", ".join(FIFO_OPENERS), fifo, fifo)
+                "os.close(os.open('plain', os.O_RDONLY | os.O_CREAT, 0o600, dir_fd=d))\n"
+                "print(refused, len(_blocking))\n") % (fifo, self.tmp, ", ".join(FIFO_OPENERS), fifo, fifo)
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
                                timeout=HANG_TIMEOUT)  # the hang guard
             self.assertEqual(r.stdout.split(), [str(len(FIFO_OPENERS))] * 2, r.stderr)
@@ -5356,7 +5394,7 @@ def _self_test():
                 for lit in news:
                     self.assertEqual(lit in held, lit in old, (old, lit))
             self.assertEqual(max(len(lit) for lit in news), LITERAL_MAX_LEN)
-            code = TIMED_PRELUDE + (
+            code = FIFO_GUARD + TIMED_PRELUDE + (  # FIFO_GUARD: the Edit target's FIFO is never opened blocking
                 "fifo = %r\n"
                 "os.mkfifo(fifo)\n"
                 "os.environ['AIQT_STORE_ROOT'] = os.path.dirname(fifo)\n"
@@ -5368,7 +5406,9 @@ def _self_test():
                 "    got = m.evaluate({'tool_name': 'Edit', 'tool_input': {'file_path': fifo, 'old_string': old,"
                 " 'new_string': new}}, now)\n"
                 "    assert len(got) == n, len(got)\n"
-                "print(json.dumps(ratio(4000, run)))\n") % os.path.join(self.tmp, "fifo")
+                "res = ratio(4000, run)\n"
+                "assert not _blocking, _blocking\n"
+                "print(json.dumps(res))\n") % os.path.join(self.tmp, "fifo")
             small, large = run_timed(code, HANG_TIMEOUT)
             # N to GROWTH * N (up to the former 32,000): about 1 when linear, about GROWTH when quadratic
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
@@ -6405,17 +6445,67 @@ def _self_test():
                               "clock_gettime")]
                 found += [("from time import", n.lineno) for n in ast.walk(tree)
                           if isinstance(n, ast.ImportFrom) and n.module == "time"]
+                names = numbers(tree)
+                found += [(what, n.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                          for what in [positional_deadline(n, names)] if what]
                 return sorted(found, key=lambda item: item[1])
+
+            def numeric(v, names):  # a number literal, a name bound to one, or arithmetic over them
+                if isinstance(v, ast.UnaryOp):
+                    return numeric(v.operand, names)
+                if isinstance(v, ast.BinOp):
+                    return numeric(v.left, names) and numeric(v.right, names)
+                return (isinstance(v, ast.Constant) and type(v.value) in (int, float)) or (
+                    isinstance(v, ast.Name) and v.id in names)
+
+            def numbers(tree):
+                return {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign) and numeric(n.value, ())
+                        for t in n.targets if isinstance(t, ast.Name)}
+
+            def positional_deadline(call, names):
+                # a deadline passed by position, which the keyword scan above cannot see (QA: `paused.wait(10)`,
+                # `a.join(10)`, `holder.wait(10)` decided verdicts in the sibling stamp-truth-stop.py): the
+                # timeout slot of a wait, wait_for, result, exception or communicate (Event, Condition, Popen,
+                # Future) holding anything but HANG_TIMEOUT; a join given a number (a str or path join is never
+                # given one); a Lock acquire or Queue get whose first argument is a bool (their (block, timeout)
+                # form; a dict get takes a key); the timeout of select.select; and a timer (threading.Timer,
+                # signal.alarm, signal.setitimer)
+                f = call.func
+                name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+                if name in ("Timer", "alarm", "setitimer"):
+                    return name
+                slot = {"wait": 0, "wait_for": 1, "result": 0, "exception": 0, "communicate": 1, "join": 0,
+                        "acquire": 1, "get": 1, "select": 3}.get(name)
+                if slot is None or len(call.args) <= slot or not isinstance(f, ast.Attribute):
+                    return None
+                arg = call.args[slot]
+                if isinstance(arg, ast.Name) and arg.id in ("HANG_TIMEOUT", "timeout"):
+                    return None
+                if name == "join" and (not numeric(arg, names) or isinstance(f.value, ast.Constant)):
+                    return None
+                if name in ("acquire", "get") and not (isinstance(call.args[0], ast.Constant)
+                                                       and type(call.args[0].value) is bool):
+                    return None
+                return "positional " + name
 
             self.assertEqual(leftover(inspect.getsource(_self_test)), [])
             bad = ("def f():\n    subprocess.run(c, timeout=5)\n    p.wait(timeout=2.5)\n    t = time.monotonic()\n"
                    "    time.sleep(1)\n    import time as tm\n    tm.perf_counter_ns()\n"
                    "    from time import process_time\n    time.tzset()\n    run(c, timeout=HANG_TIMEOUT)\n"
                    "    t = time.time_ns()\n    time.clock_gettime(1)\n"
-                   "    s = 'time.sleep(60)'\n")
+                   "    s = 'time.sleep(60)'\n"
+                   "    paused.wait(10)\n    a.join(10)\n    holder.wait(2.5)\n    cv.wait_for(ok, 5)\n"
+                   "    q.get(True, 5)\n    lk.acquire(True, 1)\n    p.communicate(b'', 3)\n    n = 7\n"
+                   "    t.join(n)\n    ', '.join(parts)\n    os.path.join(a, b)\n    d.get('k', 0)\n    '-'.join(n * 2)\n"
+                   "    s.join([x] * n)\n"
+                   "    ev.wait()\n    ev.wait(HANG_TIMEOUT)\n    p.wait(timeout=HANG_TIMEOUT)\n"
+                   "    threading.Timer(1, f)\n    signal.alarm(3)\n    select.select(r, [], [], 0.5)\n")
             self.assertEqual([what for what, _line in leftover(bad)],
                              ["timeout", "timeout", "time.monotonic", "time.sleep", "time.perf_counter_ns",
-                              "from time import", "time.clock_gettime"])
+                              "from time import", "time.clock_gettime", "positional wait", "positional join",
+                              "positional wait", "positional wait_for", "positional get", "positional acquire",
+                              "positional communicate", "positional join", "Timer", "alarm",
+                              "positional select"])
 
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
         HANG_GUARD_TESTS = ()
