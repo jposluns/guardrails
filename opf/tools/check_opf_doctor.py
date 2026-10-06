@@ -2805,7 +2805,7 @@ def _claude_hook_self_test():
                 "checkout-index", "worktree", "sparse-checkout", "bisect", "submodule",
                 "update-index", "merge-recursive", "merge-resolve", "merge-octopus",
                 "merge-subtree", "merge-index", "merge-one-file", "filter-branch", "rerere",
-                "quiltimport")
+                "quiltimport", "subtree")
             expect("bash-r15-worktree-name-list-matches-hook", sorted(worktree_names),
                    sorted(hook_mod.GIT_WORKTREE_SUBCOMMANDS))
             for name in worktree_names:
@@ -2940,6 +2940,37 @@ def _claude_hook_self_test():
                     fh.write(hook_text.replace(site, flip))
                 deny("bash-r19-grep-" + label + "-mutant-denies",
                      payload("Bash", dict(command=cmd), root), "product root", via=mhook)
+            # ROUND 20 (round-19 fixer note): git subtree add, merge and pull, and split or push
+            # with --rejoin, write the work tree, and split without --rejoin still writes
+            # $GIT_DIR/subtree-cache, commit objects and (-b) a branch (git 2.53 git-subtree), so
+            # every subtree form denies in a bound product and, plain or not, takes the unbound
+            # repository-top check in the synthetic pack repository. On the pin a4df217b every
+            # plain bound vector and every pack-repository vector below ALLOWED, except that the
+            # dashed and -c bound vectors (not plain) already denied by the product-root rule and
+            # merge-semicolon-true already denied on its merge word.
+            for label, cmd in (("add", "git subtree add --prefix=vendor ../other main"),
+                               ("merge", "git subtree merge --prefix=vendor main"),
+                               ("pull", "git subtree pull --prefix=vendor ../other main"),
+                               ("split-rejoin", "git subtree split --prefix=docs --rejoin"),
+                               ("rejoin-first", "git subtree --rejoin split --prefix=docs"),
+                               ("push-rejoin", "git subtree push --prefix=docs ../o main --rejoin"),
+                               ("split", "git subtree split --prefix=docs"),
+                               ("split-branch", "git subtree split --prefix=docs -b side"),
+                               ("bare", "git subtree")):
+                deny("bash-r20-git-subtree-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), src_dir), "rewrites the working tree")
+            for label, cmd in (("dashed", "/usr/lib/git-core/git-subtree add --prefix=v r m"),
+                               ("c-override", "git -c core.abbrev=7 subtree add --prefix=v r m")):
+                deny("bash-r20-git-subtree-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), root), "product root")
+            for label, cmd in (("add", "git subtree add --prefix=vendor ../other main"),
+                               ("split", "git subtree split --prefix=docs"),
+                               ("dir-override-pull", "git -C . subtree pull --prefix=v r m"),
+                               ("dashed-add", "/usr/lib/git-core/git-subtree add --prefix=v r m"),
+                               ("merge-semicolon-true", "git subtree merge --prefix=v m; true")):
+                deny("bash-r20-pack-repo-subtree-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
             notes = os.path.join(root, "notes.txt")
             deny("multiedit-r11-nested-path-field-denied",
                  payload("MultiEdit", dict(file_path=notes, edits=[dict(

@@ -655,12 +655,17 @@ GIT_FLAG_GLOBALS = frozenset(("--no-pager", "-P", "--no-optional-locks", "--lite
 # conflicted file) and quiltimport (applies patches to the work tree). bisect, submodule and
 # filter-branch run code and so are never plain: the coarse rule applies the same unbound
 # repository-top check to them (_exotic_bash_rule).
+# Round 20 adds subtree, with NO read form: in the git 2.53 git-subtree script add, merge and pull
+# (and split or push with --rejoin, a word read anywhere before a lone --) run git read-tree,
+# git checkout or git merge on the work tree, and split without --rejoin still deletes and
+# recreates $GIT_DIR/subtree-cache/<pid>, writes commit objects and, with -b, updates a branch, so
+# every git subtree form denies in a bound product (git subtree -h included: disclosed).
 GIT_WORKTREE_SUBCOMMANDS = frozenset((
     "checkout", "restore", "reset", "clean", "stash", "switch", "merge", "pull", "rebase",
     "cherry-pick", "revert", "am", "apply", "rm", "mv", "read-tree", "checkout-index", "worktree",
     "sparse-checkout", "bisect", "submodule", "update-index", "merge-recursive", "merge-resolve",
     "merge-octopus", "merge-subtree", "merge-index", "merge-one-file", "filter-branch", "rerere",
-    "quiltimport"))
+    "quiltimport", "subtree"))
 # The read forms of git submodule (round 13): the first word after any -q or --quiet is exactly one
 # of these. Every other form (the bare command and --cached included) is a work-tree rewrite.
 GIT_SUBMODULE_READ = frozenset(("status", "summary"))
