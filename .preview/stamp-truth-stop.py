@@ -230,8 +230,11 @@ interpreter older than Python 3.14 that can start the hook: the guard at the top
 writes one line beginning `error: stamp-truth-stop.py requires Python 3.14 or newer` to stderr and exits 1,
 which the Stop event treats as a non-blocking error, so the stop goes ahead unchecked. It does not exit 2: on
 a Stop exit 2 blocks, and the guard runs before the BLOCK CAP, so every stop would be blocked with no cap. An
-older interpreter that cannot start the hook never reaches the guard and fails with Python's own error first,
-so this exit 1 does not hold for it; .preview/README.md (Installing a hook, step 4) describes those cases.
+older interpreter that cannot start the hook never reaches the guard and fails with Python's own error first:
+one that predates the -I option exits 2, which blocks every stop with no cap, and one that accepts -I but
+cannot compile this file (Python 3.4 and 3.5 cannot: it uses f-strings) exits 1, a non-blocking error, so the
+stop goes ahead unchecked, as with the guard; .preview/README.md (Installing a hook, step 4) describes those
+cases.
 
 MESSAGES (round 33; round 34; round 35; round 36; round 37). Every message is ONE physical line: no newline
 and no carriage return. The block reason's CORE is never shortened and never dropped: BLOCK_PREFIX unchanged

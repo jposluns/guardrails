@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0eef58152fb71fc7b06fa5f1cd217da14b2b78201d3e73c2b23221745d367cbe"
+tree-sha256 = "36345a450d4932054a38d8543bcc9866bea0b7330a51f75563c584dc83164f5e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2251,13 +2251,13 @@ sha256 = "100ac19dceab9be4d4278453b880deba79a043839323cdf13d154cba0c8cdea1"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 24690
-sha256 = "142f5c873e0838b9fdd8845b8a51fe170d94cd470c010f491ff8bcdb767248fd"
+bytes = 24835
+sha256 = "8f1f28e89d5fa524217a0707697d2a723dee9eaa805ec55f6fc3b95afa202980"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 636
-sha256 = "1738f727a8d3d02f87c1cadc654313ce26aa92ea81a47b39f90ae1cf8ea68ba7"
+sha256 = "cc41db0f2d6636c08ed988b3acb6d261616c8fe0080cd7cefe436092ec797b01"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -2266,28 +2266,28 @@ sha256 = "ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930"
 
 [[sources]]
 path = ".preview/future-stamp-write.py"
-bytes = 422721
-sha256 = "ef77dd879701dfbaad1e4bc883bc727473a3538b57bed6538cf7da315b76e72d"
+bytes = 422943
+sha256 = "0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c"
 
 [[sources]]
 path = ".preview/record-remove-check.py"
-bytes = 175749
-sha256 = "65823cc971b01678695962c999233196985eb528eaffe3e1c5b4d2d355fe95e8"
+bytes = 175932
+sha256 = "c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 327090
-sha256 = "d8661041e04252cf812a3dc3a2639a11bfefd23a8062fcc7351b38cf4a3f57ef"
+bytes = 327315
+sha256 = "2082902a85d93a098df43a8adfe6b8a3dd0e4917e66d75bb8cc2e0e481f9dd04"
 
 [[sources]]
 path = ".preview/unbounded-wait.py"
-bytes = 113346
-sha256 = "7498431b9c94f3cdc91b4389500f80517a6b894fb992216d60cf4cf526e4d58b"
+bytes = 113533
+sha256 = "482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc"
 
 [[sources]]
 path = ".preview/ungated-record.py"
-bytes = 128768
-sha256 = "a744149afd8d22aa6318a3835d178ba3a2bcbba89a91989687e824a508e8b470"
+bytes = 128955
+sha256 = "04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8"
 
 [[sources]]
 path = "AGENTS.md"

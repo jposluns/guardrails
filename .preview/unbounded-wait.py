@@ -73,8 +73,10 @@ THREAT MODEL
     of this file reads no input, writes one line beginning
     `error: unbounded-wait.py requires Python 3.14 or newer` to stderr and exits 2, which PreToolUse treats as
     a deny, so every Bash call is denied until Python is upgraded or the hook's entry is removed. An older
-    interpreter that cannot start the hook never reaches the guard and fails with Python's own error first, so
-    this deny does not hold for it; .preview/README.md (Installing a hook, step 4) describes those cases.
+    interpreter that cannot start the hook never reaches the guard and fails with Python's own error first. For
+    this hook that is only one that predates the -I option, and it exits 2, which still denies every Bash call:
+    this file uses no syntax newer than Python 3.4, so any interpreter that accepts -I reaches the guard.
+    .preview/README.md (Installing a hook, step 4) describes those cases.
     The hook also stays silent for a verification worker process (a worker kill-switch variable; legacy spellings
     are also honoured), for a payload carrying agent_id (a subagent's call), for a tool_name other than Bash, for an
     event other than PreToolUse, for any argv other than the plain hook call or exactly `--self-test` (answered

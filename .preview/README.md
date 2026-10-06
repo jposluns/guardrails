@@ -73,11 +73,11 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
-| `future-stamp-write.py` | `ef77dd879701dfbaad1e4bc883bc727473a3538b57bed6538cf7da315b76e72d` | [future-stamp-write.py](future-stamp-write.py) |
-| `record-remove-check.py` | `65823cc971b01678695962c999233196985eb528eaffe3e1c5b4d2d355fe95e8` | [record-remove-check.py](record-remove-check.py) |
-| `stamp-truth-stop.py` | `d8661041e04252cf812a3dc3a2639a11bfefd23a8062fcc7351b38cf4a3f57ef` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `7498431b9c94f3cdc91b4389500f80517a6b894fb992216d60cf4cf526e4d58b` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `a744149afd8d22aa6318a3835d178ba3a2bcbba89a91989687e824a508e8b470` | [ungated-record.py](ungated-record.py) |
+| `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
+| `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
+| `stamp-truth-stop.py` | `2082902a85d93a098df43a8adfe6b8a3dd0e4917e66d75bb8cc2e0e481f9dd04` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -156,10 +156,11 @@ fails and report it; do not work around a failed check.
      a `REGISTRATION` constant; use this same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
-     on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer,
-     which step 3 checks. On an older interpreter that can start the hook, each hook reads no input,
-     writes one line beginning `error: <file> requires Python 3.14 or newer` to standard error, and
-     exits.
+     on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer.
+     Step 3 checks the installing shell's `python3`, which can differ from the one on Claude Code's
+     `PATH`; each hook also checks its own interpreter when it starts. On an older interpreter that can
+     start the hook, each hook reads no input, writes one line beginning
+     `error: <file> requires Python 3.14 or newer` to standard error, and exits.
      Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
      `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
      assistant and nothing is blocked; for the four `PreToolUse` hooks the exit is 2 and every matching

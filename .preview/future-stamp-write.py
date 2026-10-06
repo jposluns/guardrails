@@ -322,9 +322,11 @@ exception is an interpreter older than Python 3.14 that can start the hook: the 
 reads no input, writes one line beginning `error: future-stamp-write.py requires Python 3.14 or newer` to
 stderr and exits 2, which PreToolUse treats as a deny, so every matching Write, Edit, MultiEdit and Bash call
 is denied until Python is upgraded or the hook's entry is removed. An older interpreter that cannot start the
-hook never reaches the guard and fails with Python's own error first, so this deny does not hold for it;
-.preview/README.md (Installing a hook, step 4) describes those cases. The payload is read as BYTES and parsed
-by json.loads, so its decoding does not depend on the process locale. An
+hook never reaches the guard and fails with Python's own error first: one that predates the -I option exits
+2, which still denies every matching call, and one that accepts -I but cannot compile this file (Python 3.4
+and 3.5 cannot: it uses f-strings) exits 1, a non-blocking error, so every matching call is allowed
+unchecked; .preview/README.md (Installing a hook, step 4) describes those cases. The payload is read as
+BYTES and parsed by json.loads, so its decoding does not depend on the process locale. An
 error writing the deny (a closed or full stdout) also fails open (round 24): it is swallowed and the hook
 exits 0; if the stream cannot even be pointed at /dev/null, the hook ends at once with os._exit(0), so no
 exit-time flush can fail it. Kill-switch: a subordinate worker process, detected as env AIQT_HOOKS_WORKER=1

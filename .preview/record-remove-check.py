@@ -118,8 +118,9 @@ THREAT MODEL
     `error: record-remove-check.py requires Python 3.14 or newer` to stderr and exits 2, which PreToolUse
     treats as a deny, so every Bash call is denied until Python is upgraded or the hook's entry is removed. An
     older interpreter that cannot start the hook never reaches the guard and fails with Python's own error
-    first, so this deny does not hold for it; .preview/README.md (Installing a hook, step 4) describes those
-    cases.
+    first. For this hook that is only one that predates the -I option, and it exits 2, which still denies
+    every Bash call: this file uses no syntax newer than Python 3.4, so any interpreter that accepts -I
+    reaches the guard. .preview/README.md (Installing a hook, step 4) describes those cases.
     The hook also stays silent for a verification worker
     process (AIQT_HOOKS_WORKER set to "1"; or the legacy names, ORCH_WORKER set to "1" or ORCH_VERIFY_OWNER
     present at all, even empty), for a tool_name other than Bash, for an event other than PreToolUse, for a
