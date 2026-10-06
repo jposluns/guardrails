@@ -913,563 +913,190 @@ def _main_isolated(report_path=None):
                 os.environ.pop(_rr, None)
             else:
                 os.environ[_rr] = _rr_old
-        # HERE-DOCUMENT BODIES ARE DATA (adopter reproducers H1-H11; the former over-refusal residual is
-        # withdrawn): the lines after a <<WORD / <<-WORD operator up to the terminator line, quoted or
-        # unquoted delimiter, several here-documents per command, are read as data, so neither quote
-        # balancing nor '&' detection sees them. Each H-case below DENIED at the pre-fix pin (an
-        # "unbalanced" or "detach" misread of body prose) and must ALLOW now.
-        check("trunc/fg-h1-heredoc-apostrophe-commit-allows",
-              _verdict(bg("git commit -F - <<'EOF'\nDon't vendor the SDK; pin it.\nEOF", rib=False)),
-              "allow")
-        check("trunc/fg-h2-heredoc-amp-body-allows",
-              _verdict(bg("gh pr create --title t --body-file - <<'EOF'\nRe-pin A & B\nEOF", rib=False)),
-              "allow")
-        check("trunc/fg-h3-heredoc-apostrophe-file-allows",
-              _verdict(bg("cat > /tmp/brief.md <<'EOF'\nthe worker's deliverable\nEOF", rib=False)),
-              "allow")
-        check("trunc/fg-h4-heredoc-amp-python-allows",
-              _verdict(bg("python3 - <<'PY'\nmask = GENERATED & {1,2}\nPY", rib=False)), "allow")
-        check("trunc/fg-h5-commit-template-quoted-amp-allows",
-              _verdict(bg("git commit -m \"$(cat <<'EOF'\nRe-pin \"A & B\" to main\nEOF\n)\"",
-                          rib=False)), "allow")
-        check("trunc/fg-h7-unquoted-delim-apostrophe-allows",
-              _verdict(bg("cat <<EOF > /tmp/x.txt\nit's $HOME\nEOF", rib=False)), "allow")
-        check("trunc/fg-h10-stdin-brief-amp-apostrophe-allows",
-              _verdict(bg("orch-send <<BRIEF\nthe operator's plan & the fallback\nBRIEF", rib=False)),
-              "allow")
-        check("trunc/fg-h11-pr-comment-apostrophe-allows",
-              _verdict(bg("gh pr comment 2701 --body-file - <<'EOF'\nWe don't merge unpinned refs.\nEOF",
-                          rib=False)), "allow")
-        check("trunc/fg-heredoc-amp-body-allows",
-              _verdict(bg("cat > f <<'EOF'\nFix A & B\nEOF", rib=False)), "allow")
-        check("trunc/fg-heredoc-dash-tabbed-body-allows",
-              _verdict(bg("cat <<-EOF\n\tit's & indented\n\tEOF", rib=False)), "allow")
-        check("trunc/fg-commit-template-amp-allows",
-              _verdict(bg("git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\"", rib=False)), "allow")
-        # ARITHMETIC IS READ AS ON MAIN (QA round 4): an '&' in $((...)) or ((...)) is scanned as a detach,
-        # the disclosed over-refusal, and a '<<' inside it is never a here-document (a left shift).
-        check("trunc/fg-arith-bitwise-and-overrefusal-denies",
-              _verdict(bg("echo $((3 & 1))", rib=False)), "deny")
-        check("trunc/fg-arith-left-shift-allows", _verdict(bg("echo $((1<<2))", rib=False)), "allow")
-        # QA round 3 reproductions: a $(...) or backtick substitution nested in arithmetic runs (bash 5.3
-        # printed each marker on stderr). Each still denies, now as a plain detach.
-        check("trunc/fg-heredoc-arith-cmdsub-detach-denies",
-              _verdict(bg("cat <<EOF\n$(( $(printf DETACHED >&2 & wait; printf 0) ))\nEOF", rib=False)),
-              "deny")
-        check("trunc/fg-arith-command-cmdsub-detach-denies",
-              _verdict(bg("(( $(printf DETACHED >&2 & wait; printf 1) ))", rib=False)), "deny")
-        for name, cmd in (
-                ("trunc/scan-arith-backtick-detach-kind", "echo $(( `printf X >&2 & wait; printf 0` ))"),
-                ("trunc/scan-dq-arith-cmdsub-detach-kind",
-                 "echo \"$(( $(printf X >&2 & wait; printf 0) ))\""),
-                ("trunc/scan-nested-arith-cmdsub-detach-kind",
-                 "echo $(( 1 + $(( $(printf X >&2 & wait; printf 0) )) ))"),
-                ("trunc/scan-arith-subshell-cmdsub-detach-kind",
-                 "echo $(( 1 + $((printf X >&2 & wait); printf 0) ))")):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "detach")
-        # In an unquoted body a `$((` is off the `$` allowlist (QA round 9) and denies unread.
-        check("trunc/scan-heredoc-subshell-cmdsub-unread-kind",
-              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n$((printf X >&2 & wait); printf 0)\nEOF"),
-              "body-substitution-unread")
-        # QA round 4 BLOCKERS: '((' inside parameter-expansion text was read as an arithmetic opener and
-        # hid a real detach (ALLOWED at 7a767a4a; bash 5.3 printed DETACHED), and a <<$(x) delimiter was
-        # recorded as "$" so the lines through a later "$" line were hidden. Arithmetic skipping is removed
-        # and only a SIMPLE delimiter word opens a here-document, so each denies.
-        for name, cmd in (
-                ("trunc/scan-r4-paramexp-arith-opener-detach-kind",
-                 "unset x; echo ${x:-((}; printf DETACHED >&2 & wait # ))"),
-                ("trunc/scan-r4-heredoc-paramexp-arith-opener-detach-kind",
-                 "unset x; cat <<EOF\n$(echo ${x:-((}; printf DETACHED >&2 & wait # ))\n)\nEOF"),
-                ("trunc/scan-r4-cmdsub-delim-detach-kind",
-                 "cat <<$(x)\ndata\n$(x)\nprintf DETACHED >&2 & wait\ncat <<'END'\n$\nEND"),
-                # A '<<' that bash reads as a left shift, a subscript, or expansion text never opens a
-                # here-document once the scan meets a construct whose nesting it does not track, so the
-                # lines after it stay code (each was ALLOWED at 7a767a4a or would be with arithmetic
-                # skipping removed; bash 5.3 printed DETACHED for each).
-                ("trunc/scan-subscript-shift-detach-kind",
-                 "a[1<<2 ]=x\nprintf DETACHED >&2 & wait\n2"),
-                ("trunc/scan-dollar-bracket-shift-detach-kind",
-                 "echo $[1<<2 ]\nprintf DETACHED >&2 & wait\n2"),
-                ("trunc/scan-arith-command-shift-detach-kind",
-                 "(( x = 1<<2 ))\nprintf DETACHED >&2 & wait\n2"),
-                ("trunc/scan-paramexp-heredoc-text-detach-kind",
-                 "echo ${x:-<<EOF }\nprintf DETACHED >&2 & wait\nEOF"),
-                ("trunc/scan-backtick-heredoc-detach-kind",
-                 "echo `cat <<EOF` ; printf DETACHED >&2 & wait\nEOF"),
-                ("trunc/scan-dq-nested-quote-heredoc-text-detach-kind",
-                 "echo \"${x:-\"<<EOF \"}\"\nprintf DETACHED >&2 & wait\nEOF"),
-                # An unquoted body's $(...) whose end the walk cannot read exactly (a ')' inside a
-                # parameter expansion, a case pattern) is scanned as code to the end of the body; a detach
-                # that scan finds is reported as one (else cannot-evaluate, QA round 7 below).
-                ("trunc/scan-heredoc-paramexp-paren-detach-kind",
-                 "cat <<EOF\n$(echo ${x:-)}; printf DETACHED >&2 & wait)\nEOF"),
-                ("trunc/scan-heredoc-case-paren-detach-kind",
-                 "cat <<EOF\n$(case x in x) printf DETACHED >&2 & wait;; esac)\nEOF")):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "detach")
-        # QA round 4 MEDIUM: a safe <<$(x) here-document is not recognised (its delimiter word is not
-        # simple), so its body is scanned as code: a disclosed over-refusal in the deny direction.
-        check("trunc/fg-cmdsub-delim-safe-overrefusal-denies",
-              _verdict(bg("cat <<$(x)\nA & B\n$(x)", rib=False)), "deny")
-        # Simple delimiter words: letters, digits, underscore, optionally wrapped whole in quotes.
-        check("trunc/fg-simple-delim-underscore-digit-allows",
-              _verdict(bg("cat <<END_1\nx & y\nEND_1", rib=False)), "allow")
-        check("trunc/fg-double-quoted-delim-allows",
-              _verdict(bg("cat <<\"EOF\"\nit's A & B\nEOF", rib=False)), "allow")
-        check("trunc/fg-dq-dirname-nested-quotes-allows",
-              _verdict(bg("cd \"$(dirname \"${BASH_SOURCE[0]}\")\"", rib=False)), "allow")
-        # CLOSING THE HERE-DOCUMENT QUOTE-SHIFT FALSE-ALLOW (manifest case 5): body quotes no longer flip
-        # the scan's quote state, so a real bare '&' AFTER a here-document is seen. The two-heredoc form
-        # was a SILENT ALLOW at the pre-fix pin (the body apostrophes rebalanced the scan around the real
-        # detach); the trailing form denied there only via the unbalanced misread and must stay denied
-        # now, as a seen detach.
-        check("trunc/fg-detach-between-heredocs-denies",
-              _verdict(bg("cat <<'A'\nuser's\nA\nsleep 5 & cat <<'B'\nuser's\nB", rib=False)), "deny")
-        check("trunc/fg-detach-after-heredoc-denies",
-              _verdict(bg("cat <<'EOF' > /tmp/x\nthe user's file\nEOF\nsleep 100 &", rib=False)), "deny")
-        check("trunc/scan-detach-after-heredoc-kind",
-              aiqt_hooks._orch_foreground_detach_kind(
-                  "cat <<'EOF' > /tmp/x\nthe user's file\nEOF\nsleep 100 &"), "detach")
-        # An unquoted-delimiter body still runs $(...) and backtick substitutions: a real detach inside
-        # one stays caught, never silently re-allowed by the body-as-data fix.
-        check("trunc/fg-heredoc-cmdsub-detach-denies",
-              _verdict(bg("cat <<EOF\n$(job &)\nEOF", rib=False)), "deny")
-        check("trunc/fg-heredoc-backtick-detach-denies",
-              _verdict(bg("cat <<EOF\n`job &`\nEOF", rib=False)), "deny")
-        # An UNTERMINATED here-document fails toward the deny with a reason naming it (bash 5.3 warns that
-        # it was delimited by end-of-file and runs the command; the scan does not model that). At the
-        # pre-fix pin this was a SILENT ALLOW when the body shifted no quotes.
-        ut = bg("cat <<'EOF'\nno terminator", rib=False)
-        ut_reason = (ut[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
-        check("trunc/fg-unterminated-heredoc-reason",
-              (_verdict(ut), "terminator" in ut_reason, "detaches a child" in ut_reason),
-              ("deny", True, False))
-        # Here-string vs here-document (BLOCKER 1): a run of three or more `<` is a here-string operator
-        # (`<<<`), never a here-document, so the word after it stays CODE. At the pre-fix pin the scanner
-        # rejected `<<` at the FIRST `<` of `<<<`, then re-recognised `<<` at the second and parsed the
-        # here-string word as a bogus here-document delimiter, swallowing the following lines as body: a real
-        # detach after `cat <<<:` was HIDDEN (silent allow), and a safe `cat <<<'hello'` read as an
-        # unterminated here-document (over-deny). Recognising the whole `<` run first corrects both.
-        check("trunc/fg-herestring-detach-denies",
-              _verdict(bg("cat <<<:\nprintf 'child\\n' &\nwait\n:", rib=False)), "deny")
-        check("trunc/scan-herestring-colon-detach",
-              aiqt_hooks._orch_foreground_detach("cat <<<:\nsleep 100 &"), True)
-        check("trunc/scan-herestring-colon-kind",
-              aiqt_hooks._orch_foreground_detach_kind("cat <<<:\nsleep 100 &"), "detach")
-        check("trunc/fg-herestring-safe-allows", _verdict(bg("cat <<<'hello'", rib=False)), "allow")
-        check("trunc/scan-herestring-safe-not-detach",
-              aiqt_hooks._orch_foreground_detach("cat <<<'hello'"), False)
-        check("trunc/scan-herestring-word-then-detach",
-              aiqt_hooks._orch_foreground_detach("cat <<<hello &"), True)
-        # Backslash in an UNQUOTED here-document body (QA round 1 BLOCKER 2 and QA round 2 BLOCKERS 1-2):
-        # bash removes backslash-newline continuations in such a body, with an outcome that depends on how
-        # many backslashes precede the newline, so a continuation can move the terminator line (`EN\<nl>D`
-        # ends at `END`, while `\\<nl>EOF` keeps EOF a separate line) or join `$\<nl>(` into a
-        # substitution opener. The round-1 join emulation got both wrong at 9c310c2c (an escaped backslash
-        # was joined, hiding the real terminator and a later detach; the joined text chose the terminator
-        # while the substitution scan read physical text): SILENT ALLOWS. The emulation is withdrawn: an
-        # unquoted body holding ANY backslash is not read as data, the rest of the command is scanned as
-        # code, and the call DENIES (the disclosed over-refusal UNQUOTED HERE-DOCUMENT BODY WITH A
-        # BACKSLASH), so a safe body with a backslash denies too, with a reason naming the backslash. A
-        # QUOTED delimiter's body is literal and unchanged.
+        # HERE-DOCUMENT DATA ALLOWANCE (QA round 12: never worse than main, by construction). The scan is
+        # main's, unchanged; a deny of it becomes an allow ONLY when _orch_heredoc_data_proven proves the
+        # whole command safe. Each H-case and commit-message form below DENIES under main's scan (or is
+        # allowed by it already) and must ALLOW through the guard.
         def _why(result):
             return (result[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
-        check("trunc/fg-heredoc-bsnl-join-detach-denies",
-              _verdict(bg("cat <<END\nEN\\\nD\nsleep 100 &\nEND", rib=False)), "deny")
-        check("trunc/scan-heredoc-bsnl-body-detach-kind",
-              aiqt_hooks._orch_foreground_detach_kind("cat <<END\nEN\\\nD\nsleep 100 &\nEND"), "detach")
-        # Allowed at 9c310c2c (joined `EO\<nl>F` read as the terminator); a disclosed deny now.
-        bsnl_safe = bg("cat <<EOF\nEO\\\nF", rib=False)
-        check("trunc/fg-heredoc-bsnl-safe-backslash-denies",
-              (_verdict(bsnl_safe), "holds a backslash" in _why(bsnl_safe)), ("deny", True))
-        check("trunc/scan-quoted-delim-no-bsnl-join",
-              aiqt_hooks._orch_foreground_detach_kind("cat <<'END'\nEN\\\nD\nsleep 100 &"), "unterminated")
-        # QA round 2 BLOCKER 1: an escaped backslash before a newline (two or four backslashes) does not
-        # continue the line, so the physical EOF line ends the body and the detach after it runs. ALLOWED
-        # at 9c310c2c (scan None); denies now as a seen detach.
-        esc_bs = "EOF() { :; }\ncat <<EOF\n\\\\\nEOF\nprintf DETACHED &\nwait\nEOF"
-        check("trunc/fg-heredoc-escaped-bs-detach-denies", _verdict(bg(esc_bs, rib=False)), "deny")
-        check("trunc/scan-heredoc-escaped-bs-detach-kind",
-              aiqt_hooks._orch_foreground_detach_kind(esc_bs), "detach")
-        check("trunc/scan-heredoc-four-bs-detach-kind",
-              aiqt_hooks._orch_foreground_detach_kind(
-                  "EOF() { :; }\ncat <<EOF\n\\\\\\\\\nEOF\nprintf DETACHED &\nwait\nEOF"), "detach")
-        # Its safe counterpart: denied at 9c310c2c as "unterminated" (a misread); a disclosed deny now,
-        # with the backslash reason.
-        esc_safe = bg("cat <<EOF\n\\\\\nEOF", rib=False)
-        check("trunc/fg-heredoc-escaped-bs-safe-denies",
-              (_verdict(esc_safe), "holds a backslash" in _why(esc_safe)), ("deny", True))
-        check("trunc/scan-heredoc-escaped-bs-safe-kind",
-              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n\\\\\nEOF"), "body-backslash")
-        # QA round 2 BLOCKER 2: `$\<nl>(` joins into a command substitution that bash runs. ALLOWED at
-        # 9c310c2c (scan None); denies now. Its safe counterpart (no detach inside) was ALLOWED at
-        # 9c310c2c and is a disclosed deny now.
-        check("trunc/fg-heredoc-continued-cmdsub-detach-denies",
-              _verdict(bg("cat <<EOF\n$\\\n(printf DETACHED & wait)\nEOF", rib=False)), "deny")
-        check("trunc/scan-heredoc-continued-cmdsub-detach-kind",
-              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n$\\\n(printf DETACHED & wait)\nEOF"),
-              "detach")
-        cont_safe = bg("cat <<EOF\n$\\\n(printf SAFE)\nEOF", rib=False)
-        check("trunc/fg-heredoc-continued-cmdsub-safe-denies",
-              (_verdict(cont_safe), "holds a backslash" in _why(cont_safe)), ("deny", True))
-        # Unchanged controls: a QUOTED delimiter's body with backslashes is literal data and allows; the
-        # structural end finder for a `$(...)` inside double quotes gives up (-1) on an unquoted body
-        # holding a backslash instead of predicting its end, so a detach after the real span stays seen.
-        check("trunc/fg-quoted-heredoc-backslash-body-allows",
-              _verdict(bg("cat <<'EOF'\nC:\\path & \\\\\nEOF", rib=False)), "allow")
-        check("trunc/cmdsub-end-unquoted-backslash-body-unclosed",
-              aiqt_hooks._orch_cmdsub_end("$(cat <<EOF\nEO\\\nF\n)", 2, 19)[0], -1)
-        check("trunc/fg-dq-cmdsub-backslash-body-detach-denies",
-              _verdict(bg("x=\"$(cat <<EOF\nEO\\\nF\n)\"; sleep 1 &\nEOF\n)\"", rib=False)), "deny")
-        # QA round 3 MEDIUM: a double-quoted $(...) the structural reader cannot close used to fall back to
-        # a character scan that stayed inside the balanced outer double quotes and ALLOWED (both forms at
-        # ec85f8b0; bash ran the detach). It now DENIES with a reason naming the unclosed substitution.
         for name, cmd in (
-                ("trunc/fg-dq-cmdsub-continued-detach-denies",
-                 "x=\"$(cat <<EOF\n$\\\n(printf DETACHED >&2 & wait)\nEOF\n)\""),
-                ("trunc/fg-dq-cmdsub-escaped-bs-detach-denies",
-                 "x=\"$(cat <<EOF\n\\\\\nEOF\nprintf DETACHED >&2 &\nwait\n)\"")):
-            res = bg(cmd, rib=False)
-            check(name, (_verdict(res), "cannot close" in _why(res),
-                         aiqt_hooks._orch_foreground_detach_kind(cmd)),
-                  ("deny", True, "unclosed-substitution"))
-        # The safe double-quoted form with a backslash under an UNQUOTED delimiter is a disclosed deny;
-        # the same body under a quoted delimiter is literal and still allows.
-        check("trunc/fg-dq-cmdsub-unquoted-bs-safe-denies",
-              _verdict(bg("git commit -m \"$(cat <<EOF\nC:\\path\nEOF\n)\"", rib=False)), "deny")
-        check("trunc/fg-dq-cmdsub-quoted-bs-safe-allows",
-              _verdict(bg("git commit -m \"$(cat <<'EOF'\nC:\\path\nEOF\n)\"", rib=False)), "allow")
-        # Delimiter words that are not simple (QA round 5 scope reduction): an ANSI-C $'...' word, an
-        # escaped word, partial quoting, or a quoted word carrying a control byte is NOT read as a
-        # here-document, so the lines after it are scanned as code. A safe body there is a disclosed
-        # over-refusal; a detach after it, or one in a body bash ends elsewhere, denies.
+                ("trunc/fg-h1-heredoc-apostrophe-commit-allows",
+                 "git commit -F - <<'EOF'\nDon't vendor the SDK; pin it.\nEOF"),
+                ("trunc/fg-h2-heredoc-amp-body-allows", "gh pr create --title t --body-file - <<'EOF'\nRe-pin A & B\nEOF"),
+                ("trunc/fg-h3-heredoc-apostrophe-file-allows", "cat > /tmp/brief.md <<'EOF'\nthe worker's deliverable\nEOF"),
+                ("trunc/fg-h4-heredoc-amp-python-allows", "python3 - <<'PY'\nmask = GENERATED & {1,2}\nPY"),
+                ("trunc/fg-h5-commit-template-quoted-amp-allows",
+                 "git commit -m \"$(cat <<'EOF'\nRe-pin \"A & B\" to main\nEOF\n)\""),
+                ("trunc/fg-h7-unquoted-delim-apostrophe-allows", "cat <<EOF > /tmp/x.txt\nit's $HOME\nEOF"),
+                ("trunc/fg-h10-stdin-brief-amp-apostrophe-allows",
+                 "orch-send <<BRIEF\nthe operator's plan & the fallback\nBRIEF"),
+                ("trunc/fg-h11-pr-comment-apostrophe-allows",
+                 "gh pr comment 2701 --body-file - <<'EOF'\nWe don't merge unpinned refs.\nEOF"),
+                ("trunc/fg-heredoc-amp-body-allows", "cat > f <<'EOF'\nFix A & B\nEOF"),
+                ("trunc/fg-heredoc-dash-tabbed-body-allows", "cat <<-EOF\n\tit's & indented\n\tEOF"),
+                ("trunc/fg-commit-template-amp-allows", "git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\""),
+                ("trunc/fg-commit-form-apostrophe-allows",
+                 "git commit -m \"$(cat <<'EOF'\nFix A & B, the user's file\nEOF\n)\""),
+                ("trunc/fg-commit-form-unquoted-delim-allows",
+                 "git add -A && git commit -m \"$(cat <<EOF\nFix A & B, it's $HOME\nEOF\n)\""),
+                ("trunc/fg-commit-form-two-messages-allows",
+                 "git commit -m \"$(cat <<'EOF'\na\nEOF\n)\" -m \"$(cat <<'EOF'\nb's \"q\" & c\nEOF\n)\""),
+                ("trunc/fg-double-quoted-delim-allows", "cat <<\"EOF\"\nit's A & B\nEOF"),
+                ("trunc/fg-simple-delim-underscore-digit-allows", "cat <<END_1\nx & y\nEND_1"),
+                ("trunc/fg-quoted-heredoc-backslash-body-allows", "cat <<'EOF'\nC:\\path & \\\\\nEOF"),
+                ("trunc/fg-heredoc-redirect-and-chain-allows",
+                 "cat <<'EOF' 2>&1 >> /tmp/n.md && wc -l /tmp/n.md\nit's A & B\nEOF")):
+            check(name, _verdict(bg(cmd, rib=False)), "allow")
+        # The H-cases that main's scan DENIES are allowed only through the allowance (proven True).
+        check("trunc/heredoc-allowance-h-cases-proven", [aiqt_hooks._orch_heredoc_data_proven(c) for c in (
+            "git commit -F - <<'EOF'\nDon't vendor the SDK; pin it.\nEOF",
+            "python3 - <<'PY'\nmask = GENERATED & {1,2}\nPY",
+            "git commit -m \"$(cat <<'EOF'\nRe-pin \"A & B\" to main\nEOF\n)\"")], [True, True, True])
+        check("trunc/heredoc-allowance-main-denies-h-cases", [aiqt_hooks._orch_foreground_detach_kind(c) for c in (
+            "git commit -F - <<'EOF'\nDon't vendor the SDK; pin it.\nEOF",
+            "python3 - <<'PY'\nmask = GENERATED & {1,2}\nPY")], ["unbalanced", "detach"])
+        # NEVER WORSE THAN MAIN: every codex reproduction of QA rounds 1 to 11 that main's scan DENIES is
+        # outside the allowance, so the guard keeps main's verdict (deny). Each was an allow at some round.
+        r_job = "printf CHILD; true & echo PID=$!; wait"
         for name, cmd in (
-                ("trunc/scan-ansic-delim-safe-overrefusal-kind", "cat <<$'E\\x4fF'\nA & B\nEOF"),
-                ("trunc/scan-escaped-delim-safe-overrefusal-kind", "cat <<\\EOF\nA & B\nEOF"),
-                ("trunc/scan-partial-quoted-delim-safe-overrefusal-kind", "cat <<E'OF'\nA & B\nEOF"),
-                ("trunc/scan-ansic-delim-decoded-then-detach", "cat <<$'E\\x4fF'\nA\nEOF\nsleep 100 &"),
-                ("trunc/scan-ansic-delim-nul-fails-closed", "cat <<$'E\\0F'\nA & B\nE"),
-                ("trunc/scan-quoted-delim-ctlesc-fails-closed",
-                 "cat <<'E\x01F'\nE\x01\x01F\nsleep 100 &\nE\x01F")):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "detach")
-        # QA round 6 MAJOR: a double-quoted $(...) holding a here-document was skipped whole to its closing
-        # paren, so a bare '&' outside the body but inside the span was never judged (each ALLOWED at
-        # 4e3e66ea; the body-quote form DENIED on main; bash 5.3 printed DETACHED). The span's inner text is
-        # now scanned by the same scan (bodies data, everything else code), so each denies as a detach while
-        # the commit-message forms (H5 and the amp form above) still allow.
-        dq_hd_detach = "echo \"$(cat <<'EOF'\n\"\nEOF\nprintf DETACHED >&2 &\nwait\n)\""
+                ("trunc/fg-r1-herestring-detach-denies", "cat <<<:\nprintf 'child\\n' &\nwait\n:"),
+                ("trunc/fg-r1-bsnl-join-detach-denies", "cat <<END\nEN\\\nD\nsleep 100 &\nEND"),
+                ("trunc/fg-r1-ansic-delim-detach-denies", "cat <<$'E\\x4fF'\nA\nEOF\nsleep 100 &"),
+                ("trunc/fg-r2-escaped-bs-detach-denies", "EOF() { :; }\ncat <<EOF\n\\\\\nEOF\nprintf DETACHED &\nwait\nEOF"),
+                ("trunc/fg-r2-continued-cmdsub-detach-denies", "cat <<EOF\n$\\\n(printf DETACHED & wait)\nEOF"),
+                ("trunc/fg-r3-heredoc-arith-cmdsub-detach-denies",
+                 "cat <<EOF\n$(( $(printf DETACHED >&2 & wait; printf 0) ))\nEOF"),
+                ("trunc/fg-r3-arith-command-cmdsub-detach-denies", "(( $(printf DETACHED >&2 & wait; printf 1) ))"),
+                ("trunc/fg-r4-paramexp-arith-opener-detach-denies",
+                 "unset x; echo ${x:-((}; printf DETACHED >&2 & wait # ))"),
+                ("trunc/fg-r4-heredoc-paramexp-arith-opener-detach-denies",
+                 "unset x; cat <<EOF\n$(echo ${x:-((}; printf DETACHED >&2 & wait # ))\n)\nEOF"),
+                ("trunc/fg-r4-cmdsub-delim-detach-denies",
+                 "cat <<$(x)\ndata\n$(x)\nprintf DETACHED >&2 & wait\ncat <<'END'\n$\nEND"),
+                ("trunc/fg-r5-dq-cmdsub-heredoc-detach-denies",
+                 "echo \"$(cat <<'EOF'\n\"\nEOF\nprintf DETACHED >&2 &\nwait\n)\""),
+                ("trunc/fg-r7-body-paramexp-span-quote-shift-denies",
+                 "cat <<EOF\n'\n$(echo ${x}) '\n$(printf DETACHED >&2 & wait)\n'\nEOF"),
+                ("trunc/fg-r8-body-backtick-dq-cmdsub-denies", "cat <<EOF\n\"\n`echo \"$(printf DETACHED & wait)\"`\n\"\nEOF"),
+                ("trunc/fg-r8-body-paren-comment-detach-denies", "cat <<EOF\n$( (true)# )\n" + r_job + "\n)\nEOF"),
+                ("trunc/fg-r9-body-funsub-denies", "cat <<EOF\n${ true & echo BG=$!; wait; }\nEOF"),
+                ("trunc/fg-r9-body-valsub-denies", "cat <<EOF\n${| true & REPLY=BG=$!; wait; }\nEOF"),
+                ("trunc/fg-r9-body-paramexp-funsub-denies", "cat <<EOF\nA ${x:-${ " + r_job + "; }} Z\nEOF"),
+                ("trunc/fg-r10-repro-denies", "cat <<'EOF'\nA & B\nEOF\necho \"$(" + r_job + ")\""),
+                ("trunc/fg-r10-dq-backtick-body-detach-denies", "cat <<'EOF'\nA & B\nEOF\necho \"`" + r_job + "`\""),
+                ("trunc/fg-r11-repro-denies", "cat <<'EOF'\nA & B\nEOF\necho ${x:- #} & echo CHILD=$!; wait"),
+                ("trunc/fg-r11-eval-quote-removal-denies", "cat <<'EOF'\nA & B\nEOF\ne'v'al 'sleep 1 &'"),
+                ("trunc/fg-r11-eval-backslash-denies", "cat <<'EOF'\nA & B\nEOF\n\\eval 'sleep 1 &'"),
+                ("trunc/fg-r11-brace-eval-denies", "cat <<'EOF'\nA & B\nEOF\n{e,}val 'sleep 1 &'"),
+                ("trunc/fg-r11-ansi-c-denies", "cat <<'EOF'\nA & B\nEOF\necho $'\\'' & job; echo '"),
+                ("trunc/fg-r11-arith-reread-denies", "cat <<'EOF'\nA & B\nEOF\nx='a[$(job & wait)]'; echo $((x))"),
+                # QA round 11 MAJOR reproductions (each ALLOWED at c9ebec27; bash 5.3.9 printed the child pid).
+                ("trunc/fg-r12-quoted-dot-sources-body-denies",
+                 "'.' /dev/stdin <<'EOF'\ntrue &\nprintf 'child=%s\\n' \"$!\"\nwait\nEOF"),
+                ("trunc/fg-r12-escaped-dot-sources-body-denies",
+                 "\\. /dev/stdin <<'EOF'\ntrue &\nprintf 'child=%s\\n' \"$!\"\nwait\nEOF"),
+                ("trunc/fg-r12-command-dot-sources-body-denies",
+                 "command . /dev/stdin <<'EOF'\ntrue &\nprintf 'child=%s\\n' \"$!\"\nwait\nEOF"),
+                ("trunc/fg-r12-continued-eval-denies",
+                 "cat <<'EOF'\nA & B\nEOF\ne\\\nval 'true &'\nprintf 'child=%s\\n' \"$!\"\nwait"),
+                ("trunc/fg-r12-command-expansion-word-denies",
+                 "cat <<'EOF'\nA & B\nEOF\nc=ev; command ${c}al 'true &'\nprintf 'child=%s\\n' \"$!\"\nwait")):
+            check(name, (aiqt_hooks._orch_foreground_detach_kind(cmd) is not None,
+                         aiqt_hooks._orch_heredoc_data_proven(cmd), _verdict(bg(cmd, rib=False))),
+                  (True, False, "deny"))
+        # Each allowance rule, one vector apiece: main's scan denies each (the body '&' or apostrophe) and
+        # the allowance does not apply, so the guard keeps main's deny, never a new allow.
+        r12_body = "<<'EOF'\nA & it's\nEOF"
         for name, cmd in (
-                ("trunc/scan-r6-dq-cmdsub-heredoc-body-quote-detach-kind", dq_hd_detach),
-                ("trunc/scan-r6-dq-cmdsub-heredoc-detach-kind",
-                 "echo \"$(cat <<'EOF'\nx\nEOF\nprintf DETACHED >&2 &\nwait\n)\""),
-                ("trunc/scan-r6-dq-cmdsub-unquoted-heredoc-detach-kind",
-                 "echo \"$(cat <<EOF\nx\nEOF\nprintf DETACHED >&2 &\nwait\n)\""),
-                ("trunc/scan-r6-dq-cmdsub-heredoc-same-line-detach-kind",
-                 "echo \"$(cat <<'EOF' & wait\nx\nEOF\n)\"")):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "detach")
-        check("trunc/fg-r6-dq-cmdsub-heredoc-detach-denies", _verdict(bg(dq_hd_detach, rib=False)), "deny")
-        check("trunc/fg-r6-dq-cmdsub-two-commit-messages-allows",
-              _verdict(bg("git commit -m \"$(cat <<'EOF'\na\nEOF\n)\" -m \"$(cat <<'EOF'\nb's\nEOF\n)\"",
-                          rib=False)), "allow")
-        # QA round 6 MEDIUM: a here-document operator the scan does not read as one (after an untracked
-        # construct such as ${x:-}, or under a delimiter word that is not simple), with a later line, had
-        # its body scanned as code, so two body apostrophes rebalanced the quote state around a real '&'
-        # (each ALLOWED on main and at 4e3e66ea, except the dropped-pending form, denied there only as an
-        # open quote; bash 5.3 printed DETACHED). Each now denies as cannot-evaluate.
+                # (a) the owner must be a bare listed data consumer, with no word before it.
+                ("trunc/heredoc-allowance-owner-shell-denies", "bash " + r12_body),
+                ("trunc/heredoc-allowance-owner-source-denies", "source /dev/stdin " + r12_body),
+                ("trunc/heredoc-allowance-owner-eval-denies", "eval \"$(cat)\" " + r12_body),
+                ("trunc/heredoc-allowance-owner-wrapper-denies", "command cat " + r12_body),
+                ("trunc/heredoc-allowance-owner-env-denies", "env cat " + r12_body),
+                ("trunc/heredoc-allowance-owner-quoted-denies", "'cat' " + r12_body),
+                ("trunc/heredoc-allowance-owner-path-denies", "/bin/cat " + r12_body),
+                ("trunc/heredoc-allowance-owner-sed-denies", "sed -f /dev/stdin x " + r12_body),
+                ("trunc/heredoc-allowance-owner-xargs-denies", "xargs -0 " + r12_body),
+                ("trunc/heredoc-allowance-owner-assign-denies", "X=1 cat " + r12_body),
+                ("trunc/heredoc-allowance-redirect-first-denies", "<<'EOF' cat\nA & it's\nEOF"),
+                # Every other command word must be listed too, so a later shell cannot run a written body.
+                ("trunc/heredoc-allowance-later-shell-denies", "cat > f.sh " + r12_body + "\nbash f.sh"),
+                ("trunc/heredoc-allowance-later-dot-denies", "cat > f.sh " + r12_body + "\n. ./f.sh"),
+                # A command that writes a file runs only programs that cannot run another program.
+                ("trunc/heredoc-allowance-writer-git-denies", "cat > .git/hooks/pre-commit " + r12_body + "\ngit commit -m x"),
+                ("trunc/heredoc-allowance-writer-python-denies", "cat > f.py " + r12_body + "\npython3 f.py"),
+                ("trunc/heredoc-allowance-tee-node-denies", "tee f.js " + r12_body + "\nnode f.js"),
+                # (b) outside text: no backslash, expansion other than a simple $NAME argument, brace,
+                # bracket, glob, comment, substitution, tab, or non-ASCII character.
+                ("trunc/heredoc-allowance-backslash-denies", "cat " + r12_body + "\necho a\\\nb"),
+                ("trunc/heredoc-allowance-brace-param-denies", "cat " + r12_body + "\necho ${HOME}"),
+                ("trunc/heredoc-allowance-dollar-command-word-denies", "cat " + r12_body + "\n$X a"),
+                ("trunc/heredoc-allowance-cmdsub-denies", "cat " + r12_body + "\necho $(date)"),
+                ("trunc/heredoc-allowance-backtick-denies", "cat " + r12_body + "\necho `date`"),
+                ("trunc/heredoc-allowance-bracket-denies", "cat " + r12_body + "\ntest -v 'a[0]'"),
+                ("trunc/heredoc-allowance-glob-denies", "cat " + r12_body + "\nls *.md"),
+                ("trunc/heredoc-allowance-comment-denies", "cat " + r12_body + "\necho a # note"),
+                ("trunc/heredoc-allowance-procsub-denies", "cat " + r12_body + "\ndiff <(ls) f"),
+                ("trunc/heredoc-allowance-tab-denies", "cat\t" + r12_body),
+                ("trunc/heredoc-allowance-ansi-c-denies", "cat " + r12_body + "\necho $'x'"),
+                ("trunc/heredoc-allowance-dq-dollar-command-denies", "cat " + r12_body + "\n\"$X\" a"),
+                # (c) no '&' outside the bodies except && and redirections, quoted or not.
+                ("trunc/heredoc-allowance-quoted-amp-denies", "cat " + r12_body + "\necho 'a & b'"),
+                ("trunc/heredoc-allowance-pipe-amp-denies", "cat " + r12_body + " |& cat"),
+                ("trunc/heredoc-allowance-bare-amp-denies", "cat " + r12_body + "\nsleep 1 &"),
+                # Bodies: an unquoted delimiter's body holds no backslash, backtick, or '$' but $NAME; no
+                # line but the terminator starts with the delimiter; every here-document is terminated.
+                ("trunc/heredoc-allowance-unquoted-body-cmdsub-denies", "cat <<EOF\nit's $(date) & x\nEOF"),
+                ("trunc/heredoc-allowance-unquoted-body-brace-denies", "cat <<EOF\nit's ${HOME} & x\nEOF"),
+                ("trunc/heredoc-allowance-unquoted-body-backslash-denies", "cat <<EOF\nit's \\ & x\nEOF"),
+                ("trunc/heredoc-allowance-delim-prefix-line-denies", "cat <<'EOF'\nEOF)\nit's & x\nEOF"),
+                ("trunc/heredoc-allowance-unterminated-denies", "cat <<'EOF'\nit's & x"),
+                ("trunc/heredoc-allowance-partial-delim-denies", "cat <<E'OF'\nit's & x\nEOF"),
+                ("trunc/heredoc-allowance-herestring-denies", "cat <<<'a' " + r12_body),
+                # The commit form must be exactly "$(cat <<DELIM\nbody\nDELIM\n)" as a whole argument.
+                ("trunc/heredoc-allowance-commit-extra-code-denies",
+                 "git commit -m \"$(cat <<'EOF'\nA \" & B\nEOF\ntrue\n)\""),
+                ("trunc/heredoc-allowance-commit-not-cat-denies",
+                 "git commit -m \"$(bash <<'EOF'\nA \" & B\nEOF\n)\""),
+                ("trunc/heredoc-allowance-commit-same-line-heredoc-denies",
+                 "git commit -m \"$(cat <<'EOF'\nA \" & B\nEOF\n)\" -F - <<'X'\nm\nX")):
+            check(name, (aiqt_hooks._orch_foreground_detach_kind(cmd) is not None,
+                         aiqt_hooks._orch_heredoc_data_proven(cmd), _verdict(bg(cmd, rib=False))),
+                  (True, False, "deny"))
+        # Three earlier-round reproductions are main's OWN disclosed false allows (residuals (1) and (5) of
+        # _orch_foreground_detach: an '&' inside a double-quoted substitution, and body quotes that rebalance
+        # the scan). Main's scan allows each, so the guard returns main's verdict (allow), as before PR 451.
         for name, cmd in (
-                ("trunc/scan-r6-dq-paramexp-heredoc-shift-kind",
-                 "echo \"${x:-}\"; cat <<'EOF'\n'\nEOF\nprintf DETACHED >&2 &\ncat <<'EOF'\n'\nEOF\nwait"),
-                ("trunc/scan-r6-paramexp-heredoc-shift-kind",
-                 "echo ${x:-}; cat <<'EOF'\n'\nEOF\nprintf DETACHED >&2 &\ncat <<'EOF'\n'\nEOF\nwait"),
-                ("trunc/scan-r6-paramexp-dash-heredoc-shift-kind",
-                 "echo ${x:-}; cat <<-'EOF'\n'\n\tEOF\nprintf DETACHED >&2 &\ncat <<-'EOF'\n'\nEOF\nwait"),
-                ("trunc/scan-r6-dropped-pending-heredoc-shift-kind",
-                 "cat <<'EOF' ${x:-}\n'\nEOF\nprintf DETACHED >&2 &\necho \"'\" \"'\"\nwait"),
-                ("trunc/scan-r6-partial-delim-heredoc-shift-kind",
-                 "cat <<E'OF'\n'\nEOF\nprintf DETACHED >&2 &\ncat <<E'OF'\n'\nEOF\nwait")):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "heredoc-unread")
-        # The same inside a double-quoted $(...): the structural walk marks the span unreadable.
-        for name, cmd in (
-                ("trunc/scan-r6-dq-cmdsub-paramexp-heredoc-shift-kind",
-                 "echo \"$(echo ${x}; cat <<'EOF'\n\"\"\nEOF\nprintf DETACHED >&2 &\nwait\n)\""),
-                ("trunc/scan-r6-dq-cmdsub-partial-delim-shift-kind",
-                 "echo \"$(cat <<E'OF'\n\"\"\nEOF\nprintf DETACHED >&2 &\nwait\n)\"")):
-            # QA round 10: a simple ${x} is now read exactly, so the first span's here-document body is data
-            # and its real '&' is seen as a detach (still a deny).
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd),
-                  "detach" if "${x}" in cmd else "unclosed-substitution")
-        shift_res = bg("echo \"${x:-}\"; cat <<'EOF'\n'\nEOF\nprintf DETACHED >&2 &\ncat <<'EOF'\n'\nEOF\nwait",
-                       rib=False)
-        check("trunc/fg-r6-paramexp-heredoc-shift-denies",
-              (_verdict(shift_res), "cannot be evaluated" in _why(shift_res)), ("deny", True))
-        # The disclosed over-refusals this adds, pinned: a safe here-document under a delimiter word that
-        # is not simple, or after an untracked construct, denies when a later line exists; a '<<' with no
-        # later line (a one-line left shift) and a here-string are scanned on as before.
-        partial_safe = bg("cat <<E'OF'\nit's safe\nEOF", rib=False)
-        check("trunc/fg-r6-partial-delim-safe-overrefusal-reason",
-              (_verdict(partial_safe), "cannot be evaluated" in _why(partial_safe),
-               "<<E'OF'" in _why(partial_safe)), ("deny", True, True))
-        for name, cmd, want in (
-                ("trunc/scan-r6-paramexp-then-safe-heredoc-overrefusal-kind",
-                 "echo ${HOME}; cat <<'EOF'\nhello\nEOF", "heredoc-unread"),
-                ("trunc/scan-r6-escaped-delim-safe-overrefusal-kind", "cat <<\\EOF\nhello\nEOF",
-                 "heredoc-unread"),
-                ("trunc/scan-r6-arith-shift-multiline-overrefusal-kind", "x=$((1<<2))\necho $x",
-                 "heredoc-unread"),
-                ("trunc/scan-r6-arith-shift-one-line-none", "echo $((1<<2))", None),
-                ("trunc/scan-r6-herestring-after-paramexp-none", "echo ${x}; cat <<<'a'\necho b", None)):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), want)
-        # QA round 6 MEDIUM (diagnostic): the open-quote reason names every here-document over-refusal
-        # class, not only the backslash body (it named only that at 4e3e66ea).
-        ub_why = _why(bg("echo 'open", rib=False))
-        check("trunc/fg-r6-unbalanced-reason-lists-overrefusals",
-              tuple(t in ub_why for t in ("<<E'OF'", "does not track", "holding a backslash",
-                                          "cannot close or read exactly", "inside double quotes",
-                                          "never arrives")), (True,) * 6)
-        # QA round 7 MAJOR: in an unquoted-delimiter body, a $(...) span the walk reads inexactly (it holds
-        # ${x}, $((1)), or a case pattern) had the rest of the body scanned as code and a None returned as
-        # clean, so body apostrophes wrapped a later real substitution's '&' (each ALLOWED at 5c5ea3aa and
-        # DENIED on main; bash 5.3 printed DETACHED). An unbounded body-substitution scan that finds nothing
-        # is now cannot-evaluate, never clean; an unclosed backtick in a body is held to the same rule.
-        r7_tail = " '\n$(printf DETACHED >&2 & wait)\n'\nEOF"
-        for name, cmd in (
-                ("trunc/scan-r7-body-paramexp-span-quote-shift-kind", "cat <<EOF\n'\n$(echo ${x})" + r7_tail),
-                ("trunc/scan-r7-body-arith-span-quote-shift-kind", "cat <<EOF\n'\n$(echo $((1)))" + r7_tail),
-                ("trunc/scan-r7-body-case-span-quote-shift-kind",
-                 "cat <<EOF\n'\n$(case x in x) :;; esac)" + r7_tail),
-                ("trunc/scan-r7-body-unclosed-backtick-quote-shift-kind",
-                 "cat <<EOF\n'\n`echo '\n$(printf DETACHED >&2 & wait)\n'\nEOF"),
-                # The disclosed over-refusal this adds: a safe body holding such a span denies too.
-                ("trunc/scan-r7-body-paramexp-span-safe-overrefusal-kind", "cat <<EOF\nhi $(echo ${x})\nEOF"),
-                ("trunc/scan-r7-body-heredoc-span-safe-overrefusal-kind",
-                 "cat <<EOF\n$(cat <<X\nhi\nX\n)\nEOF")):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "body-substitution-unread")
-        r7_res = bg("cat <<EOF\n'\n$(echo ${x})" + r7_tail, rib=False)
-        check("trunc/fg-r7-body-paramexp-span-quote-shift-denies",
-              (_verdict(r7_res), "cannot be evaluated" in _why(r7_res), "class (d)" in _why(r7_res)),
+                ("trunc/fg-r6-dq-cmdsub-heredoc-same-line-main-residual", "echo \"$(cat <<'EOF' & wait\nx\nEOF\n)\""),
+                ("trunc/fg-r6-partial-delim-heredoc-shift-main-residual",
+                 "cat <<E'OF'\n'\nEOF\nprintf DETACHED >&2 &\ncat <<E'OF'\n'\nEOF\nwait"),
+                ("trunc/fg-detach-between-heredocs-main-residual",
+                 "cat <<'A'\nuser's\nA\nsleep 5 & cat <<'B'\nuser's\nB")):
+            check(name, (aiqt_hooks._orch_foreground_detach_kind(cmd), aiqt_hooks._orch_heredoc_data_proven(cmd),
+                         _verdict(bg(cmd, rib=False))), (None, False, "allow"))
+        # A command main's scan ALLOWS is never touched: the allowance only turns a deny into an allow.
+        for name, cmd in (("trunc/heredoc-allowance-main-allow-kept-brace", "cat <<EOF\nhome: ${HOME}\nEOF"),
+                          ("trunc/heredoc-allowance-main-allow-kept-plain", "ls -la"),
+                          ("trunc/heredoc-allowance-main-allow-kept-commit-backtick",
+                           "git commit -m \"`cat <<'EOF'\nFix A & B, the user's file\nEOF\n`\"")):
+            check(name, (aiqt_hooks._orch_foreground_verdict(cmd), _verdict(bg(cmd, rib=False))), (None, "allow"))
+        # The deny reasons name the allowance, so a refused here-document says what would be accepted.
+        r12_res = bg("bash <<'EOF'\nit's\nEOF", rib=False)
+        check("trunc/fg-heredoc-allowance-reason-named",
+              (_verdict(r12_res), "quote still open" in _why(r12_res), "provably safe" in _why(r12_res)),
               ("deny", True, True))
-        # Spans read exactly stay clean, and a detach the fallback finds is still reported as one.
-        check("trunc/scan-r7-body-exact-spans-none",
-              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\nnow: $(date) and `pwd`\nEOF"), None)
-        check("trunc/fg-r7-body-exact-spans-allows",
-              _verdict(bg("cat <<EOF\nnow: $(date) and `pwd`\nEOF", rib=False)), "allow")
-        # QA round 8 BLOCKER: a closed body span whose content holds a quote or a nested substitution
-        # opener was scanned as code and inherited that scan's residuals: `echo "$(job & wait)"` in a body
-        # backtick span read as double-quoted text (each ALLOWED at a72d694f; the quote forms DENIED on
-        # main; bash 5.3 ran the '&' in each). Only a FLAT span is judged now; any other closed span is
-        # cannot-evaluate, never the inner scan's result.
-        r8_job = "true & echo BG=$!; wait"
-        r8_repro = "cat <<EOF\n\"\n`echo \"$(printf DETACHED & wait)\"`\n\"\nEOF"
-        for name, cmd in (
-                ("trunc/scan-r8-body-backtick-dq-cmdsub-kind", r8_repro),
-                ("trunc/scan-r8-body-backtick-squote-eval-kind", "cat <<EOF\n'\n`eval '" + r8_job + "'`\n'\nEOF"),
-                ("trunc/scan-r8-body-cmdsub-squote-eval-kind", "cat <<EOF\n'\n$(eval '" + r8_job + "')\n'\nEOF"),
-                ("trunc/scan-r8-body-cmdsub-dquote-eval-kind",
-                 "cat <<EOF\n\"\n$(eval \"sleep 0 & jobs -p; wait\")\n\"\nEOF"),
-                ("trunc/scan-r8-body-backtick-dquote-eval-kind",
-                 "cat <<EOF\n\"\n`eval \"sleep 0 & jobs -p; wait\"`\n\"\nEOF"),
-                ("trunc/scan-r8-body-backtick-paramexp-comment-kind",
-                 "cat <<EOF\n`echo ${x:- #}; " + r8_job + "`\nEOF"),
-                ("trunc/scan-r8-body-backtick-nested-cmdsub-kind",
-                 "cat <<EOF\n`echo $(echo ${x:- #}); " + r8_job + "`\nEOF"),
-                # Nested openers that the inner scan did catch now deny unread too (the class rule).
-                ("trunc/scan-r8-body-backtick-dollar-bracket-kind", "cat <<EOF\n`echo $[1]; " + r8_job + "`\nEOF"),
-                ("trunc/scan-r8-body-backtick-procsub-kind", "cat <<EOF\n`cat <(echo x); " + r8_job + "`\nEOF"),
-                ("trunc/scan-r8-body-backtick-arith-kind", "cat <<EOF\n`echo $((1)); " + r8_job + "`\nEOF"),
-                # The disclosed over-refusal this adds: a safe span holding a quote denies too.
-                ("trunc/scan-r8-body-cmdsub-dq-safe-overrefusal-kind", "cat <<EOF\nhi $(echo \"x\")\nEOF"),
-                ("trunc/scan-r8-body-backtick-dq-safe-overrefusal-kind", "cat <<EOF\nd `date +\"%F\"`\nEOF")):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "body-substitution-unread")
-        r8_res = bg(r8_repro, rib=False)
-        check("trunc/fg-r8-body-backtick-dq-cmdsub-denies",
-              (_verdict(r8_res), "cannot be evaluated" in _why(r8_res), "class (d)" in _why(r8_res),
-               "nested substitution opener" in _why(r8_res)), ("deny", True, True, True))
-        # Its nested backtick sibling (a backtick in a $(...) span) was already unreadable to the walk; a
-        # flat span is still judged, so its real detach denies as one.
-        check("trunc/scan-r8-body-cmdsub-nested-backtick-denies",
-              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n\"\n$(echo \"`" + r8_job + "`\")\n\"\nEOF")
-              is not None, True)
-        check("trunc/scan-r8-body-flat-cmdsub-detach-kind",
-              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n$(" + r8_job + ")\nEOF"), "detach")
-        check("trunc/scan-r8-body-flat-backtick-detach-kind",
-              aiqt_hooks._orch_foreground_detach_kind("cat <<EOF\n`" + r8_job + "`\nEOF"), "detach")
-        # QA round 8 (found while checking siblings): `)` is a metacharacter, so a `#` right after a
-        # subshell's closing paren opens a comment to bash. The walk read it as word text, closed the body
-        # span on its first line, and left the next line's real '&' in the body as data (ALLOWED at
-        # a72d694f, DENIED on main; bash 5.3 ran it). The walk now reads the comment and finds bash's end.
-        r8_paren = "cat <<EOF\n$( (true)# )\n" + r8_job + "\n)\nEOF"
-        check("trunc/scan-r8-body-paren-comment-detach-kind", aiqt_hooks._orch_foreground_detach_kind(r8_paren),
-              "detach")
-        check("trunc/fg-r8-body-paren-comment-detach-denies", _verdict(bg(r8_paren, rib=False)), "deny")
-        check("trunc/cmdsub-end-r8-paren-comment",
-              aiqt_hooks._orch_cmdsub_end("$( (true)# )\nx\n)", 2, 16), (16, False, True))
-        check("trunc/fg-r8-body-paren-comment-safe-allows",
-              _verdict(bg("cat <<EOF\n$( (true)# )\nsafe\n)\nEOF", rib=False)), "allow")
-        # QA round 9 BLOCKER: bash 5.3's brace command substitutions ${ cmd; } and ${| cmd; } in an
-        # unquoted body ran a real '&' that no body opener named (both ALLOWED at 626606cd, DENIED on main;
-        # bash 5.3.9 printed BG=<pid>). Every `$` in an unquoted body is now read against an ALLOWLIST: a
-        # name character or digit, a special parameter, or a `(` opening a flat span (never `$((`); any
-        # other continuation denies unread. The ${x:-...}, $[...], and $((...)) forms below each ran
-        # BG=<pid> under bash 5.3.9; all but the two marked denied at 626606cd were ALLOWED there.
-        r9_job = "true & echo BG=$! >&2; wait"
-        r9_funsub = "cat <<EOF\n${ true & echo BG=$!; wait; }\nEOF"
-        for name, cmd in (
-                ("trunc/scan-r9-body-funsub-kind", r9_funsub),
-                ("trunc/scan-r9-body-valsub-kind", "cat <<EOF\n${| true & REPLY=BG=$!; wait; }\nEOF"),
-                ("trunc/scan-r9-body-paramexp-funsub-kind", "cat <<EOF\nA ${x:-${ " + r9_job + "; }} Z\nEOF"),
-                # Denied at 626606cd as a detach (its flat inner $(...) was judged); unread now.
-                ("trunc/scan-r9-body-paramexp-cmdsub-kind", "cat <<EOF\nA ${x:-$(" + r9_job + ")} Z\nEOF"),
-                ("trunc/scan-r9-body-dollar-bracket-funsub-kind",
-                 "cat <<EOF\nA $[ ${ " + r9_job + "; } 1 ] Z\nEOF"),
-                # Denied at 626606cd as a detach (read as a $( span); unread now.
-                ("trunc/scan-r9-body-arith-funsub-kind", "cat <<EOF\nA $(( ${ " + r9_job + "; } 1 )) Z\nEOF"),
-                # Arithmetic evaluates a variable's value, so $((a)) runs a command substitution held in a
-                # subscript there (bash 5.3.9 printed BG=<pid>; ALLOWED at 626606cd).
-                ("trunc/scan-r9-body-arith-indirect-kind",
-                 "a='x[$(" + r9_job + ")]'; cat <<EOF\nv=$((a))\nEOF"),
-                # The disclosed over-refusals this adds (class (d)): each is safe and ALLOWED at 626606cd.
-                ("trunc/scan-r9-body-brace-home-overrefusal-kind", "cat <<EOF\nhome: ${HOME}\nEOF"),
-                ("trunc/scan-r9-body-dollar-bracket-overrefusal-kind", "cat <<EOF\n$[1]\nEOF"),
-                ("trunc/scan-r9-body-arith-overrefusal-kind", "cat <<EOF\n$(( 1 ))\nEOF"),
-                ("trunc/scan-r9-body-ansic-overrefusal-kind", "cat <<EOF\n$'x'\nEOF"),
-                ("trunc/scan-r9-body-locale-overrefusal-kind", "cat <<EOF\n$\"y\"\nEOF"),
-                ("trunc/scan-r9-body-dollar-space-overrefusal-kind", "cat <<EOF\ncost $ 5\nEOF"),
-                ("trunc/scan-r9-body-dollar-eol-overrefusal-kind", "cat <<EOF\n^foo$\nEOF"),
-                ("trunc/scan-r9-dq-cmdsub-body-funsub-kind",
-                 "git commit -m \"$(cat <<EOF\n${ " + r9_job + "; }\nEOF\n)\"")):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "body-substitution-unread")
-        r9_res = bg(r9_funsub, rib=False)
-        check("trunc/fg-r9-body-funsub-denies",
-              (_verdict(r9_res), "cannot be evaluated" in _why(r9_res), "class (d)" in _why(r9_res),
-               "${| cmd; }" in _why(r9_res), "safe ${HOME} denies" in _why(r9_res)),
-              ("deny", True, True, True, True))
-        # The allowlist itself: $name, $1, and every special parameter stay plain text (a special
-        # parameter's second character never opens a span: bash prints $$ then a literal "(x)"), a flat
-        # span is still judged, and a quoted delimiter's body stays literal.
-        for name, cmd, want in (
-                ("trunc/scan-r9-body-allowlist-none",
-                 "cat <<EOF\nit's $HOME $_x $1 $? $# $@ $* $! $$ $- $0 $$(x) $!(y)\nEOF", None),
-                ("trunc/scan-r9-body-flat-cmdsub-detach-kind", "cat <<EOF\n$HOME $(" + r9_job + ")\nEOF", "detach"),
-                ("trunc/scan-r9-quoted-body-funsub-none", "cat <<'EOF'\n${ " + r9_job + "; }\nEOF", None),
-                ("trunc/scan-r9-dq-quoted-body-funsub-none", "cat <<\"EOF\"\n${HOME} $[1]\nEOF", None)):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), want)
-        # QA round 10 MAJOR: residual (1) composed with this change. A $(...) or backtick inside double
-        # quotes was read as quoted text (as on main), so once the body's literal '&' no longer denied, the
-        # substitution's real '&' allowed (bash 5.3.9 printed A & B then CHILDPID=<pid>; DENIED on main only
-        # for the body '&'). Every double-quoted substitution read exactly is now scanned as code; one not
-        # read exactly denies as an unclosed substitution. Each detach vector below was ALLOWED at acb7f01b.
-        r10_job = "printf CHILD; true & echo PID=$!; wait"
-        r10_repro = "cat <<'EOF'\nA & B\nEOF\necho \"$(" + r10_job + ")\""
-        for name, cmd, want in (
-                ("trunc/scan-r10-repro-detach-kind", r10_repro, "detach"),
-                ("trunc/scan-r10-dq-cmdsub-detach-kind", "echo \"$(" + r10_job + ")\"", "detach"),
-                ("trunc/scan-r10-dq-backtick-detach-kind", "echo \"`" + r10_job + "`\"", "detach"),
-                ("trunc/scan-r10-dq-backtick-body-detach-kind",
-                 "cat <<'EOF'\nA & B\nEOF\necho \"`" + r10_job + "`\"", "detach"),
-                ("trunc/scan-r10-dq-nested-unquoted-detach-kind", "echo \"$(echo $(" + r10_job + "))\"", "detach"),
-                ("trunc/scan-r10-dq-nested-dq-detach-kind", "echo \"$(echo \"$(" + r10_job + ")\")\"", "detach"),
-                # bash reads $((job) & ...) as a command substitution whose first word is a subshell.
-                ("trunc/scan-r10-dq-arith-fallback-detach-kind", "echo \"$((true) & wait)\"", "detach"),
-                # A parameter expansion whose text holds a ')' cannot be read exactly: unclosed, never allowed.
-                ("trunc/scan-r10-dq-brace-paren-unclosed-kind", "echo \"$(echo ${x%)} & wait)\"",
-                 "unclosed-substitution"),
-                ("trunc/scan-r10-dq-backtick-unclosed-kind", "echo \"`true & wait\"", "unclosed-substitution"),
-                # Safe forms that stay allowed: nested and simple-brace spans read exactly, arithmetic
-                # closed by '))' read as on main, and bash's backslash removal in a double-quoted backtick.
-                ("trunc/scan-r10-dq-safe-cmdsub-none", "echo \"$(date +%s)\"", None),
-                ("trunc/scan-r10-dq-safe-nested-none", "cd \"$(dirname \"$(pwd)\")\"", None),
-                ("trunc/scan-r10-dq-safe-brace-none", "echo \"$(basename \"${PWD}\")\"", None),
-                ("trunc/scan-r10-dq-safe-arith-none", "echo \"$((3 & 1)) $(( (1+2) * 3 ))\"", None),
-                ("trunc/scan-r10-dq-safe-backtick-none", "echo \"`date`\"", None),
-                ("trunc/scan-r10-dq-safe-backtick-escaped-quote-none", "echo \"`echo \\\"a & b\\\"`\"", None),
-                ("trunc/scan-r10-dq-safe-and-redirect-none", "x=\"$(true && cmd 2>&1)\"", None),
-                # The disclosed over-refusals this adds (class (g)): safe, ALLOWED at acb7f01b.
-                ("trunc/scan-r10-dq-brace-op-overrefusal-kind", "echo \"$(echo ${x:-y})\"",
-                 "unclosed-substitution"),
-                ("trunc/scan-r10-dq-backtick-in-span-overrefusal-kind", "echo \"$(echo `date`)\"",
-                 "unclosed-substitution"),
-                ("trunc/scan-r10-dq-arith-in-span-overrefusal-kind", "echo \"$(echo $((1+2)))\"",
-                 "unclosed-substitution"),
-                ("trunc/scan-r10-dq-bracket-overrefusal-kind", "echo \"$([ -n \"$x\" ] && echo y)\"",
-                 "unclosed-substitution")):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), want)
-        check("trunc/fg-r10-repro-denies", _verdict(bg(r10_repro, rib=False)), "deny")
-        check("trunc/fg-r10-commit-form-allows",
-              _verdict(bg("git commit -m \"$(cat <<'EOF'\nFix A & B, the user's file\nEOF\n)\"", rib=False)),
-              "allow")
-        # QA round 11 MAJOR: residual (6) composed with this change (bash 5.3.9 printed A & B, CHILD=<pid>,
-        # then #; DENIED on main only for the body '&'). The COMPOSITION RULE: once a body is read as data,
-        # the text outside it must hold no trigger of any disclosed residual. Each vector below, one per
-        # trigger, was ALLOWED at a1e562f7 and is now cannot-evaluate.
-        r11_body = "cat <<'EOF'\nA & B\nEOF\n"
-        r11_job = " & echo CHILD=$!; wait"
-        r11_repro = r11_body + "echo ${x:- #}" + r11_job
-        for kind_id, named_id, tail, residual in (
-                ("trunc/scan-r11-repro-composition-kind", "trunc/scan-r11-repro-residual-named",
-                 "echo ${x:- #}" + r11_job, "(6)"),
-                ("trunc/scan-r11-r6-brace-hash-composition-kind", "trunc/scan-r11-r6-brace-hash-residual-named",
-                 "echo ${line%% #*}" + r11_job, "(6)"),
-                ("trunc/scan-r11-r6-hash-nonblank-composition-kind", "trunc/scan-r11-r6-hash-nonblank-residual-named",
-                 "echo a;#b", "(6)"),
-                ("trunc/scan-r11-r2-eval-quote-removal-composition-kind", "trunc/scan-r11-r2-eval-quote-removal-residual-named",
-                 "e'v'al 'sleep 1 &'", "(2)"),
-                ("trunc/scan-r11-r2-eval-backslash-composition-kind", "trunc/scan-r11-r2-eval-backslash-residual-named",
-                 "\\eval 'sleep 1 &'", "(2)"),
-                ("trunc/scan-r11-r2-trap-composition-kind", "trunc/scan-r11-r2-trap-residual-named",
-                 "trap 'sleep 1 &' EXIT", "(2)"),
-                ("trunc/scan-r11-r2-source-composition-kind", "trunc/scan-r11-r2-source-residual-named",
-                 "source ./x.sh", "(2)"),
-                ("trunc/scan-r11-r2-dot-composition-kind", "trunc/scan-r11-r2-dot-residual-named",
-                 ". ./x.sh", "(2)"),
-                ("trunc/scan-r11-r2-brace-expansion-composition-kind", "trunc/scan-r11-r2-brace-expansion-residual-named",
-                 "{e,}val 'sleep 1 &'", "(2)"),
-                ("trunc/scan-r11-r2-expansion-command-word-composition-kind", "trunc/scan-r11-r2-expansion-command-word-residual-named",
-                 "$c 'sleep 1 &'", "(2)"),
-                ("trunc/scan-r11-r3-ansi-c-composition-kind", "trunc/scan-r11-r3-ansi-c-residual-named",
-                 "echo $'\\'' & job; echo '", "(3)"),
-                ("trunc/scan-r11-r5-locale-composition-kind", "trunc/scan-r11-r5-locale-residual-named",
-                 "echo $\"x\"", "(3)"),
-                ("trunc/scan-r11-r4-arith-reread-composition-kind", "trunc/scan-r11-r4-arith-reread-residual-named",
-                 "x='a[$(job & wait)]'; echo $((x))", "(4)"),
-                ("trunc/scan-r11-r4-bracket-composition-kind", "trunc/scan-r11-r4-bracket-residual-named",
-                 "[[ $x -eq 1 ]]", "(4)"),
-                ("trunc/scan-r11-r4-let-composition-kind", "trunc/scan-r11-r4-let-residual-named",
-                 "let x", "(4)"),
-                ("trunc/scan-r11-procsub-composition-kind", "trunc/scan-r11-procsub-residual-named",
-                 "diff <(printf x) <(printf y)", "process substitution"),
-                ("trunc/scan-r11-runtime-detacher-composition-kind", "trunc/scan-r11-runtime-detacher-residual-named",
-                 "setsid job", "detacher"),
-                ("trunc/scan-r11-nested-shell-composition-kind", "trunc/scan-r11-nested-shell-residual-named",
-                 "bash -c 'job &'", "shell"),
-                ("trunc/scan-r11-alias-composition-kind", "trunc/scan-r11-alias-residual-named",
-                 "alias x='job &'", "alias"),
-                ("trunc/scan-r11-function-composition-kind", "trunc/scan-r11-function-residual-named",
-                 "f() { true; }; f", "alias")):
-            cmd = r11_body + tail
-            check(kind_id, aiqt_hooks._orch_foreground_detach_kind(cmd), "heredoc-composition")
-            check(named_id, residual in str(aiqt_hooks._orch_composition_kind(cmd)), True)
-        r11_result = bg(r11_repro, rib=False)
-        check("trunc/fg-r11-repro-denies", _verdict(r11_result), "deny")
-        check("trunc/fg-r11-repro-reason-named",
-              "a here-document body was read as data, and the rest of the command uses a construct the scanner "
-              "does not model exactly" in (r11_result[1] or {}).get("hookSpecificOutput", {}).get(
-                  "permissionDecisionReason", ""), True)
-        # Without a body read as data the same constructs are judged exactly as before (no new over-refusal),
-        # and the H-cases and commit-message forms trip no trigger.
-        for name, cmd, want in (
-                ("trunc/scan-r11-no-body-brace-hash-none", "echo ${x:- #}", None),
-                ("trunc/scan-r11-no-body-bracket-none", "[ -f x ] && echo y", None),
-                ("trunc/scan-r11-no-body-eval-none", "eval 'echo x'", None),
-                ("trunc/scan-r11-unquoted-delim-bash-detach", "cat <<EOF\n$(bash -c x & wait)\nEOF", "detach"),
-                ("trunc/scan-r11-commit-dq-none", "git commit -m \"$(cat <<'EOF'\nFix A & B, the user's file\nEOF\n)\"", None),
-                ("trunc/scan-r11-commit-backtick-none", "git commit -m \"`cat <<'EOF'\nFix A & B, the user's file\nEOF\n`\"", None),
-                ("trunc/scan-r11-commit-unquoted-none", "git add -A && git commit -m \"$(cat <<EOF\nFix A & B, it's $HOME\nEOF\n)\"",
-                 None),
-                # Round 10's disclosed class (g) over-refusal (QA round 11 MEDIUM): a process substitution in a
-                # double-quoted span is not read exactly. Safe, ALLOWED on main.
-                ("trunc/scan-r11-dq-procsub-overrefusal-kind", "echo \"$(cat <(printf ok))\"", "unclosed-substitution")):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), want)
-        check("trunc/dq-backtick-text-unescape",
-              aiqt_hooks._orch_dq_backtick_text("a \\\\\\` \\$ \\\" \\x"), "a \\` $ \" \\x")
+        # Arithmetic and other forms are read exactly as on main.
+        check("trunc/fg-arith-bitwise-and-overrefusal-denies", _verdict(bg("echo $((3 & 1))", rib=False)), "deny")
+        check("trunc/fg-arith-left-shift-allows", _verdict(bg("echo $((1<<2))", rib=False)), "allow")
+        check("trunc/fg-dq-dirname-nested-quotes-allows",
+              _verdict(bg("cd \"$(dirname \"${BASH_SOURCE[0]}\")\"", rib=False)), "allow")
+        check("trunc/fg-detach-after-heredoc-denies",
+              _verdict(bg("cat <<'EOF' > /tmp/x\nthe user's file\nEOF\nsleep 100 &", rib=False)), "deny")
+        check("trunc/fg-heredoc-cmdsub-detach-denies", _verdict(bg("cat <<EOF\n$(job &)\nEOF", rib=False)), "deny")
+        check("trunc/fg-heredoc-backtick-detach-denies", _verdict(bg("cat <<EOF\n`job &`\nEOF", rib=False)), "deny")
+        check("trunc/fg-herestring-safe-allows", _verdict(bg("cat <<<'hello'", rib=False)), "allow")
+        check("trunc/scan-herestring-word-then-detach", aiqt_hooks._orch_foreground_detach("cat <<<hello &"), True)
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
@@ -2906,15 +2533,9 @@ def _main_isolated(report_path=None):
           "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
           "producer's full output and exit status) and a "
           "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment, "
-          "reading a here-document body under a simple delimiter word as DATA (a safe body '&' or apostrophe "
-          "allows; an unquoted delimiter's command/backtick substitution spans are still scanned, one "
-          "whose end the scan cannot read exactly denying as cannot-evaluate, a '$' there followed by "
-          "anything but a name, a special parameter, or a flat '$(' span denying unread, and a "
-          "double-quoted command substitution holding a here-document has its inner text scanned as code; "
-          "an unquoted body holding a backslash and arithmetic '&' are scanned as code and denied, and a "
-          "here-document under any other delimiter word or after an untracked construct denies as "
-          "cannot-evaluate, disclosed over-refusals; an unterminated here-document denies with its own "
-          "reason), denying a double-quoted command substitution it cannot close, and failing a "
+          "keeping main's scan verdict except that a deny becomes an allow only when the here-document data "
+          "allowance proves the whole command safe (listed data-consumer owners, plain outside text, no other "
+          "'&'; every codex reproduction main denies stays denied), and failing a "
           "scan that ends inside an "
           "open quote toward a deny with its own reason (a quote the scan misreads in mid-string, such as "
           "an ANSI-C escaped quote, can still shift it into a disclosed silent allow), reads a '#' comment "
