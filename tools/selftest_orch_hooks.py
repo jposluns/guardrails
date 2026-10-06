@@ -1396,6 +1396,78 @@ def _main_isolated(report_path=None):
         check("trunc/fg-r10-commit-form-allows",
               _verdict(bg("git commit -m \"$(cat <<'EOF'\nFix A & B, the user's file\nEOF\n)\"", rib=False)),
               "allow")
+        # QA round 11 MAJOR: residual (6) composed with this change (bash 5.3.9 printed A & B, CHILD=<pid>,
+        # then #; DENIED on main only for the body '&'). The COMPOSITION RULE: once a body is read as data,
+        # the text outside it must hold no trigger of any disclosed residual. Each vector below, one per
+        # trigger, was ALLOWED at a1e562f7 and is now cannot-evaluate.
+        r11_body = "cat <<'EOF'\nA & B\nEOF\n"
+        r11_job = " & echo CHILD=$!; wait"
+        r11_repro = r11_body + "echo ${x:- #}" + r11_job
+        for kind_id, named_id, tail, residual in (
+                ("trunc/scan-r11-repro-composition-kind", "trunc/scan-r11-repro-residual-named",
+                 "echo ${x:- #}" + r11_job, "(6)"),
+                ("trunc/scan-r11-r6-brace-hash-composition-kind", "trunc/scan-r11-r6-brace-hash-residual-named",
+                 "echo ${line%% #*}" + r11_job, "(6)"),
+                ("trunc/scan-r11-r6-hash-nonblank-composition-kind", "trunc/scan-r11-r6-hash-nonblank-residual-named",
+                 "echo a;#b", "(6)"),
+                ("trunc/scan-r11-r2-eval-quote-removal-composition-kind", "trunc/scan-r11-r2-eval-quote-removal-residual-named",
+                 "e'v'al 'sleep 1 &'", "(2)"),
+                ("trunc/scan-r11-r2-eval-backslash-composition-kind", "trunc/scan-r11-r2-eval-backslash-residual-named",
+                 "\\eval 'sleep 1 &'", "(2)"),
+                ("trunc/scan-r11-r2-trap-composition-kind", "trunc/scan-r11-r2-trap-residual-named",
+                 "trap 'sleep 1 &' EXIT", "(2)"),
+                ("trunc/scan-r11-r2-source-composition-kind", "trunc/scan-r11-r2-source-residual-named",
+                 "source ./x.sh", "(2)"),
+                ("trunc/scan-r11-r2-dot-composition-kind", "trunc/scan-r11-r2-dot-residual-named",
+                 ". ./x.sh", "(2)"),
+                ("trunc/scan-r11-r2-brace-expansion-composition-kind", "trunc/scan-r11-r2-brace-expansion-residual-named",
+                 "{e,}val 'sleep 1 &'", "(2)"),
+                ("trunc/scan-r11-r2-expansion-command-word-composition-kind", "trunc/scan-r11-r2-expansion-command-word-residual-named",
+                 "$c 'sleep 1 &'", "(2)"),
+                ("trunc/scan-r11-r3-ansi-c-composition-kind", "trunc/scan-r11-r3-ansi-c-residual-named",
+                 "echo $'\\'' & job; echo '", "(3)"),
+                ("trunc/scan-r11-r5-locale-composition-kind", "trunc/scan-r11-r5-locale-residual-named",
+                 "echo $\"x\"", "(3)"),
+                ("trunc/scan-r11-r4-arith-reread-composition-kind", "trunc/scan-r11-r4-arith-reread-residual-named",
+                 "x='a[$(job & wait)]'; echo $((x))", "(4)"),
+                ("trunc/scan-r11-r4-bracket-composition-kind", "trunc/scan-r11-r4-bracket-residual-named",
+                 "[[ $x -eq 1 ]]", "(4)"),
+                ("trunc/scan-r11-r4-let-composition-kind", "trunc/scan-r11-r4-let-residual-named",
+                 "let x", "(4)"),
+                ("trunc/scan-r11-procsub-composition-kind", "trunc/scan-r11-procsub-residual-named",
+                 "diff <(printf x) <(printf y)", "process substitution"),
+                ("trunc/scan-r11-runtime-detacher-composition-kind", "trunc/scan-r11-runtime-detacher-residual-named",
+                 "setsid job", "detacher"),
+                ("trunc/scan-r11-nested-shell-composition-kind", "trunc/scan-r11-nested-shell-residual-named",
+                 "bash -c 'job &'", "shell"),
+                ("trunc/scan-r11-alias-composition-kind", "trunc/scan-r11-alias-residual-named",
+                 "alias x='job &'", "alias"),
+                ("trunc/scan-r11-function-composition-kind", "trunc/scan-r11-function-residual-named",
+                 "f() { true; }; f", "alias")):
+            cmd = r11_body + tail
+            check(kind_id, aiqt_hooks._orch_foreground_detach_kind(cmd), "heredoc-composition")
+            check(named_id, residual in str(aiqt_hooks._orch_composition_kind(cmd)), True)
+        r11_result = bg(r11_repro, rib=False)
+        check("trunc/fg-r11-repro-denies", _verdict(r11_result), "deny")
+        check("trunc/fg-r11-repro-reason-named",
+              "a here-document body was read as data, and the rest of the command uses a construct the scanner "
+              "does not model exactly" in (r11_result[1] or {}).get("hookSpecificOutput", {}).get(
+                  "permissionDecisionReason", ""), True)
+        # Without a body read as data the same constructs are judged exactly as before (no new over-refusal),
+        # and the H-cases and commit-message forms trip no trigger.
+        for name, cmd, want in (
+                ("trunc/scan-r11-no-body-brace-hash-none", "echo ${x:- #}", None),
+                ("trunc/scan-r11-no-body-bracket-none", "[ -f x ] && echo y", None),
+                ("trunc/scan-r11-no-body-eval-none", "eval 'echo x'", None),
+                ("trunc/scan-r11-unquoted-delim-bash-detach", "cat <<EOF\n$(bash -c x & wait)\nEOF", "detach"),
+                ("trunc/scan-r11-commit-dq-none", "git commit -m \"$(cat <<'EOF'\nFix A & B, the user's file\nEOF\n)\"", None),
+                ("trunc/scan-r11-commit-backtick-none", "git commit -m \"`cat <<'EOF'\nFix A & B, the user's file\nEOF\n`\"", None),
+                ("trunc/scan-r11-commit-unquoted-none", "git add -A && git commit -m \"$(cat <<EOF\nFix A & B, it's $HOME\nEOF\n)\"",
+                 None),
+                # Round 10's disclosed class (g) over-refusal (QA round 11 MEDIUM): a process substitution in a
+                # double-quoted span is not read exactly. Safe, ALLOWED on main.
+                ("trunc/scan-r11-dq-procsub-overrefusal-kind", "echo \"$(cat <(printf ok))\"", "unclosed-substitution")):
+            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), want)
         check("trunc/dq-backtick-text-unescape",
               aiqt_hooks._orch_dq_backtick_text("a \\\\\\` \\$ \\\" \\x"), "a \\` $ \" \\x")
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
