@@ -31,14 +31,19 @@ never importing or running the file, and reports:
                or a keyword, cert_reqs= included); and a standard-library client whose default
                context skips certificate checks (each builds ssl._create_stdlib_context, which
                is CERT_NONE, when given none): smtplib.SMTP_SSL, poplib.POP3_SSL and
-               ftplib.FTP_TLS without a context=, imaplib.IMAP4_SSL without an ssl_context=,
-               any method named starttls or stls (smtplib, imaplib, poplib; whatever object it is
+               ftplib.FTP_TLS whose context=, imaplib.IMAP4_SSL whose ssl_context=, and any
+               method named starttls or stls (smtplib, imaplib, poplib; whatever object it is
                called on; called on a class, as in smtplib.SMTP.starttls(server), its first
-               positional argument is self) without a context, each given as literal None, a
-               name every binding of which in its scope is literal None (a None default
-               parameter never rebound, ctx = None, or ctx, other = None, 1; a bare annotation
-               such as ctx: object, or a del, stores no value, so it is no binding), or hidden
-               by a spread counting as none,
+               positional argument is self) whose context, is not PROVEN a verifying context: a
+               call of ssl.create_default_context() (no purpose, or a proven
+               ssl.Purpose.SERVER_AUTH) or ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT), with no * or
+               unreadable ** spread, or a name every binding of which, in every scope Python may
+               read it from, is such a call (judged where it is evaluated); so an absent or
+               None context, a parameter (a None default included), an attribute
+               (self.context), a name with any other binding (a walrus, a starred unpacking, a
+               conditional rebinding, a copy of another name, an import) and any other
+               expression are findings (a bare annotation such as ctx: object, or a del,
+               stores no value, so it is no binding),
                any ssl.get_server_certificate (it never checks the hostname, whatever ca_certs
                it is given), a logging.handlers.SMTPHandler whose secure= (sixth positional)
                is set or a spread hides, and any of these referenced without a call (an alias);
@@ -74,7 +79,9 @@ positional arguments or a tuple or list display (the monkeypatch idiom: (os, "sy
 reference to os.system), except in setattr, delattr, hasattr and a mock patch.object, which
 store, delete or test the attribute rather than read it.
 
-A sink module (each STAR_MODULES name) used other than as an attribute base is a finding: an
+A sink module (each STAR_MODULES name: every dotted prefix of every sink named above, derived
+from the sink sets, so multiprocessing.reduction, logging.handlers and torch are included) used
+other than as an attribute base is a finding: an
 attribute base is m.x, the first argument of getattr, setattr, delattr or a mock patch.object
 with a literal attribute name, the argument of hasattr, or the name read with a string literal
 as above. So a sink module bound to another name in any form (assignment, unpacking, walrus,
@@ -91,8 +98,9 @@ keeps its LAST value) as Python does; dict(...) is read only where the name dict
 builtin. A spread the scan cannot read inside a literal dict may overwrite every key written
 before it, so those keys are unseen, except that a literal verify, verify_ssl, ssl,
 check_hostname, server_hostname, verify_mode, cert_reqs or allow_pickle written there is still
-judged. A safe value (a yaml Loader, an SSLContext protocol, a verify_mode or cert_reqs)
-is PROVEN only when every binding the name may hold names the safe value; a name that may also
+judged. A safe value (a yaml Loader, an SSLContext protocol, a verify_mode or cert_reqs, a
+client's context) is PROVEN only when every binding the name may hold names the safe value (for
+a context, is a call of a verifying constructor); a name that may also
 hold an assignment, a parameter or any other value the scan cannot name, an unbound name, and
 an expression prove nothing, so they are findings. A reviewed site is admitted only by an
 ALLOWLIST entry (path, enclosing qualname, kind, exact count, reason); an entry whose count no
@@ -127,15 +135,17 @@ sys.modules["os"].system are not resolved), and a sink module re-exported under 
 than its own (a module that binds pickle as _p, reached as mod._p.loads); a sink function (not
 module) obtained from such an object or from a call; a method run on a profiler, debugger or
 trace object (cProfile.Profile().run, bdb.Bdb.run); a shell launched through an argv list
-naming a shell (["sh", "-c", text]), an executable= override, or os.exec*, os.spawn* or
-pty.spawn of a shell; a verify= or ssl= value hidden in, or overwritten by, a ** spread that is
-not a literal dict (only the subprocess shell switch and the command, Loader, protocol, context
-and secure= of the judged sinks are denied when unseen); the context given to a
-standard-library client is not traced beyond its own scope (a name that may hold anything but
-literal None there passes, so ctx = None rebound under a condition, a None passed in by a
-caller through a parameter without a None default, or a None kept in an attribute (self.context
-= context, then context=self.context), is not seen; a built context is judged only where it is
-built), a starttls or stls called on a class reached other than through an import binding or a
+naming a shell (["sh", "-c", text]) or a Python interpreter given code (sys.executable with -c
+or -m), an executable= override, or os.exec*, os.spawn* or pty.spawn of a shell; a verify,
+verify_ssl, ssl, check_hostname, server_hostname, verify_mode, cert_reqs or allow_pickle value
+hidden in, or overwritten by, a ** spread that is not a literal dict (only the subprocess shell
+switch and the command, Loader, protocol, context and secure= of the judged sinks are denied
+when unseen), and a verify given positionally (Session.merge_environment_settings(url, proxies,
+stream, verify, cert)); a verifying context changed after it is built other than by a
+check_hostname or verify_mode store (its trust store replaced through load_verify_locations,
+or a store through setattr with a computed name), and a context= given to a client whose
+default verifies (urllib, http.client, asyncio ssl=) is judged only where the context is built;
+a starttls or stls called on a class reached other than through an import binding or a
 class this file defines is read as bound (its first positional argument as the context), and a
 client configured from data (logging.config) is not seen; TLS verification disabled inside a
 third-party library's own defaults, through a library option this scan does not name, or
@@ -193,6 +203,11 @@ TLS_ATTRS = frozenset({"_create_unverified_context", "_create_stdlib_context",
                        "_create_default_https_context", "CERT_NONE", "CERT_OPTIONAL",
                        "CLIENT_AUTH"})
 SSL_CONTEXT = "ssl.SSLContext"
+# The verifying context constructors: ssl.create_default_context() for a server (no purpose, or
+# ssl.Purpose.SERVER_AUTH) and ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT) each turn certificate and
+# hostname checks on. A client context is proven only as a call of one of them.
+SAFE_CONTEXT_FACTORY = "ssl.create_default_context"
+SERVER_AUTH = "ssl.Purpose.SERVER_AUTH"
 # Standard-library clients whose default context skips certificate checks: each builds
 # ssl._create_stdlib_context (CERT_NONE, no hostname check) when not given one. The value is
 # (keyword, positional index or None) of the argument that supplies a verifying context.
@@ -232,17 +247,32 @@ METHOD_SINKS = {"starttls": ("tls", "tls-context"), "stls": ("tls", "tls-context
 # reference to them is an alias the call-site check cannot follow, so it is a finding.
 CALL_JUDGED = (YAML_LOAD | SUBPROCESS_FUNCS | ALWAYS_SHELL | {SSL_CONTEXT, SMTP_HANDLER}
                | frozenset(STDLIB_UNVERIFIED) | NO_HOSTNAME_CHECK)
+# The sink inventory by kind: every dotted sink the sets above name.
+SINK_INVENTORY = (
+    ("deserialize", DESERIALIZE_SINKS | YAML_LOAD | NUMPY_LOAD),
+    ("tls", frozenset("ssl." + attr for attr in TLS_ATTRS) | frozenset(STDLIB_UNVERIFIED)
+     | NO_HOSTNAME_CHECK | {SSL_CONTEXT, SMTP_HANDLER}),
+    ("shell", SUBPROCESS_FUNCS | ALWAYS_SHELL),
+    ("code", CODE_SINKS),
+)
+
+
+def _sink_modules(inventory):
+    """Every dotted prefix of every sink (its module, a submodule binding such as
+    multiprocessing.reduction, or a class holding it such as its ForkingPickler), with the kind
+    of the first sink reached through it; derived, so a sink added to a set brings its modules."""
+    out = {}
+    for kind, sinks in inventory:
+        for sink in sorted(sinks):
+            parts = sink.split(".")
+            for end in range(1, len(parts)):
+                out.setdefault(".".join(parts[:end]), kind)
+    return out
+
+
 # A star import from a sink module makes its sinks bare names; the same module object, bound
 # to another name or passed to getattr with a non-literal name, is an alias it cannot follow.
-STAR_MODULES = {"pickle": "deserialize", "_pickle": "deserialize", "cPickle": "deserialize",
-                "dill": "deserialize", "cloudpickle": "deserialize", "marshal": "deserialize",
-                "shelve": "deserialize", "jsonpickle": "deserialize", "yaml": "deserialize",
-                "pandas": "deserialize", "joblib": "deserialize",
-                "ssl": "tls", "smtplib": "tls", "imaplib": "tls", "poplib": "tls",
-                "ftplib": "tls", "os": "shell", "posix": "shell", "nt": "shell",
-                "subprocess": "shell", "asyncio": "shell",
-                "builtins": "code", "types": "code", "runpy": "code", "timeit": "code",
-                "cProfile": "code", "profile": "code", "pdb": "code", "code": "code"}
+STAR_MODULES = _sink_modules(SINK_INVENTORY)
 # An unbound name falls back to the builtin of that name only where one exists (any other
 # unbound name is a NameError when run, so it names nothing).
 BUILTIN_NAMES = frozenset(builtins.__dict__)
@@ -544,10 +574,9 @@ class _Scope:
         self.bindings = {}
         self.globals = set()
         self.nonlocals = set()
-        # Names bound to literal None (an assignment, a parameter default) and names bound to
-        # anything else: a name in nones and not in rebound can only be None in this scope.
-        self.nones = set()
-        self.rebound = set()
+        # Per name, the source of each binding: (value expression, the scope that evaluates it)
+        # for an assignment or walrus the binder can read, None for any other binding.
+        self.values = {}
 
 
 class _Binder(ast.NodeVisitor):
@@ -559,9 +588,9 @@ class _Binder(ast.NodeVisitor):
         self.current = self.module
         self.scope_of = {}
         self.classes = set()
-        self.none_targets = set()
+        self.sources = {}
 
-    def bind(self, name, value, none=False):
+    def bind(self, name, value, source=None):
         scope = self.current
         if name in scope.globals:
             scope = self.module
@@ -571,15 +600,15 @@ class _Binder(ast.NodeVisitor):
             scope = scope.parent
             while scope.parent is not None:
                 if scope.kind == "function":
-                    self._record(scope, name, value, none)
+                    self._record(scope, name, value, source)
                 scope = scope.parent
             return
-        self._record(scope, name, value, none)
+        self._record(scope, name, value, source)
 
     @staticmethod
-    def _record(scope, name, value, none):
+    def _record(scope, name, value, source):
         scope.bindings.setdefault(name, set()).add(value)
-        (scope.nones if none else scope.rebound).add(name)
+        scope.values.setdefault(name, []).append(source)
 
     def _enter(self, node):
         kind, outer, inner = _scope_parts(node)
@@ -592,14 +621,9 @@ class _Binder(ast.NodeVisitor):
         saved = self.current
         self.current = self.scope_of[id(node)] = _Scope(kind, saved)
         if kind == "function":
-            a = node.args
-            positional = a.posonlyargs + a.args
-            defaults = dict(zip([x.arg for x in positional[len(positional) - len(a.defaults):]],
-                                a.defaults))
-            defaults.update((x.arg, d) for x, d in zip(a.kwonlyargs, a.kw_defaults)
-                            if d is not None)
-            for arg in _all_args(a):
-                self.bind(arg.arg, None, arg.arg in defaults and _is_none(defaults[arg.arg]))
+            # A parameter holds whatever a caller passes, its default included: no source.
+            for arg in _all_args(node.args):
+                self.bind(arg.arg, None)
         for child in inner:
             self.visit(child)
         self.current = saved
@@ -631,36 +655,35 @@ class _Binder(ast.NodeVisitor):
         if isinstance(node.ctx, ast.Del):
             self._declare(node.id)
         elif not isinstance(node.ctx, ast.Load):
-            self.bind(node.id, None, id(node) in self.none_targets)
+            self.bind(node.id, None, self.sources.get(id(node)))
 
     def _declare(self, name):
-        """A store of no value (a bare annotation, a del) binds nothing, so a None stays
-        provable; in a function it still makes the name local, so no outer binding is read."""
+        """A store of no value (a bare annotation, a del) binds nothing, so it adds no source;
+        in a function it still makes the name local, so no outer binding is read."""
         scope = self.current
         if scope.kind == "function" and name not in scope.globals | scope.nonlocals:
             scope.bindings.setdefault(name, set())
 
-    def _none_target(self, target, value):
-        """Mark each name the store binds to literal None, an unpacked display included
-        (ctx, other = None, 1)."""
+    def _source_target(self, target, value):
+        """Record the value expression each name the store binds, an unpacked display of equal
+        length included (ctx, other = make(), 1); a starred target or value records none."""
         if isinstance(target, ast.Name):
-            if _is_none(value):
-                self.none_targets.add(id(target))
+            self.sources[id(target)] = (value, self.current)
         elif isinstance(target, (ast.Tuple, ast.List)) \
                 and isinstance(value, (ast.Tuple, ast.List)) \
                 and len(target.elts) == len(value.elts) \
                 and not any(isinstance(e, ast.Starred) for e in target.elts + value.elts):
             for item, part in zip(target.elts, value.elts):
-                self._none_target(item, part)
+                self._source_target(item, part)
 
     def visit_Assign(self, node):
         for target in node.targets:
-            self._none_target(target, node.value)
+            self._source_target(target, node.value)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node):
         if node.value is not None:
-            self._none_target(node.target, node.value)
+            self._source_target(node.target, node.value)
             self.generic_visit(node)
             return
         if isinstance(node.target, ast.Name):
@@ -673,7 +696,7 @@ class _Binder(ast.NodeVisitor):
         saved = self.current
         while self.current.kind == "comprehension":
             self.current = self.current.parent
-        self.bind(node.target.id, None)
+        self.bind(node.target.id, None, (node.value, saved))
         self.current = saved
         self.visit(node.value)
 
@@ -775,18 +798,51 @@ class _Scanner(ast.NodeVisitor):
         return [".".join(parts[i:]) for i in range(1, len(parts))
                 if parts[i] in STAR_MODULES and parts[i] != parts[i - 1]]
 
-    def none_valued(self, node):
-        """Literal None, or a name every binding of which in the scope that binds it is literal
-        None (a None default parameter never rebound, or name = None)."""
-        if _is_none(node):
-            return True
+    def safe_context(self, node):
+        """True only when the context is PROVEN a verifying one: a call of a verifying
+        constructor, or a name every binding of which, in every scope Python may read it from
+        (as candidates walks them), is such a call, each judged in the scope that evaluates it.
+        An absent node, a literal, a parameter, an attribute, an unbound name, any binding the
+        binder cannot read (a walrus or unpacking of another value, a for or with target, an
+        import) and any other expression prove nothing, so the context is a finding."""
+        if isinstance(node, ast.Call):
+            return self._safe_constructor(node)
         if not isinstance(node, ast.Name):
             return False
         start = scope = self.binder.module if node.id in self.scope.globals else self.scope
+        sources = []
         while scope is not None:
             if (scope.kind != "class" or scope is start) and node.id in scope.bindings:
-                return node.id in scope.nones and node.id not in scope.rebound
+                sources += scope.values.get(node.id, [])
+                if scope.kind == "function":
+                    break
             scope = scope.parent
+        return bool(sources) and all(
+            source is not None and self._judged_in(source[1], self._safe_constructor, source[0])
+            for source in sources)
+
+    def _judged_in(self, scope, judge, node):
+        saved, self.scope = self.scope, scope
+        try:
+            return judge(node)
+        finally:
+            self.scope = saved
+
+    def _safe_constructor(self, call):
+        """ssl.create_default_context() with no purpose or a proven ssl.Purpose.SERVER_AUTH, or
+        ssl.SSLContext with a proven ssl.PROTOCOL_TLS_CLIENT; a * or unreadable ** spread hides
+        an argument, so it proves nothing."""
+        if not isinstance(call, ast.Call) or any(isinstance(arg, ast.Starred) for arg in call.args):
+            return False
+        pairs = _effective_keywords(call, self.candidates("dict") == {"dict"})
+        if any(key is None for key, _value in pairs):
+            return False
+        if self.proves(call.func, {SAFE_CONTEXT_FACTORY}):
+            purpose = _first(_positional(call, 0), _kw(pairs, "purpose"))
+            return purpose is None or self.proves(purpose, {SERVER_AUTH})
+        if self.proves(call.func, {SSL_CONTEXT}):
+            return self.proves(_first(_positional(call, 0), _kw(pairs, "protocol")),
+                               {"ssl.PROTOCOL_TLS_CLIENT"})
         return False
 
     def _method(self, func):
@@ -883,9 +939,10 @@ class _Scanner(ast.NodeVisitor):
         if method in STARTTLS_METHODS and self.on("tls-context"):
             context = _first(_kw(pairs, "context"), _kw(pairs, "ssl_context"),
                              _positional(node, self._self_index(receiver)))
-            if context is None or self.none_valued(context):
+            if not self.safe_context(context):
                 self.add(node, "tls", "tls-context",
-                         method + " without a context (the default skips certificate checks)")
+                         method + " without a context proven to verify (the default skips"
+                         " certificate checks)")
         if method == "subprocess_shell" and self.on("shell-always"):
             command = _first(_positional(node, 1 + self._self_index(receiver)), _kw(pairs, "cmd"))
             if command is None or not _literal_command(command):
@@ -931,9 +988,10 @@ class _Scanner(ast.NodeVisitor):
         if name in STDLIB_UNVERIFIED and self.on("tls-context"):
             key, index = STDLIB_UNVERIFIED[name]
             context = _first(_kw(pairs, key), None if index is None else _positional(node, index))
-            if context is None or self.none_valued(context):
+            if not self.safe_context(context):
                 self.add(node, "tls", "tls-context",
-                         name + " without " + key + "= (the default skips certificate checks)")
+                         name + " without a " + key + "= proven to verify (the default skips"
+                         " certificate checks)")
         if name in NO_HOSTNAME_CHECK and self.on("tls-context"):
             self.add(node, "tls", "tls-context",
                      name + " never checks the hostname, whatever ca_certs it is given")
@@ -1357,6 +1415,14 @@ POSITIVE_VECTORS = (
     ("import requests\nrequests.get(url, **dict({'verify': False}))\n", ("tls-verify",)),
     # A literal false verify that a later unreadable spread may overwrite is still judged.
     ("import requests\nrequests.get(url, **{'verify': False, **opts})\n", ("tls-verify",)),
+    ("import aiohttp\naiohttp.ClientSession().get(url, **{'ssl': False, **opts})\n",
+     ("tls-verify",)),
+    ("f(**{'check_hostname': False, **opts})\n", ("tls-hostname",)),
+    ("import asyncio\nasyncio.open_connection(h, 443, ssl=True, **{'server_hostname': '', **opts})\n",
+     ("tls-hostname",)),
+    ("import urllib3\nurllib3.PoolManager(**{'cert_reqs': 'CERT_NONE', **opts})\n",
+     ("tls-verify-mode",)),
+    ("import numpy\nnumpy.load(path, **{'allow_pickle': True, **opts})\n", ("dsz-numpy",)),
     ("session.verify = False\n", ("tls-verify",)),
     # requests reads any false value as verification off, so None and "" are not proof.
     ("import requests\nrequests.get(url, verify='')\n", ("tls-verify",)),
@@ -1408,9 +1474,53 @@ POSITIVE_VECTORS = (
     ("getattr(server, 'starttls')()\n", ("tls-context",)),
     ("upgrade = server.starttls\nupgrade()\n", ("tls-context",)),
     ("upgrade = getattr(pop, 'stls')\n", ("tls-context",)),
-    # A context name that can only be None in its scope is none.
+    # A context not PROVEN a verifying constructor call (or a name bound only to one) is a finding.
     ("import smtplib\ndef connect(host, context=None):\n"
      "    return smtplib.SMTP_SSL(host, context=context)\n", ("tls-context",)),
+    ("import smtplib\nctx = None\n(ctx := None)\nclient = smtplib.SMTP_SSL(context=ctx)\n",
+     ("tls-context",)),
+    ("import smtplib\nctx = None\nctx, *rest = None, 1\nclient = smtplib.SMTP_SSL(context=ctx)\n",
+     ("tls-context",)),
+    ("import smtplib\nif (ctx := None) is None:\n    smtplib.SMTP_SSL(host, context=ctx)\n",
+     ("tls-context",)),
+    ("import smtplib\ndef outer():\n    ctx = None\n    s = smtplib.SMTP_SSL(h, context=ctx)\n"
+     "    def mid():\n        ctx = None\n        def inner():\n            nonlocal ctx\n"
+     "            ctx = make()\n", ("tls-context",)),
+    ("import smtplib\ndef connect(host, ctx):\n    return smtplib.SMTP_SSL(host, context=ctx)\n",
+     ("tls-context",)),
+    ("import smtplib\nclass Mail:\n    def go(self):\n"
+     "        return smtplib.SMTP_SSL(host, context=self.context)\n", ("tls-context",)),
+    ("import smtplib\nsmtplib.SMTP_SSL(host, context=False)\n", ("tls-context",)),
+    ("import smtplib\nsmtplib.SMTP_SSL(host, context=make())\n", ("tls-context",)),
+    ("import smtplib, ssl\ndef connect(host, context=None):\n"
+     "    context = context or ssl.create_default_context()\n"
+     "    return smtplib.SMTP_SSL(host, context=context)\n", ("tls-context",)),
+    ("def tls(server, ctx=None):\n    server.starttls(context=ctx or make())\n", ("tls-context",)),
+    ("import smtplib\ndef outer():\n    ctx = None\n    def inner():\n        nonlocal ctx\n"
+     "        ctx = make()\n    inner()\n    return smtplib.SMTP_SSL(host, context=ctx)\n",
+     ("tls-context",)),
+    ("import smtplib\nctx, other = make(), None\nsmtplib.SMTP_SSL(host, context=ctx)\n",
+     ("tls-context",)),
+    ("import smtplib, ssl\nbase = ssl.create_default_context()\nctx = base\n"
+     "smtplib.SMTP_SSL(host, context=ctx)\n", ("tls-context",)),
+    ("import smtplib, ssl\nctx = ssl.create_default_context()\nif cond:\n    ctx = make()\n"
+     "smtplib.SMTP_SSL(host, context=ctx)\n", ("tls-context",)),
+    ("import smtplib\nfrom config import ctx\nsmtplib.SMTP_SSL(host, context=ctx)\n",
+     ("tls-context",)),
+    ("import smtplib, ssl\ndef connect(host, purpose):\n"
+     "    return smtplib.SMTP_SSL(host, context=ssl.create_default_context(purpose))\n",
+     ("tls-context",)),
+    ("import smtplib, ssl\nsmtplib.SMTP_SSL(host, context=ssl.create_default_context(**opts))\n",
+     ("tls-context",)),
+    ("import smtplib, ssl\nsmtplib.SMTP_SSL(host, context=ssl.create_default_context(*args))\n",
+     ("tls-context",)),
+    # A name declared but never given a value in its function holds no proven context.
+    ("import smtplib, ssl\nctx = ssl.create_default_context()\ndef f():\n    ctx: object\n"
+     "    return smtplib.SMTP_SSL(host, context=ctx)\n", ("tls-context",)),
+    # The constructor is judged in the scope that evaluates it (here ssl is a local).
+    ("import smtplib, ssl\ndef f():\n    global CTX\n    ssl = fake()\n"
+     "    CTX = ssl.create_default_context()\nsmtplib.SMTP_SSL(host, context=CTX)\n",
+     ("tls-context",)),
     ("import smtplib\nctx = None\nsmtplib.SMTP_SSL(host, context=ctx)\n", ("tls-context",)),
     ("import poplib\nctx: object = None\npoplib.POP3_SSL(host, context=ctx)\n", ("tls-context",)),
     ("import smtplib\nctx, other = None, 1\nsmtplib.SMTP_SSL(host, context=ctx)\n",
@@ -1471,6 +1581,8 @@ POSITIVE_VECTORS = (
     # A key an unreadable spread written after it may overwrite is unseen.
     ("import subprocess\nsubprocess.run(cmd, **{'shell': False, **opts})\n",
      ("shell-subprocess",)),
+    ("import subprocess\nsubprocess.run(cmd, **{'shell': False, key: value})\n",
+     ("shell-subprocess",)),
     ("import yaml\nyaml.load(text, **{'Loader': yaml.SafeLoader, **opts})\n", ("dsz-yaml",)),
     ("import subprocess\ndef dict(**kw):\n    return {'shell': True}\n"
      "subprocess.run(cmd, **dict(shell=False))\n", ("shell-subprocess",)),
@@ -1528,6 +1640,13 @@ POSITIVE_VECTORS = (
     ("import os\nrun(os)\n", ("module-escape",)),
     ("import shutil\nm = shutil.os\n", ("chain", "module-escape")),
     ("from shutil import os as o\nm = o\n", ("chain", "module-escape")),
+    # The escape roster is every prefix of every sink, dotted bindings included.
+    ("import multiprocessing.reduction as mr\nreducer = mr\n"
+     "result = reducer.ForkingPickler.loads(payload)\n", ("module-escape",)),
+    ("from multiprocessing import reduction\nr = reduction\n", ("module-escape",)),
+    ("import torch\nt = torch\n", ("module-escape",)),
+    ("import logging.handlers\nh = logging.handlers\nh.SMTPHandler(a, b, c, d, secure=())\n",
+     ("module-escape",)),
     # Scope: a binding in another scope never hides the one Python resolves here.
     ("import pickle\ndef _u():\n    import json as pickle\npickle.loads(data)\n",
      ("scope", "dsz-ref")),
@@ -1587,18 +1706,29 @@ NEGATIVE_VECTORS = (
     "server = smtplib.SMTP(host)\nserver.starttls(context=ctx)\nimap.starttls(ssl_context=ctx)\n"
     "pop.stls(ctx)\nftplib.FTP(host)\n",
     # Called on a class, the context is the second positional argument (the first is self).
-    "import imaplib, smtplib\nsmtplib.SMTP.starttls(server, context=ctx)\n"
+    "import imaplib, smtplib, ssl\nctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)\n"
+    "smtplib.SMTP.starttls(server, context=ctx)\n"
     "imaplib.IMAP4.starttls(imap, ctx)\ngetattr(server, 'starttls')(context=ctx)\n"
     "ok = hasattr(server, 'starttls')\n",
-    # A false context is not None (the client fails to wrap the socket, never connecting).
-    "import smtplib\nsmtplib.SMTP_SSL(host, context=False)\n",
-    # A None default rebound before use is not None there; None leaves asyncio's default host.
-    "import smtplib, ssl\ndef connect(host, context=None):\n"
-    "    context = context or ssl.create_default_context()\n"
-    "    return smtplib.SMTP_SSL(host, context=context)\n"
-    "def tls(server, ctx=None):\n    server.starttls(context=ctx or make())\n"
-    "def outer():\n    ctx = None\n    def inner():\n        nonlocal ctx\n        ctx = make()\n"
-    "    inner()\n    return smtplib.SMTP_SSL(host, context=ctx)\n",
+    # A verifying constructor called in place, or bound by assignment, annotation, walrus or an
+    # unpacked display, in the scope Python reads (a function binding hides the module's).
+    "import smtplib, ssl\nsmtplib.SMTP_SSL(host, context=ssl.create_default_context())\n"
+    "smtplib.SMTP_SSL(host, context=ssl.create_default_context(ssl.Purpose.SERVER_AUTH))\n"
+    "smtplib.SMTP_SSL(host, context=ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH,"
+    " cafile=path))\n"
+    "if (made := ssl.create_default_context()):\n    smtplib.SMTP_SSL(host, context=made)\n"
+    "typed: object = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)\n"
+    "smtplib.SMTP_SSL(host, context=typed)\n"
+    "ctx = make()\ndef connect(host):\n    ctx = ssl.create_default_context()\n"
+    "    return smtplib.SMTP_SSL(host, context=ctx)\n",
+    # A class binding is not visible in its methods; a nonlocal del binds no local.
+    "import smtplib, ssl\nctx = ssl.create_default_context()\nclass Mail:\n    ctx = make()\n"
+    "    def go(self):\n        return smtplib.SMTP_SSL(host, context=ctx)\n"
+    "def outer():\n    near = ssl.create_default_context()\n    def inner():\n"
+    "        nonlocal near\n        s = smtplib.SMTP_SSL(host, context=near)\n        del near\n"
+    "def rebinds():\n    far = ssl.create_default_context()\n    def inner():\n"
+    "        nonlocal far\n        far = ssl.create_default_context()\n    inner()\n"
+    "    return smtplib.SMTP_SSL(host, context=far)\n",
     "import asyncio\nasyncio.BaseEventLoop.subprocess_shell(loop, factory, 'ls -l')\n"
     "asyncio.open_connection(host, 443, ssl=True, server_hostname=None)\n"
     "asyncio.open_connection(host, 443, ssl=True, server_hostname=host)\n",
@@ -1609,10 +1739,11 @@ NEGATIVE_VECTORS = (
     "subprocess.run(cmd, **{**{'shell': False}})\n"
     "subprocess.run(cmd, **{**opts, 'shell': False})\n"
     "yaml.load(text, **{**opts, 'Loader': yaml.SafeLoader})\n",
-    "import smtplib\nctx, other = make(), None\nsmtplib.SMTP_SSL(host, context=ctx)\n",
-    # A bare annotation still makes the name local in a function: the module None is not read.
-    "import smtplib\nctx = None\ndef f():\n    ctx: object\n"
-    "    return smtplib.SMTP_SSL(host, context=ctx)\n",
+    "import smtplib, ssl\nctx, other = ssl.create_default_context(), None\n"
+    "smtplib.SMTP_SSL(host, context=ctx)\n",
+    # A bare annotation stores no value: the name's one binding is still the constructor.
+    "import smtplib, ssl\nctx = None\ndef f():\n    ctx: object\n"
+    "    ctx = ssl.create_default_context()\n    return smtplib.SMTP_SSL(host, context=ctx)\n",
     "import logging.handlers\nlogging.handlers.SMTPHandler(host, a, b, s)\n"
     "logging.handlers.SMTPHandler(host, a, b, s, creds, None)\n"
     "logging.handlers.SMTPHandler(host, a, b, s, secure=None)\n",
@@ -1661,9 +1792,11 @@ _ROSTER = (
         "ssl.CERT_NONE ssl.CERT_OPTIONAL ssl.CLIENT_AUTH ssl._create_default_https_context "
         "ssl._create_stdlib_context ssl._create_unverified_context").split()),
     ("star-import", (
-        "_pickle asyncio builtins cPickle cProfile cloudpickle code dill ftplib imaplib joblib "
-        "jsonpickle marshal nt os pandas pdb pickle poplib posix profile runpy shelve smtplib ssl "
-        "subprocess timeit types yaml").split()),
+        "_pickle asyncio asyncio.subprocess builtins cPickle cProfile cloudpickle code dill "
+        "ftplib imaplib joblib jsonpickle jsonpickle.unpickler logging logging.handlers marshal "
+        "multiprocessing multiprocessing.reduction multiprocessing.reduction.ForkingPickler nt "
+        "numpy os pandas pdb pickle poplib posix profile runpy shelve smtplib ssl subprocess "
+        "timeit torch types yaml yaml.constructor yaml.loader").split()),
 )
 
 
