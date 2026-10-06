@@ -2101,19 +2101,32 @@ stores directly at them, and implements no section 9.2 upgrade and no legacy-sta
 An implementation MUST declare, in the documentation of each release and in every conformance report
 it emits, its release identity, its class, and its supported `spec_version`, homes generation, and
 worklog storage generation. Each release MUST ship that declaration as one file, and that file is
-the declaration that every check of it reads. The documentation of the release and every conformance
-report MUST restate that file's declaration exactly; where either states a declaration that differs
-from that file's, the declaration is malformed: it MUST yield cannot-evaluate and MUST NOT authorize
-any store operation. An implementation that declares no class MUST be treated as upgrade-capable,
-and every upgrade requirement binds it. An unreadable, malformed, or contradictory declaration MUST
-yield cannot-evaluate and MUST NOT authorize any store operation. A declaration that is absent, or
-that omits its release identity, its `spec_version`, its homes generation, or its worklog storage
+the declaration that every check of it reads. A runtime check MUST read the declaration from that
+file alone, never from the documentation of the release or from a conformance report. The
+documentation of each release and every conformance report MUST restate that file's declaration, and
+every conformance report MUST carry the SHA-256 digest of that file's bytes, so that each
+restatement can be checked mechanically against the file. A restatement differs from that file's
+declaration where it gives a different value for any field the file carries, or states a field the
+file does not carry. A release does not conform to this section, and a conformance claim MUST NOT be
+made for it, where its documentation or any conformance report omits the declaration or a field the
+file carries or states a declaration that differs from that file's, or where any conformance report
+omits that digest or carries a digest other than that file's. Each such failure is a release
+nonconformance, never a runtime state of the declaration: it MUST NOT be treated as making the
+declaration malformed or contradictory, and it does not change what a check of the file yields. An
+implementation that declares no class MUST be treated as upgrade-capable, and every upgrade
+requirement binds it. An unreadable, malformed, or contradictory declaration MUST yield
+cannot-evaluate and MUST NOT authorize any store operation. A declaration that is absent, or that
+omits its release identity, its `spec_version`, its homes generation, or its worklog storage
 generation, is malformed rather than one that declares no class: it MUST yield cannot-evaluate and
 MUST NOT authorize any store operation. A declaration that carries its release identity, its
 `spec_version`, its homes generation, and its worklog storage generation, and omits only its class,
 declares no class: it MUST NOT be treated as malformed for that omission, and the implementation
 that ships it MUST be treated as upgrade-capable unless the declaration is malformed or
-contradictory on other grounds.
+contradictory on other grounds. The rules on an absent, unreadable, malformed, contradictory, or
+classless declaration govern the file alone: where the documentation of a release or a conformance
+report states a class that the file omits, a check of the file MUST treat the declaration as
+declaring no class, and the release does not conform to this section because that restatement states
+a field the file does not carry.
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease
