@@ -21,9 +21,17 @@ validated (a deferred coverage gap). Non-nestable nesting IS detected (slice-2):
 parser accepts as well-balanced but which break rendering/behaviour. Download-artifact checksums are
 tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding, 2 on a read error (unreadable dir/file, fail-closed).
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_site.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import os
 import re
-import sys
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit

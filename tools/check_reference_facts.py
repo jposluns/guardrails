@@ -26,9 +26,17 @@ no alias, so a stale copy cannot ship silently.
   check_reference_facts.py              exit 0 clean, 1 finding, 2 unreadable/missing input (fail-closed)
   check_reference_facts.py --self-test
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_reference_facts.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import re
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

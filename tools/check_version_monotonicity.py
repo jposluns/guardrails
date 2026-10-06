@@ -62,16 +62,27 @@ Exit convention (matches the repo's gates):
   1  a real finding (append-only violation, decrease, or a tag-layer finding)
   2  malformed input, an unresolvable ref, or a git/read error (fail-closed)
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_version_monotonicity.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import io
 import subprocess
-import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: check_version_monotonicity.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: check_version_monotonicity.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402

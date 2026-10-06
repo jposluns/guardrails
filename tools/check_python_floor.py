@@ -104,9 +104,11 @@ Legs, in order:
                  must exit 0 with the exact warning on stdout and the refusal on stderr, and with
                  DENY_PROBE_MODE, a mode outside the literal, which must refuse with its refusal exit.
   completeness   OFF until the source sets completeness-check = true (the unit that guards the last
-                 shipped entrypoint switches it on): every shipped entrypoint, a .py file outside
-                 EXCLUDED_TREES with a module-level `if __name__ == "__main__":`, must be listed in
-                 guarded-surfaces.
+                 shipped entrypoint switches it on); until then an unlisted entrypoint is not a
+                 finding. The core-hook, preview-hook and adopter-tool units are listed, but
+                 tools/check_entry_guard.py is not guarded or listed yet, so it stays false. Once
+                 on, every shipped entrypoint, a .py file outside EXCLUDED_TREES with a module-level
+                 `if __name__ == "__main__":`, must be listed in guarded-surfaces.
   documentation  ON (documentation-check = true, held by the switch leg): each DECLARATION_FILES entry
                  must contain "Python <floor> or newer" as many times as DECLARATION_COPIES says
                  (once by default), and each "Python <floor> or|and <word>" in it must be that phrase,
@@ -175,6 +177,15 @@ a disclosed over-rejection: state the floor without naming older versions.
 
 Run this gate isolated: python3 -I -B tools/check_python_floor.py
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_python_floor.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import ast
 import importlib.util
 import json
@@ -182,7 +193,6 @@ import os
 import re
 import stat
 import subprocess
-import sys
 import tempfile
 import tomllib
 from pathlib import Path

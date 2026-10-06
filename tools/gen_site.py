@@ -87,17 +87,28 @@ Residuals (disclosed per `10-ACCUR-disclose-guard-residuals`):
   gen_site.py --check   fail (exit 1) if any target is out of date; exit 2 on a bad source/shell
   gen_site.py --self-test  adversarial corpus over the bounded subset and the fail-closed paths
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: gen_site.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import html
 import os
 import re
-import sys
 from html.parser import HTMLParser
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: gen_site.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: gen_site.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402

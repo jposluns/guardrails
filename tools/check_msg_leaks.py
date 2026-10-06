@@ -30,11 +30,19 @@ is never read as clean. A confidentiality gate that cannot load its codename den
 absent/empty is exit 2, stricter than the file gate, because here there is no compensating repo-wide file
 scan behind it.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_msg_leaks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

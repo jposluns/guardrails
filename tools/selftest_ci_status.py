@@ -12,18 +12,29 @@ use the child's return code and complete captured output, never a success token.
 Exit 2 is a harness/setup error, including bad arguments, a failed report write, or an unreadable,
 malformed, or suite-missing expectation manifest.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: selftest_ci_status.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import os
 import stat
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:
-    sys.exit("error: selftest_ci_status.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: selftest_ci_status.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_PATH = "/usr/bin:/bin"

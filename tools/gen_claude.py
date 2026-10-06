@@ -13,6 +13,14 @@ drift-gated in CI; the hand-authored governance around the pointer block is huma
   gen_claude.py --check    exit 0 clean, 1 on drift (run gen_claude.py to regenerate), 2 on malformed corpus
 """
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: gen_claude.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
