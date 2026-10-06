@@ -75,11 +75,11 @@ files are served from this repository's main branch; for a raw download, use
 |---|---|---|
 | `clock-inject.py` | `c29c3849bee5a3d2e3a6ea4fdaf453fba08ed8c71c64a933b216947f9156074a` | [clock-inject.py](clock-inject.py) |
 | `future-stamp-write.py` | `4a33429f732bb2319f3c0f579b8f6d633d503103d4fef0e07d283b902a399a5a` | [future-stamp-write.py](future-stamp-write.py) |
-| `preview-launch.py` | `0b9c41d6b405606196d416d45597aa5fcff59b7b5e011180443fbd2264470119` | [preview-launch.py](preview-launch.py) |
-| `record-remove-check.py` | `0fb0a63d0635441d079a477ed5840a61ec5fc91726eb6ab223648df282dd0382` | [record-remove-check.py](record-remove-check.py) |
+| `preview-launch.py` | `0074baa27ed3bb6c0cd6c2e7dc6e5852cac0529ceb3d7d64ce1d9e90e75c1f6d` | [preview-launch.py](preview-launch.py) |
+| `record-remove-check.py` | `449558d3549d581b6ae2177878857279bd0f04b1f9cc424637a56f321e5ac543` | [record-remove-check.py](record-remove-check.py) |
 | `stamp-truth-stop.py` | `662c8dd6e0a0faf0297c25b804d0b1389ab5e14573432350b3772c04ffc070d0` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `2b41eaf1281d049bbd9fa3b8670bc4f28c861f7d86bd248438bd639cb0ecef8f` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `0d56b109d885260d38332f36cd451b4d46488daea0c82e6976cbae1fca862c2b` | [ungated-record.py](ungated-record.py) |
+| `unbounded-wait.py` | `de4ae4e349e35e9f47d69eebe94b2caf89bcf503afbb425e391d1167d1dbe07a` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `526d6722a8c44ec3af55c5e10f7f8ec0bf180fd736bb5ea1247aab2ac12e3271` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 

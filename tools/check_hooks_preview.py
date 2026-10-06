@@ -14,11 +14,14 @@ real directory (a symbolic link, a regular file) is a cannot-evaluate, never abs
 
 When the directory is present, the channel's declared inputs are README.md and SHA256SUMS (both required;
 an absent or unreadable one is exit 2), and every other entry must be a hook file named like
-`clock-inject.py` (lowercase letters, digits and hyphens, ending .py). Three legs:
+`clock-inject.py` (lowercase letters, digits and hyphens, ending .py). Four legs:
 
-  (a) SELF-TEST. Each .preview/*.py runs as [sys.executable, "-I", "-S", "-B", <path>, "--self-test"] in a
-      fresh temporary working directory, with stdin closed and every AIQT_, ORCH_ and CLAUDE_ variable
-      removed from its environment, so an operator's live hook configuration cannot steer the verdict.
+  (a) SELF-TEST. Each .preview/*.py runs with "--self-test" in a fresh temporary working directory,
+      with stdin closed and every AIQT_, ORCH_ and CLAUDE_ variable removed from its environment, so an
+      operator's live hook configuration cannot steer the verdict. When preview-launch.py is present
+      (the launcher every README registration runs), each other hook's self-test is launched THROUGH it
+      ([sys.executable, "-I", "-S", "-B", <launcher>, <mode>, "--self-test"], the registered path), and
+      the launcher's own directly; otherwise each runs directly.
       After that scrub the one variable AIQT_HOOKS_REQUIRE_SIBLINGS=1 is set: a hook skips its
       sibling-parity tests when a sibling file is absent unless that variable is "1", and here the
       siblings are present, so a parity test can never skip silently under this gate.
@@ -38,6 +41,11 @@ an absent or unreadable one is exit 2), and every other entry must be a hook fil
       relative path, not a bare file name) is a finding, because `sha256sum -c` would then check the file
       at that path rather than the downloaded one. A table or SHA256SUMS line that cannot be parsed is a
       cannot-evaluate (exit 2). An empty listing is valid only when no hook file is present.
+  (d) LAUNCH. When preview-launch.py is present, one deny payload per PreToolUse hook file present
+      (a payload the hook's own documented contract denies) is sent on stdin through the launcher,
+      which must exit 0 and print the hook's PreToolUse deny object; a launcher that dispatched to
+      another file, or to nothing, prints no deny object and is a finding. The probes run in the leg
+      (a) environment plus the store root the two store-rooted hooks need.
   (c) LINK. Each table row's third cell must be exactly the relative Markdown link `[<file>](<file>)`,
       where <file> is the row's own file name, so the link resolves to the file beside README.md. A
       different target or link text, an absolute URL, a path with a `/`, a bare name that is not a link,
@@ -58,6 +66,10 @@ DISCLOSED RESIDUALS (what this gate does not catch):
   - The environment scrub removes three variable families and sets AIQT_HOOKS_REQUIRE_SIBLINGS=1, and
     changes nothing else; a hook self-test that reads another ambient input (the clock, the time zone,
     the locale) is responsible for pinning it itself.
+  - Leg (d) proves the launcher dispatches each PreToolUse hook on one pinned deny payload each; it
+    does not re-prove the hooks' own verdicts (leg (a) trusts their self-tests for that), and it is
+    inert when preview-launch.py is absent (tools/check_python_floor.py's launcher leg requires the
+    launcher whenever the README registers one).
 
   check_hooks_preview.py              run the gate over .preview/
   check_hooks_preview.py --self-test  synthetic temp-tree fixtures proving each leg fails on a seeded fault
@@ -79,6 +91,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -93,6 +106,11 @@ README_NAME = "README.md"
 SUMS_NAME = "SHA256SUMS"
 # A hook file name: lowercase letters, digits and hyphens, ending .py (safe in a URL and a shell command).
 HOOK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.py$")
+# The launcher every README registration runs; when present, leg (a) routes each other hook's
+# self-test through it and leg (d) proves its dispatch with one deny payload per PreToolUse hook.
+LAUNCHER_NAME = "preview-launch.py"
+# The deny object every PreToolUse preview hook prints (json.dumps with default separators).
+DENY_NEEDLE = '"permissionDecision": "deny"'
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 # sha256sum text-mode line: 64 lowercase hex, exactly two spaces, a name without whitespace. The name is
 # parsed even when it carries a `/` so leg (b) can report a path entry as a finding (not a parse failure).
@@ -298,7 +316,9 @@ def _tail(data, n=15):
 def leg_selftest(pdir, hooks, findings, unverifiable):
     """(a) Run each hook's own --self-test isolated; nonzero is a finding, a timeout is unverifiable. The
     environment is scrubbed of AIQT_, ORCH_ and CLAUDE_ variables and then carries AIQT_HOOKS_REQUIRE_SIBLINGS=1
-    (set after the scrub), so a hook's sibling-parity tests run rather than skip silently in CI."""
+    (set after the scrub), so a hook's sibling-parity tests run rather than skip silently in CI. When the
+    launcher is present, each other hook's self-test runs through it (the registered path)."""
+    launcher = str((pdir / LAUNCHER_NAME).resolve()) if LAUNCHER_NAME in hooks else None
     for name in hooks:
         path = str((pdir / name).resolve())
         try:
@@ -309,9 +329,15 @@ def leg_selftest(pdir, hooks, findings, unverifiable):
             continue
         try:
             try:
-                res = subprocess.run([sys.executable, "-I", "-S", "-B", path, "--self-test"], cwd=work,
-                                     capture_output=True, timeout=SELFTEST_TIMEOUT, env=_selftest_env(),
-                                     stdin=subprocess.DEVNULL)
+                if launcher is not None and name != LAUNCHER_NAME:
+                    res = subprocess.run([sys.executable, "-I", "-S", "-B", launcher,
+                                          name[:-3].replace("-", "_"), "--self-test"], cwd=work,
+                                         capture_output=True, timeout=SELFTEST_TIMEOUT,
+                                         env=_selftest_env(), stdin=subprocess.DEVNULL)
+                else:
+                    res = subprocess.run([sys.executable, "-I", "-S", "-B", path, "--self-test"],
+                                         cwd=work, capture_output=True, timeout=SELFTEST_TIMEOUT,
+                                         env=_selftest_env(), stdin=subprocess.DEVNULL)
             except subprocess.TimeoutExpired:
                 unverifiable.append("{}/{}: --self-test did not finish within this gate's {}s deadline; no "
                                     "verdict was delivered".format(PREVIEW_DIR, name, SELFTEST_TIMEOUT))
@@ -367,6 +393,78 @@ def leg_integrity(pdir, hooks, rows, sums, findings):
             PREVIEW_DIR, name, README_NAME, SUMS_NAME))
 
 
+def _deny_probes(work):
+    """(mode file name, payload, extra environment) per PreToolUse preview hook: one payload each
+    hook's own documented contract denies. `work` holds the store root the two store-rooted hooks
+    read through AIQT_STORE_ROOT; 2099 stays a future year for any plausible run of this gate."""
+    store = os.path.join(work, "store")
+    os.makedirs(store, exist_ok=True)
+    record = os.path.join(store, "X.md")
+    with open(record, "w", encoding="utf-8") as fh:
+        fh.write("x\n")
+
+    def bash(command, **extra):
+        return {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_input": dict({"command": command}, **extra)}
+
+    return (
+        ("future-stamp-write.py",
+         {"hook_event_name": "PreToolUse", "tool_name": "Write",
+          "tool_input": {"file_path": os.path.join(store, "record.md"),
+                         "content": "recorded-at: 2099-01-01T00:00:00Z"}},
+         {"AIQT_STORE_ROOT": store}),
+        ("record-remove-check.py", bash("rm -f " + record), {"AIQT_STORE_ROOT": store}),
+        ("unbounded-wait.py", bash("until grep -q X f; do sleep 5; done", run_in_background=True), {}),
+        ("ungated-record.py", bash("pytest; echo PASS >> report"), {}),
+    )
+
+
+def leg_launch(pdir, hooks, findings, unverifiable):
+    """(d) The launcher's dispatch really runs each PreToolUse hook at this interpreter: one deny
+    payload per hook file present, sent on stdin through the launcher, must exit 0 and print the
+    hook's deny object. Inert when the launcher is absent; a probed hook file that is absent is
+    already a leg (b) finding."""
+    if LAUNCHER_NAME not in hooks:
+        return
+    launcher = str((pdir / LAUNCHER_NAME).resolve())
+    try:
+        work = tempfile.mkdtemp(prefix="aiqt-hooks-preview-deny-")
+    except OSError as exc:
+        unverifiable.append("{}/{}: cannot create a scratch directory for the deny probes: {}".format(
+            PREVIEW_DIR, LAUNCHER_NAME, _bounded(exc)))
+        return
+    try:
+        for name, payload, extra in _deny_probes(work):
+            if name not in hooks:
+                continue
+            env = _selftest_env()
+            env.update(extra)
+            try:
+                res = subprocess.run([sys.executable, "-I", "-S", "-B", launcher,
+                                      name[:-3].replace("-", "_")], cwd=work,
+                                     input=json.dumps(payload).encode("utf-8"), capture_output=True,
+                                     timeout=SELFTEST_TIMEOUT, env=env)
+            except subprocess.TimeoutExpired:
+                unverifiable.append("{}/{}: the deny probe did not finish within this gate's {}s "
+                                    "deadline; no verdict was delivered".format(
+                                        PREVIEW_DIR, name, SELFTEST_TIMEOUT))
+                continue
+            except (OSError, subprocess.SubprocessError) as exc:
+                unverifiable.append("{}/{}: the deny probe could not be launched: {}".format(
+                    PREVIEW_DIR, name, exc))
+                continue
+            if res.returncode != 0 or DENY_NEEDLE not in res.stdout.decode("utf-8", "replace"):
+                detail = _tail(res.stdout) + _tail(res.stderr)
+                findings.append("{}/{}: the deny probe through {} exited {} without the deny object "
+                                "(d):\n      {}".format(PREVIEW_DIR, name, LAUNCHER_NAME,
+                                                        res.returncode,
+                                                        "\n      ".join(detail) or "(no output)"))
+            else:
+                print("  {}/{}: deny probe through {} held".format(PREVIEW_DIR, name, LAUNCHER_NAME))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def leg_link(rows, findings):
     """(c) Each row's link cell is exactly the relative Markdown link `[<file>](<file>)` to its own file.
     Only the target name is verified, never that the link resolves."""
@@ -409,6 +507,7 @@ def run(root):
                 hooks.append(name)
         print("hooks-preview: {} hook file(s), {} integrity-table row(s)".format(len(hooks), len(rows)))
         leg_selftest(pdir, hooks, findings, unverifiable)
+        leg_launch(pdir, hooks, findings, unverifiable)
         leg_integrity(pdir, hooks, rows, sums, findings)
         leg_link(rows, findings)
     except GateError as exc:
@@ -426,8 +525,9 @@ def run(root):
         return 2
     if findings:
         return 1
-    print("PASS: hooks-preview holds (every hook self-test passes, README and SHA256SUMS agree with the "
-          "files, and every row links to its own file)")
+    print("PASS: hooks-preview holds (every hook self-test passes, the launcher's dispatch denies each "
+          "PreToolUse probe, README and SHA256SUMS agree with the files, and every row links to its own "
+          "file)")
     return 0
 
 
@@ -438,6 +538,13 @@ def run(root):
 _STUB_OK = b"import sys\nsys.exit(0 if '--self-test' in sys.argv else 3)\n"
 _STUB_FAIL = b"import sys\nprint('stub self-test failure')\nsys.exit(1)\n"
 _STUB_SLOW = b"import time\ntime.sleep(30)\n"
+# A stand-in launcher for the leg (d) fixtures: exits 0 on any --self-test argv and answers a deny
+# probe with the deny object, as the real launcher's dispatched hook does.
+_STUB_LAUNCH = (b"import sys\n"
+                b"if sys.argv[-1] == '--self-test':\n    sys.exit(0)\n"
+                b"sys.stdin.read()\n"
+                b"sys.stdout.write('{\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", "
+                b"\"permissionDecision\": \"deny\", \"permissionDecisionReason\": \"stub\"}}\\n')\n")
 # Passes only when its environment carries REQUIRE_SIBLINGS_VAR=1 and no other scrubbed-family variable, and it
 # was launched the way the README tells users to launch a hook (-I -S -B: isolated, no site, no bytecode).
 _STUB_ENV = (b"import os, sys\nkeys = sorted(k for k in os.environ if k.startswith(('AIQT_', 'ORCH_', 'CLAUDE_')))\n"
@@ -692,6 +799,14 @@ def self_test_main():
             sums_text = _sums([("clock-inject.py", ok_hex)])
             (r / PREVIEW_DIR / SUMS_NAME).write_bytes(sums_text.replace("\n", ch, 1).encode("utf-8"))
             case("SHA256SUMS line separator U+{:04X}".format(ord(ch)), 2, r, needle="is not a line break")
+        # 22. (d) a launcher that answers the deny probe passes; one that ignores its mode (so the
+        #     dispatched hook never runs and nothing denies) is a finding.
+        case("launcher dispatch deny probe", 0, _build(
+            base / "launch-ok", {"preview-launch.py": _STUB_LAUNCH, "unbounded-wait.py": _STUB_OK}))
+        case("launcher dispatch not proven", 1, _build(
+            base / "launch-silent", {"preview-launch.py": _STUB_OK, "unbounded-wait.py": _STUB_OK}),
+            needle="without the deny object")
+
         r = _build(base / "readme-break", ok)
         text = (r / PREVIEW_DIR / README_NAME).read_text(encoding="utf-8")
         row_end = text.index("\n", text.index("| `clock-inject.py` |"))
@@ -714,7 +829,8 @@ def self_test_main():
           "alien and extra entries, path entries in SHA256SUMS, malformed inputs, a table row without a "
           "leading pipe, line separators the reader does not honour, a CRLF README; c: a link to another "
           "file, a mismatched text or target, an absolute URL, a path with a slash, a bare name, an "
-          "angle-bracketed link, and a missing link) all hold".format(len(ran), REQUIRE_SIBLINGS_VAR))
+          "angle-bracketed link, and a missing link; d: a launcher that answers the deny probe and one "
+          "that does not) all hold".format(len(ran), REQUIRE_SIBLINGS_VAR))
     return 0
 
 

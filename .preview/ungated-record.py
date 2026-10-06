@@ -8,8 +8,10 @@ WHAT IT DOES
     checked, and a later reader trusts it. This hook denies that shape before the command runs, when the fix
     is one operator, and its reason names the gated rewrite.
 
-    Event: PreToolUse, matcher Bash. Register the launch line REGISTRATION (below the imports), filled with
-    python3 and this file's absolute path. Output: nothing (allow), or ONE line holding the standard PreToolUse
+    Event: PreToolUse, matcher Bash. Register through .preview/preview-launch.py as the README's
+    integration steps show (the launcher refuses below the Python floor instead of failing open);
+    REGISTRATION (below the imports) is the direct launch line, kept because this hook's own self-test
+    still exercises it. Output: nothing (allow), or ONE line holding the standard PreToolUse
     deny object. Exit status: always 0; the decision travels in the JSON. The verdict is deny or silence: this
     hook never asks.
 
