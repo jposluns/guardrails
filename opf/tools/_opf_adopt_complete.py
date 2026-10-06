@@ -136,8 +136,24 @@ _YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029
 # so two keys of one mapping denote one node only when their strings are equal.
 _YAML_NULL_BOOL = frozenset("null Null NULL y Y yes Yes YES true True TRUE On ON "
                             "n N no No NO false False FALSE off Off OFF".split())
+# The plain scalars YAML 1.1 or the 1.2 core schema resolves to something other than a string: every null,
+# bool, int (binary, octal, decimal, hexadecimal, sexagesimal, `_`-grouped, signed), float (decimal,
+# exponent, sexagesimal, infinity, not-a-number) and timestamp form, read as a superset (a bare `.` is
+# included), and YAML 1.1's value `=` and merge `<<`. A plain scalar that fully matches none of them is a
+# string (_string_scalar): `1st assertion` is one, `5`, `1_0`, `.inf` and `2001-12-14` are not.
+_YAML_NONSTRING_RE = re.compile(
+    r"~|null|Null|NULL|y|Y|yes|Yes|YES|n|N|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF"
+    r"|[-+]?0b[01_]+|[-+]?0o?[0-7_]+|[-+]?0x[0-9a-fA-F_]+|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])*"
+    r"|[-+]?(?:[0-9][0-9_]*(?::[0-5]?[0-9])*)?\.[0-9_.]*(?:[eE][-+]?[0-9]+)?"
+    r"|[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)"
+    r"|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:(?:[Tt]|[ \t]+)[0-9]{1,2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]*)?(?:[ \t]*(?:Z|[-+][0-9]{1,2}(?::[0-9]{2})?))?)?|=|<<")
 # A plain scalar inside a flow collection: no indicator, comma, bracket, colon or hash anywhere.
 _FLOW_PLAIN_RE = re.compile(r"[A-Za-z0-9_./+~][A-Za-z0-9_./+~*@-]*(?: +[A-Za-z0-9_./+~*@-]+)*")
+# One entry of a flow collection the reader has already parsed, when the entry is a scalar: an optional
+# `key: ` (a mapping entry) and a quoted or plain scalar value, then a `,` or the collection's end.
+_FLOW_SCALAR = r"""'(?:[^']|'')*'|"(?:[^"\\]|\\.)*"|""" + _FLOW_PLAIN_RE.pattern
+_FLOW_ENTRY_RE = re.compile(r"[ \t]*(?:(" + _FLOW_SCALAR + r"):[ \t]+)?(" + _FLOW_SCALAR + r")[ \t]*(?:,|$)")
 # The planning inventory's closed entry-kind vocabulary (_opf_adopt_plan's observation rows).
 ENTRY_KINDS = ("absent", "directory", "excluded", "file")
 
@@ -493,9 +509,10 @@ class _Workflow:
     outside the subset (a control character, a tab outside a quoted scalar, block-scalar content or a comment
     (in the indentation or as a separator), a CR, an anchor, alias or tag, any other key (white space before
     its colon, a longer key, a numeric, null, bool, special-float or other non-identifier plain key), a
-    duplicate key in any block or flow mapping, a multi-line plain or quoted scalar, a document marker, a
-    flow collection with an empty or trailing entry, a flow pair outside a flow mapping) raises Unevaluable:
-    CI this check cannot parse is CANNOT-EVALUATE, never a pass and never a silent refusal."""
+    duplicate key in any block or flow mapping, a multi-line plain or quoted scalar, content after a quoted
+    scalar or a flow collection other than white space and a comment (a `#` directly after it included), a
+    document marker, a flow collection with an empty or trailing entry, a flow pair outside a flow mapping)
+    raises Unevaluable: CI this check cannot parse is CANNOT-EVALUATE, never a pass and never a silent refusal."""
 
     def __init__(self, text, label):
         self.label, self.i, self.lines = label, 0, []
@@ -652,19 +669,14 @@ class _Workflow:
         head = rest[0]
         if head in "'\"":
             text, j = self._quoted(rest, 0)
-            if text is None or _strip_plain_comment(rest[j:]):
-                self.fail("an unterminated quoted scalar or content after its closing quote")
-            self._no_tab(rest[j:j + _comment_start(rest[j:])])
+            if text is None:
+                self.fail("an unterminated quoted scalar")
+            self._tail(rest[j:], "its closing quote")
             return _Quoted(text)
         if head in "[{":
-            # The flow parser finds the collection's end itself, so a `#` inside a quoted entry is content;
-            # after the end only white space and a comment opened after white space may follow.
+            # The flow parser finds the collection's end itself, so a `#` inside a quoted entry is content.
             end = self._flow_node(rest, 0, 0)
-            tail = rest[end:]
-            cut = _comment_start(tail)
-            if tail[:cut].strip(_YAML_WHITE) or (cut == 0 and tail):
-                self.fail("content after a flow collection")
-            self._no_tab(tail[:cut])
+            self._tail(rest[end:], "a flow collection")
             return _Flow(rest[:end])
         body = rest[:_comment_start(rest)]
         self._no_tab(body)
@@ -672,6 +684,15 @@ class _Workflow:
                 or re.search(r":(?:[ \t]|$)", plain)):
             self.fail("an anchor, alias, tag, reserved indicator or nested mapping in a plain scalar")
         return plain
+
+    def _tail(self, tail, token):
+        """Refuse anything in `tail`, the text after a quoted scalar or a flow collection, but white space
+        and then a comment: YAML opens a comment only after white space, so a `#` directly after the token
+        (`"x"#c`, `[a]#c`) is content after it, never a comment."""
+        cut = _comment_start(tail)
+        if tail[:cut].strip(_YAML_WHITE) or (cut == 0 and tail):
+            self.fail("content after " + token)
+        self._no_tab(tail[:cut])
 
     def _flow_node(self, text, j, depth):
         """The index just past the flow node at text[j] (after spaces): a flow sequence or mapping, a
@@ -769,8 +790,10 @@ def _is_entry(body):
 def _comment_start(rest):
     """The index of the YAML comment in `rest` (a `#` at its start or after white space), else len(rest).
     It reads no quotes: `rest` is a plain scalar (where a quote is content, YAML opens no quoted span inside
-    one), a block-scalar header or the text after a quoted scalar; a flow collection finds its own end
-    (_Workflow._scalar), so a `#` inside its quoted entries is never cut."""
+    one), a block-scalar header or the text after a quoted scalar or a flow collection, which finds its own
+    end (_Workflow._scalar), so a `#` inside its quoted entries is never cut. A `#` at the start is a comment
+    only where `rest` itself follows white space (a value after its key's `: `, an entry after its `- `, a
+    whole line); the text right after a token does not, so _Workflow._tail refuses a `#` there."""
     for i, ch in enumerate(rest):
         if ch == "#" and (i == 0 or rest[i - 1] in _YAML_WHITE):
             return i
@@ -796,6 +819,15 @@ _SHIPPED_RECIPE = Path(__file__).resolve().parent.parent / "enforcement" / "ci" 
 # skip the step, change the program it resolves or move the root `.` it asserts. Each carries a value rule
 # (_canonical_value), and a value outside it is refused like a key outside the set.
 _CANONICAL_STEP_KEYS = frozenset(("name", "id", "run", "shell", "continue-on-error", "timeout-minutes"))
+# The only keys the job of a canonical step may carry, each with a value rule (_canonical_job_value). A
+# `needs:` (a skipped or failed prerequisite skips the job), an `if:`, a `strategy:` (and its `matrix:`),
+# `services:`, `container:`, `uses:`, `concurrency:`, `environment:`, `outputs:` or any other key can skip
+# the job, move where its steps run or change what they resolve, so a job carrying one asserts nothing
+# (CANNOT-EVALUATE, the key named). A valid workflow whose assertion job uses such a key is refused: the
+# assertion belongs in a job of its own. `env` is listed so its own rule names it, and no value is within
+# that rule (a job env can reach the step's shell: BASH_ENV, SHELLOPTS).
+_CANONICAL_JOB_KEYS = frozenset(("name", "runs-on", "steps", "timeout-minutes", "continue-on-error",
+                                 "permissions", "env", "defaults"))
 # A step id: a letter or `_`, then letters, digits, `_` and `-`.
 _STEP_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 
@@ -819,12 +851,12 @@ def _canonical_assertion(run, planned):
 
 def _string_scalar(value):
     """Whether a reader value is a single-line scalar YAML reads as a string: a quoted scalar, or a plain one
-    that is not a null or bool word (_YAML_NULL_BOOL, `on`, `~`) and does not open like a number (a digit, a
-    sign or a dot). A block scalar, a flow collection, a mapping, a sequence and an empty value are not."""
+    that fully matches no YAML 1.1 or 1.2 core-schema null, bool, int, float or timestamp form
+    (_YAML_NONSTRING_RE). A block scalar, a flow collection, a mapping, a sequence and an empty value are
+    not."""
     if isinstance(value, _Quoted):
         return True
-    return (type(value) is str and value not in _YAML_NULL_BOOL and value not in ("on", "~")
-            and value[:1] not in tuple("0123456789+-."))
+    return type(value) is str and _YAML_NONSTRING_RE.fullmatch(value) is None
 
 
 def _canonical_value(key, value):
@@ -846,6 +878,53 @@ def _canonical_value(key, value):
     return key == "continue-on-error" and type(value) is str and value == "false"
 
 
+def _flow_values(value, opener):
+    """The entry values of `value`, a reader flow collection opening with `opener` (`[`, a sequence, or `{`,
+    a mapping), when every entry is a scalar (a mapping entry's key set aside), each a plain str or a _Quoted
+    (its text undecoded: only its kind is read); None for any other value, kind or a nested collection. The
+    reader has already parsed the collection in full (_Workflow._flow_node)."""
+    text = value.text if isinstance(value, _Flow) else ""
+    if text[:1] != opener:
+        return None
+    body, j, out = text[1:-1], 0, []
+    if not body.strip(_YAML_WHITE):
+        return out
+    while j < len(body):
+        entry = _FLOW_ENTRY_RE.match(body, j)
+        if entry is None or (entry.group(1) is None) != (opener == "["):
+            return None
+        item = entry.group(2)
+        out.append(_Quoted(item[1:-1]) if item[0] in "'\"" else item)
+        j = entry.end()
+    return out
+
+
+def _canonical_job_value(key, value):
+    """Whether `value` meets the value rule of canonical job key `key` (_CANONICAL_JOB_KEYS): name a string
+    scalar (_string_scalar); runs-on a string scalar or a non-empty flow or block sequence of string
+    scalars; steps a block sequence; timeout-minutes and continue-on-error the canonical step's rules (a
+    positive integer literal; only the plain literal false); permissions a string scalar or a block or flow
+    mapping of string scalars; defaults a block mapping holding only a run mapping of shell and
+    working-directory (_shell_of and the working-directory rule judge those). env and any other key are
+    outside it."""
+    if key == "name":
+        return _string_scalar(value)
+    if key == "runs-on":
+        labels = value if type(value) is list else _flow_values(value, "[")
+        return _string_scalar(value) or bool(labels) and all(_string_scalar(label) for label in labels)
+    if key == "steps":
+        return type(value) is list
+    if key in ("timeout-minutes", "continue-on-error"):
+        return _canonical_value(key, value)
+    if key == "permissions":
+        scopes = list(value.values()) if type(value) is dict else _flow_values(value, "{")
+        return _string_scalar(value) or scopes is not None and all(_string_scalar(scope) for scope in scopes)
+    if key == "defaults":
+        return (type(value) is dict and set(value) == {"run"} and type(value["run"]) is dict
+                and set(value["run"]) <= {"shell", "working-directory"})
+    return False
+
+
 def _mentions_assertion(run, planned):
     """Whether a run value mentions the store assertion: CI_STORE_ASSERTION as a whole option word
     (`--require-store-fake` is another option), or the file name of a planned recipe or the shipped one."""
@@ -861,12 +940,6 @@ def _shipped_recipe():
         return _SHIPPED_RECIPE.read_bytes()
     except OSError as exc:
         raise Unevaluable("cannot read the pack's shipped CI recipe {} ({})".format(_SHIPPED_RECIPE, exc))
-
-
-def _gated(table):
-    """Whether a job can be skipped or its failure ignored: an `if:`, or a continue-on-error other than the
-    plain literal false (_canonical_value's rule: true, an expression or a quoted 'false' is refused)."""
-    return "if" in table or not _canonical_value("continue-on-error", table.get("continue-on-error", "false"))
 
 
 def _run_defaults(table, where):
@@ -895,8 +968,11 @@ def _ci_asserts_store(path, data, recipes=None, planned=None):
     exactly one canonical assertion line (_canonical_assertion), a recipe one naming a live recipe whose
     bytes are the pack's shipped recipe; the step carries only _CANONICAL_STEP_KEYS, each value within its
     rule (_canonical_value: continue-on-error only the plain literal false, timeout-minutes a positive
-    integer literal, shell bash); its job carries no `if:`, no other continue-on-error and no `env:`, and
-    neither the job nor the workflow sets `env:` or a default working directory; its shell (the step's,
+    integer literal, shell bash); its job is canonical too, carrying only _CANONICAL_JOB_KEYS, each value
+    within its rule (_canonical_job_value), so a job with `needs:`, `if:`, `strategy:`, `services:`,
+    `container:`, `uses:`, `concurrency:`, `environment:`, `outputs:` or any other key is refused, a valid
+    workflow included (the assertion belongs in a job of its own); neither the job nor the workflow sets
+    `env:` or a default working directory; its shell (the step's,
     else the job's and then the workflow's default) is bash; and no earlier step of its job runs
     shell (it could export variables or PATH entries into the step). `refused` names every other step whose
     run value mentions the assertion (_mentions_assertion): the caller reports those CANNOT-EVALUATE, never
@@ -941,8 +1017,14 @@ def _ci_asserts_store(path, data, recipes=None, planned=None):
             elif not all(_canonical_value(key, value) for key, value in step.items()):
                 why = "the step's {} value is outside the canonical step's value rule".format(
                     ", ".join(sorted(key for key, value in step.items() if not _canonical_value(key, value))))
-            elif _gated(job) or "env" in job or "env" in doc:
-                why = "its job is conditional or continue-on-error, or the job or workflow sets env"
+            elif not set(job) <= _CANONICAL_JOB_KEYS:
+                why = "its job carries a key outside the canonical job ({}): move the assertion into its own " \
+                      "job".format(", ".join(sorted(set(job) - _CANONICAL_JOB_KEYS)))
+            elif "env" in job or "env" in doc:
+                why = "the job or workflow sets env"
+            elif not all(_canonical_job_value(key, value) for key, value in job.items()):
+                why = "the job's {} value is outside the canonical job's value rule".format(
+                    ", ".join(sorted(key for key, value in job.items() if not _canonical_job_value(key, value))))
             elif any("working-directory" in table for table in defaults):
                 why = "a default working directory moves the root it asserts"
             elif _shell_of(step, *defaults) != "bash":
@@ -1643,7 +1725,33 @@ def self_test():
                                                            b"        run: python3"), VALID),
                 ("flow-quoted-hash", _CI_BYTES.replace(b"[main]", b'["release # candidate"]'), VALID),
                 ("indentless-on", _CI_BYTES.replace(b"on:\n  push:\n    branches: [main]\n", b"on:\n- push\n"),
-                 VALID)):
+                 VALID),
+                # Round 7: a `#` directly after a closing quote is no comment; an assertion job that needs a
+                # skipped prerequisite, or whose timeout-minutes is outside its rule, is not canonical; a
+                # digit-led step name is a string. Each control beside its refusal is VALID.
+                ("quoted-hash-adjacent", _CI_BYTES.replace(
+                    b"run: python3 -I -B opf/tools/opf.py doctor --require-store",
+                    b'run: "python3 -I -B opf/tools/opf.py doctor --require-store"#bad'), CANNOT_EVALUATE),
+                ("quoted-hash-spaced", _CI_BYTES.replace(
+                    b"run: python3 -I -B opf/tools/opf.py doctor --require-store",
+                    b'run: "python3 -I -B opf/tools/opf.py doctor --require-store" #ok'), VALID),
+                ("needs-skipped-prerequisite", _CI_BYTES.replace(
+                    b"    runs-on: ubuntu-latest\n", b"    needs: prerequisite\n    runs-on: ubuntu-latest\n").replace(
+                    b"jobs:\n", b"jobs:\n  prerequisite:\n    if: false\n    runs-on: ubuntu-latest\n    steps:\n"
+                    b"      - run: echo unused\n"), CANNOT_EVALUATE),
+                ("skipped-job-beside", _CI_BYTES.replace(
+                    b"jobs:\n", b"jobs:\n  prerequisite:\n    if: false\n    runs-on: ubuntu-latest\n    steps:\n"
+                    b"      - run: echo unused\n"), VALID),
+                ("job-timeout-flow", _CI_BYTES.replace(b"    runs-on: ubuntu-latest\n",
+                                                       b"    runs-on: ubuntu-latest\n    timeout-minutes: [bad]\n"),
+                 CANNOT_EVALUATE),
+                ("job-timeout-integer", _CI_BYTES.replace(b"    runs-on: ubuntu-latest\n",
+                                                          b"    runs-on: ubuntu-latest\n    timeout-minutes: 5\n"),
+                 VALID),
+                ("digit-led-name", _CI_BYTES.replace(b"      - name: OPF CI floor\n", b"      - name: 1st assertion\n"),
+                 VALID),
+                ("numeric-name", _CI_BYTES.replace(b"      - name: OPF CI floor\n", b"      - name: 1_000\n"),
+                 CANNOT_EVALUATE)):
             with mock.patch.object(here, "_CI_BYTES", ci_bytes):
                 got = _case()
             check("check-4-ci-" + label, _only(got, {} if want == VALID else _red(OPERATIONAL, want))
@@ -1823,8 +1931,12 @@ def self_test():
                 + b"        run: opf doctor --require-store\n"
 
         for key, within, outside in (
-                (b"name", (b"OPF store", b"'5'", b'"true"', b"x # c"),
-                 (b"[a]", b"{a: b}", b"|\n          x", b">\n          x", b"true", b"null", b"~", b"5", b"")),
+                (b"name", (b"OPF store", b"'5'", b'"true"', b"x # c", b"1st assertion", b".github check", b"-x",
+                           b"+x", b"0x", b"1e", b"x#c", b"2001-12-14 build"),
+                 (b"[a]", b"{a: b}", b"|\n          x", b">\n          x", b"true", b"null", b"~", b"5", b"",
+                  b"1_000", b"0x10", b"0o17", b"0b101", b"1:20", b"1.5", b"1e5", b".5", b"+1", b"-1", b".inf",
+                  b"-.inf", b".nan", b"2001-12-14", b"2001-12-14t21:59:43.10-05:00", b"2001-12-14 21:59:43.10 -5",
+                  b"on", b"Off", b"Yes", b"n", b"=", b"<<")),
                 (b"id", (b"opf_store", b"'opf-1'", b"_a"),
                  (b"a.b", b"'a b'", b"1a", b"true", b"[a]", b"|\n          a", b"'${{ x }}'", b"")),
                 (b"shell", (b"bash", b"'bash'", b'"bash"'),
@@ -1840,6 +1952,42 @@ def self_test():
             for n, value in enumerate(outside):
                 check("ci-step-value-outside-{}-{}".format(key.decode(), n),
                       ci(keyed(key, value)) == CANNOT_EVALUATE)
+        # Round 7: the job of a canonical step is canonical too (_CANONICAL_JOB_KEYS, _canonical_job_value). A
+        # job key outside the set refuses, named, with the direction to move the assertion into its own job
+        # (a valid workflow is refused too); each allowed key's value inside its rule is VALID, outside it
+        # CANNOT-EVALUATE, on the same carrier.
+        def job(key, value):
+            separated = b":" + value if value[:1] == b"\n" else b": " + value if value else b":"
+            return b"jobs:\n  t:\n    " + key + separated + b"\n    steps:\n      - run: opf doctor --require-store\n"
+
+        for key, value in ((b"needs", b"prerequisite"), (b"if", b"true"),
+                           (b"strategy", b"\n      matrix:\n        os: [a]"), (b"matrix", b"[a]"),
+                           (b"services", b"\n      db:\n        image: x"), (b"container", b"x"),
+                           (b"uses", b"./.github/workflows/x.yml"), (b"concurrency", b"x"), (b"environment", b"prod"),
+                           (b"outputs", b"\n      a: b"), (b"runs-on-x", b"x"), (b"timeout_minutes", b"5")):
+            asserted, refused = _ci_asserts_store(_CI_PATH, job(key, value))
+            check("ci-job-key-refused-" + key.decode(), not asserted and len(refused) == 1
+                  and "(" + key.decode() + ")" in refused[0] and "its own job" in refused[0])
+        for key, within, outside in (
+                (b"name", (b"OPF", b"'5'", b"1st job"), (b"[a]", b"5", b"true", b"~", b"")),
+                (b"runs-on", (b"ubuntu-latest", b"[self-hosted, linux]", b"['a', \"b c\"]",
+                             b"\n      - self-hosted\n      - linux"),
+                 (b"[]", b"{group: x}", b"[a, [b]]", b"[a, 5]", b"5", b"|\n      x", b"\n      - a\n      - [b]",
+                  b"\n      - a: b", b"")),
+                (b"timeout-minutes", (b"5", b"360"), (b"[bad]", b"0", b"'5'", b"${{ 5 }}", b"1.5", b"")),
+                (b"continue-on-error", (b"false",), (b"true", b"'false'", b"${{ false }}", b"[false]")),
+                (b"permissions", (b"read-all", b"{}", b"{contents: read}", b"{contents: read, 'id-token': \"write\"}",
+                                  b"\n      contents: read"),
+                 (b"[read]", b"5", b"{contents: [read]}", b"\n      contents:\n        x: y", b"\n      contents: true",
+                  b"")),
+                (b"defaults", (b"\n      run:\n        shell: bash",),
+                 (b"\n      run:\n        shell: bash\n      other: x", b"\n      run:\n        foo: x",
+                  b"\n      other: x")),
+                (b"env", (), (b"\n      A: b", b"{}"))):
+            for n, value in enumerate(within):
+                check("ci-job-value-within-{}-{}".format(key.decode(), n), ci(job(key, value)) == VALID)
+            for n, value in enumerate(outside):
+                check("ci-job-value-outside-{}-{}".format(key.decode(), n), ci(job(key, value)) == CANNOT_EVALUATE)
         # The pack's own workflow template (opf/enforcement/ci) is canonical with its recipe planned, and a
         # refused mention without it.
         template = (_SHIPPED_RECIPE.parent / "github-actions.yml").read_bytes()
@@ -1965,6 +2113,16 @@ def self_test():
                                                            b"          opf doctor --require-store\n"),
                             ("folded-leading-blank", steps + b"      - run: >\n\n          opf doctor --require-store\n"),
                             ("flow-hash-no-space", b'on: ["a"]#c\n' + good),
+                            ("flow-plain-hash-no-space", b"on: [a]#c\n" + good),
+                            ("flow-mapping-hash-no-space", b"on: {a: b}#c\n" + good),
+                            ("quote-hash-no-space", b'name: "x"#c\n' + good),
+                            ("single-quote-hash-no-space", b"name: 'x'#c\n" + good),
+                            ("entry-quote-hash-no-space", steps + b'      - run: "opf doctor --require-store"#bad\n'),
+                            ("sequence-quote-hash-no-space", b"on:\n  - 'push'#c\n" + good),
+                            ("block-header-hash-no-space",
+                             steps + b"      - run: |#c\n          opf doctor --require-store\n"),
+                            ("key-hash-no-space", b"name:#c\n" + good),
+                            ("entry-hash-no-space", steps + b"      -#c\n"),
                             ("flow-hash-plain-entry", b"on: [a #c]\n" + good),
                             ("flow-quoted-hash-unclosed", b'on: ["a # b]\n' + good),
                             ("sequence-then-key", b"on:\n  - push\n  x: y\n" + good),
@@ -1985,8 +2143,18 @@ def self_test():
               and ci(b'on: {a: "x # y"}\n' + good) == VALID
               and ci(b"on:\n- push\n- pull_request\n" + good) == VALID
               and ci(steps + b"    - run: opf doctor --require-store\n    timeout-minutes: 5\n") == VALID
-              and ci(b"jobs:\n  t:\n    needs:\n    - a\n    steps:\n      - run: opf doctor --require-store\n")
+              and ci(b"jobs:\n  t:\n    runs-on:\n    - a\n    steps:\n      - run: opf doctor --require-store\n")
               == VALID)
+        # Round 7 reader controls: a comment after white space follows a quoted scalar, a flow collection, a
+        # block-scalar header, a key and an entry; a `#` inside a plain scalar is content.
+        check("ci-reader-round-7-valid", ci(b'name: "x" #c\n' + good) == VALID
+              and ci(b"name: 'x' #c\n" + good) == VALID and ci(b"on: [a] #c\n" + good) == VALID
+              and ci(b"on: {a: b} #c\n" + good) == VALID and ci(b"on:\n  - 'push' #c\n" + good) == VALID
+              and ci(steps + b'      - run: "opf doctor --require-store" #ok\n') == VALID
+              and ci(steps + b"      - run: | #c\n          opf doctor --require-store\n") == VALID
+              and ci(b"name: #c\n  a: x\n" + good) == VALID
+              and ci(steps + b"      - #c\n        run: opf doctor --require-store\n") == VALID
+              and ci(b"name: x#c\n" + good) == VALID)
         # The reader vectors above are load-bearing: each carrier key alone leaves the canonical step VALID.
         check("ci-reader-carriers-valid", ci(b"on: [a, b]\n" + good) == VALID
               and ci(b"on: " + b"[" * 16 + b"]" * 16 + b"\n" + good) == VALID
