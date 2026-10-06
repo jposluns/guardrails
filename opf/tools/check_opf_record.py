@@ -405,24 +405,28 @@ Each case runs on its own copy of that template; the root is removed in a finall
       under a declared flip, another exception type carrying the declared text, a twin of the injected
       exception raised in its place, a crash the CLI turns into an unexpected-error refusal, and a
       SystemExit from the flipped run each fail the discrimination; a backstop line binds only when
-      both its text carries the token of one recorded injection (each recorded injection's message
-      holds a fresh random token) and the record CLI backstop printed that same object (identity) into
-      the capture the line was inspected in, read from that capture's final contents, so the
-      injection's line forwarded into a private capture or cleared from its own never authorizes an
-      unrecorded twin's line in a later capture, a nested run's unrecorded diagnostic copied into the
-      injection's capture binds nothing, a capture cleared and written again binds nothing, and an
-      unrecorded exception carrying the token (one raised from the injection's args, an unrelated error
-      formatted with its message, a new exception a child process prints from its message) binds
-      nothing; the injection's line inspected in its own capture is accepted however it was written
-      (one print, split writes, or writelines), as is a cleared capture with no twin (flips: the round-3
+      both its text carries the token of one recorded injection (each recorded injection's message holds a
+      fresh random token) and one record CLI backstop frame holding that same object (identity) wrote
+      every character of that line, its token and repr included, into the capture the line was inspected
+      in (a write of nothing, of a preamble or of the repr alone from that frame proves nothing), read
+      from that capture's final contents, so the injection's line forwarded into a private capture or
+      cleared from its own never authorizes an unrecorded twin's line in a later capture, a nested run's
+      unrecorded diagnostic copied into the injection's capture binds nothing, a capture cleared and
+      written again binds nothing, and an unrecorded exception carrying the token (one raised from the
+      injection's args, an unrelated error formatted with its message, a new exception a child process
+      prints from its message) binds nothing, nor does a nested run's args copy of the injection printed
+      into the injection's own capture after its backstop wrote nothing, a preamble, or no write there;
+      the injection's line inspected in its own capture is accepted however it was written (one print,
+      split writes, or writelines), as is a cleared capture with no twin (flips: the round-3
       discriminator, which matched each declared text as a substring of any backstop line and let a
-      BaseException escape; the round-5 discriminator, which matched each line by text to an emission
-      from one run-wide list, whichever capture held it; the round-6 discriminator, which bound each
-      line written in one call to the exception its nearest record CLI frame held; the round-7
-      discriminator, which bound each line by its token alone)
-      Residual: test code that deliberately copies an injection's own line, token included, into a
-      capture the backstop printed that injection into is not told apart from the backstop's own
-      emission of it. The token and the emission identity guard against accidental and unrecorded
+      BaseException escape; the round-5 discriminator, which matched each line by text to an emission from
+      one run-wide list, whichever capture held it; the round-6 discriminator, which bound each line
+      written in one call to the exception its nearest record CLI frame held; the round-7 discriminator,
+      which bound each line by its token alone; the round-8 discriminator, which counted an injection
+      printed into a capture on any write its backstop frame made there, empty or not)
+      Residual: test code that deliberately writes an injection's own line, token and repr included,
+      from the backstop frame holding that injection into its capture is not told apart from the
+      backstop's own emission of it. The token and the emission identity guard against accidental and unrecorded
       faults (a crash no recorded injection caused, a twin, a copied diagnostic of another exception,
       an unrecorded exception carrying the token), not against a test author forging its own
       injection's output.
@@ -584,7 +588,8 @@ _flip_watch = []
 # prints that exception carries it, whichever write pattern brought the line into its capture. A token
 # shows only that the text came from the injection's message (an exception raised from its args, an
 # error formatted with its message, or a child printing it carries the token too), so a line binds only
-# where the record CLI backstop also printed that same object into the same capture (_EmissionStderr).
+# where one record CLI backstop frame holding that same object also wrote that whole line into the same
+# capture (_EmissionStderr, _note_backstops).
 # The earlier rounds' discriminators, kept as T83's flips, push a list instead and record (label,
 # exception object) with the message untouched, as their rounds did; the round-7 one pushes a dict and
 # reads the token alone.
@@ -592,14 +597,18 @@ _flip_injections = []
 _INJECTION_TOKEN = re.compile(r"\binjection-[0-9a-f]{16}\b")
 
 
-def _note_backstops(text, printed=()):
+def _note_backstops(text, written=()):
     """Add each backstop occurrence in `text`, one run's final stderr, to the innermost _flip_watch list
-    as (its line, the recorded injections the record CLI backstop printed into the capture it was read
-    from): none for a child's stderr or any text read without such a capture, and None for a capture
-    written anywhere but its end or truncated (_EmissionStderr.occurrences), whose contents are no longer
-    the run's emissions as written, so none of its lines binds an injection."""
+    as (its line, the recorded injections for which one record CLI backstop frame holding the injection
+    wrote that whole line into the capture it was read from, _written_whole over `written`, that
+    capture's spans): none for a child's
+    stderr or any text read without such a capture, and None for a capture written anywhere but its end
+    or truncated (_EmissionStderr.occurrences), whose contents are no longer the run's emissions as
+    written, so none of its lines binds an injection."""
     if _flip_watch and text:
-        _flip_watch[-1].extend((found.group(0), printed) for found in _BACKSTOP.finditer(text))
+        _flip_watch[-1].extend((found.group(0), None if written is None else
+                                _written_whole(found.start(), found.end(), written))
+                               for found in _BACKSTOP.finditer(text))
 
 
 def _injected(label, exc):
@@ -646,37 +655,43 @@ class _EmissionStderr(io.StringIO):
     """A CLI run's captured stderr, read whole once the run returns (occurrences), so a backstop line is
     judged by the final contents however it was written: one print, split writes, or writelines (which
     calls write). Each write made while the nearest record CLI backstop frame (record.cli or
-    opf._cmd_record) holds a recorded injection as its `exc` adds that object to this capture's printed
-    set, by identity and once, whatever the write's text or offset, so a line split across writes loses
-    nothing; an exception the backstop prints that no injection recorded (an args copy, an unrelated
-    error carrying the token) adds nothing. Which recorded exception a line names is read from the token
-    its text carries; the printed set shows the backstop really printed that object here. The capture
-    also tracks whether its contents are the run's output as appended: a write anywhere but the end
-    (after a seek, or over an initial value) and any truncate mark it mutated, and a mutated capture
-    binds none of its lines (fail closed), so a capture cleared and written again (T83's clear-reprint)
-    stays refused rather than trusted."""
+    opf._cmd_record) holds a recorded injection as its `exc` records the span of the contents it wrote,
+    keyed by that frame and that injection; a write from any other frame, or from a frame holding an
+    exception no injection recorded (an args copy, an unrelated error carrying the token), records
+    nothing, and so does a write of nothing. A backstop line's printed set (_note_backstops) holds a
+    recorded injection only when one such frame holding that injection wrote every character of the
+    line, across one or more of its writes (so a line split across writes or sent through writelines
+    loses nothing); as _bound_injection then requires the line to carry that injection's own token and
+    repr, the set shows that the backstop frame holding that very object wrote this line, token and repr
+    included, into this capture, never merely that the frame wrote something here (a write of nothing,
+    of a preamble, or of the injection's repr alone, followed by another frame's line, adds nothing).
+    Which recorded exception a line names is read from the token its text carries. The capture also
+    tracks whether its contents are the run's output as appended: a write anywhere but the end (after a
+    seek, or over an initial value) and any truncate mark it mutated, and a mutated capture binds none of
+    its lines (fail closed), so a capture cleared and written again (T83's clear-reprint) stays refused
+    rather than trusted."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._mutated = False
-        self._printed = []
+        self._written = []   # (id of the backstop frame, its recorded injection, start, end) per write
 
     def write(self, text):
-        if self.tell() != len(self.getvalue()):
+        start = self.tell()
+        if start != len(self.getvalue()):
             self._mutated = True
         injections = _flip_injections[-1] if _flip_injections else None
-        if isinstance(injections, dict) and injections:
+        if isinstance(injections, dict) and injections and isinstance(text, str) and text:
             codes = (record.cli.__code__, opf._cmd_record.__code__)
-            frame, printed = sys._getframe(1), None
+            frame, held = sys._getframe(1), None
             try:
                 while frame is not None and frame.f_code not in codes:
                     frame = frame.f_back
-                printed = None if frame is None else frame.f_locals.get("exc")
-                if any(printed is exc for _label, exc in injections.values()) and \
-                        not any(printed is seen for seen in self._printed):
-                    self._printed.append(printed)
+                held = None if frame is None else frame.f_locals.get("exc")
+                if any(held is exc for _label, exc in injections.values()):
+                    self._written.append((id(frame), held, start, start + len(text)))
             finally:
-                del frame, printed
+                del frame, held
         return super().write(text)
 
     def truncate(self, size=None):
@@ -684,9 +699,25 @@ class _EmissionStderr(io.StringIO):
         return super().truncate(size)
 
     def occurrences(self):
-        """(the contents, the recorded injections the record CLI backstop printed here, or None for a
-        mutated capture), read together from this one capture."""
-        return self.getvalue(), None if self._mutated else tuple(self._printed)
+        """(the contents, the spans the record CLI backstop frames holding recorded injections wrote here
+        as (frame id, injection, start, end), or None for a mutated capture), read together from this one
+        capture."""
+        return self.getvalue(), None if self._mutated else tuple(self._written)
+
+
+def _written_whole(start, end, written):
+    """The recorded injections one of whose backstop frames wrote every character of [start, end): the
+    spans each frame wrote under an injection are appended in order, so they cover the range when they
+    run on without a gap from start past end."""
+    printed = []
+    for key in dict.fromkeys((frame, id(exc)) for frame, exc, _start, _end in written):
+        reach, exc = start, None
+        for frame, held, span_start, span_end in written:
+            if (frame, id(held)) == key and span_start <= reach < span_end:
+                reach, exc = span_end, held
+        if exc is not None and reach >= end and not any(exc is seen for seen in printed):
+            printed.append(exc)
+    return tuple(printed)
 
 
 def cli(env, argv):
@@ -6416,12 +6447,14 @@ def flip_t81_holder():
 def _bound_injection(line, printed, injections, consumed, allowed):
     """Consume and return the recorded injection a backstop line printed: the line carries exactly one
     token a recorded injection holds (_injected), that token not yet consumed and its label one the flip
-    declares, the line holds that object's repr, and the record CLI backstop printed that same object
-    (identity) into the intact capture the line was read from (`printed`, _EmissionStderr.occurrences).
+    declares, the line holds that object's repr, and one record CLI backstop frame holding that same object
+    (identity) wrote every character of this line into the intact capture it was read from (`printed`,
+    _note_backstops).
     A line in a mutated capture, one with no recorded token (another verb's, a twin of the injection, a
     copied diagnostic of an unrecorded exception), one with two, one whose token's injection the
     backstop never printed into its capture (an exception raised from the injection's args, an unrelated
-    error formatted with its message, any child's line), or a second line carrying an already consumed
+    error formatted with its message, any child's line, a nested run's line in a capture the injection's
+    backstop wrote nothing, a preamble or its repr alone into), or a second line carrying an already consumed
     token binds none: None. Each injection accounts for one line only."""
     tokens = set(_INJECTION_TOKEN.findall(line)) & injections.keys()
     if printed is None or len(tokens) != 1:
@@ -6440,9 +6473,9 @@ def _discriminate(name, test, flip):
     around it. The flipped run is bound to that outcome: a backstop line (_BACKSTOP) printed by any CLI
     run inside it (a crash the CLI turned into an ordinary exit 2, which an assertion then reads as red)
     fails the discrimination unless the line, read from the final contents of an intact capture, carries
-    the token of exactly one recorded injection the flip declares and the record CLI backstop printed
-    that same object into that capture, each token binding one line only (_INTENDED_BACKSTOPS,
-    _bound_injection), and any exception other
+    the token of exactly one recorded injection the flip declares and one record CLI backstop frame
+    holding that same object wrote that whole line into that capture, each token binding one line only
+    (_INTENDED_BACKSTOPS, _bound_injection), and any exception other
     than an assertion (the flip's own construction included, a SystemExit too; an interrupt propagates)
     fails it by name; neither counts as a caught defect. A crash production code swallows prints no
     backstop line and is outside this check."""
@@ -6722,6 +6755,19 @@ def _t83_nested_print(*_args, **kwargs):
     (kwargs.get("file") or sys.stderr).write(private.getvalue())
 
 
+def _t83_nested_copy_print(preamble):
+    """A print that sends the backstop's diagnostic to a private capture, writes preamble (None: nothing)
+    to the backstop's own stream, then runs a nested record CLI whose parse raises an unrecorded NameError
+    from the injection's args; the nested backstop prints that copy, token and repr matching the
+    injection's, into the same stream."""
+    def nested_print(*args, **kwargs):
+        print(*args, **dict(kwargs, file=io.StringIO()))
+        if preamble is not None:
+            (kwargs.get("file") or sys.stderr).write(preamble)
+        record.cli(["create"])
+    return nested_print
+
+
 def _t83_chunks(args, kwargs):
     """The text print(*args, **kwargs) would write, cut inside its word 'unexpected'."""
     text = kwargs.get("sep", " ").join(map(str, args)) + kwargs.get("end", "\n")
@@ -6745,13 +6791,17 @@ def _t83_writelines_print(*args, **kwargs):
 def _t83_capture_flip(first_print, twin):
     """The first record CLI run's parse_request raises a recorded t82-declared injection whose backstop
     diagnostic goes through first_print; a later run's raises an unrecorded twin of it (same type and
-    message, a distinct object) when twin, else runs unflipped."""
-    real_parse, calls, prints = record.parse_request, [], []
+    message, a distinct object) when twin, an unrecorded NameError raised from the injection's own args
+    (token included, so its repr is the injection's) when twin is "args-copy", else runs unflipped."""
+    real_parse, calls, prints, first = record.parse_request, [], [], []
 
     def parse(argv):
         calls.append(None)
         if len(calls) == 1:
-            raise _injected("t82-declared", NameError("t82 broken flip fixture"))
+            first.append(_injected("t82-declared", NameError("t82 broken flip fixture")))
+            raise first[0]
+        if twin == "args-copy":
+            raise NameError(*first[0].args)
         if twin:
             raise NameError("t82 broken flip fixture")
         return real_parse(argv)
@@ -6796,6 +6846,24 @@ def _t83_nested_flip():
     return _t83_capture_flip(_t83_nested_print, True)
 
 
+def _t83_empty_nested_flip():
+    """The injection's backstop writes nothing ("") into its own capture, then a nested run's backstop
+    prints an args copy of the injection there."""
+    return _t83_capture_flip(_t83_nested_copy_print(""), "args-copy")
+
+
+def _t83_preamble_nested_flip():
+    """The injection's backstop writes a preamble without its token into its own capture, then a nested
+    run's backstop prints an args copy of the injection there."""
+    return _t83_capture_flip(_t83_nested_copy_print("t83 a preamble that carries no token\n"), "args-copy")
+
+
+def _t83_unwritten_nested_flip():
+    """The injection's backstop makes no write to its own capture, then a nested run's backstop prints an
+    args copy of the injection there (the control)."""
+    return _t83_capture_flip(_t83_nested_copy_print(None), "args-copy")
+
+
 def _t83_split_flip():
     """The injection's line reaches its own capture in two writes (accepted)."""
     return _t83_capture_flip(_t83_split_print, False)
@@ -6821,16 +6889,19 @@ def t83_backstop_bound_to_injection(fx):
     backstop's own print of the recorded NameError (which the outer backstop then prints) each fail the
     discrimination as a backstop; so does a crash the record CLI reports as an unexpected-error refusal,
     and a SystemExit(0) from the flipped run fails it as a harness exception, never escaping. Each line
-    binds only through the token its own text carries, read from the final contents of an intact capture
-    the record CLI backstop printed that same injection object into: the recorded injection's line
-    forwarded into a private capture, or cleared from its own, never authorizes an unrecorded twin's line
-    in a later capture, a nested run's unrecorded diagnostic copied into the injection's own capture binds
+    binds only through the token its own text carries, read from the final contents of an intact capture into
+    which one record CLI backstop frame holding that same injection object wrote that whole line: the recorded
+    injection's line forwarded into a private capture, or cleared from its own, never authorizes an unrecorded
+    twin's line in a later capture, a nested run's unrecorded diagnostic copied into the injection's own
+    capture binds
     nothing, a capture cleared and written again binds nothing, and an unrecorded NameError raised from
     the injection's args, an unrelated AttributeError formatted with its message, and a child process's
-    new RuntimeError printed from its message each bind nothing though their lines carry its token; the
-    injection's line inspected in its own capture is accepted, whether printed whole, written in two
-    chunks, or through writelines, as is a cleared capture with no twin (the red then being the
-    assertion's)."""
+    new RuntimeError printed from its message each bind nothing though their lines carry its token, as does
+    a nested run's NameError raised from the injection's args and printed into the injection's own
+    capture after the injection's backstop wrote nothing, a preamble without the token, or no write there
+    (its own diagnostic sent to a private capture); the injection's line inspected in its own capture is
+    accepted, whether printed whole, written in two chunks, or through writelines, as is a cleared capture
+    with no twin (the red then being the assertion's)."""
     me = sys.modules[__name__]
 
     def create():
@@ -6864,6 +6935,12 @@ def t83_backstop_bound_to_injection(fx):
             ("formatted-unrelated", create, _t82_declared_flip,
              lambda: patch.object(me, "_t82_declared_crash", _t83_formatted_crash), backstop),
             ("child-message", create, _t83_child_flip, declared(_t83_child_flip), backstop),
+            ("empty-write-nested-args-copy", create, _t83_empty_nested_flip,
+             declared(_t83_empty_nested_flip), backstop),
+            ("preamble-write-nested-args-copy", create, _t83_preamble_nested_flip,
+             declared(_t83_preamble_nested_flip), backstop),
+            ("no-write-nested-args-copy", create, _t83_unwritten_nested_flip,
+             declared(_t83_unwritten_nested_flip), backstop),
             ("own-capture", create_twice, _t83_own_flip, declared(_t83_own_flip), None),
             ("truncate-alone", create_twice, _t83_truncate_flip, declared(_t83_truncate_flip), None),
             ("split-write", create, _t83_split_flip, declared(_t83_split_flip), None),
@@ -6943,6 +7020,56 @@ def _discriminate_round7(name, test, flip):
 def flip_t83_round7():
     """The round-7 discriminator."""
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_round7)
+
+
+class _Round8Stderr(_EmissionStderr):
+    """The round-8 capture: each write made while the nearest record CLI backstop frame holds a recorded
+    injection as its `exc` adds that object to the printed set, by identity and once, whatever the write's
+    text (a write of nothing or of a preamble included)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._printed = []
+
+    def write(self, text):
+        injections = _flip_injections[-1] if _flip_injections else None
+        if isinstance(injections, dict) and injections:
+            codes = (record.cli.__code__, opf._cmd_record.__code__)
+            frame, printed = sys._getframe(1), None
+            try:
+                while frame is not None and frame.f_code not in codes:
+                    frame = frame.f_back
+                printed = None if frame is None else frame.f_locals.get("exc")
+                if any(printed is exc for _label, exc in injections.values()) and \
+                        not any(printed is seen for seen in self._printed):
+                    self._printed.append(printed)
+            finally:
+                del frame, printed
+        return super().write(text)
+
+    def occurrences(self):
+        return self.getvalue(), None if self._mutated else tuple(self._printed)
+
+
+def _note_backstops_round8(text, printed=()):
+    """The round-8 note: each occurrence as (its line, its capture's whole printed set)."""
+    if _flip_watch and text:
+        _flip_watch[-1].extend((found.group(0), printed) for found in _BACKSTOP.finditer(text))
+
+
+def _discriminate_round8(name, test, flip, current=_discriminate):
+    """The round-8 discriminator (the fifth T83 flip): today's binding over the round-8 capture, whose
+    printed set takes in the injection a backstop frame holds on any write from that frame, read for every
+    line of the capture, so a nested run's args copy of the injection printed after that frame wrote
+    nothing, or a preamble, binds."""
+    with patch.object(sys.modules[__name__], "_EmissionStderr", _Round8Stderr), \
+            patch.object(sys.modules[__name__], "_note_backstops", _note_backstops_round8):
+        current(name, test, flip)
+
+
+def flip_t83_round8():
+    """The round-8 discriminator."""
+    return patch.object(sys.modules[__name__], "_discriminate", _discriminate_round8)
 
 
 class _Round6Stderr(_EmissionStderr):
@@ -7104,16 +7231,16 @@ def flip_t83_round5():
     return patch.object(sys.modules[__name__], "_discriminate", _discriminate_round5)
 
 
-# The flips whose intended red is reached through a CLI backstop, each with the labels of the injections
-# that may cause it. A backstop line is accepted only when a recorded injection of a declared label is its
-# cause: the line, read from an intact capture's final contents, carries that injection's token and the
-# record CLI backstop printed that same object into that capture (_injected, _EmissionStderr,
-# _bound_injection); any other backstop or exception in the flipped run fails the
-# discrimination. Each label is recorded by one test's injection site alone, so a declaration binds the
-# test, the flip and the injection together. Most label the synthetic failure their test injects, which
-# the reverted handling lets reach the backstop; the T18 flips drop an option guard and record the crash
-# the planner then meets reading the missing option; T64's emission leg reaches the backstop in every run,
-# so its recovery flip meets it too.
+# The flips whose intended red is reached through a CLI backstop, each with the labels of the injections that
+# may cause it. A backstop line is accepted only when a recorded injection of a declared label is its cause:
+# the line, read from an intact capture's final contents, carries that injection's token and one record
+# CLI backstop frame holding that same object wrote that whole line into that capture (_injected,
+# _EmissionStderr, _note_backstops, _bound_injection); any other backstop or exception in the flipped run
+# fails the discrimination. Each label is recorded by one test's injection site alone, so a declaration binds
+# the test, the flip and the injection together. Most label the synthetic failure their test injects, which
+# the reverted handling lets reach the backstop; the T18 flips drop an option guard and record the crash the
+# planner then meets reading the missing option; T64's emission leg reaches the backstop in every run, so its
+# recovery flip meets it too.
 _INTENDED_BACKSTOPS = {
     flip_t18_requires: ("t18-requires",),
     flip_t18_together: ("t18-together",),
@@ -7256,7 +7383,8 @@ TESTS = (
     ("T82-discrimination-bound-to-assertion", t82_discrimination_bound, flip_t82),
     ("T83-backstop-bound-to-injection", t83_backstop_bound_to_injection, (flip_t83, flip_t83_round5,
                                                                           flip_t83_round6,
-                                                                          flip_t83_round7)),
+                                                                          flip_t83_round7,
+                                                                          flip_t83_round8)),
 )
 
 
