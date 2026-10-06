@@ -189,12 +189,12 @@ list and an item the list omits is missing from each. A view that claims to cove
 generated, that each item of the authoritative set appears in it or is named in a recorded exclusion, and
 fails on an item in neither; a view that declares itself a curated selection makes no such claim.
 
-A check run ahead of an expensive apply step to report whether it will succeed is such a guard too: it
+A check run ahead of an expensive apply step to report whether it will succeed is such a guard too and
 evaluates every condition the apply enforces, the expected state after the change as well as the state
-before it. Check and apply decide from one shared predicate, or, where the apply's predicate is out of
-reach, a test holds the check to failing on every input the apply rejects. An input the apply would refuse,
-such as a version or sequence number no greater than the last one consumed, is refused by the check before
-any long work begins.
+before it. A pre-apply check uses its apply's own predicate, or, where that predicate is out of reach, a
+test holds the check to failing on every input the apply rejects. A pre-apply check refuses an input its
+apply would refuse, such as a version or sequence number no greater than the last one consumed, before any
+long work begins.
 
 ## Measured and estimated figures stay separate
 
