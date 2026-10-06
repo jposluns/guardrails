@@ -1217,6 +1217,12 @@ def _claude_hook_self_test():
     summary as plain read forms, and reads a not-plain command git work-tree subcommand over every
     literal word after a git word; its pack-repository vectors run against a synthetic pack
     repository holding a copy of the hook, so they no longer depend on the checkout .git entry.
+    The round-15 change exempts no dry run and no submodule read form in that not-plain read (its
+    literal words carry no command boundary, so git rm -rf .; echo -n read the later -n as a dry
+    run); separator vectors (;, &&, ||, |, a newline) followed by an unrelated -n, --dry-run or
+    status word deny, one not-plain vector per work-tree subcommand (a literal list pinned equal
+    to the hook's set) fails when that one name is removed, and git help forms that only print
+    allow in a bound product while its viewer options deny.
     git-independent (the hook reads only the live tree; nothing is committed), offline,
     hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
@@ -2579,6 +2585,30 @@ def _claude_hook_self_test():
                                ("submodule-quiet-foreach", "git submodule --quiet foreach true")):
                 deny("bash-r14-git-" + label + "-bound-denied",
                      payload("Bash", dict(command=cmd), root), "product root")
+            # ROUND 15 (PD-427-GIT-SCOPE): git help forms that only print take the exact path
+            # check and allow in a bound product (each DENIED on the predecessor pin 23e6f3de);
+            # a viewer option (-w, --web, -i, --info), -m, a --no- viewer negation, an
+            # abbreviation and a short-option cluster keep git help not plain, so each denies.
+            for label, cmd in (("no-pager-help-a", "git --no-pager help -a"),
+                               ("help-all-verbose", "git help --all --verbose"),
+                               ("help-g", "git help -g"),
+                               ("help-guides", "git help --guides"),
+                               ("help-config", "git help --config"),
+                               ("help-c", "git help -c"),
+                               ("help-command-name", "git help log"),
+                               ("help-dashdash-name", "git help -- log")):
+                allow("bash-r15-git-" + label + "-bound-allowed",
+                      payload("Bash", dict(command=cmd), root))
+            for label, cmd in (("help-w", "git help -w log"),
+                               ("help-web", "git help --web log"),
+                               ("help-i", "git help -i log"),
+                               ("help-info", "git help --info log"),
+                               ("help-m", "git help -m log"),
+                               ("help-no-man", "git help --no-man log"),
+                               ("help-abbreviated-web", "git help --we log"),
+                               ("help-cluster-aw", "git help -aw")):
+                deny("bash-r15-git-" + label + "-bound-denied",
+                     payload("Bash", dict(command=cmd), root), "product root")
             # ROUND 14: a synthetic pack repository (a .git entry, the hook copied to its
             # opf/enforcement/claude/ and an opf/tools/ directory, bound to no product), so the
             # unbound repository-top vectors run on every checkout. A not-plain command reads its
@@ -2604,10 +2634,47 @@ def _claude_hook_self_test():
                      payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
                      via=pack_hook)
             for label, cmd in (("status-then-true", "git status; true"),
-                               ("c-override-log", "git -c core.abbrev=7 log"),
+                               ("c-override-log", "git -c core.abbrev=7 log")):
+                allow("bash-r14-pack-repo-" + label + "-allowed",
+                      payload("Bash", dict(command=cmd), pack_docs), via=pack_hook)
+            # ROUND 15 (QA round 13): the not-plain read exempts no dry run and no submodule read
+            # form, because its literal words carry no command boundary: a later command's -n,
+            # --dry-run or status word read as the subcommand's own argument let git rm -rf .;
+            # echo -n delete the hook here. On the predecessor pin 23e6f3de every -denied vector
+            # in this block ALLOWED, the per-subcommand rm, mv and clean vectors included.
+            for label, cmd in (("rm-rf-semicolon-echo-n", "git rm -rf .; echo -n"),
+                               ("clean-fd-semicolon-echo-n", "git clean -fd; echo -n"),
+                               ("rm-rf-and-echo-n", "git rm -rf . && echo -n"),
+                               ("clean-fdx-or-echo-dry-run", "git clean -fdx || echo --dry-run"),
+                               ("mv-pipe-grep-n", "git mv a b | grep -n x"),
+                               ("rm-rf-newline-echo-n", "git rm -rf ." + chr(10) + "echo -n"),
+                               ("submodule-semicolon-status", "git submodule --quiet; status"),
                                ("c-override-rm-dry-run", "git -c core.abbrev=7 rm -n x"),
                                ("c-override-submodule-status", "git -c a.b=c submodule status")):
-                allow("bash-r14-pack-repo-" + label + "-allowed",
+                deny("bash-r15-pack-repo-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
+            # One not-plain vector per work-tree subcommand (a literal list, pinned equal to the
+            # hook's own set), so removing any one name from the not-plain read fails its vector.
+            worktree_names = (
+                "checkout", "restore", "reset", "clean", "stash", "switch", "merge", "pull",
+                "rebase", "cherry-pick", "revert", "am", "apply", "rm", "mv", "read-tree",
+                "checkout-index", "worktree", "sparse-checkout", "bisect", "submodule",
+                "update-index", "merge-recursive", "merge-resolve", "merge-octopus",
+                "merge-subtree", "merge-index", "merge-one-file", "filter-branch", "rerere",
+                "quiltimport")
+            expect("bash-r15-worktree-name-list-matches-hook", sorted(worktree_names),
+                   sorted(hook_mod.GIT_WORKTREE_SUBCOMMANDS))
+            for name in worktree_names:
+                deny("bash-r15-pack-repo-nonplain-" + name + "-denied",
+                     payload("Bash", dict(command="git " + name + "; echo -n"), pack_docs),
+                     "holds the protected path", via=pack_hook)
+            for label, cmd in (("status-pipe-grep-n", "git status | grep -n x"),
+                               ("log-n-then-echo-dry-run", "git log -n 3; echo --dry-run"),
+                               ("plain-rm-dry-run", "git rm -n x"),
+                               ("plain-clean-dry-run", "git clean -n"),
+                               ("plain-submodule-status", "git submodule status")):
+                allow("bash-r15-pack-repo-" + label + "-allowed",
                       payload("Bash", dict(command=cmd), pack_docs), via=pack_hook)
             allow("bash-r14-c-override-checkout-unbound-allowed",
                   payload("Bash", dict(command="git -c core.abbrev=7 checkout -- ."), elsewhere))

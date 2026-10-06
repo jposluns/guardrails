@@ -134,7 +134,13 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      reads the git work-tree subcommand over EVERY literal word after any word naming git, and
      over every dashed git-<name> builtin word (_git_worktree_words), so a global option outside
      the grammar (git -c core.abbrev=7 checkout -- .) or a second command (git checkout -- .;
-     true) no longer hides it from the repository-top check. Past the derived-spelling, base
+     true) no longer hides it from the repository-top check. Round 15: that not-plain read
+     exempts no dry run and no submodule read form (the literal words carry no command boundary,
+     so git rm -rf .; echo -n would read the later -n as a dry run of git rm); the dry-run grammar
+     and the read forms exempt only a plain single git invocation; and git help whose every option
+     word prints (GIT_HELP_PRINT_OPTIONS: -a, -g, -c and their long forms, among others) is no
+     longer a code-running subcommand, while -w, --web, -i, --info and every other option word
+     keep it not plain. Past the derived-spelling, base
      or resolved-target budget the command
      DENIES cannot-evaluate. A command referencing a protected token is denied unless the WHOLE
      command is a single plain invocation of the sanctioned writer (allowance A1 below), the only
@@ -245,6 +251,10 @@ per-platform residual coverage carry the same list):
     shadowing an allowlisted command word, and a same-named program planted on PATH ahead of an
     allowlisted command word. The allowlist and the plain semantic check exclude the inline forms
     only; the configuration, the function and the planted program are same-user preparation.
+    Round 15 names one more: a plain git help naming a page (git help log) shows it in the
+    configured format, man and its pager by default, or the viewer the help.format, man.viewer
+    and help.browser configuration names; only the explicit viewer options (-w, --web, -i, --info
+    and every other option outside GIT_HELP_PRINT_OPTIONS) keep it not plain.
   - A plain command whose operand CONTAINS a protected path rather than lying on it, outside the
     container rule: the exact check judges words that resolve INTO a protected path, the
     directory-plus-basename joins of cp, mv and ln and, for rm, rmdir, mv and chmod, a directory
@@ -390,7 +400,14 @@ per-platform residual coverage carry the same list):
     location whose repository top holds the pack own tree, a not-plain command carrying a git
     word and any later work-tree subcommand name, even as data (git log; echo reset), denies.
     Round 14 withdraws the round-13 refusal of git submodule status and git submodule --quiet
-    summary in a bound product. R6 denies every write under a
+    summary in a bound product. Round 15: at a location whose repository top holds the pack own
+    tree, a not-plain command carrying a git word and a later work-tree subcommand word denies
+    even where that subcommand is a dry run or a submodule read form (git -c core.abbrev=7 rm -n
+    x, git -c a.b=c submodule status, git status | grep -n x where no work-tree word appears
+    stays allowed); and git help -m, --man, a --no- viewer negation, an abbreviated option or a
+    short-option cluster (git help -av) is not plain and denies from a product root. Round 15
+    withdraws the refusal of git help forms that only print (git --no-pager help -a, git help
+    -g, git help --config, git help log). R6 denies every write under a
     root whose roster
     carries any unreadable or malformed entry, R3 keeps denying a frozen path even after its
     retirement is recorded, and a protected token inside prose (a commit message) still trips a
@@ -618,7 +635,20 @@ GIT_DRY_RUN_GRAMMAR = dict(
     clean=("dfqxXn", ("--dry-run", "--force", "--quiet")))
 GIT_CODE_SUBCOMMANDS = frozenset(("config", "filter-branch", "bisect", "submodule", "difftool",
                                   "mergetool", "daemon", "instaweb", "send-email", "credential",
-                                  "svn", "p4", "cvsimport", "archimport", "help", "web--browse"))
+                                  "svn", "p4", "cvsimport", "archimport", "web--browse"))
+# The git help forms that only print (round 15, PD-427-GIT-SCOPE): git help whose every option word
+# is exactly one of these (a lone -- ends the options; every other word is a page or command name)
+# lists commands, guides, interfaces or configuration names, or shows a named page in the
+# configured format, and is judged by the exact path check like any other git subcommand. Any other
+# option word (-w or --web and -i or --info, which launch a viewer, -m or --man, a --no- viewer
+# negation, an abbreviation, a short-option cluster) runs a viewer program or is not proved not to,
+# so the command is not plain. The viewer a named page launches by default (man and its pager, or
+# the help.format, man.viewer and help.browser configuration) is the disclosed configuration
+# residual.
+GIT_HELP_PRINT_OPTIONS = frozenset((
+    "-a", "--all", "-g", "--guides", "-c", "--config", "-v", "--verbose", "--no-verbose",
+    "--external-commands", "--no-external-commands", "--aliases", "--no-aliases",
+    "--user-interfaces", "--developer-interfaces"))
 GIT_CODE_OPTIONS = ("--exec", "--upload-pack", "--receive-pack", "--extcmd", "--tool",
                     "--open-files-in-pager", "-O")
 # The AMBIENT git environment (R5, round 8): the hook reads the environment the session launched it
@@ -1271,6 +1301,10 @@ def _git_runs_code(words):
     if i is None:
         return None
     sub, rest = words[i], words[i + 1:]
+    if sub == "help":
+        option = _git_help_viewer(rest)
+        if option is not None:
+            return "git help %r may launch a manual viewer" % (option,)
     if sub in GIT_CODE_SUBCOMMANDS and not _git_submodule_read(sub, rest):
         return "the git subcommand %r runs or configures a command" % (sub,)
     for word in rest:
@@ -1281,6 +1315,18 @@ def _git_runs_code(words):
             return "git rebase -x runs a command"
         if sub == "clone" and short and "u" in word[1:]:
             return "git clone -u runs a command"
+    return None
+
+
+def _git_help_viewer(rest):
+    """The first option word of git help (round 15) outside GIT_HELP_PRINT_OPTIONS, before a lone
+    --, or None when every option word is a listed print form: -w, --web, -i, --info and every
+    unlisted option (fail closed) may launch a viewer."""
+    for word in rest:
+        if word == "--":
+            return None
+        if word.startswith("-") and word not in GIT_HELP_PRINT_OPTIONS:
+            return word
     return None
 
 
@@ -1701,11 +1747,15 @@ def _git_worktree_words(words):
     option grammar: after the first word whose basename is git, EVERY later word that is a
     GIT_WORKTREE_SUBCOMMANDS name (git -c core.abbrev=7 checkout -- ., git status; git checkout
     -- ., true; git reset --hard), and every dashed builtin word whose basename is git-<name> for
-    such a name (/usr/lib/git-core/git-checkout), unless the words after it make it a dry run
-    (_git_dry_run) or a submodule read form (_git_submodule_read). A later word that is such a
-    name only as data (git log; echo reset) counts too: the over-refusal is disclosed."""
+    such a name (/usr/lib/git-core/git-checkout). A later word that is such a name only as data
+    (git log; echo reset) counts too: the over-refusal is disclosed. Round 15: NO dry-run or
+    read-form exemption applies here. The literal words carry no command boundary, so a later
+    command's words would be read as the subcommand's own arguments (git rm -rf .; echo -n read as
+    a dry run of git rm); the dry-run grammar (_git_dry_run) and the submodule read forms
+    (_git_submodule_read) exempt only a plain single git invocation (_git_worktree_sub), whose own
+    argument list the plain classifier proved."""
     found, seen_git = [], False
-    for j, word in enumerate(words):
+    for word in words:
         base = os.path.basename(word)
         if base == "git":
             seen_git = True
@@ -1715,9 +1765,6 @@ def _git_worktree_words(words):
         elif seen_git and word in GIT_WORKTREE_SUBCOMMANDS:
             sub = word
         else:
-            continue
-        rest = words[j + 1:]
-        if _git_dry_run(sub, rest) or _git_submodule_read(sub, rest):
             continue
         if sub not in found:
             found.append(sub)
