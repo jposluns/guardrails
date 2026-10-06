@@ -691,17 +691,43 @@ def _parse_heredoc_delim(command, at, n):
     return (quoted, "".join(delim_chars), strip_tabs, j)
 
 
+def _read_heredoc_body_line(command, i, n, joined):
+    """Read one here-document body line starting at `i`. Returns (line, next_i, had_newline).
+    For an UNQUOTED delimiter (`joined` True) bash removes backslash-newline line continuations as it reads,
+    so the returned line is the JOINED logical line and next_i is just past the newline that ended the last
+    physical line it spans; a backslash immediately before a newline drops both and continues on the next
+    physical line. For a QUOTED delimiter (`joined` False) the body is literal: one physical line is returned
+    unchanged. had_newline is False when the line ran to the end of the command with no terminating newline."""
+    if not joined:
+        nl = command.find("\n", i)
+        if nl == -1:
+            return command[i:n], n, False
+        return command[i:nl], nl + 1, True
+    chars = []
+    while i < n:
+        c = command[i]
+        if c == "\\" and command[i + 1:i + 2] == "\n":
+            i += 2  # a backslash-newline line continuation: drop both, join the next physical line
+            continue
+        if c == "\n":
+            return "".join(chars), i + 1, True
+        chars.append(c)
+        i += 1
+    return "".join(chars), n, False
+
+
 def _skip_heredoc_bodies(command, i, n, heredocs):
-    """Advance past the bodies of a run of QUOTED heredocs (in the order their '<<' operators appeared on the
-    line), each ending at a line that is EXACTLY its delimiter (leading tabs stripped for the <<- form). An
-    unterminated heredoc consumes the rest of the command (bash would still be reading input). Returns the
-    index just past the last consumed body. The bodies are literal data and are excluded from analysis."""
-    for delim, strip_tabs in heredocs:
+    """Advance past the bodies of a run of heredocs (in the order their '<<' operators appeared on the line),
+    each ending at a line that is EXACTLY its delimiter (leading tabs stripped for the <<- form; for an
+    UNQUOTED delimiter, backslash-newline line continuations are joined before the comparison, exactly as bash
+    reads them). `heredocs` is a list of (delim, strip_tabs, quoted). An unterminated heredoc consumes the
+    rest of the command (bash would still be reading input). Returns the index just past the last consumed
+    body. The bodies are data and are excluded from analysis."""
+    for delim, strip_tabs, quoted in heredocs:
         while i < n:
-            nl = command.find("\n", i)
-            line = command[i:(nl if nl != -1 else n)]
+            line, next_i, _had_nl = _read_heredoc_body_line(command, i, n, not quoted)
             cand = line.lstrip("\t") if strip_tabs else line
-            i = n if nl == -1 else nl + 1
+            i = next_i
             if cand == delim:
                 break
     return i
@@ -735,7 +761,7 @@ def _strip_quoted_heredoc_bodies(command):
             i = next_i
             continue
         out.append(command[i:nl + 1])        # keep through the opening line's newline
-        i = _skip_heredoc_bodies(command, nl + 1, n, [(delim, strip_tabs)])  # drop the body region
+        i = _skip_heredoc_bodies(command, nl + 1, n, [(delim, strip_tabs, True)])  # drop the body region
     return "".join(out)
 
 
@@ -762,7 +788,7 @@ def _lex_command(command, partial=False):
     redirects = []
     opaque = [False]
     seg_start = [0]
-    pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
+    pending_heredocs = []  # queued (delim, strip_tabs, quoted) for QUOTED heredocs whose bodies to skip (finding 17)
 
     def end_segment(sep, op_start, next_start):
         segments.append(_Segment(list(argv), sep, list(redirects),
@@ -831,7 +857,7 @@ def _lex_command(command, partial=False):
                             # remaining tokens (e.g. 'cat <<'EOF' > out') keep being lexed normally. An
                             # UNQUOTED heredoc (parsed[0] False) interpolates and stays the unsupported raise.
                             _quoted, _delim, _strip, _next_i = parsed
-                            pending_heredocs.append((_delim, _strip))
+                            pending_heredocs.append((_delim, _strip, True))
                             i = _next_i
                             continue
                     raise ValueError("unsupported shell construct: {}".format(op))
@@ -9653,7 +9679,7 @@ def _orch_cmdsub_end(command, j, n):
     here-document body in the double-quoted commit-message form) from shifting the OUTER scan state."""
     in_single = in_double = escaped = False
     depth = 0
-    pending = []  # (delim, strip_tabs) for here-documents opened inside the span; bodies skipped as data
+    pending = []  # (delim, strip_tabs, quoted) for here-documents opened inside the span; bodies skipped as data
     word_start = True
     while j < n:
         c = command[j]
@@ -9709,10 +9735,17 @@ def _orch_cmdsub_end(command, j, n):
             j = end
             word_start = False
             continue
-        if c == "<" and command[j + 1:j + 2] == "<" and command[j + 2:j + 3] != "<":
+        if c == "<" and command[j + 1:j + 2] == "<":
+            run = 2  # a run of three or more `<` is a here-string (`<<<`), never a here-document
+            while command[j + run:j + run + 1] == "<":
+                run += 1
+            if run >= 3:
+                j += run  # consume the whole here-string run; its word is ordinary span text
+                word_start = False
+                continue
             parsed = _parse_heredoc_delim(command, j + 2, n)
             if parsed is not None:
-                pending.append((parsed[1], parsed[2]))
+                pending.append((parsed[1], parsed[2], parsed[0]))
                 j = parsed[3]
                 word_start = False
                 continue
@@ -9782,7 +9815,8 @@ def _orch_scan_body_substitutions(body, bash_word_starts):
 def _orch_scan_heredoc_bodies(command, i, n, pending, bash_word_starts):
     """Consume the BODIES of the queued here-documents starting at `i` (the character after the newline
     that ends the line their `<<` operators appeared on), in operator order. Each body runs to the first
-    line that is EXACTLY its delimiter (leading tabs stripped first for the `<<-` form; the terminator
+    line that is EXACTLY its delimiter (leading tabs stripped first for the `<<-` form, and for an UNQUOTED
+    delimiter backslash-newline line continuations joined before the comparison as bash does; the terminator
     may be the final line with no trailing newline). Body lines are DATA: neither quote balancing nor
     `&` detection reads them. For an UNQUOTED delimiter the body substitution spans are still scanned
     (_orch_scan_body_substitutions): bash runs those even inside the body. Returns (next_i, kind): kind
@@ -9793,17 +9827,15 @@ def _orch_scan_heredoc_bodies(command, i, n, pending, bash_word_starts):
         body_start = i
         body_end = -1
         while i < n:
-            nl = command.find("\n", i)
-            line = command[i:(nl if nl != -1 else n)]
+            line, next_i, had_nl = _read_heredoc_body_line(command, i, n, not literal)
             cand = line.lstrip("\t") if strip_tabs else line
             if cand == delim:
                 body_end = i
-                i = n if nl == -1 else nl + 1
+                i = next_i
                 break
-            if nl == -1:
-                i = n
+            i = next_i
+            if not had_nl:
                 break
-            i = nl + 1
         if body_end == -1:
             return n, "unterminated"
         if not literal:
@@ -9918,7 +9950,17 @@ def _orch_foreground_scan(command, bash_word_starts):
                 prev_dup, word_start = False, bash_word_starts
                 continue
             # no `))` closes it (nested subshells): scan the characters plainly (over-deny direction)
-        if ch == "<" and command[i + 1:i + 2] == "<" and command[i + 2:i + 3] != "<":
+        if ch == "<" and command[i + 1:i + 2] == "<":
+            run = 2  # count the whole run of `<` before deciding: `<<<` (3+) is a here-string, not a heredoc
+            while command[i + run:i + run + 1] == "<":
+                run += 1
+            if run >= 3:
+                # A run of three or more `<` is a here-string operator (`<<<`), never a here-document: its
+                # following word is ordinary code (a bare `&` after the here-string still detaches), so
+                # consume the whole run and keep scanning rather than mis-reading `<<` inside the run.
+                i += run
+                prev_dup, word_start = False, False
+                continue
             parsed = _parse_heredoc_delim(command, i + 2, n)
             if parsed is not None:
                 # A here-document operator: queue (delim, strip_tabs, literal) and resume AFTER the

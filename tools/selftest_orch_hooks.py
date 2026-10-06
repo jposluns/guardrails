@@ -958,6 +958,38 @@ def _main_isolated(report_path=None):
         check("trunc/fg-unterminated-heredoc-reason",
               (_verdict(ut), "terminator" in ut_reason, "detaches a child" in ut_reason),
               ("deny", True, False))
+        # Here-string vs here-document (BLOCKER 1): a run of three or more `<` is a here-string operator
+        # (`<<<`), never a here-document, so the word after it stays CODE. At the pre-fix pin the scanner
+        # rejected `<<` at the FIRST `<` of `<<<`, then re-recognised `<<` at the second and parsed the
+        # here-string word as a bogus here-document delimiter, swallowing the following lines as body: a real
+        # detach after `cat <<<:` was HIDDEN (silent allow), and a safe `cat <<<'hello'` read as an
+        # unterminated here-document (over-deny). Recognising the whole `<` run first corrects both.
+        check("trunc/fg-herestring-detach-denies",
+              _verdict(bg("cat <<<:\nprintf 'child\\n' &\nwait\n:", rib=False)), "deny")
+        check("trunc/scan-herestring-colon-detach",
+              aiqt_hooks._orch_foreground_detach("cat <<<:\nsleep 100 &"), True)
+        check("trunc/scan-herestring-colon-kind",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<<:\nsleep 100 &"), "detach")
+        check("trunc/fg-herestring-safe-allows", _verdict(bg("cat <<<'hello'", rib=False)), "allow")
+        check("trunc/scan-herestring-safe-not-detach",
+              aiqt_hooks._orch_foreground_detach("cat <<<'hello'"), False)
+        check("trunc/scan-herestring-word-then-detach",
+              aiqt_hooks._orch_foreground_detach("cat <<<hello &"), True)
+        # Backslash-newline line continuation in an UNQUOTED here-document body (BLOCKER 2): bash joins the
+        # continued lines before matching the terminator, so `EN\<newline>D` becomes the delimiter `END` and
+        # the here-document ends there, leaving the rest as CODE. At the pre-fix pin the scanner compared
+        # PHYSICAL lines, never matched the joined terminator, and swallowed the trailing detach as body
+        # (silent allow). The safe counterpart (`EO\<newline>F` -> `EOF`) must ALLOW again. A QUOTED
+        # delimiter's body is literal and is NOT joined, so the same continuation stays an unterminated
+        # here-document (deny with its own reason), never a silent allow.
+        check("trunc/fg-heredoc-bsnl-join-detach-denies",
+              _verdict(bg("cat <<END\nEN\\\nD\nsleep 100 &\nEND", rib=False)), "deny")
+        check("trunc/scan-heredoc-bsnl-join-detach-kind",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<END\nEN\\\nD\nsleep 100 &\nEND"), "detach")
+        check("trunc/fg-heredoc-bsnl-join-safe-allows",
+              _verdict(bg("cat <<EOF\nEO\\\nF", rib=False)), "allow")
+        check("trunc/scan-quoted-delim-no-bsnl-join",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<'END'\nEN\\\nD\nsleep 100 &"), "unterminated")
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
