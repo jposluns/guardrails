@@ -43,6 +43,7 @@ guarded-surfaces = [
     "opf/tools/_opf_adopt_hook.py",
     "opf/tools/_opf_adopt_observe.py",
     "opf/tools/_opf_adopt_plan.py",
+    "opf/tools/_opf_adopt_state.py",
     "opf/tools/_opf_changelog.py",
     "opf/tools/_opf_check.py",
     "opf/tools/_opf_emit.py",

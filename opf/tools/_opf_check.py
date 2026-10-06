@@ -61,6 +61,7 @@ import ipaddress
 import os
 import re
 import stat
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -299,6 +300,30 @@ _HOMES2_RESIDUALS = (
     "Homes-2 evidence inventories establish local membership, not actor authenticity; losing a whole "
     "bundle, inventory and payload together, requires independent history to detect.",
 )
+# Disclosed only on a report of a homes-1 store that has adopted (its adoption home exists), so a legacy
+# report residuals are unchanged.
+_ADOPTING_RESIDUALS = (
+    "Homes-1 adoption control area (spec 4.2, 17): an admitted adoption run is registered at file level "
+    "only, each path its committed inventories list; its recorded Move destinations are registered only "
+    "once its retirement is recorded, and every other path under the adoption homes is graded. Admission "
+    "and retirement are decided from the committed evidence bundle and run archive alone, whose listed "
+    "bundle, archive and Move-root bytes are verified at their recorded digests; a Move-root row is "
+    "admitted only as a move destination the run's own plan records. A retirement is recorded only by a "
+    "sealed retirement inventory in the shape the retirement-phase transaction derives from its own "
+    "create ops: one row per move row of the plan, occupying or not, whose recorded Move destination lies "
+    "beneath .working/archive/moved/, naming that destination at the moved source's plan digest and "
+    "nothing else (the record of a plan without such a move row lists no files), no row naming a path the "
+    "base inventory also claims and each listed destination holding its recorded bytes live; before a "
+    "recorded retirement, a file at a plan Move destination beneath .working/archive/moved/ is a "
+    "finding. The machine-local journal is "
+    "never read, so a clone grades as the original store. The evidence check detects accidents: an "
+    "interrupted apply, a hand edit that is non-canonical or that changes listed bytes, and a misplaced "
+    "or stale record. It does not detect deliberate forgery: a hand edit that re-emits a canonical, "
+    "self-consistent record is forgery and is not detected. Import and ingest "
+    "records stay unregistered paths until their own activation, a vanished frozen source before its "
+    "recorded retirement is a failure, and a migrate source stays bounded adoption state until the import "
+    "that retires it is read.",
+)
 
 
 class StoreValidation:
@@ -307,13 +332,15 @@ class StoreValidation:
     dominates VALID, so an unreadable input is never masked by an otherwise-clean read. `checks` is the
     ordered per-check verdict map; `triage` is the spec-11/14.2 partial-import surface; `evaluated_profiles`
     and `unevaluated_profiles` name the profile scope (spec 16); `residuals` are the disclosed by-design
-    uncovered sub-checks, reported but never changing the status."""
+    uncovered sub-checks, reported but never changing the status. `migration_incomplete` (additive) names
+    each bounded adoption-state path reported rather than failed (spec 11/14.2); it never changes the status."""
     __slots__ = ("status", "findings", "cannot_evaluate", "residuals", "checks", "triage",
-                 "evaluated_profiles", "unevaluated_profiles", "by_check", "unattributed")
+                 "evaluated_profiles", "unevaluated_profiles", "by_check", "unattributed",
+                 "migration_incomplete")
 
     def __init__(self, status, findings=None, cannot_evaluate=None, residuals=None, checks=None,
                  triage=None, evaluated_profiles=None, unevaluated_profiles=None,
-                 by_check=None, unattributed=None):
+                 by_check=None, unattributed=None, migration_incomplete=None):
         self.status = status
         self.findings = findings or []
         self.cannot_evaluate = cannot_evaluate or []
@@ -329,6 +356,7 @@ class StoreValidation:
         # fail closed on an internal fault the per-check map does not carry.
         self.by_check = by_check or {}
         self.unattributed = unattributed or []
+        self.migration_incomplete = migration_incomplete or []
 
 
 def exit_code(result):
@@ -349,7 +377,7 @@ class _Report:
     check that never registered `ran` is routed to CANNOT-EVALUATE naming it, so a silently-skipped check is
     never a pass."""
     __slots__ = ("findings", "cannot", "residuals", "checks", "triage", "_current", "by_check",
-                 "unattributed", "required")
+                 "unattributed", "required", "migration_incomplete")
 
     def __init__(self):
         self.findings = []
@@ -361,6 +389,7 @@ class _Report:
         self.by_check = {}                # check-id -> list of the source-attributed message strings it emitted
         self.unattributed = []            # no-current findings/cants + duplicate-ran / unknown-id internal faults
         self.required = REQUIRED_CHECKS   # the closed roster; a homes-2 store widens it via require_homes
+        self.migration_incomplete = []    # bounded adoption-state paths: reported, never a status change
 
     def require_homes(self, homes):
         # Bind the roster to the store's homes generation once the manifest names it. A homes-2 check that
@@ -392,6 +421,11 @@ class _Report:
 
     def triage_path(self, msg):
         self.triage.append(msg)
+
+    def migration_incomplete_path(self, msg):
+        # A bounded adoption-state path (spec 11/14.2): reported rather than failed, so, like triage, it is
+        # never attributed to a check verdict and never changes the status.
+        self.migration_incomplete.append(msg)
 
     def _attribute(self, status, msg):
         # Attribute the verdict AND the message to the current check. A finding/cant emitted with NO current
@@ -439,7 +473,8 @@ class _Report:
             status = VALID
         return StoreValidation(status, self.findings, self.cannot, self.residuals, ordered, self.triage,
                                sorted(evaluated_profiles or []), sorted(unevaluated_profiles or []),
-                               by_check=self.by_check, unattributed=self.unattributed)
+                               by_check=self.by_check, unattributed=self.unattributed,
+                               migration_incomplete=self.migration_incomplete)
 
 
 # --- a lightweight record descriptor for the cross-record checks -------------------------------------
@@ -1926,8 +1961,10 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
 
 def _evidence_claim(bundle, kind, run_id, path):
     """Validate one inventory row path against what its bundle may claim: a member of the bundle itself
-    other than a bundle-root inventory, a default Move destination, or, for an adoption bundle, a retire
-    preimage of the same run."""
+    other than a bundle-root inventory, a Move destination (any path beneath .working/archive/moved/,
+    default or explicit), or, for an adoption bundle, a retire preimage of the same run. (This docstring
+    was corrected in review round 7 as a deliberate, documentation-only exception to the byte-identical
+    protected set; the body is unchanged.)"""
     _opf_store._home_file(path)
     if path.startswith(bundle + "/"):
         member = path[len(bundle) + 1:]
@@ -1945,14 +1982,106 @@ class _LegacyIngestInventory(ValueError):
     """Recognized unsupported format: a named finding, not an unreadable inventory."""
 
 
+ADOPTION_BASE_PHASE = "base"    # the [adoption] identity phase of inventory.toml (spec 4.2)
+ADOPTION_PLAN_NAME = "plan.toml"   # the adoption bundle's own sealed plan (spec 4.2, 14.1)
+
+
+def _inventory_phase(name):
+    """The identity phase a bundle-root inventory file name carries (spec 4.2): `inventory.toml` is the
+    base phase; `inventory-<phase>.toml` is that later phase, whose name is never `base` (the base phase
+    name is reserved, so one phase spelling never answers to two file names). Raises ValueError."""
+    if not _opf_store.is_evidence_inventory_name(name):
+        raise ValueError("{!r} is not an evidence inventory name".format(name))
+    if name == "inventory.toml":
+        return ADOPTION_BASE_PHASE
+    phase = name[len("inventory-"):-len(".toml")]
+    if phase == ADOPTION_BASE_PHASE:
+        raise ValueError("a later phase inventory is never named {!r}: the base phase name is reserved "
+                         "for inventory.toml (spec 4.2)".format(name))
+    return phase
+
+
+def _adoption_identity(run_id, doc):
+    """The validated (phase, plan_digest) identity of ONE adoption inventory (spec 4.2): the [adoption]
+    table holds exactly the bundle's own run id, a phase name and a sha256:<64 lowercase hex> plan
+    digest. Anything else raises ValueError, so a copied, misplaced or malformed record never evaluates;
+    the phase-to-file-name and plan-digest-to-proven-plan bindings are each caller's own check (this
+    helper sees neither the file name nor the plan)."""
+    block = doc.get("adoption") if isinstance(doc, dict) else None
+    if not isinstance(block, dict) or set(block) != {"run_id", "phase", "plan_digest"}:
+        raise ValueError("the [adoption] identity table holds exactly run_id, phase and plan_digest "
+                         "(spec 4.2)")
+    if block["run_id"] != run_id:
+        raise ValueError("the [adoption] identity names run {!r}, not the bundle run {!r} (an inventory "
+                         "copied from another run, spec 4.2)".format(block["run_id"], run_id))
+    phase = block["phase"]
+    if not isinstance(phase, str) or (phase != ADOPTION_BASE_PHASE and not (
+            _opf_store.is_evidence_inventory_name("inventory-{}.toml".format(phase)))):
+        raise ValueError("the [adoption] identity phase {!r} is not a phase name (spec 4.2)".format(phase))
+    digest = block["plan_digest"]
+    if (not isinstance(digest, str) or not digest.startswith("sha256:")
+            or not _HEX64_RE.fullmatch(digest[len("sha256:"):])):
+        raise ValueError("the [adoption] identity plan_digest is not a sha256:<64 lowercase hex> digest "
+                         "(spec 4.2)")
+    return phase, digest
+
+
+def _adoption_plan_digest(root_fd, bundle, run_id, rep):
+    """(digest, bytes): the plan_digest of an adoption bundle's own plan.toml, proven from ONE read of
+    its bytes, and those exact bytes, so the caller checks the plan's inventory row against the bytes
+    the seal proof read, never a second read (spec 4.2). An absent or unreadable plan, and every refusal
+    of _prove_adoption_plan, raises ValueError, so no inventory of that bundle evaluates as this run's
+    record."""
+    rel = _rel(bundle, ADOPTION_PLAN_NAME)
+    raw, state = _read_bytes(root_fd, rel, rep)
+    if state == "absent":
+        raise ValueError("the adoption bundle has no {} to prove its inventories' plan digest against "
+                         "(spec 4.2)".format(ADOPTION_PLAN_NAME))
+    if state != "ok":
+        raise ValueError("the adoption bundle's {} is unreadable, so no plan digest is proven (spec "
+                         "4.2)".format(ADOPTION_PLAN_NAME))
+    return _prove_adoption_plan(raw, run_id), raw
+
+
+def _prove_adoption_plan(raw, run_id):
+    """The plan_digest an adoption bundle's plan.toml bytes prove (spec 4.2): canonical TOML naming the
+    bundle's run id, whose plan_digest re-seals it (the planner's seal: the digest of the canonical
+    emission of the plan without its plan_digest). Every adoption inventory's [adoption] identity must
+    name this digest. Pure over bytes its caller read once, and shared by the doctor and the apply
+    side's bundle verifier; a non-canonical, foreign-run or unsealed plan raises ValueError."""
+    try:
+        plan = tomllib.loads(raw.decode("utf-8"))
+        canonical = _opf_emit.emit_checked(plan).encode("utf-8")
+        body = dict(plan)
+        claimed = body.pop("plan_digest", None)
+        sealed = "sha256:" + hashlib.sha256(_opf_emit.emit_checked(body).encode("utf-8")).hexdigest()
+    except (TypeError, ValueError, RecursionError, _opf_emit.EmitError) as exc:
+        raise ValueError("the adoption bundle's {} is malformed TOML ({})".format(ADOPTION_PLAN_NAME, exc))
+    if canonical != raw or claimed != sealed:
+        raise ValueError("the adoption bundle's {} is not a canonical plan whose plan_digest seals its own "
+                         "bytes (an edited plan, spec 4.2)".format(ADOPTION_PLAN_NAME))
+    if plan.get("run_id") != run_id:
+        raise ValueError("the adoption bundle's {} names run {!r}, not the bundle run {!r} (a plan of "
+                         "another run, spec 4.2)".format(ADOPTION_PLAN_NAME, plan.get("run_id"), run_id))
+    return sealed
+
+
 def _evidence_rows(bundle, kind, run_id, doc):
-    """Shared schema/path validation for doctor and the adoption apply shell; never upgrades old bytes."""
+    """Shared schema/path validation for doctor and the adoption apply shell; never upgrades old bytes.
+    An adoption inventory additionally holds exactly one [adoption] identity table, validated here
+    against the bundle's own run id (spec 4.2); an inventory of any other kind never carries one."""
     if isinstance(doc, dict) and doc.get("format") == "opf.ingest.evidence-inventory/v1":
         raise _LegacyIngestInventory("legacy-ingest-inventory: old-format ingest inventory is unsupported; "
                                      "refused without migration or rewrite")
-    if (not isinstance(doc, dict) or set(doc) != {"format", "file"}
+    keys = {"format", "file", "adoption"} if kind == "adoption" else {"format", "file"}
+    if (not isinstance(doc, dict) or set(doc) != keys
             or doc["format"] != EVIDENCE_FORMAT or not isinstance(doc["file"], list)):
+        if kind == "adoption":
+            raise ValueError("an adoption inventory holds exactly format {!r}, an [adoption] identity "
+                             "table and a file array (spec 4.2)".format(EVIDENCE_FORMAT))
         raise ValueError("an inventory holds exactly format {!r} and a file array".format(EVIDENCE_FORMAT))
+    if kind == "adoption":
+        _adoption_identity(run_id, doc)
     for row in doc["file"]:
         if not isinstance(row, dict) or set(row) != {"path", "size", "sha256"}:
             raise ValueError("file rows require exactly path, size and sha256")
@@ -1974,9 +2103,14 @@ def _check_evidence(root_fd, homes, rep):
     inventory, missing listed files, and a recognized legacy ingest inventory are findings.
     An unreadable or malformed input, and a bundle with
     a phase inventory but no inventory.toml, cannot evaluate; a malformed inventory stops the
-    reconciliation, since its claims are unknown. Deleting a whole bundle, inventory and payload
-    together, is outside this local snapshot check; history coverage is separate. Reads use the contained
-    readers and their per-file cap, with a bounded walk.
+    reconciliation, since its claims are unknown. An adoption inventory's [adoption] identity must name
+    the phase its file name carries and the plan digest its bundle's own sealed plan.toml proves; a
+    foreign identity, or a bundle whose plan.toml is absent or does not prove, cannot evaluate. The
+    plan's seal proof and its inventory row are checked against ONE read of its bytes, so a plan swapped
+    between two reads never combines into a clean result.
+    Deleting a whole bundle, inventory and payload together, is outside this local snapshot check;
+    history coverage is separate. Reads use the contained readers and their per-file cap, with a
+    bounded walk.
     """
     if homes < 2:
         return
@@ -1985,6 +2119,8 @@ def _check_evidence(root_fd, homes, rep):
     bundles = []
     budget = [0]
     failed = [False]
+    plans = {}    # adoption bundle -> (its proven plan digest, the bytes proven), or the ValueError raised
+    proven = {}   # plan.toml path -> the bytes its seal proof read, the ONE read its row is checked against
 
     def listing(rel, depth, required):
         # A directory reached through its parent's listing is required: its absence is a race.
@@ -2022,6 +2158,26 @@ def _check_evidence(root_fd, homes, rep):
                 if row["path"] in expected:
                     raise ValueError("{!r} is claimed more than once".format(row["path"]))
                 expected[row["path"]] = row
+            if kind == "adoption":
+                phase, plan_digest = _adoption_identity(run_id, doc)
+                named_phase = _inventory_phase(rel.rsplit("/", 1)[-1])
+                if phase != named_phase:
+                    raise ValueError("the [adoption] identity names phase {!r}, not the {!r} phase its "
+                                     "file name carries (an inventory copied from another phase, "
+                                     "spec 4.2)".format(phase, named_phase))
+                if bundle not in plans:
+                    try:
+                        plans[bundle] = _adoption_plan_digest(root_fd, bundle, run_id, rep)
+                    except ValueError as exc:
+                        plans[bundle] = exc
+                    else:
+                        proven[_rel(bundle, ADOPTION_PLAN_NAME)] = plans[bundle][1]
+                if isinstance(plans[bundle], ValueError):
+                    raise plans[bundle]
+                if plan_digest != plans[bundle][0]:
+                    raise ValueError("the [adoption] identity names plan digest {!r}, not its bundle's own "
+                                     "sealed plan's {!r} (an inventory of another run or plan, spec "
+                                     "4.2)".format(plan_digest, plans[bundle][0]))
         except _LegacyIngestInventory as exc:
             rep.finding("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))
             failed[0] = True
@@ -2078,7 +2234,10 @@ def _check_evidence(root_fd, homes, rep):
             if full not in expected:
                 rep.finding("C-EVIDENCE-ENUM: off-inventory file {!r}".format(full))
                 continue
-            raw, status = _read_bytes(root_fd, full, rep)
+            if full in proven:
+                raw, status = proven[full], "ok"    # the bytes the seal proof read: never a second read
+            else:
+                raw, status = _read_bytes(root_fd, full, rep)
             if status == "absent":
                 continue    # reported below with every other missing listed file
             seen.add(full)
@@ -2308,7 +2467,21 @@ def _legacy_import_staging(machine_rel):
     return _rel(machine_rel, _LEGACY_IMPORTS_DIRNAME), review
 
 
-def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
+def _adoption_state(root_fd, machine_rel, in_repo, rep):
+    """The homes-1 adoption state through the read-only `_opf_adopt_state` reader (spec 4.2, 11, 14.2, 17),
+    or None after a CANNOT-EVALUATE: any fault inside the reader is a named cannot-evaluate, never a silent
+    fallback to the not-adopting grading. The reader is imported lazily, so the doctor gains no top-level
+    import of the adoption modules."""
+    try:
+        import _opf_adopt_state
+        return _opf_adopt_state.adoption_state(root_fd, machine_rel, in_repo=in_repo)
+    except Exception as exc:  # noqa: BLE001  fail-closed barrier around the whole reader
+        rep.cant("C-CONTAINMENT: the adoption state cannot be read ({}); fail-closed".format(
+            _safe_display(repr(exc))))
+        return None
+
+
+def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, *, in_repo=None):
     """C-CONTAINMENT: recursively walk `.working/`, matching every regular file against the managed set
     (the ledgers, the enabled non-ledger type indexes, per-record bodies, the archive tree, declared
     store-scope view targets, and files under a valid declared [unmanaged] path). A path in neither set is
@@ -2319,7 +2492,10 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
     (view targets, the collision-filtered valid_unmanaged, and the malformed / colliding declarations) is
     derived by the pure `classify_containment`, the SINGLE authority for adoption content (F10-1).
     enabled_types / layout are derived inside that helper from the manifest (D2), so they are no longer
-    passed in."""
+    passed in. On homes 1 a store that has adopted also registers, at file level, each admitted adoption
+    run's committed-evidence record paths and reports its frozen sources as bounded adoption state
+    (`_opf_adopt_state`); `in_repo` (keyword only, unknown by default) is the store topology the adoption
+    plan identity is checked against."""
     cls = classify_containment(manifest_data, machine_rel)
     # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
     # all colliding findings), exactly as the inline classification emitted them before the extraction.
@@ -2347,6 +2523,54 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
     staged_roots = (imports_root, staging_root) if homes2 else (imports_root,)
     kind_roots = tuple(staging_root + "/" + k for k in _opf_store.STAGING_KINDS) if homes2 else ()
     skipped_roots = cls.evidence_roots + ((_opf_store.JOURNALS_REL,) if homes2 else ())
+    # Homes-1 adoption control area and bounded adoption state (spec 4.2, 11, 14.2, 17), read by the read-only
+    # _opf_adopt_state reader. Without the adoption home it is NOT_ADOPTING after one lstat and every line
+    # below grades exactly as before. Homes 2 registers its evidence roots wholesale above.
+    adoption = None if homes2 else _adoption_state(root_fd, machine_rel, in_repo, rep)
+    adopting = adoption is not None and adoption.adopting
+    frozen = adoption.frozen if adopting else {}
+    adoption_dirs = frozenset()
+    if adopting:
+        import _opf_adopt_state
+        for msg in adoption.cannot:
+            rep.cant(msg)
+        for msg in adoption.findings:
+            rep.finding(msg)
+        rep.residuals.extend(_ADOPTING_RESIDUALS)
+        # QA round 1: registration is at FILE level (each committed-inventory-listed path and recorded
+        # Move destination), never a whole tree, so a stray under an admitted run's homes is graded.
+        registered_files = frozenset(adoption.registered)
+        # spec 14.2: an [unmanaged] declaration MUST NOT equal, contain or lie within the control area. A
+        # colliding one is a finding and covers nothing, so every path beneath it is graded.
+        control = _opf_adopt_state.CONTROL_ROOTS
+        collided = [u for u in valid_unmanaged
+                    if _under_any(u, control) or any(_under_any(c, (u,)) for c in control)]
+        for u in collided:
+            rep.finding("C-CONTAINMENT: unmanaged path {!r} equals, contains or lies within the OPF control "
+                        "area ({}) of an adopting store, so it covers nothing (spec 14.2)".format(
+                            u, ", ".join(repr(c) for c in control)))
+        if collided:
+            valid_unmanaged = [u for u in valid_unmanaged if u not in collided]
+            classified_file = managed_file
+
+            def managed_file(p):
+                if _under_any(p, collided) and not _under_any(p, valid_unmanaged):
+                    return False
+                return classified_file(p)
+        # Walked as namespaces so that every entry beneath them other than a registered FILE is graded:
+        # the adoption homes themselves, each strict ancestor directory of a registered file (so a stray
+        # beside it is graded one by one), and each strict ancestor directory of a LIVE frozen source (an
+        # ancestor whose frozen source is gone is graded as one unregistered entry). With no admitted run
+        # the namespaces keep the legacy whole-entry grading.
+        live = [p for p, src in frozen.items() if src.grade != "absent"]
+        covered = list(registered_files) + live
+        adoption_dirs = frozenset(_opf_adopt_state.ADOPTION_NAMESPACES if adoption.runs else ()) | frozenset(
+            p.rsplit("/", i)[0] for p in covered for i in range(1, p.count("/")))
+        if registered_files:
+            graded_file = managed_file
+
+            def managed_file(p):
+                return p in registered_files or graded_file(p)
 
     unmanaged_files = []
 
@@ -2357,7 +2581,7 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
         # handled by the caller's skip.) Anything else under the store is an UNREGISTERED directory, graded
         # as a stray even when empty (round-14: the walk previously graded files only, so an empty rogue
         # directory, or a tree of only empty dirs, escaped grading entirely).
-        if full == mrel or _under_any(full, staged_roots):
+        if full == mrel or _under_any(full, staged_roots) or full in adoption_dirs:
             return True
         if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
             try:
@@ -2428,12 +2652,33 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
                     "or migration actually running (spec 11:943/14.2)")
     walk(WORKING_DIRNAME, 0)
     for p in sorted(unmanaged_files):
-        if partial_active:
+        if p in frozen:
+            continue      # a frozen source is graded below from the adoption state, whatever the status
+        # Ruling R-a (QA round 1, codex MAJOR 1): the partial triage posture is for legacy (non-adopting)
+        # stores only; in an adopting store every unenumerated path stays a finding at required.
+        if partial_active and not adopting:
             rep.triage_path("unregistered path {!r} at the store location (an import or migration is in "
                             "progress; triage per spec 14.2)".format(p))
         else:
             rep.finding("C-CONTAINMENT: unregistered path {!r} at the store location is neither OPF-managed "
                         "nor enumerated as unmanaged (spec 14.2/11)".format(p))
+    # spec 11/14.2: a frozen source whose live bytes match its plan digest is bounded adoption state, reported
+    # rather than failed at any import_status; a drifted or vanished one fails at required, even under a
+    # substantiated partial (never triage). A source the reader could not grade is already a cannot-evaluate.
+    for p in sorted(frozen):
+        src = frozen[p]
+        if src.grade == "bounded":
+            rep.migration_incomplete_path(
+                "migration_incomplete: frozen {} source {!r} of adoption run {}: {}; bounded adoption state "
+                "until its retirement is recorded (spec 11/14.2)".format(src.disposition, p, src.run_id, src.detail))
+        elif src.grade in ("drifted", "absent"):
+            rep.finding("C-CONTAINMENT: frozen {} source {!r} of adoption run {}: {} (spec 11/14.2)".format(
+                src.disposition, p, src.run_id, src.detail))
+            # QA round 1 (codex MEDIUM 3): the approved source remains unresolved, so the report carries
+            # migration_incomplete as well as the required-grade failure above (spec 11).
+            rep.migration_incomplete_path(
+                "migration_incomplete: frozen {} source {!r} of adoption run {} remains unresolved: {} "
+                "(spec 11)".format(src.disposition, p, src.run_id, src.detail))
 
 
 def _check_lease(root_fd, machine_rel, rep):
@@ -3105,7 +3350,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-CONTAINMENT: whole-tree path / unmanaged-path containment (spec 14.2/11) -------------------
     rep.ran("C-CONTAINMENT")
-    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep)
+    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep, in_repo=in_repo)
 
     # --- C-VIEW-DRIFT: byte-level drift of every declared deterministic view (spec 5.8/10) ------------
     rep.ran("C-VIEW-DRIFT")

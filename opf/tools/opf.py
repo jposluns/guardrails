@@ -58,8 +58,9 @@ nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readines
 the adoption journal; with neither present it reports that no adoption run exists). The stage driver adds
 `opf adopt approve --inputs FILE --plan FILE --actor NAME`, the one approval, printed and writing nothing,
 and `opf adopt apply --inputs FILE --plan FILE --approval FILE`, which admits only the approved plan and
-refuses before any write while a plan op's slice has not landed. `complete` and `reconcile` are
-recognized and refuse (exit 2) until the completion and recovery stages land in a later PR.
+refuses before any write while a plan op's slice, or the driver's receipt stage, has not landed. `complete`
+and `reconcile` are recognized and refuse (exit 2) until the completion and recovery stages land in a later
+PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -110,6 +111,7 @@ def _bootstrap():
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
+    global _opf_adopt_state
     try:
         import _opf_worklog     # manifest-selected worklog intake + WL reference grammar
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
@@ -126,6 +128,7 @@ def _bootstrap():
         import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
         import _opf_adopt_apply  # OPF-ADOPT U1+U5: the apply shell (the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
+        import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
         return EXIT_MALFORMED
@@ -11327,6 +11330,11 @@ def _doctor_report(result):
         print("  CANNOT-EVALUATE: {}".format(c))
     if result.triage:
         print("  partial-import triage entries: {}".format(len(result.triage)))
+    if result.migration_incomplete:
+        print("  migration_incomplete entries (bounded adoption state, reported not failed): {}".format(
+            len(result.migration_incomplete)))
+        for entry in result.migration_incomplete:
+            print("    {}".format(entry))
     print("  residuals (disclosed by-design, not gradeable): {}".format(len(result.residuals)))
 
 
@@ -13180,7 +13188,9 @@ def _cmd_adopt(rest):
           journal, a bundle the validator grades INVALID, or a directory at the evidence home that is not
           a run id). Exit 2: cannot-evaluate (a symlinked, dangling or wrong-type root or home, evidence-
           home entry or journal entry -- a journal entry other than a transaction directory or a
-          regular, singly-linked `lock` / `lock.break` -- a root reached through a symlink, `..` included, or an unreadable
+          regular, singly-linked `lock` / `lock.break` -- a root reached through a symlink, `..` included, a foreign
+          plan digest, a wrong phase, a missing or unproven plan.toml, unless an earlier finding
+          (no inventory, or a legacy-format inventory) ends verification first, or an unreadable
           journal or bundle). Like
           `plan`, a NOT-ADOPTED root is fine: adoption is the verb that PRECEDES a store, so neither
           subcommand requires store resolution (unlike import D7).
@@ -14275,10 +14285,22 @@ def _cli_self_test():
                             os.close(jr_fd)
                     finally:
                         os.close(debris_fd)
-                    # done: a COMPLETED engine transaction (its journal entry stays, and its bundle is VALID).
+                    # done: a COMPLETED engine transaction (its journal entry stays, and its bundle is VALID):
+                    # it stages a plan sealed as the planner seals it, as apply stages the approved plan, so
+                    # the bundle verifier proves its inventory's plan digest against it (spec 4.2).
+                    def sealed_plan(run_id_):
+                        body = dict(format="opf.adoption.plan/v2", run_id=run_id_)
+                        digest = "sha256:" + _opf_adopt_apply._sha256(
+                            _opf_adopt_apply.emit_checked(body).encode("utf-8"))
+                        return (_opf_adopt_apply.emit_checked(dict(body, plan_digest=digest)).encode("utf-8"),
+                                digest)
+
+                    adopt_plan, adopt_digest = sealed_plan(adopt_rid)
                     done = os.path.join(abase, "done")
                     os.mkdir(done)
-                    _opf_adopt_apply.run_adopt_transaction(done, adopt_rid, lambda ops: None)
+                    _opf_adopt_apply.run_adopt_transaction(
+                        done, adopt_rid, lambda ops: ops.create(_opf_adopt_apply.plan_rel(adopt_rid), adopt_plan),
+                        plan_digest=adopt_digest)
                     # an empty (nothing-opened) journal entry, which the engine classifies as clean.
                     unopened = os.path.join(abase, "unopened")
                     os.makedirs(os.path.join(unopened, adopt_j_rel, "txn"))
@@ -14336,6 +14358,30 @@ def _cli_self_test():
                                        "adoption run {}: evidence bundle at".format(adopt_rid)),
                                       ("nothing-opened journal entry", unopened, EXIT_OK,
                                        "no adoption run exists")]
+                    # Round 9: status holds each inventory's [adoption] identity to the doctor's bar (spec
+                    # 4.2), each red at the round-9 head (which listed the run and exited 0): a plan digest
+                    # other than the bundle's own sealed plan's, a phase other than the file name's, and an
+                    # empty base inventory with no plan are each cannot-evaluate; the hand-built control
+                    # with its own sealed plan stays clean.
+                    for v_tag, v_plan, v_phase, v_digest, v_want, v_needle in (
+                            ("handbuilt", adopt_plan, None, adopt_digest, EXIT_OK,
+                             "adoption run {}: evidence bundle at".format(adopt_rid)),
+                            ("foreigndigest", adopt_plan, None, "sha256:" + "0" * 64, EXIT_MALFORMED,
+                             "not its bundle's own sealed plan"),
+                            ("wrongphase", adopt_plan, "completion", adopt_digest, EXIT_MALFORMED,
+                             "phase its file name carries"),
+                            ("emptynoplan", None, None, adopt_digest, EXIT_MALFORMED, "no plan.toml")):
+                        root = fresh_root(v_tag)
+                        os.makedirs(os.path.join(root, evidence_rel, adopt_rid))
+                        v_rows = []
+                        if v_plan is not None:
+                            v_plan_rel = _opf_adopt_apply.plan_rel(adopt_rid)
+                            with open(os.path.join(root, v_plan_rel), "wb") as fh:
+                                fh.write(v_plan)
+                            v_rows.append(_opf_adopt_apply.inventory_row(v_plan_rel, v_plan))
+                        with open(os.path.join(root, _opf_adopt_apply.inventory_rel(adopt_rid)), "wb") as fh:
+                            fh.write(_opf_adopt_apply.emit_inventory(adopt_rid, v_rows, v_phase, v_digest))
+                        status_vectors.append(("bundle ({})".format(v_tag), root, v_want, v_needle))
                     root = fresh_root("nobundle")
                     os.makedirs(os.path.join(root, evidence_rel, adopt_rid))
                     status_vectors.append(("run-id directory with no inventory", root, EXIT_FINDING,
@@ -14490,16 +14536,21 @@ def _cli_self_test():
                     home_abs = os.path.join(swaproot, evidence_rel)
                     payload_rel = evidence_rel + "/" + adopt_rid + "/payload.txt"
                     good_inv = _opf_adopt_apply.emit_inventory(
-                        adopt_rid, [_opf_adopt_apply.inventory_row(payload_rel, b"GOOD!")])
+                        adopt_rid, [_opf_adopt_apply.inventory_row(payload_rel, b"GOOD!")],
+                        plan_digest=adopt_digest)
                     os.makedirs(os.path.join(home_abs, adopt_rid))
                     with open(os.path.join(home_abs, adopt_rid, "inventory.toml"), "wb") as fh:
                         fh.write(good_inv)
+                    with open(os.path.join(home_abs, adopt_rid, "plan.toml"), "wb") as fh:
+                        fh.write(adopt_plan)                     # each home's own sealed plan (spec 4.2)
                     with open(os.path.join(home_abs, adopt_rid, "payload.txt"), "wb") as fh:
                         fh.write(b"BAD!!")                       # drifted: the original home is exit 1
                     repl_abs = os.path.join(swaproot, ".working", "imported", "adoption-replacement")
                     os.makedirs(os.path.join(repl_abs, adopt_rid))
                     with open(os.path.join(repl_abs, adopt_rid, "inventory.toml"), "wb") as fh:
                         fh.write(good_inv)
+                    with open(os.path.join(repl_abs, adopt_rid, "plan.toml"), "wb") as fh:
+                        fh.write(adopt_plan)
                     with open(os.path.join(repl_abs, adopt_rid, "payload.txt"), "wb") as fh:
                         fh.write(b"GOOD!")                       # verifies, but beside a foreign entry
                     os.mkdir(os.path.join(repl_abs, "zzz-foreign"))
@@ -14802,12 +14853,14 @@ def _cli_self_test():
                 # The stage driver end to end over a decision-complete fixture (a retire source and a
                 # kept file at a NOT-ADOPTED root), planned through the wired `plan`: approve -> 0 with
                 # the approval binding the plan's two digests on stdout, writing nothing; apply -> 2
-                # naming the unlanded ops (no op executes in this build), writing nothing, no journal and
-                # no bundle (the wiring discriminator: an unwired apply refuses with the not-yet-available
-                # message instead). Flips: an approval for a fresh plan of the same tree -> apply 2 on the
-                # binding; a source edited after planning -> approve 2 into a fresh plan; an open
-                # adoption-journal transaction -> plan 2 directing to reconcile (the planner itself never
-                # reads that journal, so without the gate it reports the worksheet's digest mismatch).
+                # naming the unlanded ops (the fixture plan's init-store, install-pack, register-unmanaged
+                # and retire-file ops, and the driver's receipt stage, are not landed in this build),
+                # writing nothing, no journal and no bundle (the wiring discriminator: an unwired apply
+                # refuses with the not-yet-available message instead). Flips: an approval for a fresh plan
+                # of the same tree -> apply 2 on the binding; a source edited after planning -> approve 2
+                # into a fresh plan; an open adoption-journal transaction -> plan 2 directing to reconcile
+                # (the planner itself never reads that journal, so without the gate it reports the
+                # worksheet's digest mismatch).
                 import hashlib
                 import _opf_adopt
                 import _opf_init
@@ -14887,7 +14940,7 @@ def _cli_self_test():
                     rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan_path,
                                                "--approval", approval_path, "--root", adoptee])
                     if rc != EXIT_MALFORMED or "not yet executable" not in err:
-                        failures.append("adopt apply with no landed op: rc={!r} (expected 2 + the unlanded-op "
+                        failures.append("adopt apply with unlanded ops: rc={!r} (expected 2 + the unlanded-op "
                                         "refusal; {})".format(rc, err.strip()))
                     rc, _out, err = run_split(["adopt", "apply", "--inputs", sheet_path, "--plan", plan2_path,
                                                "--approval", approval_path, "--root", adoptee])
@@ -14994,7 +15047,9 @@ def _cli_self_test():
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
               "adoption planner -- bare/malformed usage and the deferred complete/reconcile "
               "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
-              "bundle finding / 2 symlinked, dangling or wrong-type home, plan -> 2 missing, FIFO, oversized "
+              "bundle finding / 2 symlinked, dangling or wrong-type home or a bundle whose inventory names "
+              "another phase or plan digest than its own sealed plan's, or has no plan, "
+              "plan -> 2 missing, FIFO, oversized "
               "or symlinked worksheet, stale digest or an interrupted adoption transaction / 1 "
               "schema-violating op, each mutating nothing; the stage driver's approve -> 0 with the approval "
               "binding the plan's two digests / 2 after a source edit or a moved revision, and apply -> 2 on "
@@ -15702,7 +15757,8 @@ def _close_exc_safe_vectors_self_test():
             try:
                 with mock.patch.object(_opf_adopt_apply, "_open_product_root", open_root):
                     _opf_adopt_apply.run_adopt_transaction(
-                        str(product), "adopt-20260101T000000Z-0123456789abcdef", compose)
+                        str(product), "adopt-20260101T000000Z-0123456789abcdef", compose,
+                        plan_digest="sha256:" + "ab" * 32)
             finally:
                 shutil.rmtree(str(product), ignore_errors=True)
         return call
@@ -16213,6 +16269,7 @@ def _self_tests():
     ("opf-absorb", _opf_absorb.self_test),
     ("opf-record", _opf_record.self_test),
     ("opf-adopt-apply", _opf_adopt_apply.self_test),
+    ("opf-adopt-state", _opf_adopt_state.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-journal", _opf_store._journal.self_test),   # #378: the _close_fd_yielding vectors
