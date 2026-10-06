@@ -56,11 +56,14 @@ every non-daemon thread is joined, every later atexit callback has run, and a bo
 collection, and the process then ends with os._exit; the report carries format_version 2, finalized
 true, and the exit_code that must equal the child's real exit status. A fault the child survived (an
 atexit callback, a destructor, a thread) therefore reaches the error stream and refuses the verdict; a
-thread that ends in a failure SystemExit, which writes nothing to stderr, and a status recorded
-through exit_with whose exit was caught before the process left by another path, both make the child
-write no report and exit 2; and an in-band (format 1) report is refused. The child-side teardown
-residual (a destructor of an object still reachable at exit never runs, a daemon thread is killed) is
-disclosed in that module. A report that is missing, truncated, malformed,
+thread that ends in a failure SystemExit, which writes nothing to stderr, a thread started through
+_thread directly (whose SystemExit _thread ignores silently), a thread started or an atexit callback
+registered after the exit-time thread join (neither is ever joined or run), and a status recorded
+through exit_with that the interpreter's own exit did not confirm (its exit was caught before the
+process left by another path, an earlier exit_with outlived it, or a C callable read its code), each
+make the child write no report and exit 2; and an in-band (format 1) report is refused. The
+child-side teardown residual (a destructor of an object still reachable at exit never runs, a daemon
+thread is killed, a thread started before arm is unobserved) is disclosed in that module. A report that is missing, truncated, malformed,
 wrong-suite, non-regular, or carrying a duplicate or wrong-typed entry is CANNOT-EVALUATE, never a
 pass, whatever the child's exit code; completeness is never inferred from output volume or from the
 absence of a reported problem.
@@ -113,8 +116,8 @@ outside this repo's sole-orchestrator threat model (the runtime layer still reco
 actually ran). The fail-closed child contract's one permitted residual is loaded code replacing the
 reporting machinery: code running inside the child can write a complete finalized-shape report itself
 (for example, then os._exit(0), whether or not it armed the finalizer), or replace sys.stderr,
-sys.unraisablehook, threading.excepthook, os._exit, the atexit registrations, or the finalizer's
-state; this gate sees the child only from outside and no in-process secret is hidden from that code,
+sys.unraisablehook, threading.excepthook, threading._shutdown, threading.Thread._bootstrap,
+os._exit, the atexit registrations, or the finalizer's state; this gate sees the child only from outside and no in-process secret is hidden from that code,
 so the channel is closed only by the suite's own source being reviewed and pinned. The child runs un-timed
 (parity with the roster's other selftest steps; the CI job timeout is the outer bound).
 """
@@ -1152,6 +1155,59 @@ def self_test():
                             "except SystemExit:\n    raise\n")):
             code, _out, err = run(build(_manifest_text(), arm_line + tail))
             expect("st/finalizer-unwound-{}-passes".format(label), (code, err), (0, ""))
+        # 25b: a thread whose exit cannot be observed, and a status confirmed by anything but the
+        # interpreter's own exit, are refused 2: a thread started through _thread directly (a Python
+        # target ending in SystemExit(1), a C-callable target through an alias bound before arm, and
+        # the joinable entry point where it exists), an earlier exit_with whose exception outlives a
+        # later caught one, a caught exit_with whose code a C callable reads as an atexit callback or
+        # as a _thread target before another exit or a fall-through, a thread started from an atexit
+        # callback, and an atexit callback registered from one; a thread that a non-daemon thread
+        # starts while the exit-time join waits on it still passes
+        raw_wait = "import _thread, time\nwhile _thread._count():\n    time.sleep(0.001)\n"
+        caught_zero = ("import atexit, operator\ntry:\n    _selftest_exit_report.exit_with(0)\n"
+                       "except SystemExit as _e:\n    ")
+        unobserved, unconfirmed = "outside threading", "is not the one the process exited with"
+        late = "after the exit-time thread join"
+        for label, head, tail, named in (
+                ("raw-thread-exit-1", "", "import _thread, threading\n_ready = threading.Event()\n"
+                 "def _worker():\n    _ready.set()\n    sys.exit(1)\n"
+                 "_thread.start_new_thread(_worker, ())\n_ready.wait(5)\n" + raw_wait
+                 + "_selftest_exit_report.exit_with(0)\n", unobserved),
+                ("raw-thread-alias-c-target", "from _thread import start_new_thread as _snt\n",
+                 "_snt(sys.exit, (1,))\n" + raw_wait + "_selftest_exit_report.exit_with(0)\n",
+                 unobserved),
+                ("raw-thread-joinable", "", "import _thread, functools\n"
+                 "_start = getattr(_thread, 'start_joinable_thread', None)\n"
+                 "if _start is None:\n    _thread.start_new_thread(sys.exit, (1,))\n"
+                 "else:\n    _start(functools.partial(sys.exit, 1)).join()\n" + raw_wait
+                 + "_selftest_exit_report.exit_with(0)\n", unobserved),
+                ("earlier-exit-outlives-caught", "", "try:\n    _selftest_exit_report.exit_with(1)\n"
+                 "finally:\n    try:\n        _selftest_exit_report.exit_with(0)\n"
+                 "    except SystemExit:\n        pass\n", unconfirmed),
+                ("atexit-code-read-then-exit-1", "", caught_zero
+                 + "atexit.register(operator.attrgetter('code'), _e)\nsys.exit(1)\n", unconfirmed),
+                ("atexit-code-read-fall-through", "", caught_zero
+                 + "atexit.register(operator.attrgetter('code'), _e)\n", unconfirmed),
+                ("raw-thread-code-read-then-exit-1", "", caught_zero
+                 + "import _thread\n    _thread.start_new_thread(operator.attrgetter('code'), (_e,))\n"
+                 + raw_wait + "sys.exit(1)\n", unobserved),
+                ("thread-from-atexit", "", "import atexit, threading, time\n"
+                 "def _late():\n    time.sleep(0.3)\n    raise RuntimeError('ST_LATE_THREAD')\n"
+                 "atexit.register(lambda: threading.Thread(target=_late).start())\n"
+                 "_selftest_exit_report.exit_with(0)\n", late),
+                ("atexit-from-atexit", "", "import atexit\n"
+                 "def _late_fault():\n    raise RuntimeError('ST_LATE_ATEXIT')\n"
+                 "atexit.register(lambda: atexit.register(_late_fault))\n"
+                 "_selftest_exit_report.exit_with(0)\n", late)):
+            code, _out, err = run(build(_manifest_text(), head + arm_line + tail))
+            expect("st/finalizer-{}-2".format(label), code, 2)
+            expect("st/finalizer-{}-named".format(label), named in err, True)
+        code, _out, err = run(build(_manifest_text(), arm_line + (
+            "import threading, time\n"
+            "def _parent():\n    time.sleep(0.2)\n"
+            "    threading.Thread(target=time.sleep, args=(0.1,)).start()\n"
+            "threading.Thread(target=_parent).start()\n_selftest_exit_report.exit_with(0)\n")))
+        expect("st/finalizer-thread-during-join-twin-passes", (code, err), (0, ""))
 
         # 26: the declared stderr allowance is byte-exact over the WHOLE stream: the declared bytes
         # pass, and a repetition, a line-separator variant (CRLF, vertical tab, file separator), a
@@ -1218,9 +1274,10 @@ def self_test():
           "duplicate-member, non-regular, in-band, unfinalized, or exit-status-mismatched report as no "
           "verdict, refuses an atexit, destructor, or thread fault the child survived (an error stream "
           "differing by any byte from the declared bytes) while each fault-free twin passes, refuses a "
-          "silent failure SystemExit in a non-daemon thread, refuses an armed child whose status or "
-          "report bypassed the exit finalizer or whose recorded status was caught before another "
-          "exit, never masks a failing child behind a "
+          "silent failure SystemExit in a non-daemon thread, a thread started through _thread "
+          "directly, and a thread or atexit callback added after the exit-time join, refuses an armed "
+          "child whose status or report bypassed the exit finalizer or whose recorded status the "
+          "interpreter's own exit did not confirm, never masks a failing child behind a "
           "complete set, refuses a child harness error, refuses an escaping, non-regular, or symlinked "
           "runner without launching, reconciles the runner's static check() source set against the "
           "manifest before any launch (refusing an unregistered source check, a registered id with no "
