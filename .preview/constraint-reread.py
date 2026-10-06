@@ -5,8 +5,8 @@ WHAT IT DOES
     A constraint that the operator or a governing rule has set (propose but do not act without approval, never
     touch a named resource) stays in force when the working context is compacted; it does not lapse because it
     is no longer visible (standing-constraints-persist). This hook puts the standing constraints back in view
-    after a compaction and holds each turn end until the assistant has re-read them from the project's durable
-    record:
+    after a compaction, asks the assistant to re-read them from the project's durable record, and refuses the
+    turn end while no re-read entry is recorded, up to a loop cap after which the stop is allowed:
 
     1. When the platform reports a compaction, the hook reads the clock, records that time as the compaction
        time in a private per-session state file, and adds a reminder to the assistant's context that names the
@@ -56,11 +56,13 @@ FAILURE DIRECTION
     Each event fails toward its own safe direction. The reminder events remind when in doubt: a record that
     cannot be read keeps the reminder on (it says the record could not be read and asks the assistant to hold
     and check), and a compaction whose state cannot be saved is still reminded once at SessionStart. A state
-    file that exists but cannot be parsed is read as a compaction no earlier than the file's modification time,
-    so only an entry after that time clears it. A state path under a component that is not a directory is
+    file that exists but cannot be parsed, or is longer than STATE_MAX_BYTES (never parsed from a cut prefix),
+    is read as a compaction no earlier than the file's modification time, so only an entry after that time
+    clears it. A state path under a component that is not a directory is
     read as no state (nothing can have been saved there). A state location that cannot be examined at all
     (any other error) keeps the reminder on with the compaction time unknown, and its Stop is allowed with a
-    warning, since no entry can be dated against an unknown time. The Stop event refuses while a re-read is
+    warning, since no entry can be dated against an unknown time; that reminder says so, and says that only
+    restoring access to the state location clears it. The Stop event refuses while a re-read is
     outstanding, but its
     count is the loop bound: under stop_hook_active an unknown or unsaveable count allows with a warning rather
     than refusing again. Any error in the hook itself, an unreadable payload, or an unrecognized event exits 0
@@ -225,7 +227,10 @@ def load_state(path):
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(fd, "rb") as fh:
-            obj = json.loads(fh.read(STATE_MAX_BYTES + 1)[:STATE_MAX_BYTES])
+            data = fh.read(STATE_MAX_BYTES + 1)
+        if len(data) > STATE_MAX_BYTES:
+            raise ValueError("oversized state")  # never parse a cut prefix
+        obj = json.loads(data)
         when = parse_stamp(obj["compacted_at"])
         blocks = obj["blocks"]
         if when is None or type(blocks) is not int or blocks < 0:
@@ -273,10 +278,14 @@ def status(spath, rpath, now):
 
 
 def reminder(since, rpath, constraints, why):
-    when = stamp(since) if since is not None else "an unknown time (this hook's state could not be read)"
-    parts = ["STANDING CONSTRAINTS (re-injected by the constraint-reread hook): a context compaction at "
-             + when + " may have removed standing constraints from view; compaction does not lift them, and "
-             "only the authority that set a constraint can lift it. The durable record is " + rpath + "."]
+    if since is not None:
+        head = "a context compaction at " + stamp(since) + " may have removed standing constraints from view"
+    else:
+        head = ("this hook's state location could not be examined, so it cannot tell whether or when a context "
+                "compaction removed standing constraints from view")
+    parts = ["STANDING CONSTRAINTS (re-injected by the constraint-reread hook): " + head + "; compaction does "
+             "not lift them, and only the authority that set a constraint can lift it. The durable record is "
+             + rpath + "."]
     if why is not None:
         parts.append("The record could not be read (" + why + "); hold and check before any action a "
                      "constraint might cover.")
@@ -287,9 +296,16 @@ def reminder(since, rpath, constraints, why):
                      + (" (and " + str(more) + " more in the record)" if more > 0 else ""))
     else:
         parts.append("The record names no `" + CONSTRAINT_FIELD + ":` line; re-read it whole.")
-    parts.append("Re-read the record now, then append one line to it: `" + ENTRY_FIELD + ": ` followed by the "
-                 "output of `date -u +%Y-%m-%dT%H:%M:%SZ`. Until that entry exists this reminder repeats each "
-                 "turn and each turn end is held.")
+    if since is None:
+        parts.append("Re-read the record before any action a constraint might cover. No `" + ENTRY_FIELD
+                     + ":` entry can clear this reminder while the state location cannot be examined; it stops "
+                     "when access to this hook's state directory is restored. The turn end is not refused in "
+                     "this state.")
+    else:
+        parts.append("Re-read the record now, then append one line to it: `" + ENTRY_FIELD + ": ` followed by "
+                     "the output of `date -u +%Y-%m-%dT%H:%M:%SZ`. Until that entry exists this reminder repeats "
+                     "each turn, and each turn end is refused, at most " + str(BLOCK_CAP) + " times in a row "
+                     "before the stop is allowed with a warning.")
     return " ".join(parts)
 
 
@@ -551,8 +567,12 @@ def _self_test():
             try:
                 if os.access(d, os.X_OK):
                     self.skipTest("SKIPPED, running with privileges that ignore directory modes")
-                out = self.call("UserPromptSubmit", 5)
-                self.assertIn("unknown time", out["hookSpecificOutput"]["additionalContext"])
+                self.write("Constraints-reread: " + stamp(at(3)) + "\n", "a")
+                ctx = self.call("UserPromptSubmit", 5)["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("could not be examined", ctx)
+                self.assertIn("can clear this reminder while the state location cannot be examined", ctx)
+                self.assertIn("The turn end is not refused in this state.", ctx)
+                self.assertNotIn("each turn end is refused", ctx)
                 out = self.call("Stop", 6)
                 self.assertNotIn("decision", out)
                 self.assertIn("could not be read", out["systemMessage"])
@@ -568,6 +588,28 @@ def _self_test():
             self.assertIn(stamp(at(50)), ctx)
             self.write("Constraints-reread: " + stamp(at(55)) + "\n", "a")
             self.assertIsNone(self.call("UserPromptSubmit", 60))
+
+        def test_21_an_oversized_state_reads_as_a_compaction_at_its_mtime(self):
+            self.compact()
+            with open(self.spath(), "rb") as fh:
+                body = fh.read()
+            with open(self.spath(), "wb") as fh:  # valid JSON, padded to the limit: still read
+                fh.write(body + b" " * (STATE_MAX_BYTES - len(body)))
+            self.assertEqual(load_state(self.spath())[0], "ok")
+            with open(self.spath(), "ab") as fh:  # one byte more: never parsed from the cut prefix
+                fh.write(b"CORRUPT")
+            mtime = int(at(100).timestamp())
+            os.utime(self.spath(), (mtime, mtime))
+            self.assertEqual(load_state(self.spath())[:2], ("bad", at(100)))
+            self.write("Constraints-reread: " + stamp(at(50)) + "\n", "a")
+            self.assertEqual(self.call("Stop", 110)["decision"], "block")
+            self.write("Constraints-reread: " + stamp(at(105)) + "\n", "a")
+            self.assertIsNone(self.call("Stop", 110))
+
+        def test_22_the_reminder_states_the_loop_cap(self):
+            ctx = self.compact()["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("at most " + str(BLOCK_CAP) + " times in a row before the stop is allowed", ctx)
+            self.assertNotIn("is held", ctx)
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))

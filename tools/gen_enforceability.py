@@ -11,8 +11,9 @@ reuses the sibling generators' validated loaders (gen_rules.load_corpus, gen_hoo
 plugin hooks-manifest validation is never forked, and _gen_common.reconcile for the drift/write step. The
 preview manifest has its own loader (load_preview_manifest, a different key set: a file, no stage), which
 reuses gen_hooks' event sets for the same matcher, warn, and cannot-block rules, adds PostToolUseFailure
-and PreCompact (read as unable to block, the strict reading), and requires each file to be a readable
-regular file.
+and PreCompact (held to a warn default by this pack's own choice, not by a claim about the platform),
+requires each file to be a readable regular file, and reads the manifest itself only as a regular file
+(an absent one is an empty channel; a symlink, dangling or not, or another type fails closed).
 
 HONEST BOUNDARY. See the BOUNDARY constant below, emitted verbatim into the ledger.
 
@@ -85,10 +86,12 @@ PREVIEW_KEYS = {"id", "file", "rules", "platform", "event", "matcher", "default"
 PREVIEW_EVENTS = set(KNOWN_EVENTS) | {"PostToolUseFailure", "PreCompact"}
 PREVIEW_TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
 # gen_hooks' warn rule (warn is legal on every event but PreToolUse; a preview hook has no bake stage) and
-# its cannot-block rule, extended to the two preview-only events: a PreCompact control is read as unable to
-# block (the strict reading), and PostToolUseFailure follows PostToolUse.
+# its cannot-block rule (NONBLOCK_EVENTS), extended to the two preview-only events: PostToolUseFailure
+# follows PostToolUse, and a PreCompact control is held to a warn default by this pack's own choice (a
+# preview hook does not refuse a compaction). That choice is the pack's rule; it states nothing about
+# whether the platform lets a PreCompact hook block.
 PREVIEW_WARN_EVENTS = set(WARN_EVENTS) | {"PostToolUseFailure", "PreCompact"}
-PREVIEW_NONBLOCK_EVENTS = set(NONBLOCK_EVENTS) | {"PreCompact"}
+PREVIEW_WARN_ONLY_EVENTS = set(NONBLOCK_EVENTS) | {"PreCompact"}
 PREVIEW_FILE_RE = re.compile(r"^\.preview/[a-z0-9][a-z0-9-]*\.py$")
 RULES_DIR_REL = ".aiqt/core/rules"
 # The Quality roster: the local mirror plus its CI workflow. Reading them to scan their gate steps is a
@@ -223,12 +226,19 @@ def load_gates_manifest(path, root):
 
 
 def load_preview_manifest(path, root, plugin_ids):
-    """Parse and validate the preview-channel hooks manifest; return its [[hook]] tables. An ABSENT file is
-    an empty list (retiring the channel needs no edit here); an unreadable or malformed one raises
-    (ValueError/OSError -> exit 2). Each id must be unique here and absent from the plugin hooks manifest,
-    and each file must be a readable regular .preview/<name>.py."""
-    if not _exists(path):
+    """Parse and validate the preview-channel hooks manifest; return its [[hook]] tables. Only a GENUINELY
+    ABSENT file is an empty list (retiring the channel needs no edit here): the path is examined with lstat,
+    which does not follow a link, so a symlink (dangling or not), a directory, or another non-regular file
+    raises ValueError, and an unreadable or malformed one raises (ValueError/OSError -> exit 2). Each id must
+    be unique here and absent from the plugin hooks manifest, and each file must be a readable regular
+    .preview/<name>.py."""
+    try:
+        st = os.lstat(str(path))
+    except FileNotFoundError:
         return []
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError("{}: the preview manifest must be a regular file, not a symlink or another file "
+                         "type".format(path.name))
     data = load_toml(path)
     extra = set(data) - {"hook"}
     if extra:
@@ -276,9 +286,11 @@ def load_preview_manifest(path, root, plugin_ids):
         if default == "warn" and event not in PREVIEW_WARN_EVENTS:
             raise ValueError("{}: default 'warn' is not legal on {} (a preview hook has no bake stage)".format(
                 where, event))
-        if event in PREVIEW_NONBLOCK_EVENTS and default != "warn":
-            raise ValueError("{}: event {} cannot block at the platform, so default must be 'warn'".format(
-                where, event))
+        if event in PREVIEW_WARN_ONLY_EVENTS and default != "warn":
+            why = ("cannot block at the platform" if event in NONBLOCK_EVENTS else
+                   "is held to a warn default by this pack's own choice (a preview hook does not refuse a "
+                   "compaction)")
+            raise ValueError("{}: event {} {}, so default must be 'warn'".format(where, event, why))
         if _req_str(hook, "class", where) not in ("b", "c"):
             raise ValueError("{}: class must be b or c (a is the gate axis; d is never authored)".format(where))
         _req_str(hook, "residue", where)  # required, never empty
@@ -886,6 +898,33 @@ def self_test_main():
         for name, kwargs in cases:
             if run_quiet(preview_tree(name, **kwargs), check=False) != 2:
                 failures.append("preview: case {} expected exit 2 (fail-closed)".format(name))
+        # (q2) Only a genuinely absent preview manifest is an empty channel (exit 0); a manifest that is a
+        #      dangling symlink, a symlink to a conformant manifest, or a directory fails closed (exit 2).
+        if run_quiet(_build(tmp / "preview-manifest-absent"), check=False) != 0:
+            failures.append("preview: an absent preview manifest expected exit 0 (an empty channel)")
+        for name in ("preview-manifest-dangling", "preview-manifest-symlink", "preview-manifest-dir"):
+            t = preview_tree(name)
+            m = t / PREVIEW_MANIFEST_REL
+            if name.endswith("dangling"):
+                m.unlink()
+                m.symlink_to("missing-preview.toml")
+            elif name.endswith("symlink"):
+                m.rename(m.with_name("real-preview.toml"))
+                m.symlink_to("real-preview.toml")
+            else:
+                m.unlink()
+                m.mkdir()
+            if run_quiet(t, check=False) != 2:
+                failures.append("preview: case {} expected exit 2 (fail-closed)".format(name))
+        # (q3) The PreCompact warn rule is the pack's own choice: its refusal must not claim a platform limit.
+        pc = preview_tree("preview-precompact-reason", event="PreCompact")
+        try:
+            load_preview_manifest(pc / PREVIEW_MANIFEST_REL, pc, set())
+            failures.append("preview: a PreCompact block default must be refused")
+        except ValueError as exc:
+            if "cannot block at the platform" in str(exc) or "own choice" not in str(exc):
+                failures.append("preview: the PreCompact refusal must state the pack's own choice, not a "
+                                "platform limit")
     finally:
         if unread_manifest is not None:
             os.chmod(unread_manifest, 0o644)  # restore even on an unexpected early exit
@@ -913,8 +952,10 @@ def self_test_main():
           "its rule as a preview row and a SessionStart warn preview row is accepted, and a preview hook "
           "whose file is absent, a directory, a FIFO, a symlink, or unreadable, or with a duplicate id, an "
           "unknown corpus-id, class a or d, an unknown key, platform, event, or default, a missing, invalid, "
-          "or stray matcher, a block default on SessionStart or PreCompact, or a warn default on PreToolUse "
-          "fails closed (exit 2)" + note)
+          "or stray matcher, a block default on SessionStart or PreCompact (the latter refused as the pack's "
+          "own choice, not as a platform limit), or a warn default on PreToolUse fails closed (exit 2); an "
+          "absent preview manifest is an empty channel, and one that is a dangling symlink, a symlink, or a "
+          "directory fails closed (exit 2)" + note)
     return 0
 
 

@@ -869,6 +869,19 @@ class = "b"
 residue = '''{residue}'''
 """.format(residue=_HOOK_RESIDUE)
 
+# A preview-channel hook (a standalone .preview/ file, not in the plugin) citing rulecc, which hook-one also
+# cites (the mixed case), and ruledd, which nothing else cites (the preview-only case).
+_PREVIEW = """[[hook]]
+id = "pv-one"
+file = ".preview/pv-one.py"
+rules = ["rulecc", "ruledd"]
+platform = "claude-code"
+event = "Stop"
+default = "block"
+class = "b"
+residue = "A self-test preview hook, installed by hand."
+"""
+
 _GATES = """[[gate]]
 id = "gate-alpha"
 script = "tools/g_alpha.py"
@@ -1284,6 +1297,38 @@ def self_test_main():
                     t / ROADMAP,
                     'description = "A self-test intended build for the apex rule."',
                     'description = "   "'))
+        # (y) PREVIEW CHANNEL, both views: a rule linked only to a preview-channel hook is shown as Preview
+        # only, never as Enforced, and a rule linked to a plugin hook AND a preview hook (the mixed case)
+        # stays Enforced with the preview mechanism marked as installed by hand.
+        pv = _build(tmp / "preview")
+        (pv / ".preview").mkdir()
+        (pv / ".preview" / "pv-one.py").write_text("# self-test preview hook\n", encoding="utf-8")
+        (pv / ".aiqt" / "core" / "hooks" / "preview.toml").write_text(_PREVIEW, encoding="utf-8")
+        (pv / ".aiqt" / "enforceability.json").write_text(gen_enforceability.build_ledger(pv), encoding="utf-8")
+        replace_in(pv / ROADMAP, 'corpus-id = "rulecc"\nstatus = "enforced"\nmechanisms = ["hook:hook-one"]',
+                   'corpus-id = "rulecc"\nstatus = "enforced"\nmechanisms = ["hook:hook-one", "hook:pv-one"]')
+        replace_in(pv / ROADMAP, 'corpus-id = "ruledd"\nstatus = "none"\nmechanisms = []',
+                   'corpus-id = "ruledd"\nstatus = "enforced"\nmechanisms = ["hook:pv-one"]')
+        if run_quiet(pv, check=False) != 0 or run_quiet(pv, check=True) != 0:
+            failures.append("preview tree: generation and a drift-clean regeneration expected exit 0")
+        else:
+            sfx = " (preview channel, installed by hand)"
+            body = (pv / MD_REL).read_text(encoding="utf-8")
+            for token in ("| Enforced | 3 |", "| Preview only | 1 |", "| Pending | 1 |", "| None | 0 |",
+                          "| `ruledd` | Preview only | `hook:pv-one`" + sfx + ", class b |",
+                          "| `rulecc` | Enforced | `hook:hook-one`, class b; `hook:pv-one`" + sfx + ", class b |",
+                          "- Channel: `preview, installed by hand from .preview/pv-one.py; not in the plugin`"):
+                if token not in body:
+                    failures.append("preview tree: {!r} missing from ENFORCEMENT.md".format(token))
+            page = (pv / HTML_REL).read_text(encoding="utf-8")
+            pv_link = '<a href="#mechanism-hook-pv-one"><code>hook:pv-one</code></a>' + sfx + ", class b"
+            for token in ("<strong>3</strong> enforced, <strong>1</strong> preview only, <strong>1</strong> "
+                          "pending, <strong>0</strong> none.",
+                          "<td><code>ruledd</code></td><td>Preview only</td><td>" + pv_link + "</td>",
+                          "<td><code>rulecc</code></td><td>Enforced</td><td><a href=\"#mechanism-hook-hook-one\">"
+                          "<code>hook:hook-one</code></a>, class b; " + pv_link + "</td>"):
+                if token not in page:
+                    failures.append("preview tree: {!r} missing from the generated page".format(token))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1304,7 +1349,9 @@ def self_test_main():
           "description or carrying a mechanism or carrying only whitespace, a NEWLINE in a table-cell "
           "description, an unsupported lint: reference, a stale committed ledger, an en dash or a raw tab "
           "in a residue, a boolean roadmap version, a site shell missing its content token, and an "
-          "invalid-UTF-8 generated Markdown or HTML target all fail closed (exit 2)")
+          "invalid-UTF-8 generated Markdown or HTML target all fail closed (exit 2); and a rule linked only "
+          "to a preview-channel hook reads Preview only (not Enforced) while a rule linked to a plugin hook "
+          "and a preview hook reads Enforced with the preview mechanism marked, in both views")
     return 0
 
 
