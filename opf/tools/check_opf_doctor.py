@@ -92,7 +92,7 @@ spelling each DENY with a structured decision; a pristine sanctioned-writer invo
 record call included), a known read-only tool, an unrelated write and the still-writerless
 imported-series leaves each ALLOW; every other Bash command or unknown-tool payload that the hook SEES
 referencing or resolving to a protected token DENIES, read-only spellings (grep, git diff) included,
-and a Bash word's option-glued and delimiter-embedded spellings (sort -oTODO.md, dd of=/abs/x) are
+and a Bash word's option-glued and delimiter-embedded spellings (ls -ITODO.md, dd of=/abs/x) are
 judged as such references (within the hook's disclosed lexical residuals: a variable, a substitution,
 an interpreter's own language, an R7 payload string judged whole): the single writer allowance is the
 whole allowance surface; a malformed payload, a mis-wired hook event and a
@@ -1199,11 +1199,19 @@ def _claude_hook_self_test():
     reproduction FAILS on the predecessor pin, and one discriminating vector per coarse, git and
     forbidden-character behaviour fails under a mutant removing that behaviour alone. The round-10
     change keeps every directory-plus-basename join in the container check (no dedupe against the
-    candidates), recognizes the container verbs and git container forms at any word, and reads git
-    only through a small allowlisted option grammar (an unlisted global or container-subcommand
-    option and a pathspec magic word are not plain); each round-10 reproduction FAILS on the
-    predecessor pin, and one vector per container verb and per git container subcommand, plus a
-    pack-tree container vector, pins the round-9 rule against the mutants that survived it.
+    candidates) and reads git only through a small allowlisted global-option grammar (an unlisted
+    global option is not plain); each round-10 reproduction FAILS on the predecessor pin. The
+    round-11 change follows the shared specification's 2026-10-06 revision (a command-word
+    allowlist, bare or under /usr/bin, /bin, /usr/local/bin or /usr/sbin, and no dollar sign,
+    backquote, square bracket or backslash inside single quotes; the revised vector rows are
+    carried), so a wrapper, an unlisted remover and a dashed git builtin are not plain; reads the
+    container verbs and the cp, mv and ln joins on the command word alone; and denies, in a bound
+    product, every git subcommand that rewrites the working tree or the index whatever its
+    pathspec (a single-quoted glob from a subdirectory included), exempting only dry runs read
+    through a strict grammar, while every other git subcommand allows; one vector per subcommand,
+    per container verb and per dry-run grammar branch pins the rule, the round-11 reproductions
+    FAIL on the predecessor pin, and a file-tool payload carrying an unevaluated path-like field
+    denies.
     git-independent (the hook reads only the live tree; nothing is committed), offline,
     hermetic (one TemporaryDirectory, removed by its context manager). Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (the shipped hook missing, a fixture unbuildable, or a child that
@@ -1513,7 +1521,7 @@ def _claude_hook_self_test():
             deny("bash-cp-frozen-denied", payload("Bash", dict(command="cp x LEGACY.md"), root),
                  "LEGACY.md")
             deny("bash-truncate-view-denied",
-                 payload("Bash", dict(command="truncate -s 0 TODO.md"), root), "TODO.md")
+                 payload("Bash", dict(command="touch TODO.md"), root), "TODO.md")
             deny("bash-dd-store-denied",
                  payload("Bash", dict(command="dd if=/dev/zero of=.working/toml/counters.toml"),
                          root), "lexical hook")
@@ -2139,7 +2147,22 @@ def _claude_hook_self_test():
                               ("git log " + chr(92) + chr(10), False),
                               ("git log -" + chr(0x661), False),
                               ("bash -c " + chr(39) + "x" + chr(39), False),
-                              ("xargs git reset", False)):
+                              ("xargs git reset", False),
+                              # The specification's 2026-10-06 revision: a command-word allowlist
+                              # (bare, or under /usr/bin, /bin, /usr/local/bin, /usr/sbin) and no
+                              # dollar sign, backquote, square bracket or backslash in single quotes.
+                              ("/usr/bin/python3.14 -c " + chr(39) + "x" + chr(39), False),
+                              ("python3.14 -c " + chr(39) + "x" + chr(39), False),
+                              ("awk -f p", False), ("sed -n p f", False),
+                              ("find . -delete", False), ("tar -xf a", False),
+                              ("sort -S 4K --compress-program=bash f", False),
+                              ("printf -v " + chr(39) + "a" + chr(91) + "$(x)" + chr(93) + chr(39)
+                               + " y", False),
+                              ("test -v " + chr(39) + "a" + chr(91) + "$(x)" + chr(93) + chr(39),
+                               False),
+                              ("./ls", False), ("/tmp/x/ls", False), ("nodejs -e x", False),
+                              ("/usr/lib/git-core/git-rm . -r -q", False),
+                              ("/usr/bin/ls docs", True), ("rm notes.txt", True)):
                 got = hook_mod._provably_plain(cmd) is not None
                 expect("spec-vector " + ascii(cmd), got, want)
             for prefix in ("</dev/null", "command -p", "env -i", "exec -a harmless", "eatmydata"):
@@ -2175,11 +2198,11 @@ def _claude_hook_self_test():
             alias = os.path.join(root, "alias")
             os.symlink(counters, alias)
             deny("bash-r8-glued-view-in-product-denied",
-                 payload("Bash", dict(command="sort -oTODO.md /dev/null"), root), "declared view")
+                 payload("Bash", dict(command="ls -ITODO.md /dev/null"), root), "declared view")
             deny("bash-r8-glued-frozen-in-product-denied",
-                 payload("Bash", dict(command="sort -oLEGACY.md /dev/null"), root), "plan-frozen")
+                 payload("Bash", dict(command="ls -ILEGACY.md /dev/null"), root), "plan-frozen")
             deny("bash-r8-glued-abs-view-outside-denied",
-                 payload("Bash", dict(command="sort -o" + os.path.join(root, "TODO.md")
+                 payload("Bash", dict(command="ls -I" + os.path.join(root, "TODO.md")
                                       + " /dev/null"), elsewhere), "declared view")
             deny("bash-r8-delimited-store-alias-in-product-denied",
                  payload("Bash", dict(command="dd if=/dev/zero of=alias bs=1 count=1"), root),
@@ -2219,7 +2242,8 @@ def _claude_hook_self_test():
             # (no word of the command reaches the product), the git -c override, a code-running git
             # subcommand, each command-naming git option, the leading-exclamation and the
             # interpreter command-string checks, the square-bracket, tilde, hash and exclamation
-            # entries of the forbidden set, and the deny list's case folding.
+            # entries of the forbidden set, and the command-word allowlist's exact (case-sensitive)
+            # match (LS is not ls, so it is not plain).
             for label, cmd in (
                     ("coarse-cwd-only", "/bin/echo </dev/null"),
                     ("git-config-override", "git -c core.pager=cat status"),
@@ -2233,7 +2257,7 @@ def _claude_hook_self_test():
                     ("forbidden-tilde", "cp /dev/null " + chr(126) + "/notes"),
                     ("forbidden-hash", "ls docs " + chr(35) + "x"),
                     ("forbidden-bang", "ls docs x" + chr(33)),
-                    ("deny-list-case-fold", "PYTHON3 -c x")):
+                    ("allowlist-exact-case", "LS docs")):
                 deny("bash-r8-discriminating-" + label + "-denied",
                      payload("Bash", dict(command=cmd), root), "product root")
             # ROUND 9 (QA round 9): each vector below ALLOWED on the predecessor pin 7a7c8fde and
@@ -2295,8 +2319,8 @@ def _claude_hook_self_test():
                  payload("Bash", dict(command="cp " + staged + " docs"), root), "declared view")
             deny("bash-r9-cp-t-view-directory-denied",
                  payload("Bash", dict(command="cp -t docs " + staged), root), "declared view")
-            deny("bash-r9-install-into-view-directory-denied",
-                 payload("Bash", dict(command="install " + staged + " docs/"), root),
+            deny("bash-r9-ln-into-view-directory-denied",
+                 payload("Bash", dict(command="ln " + staged + " docs/"), root),
                  "declared view")
             deny("bash-r9-mv-into-abs-view-directory-outside-denied",
                  payload("Bash", dict(command="mv " + staged + " " + os.path.join(root, "docs")),
@@ -2307,7 +2331,7 @@ def _claude_hook_self_test():
             deny("bash-r9-rm-r-view-directory-denied",
                  payload("Bash", dict(command="rm -r docs"), root), "holds the protected path")
             deny("bash-r9-git-rm-r-view-directory-denied",
-                 payload("Bash", dict(command="git rm -r docs"), root), "holds the protected path")
+                 payload("Bash", dict(command="git rm -r docs"), root), "rewrites the working tree")
             os.makedirs(os.path.join(root, ".claude"), exist_ok=True)
             deny("bash-r9-rm-r-registration-directory-denied",
                  payload("Bash", dict(command="rm -r .claude"), root), "holds the protected path")
@@ -2325,12 +2349,12 @@ def _claude_hook_self_test():
             # spelling, so it no longer parses toward completeness. (1) A directory-plus-basename
             # join is container-checked even when another word already resolves to it (one extra
             # word spelling the joined directory, a cp backup suffix or a second operand, hid it).
-            # (2) git's subcommand is recognized only through a small allowlisted option grammar:
-            # an unlisted global option (--attr-source, --shallow-file), an unlisted option of a
-            # container subcommand and a pathspec magic word (:(top), :/docs) are NOT plain, so they
-            # take the coarse rule and deny from a product cwd. (3) A container verb or git
-            # container form behind a wrapper word (setarch) still takes the container rule. Each
-            # reproduction below ALLOWED on the predecessor pin dd48a8d5 and denies now.
+            # (2) git's subcommand is recognized only through a small allowlisted global-option
+            # grammar: an unlisted global option (--attr-source, --shallow-file) is NOT plain, so it
+            # takes the coarse rule and denies from a product cwd. (3) Round 11: a wrapper word
+            # (setarch) is off the command-word allowlist, and a pathspec magic word under a git
+            # work-tree subcommand denies through the git work-tree rule (bound product root).
+            # Each reproduction below ALLOWED on the predecessor pin dd48a8d5 and denies now.
             os.makedirs(os.path.join(stage, ".claude"))
             with open(os.path.join(stage, ".claude", "settings.json"), "w", encoding="utf-8") as fh:
                 fh.write("{}\n")
@@ -2342,9 +2366,7 @@ def _claude_hook_self_test():
                     ("cp-suffix-short-over-views", "cp -r -S docs " + stage_docs + " ."),
                     ("cp-second-operand-over-views", "cp -r " + stage_docs + " docs ."),
                     ("cp-suffix-over-registration", "cp -r -S .claude "
-                     + os.path.join(stage, ".claude") + " ."),
-                    ("wrapper-rm-r-views", "setarch x86_64 rm -r docs"),
-                    ("wrapper-git-clean-cwd", "setarch x86_64 git clean -fdx")):
+                     + os.path.join(stage, ".claude") + " .")):
                 deny("bash-r10-" + label + "-denied", payload("Bash", dict(command=cmd), root),
                      "holds the protected path")
             for label, cmd, cwd in (
@@ -2354,6 +2376,9 @@ def _claude_hook_self_test():
                     ("git-shallow-file-clean", "git --shallow-file x clean -fdx", root),
                     ("git-attr-source-config-override",
                      "git --attr-source HEAD -c diff.external=rm diff", root),
+                    ("git-attr-source-status", "git --attr-source HEAD status", root),
+                    ("wrapper-rm-r-views", "setarch x86_64 rm -r docs", root),
+                    ("wrapper-git-clean-cwd", "setarch x86_64 git clean -fdx", root),
                     ("wrapper-git-attr-source-clean",
                      "setarch x86_64 git --attr-source HEAD clean -fdx", root),
                     ("git-restore-top-magic", "git restore -s HEAD^ " + chr(39) + ":" + chr(40)
@@ -2365,34 +2390,120 @@ def _claude_hook_self_test():
                 deny("bash-r10-" + label + "-denied", payload("Bash", dict(command=cmd), cwd),
                      "product root")
             # The grammar's own allowances (each denies under a mutant that drops the matching
-            # entry): a listed global flag, a valued short and a valued long option of a container
-            # subcommand, a single-file git rm from a directory holding nothing protected, and an
-            # unlisted global option in a session bound to no product root (never over-denied).
+            # entry): a listed global flag, a separate and a glued value global before an allowed
+            # subcommand, and an unlisted global option in a session bound to no product root
+            # (never over-denied).
             for label, cmd, cwd in (
                     ("git-no-pager-log", "git --no-pager log", root),
-                    ("git-checkout-new-branch-free-dir", "git checkout -b feature", src_dir),
-                    ("git-restore-source-free-dir", "git restore --source HEAD a.py", src_dir),
-                    ("git-rm-file-free-dir", "git rm a.py", src_dir),
+                    ("git-C-value-global-status", "git -C src status", root),
+                    ("git-work-tree-glued-status", "git --work-tree=. status", root),
                     ("git-attr-source-unbound", "git --attr-source HEAD clean -fdx", elsewhere)):
                 allow("bash-r10-" + label + "-allowed", payload("Bash", dict(command=cmd), cwd))
-            # ROUND 10 mutant pins (QA round 10, claude medium 3): each vector below denies only
-            # through the behaviour it names. A git container form judges the session cwd (git
-            # rm, mv, clean, checkout and restore act below it with no directory operand), one
-            # vector per subcommand; every container verb is pinned by its own vector (a literal
-            # list here, never the hook's constant, so a mutant shrinking the constant cannot
-            # shrink the test with it); and a directory holding the pack own tree is a container.
-            for cmd in ("git rm notes.txt", "git mv notes.txt n2.txt", "git clean -fdx",
-                        "git checkout main", "git restore notes.txt"):
-                deny("bash-r10-git-cwd-container-" + cmd.split(" ")[1] + "-denied",
-                     payload("Bash", dict(command=cmd), root), "holds the protected path")
-            for verb in ("rm", "rmdir", "unlink", "mv", "shred", "srm", "wipe", "trash",
-                         "trash-put", "chmod", "chown", "chgrp", "setfacl", "chattr"):
+            # The container verbs (a literal list here, never the hook's constant, so a mutant
+            # shrinking the constant cannot shrink the test with it): rm, rmdir, mv and chmod lead a
+            # plain command and take the container rule, one vector each; every other remover,
+            # mover or re-permissioner is off the command-word allowlist (round 11) and denies as
+            # not plain from a product cwd. A directory holding the pack own tree is a container.
+            for verb in ("rm", "rmdir", "mv", "chmod"):
                 deny("bash-r10-container-verb-" + verb + "-denied",
                      payload("Bash", dict(command=verb + " docs"), root),
                      "holds the protected path")
+            for verb in ("unlink", "shred", "srm", "wipe", "trash", "trash-put", "chown", "chgrp",
+                         "setfacl", "chattr", "rename", "file-rename", "prename"):
+                deny("bash-r11-unlisted-remover-" + verb + "-denied",
+                     payload("Bash", dict(command=verb + " docs"), root), "product root")
             deny("bash-r10-container-pack-tree-outside-denied",
                  payload("Bash", dict(command="chmod -R u+w " + os.path.join(repo_root, "opf")),
                          elsewhere), "holds the protected path")
+            # ROUND 11 (QA round 11; the git work-tree rule): in a bound product a git subcommand
+            # that rewrites the working tree or the index denies whatever its pathspec spelling (git
+            # expands a single-quoted glob such as '../*' itself), one vector per subcommand (a
+            # literal list here, never the hook's constant), each run from a directory holding
+            # nothing protected; a dashed git builtin is off the command-word allowlist; a dry run
+            # of git rm, mv or clean read through the strict dry-run grammar allows, and each
+            # grammar branch is pinned by a vector that a mutant dropping that branch flips; every
+            # other git subcommand allows; a read-only plain command whose argument word names a
+            # container program, git or an interpreter, or names a directory beside a joinable
+            # name, allows; and a file-tool payload carrying a path-like field the hook does not
+            # evaluate denies. On the predecessor pin ae34350a every -denied git, glob, dashed,
+            # rename and path-field vector below ALLOWED, the four dry-run grammar pins and the
+            # other unlisted removers denied by another rule, every -allowed dry-run, joinable,
+            # argument-word and pathspec-magic vector DENIED, and the git commit, add, push, fetch
+            # and show, git status and documented MultiEdit allowances already allowed (they pin
+            # against over-denial).
+            for sub in ("checkout", "restore", "reset", "clean", "stash", "switch", "merge", "pull",
+                        "rebase", "cherry-pick", "revert", "am", "apply", "rm", "mv", "read-tree",
+                        "checkout-index", "worktree"):
+                deny("bash-r11-git-" + sub + "-free-dir-denied",
+                     payload("Bash", dict(command="git " + sub + " x"), src_dir),
+                     "rewrites the working tree")
+            sq = chr(39)
+            for label, cmd, cwd in (
+                    ("git-rm-glob", "git rm -r -q " + sq + "../" + chr(42) + sq, src_dir),
+                    ("git-checkout-view-glob", "git checkout HEAD -- " + sq + "../d" + chr(42) + sq,
+                     src_dir),
+                    ("git-restore-view-glob", "git restore -s HEAD " + sq + "../d" + chr(42) + sq,
+                     src_dir),
+                    ("git-checkout-frozen-glob", "git checkout HEAD -- " + sq + "../L" + chr(42)
+                     + sq, src_dir),
+                    ("git-C-glob-unbound-cwd", "git -C " + src_dir + " rm -r -q " + sq + "../"
+                     + chr(42) + sq, elsewhere),
+                    ("git-clean-short-letter-outside-grammar", "git clean -e x -n", root),
+                    ("git-rm-negated-dry-run", "git rm --no-dry-run -n -r docs", root),
+                    ("git-rm-dry-run-after-dashdash", "git rm -r -- -n docs", root),
+                    ("git-rm-abbreviated-dry-run", "git rm --dry -r docs", root)):
+                deny("bash-r11-" + label + "-denied", payload("Bash", dict(command=cmd), cwd),
+                     "rewrites the working tree")
+            for label, cmd in (("rm", "/usr/lib/git-core/git-rm . -r -q"),
+                               ("checkout", "/usr/lib/git-core/git-checkout HEAD ."),
+                               ("mv", "/usr/lib/git-core/git-mv docs dox"),
+                               ("restore", "git-restore docs")):
+                deny("bash-r11-dashed-git-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), root), "product root")
+            for label, cmd in (
+                    ("git-clean-dry-run", "git clean -n"),
+                    ("git-clean-dry-run-cluster", "git clean -nfdx"),
+                    ("git-clean-dry-run-long", "git clean --dry-run --force"),
+                    ("git-rm-dry-run", "git rm -n notes.txt"),
+                    ("git-rm-dry-run-dashdash", "git rm -n -- notes.txt"),
+                    ("git-mv-dry-run", "git mv -n notes.txt n2.txt"),
+                    ("git-commit", "git commit -m " + sq + "msg" + sq),
+                    ("git-add", "git add notes.txt"),
+                    ("git-add-top-magic", "git add " + sq + ":/docs" + sq),
+                    ("git-push", "git push"),
+                    ("git-fetch", "git fetch"),
+                    ("git-show", "git show HEAD"),
+                    ("git-log-joinable-dirs", "git log -- docs ."),
+                    ("ls-joinable-dirs", "ls docs ."),
+                    ("du-joinable-dirs", "du -sh docs ."),
+                    ("grep-container-word", "grep -rn mv docs"),
+                    ("cat-container-stem", "cat rm-old.txt docs"),
+                    ("ls-git-word", "ls git -la"),
+                    ("grep-git-word", "grep git -r src"),
+                    ("grep-interpreter-word", "grep -rn python src")):
+                allow("bash-r11-" + label + "-allowed", payload("Bash", dict(command=cmd), root))
+            # Outside every bound product the pack own tree (R8) still bounds a git work-tree
+            # rewrite: from a subdirectory of the pack's own repository, the repository top above
+            # the cwd holds the pack tree (pinned where the checkout carries its .git entry).
+            pack_sub = os.path.join(repo_root, "docs")
+            if os.path.isdir(pack_sub) and os.path.lexists(os.path.join(repo_root, ".git")):
+                deny("bash-r11-git-checkout-pack-repo-top-denied",
+                     payload("Bash", dict(command="git checkout x"), pack_sub),
+                     "holds the protected path")
+                allow("bash-r11-git-status-pack-repo-allowed",
+                      payload("Bash", dict(command="git status"), pack_sub))
+            notes = os.path.join(root, "notes.txt")
+            deny("multiedit-r11-nested-path-field-denied",
+                 payload("MultiEdit", dict(file_path=notes, edits=[dict(
+                     file_path=os.path.join(root, "TODO.md"), old_string="x", new_string="y")]),
+                     root), "path-like field")
+            deny("write-r11-extra-path-field-denied",
+                 payload("Write", dict(file_path=notes, content="x",
+                                       path=os.path.join(root, "TODO.md")), root),
+                 "path-like field")
+            allow("multiedit-r11-documented-schema-allowed",
+                  payload("MultiEdit", dict(file_path=notes, edits=[dict(
+                      old_string="x", new_string="y", replace_all=False)]), root))
             # Another user's unsearchable directory is absence, never cannot-evaluate (round 9),
             # pinned where the host offers one (the superuser's home, typically mode 0700): a
             # session that is not the superuser and cannot search it is never over-denied.
@@ -2526,14 +2637,24 @@ def _claude_hook_self_test():
           "and an absolute GIT_TRACE value denies while GIT_TRACE=1 allows. ROUND 10: a "
           "directory-plus-basename join stays container-checked when another word already names it "
           "(cp -r -S docs, --suffix=docs, a second docs operand, and the registration directory "
-          "deny), a wrapper word keeps the container rule (setarch x86_64 rm -r docs and git clean "
-          "deny), git is read through a small allowlisted option grammar (--attr-source and "
-          "--shallow-file globals, a git -c override behind one, a pathspec magic word and an "
-          "unlisted container-subcommand option each deny from a product cwd, while --no-pager, "
-          "checkout -b, restore --source, a single-file rm in a free directory and an unlisted "
-          "global in an unbound session allow), and one vector per container verb, per git "
-          "container subcommand (the session cwd judged) and for the pack tree pins each, and "
-          "another user's unsearchable directory stays absence where the host offers one)")
+          "deny), git is read through a small allowlisted global-option grammar (--attr-source and "
+          "--shallow-file globals and a git -c override behind one deny from a product cwd, while "
+          "--no-pager, a separate and a glued value global and an unlisted global in an unbound "
+          "session allow), one vector per container verb and for the pack tree pins each, and "
+          "another user's unsearchable directory stays absence where the host offers one. ROUND "
+          "11: the classifier follows the shared specification's 2026-10-06 revision (a "
+          "command-word allowlist and no dollar sign, backquote, square bracket or backslash in "
+          "single quotes; its rows carried), so a wrapper word, every remover off the allowlist "
+          "and a dashed git builtin deny as not plain from a product cwd; in a bound product each "
+          "of the eighteen work-tree or index rewriting git subcommands denies from a directory "
+          "holding nothing protected, a single-quoted glob pathspec from a subdirectory and "
+          "through git -C from an unbound cwd denies, the strict dry-run grammar allows git clean "
+          "-n, git rm -n and git mv -n while an unlisted letter, a negation, an abbreviation and a "
+          "dry-run word after -- deny, every other git subcommand allows, read-only commands whose "
+          "argument words name a container program, git or an interpreter, or a directory beside "
+          "a joinable name, allow, a git work-tree rewrite in the pack's own repository denies "
+          "from a subdirectory, and a MultiEdit or Write payload carrying an unevaluated "
+          "path-like field denies while the documented MultiEdit schema allows)")
     return EXIT_OK
 
 

@@ -51,28 +51,34 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
   R4 declared-view writes. Each machine-store manifest's views targets are declared view destinations;
      a target equal to one is denied (views change only through `opf render`; spec 5.8, 14.1).
   R5 Bash writes. EVERY Bash command is first classified PROVABLY PLAIN or not by ONE strict
-     classifier (D-DISCARD-SOUND-RULE; the shared plain-command specification, QA round 7), decided
-     on the RAW command string before any lexing: (1) every character is printable ASCII (no tab,
-     newline, carriage return, NUL or non-ASCII character, so no Unicode digit, homoglyph or
-     invisible character); (2) no dollar sign, backquote, backslash, semicolon, ampersand, pipe,
-     angle bracket, parenthesis, brace, square bracket, star, question mark, exclamation mark, hash
-     or tilde appears outside a single-quoted span, and no assignment precedes the command word;
-     (3) a single-quoted span is literal and a double-quoted span carries none of those characters,
-     every quote terminated; (4) words are separated by spaces only, and the command word is a bare
-     unquoted name or path that is not a shell, an interpreter, eval, exec, source, ".", env,
-     command, builtin, xargs, nohup, timeout, sudo or any other wrapper or program on the explicit
-     deny list (PLAIN_DENIED_COMMANDS). So no redirection, here-document, sequencing, substitution,
-     expansion, glob, escape, line continuation or leading wrapper can sit in a plain command, and
-     the hook's own lexer never has to read one. A plain command that still names a command to run
-     on its own command line (an argument word that is a shell or interpreter name, or that carries
-     a shell or interpreter command string or a leading exclamation mark, a git configuration
-     override, a code-running git subcommand or a command-naming git option: _plain_runs_code) is
-     judged as not plain. A PROVABLY PLAIN command
+     classifier (D-DISCARD-SOUND-RULE; the shared plain-command specification, QA round 7, revised
+     2026-10-06), decided on the RAW command string before any lexing: (1) every character is
+     printable ASCII (no tab, newline, carriage return, NUL or non-ASCII character, so no Unicode
+     digit, homoglyph or invisible character); (2) no dollar sign, backquote, backslash, semicolon,
+     ampersand, pipe, angle bracket, parenthesis, brace, square bracket, star, question mark,
+     exclamation mark, hash or tilde appears outside a single-quoted span, and no assignment
+     precedes the command word; (3) a single-quoted span carries no dollar sign, backquote, square
+     bracket or backslash (a builtin such as printf -v or test -v re-evaluates a quoted array
+     subscript), a double-quoted span carries none of the rule-2 characters, and every quote is
+     terminated; (4) words are separated by spaces only, and the command word is a bare unquoted
+     name, or an absolute path whose directory is exactly /usr/bin, /bin, /usr/local/bin or
+     /usr/sbin, whose basename is on the allowlist PLAIN_ALLOWED_COMMANDS: git and opf (which this
+     hook judges by its own semantic check) and programs that cannot run another program (ls, cat,
+     grep, cp, mv, rm and the others listed). So no redirection, here-document, sequencing,
+     substitution, expansion, glob, escape, line continuation, wrapper, interpreter, unlisted
+     program or dashed git builtin (git-rm, /usr/lib/git-core/git-checkout) can lead a plain
+     command, and the hook's own lexer never has to read one. A plain git or opf command that still
+     names a command to run on its own command line (an argument word that is a shell or
+     interpreter name, or that carries a shell or interpreter command string or a leading
+     exclamation mark, a git configuration override, a code-running git subcommand, a
+     command-naming git option, or a git global option outside the allowlisted grammar:
+     _plain_runs_code) is judged as not plain; an argument word of any other allowlisted program
+     is data, never a command that program runs. A PROVABLY PLAIN command
      takes the EXACT path check: the raw string and every dequoted word are scanned for the
      protected tokens (the .working store tree by any substring spelling, a session cwd inside a
      .working tree, and the frozen (R3) and declared-view (R4) paths matched with path boundaries),
      the judged spellings are every dequoted word, every spelling an argument word carries inside
-     itself (round 8: a value glued to a short-option run, sort -oTODO.md or -o/abs/TODO.md, and the
+     itself (round 8: a value glued to a short-option run, ls -ITODO.md or -I/abs/TODO.md, and the
      text after each delimiter inside a word, of=alias or --target-directory=/abs/x) and every value
      of an inherited git path variable (GIT_DIR, GIT_WORK_TREE and the others in GIT_PATH_ENV);
      every spelling is resolved against the session cwd AND against every directory another
@@ -80,28 +86,37 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      authority), to a fixed point; the rosters bind from the product roots above the session cwd,
      every absolute spelling and every resolved target; and every resolved target is judged exactly
      as a file-tool target would be (store, frozen, view, the pack own files (R8) and the
-     registration (R8)). Round 9: every directory a spelling resolves to also receives the
-     basename of every argument spelling as one more resolved target (cp X docs, cp -t docs X,
-     install X docs and mv X /abs/docs write docs/<basename of X>); a command led by a removing,
-     moving or re-permissioning word (CONTAINER_VERBS) or git rm, mv, clean, checkout or restore
-     denies when a resolved operand (the cwd too, for git) is a directory HOLDING a protected
-     path (a bound store tree, a frozen file, a view, a registration or the pack tree), and so
-     does any command whose directory-plus-basename target is such a directory (cp -r src/docs
-     .); a tilde-headed spelling is judged in BOTH readings, literal under the cwd (bash keeps a
-     quoted tilde literal) and expanded; and an absolute GIT_TRACE* value is one more inherited
+     registration (R8)). Round 9: for a cp, mv or ln command word (JOIN_WRITERS), every
+     directory a spelling resolves to also receives the basename of every argument spelling as one
+     more resolved target (cp X docs, cp -t docs X and mv X /abs/docs write docs/<basename of X>);
+     a command led by rm, rmdir, mv or chmod (CONTAINER_VERBS, matched on the command word alone)
+     denies when a resolved operand is a directory HOLDING a protected path (a bound store tree, a
+     frozen file, a view, a registration or the pack tree), and so does a cp, mv or ln whose
+     directory-plus-basename target is such a directory (cp -r src/docs .); a tilde-headed
+     spelling is judged in BOTH readings, literal under the cwd (bash keeps a quoted tilde
+     literal) and expanded; and an absolute GIT_TRACE* value is one more inherited
      spelling. Round 10 (D-RESCOPES-A) stops parsing toward completeness: every
      directory-plus-basename join is container-checked even when another word already resolves
      to it (no dedupe across the two checks, so a cp backup suffix or a second operand spelling
-     the joined directory no longer hides it); the container verbs and git container forms are
-     recognized at ANY word of the command, so a wrapper word in front (setarch x86_64 rm -r docs)
-     keeps the rule; and git is read only through a small allowlisted option grammar
-     (_git_grammar: the global options GIT_FLAG_GLOBALS and GIT_VALUE_GLOBALS, and for rm, mv,
-     clean, checkout and restore the options listed in GIT_CONTAINER_OPTIONS), so an unlisted
-     global option (--attr-source, --shallow-file), an unlisted option of a container subcommand
-     (--pathspec-from-file, -p, -e, an abbreviated long option) and a pathspec magic word (any
-     word after the subcommand opening with a colon: :(top), :/docs) make the command NOT plain,
-     and it takes the coarse rule below (it denies when the session cwd or a literal word lies in
-     a product root, and is allowed in a session bound to none). Past the derived-spelling, base
+     the joined directory no longer hides it); and git is read only through a small allowlisted
+     global-option grammar (_git_grammar: GIT_FLAG_GLOBALS and GIT_VALUE_GLOBALS), so an unlisted
+     global option (--attr-source, --shallow-file) makes the command NOT plain, and it takes the
+     coarse rule below (it denies when the session cwd or a literal word lies in a product root,
+     and is allowed in a session bound to none). Round 11 (the git work-tree rule): a plain git
+     command whose subcommand rewrites the working tree or the index (GIT_WORKTREE_SUBCOMMANDS:
+     checkout, restore, reset, clean, stash, switch, merge, pull, rebase, cherry-pick, revert, am,
+     apply, rm, mv, read-tree, checkout-index and worktree) DENIES whenever it acts in a bound
+     product (a product root at or above the session cwd, an absolute spelling or a resolved
+     operand, git -C and --work-tree values included), whatever its pathspec spelling, because git
+     expands a glob ('../*') or pathspec magic (:(top), :/docs) itself; a dry run of git rm, mv
+     or clean read through a strict grammar (GIT_DRY_RUN_GRAMMAR: only listed option letters and
+     exact long options, -n or --dry-run among them) writes nothing and is exempt; outside every
+     bound product such a command denies when the session cwd, a directory it names or the
+     repository top above either holds the pack own tree (R8). Every other git subcommand
+     (commit, add, push, status, log, diff, show, fetch and the rest) is judged by the exact path
+     check alone, so it is allowed unless it references or resolves to a protected path. The
+     dashed builtin forms (git-checkout, /usr/lib/git-core/git-rm) are off the allowlist and take
+     the coarse rule. Past the derived-spelling, base
      or resolved-target budget the command
      DENIES cannot-evaluate. A command referencing a protected token is denied unless the WHOLE
      command is a single plain invocation of the sanctioned writer (allowance A1 below), the only
@@ -171,11 +186,12 @@ THE SINGLE PRISTINE ALLOWANCE for a Bash command that references a protected tok
 machinery is itself attack surface, so the read-only command words and read-only git forms earlier
 revisions allowed are REMOVED rather than patched; the over-refusal is disclosed below). The command
 must pass rules 1 to 3 of the same provably plain classifier, with a bare command word (rule 4's word
-split, without its deny list, so the python3 launcher form below can be read): printable ASCII only,
-no metacharacter outside a single-quoted span, double-quoted spans free of them, every quote
-terminated. So no second command, redirection, substitution or expansion can ride along, while a
-sanctioned invocation may still QUOTE prose or a path that names a protected token (an `opf record`
-title, an `opf render --root` operand with spaces or parentheses, single-quoted). A leading
+split, without its allowlist, so the python3 launcher form below can be read): printable ASCII only,
+no metacharacter outside a single-quoted span, double-quoted spans free of them, single-quoted spans
+free of a dollar sign, backquote, square bracket or backslash, every quote terminated. So no second
+command, redirection, substitution or expansion can ride along, while a sanctioned invocation may
+still QUOTE prose or a path that names a protected token (an `opf record` title, an `opf render
+--root` operand with spaces or parentheses, single-quoted). A leading
 VAR=value assignment is never a bare command word: an environment assignment changes what a program
 does (GIT_EXTERNAL_DIFF and GIT_CONFIG_* make `git diff` execute an arbitrary writer), so an
 assignment-bearing command is never the allowance.
@@ -193,29 +209,37 @@ assignment-bearing command is never the allowance.
 RESIDUALS (spec 14.1 requires each disclosed; the pack's residual register (slice (d)) and the plan's
 per-platform residual coverage carry the same list):
   - A Bash write the matcher cannot see: a protected path reaching the filesystem through a shell
-    variable, glob, alias, function, cd-relative spelling that drops the token, command or process
-    substitution, an interpreter one-liner, or any other spelling in which no protected token appears
-    textually in the command string. R5 is a lexical floor, not a sandbox.
-  - A plain command whose program runs code the command line does not name: a script or binary the
-    session prepared earlier (./tool.py), a build, package or test runner not on the deny list
-    reading its own recipe file, a git hook, alias, pager, filter or diff driver taken from
-    repository or user configuration, a program configured through an environment variable the
-    session inherited, an exported shell function shadowing the command word, and a program outside
-    PLAIN_DENIED_COMMANDS that runs a command named in its own options. The deny list and the plain
-    semantic check exclude the inline forms only; the configuration and the prepared file are
-    same-user preparation.
+    variable, glob, alias, function, command or process substitution, an interpreter one-liner, or
+    any other spelling in which no protected token appears textually in the command string. This
+    includes a directory change whose destination no word spells (cd -, a bare cd to HOME, a CDPATH
+    lookup, a pushd or popd stack entry) followed, in the same command, by a relative spelling that
+    reaches a protected path only from that destination: such a command is not plain, so it denies
+    when the session cwd lies inside a product root, but run from outside every product root with
+    no literal word inside one (cd - and rm -rf docs) it is allowed. A directory change whose
+    destination IS spelled (cd /abs/product, cd ../product/docs) binds that product and denies.
+    R5 is a lexical floor, not a sandbox.
+  - A plain command whose program runs code the command line does not name: a git hook, alias,
+    pager, filter, diff or merge driver, credential helper or fsmonitor taken from repository or
+    user configuration (a configuration alias standing for a work-tree rewrite, git co for git
+    checkout, and a commit or merge hook that writes the work tree included: git aliases and
+    configuration-driven writes are disclosed here by name, not chased), a program configured
+    through an environment variable the session inherited, an exported shell function or alias
+    shadowing an allowlisted command word, and a same-named program planted on PATH ahead of an
+    allowlisted command word. The allowlist and the plain semantic check exclude the inline forms
+    only; the configuration, the function and the planted program are same-user preparation.
   - A plain command whose operand CONTAINS a protected path rather than lying on it, outside the
-    round-9 container rule: the exact check judges words that resolve INTO a protected path, the
-    directory-plus-basename joins and, for CONTAINER_VERBS and git rm, mv, clean, checkout and
-    restore (at any word of the command, round 10), a directory operand holding a protected path
-    of a BOUND root. So a program outside those words acting on a directory's whole contents
-    under a name no operand carries (an archive extraction or a sync into a parent directory,
-    cp -r src/. docs, cp -rT src/docs docs), a git work-tree rewrite named by no path (git reset
-    --hard, git stash, git switch, git merge or pull, and git checkout of a branch run from a
-    directory holding no protected path), a git alias from configuration standing for a
-    container subcommand (git co, same-user preparation), and a recursive remove of an ancestor
-    of a product root that the session neither sits in nor binds (no product root above the cwd
-    or any operand) reach a protected file with no protected token.
+    container rule: the exact check judges words that resolve INTO a protected path, the
+    directory-plus-basename joins of cp, mv and ln and, for rm, rmdir, mv and chmod, a directory
+    operand holding a protected path of a BOUND root. So a copy of a directory's whole contents
+    under a name no operand carries (cp -r src/. docs, cp -rT src/docs docs), a git subcommand
+    outside GIT_WORKTREE_SUBCOMMANDS that still writes the work tree or the index (git
+    sparse-checkout set or reapply, which removes every file outside the sparse cone, and the
+    index writers git add, git stage, git commit -a and git update-index; each is judged by the
+    exact path check alone, as the git work-tree rule's subcommand list directs), and a
+    work-tree rewrite or a recursive remove reaching a product root that the session neither sits
+    in nor binds (no product root above the cwd or any operand: git reset --hard, git stash or git
+    rm -r '*' run from a repository top or a sibling directory above or beside the product root,
+    rm -r of such an ancestor) reach a protected file with no protected token.
   - A relative protected spelling past the word budget: a provably plain command binds the rosters
     above every RESOLVED target (round 8), so a relative spelling that climbs into a product from
     outside it denies; past MAX_RESOLVED_WORDS words only absolute spellings resolve (the budget
@@ -285,46 +309,44 @@ per-platform residual coverage carry the same list):
     LEGACY.md). A command that is NOT provably plain denies whenever the session working directory,
     or any literal path word, lies inside a product root, even when it touches nothing protected: so
     from a cwd inside a product root a parameter expansion (echo $HOME), a command substitution
-    (gh pr create --body "$(...)"), an interpreter, wrapper or build tool (python3 script.py, make
-    test, bash -c ..., env, sed, find, tar), an eval, a line continuation, an ANSI-C or locale
-    quote, a glob, a redirection, any here-document (a quoted commit-message here-document
-    included), a tab or non-ASCII character, a double-quoted dollar sign (opf record task "costs
-    $5"; single-quote it), a git configuration override or config subcommand, an argument word that
-    names a shell or interpreter (grep -rn python src; use the Grep tool), and an argument word
-    carrying a shell or interpreter command string (a commit message beginning "sh -c" or "!")
-    all deny; run them from outside the product tree or outside a hooked session, read
-    protected files through the Read tool, and change the store through the opf CLI. R8 denies
-    rewriting the pack own files and the per-product registration through the gated tools, and the
-    word-resolution pass of a plain command denies a command that merely names a protected or
-    pack-owned file as a resolvable argument. Round 8 widens both passes: a word whose glued option
-    suffix or post-delimiter suffix happens to name a protected path (a prose word such as
-    -xTODO.md, or key=LEGACY.md), a relative operand that names a protected path under ANY directory
-    the same command names (ls docs STATUS.md where docs/STATUS.md is a view), any not-plain command
-    that spells .working anywhere (grep .working from outside every product), a git command under a
-    non-trivial inherited GIT_PAGER, GIT_EXTERNAL_DIFF or similar, and a plain command naming more
-    than MAX_BASES directories, all deny. Round 9 widens them again: a remove, move or
-    re-permission of ANY directory holding a protected path (mv notes.md docs where docs holds a
-    view, chmod -R u+w . from a product root), git restore --staged or git rm --cached over such a
-    directory, a directory operand beside a word whose basename names a protected file inside it,
-    a quoted tilde spelling whose literal OR expanded reading is protected, and every path below a
-    directory the session's own user made unsearchable, all deny. Round 10 widens them again, by
-    name, from a product root or any directory holding a protected path (the git container forms
-    judge the session cwd): everyday git checkout main, git checkout -b feature, git rm notes.txt,
-    git mv notes.txt n2.txt, git restore notes.txt, git restore --staged notes.txt and git clean -n
-    all deny; and from ANY directory inside a product root, git with a global option outside the
-    allowlisted grammar (git -p log, git --bare status, git --exec-path, git --attr-source HEAD
-    log, git --namespace x log), git rm, mv, clean, checkout or restore with an option outside
-    their listed sets (git checkout -p, git restore -p, the abbreviated git restore --sour HEAD
-    x, git clean -e pattern, git clean -i, git rm --pathspec-from-file=list, git checkout
-    --orphan x), and any git command carrying a pathspec magic or colon-headed word (git
-    add :/docs, git show :docs/x for an index blob, git log -- ':(exclude)x') all deny; so does a
-    plain command naming a directory that holds a protected path beside a directory word that
-    the first name could be joined to (ls docs ., where docs holds a view), and a plain command
-    whose argument word names a removing, moving or re-permissioning program or git container
-    form (grep -rn mv docs, or a wrapped git) over such a directory, the names matched like the
-    deny list, version or variant suffix included (rm-old.txt counts as rm), and from inside a
-    product root a plain command whose argument word names git (git-notes.md included) followed
-    by an option outside the grammar (ls git -la). R6 denies every write under a
+    (gh pr create --body "$(...)"), any program off the rule-4 allowlist (python3 script.py, make
+    test, bash -c ..., env, sed, find, tar, sort, jq, curl, gh, pytest, ./tool, a dashed git builtin
+    such as git-log), an eval, a line continuation, an ANSI-C or locale quote, a glob, a
+    redirection, any here-document (a quoted commit-message here-document included), a tab or
+    non-ASCII character, a dollar sign, backquote, square bracket or backslash even inside single
+    quotes (opf record task 'costs $5'), a git configuration override or config subcommand, and a
+    git argument word carrying a shell or interpreter command string (a commit message beginning
+    "sh -c" or "!") all deny; run them from outside the product tree or outside a hooked session,
+    read protected files through the Read tool, and change the store through the opf CLI. R8
+    denies rewriting the pack own files and the per-product registration through the gated tools,
+    and the word-resolution pass of a plain command denies a command that merely names a protected
+    or pack-owned file as a resolvable argument. Round 8 widens both passes: a word whose glued
+    option suffix or post-delimiter suffix happens to name a protected path (a prose word such as
+    -xTODO.md, or key=LEGACY.md), a relative operand that names a protected path under ANY
+    directory the same command names (ls docs STATUS.md where docs/STATUS.md is a view), any
+    not-plain command that spells .working anywhere (grep .working from outside every product), a
+    git command under a non-trivial inherited GIT_PAGER, GIT_EXTERNAL_DIFF or similar, and a plain
+    command naming more than MAX_BASES directories, all deny. Round 9 widens them again: a remove,
+    move or re-permission of ANY directory holding a protected path (mv notes.md docs where docs
+    holds a view, chmod -R u+w . from a product root), a cp, mv or ln directory operand beside a
+    word whose basename names a protected file inside it, a quoted tilde spelling whose literal
+    OR expanded reading is protected, and every path below a directory the session's own user
+    made unsearchable, all deny. Round 10 named some refusals that predate it (git checkout main
+    and git clean -n already denied from a product root before round 10) and added the git
+    global-option grammar. Round 11 states the git refusals by subcommand: in a bound product
+    every git subcommand in GIT_WORKTREE_SUBCOMMANDS denies, even where it writes only an
+    unprotected file or only .git, or writes nothing (git checkout main, git checkout -b feature,
+    git switch main, git restore notes.txt, git restore --staged notes.txt, git rm notes.txt, git
+    mv notes.txt n2.txt, git stash list, git worktree list, git reset --soft HEAD), and so does a
+    git rm, mv or clean dry run outside the strict dry-run grammar (git clean -e x -n, git rm
+    --dry -r x); outside every bound product such a subcommand run in a repository whose tree
+    holds the pack own files (R8) denies from any directory of that repository; and a git global
+    option outside the allowlisted grammar (git -p log, git --bare status, git --exec-path, git
+    --attr-source HEAD log, git --namespace x log) is not plain and denies from a product root.
+    Round 11 also withdraws the round-10 over-refusals that wrote nothing: ls docs ., du -sh docs
+    ., git log -- docs ., grep -rn mv docs, cat rm-old.txt docs, ls git -la, grep git -r src,
+    grep -rn python src, git clean -n, git rm -n notes.txt, git add :/docs and git show :docs/x
+    are allowed when they reference no protected path. R6 denies every write under a
     root whose roster
     carries any unreadable or malformed entry, R3 keeps denying a frozen path even after its
     retirement is recorded, and a protected token inside prose (a commit message) still trips a
@@ -458,49 +480,44 @@ _ASSIGNMENT_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*=")
 _OPTION_GLUE_RE = re.compile(r"\A[-+]+([A-Za-z0-9]*)")
 _PYTHON_RE = re.compile(r"\Apython(3(\.\d+)?)?\Z")
 _PYFLAGS_RE = re.compile(r"\A-[IBEsuPb]+\Z")
-# THE PROVABLY PLAIN CLASSIFIER (R5): the shared plain-command specification, decided on the raw
-# command string before any lexing. Rule 1: every character is printable ASCII (0x20 to 0x7E; no tab,
-# newline, carriage return, NUL or non-ASCII character, so no Unicode digit, homoglyph or invisible
-# character). Rule 2: PLAIN_FORBIDDEN never appears outside a single-quoted span: dollar sign,
-# backquote, backslash, semicolon, ampersand, pipe, the two angle brackets, the two parentheses, the
-# two braces, the two square brackets, star, question mark, exclamation mark, hash and tilde, each
-# built from its code point so none appears literally here. Rule 3: a single-quoted span is literal; a
-# double-quoted span may carry no PLAIN_FORBIDDEN character; an unterminated quote is not plain.
-# Rule 4: words are separated by spaces only; the command word is bare (PLAIN_COMMAND_RE, so no
-# quote and no leading assignment) and is not on PLAIN_DENIED_COMMANDS.
+# THE PROVABLY PLAIN CLASSIFIER (R5): the shared plain-command specification (revised 2026-10-06),
+# decided on the raw command string before any lexing. Rule 1: every character is printable ASCII
+# (0x20 to 0x7E; no tab, newline, carriage return, NUL or non-ASCII character, so no Unicode digit,
+# homoglyph or invisible character). Rule 2: PLAIN_FORBIDDEN never appears outside a single-quoted
+# span: dollar sign, backquote, backslash, semicolon, ampersand, pipe, the two angle brackets, the two
+# parentheses, the two braces, the two square brackets, star, question mark, exclamation mark, hash
+# and tilde, each built from its code point so none appears literally here. Rule 3: a single-quoted
+# span may carry no PLAIN_SQ_FORBIDDEN character (dollar sign, backquote, the two square brackets,
+# backslash: a builtin such as printf -v or test -v re-evaluates a quoted array subscript, so
+# 'a[$(cmd)]' runs cmd); a double-quoted span may carry no PLAIN_FORBIDDEN character; an
+# unterminated quote is not plain. Rule 4: words are separated by spaces only; the command word is
+# bare (PLAIN_COMMAND_RE, so no quote and no leading assignment) and its basename is on the
+# PLAIN_ALLOWED_COMMANDS allowlist, spelled as a bare name or as an absolute path whose directory is
+# exactly one of PLAIN_COMMAND_DIRS (any other path, ./ls or /tmp/x/ls, is not plain).
 PLAIN_FORBIDDEN = frozenset(chr(c) for c in (36, 96, 92, 59, 38, 124, 60, 62, 40, 41, 123, 125,
                                              91, 93, 42, 63, 33, 35, 126))
+PLAIN_SQ_FORBIDDEN = frozenset(chr(c) for c in (36, 96, 91, 93, 92))
 PLAIN_COMMAND_RE = re.compile(r"\A[A-Za-z0-9_./-]+\Z")
-# Rule 4's explicit deny list (acceptable because rules 1 and 2 already exclude every expansion
-# form): a command word naming a shell, an interpreter, a shell builtin or keyword that runs, loads
-# or defers code, a wrapper that runs another command, or a program that runs a command or code
-# named in its own arguments or options. Matched case-insensitively on the word's basename (a
-# case-insensitive filesystem launches PYTHON3 as python3), exactly or with a version or variant
-# suffix that starts with a digit, dot, underscore or dash (python3.12, perl5.36, node-18).
-PLAIN_DENIED_COMMANDS = frozenset((
-    "sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", "mksh", "pdksh", "oksh", "yash", "posh",
-    "csh", "tcsh", "fish", "nu", "elvish", "xonsh", "busybox", "toybox",
-    ".", "eval", "exec", "source", "command", "builtin", "enable", "trap", "alias", "fc", "bind",
-    "coproc", "time", "r",
-    "env", "xargs", "nohup", "timeout", "sudo", "doas", "su", "sg", "newgrp", "runuser", "pkexec",
-    "chroot", "nice", "ionice", "chrt", "taskset", "numactl", "prlimit", "setpriv", "capsh",
-    "cgexec", "chpst", "setsid", "stdbuf", "unbuffer", "script", "flock", "watch", "parallel",
-    "nsenter", "unshare", "firejail", "bwrap", "proot", "faketime", "strace", "ltrace", "gdb",
-    "lldb", "valgrind", "catchsegv", "hyperfine", "entr", "nodemon", "systemd-run", "caffeinate",
-    "daemonize", "start-stop-daemon", "dbus-launch", "dbus-run-session", "xvfb-run", "ssh-agent",
-    "at", "batch", "crontab", "screen", "tmux", "docker", "podman",
-    "find", "make", "gmake", "bmake", "ninja", "sed", "gsed", "awk", "gawk", "mawk", "nawk", "tar",
-    "gtar", "bsdtar", "rsync", "zip", "ssh", "scp", "sftp", "vi", "vim", "nvim", "view", "ex", "ed",
-    "emacs", "less", "more", "man",
-    "python", "pythonw", "pypy", "perl", "ruby", "irb", "node", "nodejs", "deno", "bun", "php",
-    "lua", "luajit", "tclsh", "wish", "expect", "rscript", "osascript", "pwsh", "powershell",
-    "java", "jshell", "groovy", "julia", "guile", "racket", "sbcl", "ocaml", "swift", "npm", "npx",
-    "yarn", "pnpm", "uv", "uvx", "pipx", "dotnet", "cargo", "go"))
-_DENIED_STEM_RE = re.compile(r"\A([a-z]+)[0-9._-]")
+# Rule 4's allowlist (the shared specification: a deny list of interpreter names was bypassed by a
+# versioned interpreter path). git and opf CAN run other programs, so each is judged by this hook's
+# own semantic check (_plain_runs_code, the git work-tree rule, A1); every other listed program
+# cannot run another program, so an argument word of it is data, never a command it runs. Every
+# other command word (a shell, an interpreter at any version, a wrapper, sed, find, tar, make, sort,
+# a dashed git builtin such as git-rm or /usr/lib/git-core/git-checkout) is NOT plain and takes the
+# coarse rule. Allowlist membership never makes a command safe by itself.
+PLAIN_ALLOWED_COMMANDS = frozenset((
+    "git", "opf", "ls", "cat", "echo", "printf", "pwd", "true", "false", "test", "head", "tail",
+    "wc", "grep", "egrep", "fgrep", "diff", "cmp", "stat", "du", "df", "date", "basename",
+    "dirname", "realpath", "readlink", "uniq", "cut", "tr", "mkdir", "rmdir", "touch", "cp", "mv",
+    "rm", "ln", "chmod"))
+PLAIN_COMMAND_DIRS = frozenset(("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin"))
+# The allowlisted programs that can run another program: only these have their argument words read
+# for a command or code they may run (_plain_runs_code).
+PLAIN_CODE_RUNNERS = frozenset(("git", "opf"))
 # An argument word's runner spelling: a name with at most a version suffix (python3, python3.12),
 # never a longer identifier (PYTHON_VERSION, sh-notes).
 _RUNNER_WORD_RE = re.compile(r"\A([a-z]+)[0-9.]*\Z")
-# The subset of the deny list that, at the head of a command string carried INSIDE a plain
+# The shell and interpreter names that, at the head of a command string carried INSIDE a plain
 # argument word (git -c alias.x=!cmd, --to-command=cmd), marks inline code: a plain command carrying
 # such a word takes the coarse rule, never the exact one (the plain semantic check).
 INLINE_RUNNERS = frozenset(("sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", "mksh", "pdksh",
@@ -516,23 +533,30 @@ INLINE_RUNNERS = frozenset(("sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", 
 # or runs a command string, and the options that name a command to run (rebase -x and clone -u are
 # matched on their own subcommands).
 GIT_VALUE_GLOBALS = frozenset(("-C", "--git-dir", "--work-tree"))
-# The SMALL allowlisted git option grammar (round 10, D-RESCOPES-A): the subcommand is recognized only
-# past these global options (a value global as a separate word, or --git-dir=/--work-tree= glued);
-# any other global option (git 2.53 accepts --attr-source <tree-ish> and --shallow-file <file> as
-# separate words, and a value word would otherwise be read as the subcommand) makes the command NOT
-# plain. A container subcommand (GIT_CONTAINER_OPTIONS) accepts only its listed short letters, valued
-# short letters and exact long options before a lone --; and any word after the subcommand that opens
-# with a colon (pathspec magic, :(top) or :/docs, which reaches the repository top) is not plain.
+# The SMALL allowlisted git global-option grammar (round 10, D-RESCOPES-A): the subcommand is
+# recognized only past these global options (a value global as a separate word, or --git-dir= and
+# --work-tree= glued); any other global option (git 2.53 accepts --attr-source <tree-ish> and
+# --shallow-file <file> as separate words, and a value word would otherwise be read as the
+# subcommand) makes the command NOT plain.
 GIT_FLAG_GLOBALS = frozenset(("--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs",
                               "--no-replace-objects", "--version"))
-GIT_CONTAINER_OPTIONS = dict(
-    rm=("rfnq", "", ("--force", "--dry-run", "--quiet", "--cached", "--ignore-unmatch"), ()),
-    mv=("fnkv", "", ("--force", "--dry-run", "--verbose"), ()),
-    clean=("dfnqxX", "", ("--force", "--dry-run", "--quiet"), ()),
-    checkout=("fqtm", "bB", ("--force", "--quiet", "--detach", "--track", "--no-track", "--merge",
-                             "--ours", "--theirs"), ()),
-    restore=("SWqm", "s", ("--staged", "--worktree", "--quiet", "--merge", "--ours", "--theirs"),
-             ("--source",)))
+# The git subcommands that rewrite the working tree or the index (round 11): in a BOUND product (a
+# product root at or above the session cwd, an absolute spelling or a resolved operand) a plain git
+# command naming one of these denies whatever its pathspec form (a glob such as '../*', pathspec
+# magic, no operand at all), since git expands the pathspec itself; outside every bound product it
+# denies when the cwd, a directory it names or the repository top above either holds the pack own
+# tree (R8). Every other git subcommand is judged by the exact path check alone.
+GIT_WORKTREE_SUBCOMMANDS = frozenset((
+    "checkout", "restore", "reset", "clean", "stash", "switch", "merge", "pull", "rebase",
+    "cherry-pick", "revert", "am", "apply", "rm", "mv", "read-tree", "checkout-index", "worktree"))
+# The dry-run grammar (round 11): git rm, mv or clean whose every option word is one of these short
+# letters or exact long options, at least one of them the dry run (-n, --dry-run), writes nothing
+# and is judged like any other git subcommand. Any other option (a valued one, an abbreviation, a
+# --no- negation) leaves the subcommand a work-tree rewrite.
+GIT_DRY_RUN_GRAMMAR = dict(
+    rm=("rfqn", ("--dry-run", "--force", "--quiet", "--cached", "--ignore-unmatch")),
+    mv=("fkvn", ("--dry-run", "--force", "--verbose")),
+    clean=("dfqxXn", ("--dry-run", "--force", "--quiet")))
 GIT_CODE_SUBCOMMANDS = frozenset(("config", "filter-branch", "bisect", "submodule", "difftool",
                                   "mergetool", "daemon", "instaweb", "send-email", "credential",
                                   "svn", "p4", "cvsimport", "archimport", "help", "web--browse"))
@@ -560,13 +584,21 @@ GIT_TRACE_PREFIX = "GIT_TRACE"
 # absence (_store_entry), and every other error is cannot-evaluate.
 ABSENT_ERRNOS = frozenset((errno.ENOENT, errno.ENOTDIR, errno.ENAMETOOLONG, errno.ELOOP))
 # The removing, moving and permission-changing command words (round 9): such a program applied to a
-# DIRECTORY operand acts on everything inside it, so a plain command led by one of these (or git rm,
-# mv, clean, checkout or restore) denies when a resolved operand is a directory that CONTAINS a
-# protected path: the store tree of a bound root, a frozen file, a declared view, the registration or
-# the pack own tree (_container_rule). Matched like the deny list, on the lowercased basename.
-CONTAINER_VERBS = frozenset(("rm", "rmdir", "unlink", "mv", "shred", "srm", "wipe", "trash",
-                             "trash-put", "chmod", "chown", "chgrp", "setfacl", "chattr"))
-GIT_CONTAINER_SUBCOMMANDS = frozenset(GIT_CONTAINER_OPTIONS)
+# DIRECTORY operand acts on everything inside it, so a plain command led by one of these denies when
+# a resolved operand is a directory that CONTAINS a protected path: the store tree of a bound root, a
+# frozen file, a declared view, the registration or the pack own tree (_container_rule). Round 11:
+# only the command word is read, matched exactly on its basename (an allowlisted command word is
+# never a wrapper, so no argument word is a program it runs); every other remover or mover
+# (unlink, shred, chown, util-linux or Perl rename) is off the rule-4 allowlist and NOT plain.
+CONTAINER_VERBS = frozenset(("rm", "rmdir", "mv", "chmod"))
+# The plain programs that write INTO a directory operand under another operand's basename (cp X docs,
+# cp -t docs X, mv X /abs/docs, ln X docs): only their directory-plus-basename joins are judged
+# (_joined_targets); a read-only program naming a directory beside a file (ls docs .) joins nothing.
+JOIN_WRITERS = frozenset(("cp", "mv", "ln"))
+# The payload-key spelling of a path-like file-tool field (round 11): a write-capable file tool whose
+# tool_input carries such a key anywhere other than its one evaluated target field is denied, since
+# this hook judges only that field.
+PATHLIKE_KEY_RE = re.compile(r"path|file|dir|target|dest|notebook|uri|url", re.IGNORECASE)
 
 SANCTIONED = ("OPF content changes only through the sanctioned writer: run the opf CLI (opf record, "
               "opf render, and the other opf verbs), or make the change outside the store's scope")
@@ -961,6 +993,27 @@ def _rosters(roots):
     return (frozen_abs, frozen_rel), (views_abs, views_rel), None
 
 
+def _pathlike_keys(tool_input, field):
+    """Every key of a file-tool payload, at any depth (inside the MultiEdit edits array included),
+    that spells a path-like field (PATHLIKE_KEY_RE) other than the top-level evaluated target
+    `field`; past MAX_PAYLOAD_STRINGS entries the overflow itself is reported (fail closed)."""
+    out, stack, seen = [], [(tool_input, 0)], 0
+    while stack:
+        value, depth = stack.pop()
+        seen += 1
+        if seen > MAX_PAYLOAD_STRINGS:
+            return out + ["(more than %d payload entries)" % (MAX_PAYLOAD_STRINGS,)]
+        if isinstance(value, dict):
+            for key, sub in value.items():
+                if isinstance(key, str) and not (depth == 0 and key == field) \
+                        and PATHLIKE_KEY_RE.search(key):
+                    out.append(key)
+                stack.append((sub, depth + 1))
+        elif isinstance(value, list):
+            stack.extend((sub, depth + 1) for sub in value)
+    return out
+
+
 def _file_tool_rule(tool_name, tool_input, cwd):
     """R1-R4, R6 and R8 for the write-capable file tools; returns a deny reason or None (allow).
     Rosters bind from the product roots above each candidate target AND above the session cwd
@@ -974,6 +1027,11 @@ def _file_tool_rule(tool_name, tool_input, cwd):
     if not isinstance(target, str) or not target or any(ord(c) < 0x20 for c in target):
         return ("the %s payload field %s is missing, empty, non-string or control-character-bearing; "
                 "failing closed (R6)" % (tool_name, field))
+    stray = _pathlike_keys(tool_input, field)
+    if stray:
+        return ("the %s payload carries the path-like field %r besides its evaluated target field "
+                "%s, and this hook judges only that field, so it is denied fail-closed (R6)"
+                % (tool_name, stray[0], field))
     cands = _candidates(target, cwd)
     if cands is None:
         return ("the %s target %r is relative and the payload carries no absolute session cwd to "
@@ -1026,27 +1084,23 @@ def _file_tool_rule(tool_name, tool_input, cwd):
     return None
 
 
-def _command_names(word):
-    """The names a command word is matched under (rule 4): its basename, lowercased, and the stem
-    before a version or variant suffix (python3.12 -> python)."""
-    base = os.path.basename(word).lower()
-    stem = _DENIED_STEM_RE.match(base)
-    return frozenset((base, stem.group(1))) if stem else frozenset((base,))
-
-
-def _denied_command(word):
-    """Rule 4's deny list over one command word (PLAIN_DENIED_COMMANDS): True when its basename names
-    a shell, an interpreter, a code-running builtin or a wrapper, exactly or with a version or
-    variant suffix, compared case-insensitively."""
-    return bool(_command_names(word) & PLAIN_DENIED_COMMANDS)
+def _plain_command_word(word):
+    """Rule 4's allowlist over one command word: True when its basename is on PLAIN_ALLOWED_COMMANDS
+    (compared exactly), spelled bare or as an absolute path whose directory is exactly one of
+    PLAIN_COMMAND_DIRS."""
+    if os.sep not in word:
+        return word in PLAIN_ALLOWED_COMMANDS
+    head, base = os.path.split(word)
+    return head in PLAIN_COMMAND_DIRS and base in PLAIN_ALLOWED_COMMANDS
 
 
 def _plain_words(command):
     """Rules 1 to 3 of the provably plain specification and rule 4's word split, decided on the raw
     string before any lexing: the dequoted words when every character is printable ASCII, no
     PLAIN_FORBIDDEN character appears outside a single-quoted span (a double-quoted span carries none
-    either), every quote is terminated, words are separated by spaces only and the command word is a
-    bare unquoted PLAIN_COMMAND_RE name or path; else None. The deny list is NOT applied here: the
+    either, a single-quoted span no PLAIN_SQ_FORBIDDEN character), every quote is terminated, words
+    are separated by spaces only and the command word is a bare unquoted PLAIN_COMMAND_RE name or
+    path; else None. The allowlist is NOT applied here: the
     sanctioned-writer allowance (A1) reads its python3 launcher form through these same words."""
     if any(not 0x20 <= ord(ch) <= 0x7E for ch in command):
         return None
@@ -1063,6 +1117,8 @@ def _plain_words(command):
                 return None
             span = command[i + 1:end]
             if ch == chr(34) and any(c in PLAIN_FORBIDDEN for c in span):
+                return None
+            if ch == chr(39) and any(c in PLAIN_SQ_FORBIDDEN for c in span):
                 return None
             cur.append(span)
             has, i = True, end + 1
@@ -1087,7 +1143,7 @@ def _provably_plain(command):
     of a provably plain command, or None when the command is not plain. Every command this returns
     None for is judged by _exotic_bash_rule, the coarse product-root check."""
     words = _plain_words(command)
-    if not words or _denied_command(words[0]):
+    if not words or not _plain_command_word(words[0]):
         return None
     return words
 
@@ -1101,12 +1157,14 @@ def _names_runner(word):
 def _plain_runs_code(words):
     """The plain semantic check (R5): a phrase naming why a provably plain command still runs a
     command or code it names on its own command line, or None. Such a command takes the coarse rule.
-    An argument word that IS an INLINE_RUNNERS name (a wrapper outside the deny list, such as
-    eatmydata python3 -c ..., runs it), and a word carrying a command string headed by such a name
-    or by a leading exclamation mark (git alias.x=!cmd, --to-command=python3 -c ...), are inline
-    code; so are git's configuration overrides, its code-running subcommands and its
-    command-naming options, and (round 10) a git word anywhere on the line (git itself or git run
-    by a wrapper) whose options fall outside the allowlisted git option grammar (_git_grammar)."""
+    Only a PLAIN_CODE_RUNNERS command word (git, opf) can run another program (round 11: every other
+    allowlisted program cannot, so its argument words are data). For those, an argument word that IS
+    an INLINE_RUNNERS name, and a word carrying a command string headed by such a name or by a
+    leading exclamation mark (git alias.x=!cmd), are inline code; so are git's configuration
+    overrides, its code-running subcommands, its command-naming options and a global option outside
+    the allowlisted git grammar (_git_grammar)."""
+    if os.path.basename(words[0]) not in PLAIN_CODE_RUNNERS:
+        return None
     for word in words[1:]:
         if _names_runner(word):
             return "an argument word names a shell or interpreter another program may run"
@@ -1117,17 +1175,14 @@ def _plain_runs_code(words):
             head = piece.split(" ")
             if len(head) > 1 and _names_runner(head[0]):
                 return "an argument word carries a shell or interpreter command string"
-    for j, word in enumerate(words):
-        if "git" in _command_names(word):
-            reason = _git_runs_code(words[j:])
-            if reason is not None:
-                return reason
+    if os.path.basename(words[0]) == "git":
+        return _git_runs_code(words)
     return None
 
 
 def _git_runs_code(words):
-    """The git part of the plain semantic check over a git invocation `words` (words[0] names git,
-    as the command word or behind a wrapper): a phrase, or None."""
+    """The git part of the plain semantic check over a git invocation `words` (words[0] is the git
+    command word): a phrase, or None."""
     for name in GIT_CODE_ENV:
         value = os.environ.get(name)
         if value is not None and value.strip(" ") not in GIT_ENV_NOOPS:
@@ -1455,12 +1510,12 @@ def _joined_targets(cands, spellings):
 
 
 def _git_grammar(words):
-    """The allowlisted git option grammar (round 10) over a git invocation `words` (words[0] names
-    git): (index of the subcommand word, None), (None, None) when no subcommand follows the global
-    options, or (None, reason) when a word falls outside the grammar (an unlisted global option, an
-    unlisted option of a container subcommand, a value option with no value, or a pathspec magic
-    word), which makes the command NOT plain. The grammar is deliberately small: it never tries to
-    model every git option, so an unrecognized spelling is refused, never guessed."""
+    """The allowlisted git global-option grammar (round 10) over a git invocation `words` (words[0]
+    is git): (index of the subcommand word, None), (None, None) when no subcommand follows the
+    global options, or (None, reason) when a global option falls outside the grammar or a value
+    global carries no value, which makes the command NOT plain. The grammar is deliberately small:
+    it never tries to model every git option, so an unrecognized spelling is refused, never
+    guessed."""
     i = 1
     while i < len(words) and words[i].startswith("-"):
         opt = words[i]
@@ -1477,65 +1532,62 @@ def _git_grammar(words):
                           % (opt,))
     if i >= len(words):
         return None, None
-    sub = words[i]
-    for word in words[i + 1:]:
-        if word.startswith(":"):
-            return None, ("the git word %r is a pathspec magic form (it can reach the repository "
-                          "top)" % (word,))
-    grammar = GIT_CONTAINER_OPTIONS.get(sub)
+    return i, None
+
+
+def _git_dry_run(sub, rest):
+    """True when git `sub` (rm, mv or clean) with the words `rest` after it is a dry run by the
+    GIT_DRY_RUN_GRAMMAR: every option word before a lone -- is a listed short-letter run or an
+    exact listed long option, and one of them is -n or --dry-run. Any other option word (a valued
+    or unlisted letter, an abbreviation, a --no- negation) is not a dry run (fail closed)."""
+    grammar = GIT_DRY_RUN_GRAMMAR.get(sub)
     if grammar is None:
-        return i, None
-    flags, valued, longs, valued_longs = grammar
-    j = i + 1
-    while j < len(words):
-        word = words[j]
-        j += 1
+        return False
+    flags, longs = grammar
+    dry = False
+    for word in rest:
         if word == "--":
             break
         if not word.startswith("-") or word == "-":
             continue
         if word.startswith("--"):
-            name = word.split("=", 1)[0]
-            if word in longs:
-                continue
-            if name in valued_longs:
-                if name == word:
-                    j += 1
-                continue
-            return None, ("the git %s option %r is outside the recognized git option grammar"
-                          % (sub, word))
-        for k, letter in enumerate(word[1:]):
-            if letter in valued:
-                if k + 2 == len(word):
-                    j += 1
-                break
+            if word not in longs:
+                return False
+            dry = dry or word == "--dry-run"
+            continue
+        for letter in word[1:]:
             if letter not in flags:
-                return None, ("the git %s option %r is outside the recognized git option grammar"
-                              % (sub, word))
-    if j > len(words):
-        return None, "a git %s option carries no value" % (sub,)
-    return i, None
+                return False
+        dry = dry or "n" in word[1:]
+    return dry
 
 
-def _container_verb(words):
-    """True when a plain command acts on a directory operand's whole contents (round 9): ANY word
-    of it (round 10: the command word or one a wrapper runs, setarch x86_64 rm -r docs) naming a
-    CONTAINER_VERBS program, or a git container form (_git_container)."""
-    for word in words:
-        if _command_names(word) & CONTAINER_VERBS:
-            return True
-    return _git_container(words)
+def _git_worktree_sub(words):
+    """The work-tree or index rewriting subcommand of a plain git command (round 11), or None:
+    words[0] is git, the subcommand found by the global grammar is a GIT_WORKTREE_SUBCOMMANDS
+    name, and the command is not a dry run (_git_dry_run)."""
+    if os.path.basename(words[0]) != "git":
+        return None
+    i, reason = _git_grammar(words)
+    if reason is not None or i is None:
+        return None
+    sub = words[i]
+    if sub not in GIT_WORKTREE_SUBCOMMANDS or _git_dry_run(sub, words[i + 1:]):
+        return None
+    return sub
 
 
-def _git_container(words):
-    """True when any word of a plain command names git and, by the allowlisted grammar, its
-    subcommand is a GIT_CONTAINER_SUBCOMMANDS form (git itself or git behind a wrapper)."""
-    for j, word in enumerate(words):
-        if "git" in _command_names(word):
-            i, reason = _git_grammar(words[j:])
-            if reason is None and i is not None and words[j + i] in GIT_CONTAINER_SUBCOMMANDS:
-                return True
-    return False
+def _git_top(path):
+    """The nearest directory at or above the absolute directory `path` holding a .git entry (the
+    repository top git acts on from there), or None."""
+    cur = path
+    while True:
+        if os.path.lexists(os.path.join(cur, ".git")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
 
 
 def _container_rule(cand, protected):
@@ -1734,7 +1786,7 @@ def _exotic_bash_rule(command, cwd, tokens):
 def _plain_bash_rule(command, words, cwd):
     """R5, R6 and R8 for a PROVABLY PLAIN Bash command: the exact path check. The judged spellings
     are every dequoted word, every option-glued or delimiter-embedded spelling inside a word
-    (_derived_spellings: sort -oTODO.md, of=alias, -o/abs/TODO.md) and every inherited git path value
+    (_derived_spellings: ls -ITODO.md, of=alias, -I/abs/TODO.md) and every inherited git path value
     (_ambient_git_spellings). The raw string and every spelling are scanned for the protected tokens
     (boundary-matched); every spelling is resolved against the session cwd and against every
     directory another spelling names (_resolved_targets: git -C dir, --output-dir dir, an inherited
@@ -1752,15 +1804,14 @@ def _plain_bash_rule(command, words, cwd):
     cands, reason = _resolved_targets(spellings, cwd, resolve_all)
     if reason is not None:
         return reason
-    joined, reason = _joined_targets(cands, words[1:] + derived)
-    if reason is not None:
-        return reason
-    container = _container_verb(words)
-    if _git_container(words):
-        # git clean (and the other git container forms) act below the cwd with no path operand.
-        for cand in _candidates(cwd, None, "literal") or ():
-            if cand not in cands:
-                cands.append(cand)
+    program = os.path.basename(words[0])
+    joined = []
+    if program in JOIN_WRITERS:
+        joined, reason = _joined_targets(cands, words[1:] + derived)
+        if reason is not None:
+            return reason
+    container = program in CONTAINER_VERBS
+    git_sub = _git_worktree_sub(words)
     roots, reason = _bound_roots(command, cwd, spellings)
     if reason is not None:
         return reason + "; failing closed (R6)"
@@ -1781,8 +1832,25 @@ def _plain_bash_rule(command, words, cwd):
                 "sanctioned writer (opf record or opf render): a lexical hook cannot prove any "
                 "other referencing command read-only, so it is denied fail-closed (R5). %s; read "
                 "protected files through the platform Read tool." % (kind, SANCTIONED))
+    if git_sub is not None and roots:
+        return ("git %s rewrites the working tree or the index, and this command acts in the bound "
+                "OPF product root %r, so it is denied whatever its pathspec spelling (git expands "
+                "a glob or pathspec magic itself) (R5). %s." % (git_sub, roots[0], SANCTIONED))
     protected = set(frozen[0]) | set(views[0]) | set(reg_idents) | set(_guarded_prefixes())
     protected.update(os.path.join(root, WORKING) for root in roots)
+    if git_sub is not None:
+        # Unbound: the pack own tree (R8) under the cwd, a directory the command names, or the
+        # repository top above either is still a container git rewrites.
+        bases = []
+        for base in (_candidates(cwd, None, "literal") or []) + [c for c in cands
+                                                                   if os.path.isdir(c)]:
+            for spot in (base, _git_top(base)):
+                if spot is not None and spot not in bases:
+                    bases.append(spot)
+        for base in bases:
+            reason = _container_rule(base, protected)
+            if reason is not None:
+                return reason
     for cand in (cands if container else []) + joined:
         reason = _container_rule(cand, protected)
         if reason is not None:
