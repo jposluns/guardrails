@@ -1424,7 +1424,15 @@ def _rdp_scope_cases(base, plain):
                 "git grep -e -e -e -- -O", "git commit --mess -m -m -- -S", "git blame -n -L -- --ext-diff",
                 "git stash show -- --ext-diff", "git clone -- evil::x d", "git commit --mess --mess --mess -- -S",
                 "git blame -L -- --ext-diff", "git shortlog --committer --grep -- --ext-diff",
-                "git commit --allow-empty --mess --mess --mess -- -S", "git blame -CS --ext-diff f")
+                "git commit --allow-empty --mess --mess --mess -- -S", "git blame -CS --ext-diff f",
+                "git blame -MS --ext-diff f", "git shortlog -wG --ext-diff",
+                "git show --word-diff-regex --grep --ext-diff", "git log -p --word-diff-regex -S --ext-diff",
+                "git show HEAD --default --grep --ext-diff", "git log -p --output --grep --ext-diff",
+                "git show -s --word-diff-regex -S --show-signature", "git log --since-as-filter --author --ext-diff",
+                "git diff --word-diff-regex --grep --ext-diff", "git rev-list --default --grep --ext-diff HEAD",
+                "git shortlog --since-as-filter --grep --ext-diff", "git blame --word-diff-regex -S --ext-diff f",
+                "git log --word-diff-regex -- --ext-diff", "git show --word-diff-reg --grep --ext-diff",
+                "git log --oneline --default --grep --ext-diff")
     pr_got = []
     for c in programs:
         result = go.run(c)
@@ -1458,7 +1466,8 @@ def _rdp_scope_cases(base, plain):
     check("rdp/plain-git-option-operands-parsed", [_rdp_kind(go.run(c)) for c in operands],
           ["allow"] * len(operands))
     patches = ("git log -Sx -p -- .aiqt", "git log -pSconfig -- .aiqt", "git log -cS x -- .aiqt",
-               "git show -U3 -- .aiqt", "git log --grep=x --patch -- .aiqt")
+               "git show -U3 -- .aiqt", "git log --grep=x --patch -- .aiqt", "git log --default --grep -p -- .aiqt",
+               "git show --since-as-filter -S -p -- .aiqt", "git log --default -- -p -- .aiqt")
     check("rdp/plain-git-patch-read-judged", [_rdp_kind(go.run(c)) for c in patches], ["deny"] * len(patches))
     # A git config read keeps its scope options (--local, --global, --system, --worktree, --file PATH),
     # --show-origin and --type before any read form; a trailing word after the key is still a value.

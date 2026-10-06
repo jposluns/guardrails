@@ -11767,6 +11767,25 @@ _RDP_GIT_DASHDASH_TAKES = {
 _RDP_GIT_DASHDASH_FREE = {
     "log": ("--decorate",), "show": ("--decorate",), "shortlog": ("--email", "--summary"),
     "blame": ("--abbrev", "--incremental", "--line-porcelain", "--minimal", "--root")}
+# The long options, written whole, that take no value (or one only glued after =) for every subcommand of
+# _RDP_GIT_DASHDASH_TAKES that accepts them: git 2.53 refused, as an unknown option, a word given after
+# each (git log --stat --bogus), or, for diff, rev-list, shortlog and blame, which do not name the word they
+# refuse, ran with the option alone and refused the word after it. Every other long option word written
+# without = may take the next word as its value (_rdp_git_may_take): an option missing from the value tables
+# (git 2.53 log, show, diff, rev-list, shortlog and blame take the next word for --word-diff-regex,
+# --default, --output and --since-as-filter, among others), an abbreviation or a misspelling.
+_RDP_GIT_FREE_LONG = frozenset((
+    "--abbrev-commit", "--all-match", "--allow-empty", "--amend", "--binary", "--boundary", "--branch", "--cached",
+    "--check", "--cherry-pick", "--color-words", "--count", "--date-order", "--decorate", "--deleted", "--detach",
+    "--dry-run", "--email", "--exit-code", "--extended-regexp", "--files-with-matches", "--first-parent",
+    "--fixed-strings", "--force", "--full-history", "--full-index", "--hard", "--ignore-all-space", "--ignore-case",
+    "--ignore-space-change", "--ignored", "--intent-to-add", "--keep", "--left-right", "--line-number",
+    "--merge-base", "--merges", "--minimal", "--mixed", "--modified", "--name-only", "--name-status",
+    "--no-decorate", "--no-edit", "--no-ext-diff", "--no-index", "--no-merges", "--no-patch", "--no-renames",
+    "--no-textconv", "--no-verify", "--no-walk", "--numbered", "--numstat", "--oneline", "--others", "--ours",
+    "--patch", "--porcelain", "--quiet", "--raw", "--recursive", "--reverse", "--root", "--short", "--shortstat",
+    "--show-email", "--show-stash", "--signoff", "--soft", "--staged", "--stat", "--summary", "--text", "--theirs",
+    "--topo-order", "--update", "--verbose", "--word-diff", "--worktree"))
 # The subcommands that reach a remote, where a URL written TRANSPORT::ADDRESS runs the remote helper
 # git-remote-TRANSPORT found on PATH.
 _RDP_GIT_TRANSPORTS = frozenset(("fetch", "push", "clone", "remote"))
@@ -11854,6 +11873,16 @@ def _rdp_git_takes_next(sub, word):
     return False
 
 
+def _rdp_git_may_take(sub, word):
+    """Whether the option word may take the next word as its value when given to the git subcommand sub:
+    it surely does (_rdp_git_takes_next), it may take a -- (_rdp_git_takes_dashdash), or, for a subcommand
+    of _RDP_GIT_DASHDASH_TAKES, it is a long option written without = other than one of
+    _RDP_GIT_FREE_LONG (git show --word-diff-regex --grep gives --grep as the regex)."""
+    return _rdp_git_takes_next(sub, word) or _rdp_git_takes_dashdash(sub, word) or (
+        sub in _RDP_GIT_DASHDASH_TAKES and word.startswith("--") and "=" not in word and
+        word not in _RDP_GIT_FREE_LONG)
+
+
 def _rdp_git_program_under(sub, before, after):
     """The first word that runs a program when the git subcommand sub is called with the words after,
     after the global options before; None when none does (_rdp_git_runs_program)."""
@@ -11884,11 +11913,13 @@ def _rdp_git_program_under(sub, before, after):
         # an abbreviation of a value-taking option included (git commit --mess --mess -- -S gives the second
         # --mess as the message, and -- ends the options); possibly one after any word that may take one (a
         # word naming both a value-taking option and one taking none, an option of a word that may itself be
-        # a value). Only a word surely a value is skipped unjudged (git commit --mess --gpg-sign gives
-        # --gpg-sign as the message); a word possibly one is still judged, which only refuses.
+        # a value, a long option missing from the value tables: git show --word-diff-regex --grep --ext-diff
+        # gives --grep as the regex and runs diff.external, _rdp_git_may_take). Only a word surely a value is
+        # skipped unjudged (git commit --mess --gpg-sign gives --gpg-sign as the message); a word possibly
+        # one is still judged, which only refuses.
         takes = _rdp_git_takes_next(sub, word)
         held, data = (False, False) if data else (
-            takes or _rdp_git_takes_dashdash(sub, word), (takes or _rdp_git_waits(sub, word)) and not held)
+            _rdp_git_may_take(sub, word), (takes or _rdp_git_waits(sub, word)) and not held)
         if skip:
             # An option's operand is data, a format-looking one included (git log --grep --format=%G
             # searches for --format=%G); a URL operand was judged above, since git still reaches it.
@@ -11990,18 +12021,22 @@ def _rdp_git_reads(words):
             return False
     if sub not in ("log", "show", "diff"):
         return True
-    skip = False
+    # A word is skipped as a value only after an option surely taking it that no word before may take
+    # (git log --default --grep -p asks for patch output, its --grep the value of --default), and a -- ends
+    # the options only when no word before may take it (_rdp_git_may_take).
+    skip = held = False
     for word in words[at + 1:]:
         if skip:
-            skip = False
+            skip = held = False
             continue
-        if word == "--":
+        if word == "--" and not held:
             break
+        prev, held = held, _rdp_git_may_take(sub, word)
         name = word.split("=", 1)[0]
         if name.startswith("--"):
             if _rdp_long_option(name, _RDP_GIT_PATCH_OPTIONS):
                 return False
-            skip = name in _RDP_GIT_DIFF_NEXT_LONG and name == word
+            skip = name in _RDP_GIT_DIFF_NEXT_LONG and name == word and not prev
             continue
         if not word.startswith("-"):
             continue
@@ -12009,7 +12044,7 @@ def _rdp_git_reads(words):
             if ch in _RDP_GIT_PATCH_LETTERS:
                 return False
             if ch in _RDP_GIT_DIFF_VALUED:
-                skip = ch in _RDP_GIT_DIFF_NEXT and k == len(word) - 1
+                skip = ch in _RDP_GIT_DIFF_NEXT and k == len(word) - 1 and not prev
                 break
     return True
 
