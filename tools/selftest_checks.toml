@@ -497,6 +497,7 @@ expected-check-ids = [
   "ci/oneshot-conflict-retried-once",
   "ci/scan-stops-at-lower-bound",
   "ci/scan-margin-covers-clock-skew",
+  "ci/scan-margin-boundary-pinned",
   "ci/scan-future-commit-date-clamped",
   "ci/scan-unbounded-fail-closed",
   "ci/scan-shrinking-listing-fail-closed",

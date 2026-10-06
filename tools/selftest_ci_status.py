@@ -10,8 +10,8 @@ and complete captured output, never a success token.
   selftest_ci_status.py                              exit 0 on self-test pass, 1 on assertion failure
   selftest_ci_status.py --execution-report ABS_PATH  also write the executed check IDs as JSON
 
-Exit 2 is a harness/setup error, including bad arguments, a failed report write, or an unreadable,
-malformed, or suite-missing expectation manifest.
+Exit 2 is a harness/setup error, including bad arguments, a failed report write, an unreadable,
+malformed, or suite-missing expectation manifest, or a ci-status.sh whose jq program cannot be extracted.
 """
 import sys
 
@@ -61,6 +61,7 @@ MARGIN = 86400
 LOWER_BOUND = COMMIT_TIME - MARGIN
 MAX_PAGES = 50
 FAILURES = []
+HARNESS_ERRORS = []
 EXECUTED = []
 _EXECUTED_SET = set()
 
@@ -167,6 +168,12 @@ def check(name, got, want):
     EXECUTED.append(name)
     if got != want:
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
+
+
+def harness_error(check_id, detail):
+    message = "{}: not evaluated: {}".format(check_id, detail)
+    HARNESS_ERRORS.append(message)
+    print("SELF-TEST HARNESS ERROR: " + message, file=sys.stderr)
 
 
 def iso(epoch):
@@ -351,6 +358,7 @@ def main(report_path=None):
         other_commits = [workflow_run(5000 + index, "completed", "success",
                                       "Other commit run {}".format(index), "e" * 40)
                          for index in range(100)]
+        program = None
         try:
             program = jq_program()
             conflict = run_jq(program, [page([success_a, conflict_a], 1)], head_sha)
@@ -388,8 +396,12 @@ def main(report_path=None):
             )
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             direct_result = "jq-filter setup failed: {}".format(exc)
-        check("ci/jq-filter-direct-cases", direct_result,
-              (True, True, True, True, True, True, True, True))
+        if program is None:
+            harness_error("ci/jq-filter-direct-cases",
+                          "cannot extract the jq program from {}: {}".format(SCRIPT, direct_result))
+        else:
+            check("ci/jq-filter-direct-cases", direct_result,
+                  (True, True, True, True, True, True, True, True))
 
         rc, _output, _calls = fixture.invoke([[page([wrong_head])]])
         check("ci/mismatched-head-sha-exit2", rc, 2)
@@ -555,6 +567,28 @@ def main(report_path=None):
         check("ci/scan-margin-covers-clock-skew",
               (rc, fixture.scan_pages, "failure" in output), (1, [1, 2], True))
 
+        # Round 3: pin the margin and the strict comparison at the bound. Only the scan sees this
+        # commit's green run, on page 2, so the verdict is green only if page 1 does not end the scan.
+        # (a) Skew of about 23 hours: page 1 holds runs created between 23 and 24 hours before the
+        # committer date, so a margin of 3600 or 82800 seconds stops after page 1 and reports no run.
+        # (b) Page 1's newest run is created exactly AT the lower bound and the rest before it, so
+        # replacing `<` with `<=` in the stop rule stops after page 1 and reports no run.
+        near_day = [workflow_run(7600 + index, "completed", "success", "Near day run {}".format(index),
+                                 "e" * 40, created=COMMIT_TIME - 82800 - 60 - index)
+                    for index in range(100)]
+        at_bound = [workflow_run(7800 + index, "completed", "success", "At bound run {}".format(index),
+                                 "e" * 40, created=LOWER_BOUND - index)
+                    for index in range(100)]
+        boundary = []
+        for first_page, created in ((near_day, COMMIT_TIME - 82800 - 300),
+                                    (at_bound, LOWER_BOUND - 200)):
+            rc, output, _calls = fixture.invoke([{
+                "filtered": [page([])],
+                "scan": [page(first_page, 101), page([dict(success_a, created_at=iso(created))], 101)]}])
+            boundary.append((rc, fixture.scan_pages, "Web generator health" in output,
+                             "no workflow run registered" in output))
+        check("ci/scan-margin-boundary-pinned", boundary, [(0, [1, 2], True, False)] * 2)
+
         # A committer date in the future is clamped to now before the margin is applied.
         clock = COMMIT_TIME - 2 * MARGIN
         recent = [workflow_run(7400 + index, "completed", "success", "Recent run {}".format(index),
@@ -629,6 +663,8 @@ def main(report_path=None):
         # as "no run", a duplicate on full pages that the age bound ended must not pass, and neither may
         # a duplicate within the filtered source. Each is re-read once in one-shot mode, then exit 2.
         old_tail = other_commits[1:] + [dict(old_commits[0])]
+        busy = [workflow_run(8000 + index, "completed", "success", "Busy run {}".format(index),
+                             "e" * 40) for index in range(150)]
         duplicates = []
         for polls, source in (
                 ([{"filtered": [page([success_a])], "scan": [page([success_a, success_a])]}],
@@ -637,12 +673,16 @@ def main(report_path=None):
                 ([{"filtered": [page([success_a])],
                    "scan": [page(old_tail, 300), page(old_commits, 300)]}], "unfiltered"),
                 ([{"filtered": [page([success_a, success_a], 1)], "scan": [page([success_a])]}],
-                 "head_sha-filtered")):
+                 "head_sha-filtered"),
+                # Round 3: a run created between the two page reads, on the first read and on the
+                # re-read alike, repeats runs[99] on page 2. Disclosed availability cost: exit 2.
+                ([{"filtered": [page([success_a])],
+                   "scan": [page(busy[:100], 150), page(busy[99:], 151)]}], "unfiltered")):
             rc, output, calls = fixture.invoke(polls)
             duplicates.append(
                 (rc, calls, "duplicate run id within the {} listing".format(source) in output,
                  "no workflow run registered" in output))
-        check("ci/duplicate-run-id-fail-closed", duplicates, [(2, 2, True, False)] * 4)
+        check("ci/duplicate-run-id-fail-closed", duplicates, [(2, 2, True, False)] * 5)
 
         # A scan that reached the end of the listing reconciles unique run IDs against total_count even
         # when every page's own count is in range.
@@ -671,21 +711,25 @@ def main(report_path=None):
         # A short page before the last is incomplete even when every total_count covers its position
         # and the page after it ends the scan at the age bound. The script's loop stops at any short
         # page, so only the verdict program can be handed this shape: it is checked there directly.
-        try:
-            short_middle = run_jq(program, [page([success_a])], head_sha,
-                                  [page(other_commits[:50], 300), page(old_commits, 300)])
-            short_middle_result = (
-                short_middle.returncode != 0
-                and "incomplete unfiltered workflow-runs listing" in short_middle.stderr)
-        except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            short_middle_result = "jq-filter setup failed: {}".format(exc)
-        check("ci/scan-short-middle-page-fail-closed", short_middle_result, True)
+        if program is None:
+            harness_error("ci/scan-short-middle-page-fail-closed", "no jq program was extracted")
+        else:
+            try:
+                short_middle = run_jq(program, [page([success_a])], head_sha,
+                                      [page(other_commits[:50], 300), page(old_commits, 300)])
+                short_middle_result = (
+                    short_middle.returncode != 0
+                    and "incomplete unfiltered workflow-runs listing" in short_middle.stderr)
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                short_middle_result = "jq-filter setup failed: {}".format(exc)
+            check("ci/scan-short-middle-page-fail-closed", short_middle_result, True)
 
         # Round 2 MINOR: created_at must be calendar-valid (formats back to the same string). February
         # 31st matches the pattern and parses, so only the round trip rejects it; an hour of 24 is
-        # refused by the parser itself.
+        # refused by the parser itself. A null created_at is caught only by the type test: the round
+        # trip's catch yields null, which equals it, and a short page never reaches the stop rule.
         bad_dates = []
-        for created_at in ("2026-02-31T00:00:00Z", "2026-01-01T24:00:00Z"):
+        for created_at in ("2026-02-31T00:00:00Z", "2026-01-01T24:00:00Z", None):
             for filtered in ([page([success_a])], [page([])]):
                 rc, output, _calls = fixture.invoke([{
                     "filtered": filtered,
@@ -693,7 +737,7 @@ def main(report_path=None):
                 bad_dates.append(
                     (rc, "malformed workflow run record" in output,
                      "no workflow run registered" in output))
-        check("ci/scan-created-at-calendar-valid", bad_dates, [(2, True, False)] * 4)
+        check("ci/scan-created-at-calendar-valid", bad_dates, [(2, True, False)] * 6)
 
         # A failure seen ONLY by the head_sha query is still reported.
         rc, output, _calls = fixture.invoke([{
@@ -701,38 +745,45 @@ def main(report_path=None):
         check("ci/filtered-only-failure-reported",
               (rc, "Repository quality checks" in output and "failure" in output), (1, True))
 
-        try:
-            steps = (
-                run_jq(program, page([success_a]), head_sha, mode="step"),
-                run_jq(program, page(other_commits, 300), head_sha, mode="step"),
-                run_jq(program, page(old_commits, 300), head_sha, mode="step"),
-                run_jq(program, page([dict(other, head_sha="")]), head_sha, mode="step"),
-                run_jq(program, [page([success_a])], head_sha,
-                       [page(other_commits, 100)] * (MAX_PAGES + 1)),
-                run_jq(program, [page([success_a])], head_sha,
-                       [page([success_a, dict(other, head_sha="")])]),
-                run_jq(program, [page([success_a])], head_sha,
-                       [page(other_commits[:50], 150), page(old_commits, 150)]),
-                run_jq(program, page([dict(other, created_at="2026-02-31T00:00:00Z")]), head_sha,
-                       mode="step"),
-            )
-            step_result = (
-                (steps[0].returncode, steps[0].stdout.split("\n")[0]),
-                (steps[1].returncode, steps[1].stdout.split("\n")[0]),
-                (steps[2].returncode, steps[2].stdout.split("\n")[0]),
-                steps[3].returncode != 0 and "malformed workflow run record" in steps[3].stderr,
-                steps[4].returncode != 0 and "not bounded within the page limit" in steps[4].stderr,
-                steps[5].returncode != 0 and "malformed workflow run record" in steps[5].stderr,
-                steps[6].returncode != 0
-                and "incomplete unfiltered workflow-runs listing" in steps[6].stderr,
-                steps[7].returncode != 0 and "malformed workflow run record" in steps[7].stderr,
-            )
-        except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            step_result = "jq-step setup failed: {}".format(exc)
-        check("ci/jq-step-direct-cases", step_result,
-              ((0, "stop"), (0, "more"), (0, "stop"), True, True, True, True, True))
+        if program is None:
+            harness_error("ci/jq-step-direct-cases", "no jq program was extracted")
+        else:
+            try:
+                steps = (
+                    run_jq(program, page([success_a]), head_sha, mode="step"),
+                    run_jq(program, page(other_commits, 300), head_sha, mode="step"),
+                    run_jq(program, page(old_commits, 300), head_sha, mode="step"),
+                    run_jq(program, page([dict(other, head_sha="")]), head_sha, mode="step"),
+                    run_jq(program, [page([success_a])], head_sha,
+                           [page(other_commits, 100)] * (MAX_PAGES + 1)),
+                    run_jq(program, [page([success_a])], head_sha,
+                           [page([success_a, dict(other, head_sha="")])]),
+                    run_jq(program, [page([success_a])], head_sha,
+                           [page(other_commits[:50], 150), page(old_commits, 150)]),
+                    run_jq(program, page([dict(other, created_at="2026-02-31T00:00:00Z")]), head_sha,
+                           mode="step"),
+                )
+                step_result = (
+                    (steps[0].returncode, steps[0].stdout.split("\n")[0]),
+                    (steps[1].returncode, steps[1].stdout.split("\n")[0]),
+                    (steps[2].returncode, steps[2].stdout.split("\n")[0]),
+                    steps[3].returncode != 0 and "malformed workflow run record" in steps[3].stderr,
+                    steps[4].returncode != 0 and "not bounded within the page limit" in steps[4].stderr,
+                    steps[5].returncode != 0 and "malformed workflow run record" in steps[5].stderr,
+                    steps[6].returncode != 0
+                    and "incomplete unfiltered workflow-runs listing" in steps[6].stderr,
+                    steps[7].returncode != 0 and "malformed workflow run record" in steps[7].stderr,
+                )
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                step_result = "jq-step setup failed: {}".format(exc)
+            check("ci/jq-step-direct-cases", step_result,
+                  ((0, "stop"), (0, "more"), (0, "stop"), True, True, True, True, True))
 
     if not _write_report(report_path):
+        return 2
+    if HARNESS_ERRORS:
+        print("SELF-TEST HARNESS ERROR: {} check(s) not evaluated; see the labelled errors above "
+              "(cannot evaluate)".format(len(HARNESS_ERRORS)), file=sys.stderr)
         return 2
     expected = _expected_check_ids()
     if expected is None:

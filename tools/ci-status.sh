@@ -64,17 +64,24 @@ DEADLINE=$(( NOW + ${CI_STATUS_TIMEOUT:-900} ))
 # A run for this commit is created after the commit is pushed, so after the commit object exists; its
 # created_at (GitHub's clock) can precede the committer date only when the committer's clock ran ahead.
 # LOWER_BOUND is therefore min(committer date, now) minus SCAN_MARGIN_SECONDS. The clamp to now
-# neutralises a committer date in the future. The 24-hour margin covers a committer clock that is
-# ahead by up to a day, which includes the largest error a wrong time zone setting can introduce
-# (UTC offsets reach +14 hours), and it equally absorbs any ordering jitter in the listing: a run of
-# this commit would have to be listed after a full page of runs created up to 24 hours before it.
-# RESIDUAL (disclosed, not closed): a committer clock ahead by more than 24 hours, still ahead when
-# the commit was made, can place this commit's runs below LOWER_BOUND; they are then visible only to
-# the head_sha query, which is exactly the parent script's coverage. ASSUMPTION: the listing is ordered
-# newest first by creation, so a new run enters at the head (observed GitHub behaviour, not a
-# documented contract). Cost scales with the runs created since LOWER_BOUND: one request for the
-# head_sha query plus one per page, typically one or two pages for a recent commit; a scan that has not
-# reached the bound within SCAN_MAX_PAGES pages (5,000 runs) is an API error, never a verdict.
+# neutralises a committer date in the future; it can only lower the bound, so a wrong local clock never
+# narrows the scan. WHAT THE 24-HOUR MARGIN COVERS: a committer clock ahead of GitHub's by at most 24
+# hours, whatever the cause. A clock behind is always covered, since it only lowers the bound. A wrong
+# time zone setting on a clock showing the right local time shifts the committer date by the
+# difference of two UTC offsets, which span UTC-12 to UTC+14, so up to 26 hours either way: an error of
+# up to 24 hours ahead is covered, one of 24 to 26 hours ahead is NOT. ORDERING JITTER: the stop rule
+# ends the scan at a page whose runs were ALL created before LOWER_BOUND, so a run of this commit is
+# missed only if the listing places it after a full page of 100 runs each created before LOWER_BOUND;
+# with an accurate committer clock each of those runs was created at least 24 hours before it (at least
+# 24 hours minus the clock error when the clock is ahead). Jitter on that scale is NOT covered.
+# RESIDUAL (disclosed, not closed): a committer clock ahead by more than 24 hours (including the 24 to
+# 26 hour wrong time zone case), still ahead when the commit was made, can place this commit's runs below
+# LOWER_BOUND; they are then visible only to the head_sha query, which is exactly the parent script's
+# coverage. ASSUMPTION: the listing is ordered newest first by creation, so a new run enters at the head
+# (observed GitHub behaviour, not a documented contract). Cost scales with the runs created since
+# LOWER_BOUND: one request for the head_sha query plus one per page, typically one or two pages for a
+# recent commit; a scan that has not reached the bound within SCAN_MAX_PAGES pages (5,000 runs) is an
+# API error, never a verdict.
 SCAN_MARGIN_SECONDS=86400
 SCAN_MAX_PAGES=50
 SCAN_FROM="$COMMIT_TIME"
@@ -84,6 +91,13 @@ LOWER_BOUND=$(( SCAN_FROM - SCAN_MARGIN_SECONDS ))
 # listing shrank between pages, or one source listed a run ID twice (each is the signature of a run
 # changing state, being deleted, or being created between requests); a disagreement that persists is
 # reported as an API error (exit 2).
+# AVAILABILITY COST (disclosed, accepted): a run created between two page reads of the unfiltered
+# listing pushes every older run down one position, so the next page repeats the previous page's last
+# run (page 1 holds runs[0:100] with total_count 150, page 2 holds runs[99:150] with total_count 151).
+# The duplicate-ID check rejects that repeat rather than reasoning about which shifts are safe, so when
+# a run is created between page reads on both the first read and the one re-read, one-shot mode exits 2
+# (API error) even if every run of this commit was read. On a repository that creates runs that often,
+# report-once can fail this way repeatedly; --wait keeps polling through it until the deadline.
 RETRY_SECONDS=5
 
 POLL_SECONDS=15
@@ -126,9 +140,10 @@ SETTLE_OBSERVATIONS=5
 # the sources, or two pages, disagree about a run ID's head_sha (checked across ALL records, BEFORE
 # selecting this commit's runs); two records of this commit's run disagree about status, conclusion,
 # name, or URL; one source lists a run ID twice (offset pagination shifted between page reads, so some
-# other run went unseen); a scan that reached the end of the listing (a short last page) holds a number
-# of unique run IDs other than that page's total_count; or the filtered source's unique count differs
-# from its total_count.
+# other run may have gone unseen; it equally rejects the repeat that a newly created run causes, at the
+# availability cost disclosed at RETRY_SECONDS); a scan that reached the end of the listing (a short
+# last page) holds a number of unique run IDs other than that page's total_count; or the filtered
+# source's unique count differs from its total_count.
 #
 # DELETION DURING THE SCAN. Offset pagination skips a run only when the runs ahead of the page boundary
 # shift up, which needs more deletions ahead of the boundary than insertions; new runs enter at the
