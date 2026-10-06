@@ -8,10 +8,40 @@ so a new yield path is covered by adding a binding, never by re-implementing jud
 
 ## The registry
 
-The suite is INERT unless a registry is present: `.aiqt/orchestration.local.json` (machine-local,
-never committed; whole-file precedence) or `.aiqt/orchestration.json` (committed, adopter-authored),
-resolved at the repository root of the session cwd. Relative paths resolve against that root. All
-keys except `version` are optional; an undeclared surface simply removes the probes that need it.
+A registry is `.aiqt/orchestration.local.json` (machine-local, never committed; whole-file
+precedence) or `.aiqt/orchestration.json` (committed, adopter-authored). Relative paths in it resolve
+against the repository root of the session cwd. All keys except `version` are optional; an undeclared
+surface simply removes the probes that need it.
+
+Where a registry is looked up (two scopes):
+
+- Every component except the truncation guard (the stop guard, the scheduled-yield and
+  TeammateIdle bindings, the unattended-ask blocker, the resume audit and barrier, the dispatch
+  ledger, the prompt stamp, and the untracked wait-loop guard) looks only at the git-resolved
+  toplevel of the session cwd. With no git toplevel, or no registry there, each of them is inert.
+- The truncation guard looks at the UNION of two places: every directory on the cwd's physical
+  ancestor chain (a no-follow, descriptor-anchored walk that needs no git) and, where git resolves
+  a toplevel for the cwd, that toplevel (which `core.worktree` can place off the ancestor chain).
+  Before either lookup it denies a malformed payload or a cwd it cannot walk, in every session.
+
+What an absent registry means (two modes, truncation guard only):
+
+- DEFAULT (`AIQT_ORCH_REQUIRE_REGISTRY` unset or an explicit off value: `""`, `0`, `false`, `no`,
+  `off`, ASCII case-insensitive, matched exactly with nothing stripped): with no registry in its
+  scope the truncation guard is inert and allows every Bash call that passes those pre-scope
+  checks. A `.aiqt` entry it cannot evaluate (a regular file, a symlink, or an unreadable directory
+  named `.aiqt`; a registry name that is not a regular file or cannot be examined) counts as
+  present, so the guard stays active there.
+- REGISTRY-REQUIRED (`AIQT_ORCH_REQUIRE_REGISTRY` set to any other value, including a padded or
+  garbled one): with no registry in its scope the truncation guard DENIES every Bash call that
+  passes the pre-scope checks, and an entry it cannot evaluate also DENIES (a discovery fault is
+  not a registry). A registry reachable only through the git toplevel reads as absent when git
+  fails. No other component reads the variable, so every other component stays inert on an
+  absent registry in both modes.
+
+The write-scope guard is not part of this suite but locates its declaration through this registry,
+and it is not inert on an absent registry: it then reads the declaration from the default state
+directory below, and a declaration there arms slice confinement.
 
 ```json
 {

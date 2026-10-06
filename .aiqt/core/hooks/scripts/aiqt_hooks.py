@@ -8020,15 +8020,21 @@ def gensrc_guard(data):
 # --- the orchestrator-integrity suite ----------------------------------------------------------
 # One registry, one state directory, one PURE decision core (decide_yield), one delivery substrate; the
 # six components are thin bindings over them. The whole suite is REGISTRY-SCOPED: BY DEFAULT, with no
-# .aiqt/orchestration.local.json or .aiqt/orchestration.json in scope it is inert (the gensrc.json
+# .aiqt/orchestration.local.json or .aiqt/orchestration.json at the session cwd's git-resolved toplevel
+# (_orch_root, the scope every component except orch_truncation_guard uses) it is inert (the gensrc.json
 # precedent), with two disclosed exceptions, both in orch_truncation_guard. First, that guard's scope is
 # not the session repo root alone but the UNION of the cwd's physical ancestor chain and any git-resolved
 # toplevel (_orch_registry_walk, _orch_git_toplevel_has_registry), and its pre-scope malformed-payload and
 # unwalkable-cwd denies apply before that scope in every session, registry or not. Second, in the opt-in
 # registry-required mode (AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value,
 # _orch_registry_required) that guard is NOT inert with no registry: a Bash call that passes its pre-scope
-# checks with no registry on that chain or at a git-resolved toplevel is DENIED. No other suite component
-# reads that variable, so strict mode changes no other component's outcome. The backlog guards
+# checks with no registry on that chain or at a git-resolved toplevel is DENIED, and so is one whose nearest
+# registry entry the discovery probe cannot confirm (_ORCH_REG_CANNOT_EVALUATE: a discovery fault is not a
+# registry). No other suite component reads that variable, so strict mode changes no other component's
+# outcome. Outside the suite, the write-scope guard locates its declaration through this registry and is
+# NOT inert on an absent one: _load_write_scope falls back to the XDG default state directory, and a
+# declaration there arms slice confinement (see _orch_registry for every caller's reading of 'absent'). The
+# backlog guards
 # additionally require a live orchestrator lease or a
 # declared mode record, so bounded workers and plain sessions never inherit the global backlog. The
 # stop path fails OPEN on a guard's own error (which can never wedge a session) but DENIES on a backlog
@@ -8124,35 +8130,57 @@ _ORCH_WALK_BOUND = 4096  # ancestor-chain safety bound; a deeper chain is a walk
 _ORCH_O_WALK = getattr(os, "O_PATH", os.O_RDONLY)
 
 
+# The registry probe's THIRD value (round 5): a registry entry the no-follow lookups can neither cleanly rule
+# out nor confirm as a regular registry file. It is a non-empty string, so it is TRUTHY: every boolean
+# reading of the probe (the walk's stop test, the default-mode scope decision, and every caller outside the
+# truncation guard's registry-required branch) treats it as PRESENT exactly as before round 5, the deny-safe
+# direction there. Only orch_truncation_guard's registry-required mode tells it apart from a confirmed
+# registry, and DENIES it: a discovery fault never satisfies that mode.
+_ORCH_REG_CANNOT_EVALUATE = "cannot-evaluate"
+
+
 def _orch_dirfd_has_registry(dirfd):
     """Whether the directory open at dirfd carries an orchestration registry entry, judged with NO-FOLLOW,
     DESCRIPTOR-ANCHORED lookups (openat semantics, so a path component swapped mid-walk cannot redirect the
-    probe). Returns False ONLY on a clean not-present: the `.aiqt` entry, or both registry names inside a
-    real `.aiqt` directory, raise FileNotFoundError. EVERY other outcome returns True, reading as PRESENT
-    in the deny-safe direction: a successful no-follow stat of either registry name, whatever its file type
-    (presence, not validity, decides scope: a present-but-unreadable or malformed registry has always kept
-    the guard ACTIVE, never inert), and equally a `.aiqt` entry these lookups cannot cleanly rule out (a
-    symlink the O_NOFOLLOW open refuses, a regular file, an unreadable directory, or any other fault),
-    which must never read as absent - that would silently disarm an orchestrated tree."""
+    probe). THREE-VALUED (round 5). Returns False ONLY on a clean not-present: the `.aiqt` entry, or both
+    registry names inside a real `.aiqt` directory, raise FileNotFoundError. Returns True (a CONFIRMED
+    registry) when the first registry name present inside a real `.aiqt` directory (the local name first,
+    the whole-file precedence _orch_registry applies) is a regular file under a no-follow stat (presence,
+    not validity, decides scope: a present-but-unreadable or malformed regular registry has always kept the
+    guard ACTIVE, never inert). EVERY other outcome returns _ORCH_REG_CANNOT_EVALUATE: a `.aiqt` entry these
+    lookups cannot cleanly rule out (a symlink the O_NOFOLLOW open refuses, a regular file, an unreadable
+    directory, or any other fault), or a first present registry name that is not a regular file (a
+    directory, a symlink, a FIFO, a socket, a device) or whose no-follow stat faults. That value is TRUTHY,
+    so every boolean caller reads it as PRESENT in the deny-safe direction it always had (it must never
+    read as absent - that would silently disarm an orchestrated tree), while the truncation guard's
+    registry-required mode denies it rather than counting a discovery fault as a registry."""
     try:
         aiqt_fd = os.open(".aiqt", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
     except FileNotFoundError:
         return False
     except OSError:
-        return True  # a .aiqt entry this walk cannot examine is not cleanly absent: PRESENT (deny-safe)
+        return _ORCH_REG_CANNOT_EVALUATE  # a .aiqt entry this walk cannot examine: not absent, not confirmed
     try:
         for rel in _ORCH_REGISTRY_FILES:
             name = rel.rsplit("/", 1)[-1]
             try:
-                os.stat(name, dir_fd=aiqt_fd, follow_symlinks=False)
+                st = os.stat(name, dir_fd=aiqt_fd, follow_symlinks=False)
             except FileNotFoundError:
                 continue  # this registry name is cleanly not present: try the next one
             except OSError:
-                return True  # a name these lookups cannot stat is not cleanly absent: PRESENT (deny-safe)
-            return True
+                return _ORCH_REG_CANNOT_EVALUATE  # a name these lookups cannot stat: not absent, not confirmed
+            # The first present name decides (whole-file precedence): a regular file is a confirmed
+            # registry; any other file type is present but unconfirmable.
+            return True if stat.S_ISREG(st.st_mode) else _ORCH_REG_CANNOT_EVALUATE
         return False
     finally:
         os.close(aiqt_fd)
+
+
+def _orch_probe_scope(probe):
+    """Map a registry-probe result to a walk scope: 'cannot-evaluate' for _ORCH_REG_CANNOT_EVALUATE, else
+    'found' (called only on a truthy probe)."""
+    return "cannot-evaluate" if probe == _ORCH_REG_CANNOT_EVALUATE else "found"
 
 
 def _orch_registry_walk(cwd):
@@ -8166,8 +8194,12 @@ def _orch_registry_walk(cwd):
     identity) is stepped THROUGH rather than misread as the root, so a registry above such a mount point
     is still reached (verified by simulation; these test hosts cannot create mounts, and the path-anchored
     recheck below independently re-probes the textual chain, so an fd-walk miss at a mount edge surfaces
-    as a found or a deny, never an allow). Returns ('found', None) when a chain directory carries a
-    registry (or one the no-follow lookups cannot cleanly rule out); ('none', None) only when the walk
+    as a found or a deny, never an allow). The walk stops at the FIRST chain directory whose probe is not a
+    clean not-present and returns ('found', None) when that probe confirms a registry, or
+    ('cannot-evaluate', None) when it returns _ORCH_REG_CANNOT_EVALUATE (an entry the no-follow lookups can
+    neither rule out nor confirm; the default mode reads it exactly as 'found', the deny-safe direction,
+    and registry-required mode denies it without consulting the chain above it or the git toplevel);
+    ('none', None) only when the walk
     reaches the root with every lookup a clean not-present AND the post-walk recheck agrees
     (_orch_walk_recheck, the round-4 concurrent-move detection: descriptor anchoring preserves each opened
     directory's identity, not its parent relationship, so a mid-walk rename of an ancestor can redirect
@@ -8220,8 +8252,9 @@ def _orch_registry_walk(cwd):
         cur = os.fstat(fd)
         chain = [(cur.st_dev, cur.st_ino)]
         for _ in range(_ORCH_WALK_BOUND):
-            if _orch_dirfd_has_registry(fd):
-                return ("found", None)
+            probe = _orch_dirfd_has_registry(fd)
+            if probe:
+                return (_orch_probe_scope(probe), None)
             try:
                 parent = os.open("..", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             except OSError as exc:
@@ -8262,7 +8295,8 @@ def _orch_walk_recheck(cwd, chain):
     directory with the same registry probe the walk uses (_orch_dirfd_has_registry, so the deny-safe
     crafted-entry reads and the self-test ceiling apply identically), and compare the re-resolved
     (st_dev, st_ino) sequence against `chain`, the dev/ino sequence the descriptor walk actually visited.
-    A registry found on this second, path-anchored pass scopes the session IN (('found', None)): that is
+    A registry found on this second, path-anchored pass scopes the session IN (('found', None), or
+    ('cannot-evaluate', None) when the probe returns _ORCH_REG_CANNOT_EVALUATE there): that is
     the mid-walk-rename case, where the descriptor chain was redirected past a continuously present
     registry, and equally a registry that appeared while the walk ran. A sequence mismatch means an
     ancestor moved while the walk read the chain, so the clean not-present result cannot be trusted:
@@ -8302,8 +8336,9 @@ def _orch_walk_recheck(cwd, chain):
                                  .format(type(exc).__name__),
                                  "Re-issue the call once the cwd's directory tree is stable."))
             seen.append((rst.st_dev, rst.st_ino))
-            if _orch_dirfd_has_registry(fd):
-                return ("found", None)
+            probe = _orch_dirfd_has_registry(fd)
+            if probe:
+                return (_orch_probe_scope(probe), None)
         finally:
             os.close(fd)
         parent = os.path.dirname(path)
@@ -8329,12 +8364,14 @@ def _orch_git_toplevel_has_registry(cwd):
     to the ancestor walk, because core.worktree (set in a repository config or a gitfile's gitdir target)
     can point the work tree OFF the cwd's physical ancestor chain: from inside such a repository's
     metadata directory the old scoping read the external work tree's registry and denied, and the walk
-    alone never visits it (the round-4 finding). Returns True (IN SCOPE) when git resolves a toplevel and
-    the same no-follow registry probe the walk uses (_orch_dirfd_has_registry, so a crafted entry stays
-    deny-safe PRESENT and the self-test ceiling masks this leg identically) does not cleanly rule a
-    registry out there, and True when the resolved toplevel exists but cannot be opened as a directory (a
-    toplevel git can name but this probe cannot examine is not cleanly registry-free: deny-safe, matching
-    the old scoping's present-but-unreadable read). Returns False when git cannot resolve a toplevel at
+    alone never visits it (the round-4 finding). THREE-VALUED like the probe (round 5): returns True (IN
+    SCOPE) when git resolves a toplevel and the same no-follow registry probe the walk uses
+    (_orch_dirfd_has_registry, so the self-test ceiling masks this leg identically) confirms a registry
+    there; returns _ORCH_REG_CANNOT_EVALUATE (truthy, so IN SCOPE by default, deny-safe; denied in
+    registry-required mode) when that probe neither rules a registry out nor confirms one, and equally when
+    the resolved toplevel exists but cannot be opened as a directory (a toplevel git can name but this
+    probe cannot examine is not cleanly registry-free, matching the old scoping's present-but-unreadable
+    read). Returns False when git cannot resolve a toplevel at
     all (BY DEFAULT git success can only ADD a deny and a git failure alone never denies; in
     registry-required mode a False here with nothing on the walk is the ABSENT registry the caller denies,
     so a git failure where the registry is reachable only through the git toplevel is denied, and git
@@ -8348,23 +8385,31 @@ def _orch_git_toplevel_has_registry(cwd):
     except FileNotFoundError:
         return False
     except (OSError, ValueError):
-        return True
+        return _ORCH_REG_CANNOT_EVALUATE
     try:
-        return bool(_orch_dirfd_has_registry(fd))
+        probe = _orch_dirfd_has_registry(fd)
+        return _ORCH_REG_CANNOT_EVALUATE if probe == _ORCH_REG_CANNOT_EVALUATE else bool(probe)
     finally:
         os.close(fd)
 
 
 def _orch_registry(root):
     """Load the orchestration registry: ('absent', None) only when a registry file is genuinely NOT PRESENT
-    (a clean lstat FileNotFoundError; each caller is inert by design, and orch_truncation_guard, whose
-    opt-in registry-required mode denies an absent registry, does not scope through this loader), ('ok',
-    dict) on a schema-valid
-    registry, ('bad', detail) otherwise. A present-but-unreadable registry is a cannot-evaluate returned as
+    (a clean lstat FileNotFoundError), ('ok', dict) on a schema-valid registry, ('bad', detail) otherwise. A present-but-unreadable registry is a cannot-evaluate returned as
     bad, never absent: an lstat FAULT (a permission or I/O error), a read/parse error, or a non-version-1
     object all fail closed rather than silently disarming a caller that locates confinement through it. The
     machine-local .aiqt/orchestration.local.json takes WHOLE-FILE precedence over the committed
-    .aiqt/orchestration.json; there is no merge, so precedence is never ambiguous."""
+    .aiqt/orchestration.json; there is no merge, so precedence is never ambiguous.
+
+    WHAT 'absent' MEANS TO EACH CALLER (it is NOT inert everywhere): orch_stop_guard and
+    orch_teammate_idle (via _orch_stop_family), orch_yield_tool, orch_ask_guard, orch_untracked_wait_loop,
+    orch_dispatch_ledger, orch_prompt_stamp, orch_resume_audit and orch_resume_barrier ALLOW (inert);
+    _orch_state_dir_for_root resolves the XDG default state directory; _load_write_scope ALSO falls back
+    to that XDG default and reads the write-scope declaration there, so a declaration present at the XDG
+    default ARMS slice confinement on an ABSENT registry (by design: the harness writes the declaration);
+    _companion_stores yields no stores, so cross-repo writes deny exactly as with no stores declared.
+    orch_truncation_guard does not scope through this loader (its own ancestor walk unioned with the git
+    toplevel decides its scope, and its opt-in registry-required mode denies an absent registry)."""
     for rel in _ORCH_REGISTRY_FILES:
         path = os.path.join(root, *rel.split("/"))
         try:
@@ -9879,7 +9924,10 @@ def _orch_registry_required():
     around it) is not an off value and reads as ON. Under it, an ABSENT orchestration registry DENIES every
     Bash call that passes the pre-scope checks instead of leaving orch_truncation_guard inert, and ABSENT
     includes a registry reachable only through a git-resolved toplevel (core.worktree) when git fails, so
-    there a git failure alone denies; the default (variable unset) is unchanged. An environment variable, not a pack config key, because every pack config
+    there a git failure alone denies; a registry entry the discovery probe cannot confirm
+    (_ORCH_REG_CANNOT_EVALUATE: a `.aiqt` that is a regular file, a symlink, or an unreadable directory,
+    or a first present registry name that is not a regular file or cannot be stat'ed) is not a registry
+    either and denies the same way; the default (variable unset) is unchanged. An environment variable, not a pack config key, because every pack config
     surface (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
     located by the same cwd-anchored lookup whose EMPTY result this mode exists to fail closed on, so a
     file-based key can never speak exactly when it is needed; the hook execution environment is the one
@@ -9928,7 +9976,12 @@ def orch_truncation_guard(data):
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
     off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
     stripped, so a padded off word reads as ON), an ABSENT registry DENIES instead of
-    leaving the guard inert (_orch_registry_required). PRE-SCOPE DENIES, checked BEFORE the
+    leaving the guard inert (_orch_registry_required), and so does a registry discovery that cannot be
+    evaluated (round 5): the nearest non-absent chain entry, or with none on the chain the git-resolved
+    toplevel's entry, that the probe returns as _ORCH_REG_CANNOT_EVALUATE (a `.aiqt` that is a regular
+    file, a symlink, or an unreadable directory; a first present registry name that is not a regular file
+    or whose no-follow stat faults; a toplevel that cannot be opened) DENIES in that mode, never read as a
+    registry, while by default it keeps the guard ACTIVE exactly as a present registry does. PRE-SCOPE DENIES, checked BEFORE the
     registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
     not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
     not a string; and a string cwd whose registry walk cannot be carried out (a NUL in the path, a path
@@ -9989,7 +10042,8 @@ def orch_truncation_guard(data):
         # git failure alone never denies (the union leg reads False and the allow stands); in
         # registry-required mode that False is an ABSENT registry, so a git failure hiding a registry
         # reachable only through the git toplevel is denied below, and git success removes that deny.
-        if not _orch_git_toplevel_has_registry(cwd):
+        top_probe = _orch_git_toplevel_has_registry(cwd)
+        if not top_probe:
             if _orch_registry_required():
                 # REGISTRY-REQUIRED MODE (opt-in): the adopter set AIQT_ORCH_REQUIRE_REGISTRY, so an
                 # absent registry fails closed instead of leaving the guard inert. Default unchanged.
@@ -10004,6 +10058,25 @@ def orch_truncation_guard(data):
                     "AIQT guardrail: denied a Bash call in registry-required mode with no orchestration "
                     "registry found (rule trkasy, fail-closed).")
             return _allow()  # not an orchestrated session: no registry on the chain or at a git toplevel
+        if top_probe == _ORCH_REG_CANNOT_EVALUATE:
+            scope = "cannot-evaluate"
+    if scope == "cannot-evaluate" and _orch_registry_required():
+        # REGISTRY-REQUIRED MODE, round 5: the discovery found an entry it can neither rule out nor confirm
+        # as a registry. By default that keeps the guard ACTIVE (deny-safe); in this mode a discovery fault
+        # must not satisfy the registry requirement, so it denies. Default unchanged.
+        return _deny(
+            "AIQT rule trkasy (track-launched-work) (registry-required mode): "
+            "AIQT_ORCH_REQUIRE_REGISTRY is set, so this guard must confirm an orchestration registry, and "
+            "the nearest .aiqt entry on this cwd's ancestor chain (or, with none there, at the git-resolved "
+            "toplevel) could not be confirmed as one: .aiqt is not a directory this process can open "
+            "without following a symlink, or its first present registry name (orchestration.local.json, "
+            "then orchestration.json) is not a regular file or cannot be examined. A registry this guard "
+            "cannot evaluate is not a registry, so the call is denied rather than read as registry-present "
+            "(check-fails-closed-on-unreadable). Make that .aiqt a real, readable directory holding a "
+            "regular registry file, remove the stray .aiqt entry, or unset AIQT_ORCH_REQUIRE_REGISTRY to "
+            "restore the default scoping (where such an entry keeps this guard active).",
+            "AIQT guardrail: denied a Bash call in registry-required mode whose orchestration registry "
+            "could not be evaluated (rule trkasy, fail-closed).")
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
         kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
@@ -10121,7 +10194,8 @@ _ORCH_POLL_PROBE_CMDS = frozenset(("gh", "curl"))
 
 # Reserved words that make a loop span un-attributable to the single canonical poll shape: a conditional
 # reserved word or a '!' negation, and brace grouping. Any of these appearing raw-unquoted in the loop span
-# routes to 'indeterminate' (defer to the ASK) rather than a match the walk cannot soundly justify.
+# routes to 'indeterminate' (defer to the truncation guard's generic bare-& deny) rather than a match the walk
+# cannot soundly justify.
 _ORCH_POLL_FORBIDDEN = frozenset((
     "if", "then", "elif", "else", "fi", "case", "esac", "!", "{", "}"))
 
@@ -10259,7 +10333,8 @@ def _orch_bg_poll_loop(command):
     disclosed heuristic, not exhaustive). 'none' on a full parse that is simply not that shape and carries no
     ambiguity to defer: no bare `&`; a bare `&` that does not close a raw-unquoted `done` terminator; or a
     clean single loop that lacks the sleep or the probe. 'indeterminate' whenever the structure cannot be
-    soundly attributed to one canonical loop, so the guard defers to the ASK rather than risk a false deny:
+    soundly attributed to one canonical loop, so the guard defers to the truncation guard's generic bare-`&`
+    DENY-and-educate rather than risk a false match:
     an unparseable construct, subshell or C-style `(( ))` grouping, more than one bare `&`, a command
     trailing the bare-`&` `done`, a nested or extra loop keyword, a conditional reserved word, or brace
     grouping.
@@ -10271,8 +10346,8 @@ def _orch_bg_poll_loop(command):
     still counted (forcing 'indeterminate').
 
     The conservative posture is deliberate for a BLOCK guard: a false 'match' strands a session, whereas a
-    'none'/'indeterminate' emits nothing and defers to orch_truncation_guard's generic bare-`&` ASK on the
-    same event. Residuals are disclosed in the manifest."""
+    'none'/'indeterminate' emits nothing and defers to orch_truncation_guard's generic bare-`&`
+    DENY-and-educate on the same event. Residuals are disclosed in the manifest."""
     try:
         segments = _lex_command(command)
     except ValueError:
@@ -10295,15 +10370,19 @@ def _orch_bg_poll_loop(command):
 def orch_untracked_wait_loop(data):
     """trkasy, PreToolUse Bash: DENY a command that backgrounds a status-polling loop with a bare `&`. A
     detached child is not a harness-tracked task, so its completion cannot notify this session and the result
-    is stranded while the session goes dark waiting on it. Registry-gated like orch_truncation_guard's
-    DEFAULT mode (inert with no orchestration registry present; it never reads AIQT_ORCH_REQUIRE_REGISTRY,
-    so it stays inert there in registry-required mode too, where the truncation guard denies instead) but
-    NOT lease-gated: a bounded worker building a
-    fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash or absent tool, an absent
-    registry, or a non-string/empty command; a NUL, heredoc, unbalanced quote, or subshell-grouped detach
-    classifies 'indeterminate' and emits nothing, deferring to the generic bare-`&` ASK of the truncation
-    guard. Only a positive 'match' DENIES. This is a deny-side companion to that ASK-side guard, defence in
-    depth on the same event: the ASK catches a generic detach, this DENIES the specific untracked poll loop."""
+    is stranded while the session goes dark waiting on it. Registry-gated, but with a NARROWER scope than
+    orch_truncation_guard: it roots via _orch_root (the session cwd's git-resolved toplevel ONLY, no
+    ancestor walk and no union) and loads the registry there (_orch_registry), so it is inert where git
+    resolves no toplevel or that toplevel has no registry, even where the truncation guard's ancestor walk
+    finds one above or beside it. It never reads AIQT_ORCH_REQUIRE_REGISTRY, so it stays inert on an absent
+    registry in registry-required mode too, where the truncation guard denies instead. NOT lease-gated: a
+    bounded worker building a fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash
+    or absent tool, no git toplevel, an absent registry, or a non-string/empty command; a NUL, heredoc,
+    unbalanced quote, or subshell-grouped detach classifies 'indeterminate' and emits nothing, deferring to
+    the truncation guard's generic bare-`&` DENY-and-educate (or its open-quote deny) on the same event.
+    Only a positive 'match' DENIES here. This is a specific companion to that generic deny, defence in
+    depth on the same event: the truncation guard denies any bare-`&` detach it can read, this denies the
+    specific untracked poll loop with a reason about the stranded poll."""
     if data.get("tool_name") != "Bash":
         return _allow()
     root = _orch_root(data)

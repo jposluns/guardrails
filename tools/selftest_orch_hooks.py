@@ -878,7 +878,7 @@ def _main_isolated(report_path=None):
         check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
         check("trunc/fg-comment-then-detach-denies", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "deny")
         check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
-        # inert when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
+        # inert BY DEFAULT when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
         ti = Fixture(tmp, "trunc-inert")
         (ti.root / ".aiqt" / "orchestration.local.json").unlink()
         check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
@@ -958,7 +958,8 @@ def _main_isolated(report_path=None):
         check("trunc/rib-omitted-foreground-allows", raw({"tool_input": {"command": "ls -la"}}), "allow")
         check("trunc/rib-omitted-foreground-detach-denies", raw({"tool_input": {"command": "sleep 5 &"}}),
               "deny")
-        # Registry scope, the disclosed residual: with NO registry file the guard is inert (malformed input
+        # Registry scope, the disclosed residual: BY DEFAULT (this run pops AIQT_ORCH_REQUIRE_REGISTRY) with NO
+        # registry file the guard is inert (malformed input
         # included), while a PRESENT but unreadable or invalid registry keeps it active (fail-closed).
         check("trunc/malformed-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
             {"hook_event_name": "PreToolUse", "cwd": str(ti.root), "tool_name": "Bash",
@@ -1324,6 +1325,115 @@ def _main_isolated(report_path=None):
             aiqt_hooks.os.stat = saved_stat
         check("trunc/aiqt-registry-name-stat-fault-denies", (cv, "detaches a child" in cw),
               ("deny", True))
+        # ROUND 5, THREE-VALUED DISCOVERY: a registry entry the probe can neither rule out nor confirm is
+        # _ORCH_REG_CANNOT_EVALUATE. BY DEFAULT it reads PRESENT (the guard stays active, so a plain
+        # command allows and the detach rows above deny, unchanged); under registry-required mode it is
+        # NOT a registry and a plain command DENIES with the cannot-evaluate reason. Each vector pins the
+        # strict deny AND the unset verdict (plain allow, detach deny), so the strict deny is red when a
+        # cannot-evaluate is read as a registry again and the unset pair is red on any default drift.
+        (craft / "unreadable-dir" / ".aiqt").mkdir(parents=True)
+        (craft / "nonreg-dir" / ".aiqt" / "orchestration.json").mkdir(parents=True)
+        (craft / "nonreg-link" / ".aiqt").mkdir(parents=True)
+        (craft / "nonreg-link" / "real.json").write_text(json.dumps(dict(version=1)), encoding="utf-8")
+        os.symlink(str(craft / "nonreg-link" / "real.json"),
+                   str(craft / "nonreg-link" / ".aiqt" / "orchestration.json"))
+        _r5 = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+        _r5_old = os.environ.get(_r5)
+        _r5_stat = aiqt_hooks.os.stat
+        _r5_unread = os.path.realpath(str(craft / "unreadable-dir" / ".aiqt"))
+
+        def _r5_stat_unreadable(path, *a, **k):
+            # A root run is not bound by mode 000, so the seam supplies the kernel's EACCES there for
+            # the unreadable directory's registry lookups only (the uid-independence precedent).
+            dfd = k.get("dir_fd")
+            if (dfd is not None and path in _reg_names
+                    and os.path.realpath("/proc/self/fd/{}".format(dfd)) == _r5_unread):
+                raise PermissionError(13, "Permission denied", path)
+            return _r5_stat(path, *a, **k)
+
+        def _r5_case(cwd, command):
+            res = aiqt_hooks.orch_truncation_guard(dict(nocwd, cwd=cwd, tool_input=dict(command=command)))
+            why = (res[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+            return _verdict(res), ("could not be confirmed" in why and _r5 in why)
+        _r5_vectors = (("aiqt-regular-file", craft / "regular-file"),
+                       ("aiqt-dangling-symlink", craft / "dangling"),
+                       ("aiqt-unreadable-dir", craft / "unreadable-dir"),
+                       ("aiqt-registry-name-directory", craft / "nonreg-dir"),
+                       ("aiqt-registry-name-symlink", craft / "nonreg-link"))
+        _r5_rows = {}
+        try:
+            os.chmod(_r5_unread, 0)
+            if os.geteuid() == 0:
+                aiqt_hooks.os.stat = _r5_stat_unreadable
+            for _name, _dir in _r5_vectors:
+                _r5_fd = os.open(str(_dir), aiqt_hooks._ORCH_O_WALK | os.O_DIRECTORY)
+                try:
+                    _probe = aiqt_hooks._orch_dirfd_has_registry(_r5_fd)
+                finally:
+                    os.close(_r5_fd)
+                os.environ.pop(_r5, None)
+                _unset = (_r5_case(str(_dir), "printf ok")[0], _r5_case(str(_dir), "long_job &")[0])
+                os.environ[_r5] = "1"
+                _strict = _r5_case(str(_dir), "printf ok")
+                _r5_rows[_name] = (_probe, _unset, _strict)
+        finally:
+            aiqt_hooks.os.stat = _r5_stat
+            os.chmod(_r5_unread, 0o755)
+            if _r5_old is None:
+                os.environ.pop(_r5, None)
+            else:
+                os.environ[_r5] = _r5_old
+        # The rows sit literally in the for header so the execution-set gate resolves each id.
+        for _cid, _name in (("trunc/registry-required-aiqt-regular-file-plain-denies", "aiqt-regular-file"),
+                            ("trunc/registry-required-aiqt-dangling-symlink-plain-denies",
+                             "aiqt-dangling-symlink"),
+                            ("trunc/registry-required-aiqt-unreadable-dir-plain-denies",
+                             "aiqt-unreadable-dir"),
+                            ("trunc/registry-required-aiqt-registry-name-directory-plain-denies",
+                             "aiqt-registry-name-directory"),
+                            ("trunc/registry-required-aiqt-registry-name-symlink-plain-denies",
+                             "aiqt-registry-name-symlink")):
+            check(_cid, _r5_rows[_name],
+                  (aiqt_hooks._ORCH_REG_CANNOT_EVALUATE, ("allow", "deny"), ("deny", True)))
+        # The CONFIRMED side of the same probe: a regular registry file reads True (not the third value),
+        # and the fixture tree's own regular registry satisfies registry-required mode (plain allow).
+        conf_fd = os.open(str(t.root), aiqt_hooks._ORCH_O_WALK | os.O_DIRECTORY)
+        try:
+            _confirmed = aiqt_hooks._orch_dirfd_has_registry(conf_fd)
+        finally:
+            os.close(conf_fd)
+        try:
+            os.environ[_r5] = "1"
+            _confirmed_strict = _r5_case(str(t.root), "printf ok")
+        finally:
+            if _r5_old is None:
+                os.environ.pop(_r5, None)
+            else:
+                os.environ[_r5] = _r5_old
+        check("trunc/registry-required-confirmed-registry-plain-allows",
+              (_confirmed is True, _confirmed_strict), (True, ("allow", False)))
+        # The UNION leg is three-valued too: a git toplevel (core.worktree, off the ancestor chain) whose
+        # .aiqt is a regular file reads cannot-evaluate, so the default keeps the guard active (detach
+        # denies, plain allows) and registry-required mode denies the plain call.
+        gwc = tmp / "gw-cannot"
+        (gwc / "B").mkdir(parents=True)
+        (gwc / "B" / ".aiqt").write_text("not a directory", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(gwc / "A")], check=True, capture_output=True, timeout=30)
+        subprocess.run(["git", "-C", str(gwc / "A"), "config", "core.worktree", str(gwc / "B")],
+                       check=True, capture_output=True, timeout=30)
+        try:
+            os.environ.pop(_r5, None)
+            _gw_unset = (_r5_case(str(gwc / "A"), "printf ok")[0], _r5_case(str(gwc / "A"), "long_job &")[0])
+            os.environ[_r5] = "1"
+            _gw_strict = _r5_case(str(gwc / "A"), "printf ok")
+        finally:
+            if _r5_old is None:
+                os.environ.pop(_r5, None)
+            else:
+                os.environ[_r5] = _r5_old
+        check("trunc/registry-required-git-toplevel-cannot-evaluate-plain-denies",
+              (aiqt_hooks._orch_git_toplevel_has_registry(str(gwc / "A")), _gw_unset, _gw_strict),
+              (aiqt_hooks._ORCH_REG_CANNOT_EVALUATE, ("allow", "deny"), ("deny", True)))
         # A SEARCH-ONLY ancestor must not fail the walk: O_PATH steps need only the search permission path
         # resolution itself needs, so the registry above is still found. The real chmod 0o311 exercises
         # the kernel on a non-root run; the os.open seam refuses a READ-open of that ancestor so the row
@@ -2415,7 +2525,7 @@ def _main_isolated(report_path=None):
           "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
           "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "
           "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, denies every "
-          "Bash call that passes the pre-scope checks when the opt-in registry-required mode is set and no registry is found, and fails "
+          "Bash call that passes the pre-scope checks when the opt-in registry-required mode is set and no registry is found or the nearest registry entry cannot be evaluated (a discovery fault never satisfies that mode; by default it keeps the guard active), and fails "
           "closed on a missing or unreadable tool_name, an unreadable cwd or one whose registry walk cannot "
           "be carried out (scope is the ancestor walk with its concurrent-move recheck, unioned with "
           "a git-resolved toplevel; by default a git failure alone never denies, while the "

@@ -31,7 +31,15 @@ def main():
     root = str(repo_root())
     status, reg = aiqt_hooks._orch_registry(root)
     if status == "absent":
-        print("no orchestration registry: the suite is inert here (by design)")
+        if aiqt_hooks._orch_registry_required():
+            # Registry-required mode: the truncation guard is NOT inert here, so the message must not say so.
+            print("no orchestration registry at the repository root, and {} is set (registry-required "
+                  "mode): the truncation guard denies every Bash call that passes its pre-scope checks "
+                  "unless it finds a registry on the cwd's ancestor chain or at the git toplevel; every "
+                  "other suite component is inert here".format(aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV))
+        else:
+            print("no orchestration registry: the suite is inert here (by design; set {} to make the "
+                  "truncation guard deny instead)".format(aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV))
         return 2
     findings = []
     if status == "bad":
