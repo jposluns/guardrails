@@ -56,11 +56,14 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     the plan digest instead and requires no archive copy of it.
   4 operational-readiness: the store resolves to the planned identity (an absent store is a finding, so a
     de-adopted repository cannot pass as NOT-APPLICABLE); every CI enforcement member is live at its plan
-    digest, and per CI row a digest-matched workflow member configures a step whose run command invokes
-    the store assertion (`doctor --require-store` as a command word sequence of the opf program, or a run of
-    a planned recipe member of the same row that does), parsed as YAML-shaped jobs and steps and shell
-    commands, never a comment, a step name, an echo, a quoted string or a conditional or continue-on-error
-    step, and undecodable or unparseable CI is CANNOT-EVALUATE; every planned view
+    digest, and per CI row a digest-matched workflow member configures the store assertion in canonical
+    form (adoption writes that step itself): a step whose run value is exactly one canonical assertion line
+    (`opf doctor --require-store`, optionally with the recipe's `--root .`, or `sh` running a planned recipe
+    member of the same row that is the pack's shipped recipe) with no `if:`, no continue-on-error other
+    than false and a bash or sh shell (_ci_asserts_store). A step that mentions the assertion in any other
+    form is CANNOT-EVALUATE, named, never VALID or INVALID, since this check proves nothing about other
+    shell; with no step mentioning it the check is INVALID; undecodable or unparseable CI (a control
+    character, an unparsed flow collection) is CANNOT-EVALUATE; every planned view
     destination holds exactly its planned bytes, a formerly occupied destination included (spec 14.1: once
     apply commits, restoring an archived file to the live tree takes a fresh plan, so old occupant bytes
     there are drift the plan does not account for); every consumer repointing holds its planned new bytes;
@@ -73,12 +76,12 @@ DISCLOSED RESIDUALS: the receipt core schema requires a null after_digest for re
 TOML cannot spell, so check 1 compares only the receipt rows present and cannot require one row per source;
 check 2 trusts the planning inventory the caller supplies once it re-seals to the plan's bound digest;
 check 4's doctor verdict is only as complete as the caller's observations; the CI assertion test parses the
-digest-pinned planned CI members through a block-YAML subset and a shell subset (an anchor, a flow step, a
-here-document or a multi-line plain scalar is CANNOT-EVALUATE), knows the opf program by its name (`opf`,
-`opf.py`, or a python interpreter running `opf.py`) and a recipe function only by a body running a
-parameter-expanded or opf program with "$@" (the function's status propagation and an environment override
-of the program it runs are not modelled), reads only the step and job `if:`, `continue-on-error` and
-`shell:` keys of the CI platform, and is not a run of CI.
+digest-pinned planned CI members through a block-YAML subset (an anchor, a flow step, a control character or
+a multi-line plain scalar is CANNOT-EVALUATE), accepts only the canonical step forms and reads no other
+shell, knows the opf program by its name (`opf`, or `python3 -I -B` running a relative `opf.py`) and the
+recipe only by byte equality with the pack's shipped recipe, does not model what an earlier `uses:` step, the
+runner image or a container puts on the path or into the environment, nor which triggers run the workflow,
+and is not a run of CI.
 
 Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
 modules, so the standalone-closure property holds.
@@ -118,6 +121,11 @@ _WIRING_NOTE = ("check 5 (wiring) is not evaluated by this slice: its enforcemen
                 "the roster is incomplete until it runs (never a pass)")
 # A block-mapping entry of the CI workflow subset: a plain key, a colon, and the rest of the line.
 _YAML_KEY_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_.-]*) *:(?: +(.*))?$")
+# Characters the YAML reader refuses anywhere (CANNOT-EVALUATE): the C0 controls except tab, LF and CR (a
+# CR is refused on its own), DEL, the C1 controls, a byte-order mark and the two noncharacters.
+_YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufeff\ufffe\uffff]")
+# A plain scalar inside a flow collection: no indicator, comma, bracket, colon or hash anywhere.
+_FLOW_PLAIN_RE = re.compile(r"[A-Za-z0-9_./+~][A-Za-z0-9_./+~*@-]*(?: +[A-Za-z0-9_./+~*@-]+)*")
 # The planning inventory's closed entry-kind vocabulary (_opf_adopt_plan's observation rows).
 ENTRY_KINDS = ("absent", "directory", "excluded", "file")
 
@@ -443,7 +451,8 @@ def _is_workflow(path):
 
 
 class _Flow:
-    """A single-line YAML flow collection (`[main]`, `{a: b}`): kept opaque, never read as a step."""
+    """A single-line YAML flow collection (`[main]`, `{a: b}`), parsed in full by _Workflow._flow_node but
+    kept opaque: never read as jobs, a step or a run value."""
     __slots__ = ("text",)
 
     def __init__(self, text):
@@ -452,13 +461,19 @@ class _Flow:
 
 class _Workflow:
     """A reader for the block-YAML subset CI workflows are written in: block mappings with plain keys,
-    block sequences, plain and quoted single-line scalars, literal and folded block scalars, and opaque
-    single-line flow collections. Anything outside it (a tab in the indentation, a CR, an anchor, alias or
-    tag, a quoted or duplicate key, a multi-line plain or quoted scalar, a document marker) raises
-    Unevaluable: CI this check cannot parse is CANNOT-EVALUATE, never a pass and never a silent refusal."""
+    block sequences, plain and quoted single-line scalars, literal and folded block scalars, and single-line
+    flow collections of plain and quoted scalars, parsed in full and kept opaque. Anything outside it (a
+    control character, a tab in the indentation, a CR, an anchor, alias or tag, a quoted or duplicate key, a
+    multi-line plain or quoted scalar, a document marker, a flow collection with an empty or trailing entry,
+    a flow pair outside a flow mapping) raises Unevaluable: CI this check cannot parse is CANNOT-EVALUATE,
+    never a pass and never a silent refusal."""
 
     def __init__(self, text, label):
         self.label, self.i, self.lines = label, 0, []
+        control = _YAML_CONTROL_RE.search(text)
+        if control is not None:
+            self.i = text.count("\n", 0, control.start())
+            self.fail("control character U+{:04X}".format(ord(control.group())))
         for raw in text.split("\n"):
             body = raw.lstrip(" ")
             self.lines.append([len(raw) - len(body), body, raw])
@@ -568,12 +583,67 @@ class _Workflow:
                 self.fail("an unterminated quoted scalar or content after its closing quote")
             return "".join(text)
         if head in "[{":
-            if plain[-1] != {"[": "]", "{": "}"}[head] or plain.count(head) != plain.count(plain[-1]):
-                self.fail("a multi-line or unbalanced flow collection")
+            if self._flow_node(plain, 0, 0) != len(plain):
+                self.fail("content after a flow collection")
             return _Flow(plain)
-        if head in "&*!%@`|>" or ": " in plain or plain.endswith(":"):
+        if (head in "&*!%@`|>,]}" or plain[:2] in ("- ", "? ", ": ") or plain in ("-", "?", ":")
+                or ": " in plain or plain.endswith(":")):
             self.fail("an anchor, alias, tag, reserved indicator or nested mapping in a plain scalar")
         return plain
+
+    def _flow_node(self, text, j, depth):
+        """The index just past the flow node at text[j] (after spaces): a flow sequence or mapping, a
+        single- or double-quoted scalar, or a plain scalar of _FLOW_PLAIN_RE. Every entry is checked, so an
+        empty entry (`[a,,b]`), a trailing comma, a missing separator or a bracket left open fails."""
+        while text[j:j + 1] == " ":
+            j += 1
+        head = text[j:j + 1]
+        if depth > 16:
+            self.fail("a flow collection nested too deeply")
+        if head in ("[", "{"):
+            closer, j, first = "]" if head == "[" else "}", j + 1, True
+            while True:
+                while text[j:j + 1] == " ":
+                    j += 1
+                if text[j:j + 1] == closer and first:
+                    return j + 1
+                if not first:
+                    if text[j:j + 1] == closer:
+                        return j + 1
+                    if text[j:j + 1] != ",":
+                        self.fail("a flow collection entry not followed by `,` or its closing bracket")
+                    j += 1
+                    while text[j:j + 1] == " ":
+                        j += 1
+                first = False
+                if head == "{":
+                    key = _FLOW_PLAIN_RE.match(text, j)
+                    if key is None or text[key.end():key.end() + 2] != ": ":
+                        self.fail("a flow mapping entry that is not `key: value`")
+                    j = key.end() + 2
+                j = self._flow_node(text, j, depth + 1)
+        if head == "'":
+            j += 1
+            while True:
+                end = text.find("'", j)
+                if end < 0:
+                    self.fail("an unterminated quoted scalar in a flow collection")
+                if text[end + 1:end + 2] != "'":
+                    return end + 1
+                j = end + 2
+        if head == '"':
+            j += 1
+            while j < len(text) and text[j] != '"':
+                if text[j] == "\\" and text[j + 1:j + 2] not in ("\\", '"', "/", "n", "t"):
+                    self.fail("a double-quoted escape outside the subset")
+                j += 2 if text[j] == "\\" else 1
+            if j >= len(text):
+                self.fail("an unterminated quoted scalar in a flow collection")
+            return j + 1
+        plain = _FLOW_PLAIN_RE.match(text, j)
+        if plain is None:
+            self.fail("a flow collection entry outside the subset (empty, an indicator or a flow pair)")
+        return plain.end()
 
     def _block(self, indent, indicator):
         raw = []
@@ -610,269 +680,52 @@ def _strip_plain_comment(rest):
     return rest.strip()
 
 
-def _shell_subst_end(text, i, where):
-    """The index just past the `$(...)`, `${...}`, `<(...)`, `>(...)` or backquote substitution opening at
-    text[i]: its text stays inside the word, an argument and never a configured command."""
-    if text[i] == "`":
-        j = i + 1
-        while j < len(text) and text[j] != "`":
-            j += 2 if text[j] == "\\" else 1
-        if j >= len(text):
-            raise Unevaluable("{}: an unterminated backquote substitution".format(where))
-        return j + 1
-    opener = text[i + 1]
-    closer = {"(": ")", "{": "}"}[opener]
-    depth, j = 1, i + 2
-    while j < len(text):
-        ch = text[j]
-        if ch == "\\":
-            j += 2
-            continue
-        if ch == "'" and opener == "(":
-            end = text.find("'", j + 1)
-            if end < 0:
-                break
-            j = end + 1
-            continue
-        if ch == '"':
-            j = _shell_dquote_end(text, j, where)
-            continue
-        if ch == "`" or (ch in "$<>" and text[j + 1:j + 2] in ("(", "{") and (ch == "$" or text[j + 1] == "(")):
-            j = _shell_subst_end(text, j, where)
-            continue
-        if ch == opener:
-            depth += 1
-        elif ch == closer:
-            depth -= 1
-            if depth == 0:
-                return j + 1
-        j += 1
-    raise Unevaluable("{}: an unterminated substitution".format(where))
+# The canonical CI assertion (spec 14.1 check 4). Adoption writes the CI step itself, so a step counts only
+# in one exact form, and this check proves nothing about what any other shell text does: the opf program
+# (`opf`, or `python3 -I -B` running a relative `opf.py`, the recipe's own launch) with exactly the
+# arguments `doctor --require-store`, optionally followed by the recipe's `--root .`; or `sh` running a
+# planned recipe member of the same CI row (optionally `./`-prefixed) with no argument or the root `.`, the
+# invocation the recipe's usage line names, where the recipe's bytes are the pack's shipped recipe.
+_CANONICAL_ROOT = "."
+_OPF_PY_RE = re.compile(r"(?:[A-Za-z0-9_-]+/)*opf\.py")
+_SHIPPED_RECIPE = Path(__file__).resolve().parent.parent / "enforcement" / "ci" / "opf-ci.sh"
+# The only keys a canonical step may carry: an `if:`, an `env:`, a `working-directory:` or a `uses:` can
+# skip the step, change the program it resolves or move the root `.` it asserts.
+_CANONICAL_STEP_KEYS = frozenset(("name", "id", "run", "shell", "continue-on-error", "timeout-minutes"))
 
 
-def _shell_dquote_end(text, i, where):
-    """The index just past the double-quoted string opening at text[i]."""
-    j = i + 1
-    while j < len(text):
-        ch = text[j]
-        if ch == "\\":
-            j += 2
-        elif ch == '"':
-            return j + 1
-        elif ch == "`" or (ch == "$" and text[j + 1:j + 2] in ("(", "{")):
-            j = _shell_subst_end(text, j, where)
-        else:
-            j += 1
-    raise Unevaluable("{}: an unterminated double quote".format(where))
-
-
-def _shell_tokens(text, where):
-    """Shell text to tokens: ("w", word) after quote removal, ("op", operator) for the list, pipeline and
-    subshell operators and newline. A `#` opening a word starts a comment, so a quoted `#` stays a word
-    character. A here-document or an unterminated quote or substitution raises Unevaluable."""
-    toks, word, i = [], None, 0
-    while i < len(text):
-        ch = text[i]
-        if ch == "\\":
-            if text[i + 1:i + 2] != "\n":
-                word = (word or "") + text[i + 1:i + 2]
-            i += 2
-        elif ch == "'":
-            end = text.find("'", i + 1)
-            if end < 0:
-                raise Unevaluable("{}: an unterminated single quote".format(where))
-            word, i = (word or "") + text[i + 1:end], end + 1
-        elif ch == '"':
-            end = _shell_dquote_end(text, i, where)
-            word, i = (word or "") + re.sub(r'\\([$`"\\\n])', lambda m: m.group(1).strip("\n"),
-                                            text[i + 1:end - 1]), end
-        elif ch == "`" or (ch == "$" and text[i + 1:i + 2] in ("(", "{")) or (
-                ch == "(" and word and word[-1] in "<>"):
-            start = i - 1 if ch == "(" else i
-            end = _shell_subst_end(text, start, where)
-            word, i = (word or "")[:len(word or "") - (ch == "(")] + text[start:end], end
-        elif ch == "#" and word is None:
-            while i < len(text) and text[i] != "\n":
-                i += 1
-        elif text.startswith("<<", i):
-            raise Unevaluable("{}: a here-document is outside the shell subset this check reads".format(where))
-        elif ch == "(" and word and text.startswith("()", i):
-            word, i = word + "()", i + 2
-        elif ch in " \t":
-            if word is not None:
-                toks.append(("w", word))
-            word, i = None, i + 1
-        elif ch in "\n;&|()" and not (ch in "&|" and word and word[-1] in "<>"):
-            if word is not None:
-                toks.append(("w", word))
-            op = text[i:i + 2] if text[i:i + 2] in ("&&", "||", "|&", ";;") else ch
-            toks.append(("op", op))
-            word, i = None, i + len(op)
-        else:
-            word, i = (word or "") + ch, i + 1
-    if word is not None:
-        toks.append(("w", word))
-    return toks
-
-
-# Reserved words that open, continue or close a compound command, and the opener each closer matches.
-_SHELL_OPENERS = ("if", "while", "until", "for", "select", "case", "{")
-_SHELL_CLOSERS = {"fi": ("if",), "done": ("while", "until", "for", "select"), "esac": ("case",), "}": ("{",)}
-_SHELL_JOINERS = ("then", "do", "else", "elif", "!")
-
-
-def _shell_commands(text, where):
-    """The simple commands of shell `text` as dicts: words (leading assignments kept), the operator before and
-    after, `top` (outside every compound command, subshell and function body, not negated and not headed by
-    a reserved word), and `fn` (the function whose body holds it, or None). Unbalanced compound nesting
-    raises Unevaluable."""
-    cmds, words, before, stack = [], [], None, []
-
-    def close(kind):
-        if not stack or stack[-1][0] not in kind:
-            raise Unevaluable("{}: unbalanced shell compound commands".format(where))
-        stack.pop()
-
-    for kind, val in _shell_tokens(text, where) + [("op", None)]:
-        if kind == "w":
-            words.append(val)
-            continue
-        if words:
-            lead, rest = [], list(words)
-            while rest and (rest[0] in _SHELL_OPENERS or rest[0] in _SHELL_CLOSERS or rest[0] in _SHELL_JOINERS):
-                head = rest.pop(0)
-                lead.append(head)
-                if head in _SHELL_CLOSERS:
-                    close(_SHELL_CLOSERS[head])
-                elif head == "{" and stack and stack[-1][0] == "fn":
-                    stack[-1] = ("{", stack[-1][1])
-                elif head in _SHELL_OPENERS:
-                    stack.append((head, None))
-                    if head in ("for", "select", "case"):
-                        rest = []
-            fn = next((name for _opened, name in reversed(stack) if name), None)
-            if rest and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\(\)", rest[0]):
-                if rest[1:2] not in ([], ["{"]):
-                    raise Unevaluable("{}: a function definition outside the subset".format(where))
-                # `f()` alone waits for its `{`; `f() {` opens the body, whose first command may follow.
-                stack.append(("{" if rest[1:] else "fn", rest[0][:-2]))
-                fn, rest = rest[0][:-2], rest[2:]
-            if rest:
-                cmds.append(dict(words=rest, before=before, after=val, fn=fn, top=not stack and not lead))
-            words = []
-        elif val in ("\n", None) and before in ("&&", "||", "|", "|&"):
-            continue  # a list or pipeline operator continues onto the next line
-        elif not (val in ("\n", None, ";;", "(", ")") or before == ")" or (val == ";" and before in ("&", ";;"))):
-            raise Unevaluable("{}: an empty command before {!r}".format(where, val))
-        if val == "(":
-            stack.append(("(", None))
-        elif val == ")" and not (stack and stack[-1][0] == "case"):
-            close(("(",))
-        if val is not None:
-            before = val
-    if stack:
-        raise Unevaluable("{}: unclosed shell compound commands".format(where))
-    return cmds
-
-
-_PYTHON_RE = re.compile(r"python(?:3(?:\.[0-9]+)?)?")
-_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-_EXPANSION_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})")
-
-
-def _program(words):
-    """`words` without leading variable assignments (the command's own words)."""
-    k = 0
-    while k < len(words) and _ASSIGNMENT_RE.match(words[k]):
-        k += 1
-    return words[k:]
-
-
-def _opf_arguments(words, functions=()):
-    """The words after the opf program when the command runs it (`opf`, a path to `opf` or `opf.py`, a
-    python interpreter running `opf.py`, or a function the recipe defines to run it), else None."""
-    words = _program(words)
-    if not words:
+def _canonical_assertion(run, planned):
+    """The canonical form `run` is exactly: ("doctor", None), ("recipe", path) for a path in `planned`,
+    else None. `run` is one line (one trailing newline allowed) of single-space-separated words."""
+    words = (run[:-1] if run.endswith("\n") else run).split(" ")
+    flag = CI_STORE_ASSERTION.decode("ascii")
+    if words[:1] == ["opf"]:
+        args = words[1:]
+    elif words[:3] == ["python3", "-I", "-B"] and len(words) > 3 and _OPF_PY_RE.fullmatch(words[3]):
+        args = words[4:]
+    elif words[:1] == ["sh"] and len(words) in (2, 3) and words[2:] in ([], [_CANONICAL_ROOT]):
+        path = words[1][2:] if words[1].startswith("./") else words[1]
+        return ("recipe", path) if path in planned else None
+    else:
         return None
-    base = words[0].rsplit("/", 1)[-1]
-    if base in ("opf", "opf.py") or words[0] in functions:
-        return words[1:]
-    if _PYTHON_RE.fullmatch(base):
-        k = 1
-        while k < len(words) and words[k].startswith("-"):
-            k += 1
-        if k < len(words) and words[k].rsplit("/", 1)[-1] == "opf.py":
-            return words[k + 1:]
-    return None
+    return ("doctor", None) if args in (["doctor", flag], ["doctor", flag, "--root", _CANONICAL_ROOT]) else None
 
 
-def _invokes_assertion(words, functions=()):
-    """Whether one simple command runs the store assertion: the opf program, then the word `doctor`, then
-    CI_STORE_ASSERTION as a whole later word (a command word sequence, never a substring)."""
-    args = _opf_arguments(words, functions)
-    return args is not None and args[:1] == ["doctor"] and CI_STORE_ASSERTION.decode("ascii") in args[1:]
+def _mentions_assertion(run, planned):
+    """Whether a run value mentions the store assertion: CI_STORE_ASSERTION as a whole option word
+    (`--require-store-fake` is another option), or the file name of a planned recipe or the shipped one."""
+    flag = re.escape(CI_STORE_ASSERTION.decode("ascii"))
+    if re.search(r"(?<![A-Za-z0-9_-])" + flag + r"(?![A-Za-z0-9_-])", run):
+        return True
+    return any(name in run for name in {path.rsplit("/", 1)[-1] for path in planned} | {_SHIPPED_RECIPE.name})
 
 
-def _fails_the_run(cmds, k, errexit):
-    """Whether command k's failure fails its script: it is not negated, conditional, piped, backgrounded or
-    inside a compound command or function body, and either the shell stops on error (errexit) and the
-    command ends its list, or a following `|| exit` with a non-zero status propagates it, or (no errexit)
-    it is the script's last command."""
-    cmd = cmds[k]
-    if not cmd["top"] or cmd["before"] not in (None, "\n", ";", "&"):
-        return False
-    if cmd["after"] == "||":
-        handler = _program(cmds[k + 1]["words"]) if k + 1 < len(cmds) else []
-        return handler[:1] == ["exit"] and handler[1:2] != ["0"] and cmds[k + 1]["after"] in (None, "\n", ";")
-    if cmd["after"] not in (None, "\n", ";"):
-        return False
-    return errexit or k == len(cmds) - 1
-
-
-def _errexit(cmds, base):
-    """The shell's stop-on-error state for a script: `base` unless a `set` turns errexit off anywhere."""
-    for cmd in cmds:
-        words = _program(cmd["words"])
-        if words[:1] == ["set"]:
-            if any(w.startswith("+") and "e" in w[1:] for w in words[1:]):
-                return False
-            if any(w == "+o" and words[j + 2:j + 3] == ["errexit"] for j, w in enumerate(words[1:])):
-                return False
-    return base
-
-
-def _recipe_asserts(path, data):
-    """Whether a planned CI recipe (a shell script a workflow step runs) runs the store assertion as a
-    command whose failure fails the recipe. A function the recipe defines counts as the opf program when
-    its body runs a parameter-expanded or opf program with "$@"."""
+def _shipped_recipe():
+    """The pack's shipped CI recipe bytes (opf/enforcement/ci/opf-ci.sh beside these tools)."""
     try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        raise Unevaluable("CI recipe {!r} is not UTF-8 text".format(path))
-    cmds = _shell_commands(text, "CI recipe {!r}".format(path))
-    functions = set()
-    for cmd in cmds:
-        words = _program(cmd["words"])
-        if cmd["fn"] and words and "$@" in words[1:] and (
-                _EXPANSION_RE.fullmatch(words[0]) or _opf_arguments(words) is not None):
-            functions.add(cmd["fn"])
-    errexit = _errexit(cmds, False)
-    return any(_invokes_assertion(cmd["words"], functions) and _fails_the_run(cmds, k, errexit)
-               for k, cmd in enumerate(cmds))
-
-
-def _runs_recipe(words, recipes):
-    """The planned recipe path a command runs (`sh PATH`, `bash PATH` or `PATH`, options before PATH
-    allowed for the shell), else None."""
-    words = _program(words)
-    if words and words[0].rsplit("/", 1)[-1] in ("sh", "bash"):
-        words = words[1:]
-        while words and words[0].startswith("-") and words[0] not in ("-c", "-s"):
-            words = words[1:]
-    path = words[0] if words else ""
-    while path.startswith("./"):
-        path = path[2:]
-    return path if path in recipes else None
+        return _SHIPPED_RECIPE.read_bytes()
+    except OSError as exc:
+        raise Unevaluable("cannot read the pack's shipped CI recipe {} ({})".format(_SHIPPED_RECIPE, exc))
 
 
 def _gated(table):
@@ -897,28 +750,38 @@ def _shell_of(*tables):
     return "bash"
 
 
-def _ci_asserts_store(path, data, recipes=None):
-    """Whether one CI workflow member configures a step whose run command invokes the store assertion
-    (spec 14.1 check 4: CI asserts store presence and identity so absence cannot pass as NOT-APPLICABLE).
-    The workflow is parsed as YAML-shaped jobs and steps; a step counts only when neither it nor its job is
-    conditional or continue-on-error, its shell is bash or sh (each runs `-e`), and its `run:` holds a
-    simple command, outside every quoted string, compound command and comment, that is the opf program's
-    `doctor` with CI_STORE_ASSERTION as a whole word (an echo, a step name, an env value or a suffixed flag
-    configures nothing), or that runs a planned recipe in `recipes` which itself runs the assertion
-    (_recipe_asserts). Undecodable or unparseable CI raises Unevaluable: CANNOT-EVALUATE, never a pass."""
+def _ci_asserts_store(path, data, recipes=None, planned=None):
+    """Whether one CI workflow member configures the store assertion (spec 14.1 check 4: CI asserts store
+    presence and identity so absence cannot pass as NOT-APPLICABLE), as (asserted, refused). `recipes` maps
+    each live, digest-matched planned recipe path to its bytes; `planned` lists every planned recipe path of
+    the row (default: the keys of `recipes`). A step asserts only in canonical form: its run value is
+    exactly one canonical assertion line (_canonical_assertion), a recipe one naming a live recipe whose
+    bytes are the pack's shipped recipe; the step carries only _CANONICAL_STEP_KEYS, no `if:` and no
+    continue-on-error other than false; its job carries no `if:`, no such continue-on-error and no `env:`,
+    and neither the job nor the workflow sets `env:` or a default working directory; its shell (the step's,
+    else the job's and then the workflow's default) is bash or sh; and no earlier step of its job runs
+    shell (it could export variables or PATH entries into the step). `refused` names every other step whose
+    run value mentions the assertion (_mentions_assertion): the caller reports those CANNOT-EVALUATE, never
+    VALID and never INVALID, because this check proves nothing about what other shell text does. A step
+    running a planned recipe that is absent or drifted asserts nothing and is not refused (the member
+    finding names it). Undecodable or unparseable CI raises Unevaluable: CANNOT-EVALUATE, never a pass."""
     recipes = recipes or {}
+    planned = list(recipes) if planned is None else list(planned)
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         raise Unevaluable("CI workflow {!r} is not UTF-8 text".format(path))
     doc = _Workflow(text, path).document()
-    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict):
+        return False, []
+    jobs = doc.get("jobs", {})
     if not isinstance(jobs, dict):
-        return False
-    found = False
+        raise Unevaluable("CI workflow {!r} jobs is not a block mapping".format(path))
+    asserted, refused = False, []
     for job_id, job in sorted(jobs.items()):
         if not isinstance(job, dict) or not isinstance(job.get("steps", []), list):
             raise Unevaluable("CI workflow {!r} job {!r} is not a mapping with a steps list".format(path, job_id))
+        shelled = False
         for n, step in enumerate(job.get("steps", [])):
             if not isinstance(step, dict):
                 raise Unevaluable("CI workflow {!r} job {!r} step {} is not a mapping".format(path, job_id, n))
@@ -928,19 +791,33 @@ def _ci_asserts_store(path, data, recipes=None):
             if not isinstance(run, str):
                 raise Unevaluable("CI workflow {!r} job {!r} step {} run is not a string".format(path, job_id, n))
             where = "CI workflow {!r} job {!r} step {}".format(path, job_id, n)
-            cmds = _shell_commands(run, where)
-            shell = _shell_of(step, _run_defaults(job, where), _run_defaults(doc, where))
-            if _gated(job) or _gated(step) or shell not in ("bash", "sh"):
+            defaults = (_run_defaults(job, where), _run_defaults(doc, where))
+            earlier, shelled = shelled, True
+            form = _canonical_assertion(run, planned)
+            why = None
+            if form is None:
+                why = "its run value is not exactly one canonical assertion line"
+            elif not set(step) <= _CANONICAL_STEP_KEYS or _gated(step):
+                why = "the step carries a key outside the canonical step ({})".format(
+                    ", ".join(sorted(set(step) - _CANONICAL_STEP_KEYS)) or "continue-on-error")
+            elif _gated(job) or "env" in job or "env" in doc:
+                why = "its job is conditional or continue-on-error, or the job or workflow sets env"
+            elif any("working-directory" in table for table in defaults):
+                why = "a default working directory moves the root it asserts"
+            elif _shell_of(step, *defaults) not in ("bash", "sh"):
+                why = "its shell is not bash or sh"
+            elif earlier:
+                why = "an earlier step of its job runs shell"
+            elif form[0] == "recipe" and form[1] not in recipes:
                 continue
-            errexit = _errexit(cmds, True)
-            for k, cmd in enumerate(cmds):
-                if not _fails_the_run(cmds, k, errexit):
-                    continue
-                recipe = _runs_recipe(cmd["words"], recipes)
-                if _invokes_assertion(cmd["words"]) or (recipe is not None
-                                                        and _recipe_asserts(recipe, recipes[recipe])):
-                    found = True
-    return found
+            elif form[0] == "recipe" and recipes[form[1]] != _shipped_recipe():
+                why = "the planned recipe {!r} is not the pack's shipped recipe {}".format(
+                    form[1], _SHIPPED_RECIPE.name)
+            if why is None:
+                asserted = True
+            elif _mentions_assertion(run, planned):
+                refused.append("{} mentions the store assertion but is not canonical: {}".format(where, why))
+    return asserted, refused
 
 
 def _check_operational(ev, rep):
@@ -951,8 +828,8 @@ def _check_operational(ev, rep):
     fails the check. Consumer repointings match the plan.' The plan accounts for a view destination by
     binding its rendered member digest, nothing else: old occupant bytes there are unaccounted drift (spec
     14.1: once apply commits, restoring an archived file takes a fresh plan), and no doctor finding is ever
-    set aside. CI asserts only through a configured step whose run command invokes the store assertion
-    (_ci_asserts_store), never a comment, a step name or an echo; unparseable CI is CANNOT-EVALUATE."""
+    set aside. CI asserts only through a canonical step (_ci_asserts_store), never a comment, a step name or
+    an echo; a non-canonical mention of the assertion and unparseable CI are CANNOT-EVALUATE."""
     plan = ev.plan
     resolution = store.resolve_store(Path(ev.product_root))
     if resolution.status == store.NOT_ADOPTED:
@@ -984,10 +861,17 @@ def _check_operational(ev, rep):
             else:
                 live[member["path"]] = data
         recipes = {path: data for path, data in live.items() if not _is_workflow(path)}
+        planned = [member["path"] for member in row["members"] if not _is_workflow(member["path"])]
         # Every live workflow is parsed (no short-circuit), so unparseable CI is CANNOT-EVALUATE, never masked.
-        asserted = [path for path, data in sorted(live.items())
-                    if _is_workflow(path) and _ci_asserts_store(path, data, recipes)]
-        if not asserted:
+        verdicts = [_ci_asserts_store(path, data, recipes, planned)
+                    for path, data in sorted(live.items()) if _is_workflow(path)]
+        refused = [why for _asserted, whys in verdicts for why in whys]
+        if any(asserted for asserted, _whys in verdicts):
+            pass
+        elif refused:
+            rep.cannot.append("no CI step asserts the store in canonical form, and this check proves nothing "
+                              "about other shell: " + "; ".join(refused))
+        else:
             rep.finding("no live, digest-matched CI workflow configures a step whose run command invokes "
                         "doctor {}: a comment, a step name, an echo or a conditional step configures "
                         "nothing, so CI does not assert store presence and "
@@ -1111,16 +995,11 @@ _CI_BYTES = (b"name: OPF\non:\n  push:\n    branches: [main]\njobs:\n  opf:\n   
              b"    steps:\n      - uses: actions/checkout@v4\n"
              b"      - name: OPF CI floor\n        run: python3 -I -B opf/tools/opf.py doctor --require-store\n")
 _CI_PATH = ".github/workflows/opf.yml"
-# A recipe-delegating workflow and recipe shaped like the shipped pack (opf/enforcement/ci): the step runs the
-# planned recipe, and the recipe's own function runs the opf program with "$@" and its status propagates.
+# A recipe-delegating workflow shaped like the shipped pack (opf/enforcement/ci): the step runs the planned
+# recipe in the invocation its usage line names, and the planned recipe is the pack's shipped recipe.
 _CI_RECIPE_PATH = "opf/enforcement/ci/opf-ci.sh"
 _CI_DELEGATING = (b"jobs:\n  opf:\n    steps:\n      - name: OPF CI floor (doctor --require-store)\n"
                   b"        run: sh opf/enforcement/ci/opf-ci.sh .\n")
-_CI_RECIPE = (b"#!/bin/sh\nset -u\nroot=${1:-.}\n"
-              b"run_step() {\n    \"$opf_python\" -I -B \"$opf_tool\" \"$@\"\n    rc=$?\n"
-              b"    case \"$rc\" in\n        0|1|2) return \"$rc\" ;;\n    esac\n    return 2\n}\n"
-              b"run_step doctor --require-store --root \"$root\" || exit $?\n"
-              b"run_step render --check --root \"$root\"\n")
 _RENDERED = b"rendered todo view\n"
 _MOVE_DEST = ".working/archive/moved/adopter/MOVE.md"
 _CONSUMER = "consumer/USES.md"
@@ -1569,22 +1448,43 @@ def self_test():
             lipsvc = _case()
         check("check-4-ci-comment-not-a-step", _only(lipsvc, _red(OPERATIONAL))
               and _says(lipsvc, OPERATIONAL, "run command invokes"))
-        # The round-2 counterexamples end to end: the assertion token only in a top-level block scalar, an
-        # echo, a suffixed flag; undecodable and unparseable CI; a quoted `#` inside a real step.
+        # The round-2 and round-3 counterexamples end to end: the assertion token only in a top-level block
+        # scalar or a suffixed flag configures nothing (INVALID); every step that mentions the assertion in a
+        # non-canonical form is CANNOT-EVALUATE, never VALID and never INVALID (unreachable after `exit 0` or
+        # `set -n`, an `|| exit 256` or `|| exit "$ZERO"` handler, an interpreter option, an and-list, an
+        # echo, a quoted hash); malformed YAML (an empty flow entry, a NUL byte) and undecodable or
+        # unparseable CI are CANNOT-EVALUATE.
+        def _run_step(script):
+            return _CI_BYTES.replace(b"        run: python3 -I -B opf/tools/opf.py doctor --require-store\n",
+                                     b"        run: |\n" + b"".join(b"          " + line + b"\n"
+                                                             for line in script.split(b"\n")))
+
         for label, ci_bytes, want in (
                 ("name-block-scalar", b"name: |\n  --require-store\non: push\njobs:\n  test:\n"
                                       b"    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n", INVALID),
-                ("echo", b"jobs:\n  t:\n    steps:\n      - run: echo --require-store\n", INVALID),
                 ("suffixed-flag", b"jobs:\n  t:\n    steps:\n      - run: opf doctor --require-store-fake\n",
                  INVALID),
+                ("echo", b"jobs:\n  t:\n    steps:\n      - run: echo --require-store\n", CANNOT_EVALUATE),
                 ("undecodable", b"\xff\xfe--require-store\n", CANNOT_EVALUATE),
                 ("unparseable", b"jobs:\n  t:\n    steps:\n      - run: opf doctor --require-store 'x\n",
                  CANNOT_EVALUATE),
-                ("quoted-hash-block", b"jobs:\n  t:\n    steps:\n      - run: |\n"
-                                      b"          printf ' # '; opf doctor --require-store\n", VALID)):
+                ("quoted-hash-block", _run_step(b"printf ' # '; opf doctor --require-store"), CANNOT_EVALUATE),
+                ("literal-block-canonical", _run_step(b"opf doctor --require-store"), VALID),
+                ("unreachable-after-exit-0", _run_step(b"exit 0\nopf doctor --require-store"), CANNOT_EVALUATE),
+                ("unreachable-after-set-n", _run_step(b"set -n\nopf doctor --require-store"), CANNOT_EVALUATE),
+                ("or-exit-256", _run_step(b"opf doctor --require-store || exit 256"), CANNOT_EVALUATE),
+                ("or-exit-expansion", _run_step(b"ZERO=0\nopf doctor --require-store || exit \"$ZERO\""),
+                 CANNOT_EVALUATE),
+                ("interpreter-option", _run_step(b"python3 --version opf.py doctor --require-store"),
+                 CANNOT_EVALUATE),
+                ("and-list", _run_step(b"opf doctor --require-store && true"), CANNOT_EVALUATE),
+                ("flow-empty-entry", b"env: [a,,b]\n" + _CI_BYTES, CANNOT_EVALUATE),
+                ("flow-empty-entry-on", _CI_BYTES.replace(b"[main]", b"[main,,b]"), CANNOT_EVALUATE),
+                ("nul-byte", _CI_BYTES.replace(b"name: OPF", b"name: O\x00PF"), CANNOT_EVALUATE)):
             with mock.patch.object(here, "_CI_BYTES", ci_bytes):
                 got = _case()
-            check("check-4-ci-" + label, _only(got, {} if want == VALID else _red(OPERATIONAL, want)))
+            check("check-4-ci-" + label, _only(got, {} if want == VALID else _red(OPERATIONAL, want))
+                  and (want != CANNOT_EVALUATE or _says(got, OPERATIONAL, "cannot evaluate")))
         ciabsent = _case(lambda r, i: _remove(r, ".github/workflows/opf.yml"))
         check("check-4-ci-member-absent", _only(ciabsent, _red(OPERATIONAL))
               and _says(ciabsent, OPERATIONAL, "is absent: nothing asserts store presence"))
@@ -1597,125 +1497,208 @@ def self_test():
         repointed = _case(lambda r, i: _put(r, _CONSUMER, b"stale consumer\n"))
         check("check-4-repoint-drifted-red", _only(repointed, _red(OPERATIONAL))
               and _says(repointed, OPERATIONAL, "planned repointing"))
-        # The CI configured-step rule, unit level: a step's run command invokes the assertion, nothing
-        # else does; undecodable or unparseable CI raises (CANNOT-EVALUATE).
+        # The CI canonical-step rule, unit level: VALID only for a canonical step, CANNOT-EVALUATE for a step
+        # that mentions the assertion in any other form and for unparseable CI, INVALID when no step
+        # mentions it.
         steps = b"jobs:\n  t:\n    runs-on: x\n    steps:\n"
+        recipe = _shipped_recipe()
 
-        def ci(step, recipes=None):
-            return _ci_asserts_store(_CI_PATH, steps + step, recipes)
-
-        def ci_cannot(data):
+        def ci(data, recipes=None, planned=None):
             try:
-                _ci_asserts_store(_CI_PATH, data)
+                asserted, refused = _ci_asserts_store(_CI_PATH, data, recipes, planned)
             except Unevaluable:
-                return True
-            return False
+                return CANNOT_EVALUATE
+            return VALID if asserted else CANNOT_EVALUATE if refused else INVALID
 
-        for label, step in (
-                ("run-line", b"      - run: opf doctor --require-store\n"),
-                ("python-opf-py", b"      - run: python3 -I -B opf/tools/opf.py doctor --require-store\n"),
-                ("double-quoted", b'      - run: "opf doctor --require-store"\n'),
-                ("block-scalar", b"      - run: |\n          echo start\n          opf doctor --require-store\n"),
-                ("folded-scalar", b"      - run: >\n          opf doctor\n          --require-store\n"),
-                ("or-exit", b"      - run: opf doctor --require-store || exit 2\n"),
-                ("set-e-off-last", b"      - run: |\n          set +e\n          opf doctor --require-store\n"),
-                ("assignment-prefix", b"      - run: OPF_X=1 opf doctor --require-store\n"),
-                ("sh-shell", b"      - shell: sh\n        run: opf doctor --require-store\n"),
+        def block(script):
+            return b"      - run: |\n" + b"".join(b"          " + line + b"\n" for line in script.split(b"\n"))
+
+        delegating = b"      - run: sh opf/enforcement/ci/opf-ci.sh .\n"
+        planned = {_CI_RECIPE_PATH: recipe}
+        for label, data, recipes, want in (
+                ("run-line", steps + b"      - run: opf doctor --require-store\n", None, VALID),
+                ("python-opf-py", steps + b"      - run: python3 -I -B opf/tools/opf.py doctor --require-store\n",
+                 None, VALID),
+                ("double-quoted", steps + b'      - run: "opf doctor --require-store"\n', None, VALID),
+                ("literal-block", steps + block(b"opf doctor --require-store"), None, VALID),
+                ("folded-scalar", steps + b"      - run: >\n          opf doctor\n          --require-store\n",
+                 None, VALID),
+                ("root-dot", steps + b"      - run: opf doctor --require-store --root .\n", None, VALID),
+                ("sh-shell", steps + b"      - shell: sh\n        run: opf doctor --require-store\n", None, VALID),
+                ("bash-shell", steps + b"      - shell: bash\n        run: opf doctor --require-store\n", None,
+                 VALID),
                 ("continue-on-error-false",
-                 b"      - continue-on-error: false\n        run: opf doctor --require-store\n"),
-                ("errexit-not-last", b"      - run: |\n          opf doctor --require-store\n          echo done\n"),
-                ("sequence-at-key-indent", b"    - run: opf doctor --require-store\n")):
-            check("ci-assert-" + label, ci(step))
-        for label, step in (
-                ("comment", b"      - run: echo  # opf doctor --require-store\n"),
-                ("step-name", b"      - name: opf doctor --require-store\n        run: y\n"),
-                ("env-value", b"      - env:\n          X: opf doctor --require-store\n        run: y\n"),
-                ("echo", b"      - run: echo opf doctor --require-store\n"),
-                ("quoted-one-word", b"      - run: opf 'doctor --require-store'\n"),
-                ("suffixed-flag", b"      - run: opf doctor --require-store-fake\n"),
-                ("other-verb", b"      - run: opf render --require-store\n"),
-                ("or-true", b"      - run: opf doctor --require-store || true\n"),
-                ("or-exit-0", b"      - run: opf doctor --require-store || exit 0\n"),
-                ("and-list", b"      - run: opf doctor --require-store && true\n"),
-                ("after-and", b"      - run: false && opf doctor --require-store\n"),
-                ("piped", b"      - run: opf doctor --require-store | cat\n"),
-                ("backgrounded", b"      - run: opf doctor --require-store &\n"),
-                ("negated", b"      - run: '! opf doctor --require-store'\n"),
-                ("in-if", b"      - run: |\n          if false; then\n            opf doctor --require-store\n"
-                          b"          fi\n"),
-                ("in-subshell-masked", b"      - run: |\n          (\n          opf doctor --require-store\n"
-                                       b"          ) || true\n"),
-                ("function-body", b"      - run: |\n          f() { opf doctor --require-store; }\n          true\n"),
-                ("command-substitution", b"      - run: x $(opf doctor --require-store)\n"),
-                ("set-e-off-mid", b"      - run: |\n          set +e\n          opf doctor --require-store\n"
-                                  b"          true\n"),
-                ("step-if", b"      - if: false\n        run: opf doctor --require-store\n"),
-                ("continue-on-error", b"      - continue-on-error: true\n        run: opf doctor --require-store\n"),
-                ("other-shell", b"      - shell: pwsh\n        run: opf doctor --require-store\n"),
-                ("recipe-not-planned", b"      - run: sh opf/enforcement/ci/opf-ci.sh .\n"),
-                ("echo-doctor", b"      - run: echo doctor --require-store\n"),
-                ("comment-hides-command", b"      - run: |\n          echo hi # ; opf doctor --require-store\n"),
-                ("set-plus-o-errexit-mid", b"      - run: |\n          set +o errexit\n"
-                                           b"          opf doctor --require-store\n          true\n"),
-                ("set-plus-euo-mid", b"      - run: |\n          set +euo pipefail\n"
-                                     b"          opf doctor --require-store\n          true\n")):
-            check("ci-refuse-" + label, not ci(step))
-        check("ci-refuse-job-if", not _ci_asserts_store(_CI_PATH, b"jobs:\n  t:\n    if: false\n    steps:\n"
-                                                                  b"      - run: opf doctor --require-store\n"))
-        check("ci-refuse-workflow-default-shell", not _ci_asserts_store(
-            _CI_PATH, b"defaults:\n  run:\n    shell: pwsh\n" + steps + b"      - run: opf doctor --require-store\n"))
-        check("ci-refuse-job-default-shell", not _ci_asserts_store(
-            _CI_PATH, b"jobs:\n  t:\n    defaults:\n      run:\n        shell: pwsh\n    steps:\n"
-            b"      - run: opf doctor --require-store\n"))
-        check("ci-refuse-sequence-value", not _ci_asserts_store(
-            _CI_PATH, b"on:\n  push:\n    branches:\n      - opf doctor --require-store\n" + steps
-            + b"      - run: echo\n"))
-        recipes = {_CI_RECIPE_PATH: _CI_RECIPE}
-        check("ci-assert-recipe-delegation", _ci_asserts_store(_CI_PATH, _CI_DELEGATING, recipes))
-        check("ci-refuse-recipe-masked", not _ci_asserts_store(_CI_PATH, _CI_DELEGATING, {
-            _CI_RECIPE_PATH: _CI_RECIPE.replace(b"|| exit $?", b"|| true")}))
-        check("ci-refuse-recipe-echo-function", not _ci_asserts_store(_CI_PATH, _CI_DELEGATING, {
-            _CI_RECIPE_PATH: _CI_RECIPE.replace(b'\"$opf_python\" -I -B \"$opf_tool\"', b"echo")}))
-        check("ci-refuse-recipe-not-last-no-exit", not _ci_asserts_store(_CI_PATH, _CI_DELEGATING, {
-            _CI_RECIPE_PATH: _CI_RECIPE.replace(b" || exit $?", b"")}))
-        check("ci-assert-recipe-dot-slash", _ci_asserts_store(_CI_PATH, _CI_DELEGATING.replace(
-            b"sh opf/", b"sh ./opf/"), recipes))
-        check("ci-refuse-recipe-function-drops-args", not _ci_asserts_store(_CI_PATH, _CI_DELEGATING, {
-            _CI_RECIPE_PATH: _CI_RECIPE.replace(b'\"$opf_tool\" \"$@\"', b'\"$opf_tool\" render')}))
-        check("ci-assert-recipe-last-command", _ci_asserts_store(_CI_PATH, _CI_DELEGATING, {
-            _CI_RECIPE_PATH: _CI_RECIPE.replace(b" || exit $?", b"").replace(
-                b'run_step render --check --root \"$root\"\n', b"")}))
-        check("ci-refuse-recipe-gated-step", not _ci_asserts_store(_CI_PATH, _CI_DELEGATING.replace(
-            b"        run:", b"        if: false\n        run:"), recipes))
+                 steps + b"      - continue-on-error: false\n        run: opf doctor --require-store\n", None, VALID),
+                ("canonical-keys", steps + b"      - name: n\n        id: i\n        timeout-minutes: 5\n"
+                                           b"        run: opf doctor --require-store\n", None, VALID),
+                ("after-uses-step", steps + b"      - uses: actions/checkout@v4\n"
+                                            b"      - run: opf doctor --require-store\n", None, VALID),
+                ("sequence-at-key-indent", steps + b"    - run: opf doctor --require-store\n", None, VALID),
+                ("flow-collections-parsed", b"on: {push: {branches: [main, 'release/**', \"a\\\"b\"]}, x: []}\n"
+                                            + steps + b"      - run: opf doctor --require-store\n", None, VALID),
+                ("canonical-beside-refused", steps + b"      - run: opf doctor --require-store\n"
+                                             b"      - run: opf doctor --require-store || true\n", None, VALID),
+                ("recipe-delegation", steps + delegating, planned, VALID),
+                ("recipe-dot-slash", steps + delegating.replace(b"sh opf/", b"sh ./opf/"), planned, VALID),
+                ("recipe-no-root", steps + delegating.replace(b".sh .\n", b".sh\n"), planned, VALID),
+                ("comment", steps + b"      - run: echo  # opf doctor --require-store\n", None, INVALID),
+                ("step-name", steps + b"      - name: opf doctor --require-store\n        run: y\n", None, INVALID),
+                ("env-value", steps + b"      - env:\n          X: opf doctor --require-store\n        run: y\n",
+                 None, INVALID),
+                ("suffixed-flag", steps + b"      - run: opf doctor --require-store-fake\n", None, INVALID),
+                ("plain-scalar-cut-at-hash", steps + b"      - run: printf ' # '; opf doctor --require-store\n",
+                 None, INVALID),
+                ("sequence-value", b"on:\n  push:\n    branches:\n      - opf doctor --require-store\n" + steps
+                 + b"      - run: echo\n", None, INVALID),
+                ("no-run-step", steps + b"      - uses: opf/doctor-require-store@v1\n", None, INVALID),
+                ("block-two-lines", steps + block(b"echo start\nopf doctor --require-store"), None, CANNOT_EVALUATE),
+                ("errexit-not-last", steps + block(b"opf doctor --require-store\necho done"), None, CANNOT_EVALUATE),
+                ("set-e-off-last", steps + block(b"set +e\nopf doctor --require-store"), None, CANNOT_EVALUATE),
+                ("exit-0-first", steps + block(b"exit 0\nopf doctor --require-store"), None, CANNOT_EVALUATE),
+                ("set-n-first", steps + block(b"set -n\nopf doctor --require-store"), None, CANNOT_EVALUATE),
+                ("or-exit-2", steps + b"      - run: opf doctor --require-store || exit 2\n", None, CANNOT_EVALUATE),
+                ("or-exit-256", steps + b"      - run: opf doctor --require-store || exit 256\n", None,
+                 CANNOT_EVALUATE),
+                ("or-true", steps + b"      - run: opf doctor --require-store || true\n", None, CANNOT_EVALUATE),
+                ("and-list", steps + b"      - run: opf doctor --require-store && true\n", None, CANNOT_EVALUATE),
+                ("after-and", steps + b"      - run: false && opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("piped", steps + b"      - run: opf doctor --require-store | cat\n", None, CANNOT_EVALUATE),
+                ("backgrounded", steps + b"      - run: opf doctor --require-store &\n", None, CANNOT_EVALUATE),
+                ("negated", steps + b"      - run: '! opf doctor --require-store'\n", None, CANNOT_EVALUATE),
+                ("in-if", steps + block(b"if false; then\n  opf doctor --require-store\nfi"), None,
+                 CANNOT_EVALUATE),
+                ("function-body", steps + block(b"f() { opf doctor --require-store; }"), None, CANNOT_EVALUATE),
+                ("command-substitution", steps + b"      - run: x $(opf doctor --require-store)\n", None,
+                 CANNOT_EVALUATE),
+                ("comment-hides-command", steps + block(b"echo hi # ; opf doctor --require-store"), None,
+                 CANNOT_EVALUATE),
+                ("echo", steps + b"      - run: echo opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("quoted-one-word", steps + b"      - run: opf 'doctor --require-store'\n", None, CANNOT_EVALUATE),
+                ("other-verb", steps + b"      - run: opf render --require-store\n", None, CANNOT_EVALUATE),
+                ("assignment-prefix", steps + b"      - run: OPF_X=1 opf doctor --require-store\n", None,
+                 CANNOT_EVALUATE),
+                ("double-space", steps + b"      - run: opf  doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("leading-space", steps + b'      - run: " opf doctor --require-store"\n', None, CANNOT_EVALUATE),
+                ("option-order", steps + b"      - run: opf doctor --root . --require-store\n", None,
+                 CANNOT_EVALUATE),
+                ("root-elsewhere", steps + b"      - run: opf doctor --require-store --root /srv/other\n", None,
+                 CANNOT_EVALUATE),
+                ("extra-option", steps + b"      - run: opf doctor --require-store --json\n", None,
+                 CANNOT_EVALUATE),
+                ("python-option", steps + b"      - run: python3 --version opf.py doctor --require-store\n", None,
+                 CANNOT_EVALUATE),
+                ("python-not-isolated", steps + b"      - run: python3 opf/tools/opf.py doctor --require-store\n",
+                 None, CANNOT_EVALUATE),
+                ("python-parent-path", steps + b"      - run: python3 -I -B ../opf.py doctor --require-store\n",
+                 None, CANNOT_EVALUATE),
+                ("step-if", steps + b"      - if: false\n        run: opf doctor --require-store\n", None,
+                 CANNOT_EVALUATE),
+                ("continue-on-error", steps + b"      - continue-on-error: true\n        run: opf doctor "
+                                              b"--require-store\n", None, CANNOT_EVALUATE),
+                ("step-env", steps + b"      - env:\n          BASH_ENV: x\n        run: opf doctor --require-store\n",
+                 None, CANNOT_EVALUATE),
+                ("step-working-directory", steps + b"      - working-directory: other\n"
+                                                   b"        run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("other-shell", steps + b"      - shell: pwsh\n        run: opf doctor --require-store\n", None,
+                 CANNOT_EVALUATE),
+                ("custom-shell", steps + b"      - shell: bash {0}\n        run: opf doctor --require-store\n", None,
+                 CANNOT_EVALUATE),
+                ("earlier-run-step", steps + b"      - run: echo PATH=x >> \"$GITHUB_ENV\"\n"
+                                             b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("job-if", b"jobs:\n  t:\n    if: false\n    steps:\n      - run: opf doctor --require-store\n", None,
+                 CANNOT_EVALUATE),
+                ("job-continue-on-error", b"jobs:\n  t:\n    continue-on-error: true\n    steps:\n"
+                                          b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("job-env", b"jobs:\n  t:\n    env:\n      SHELLOPTS: noexec\n    steps:\n"
+                            b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("workflow-env", b"env:\n  OPF_PYTHON: 'true'\n" + steps
+                 + b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("job-default-working-directory", b"jobs:\n  t:\n    defaults:\n      run:\n"
+                                                  b"        working-directory: other\n    steps:\n"
+                                                  b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("workflow-default-working-directory", b"defaults:\n  run:\n    working-directory: other\n"
+                 + steps + b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("workflow-default-shell", b"defaults:\n  run:\n    shell: pwsh\n" + steps
+                 + b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("job-default-shell", b"jobs:\n  t:\n    defaults:\n      run:\n        shell: pwsh\n    steps:\n"
+                                      b"      - run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
+                ("recipe-not-planned", steps + delegating, {}, CANNOT_EVALUATE),
+                ("recipe-sh-n", steps + delegating.replace(b"sh opf/", b"sh -n opf/"), planned, CANNOT_EVALUATE),
+                ("recipe-bash", steps + delegating.replace(b"sh opf/", b"bash opf/"), planned, CANNOT_EVALUATE),
+                ("recipe-other-root", steps + delegating.replace(b".sh .\n", b".sh /srv/other\n"), planned,
+                 CANNOT_EVALUATE),
+                ("recipe-gated-step", steps + b"      - if: false\n" + delegating.replace(b"      - ", b"        "),
+                 planned, CANNOT_EVALUATE),
+                ("recipe-masked", steps + delegating, {_CI_RECIPE_PATH: recipe.replace(b"|| exit $?", b"|| true")},
+                 CANNOT_EVALUATE),
+                ("recipe-exit-0-first", steps + delegating, {_CI_RECIPE_PATH: recipe.replace(
+                    b"\nrun_step doctor", b"\nexit 0\nrun_step doctor")}, CANNOT_EVALUATE),
+                ("recipe-echo-function", steps + delegating, {_CI_RECIPE_PATH: recipe.replace(
+                    b'"$opf_python" -I -B "$opf_tool"', b"echo")}, CANNOT_EVALUATE),
+                ("recipe-function-drops-args", steps + delegating, {_CI_RECIPE_PATH: recipe.replace(
+                    b'"$opf_tool" "$@"', b'"$opf_tool" render')}, CANNOT_EVALUATE),
+                ("recipe-non-utf8", steps + delegating, {_CI_RECIPE_PATH: b"\xff\xfe run_step doctor\n"},
+                 CANNOT_EVALUATE)):
+            check("ci-" + label, ci(data, recipes) == want)
+        # The pack's own workflow template (opf/enforcement/ci) is canonical with its recipe planned, and a
+        # refused mention without it.
+        template = (_SHIPPED_RECIPE.parent / "github-actions.yml").read_bytes()
+        check("ci-shipped-template", ci(template, planned) == VALID and ci(template) == CANNOT_EVALUATE)
+        # A planned recipe that is absent or drifted asserts nothing (INVALID, the member finding names it);
+        # a non-canonical run of it is still refused.
+        check("ci-recipe-planned-absent", ci(steps + delegating, {}, [_CI_RECIPE_PATH]) == INVALID)
+        check("ci-recipe-planned-absent-mentions", ci(steps + b"      - run: sh -n opf/enforcement/ci/opf-ci.sh .\n",
+                                                      {}, [_CI_RECIPE_PATH]) == CANNOT_EVALUATE)
+        # Unparseable CI and every construct the YAML reader does not fully parse are CANNOT-EVALUATE.
+        good = steps + b"      - run: opf doctor --require-store\n"
         for label, data in (("non-utf8", b"\xff\xfe--require-store\n"),
                             ("tab-indent", b"jobs:\n\tt: x\n"),
                             ("carriage-return", steps + b"      - run: opf doctor --require-store\r\n"),
+                            ("nul-byte", good.replace(b"runs-on: x", b"runs-on: x\x00")),
+                            ("c0-control", good.replace(b"runs-on: x", b"runs-on: x\x01")),
+                            ("escape-control", good.replace(b"runs-on: x", b"runs-on: x\x1b[0m")),
+                            ("delete-control", good.replace(b"runs-on: x", b"runs-on: x\x7f")),
+                            ("c1-control", good.replace(b"runs-on: x", "runs-on: x\x85".encode("utf-8"))),
+                            ("byte-order-mark", good.replace(b"runs-on: x", "runs-on: x\ufeff".encode("utf-8"))),
                             ("unterminated-quote", steps + b"      - run: opf doctor --require-store 'x\n"),
                             ("flow-step", steps + b"      - {run: opf doctor --require-store}\n"),
-                            ("here-document", steps + b"      - run: |\n          cat <<EOF\n"
-                                              b"          opf doctor --require-store\n          EOF\n"),
+                            ("here-document", steps + block(b"cat <<EOF\nopf doctor --require-store\nEOF")),
                             ("duplicate-key", steps + b"      - run: a\n        run: opf doctor --require-store\n"),
                             ("multi-line-plain", steps + b"      - run: opf doctor\n          --require-store\n"),
                             ("anchor", steps + b"      - run: &a opf doctor --require-store\n"),
-                            ("plain-scalar-cut-at-hash", steps + b"      - run: printf ' # '; opf doctor "
-                                                         b"--require-store\n"),
-                            ("unbalanced-compound", steps + b"      - run: |\n          if true; then\n"
-                                                    b"          opf doctor --require-store\n"),
+                            ("unbalanced-compound", steps + block(b"if true; then\nopf doctor --require-store")),
                             ("step-not-mapping", steps + b"      - opf doctor --require-store\n"),
-                            ("defaults-not-mapping", b"defaults: [x]\n" + steps
-                                                     + b"      - run: opf doctor --require-store\n"),
+                            ("defaults-not-mapping", b"defaults: [x]\n" + good),
                             ("yaml-unterminated-quote", steps + b'      - run: "opf doctor --require-store\n'),
                             ("yaml-after-quote", steps + b'      - run: "true" opf doctor --require-store\n'),
                             ("alias", steps + b"      - run: *ref\n"),
                             ("flow-run", steps + b"      - run: [opf, doctor, --require-store]\n"),
+                            ("flow-empty-entry", b"on: [a,,b]\n" + good),
+                            ("flow-leading-comma", b"on: [,a]\n" + good),
+                            ("flow-trailing-comma", b"on: [a,]\n" + good),
+                            ("flow-unclosed", b"on: [a, [b]\n" + good),
+                            ("flow-extra-closer", b"on: [a]]\n" + good),
+                            ("flow-content-after", b"on: [a] b\n" + good),
+                            ("flow-pair-in-sequence", b"on: [a: b]\n" + good),
+                            ("flow-mapping-no-space", b"on: {a:b}\n" + good),
+                            ("flow-mapping-no-value", b"on: {a}\n" + good),
+                            ("flow-mapping-key-colon", b"on: {a:xb}\n" + good),
+                            ("flow-nested-too-deep", b"on: " + b"[" * 20 + b"]" * 20 + b"\n" + good),
+                            ("flow-bad-escape", b'on: ["a\\qb"]\n' + good),
+                            ("flow-unterminated-quote", b"on: ['a]\n" + good),
+                            ("flow-indicator-entry", b"on: [&a b]\n" + good),
+                            ("plain-head-comma", b"name: ,x\n" + good),
+                            ("plain-head-closer", b"name: ]x\n" + good),
+                            ("plain-sequence-entry", b"name: - x\n" + good),
+                            ("jobs-flow", b"jobs: {}\n"),
+                            ("jobs-scalar", b"jobs: x\n"),
                             ("block-less-indented", steps + b"      - run: |\n            opf doctor --require-store\n"
                                                     b"          true\n")):
-            check("ci-cannot-" + label, ci_cannot(data))
-        try:
-            _ci_asserts_store(_CI_PATH, _CI_DELEGATING, {_CI_RECIPE_PATH: b"\xff\xfe run_step doctor\n"})
-            check("ci-cannot-recipe-non-utf8", False)
-        except Unevaluable:
-            check("ci-cannot-recipe-non-utf8", True)
+            check("ci-cannot-" + label, ci(data) == CANNOT_EVALUATE)
+        # The reader vectors above are load-bearing: each carrier key alone leaves the canonical step VALID.
+        check("ci-reader-carriers-valid", ci(b"on: [a, b]\n" + good) == VALID
+              and ci(b"on: " + b"[" * 16 + b"]" * 16 + b"\n" + good) == VALID
+              and ci(good.replace(b"runs-on: x", b"runs-on: x\ty")) == VALID and ci(b"name: x\n" + good) == VALID)
         # Check 3: archive preservation, bundle claims, the move source, and the restore exercise.
         corrupt = _case(lambda r, i: _put(r, apply.archive_rel(_RUN, "legacy/RULES.md"), b"other\n"))
         check("check-3-preimage-corrupted", _only(corrupt, _red(PRESERVATION))
@@ -1790,15 +1773,32 @@ def self_test():
                 _check_preservation(ev, direct)
                 check("check-3-foreign-preservation-red", direct.result().status == INVALID
                       and any("not under this run's adoption archive" in f for f in direct.findings))
-                _put(root, _CI_PATH, _CI_DELEGATING)
-                _put(root, _CI_RECIPE_PATH, _CI_RECIPE)
-                ev.plan = dict(plan, enforcement=[
-                    dict(row, members=[dict(path=_CI_PATH, digest=_digest(_CI_DELEGATING)),
-                                       dict(path=_CI_RECIPE_PATH, digest=_digest(_CI_RECIPE))])
-                    if row["platform"] == "ci" else row for row in plan["enforcement"]])
-                direct = _Report()
-                _check_operational(ev, direct)
-                check("check-4-recipe-delegation-direct", direct.result().status == VALID)
+
+                def _delegated(workflow, planned_recipe, live_recipe=None):
+                    _put(root, _CI_PATH, workflow)
+                    _put(root, _CI_RECIPE_PATH, planned_recipe if live_recipe is None else live_recipe)
+                    ev.plan = dict(plan, enforcement=[
+                        dict(row, members=[dict(path=_CI_PATH, digest=_digest(workflow)),
+                                           dict(path=_CI_RECIPE_PATH, digest=_digest(planned_recipe))])
+                        if row["platform"] == "ci" else row for row in plan["enforcement"]])
+                    report = _Report()
+                    try:
+                        _check_operational(ev, report)
+                    except Unevaluable as exc:
+                        report.cannot.append(str(exc))
+                    return report.result()
+
+                check("check-4-recipe-delegation-direct", _delegated(_CI_DELEGATING, recipe).status == VALID)
+                # The round-3 interpreter-option reproduction at the recipe step: `sh -n` reads the recipe
+                # without running it, so the step is not canonical (CANNOT-EVALUATE, named).
+                sh_n = _delegated(_CI_DELEGATING.replace(b"run: sh ", b"run: sh -n "), recipe)
+                check("check-4-recipe-sh-n-direct", sh_n.status == CANNOT_EVALUATE
+                      and any("not canonical" in f for f in sh_n.findings))
+                check("check-4-recipe-not-shipped-direct", _delegated(_CI_DELEGATING, recipe.replace(
+                    b"|| exit $?", b"|| true")).status == CANNOT_EVALUATE)
+                drifted = _delegated(_CI_DELEGATING, recipe, live_recipe=recipe + b"# edited\n")
+                check("check-4-recipe-drifted-direct", drifted.status == INVALID
+                      and any("does not match its planned bytes" in f for f in drifted.findings))
                 _put(root, _CI_PATH, _CI_BYTES)
                 ev.plan = dict(plan, enforcement=[row for row in plan["enforcement"]
                                                  if row["platform"] != "ci"])
