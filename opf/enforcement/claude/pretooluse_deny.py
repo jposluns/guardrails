@@ -341,11 +341,24 @@ per-platform residual coverage carry the same list):
     non-empty directory. SIMPLE_BACKUP_SUFFIX and VERSION_CONTROL only name a backup that an
     option already asks for. The other forms of the allowlisted programs that write a
     destination no operand spells literally were checked and are handled: cp, mv and ln -t and
-    --target-directory (the round-9 joins), cp --parents (the source spelling resolves against
-    the named directory as a base) and ln with one operand (the round-14 cwd join); ln -r and
-    ln -s change only the link text, and cp -T, mv -T, ln -T and mv --exchange write only named
-    operands. install (-D, -t, a backup option) is off the allowlist and takes the coarse rule,
-    so outside every bound product it is judged by that rule alone.
+    --target-directory (the round-9 joins), cp --parents and ln with one operand (the round-14
+    cwd join); ln -r and ln -s change only the link text, and cp -T, mv -T, ln -T and mv
+    --exchange write only named operands. install (-D, -t, a backup option) is off the
+    allowlist and takes the coarse rule, so outside every bound product it is judged by that
+    rule alone. Round 16 corrects the cp --parents claim: cp --parents /abs/src.txt docs writes
+    docs/abs/src.txt (the source's WHOLE spelling under the directory, leading slashes dropped;
+    GNU coreutils 9.7 confirmed), which neither the absolute resolution nor the basename join
+    reached. A cp, mv or ln carrying --parents (or an abbreviation of it) now joins EVERY
+    argument spelling, absolute and relative, whole, under every directory the command names
+    (_parents_targets), each join judged exactly and by the container check; in a plain command
+    past the word budget, where a relative spelling no longer resolves, such a command denies
+    with a named reason, and the coarse rule judges the same joins for its product-root check.
+    mv and ln on the test host reject --parents (each exits 1) and are joined the same way.
+    Round 16 also covers the git subcommands that write a file whose name they construct or an
+    option names (GIT_OUTPUT_WRITERS below and _git_output_reason): such a file landing at or
+    under a product root, or in the pack own tree, denies with a named reason unless the form
+    writes to standard output. A git configuration value naming an output location
+    (format.outputDirectory) is the configuration residual named above.
   - Platform hook-startup failures may fall through to the platform's normal permission flow.
   - Shell or interpreter wrapping of the platform itself is outside the hook's reach.
   - Over-approximation is the accepted cost of the fail-closed posture. A provably plain command
@@ -407,7 +420,16 @@ per-platform residual coverage carry the same list):
     stays allowed); and git help -m, --man, a --no- viewer negation, an abbreviated option or a
     short-option cluster (git help -av) is not plain and denies from a product root. Round 15
     withdraws the refusal of git help forms that only print (git --no-pager help -a, git help
-    -g, git help --config, git help log). R6 denies every write under a
+    -g, git help --config, git help log). Round 16: a cp, mv or ln carrying --parents joins
+    every argument spelling under every named directory, so a dot spelling (cp --parents
+    notes.txt . from a product root) or a destination spelled to climb back to itself joins as
+    that directory and denies by the container check; in a bound product or naming a product
+    path, a git subcommand that writes a file whose name it constructs or an option names
+    denies when the cwd, any directory the command names, or the option value lies at or under
+    a product root (git format-patch -1 HEAD, git diff --output=out.patch, git bugreport), git
+    clone denies whenever the cwd or any word lies in one (git clone url /elsewhere/x from a
+    product root included), and git bundle create with an option outside its recognized
+    grammar denies. R6 denies every write under a
     root whose roster
     carries any unreadable or malformed entry, R3 keeps denying a frozen path even after its
     retirement is recorded, and a protected token inside prose (a commit message) still trips a
@@ -684,6 +706,42 @@ CONTAINER_VERBS = frozenset(("rm", "rmdir", "mv", "chmod"))
 # cp -t docs X, mv X /abs/docs, ln X docs): only their directory-plus-basename joins are judged
 # (_joined_targets); a read-only program naming a directory beside a file (ls docs .) joins nothing.
 JOIN_WRITERS = frozenset(("cp", "mv", "ln"))
+# The cp option that writes each source's WHOLE spelling under the destination directory (round 16:
+# cp --parents /abs/src.txt docs writes docs/abs/src.txt), matched with any abbreviation of at least
+# one letter (_parents_option), so every argument spelling is joined whole (_parents_targets).
+PARENTS_OPTION = "--parents"
+# The git subcommands that write a file whose name they CONSTRUCT or an option names (round 16; each
+# checked against its git 2.53 -h output): format-patch (NNNN-subject.patch, the cover letter),
+# bugreport and diagnose (a suffixed report name) write into the cwd unless an output directory is
+# named, and format-patch --stdout writes no file; pack-objects (<base-name>-<hash>.pack, .idx, .rev;
+# --stdout writes no file) and index-pack (<pack>.idx, .rev, .keep) write beside a named base or
+# pack; bundle create writes its first operand (- is standard output); clone creates a directory
+# named after the repository, or its operand; mailsplit writes numbered files into its -o
+# directory. The valued options of GIT_OUTPUT_OPTIONS (any abbreviation) and, for the
+# GIT_SHORT_O_OUTPUT subcommands, -o name an output file or directory: --output on diff, diff-files,
+# diff-index, diff-tree, diff-pairs, log, show, whatchanged, range-diff and format-patch, -o or
+# --output on archive, --output-directory on format-patch, bugreport and diagnose, --export-marks on
+# fast-export and fast-import, --index-output on read-tree, --expire-to and --filter-to on gc and
+# repack, --object-dir on commit-graph and multi-pack-index. Every other git 2.53 builtin was read
+# from its -h output: an operand or option it writes is spelled whole (interpret-trailers
+# --in-place, merge-file, credential-store --file, init) and takes the exact path check, or it
+# writes only inside the repository's own git directory (fetch, hash-object -w, notes, fsck,
+# update-server-info, maintenance), or it reads the file it names (-F, --file, -O, --contents,
+# --pathspec-from-file, --import-marks, --ignore-revs-file).
+GIT_CWD_WRITERS = frozenset(("format-patch", "bugreport", "diagnose"))
+GIT_BASE_WRITERS = frozenset(("pack-objects", "index-pack"))
+GIT_SHORT_O_OUTPUT = frozenset(("archive", "bugreport", "diagnose", "format-patch", "index-pack",
+                                "mailsplit"))
+GIT_OUTPUT_OPTIONS = ("--output", "--output-directory", "--export-marks", "--index-output",
+                      "--expire-to", "--filter-to", "--object-dir")
+GIT_OUTPUT_WRITERS = GIT_CWD_WRITERS | GIT_BASE_WRITERS | GIT_SHORT_O_OUTPUT | frozenset((
+    "bundle", "clone", "diff", "diff-files", "diff-index", "diff-tree", "diff-pairs", "log",
+    "show", "whatchanged", "range-diff", "fast-export", "fast-import", "read-tree", "gc",
+    "repack", "commit-graph", "multi-pack-index"))
+# The option words git bundle create accepts before its file operand (git 2.53 -h; --version takes
+# its value glued); any other option word there leaves the file operand uncomputed (deny).
+GIT_BUNDLE_CREATE_FLAGS = frozenset(("-q", "--quiet", "--no-quiet", "--progress", "--no-progress",
+                                     "--all-progress", "--all-progress-implied"))
 # The backup-making writers (round 14): a backup option of cp, mv or ln (install takes the same
 # options but is off the rule-4 allowlist and takes the coarse rule) renames an EXISTING destination
 # to that destination plus a suffix before writing, so cp --backup=simple --suffix=.md notes.txt
@@ -1624,6 +1682,45 @@ def _joined_targets(cands, spellings):
     return out, None
 
 
+def _parents_option(words):
+    """The first --parents option word among `words` (round 16), bare or abbreviated to any prefix
+    of at least one letter, or None. A lone -- does not end the scan (a file operand spelled like
+    the option only adds joins)."""
+    for word in words:
+        name = word.split("=", 1)[0]
+        if name.startswith("--") and len(name) > 2 and PARENTS_OPTION.startswith(name):
+            return word
+    return None
+
+
+def _parents_targets(cands, spellings):
+    """The targets cp --parents writes (round 16): every resolved candidate that is a directory
+    receives every argument spelling WHOLE (its leading slashes dropped, never normalized first, so
+    a dot-dot inside it climbs from the directory as the kernel resolves it) as one more resolved
+    target (lexical and realpath): (targets, None), or (None, reason) past MAX_JUDGED_TARGETS."""
+    tails = []
+    for spelling in spellings:
+        tail = spelling.lstrip(os.sep) if spelling else ""
+        if tail and tail not in tails:
+            tails.append(tail)
+    out, seen = [], set()
+    for directory in cands:
+        if not tails or not os.path.isdir(directory):
+            continue
+        for tail in tails:
+            for cand in _candidates(os.path.join(directory, tail), None, "literal") or ():
+                if cand in seen:
+                    continue
+                seen.add(cand)
+                if len(seen) > MAX_JUDGED_TARGETS:
+                    return None, ("the command reaches more than %d candidate targets under the "
+                                  "directories it names (--parents), over the resolution budget, "
+                                  "so it cannot be fully examined; failing closed (R6)"
+                                  % (MAX_JUDGED_TARGETS,))
+                out.append(cand)
+    return out, None
+
+
 def _git_grammar(words):
     """The allowlisted git global-option grammar (round 10) over a git invocation `words` (words[0]
     is git): (index of the subcommand word, None), (None, None) when no subcommand follows the
@@ -1683,6 +1780,101 @@ def _backup_reason(words, root):
                     "docs/STATUS overwrites docs/STATUS.md), a target no word of the command spells, "
                     "and this command acts in the bound OPF product root %r, so it is denied "
                     "fail-closed (R5). %s." % (os.path.basename(word), option, root, SANCTIONED))
+    return None
+
+
+def _git_output_spots(sub, rest, cwd, cands):
+    """Where git `sub` with the words `rest` after it writes a file whose name it constructs or an
+    option names (round 16, GIT_OUTPUT_WRITERS): (spots, None), each an absolute path at or under
+    which such a file lands, or (None, reason) when the location cannot be computed. A relative
+    location is resolved against the cwd and every directory the command names (an
+    over-approximation: git -C and --work-tree move it), and a cwd-defaulted location is every one
+    of those directories."""
+    bases = [cwd] + [c for c in cands if os.path.isdir(c)]
+    values, operands, k = [], [], 0
+    while k < len(rest):
+        word = rest[k]
+        name, eq, glued = word.partition("=")
+        long_output = (name.startswith("--") and len(name) > 2
+                       and any(full.startswith(name) for full in GIT_OUTPUT_OPTIONS))
+        short_output = (sub in GIT_SHORT_O_OUTPUT and word.startswith("-")
+                        and not word.startswith("--") and "o" in word[1:])
+        if word == "--":
+            operands.extend(rest[k + 1:])
+            break
+        if long_output or short_output:
+            tail = glued if long_output else word[word.index("o", 1) + 1:]
+            if (eq if long_output else tail):
+                values.append(tail)
+            elif k + 1 < len(rest):
+                k += 1
+                values.append(rest[k])
+            else:
+                return None, "its option %r carries no value" % (word,)
+        elif not word.startswith("-") or word == "-":
+            operands.append(word)
+        k += 1
+    files, spots = list(values), []
+    if sub in GIT_CWD_WRITERS and not values:
+        if not (sub == "format-patch" and "--stdout" in rest):
+            spots.extend(bases)
+    if sub in GIT_BASE_WRITERS and not (sub == "pack-objects" and "--stdout" in rest):
+        for word in operands:
+            for base in bases:
+                spots.extend(os.path.dirname(c) for c in _candidates(word, base, "literal") or ())
+    if sub == "bundle" and rest and rest[0] == "create":
+        for word in rest[1:]:
+            if word in GIT_BUNDLE_CREATE_FLAGS or word.startswith("--version="):
+                continue
+            if word.startswith("-") and word != "-":
+                return None, ("its create option %r is outside the recognized grammar, so the "
+                              "file operand cannot be computed" % (word,))
+            if word != "-":
+                files.append(word)
+            break
+    if sub == "clone":
+        spots.extend(bases)
+        spots.extend(cands)
+    for value in files:
+        for base in bases:
+            spots.extend(_candidates(value, base, "literal") or ())
+    return spots, None
+
+
+def _git_output_reason(words, cwd, cands):
+    """The round-16 deny reason for a plain git command whose subcommand writes a file whose name
+    it constructs or an option names (_git_output_spots), or None: such a file landing at or under
+    a product root (judged with _roots_above, so a root is found whether or not it is already
+    bound) or inside the pack own tree (R8) denies, as does a location that cannot be computed. A
+    form that writes only to standard output (format-patch or pack-objects --stdout, bundle create
+    -, no output option) yields no spot, and the exact path check then applies."""
+    if os.path.basename(words[0]) != "git":
+        return None
+    i, reason = _git_grammar(words)
+    if reason is not None or i is None or words[i] not in GIT_OUTPUT_WRITERS:
+        return None
+    sub = words[i]
+    spots, reason = _git_output_spots(sub, words[i + 1:], cwd, cands)
+    if reason is not None:
+        return ("git %s writes a file whose name it constructs or an option names, and %s; it is "
+                "denied fail-closed (R5, R6). %s." % (sub, reason, SANCTIONED))
+    seen = set()
+    for spot in spots:
+        if spot in seen:
+            continue
+        seen.add(spot)
+        got, reason = _roots_above(spot)
+        if reason is not None:
+            return reason + "; failing closed (R6)"
+        where = got[0] if got else None
+        if where is None and _guard_rule(spot) is not None:
+            where = "the enforcement pack own tree"
+        if where is not None:
+            return ("git %s writes a file whose name it constructs or an option names (a "
+                    "generated patch, report or pack name, or an output option's value) at %r, "
+                    "inside %r, so it is denied whatever name it constructs (R5, R8); write to "
+                    "standard output (--stdout) or to a location outside every product root. %s."
+                    % (sub, spot, where, SANCTIONED))
     return None
 
 
@@ -1981,6 +2173,13 @@ def _exotic_bash_rule(command, cwd, tokens):
     cands, reason = _resolved_targets(words + derived + ambient, cwd)
     if reason is not None:
         return reason
+    if _parents_option(words) is not None and any(
+            os.path.basename(word) in JOIN_WRITERS for word in words):
+        # Round 16: the --parents joins (_parents_targets) take the same product-root check.
+        more, reason = _parents_targets(cands, words + derived)
+        if reason is not None:
+            return reason
+        cands = cands + more
     for cand in cands:
         got, reason = _roots_above(cand)
         if reason is not None:
@@ -2034,6 +2233,20 @@ def _plain_bash_rule(command, words, cwd):
         joined, reason = _joined_targets(cands, words[1:] + derived)
         if reason is not None:
             return reason
+        parents = _parents_option(words[1:])
+        if parents is not None:
+            # Round 16: --parents writes each source's whole spelling under the directory.
+            if not resolve_all:
+                return ("%s carries %r, which writes each source's whole spelling under the "
+                        "destination directory (cp --parents /abs/src.txt docs writes "
+                        "docs/abs/src.txt), and the command names more than %d words, past the "
+                        "word budget where a relative spelling no longer resolves, so the "
+                        "destinations cannot be computed; it is denied fail-closed (R5, R6). %s."
+                        % (program, parents, MAX_RESOLVED_WORDS, SANCTIONED))
+            more, reason = _parents_targets(cands, words[1:] + derived)
+            if reason is not None:
+                return reason
+            joined = joined + more
     if program == "ln":
         # Round 14: ln with one operand links it into the CURRENT directory under its basename
         # (ln -f notes/STATUS.md from docs replaces docs/STATUS.md), a target no word spells.
@@ -2067,6 +2280,9 @@ def _plain_bash_rule(command, words, cwd):
         return ("git %s rewrites the working tree or the index, and this command acts in the bound "
                 "OPF product root %r, so it is denied whatever its pathspec spelling (git expands "
                 "a glob or pathspec magic itself) (R5). %s." % (git_sub, roots[0], SANCTIONED))
+    reason = _git_output_reason(words, cwd, cands)
+    if reason is not None:
+        return reason
     protected = set(frozen[0]) | set(views[0]) | set(reg_idents) | set(_guarded_prefixes())
     protected.update(os.path.join(root, WORKING) for root in roots)
     if git_sub is not None:

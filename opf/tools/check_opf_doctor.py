@@ -2609,6 +2609,80 @@ def _claude_hook_self_test():
                                ("help-cluster-aw", "git help -aw")):
                 deny("bash-r15-git-" + label + "-bound-denied",
                      payload("Bash", dict(command=cmd), root), "product root")
+            # ROUND 16 (QA round 14): cp --parents writes each source's WHOLE spelling under the
+            # directory (GNU coreutils 9.7: cp --parents /abs/src.txt docs writes
+            # docs/abs/src.txt), so an absolute source lands below it; and a git subcommand that
+            # writes a file whose name it constructs or an option names (git format-patch -1 HEAD
+            # writes 0001-<subject>.patch into the cwd) denies when that file lands in a product
+            # root, unless it writes to standard output or outside every product root. The direct
+            # Write control denies the same view. On the predecessor pin 268c1920 every -denied
+            # vector in this block but that control ALLOWED.
+            deny("write-r16-parents-view-control-denied",
+                 payload("Write", dict(file_path=os.path.join(root, "docs", "STATUS.md"),
+                                       content="x"), root), "declared-view")
+            for label, cmd, where in (
+                    ("cp-parents-absolute", "cp --parents /docs//STATUS.md " + root, elsewhere),
+                    ("cp-parents-abbreviated", "cp --par /docs//STATUS.md " + root, elsewhere),
+                    ("cp-parents-target-directory",
+                     "cp --parents -t " + root + " /docs//STATUS.md", elsewhere),
+                    ("cp-parents-absolute-dot-segment",
+                     "cp --parents /docs/./STATUS.md " + root, elsewhere),
+                    ("cp-parents-absolute-climb", "cp --parents /../product/docs/STATUS.md .",
+                     elsewhere)):
+                deny("bash-r16-" + label + "-denied", payload("Bash", dict(command=cmd), where),
+                     "declared view")
+            # The join of a dot spelling under the directory is that directory, judged as a
+            # container (fail closed: the dot may be a recursive source), so a --parents command
+            # naming the product root as its destination denies by the container check.
+            deny("bash-r16-cp-parents-dot-destination-container-denied",
+                 payload("Bash", dict(command="cp --parents /docs//STATUS.md ."), root),
+                 "holds the protected path")
+            deny("bash-r16-cp-parents-not-plain-climb-denied",
+                 payload("Bash", dict(command="cp --parents /../product/docs/STATUS.md .; true"),
+                         elsewhere), "product root")
+            deny("bash-r16-cp-parents-past-word-budget-denied",
+                 payload("Bash", dict(command="cp --parents " + "a " * 520 + "."), root),
+                 "--parents")
+            allow("bash-r16-cp-parents-unprotected-allowed",
+                  payload("Bash", dict(command="cp --parents notes.txt " + elsewhere), root))
+            for label, cmd in (
+                    ("format-patch-cwd", "git format-patch -1 HEAD"),
+                    ("format-patch-o-docs", "git format-patch -1 -o docs"),
+                    ("format-patch-output-dir-abbreviated", "git format-patch -1 --output-dir=docs"),
+                    ("diff-output-glued", "git diff --output=out.patch"),
+                    ("log-output-separate", "git log --output out.txt"),
+                    ("show-output", "git show --output=out.txt HEAD"),
+                    ("range-diff-output", "git range-diff --output=out.txt a...b"),
+                    ("archive-o", "git archive -o out.tar HEAD"),
+                    ("bundle-create", "git bundle create out.bundle HEAD"),
+                    ("bundle-create-unknown-option", "git bundle create --zz out.bundle HEAD"),
+                    ("bugreport", "git bugreport"),
+                    ("diagnose", "git diagnose"),
+                    ("pack-objects-base-name", "git pack-objects pk"),
+                    ("index-pack", "git index-pack x.pack"),
+                    ("mailsplit-o-glued", "git mailsplit -omail box"),
+                    ("fast-export-marks", "git fast-export --export-marks=marks HEAD"),
+                    ("gc-expire-to", "git gc --expire-to=old"),
+                    ("commit-graph-object-dir", "git commit-graph write --object-dir objs"),
+                    ("clone-derived-name", "git clone https://example.invalid/r.git")):
+                deny("bash-r16-git-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "constructs")
+            deny("bash-r16-git-format-patch-o-product-from-outside-denied",
+                 payload("Bash", dict(command="git format-patch -1 -o "
+                                      + os.path.join(root, "docs")), elsewhere), "constructs")
+            for label, cmd in (
+                    ("format-patch-stdout", "git format-patch -1 --stdout"),
+                    ("format-patch-o-outside", "git format-patch -1 -o " + elsewhere),
+                    ("bundle-create-outside",
+                     "git bundle create " + os.path.join(elsewhere, "x.bundle") + " HEAD"),
+                    ("bundle-create-stdout", "git bundle create - HEAD"),
+                    ("pack-objects-stdout", "git pack-objects --stdout"),
+                    ("archive-stdout", "git archive HEAD"),
+                    ("log-oneline", "git log --oneline"),
+                    ("diff-output-indicator", "git diff --output-indicator-new=x")):
+                allow("bash-r16-git-" + label + "-allowed", payload("Bash", dict(command=cmd), root))
+            allow("bash-r16-git-format-patch-outside-allowed",
+                  payload("Bash", dict(command="git format-patch -1 HEAD"), elsewhere))
             # ROUND 14: a synthetic pack repository (a .git entry, the hook copied to its
             # opf/enforcement/claude/ and an opf/tools/ directory, bound to no product), so the
             # unbound repository-top vectors run on every checkout. A not-plain command reads its
