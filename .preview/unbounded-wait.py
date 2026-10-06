@@ -69,10 +69,12 @@ THREAT MODEL
     This is an accidental-habit guard, not a security boundary. The actor is a well-meaning assistant that writes an
     ordinary wait loop and forgets its bound; nothing here resists a caller that sets out to hide a loop. So every
     internal error, every input the scan cannot follow, and every malformed payload fails OPEN: no output, exit 0.
-    The one exception is an interpreter older than Python 3.14: the guard at the top of this file reads no
-    input, writes one `error: unbounded-wait.py requires Python 3.14 or newer` line to stderr and exits 2,
-    which PreToolUse treats as a deny, so every Bash call is denied until Python is upgraded or the hook's
-    entry is removed.
+    The one exception is an interpreter older than Python 3.14 that can start the hook: the guard at the top
+    of this file reads no input, writes one line beginning
+    `error: unbounded-wait.py requires Python 3.14 or newer` to stderr and exits 2, which PreToolUse treats as
+    a deny, so every Bash call is denied until Python is upgraded or the hook's entry is removed. An older
+    interpreter that cannot start the hook never reaches the guard and fails with Python's own error first, so
+    this deny does not hold for it; .preview/README.md (Installing a hook, step 4) describes those cases.
     The hook also stays silent for a verification worker process (a worker kill-switch variable; legacy spellings
     are also honoured), for a payload carrying agent_id (a subagent's call), for a tool_name other than Bash, for an
     event other than PreToolUse, for any argv other than the plain hook call or exactly `--self-test` (answered

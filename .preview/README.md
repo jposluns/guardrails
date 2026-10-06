@@ -72,12 +72,12 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `clock-inject.py` | `4d21c1cd80c6ae5db9bc36e4c90975bf616b8f758f8666b4495575c515046611` | [clock-inject.py](clock-inject.py) |
-| `future-stamp-write.py` | `103704a1fe8935d2bb2a0fedbbeb71491d0cfbb9c0e0a9978023fac8e023e352` | [future-stamp-write.py](future-stamp-write.py) |
-| `record-remove-check.py` | `bf78717585f3b6f8acd007a4f6d7a13c1b7c49f0b65d26f83ee3e2ef133b5993` | [record-remove-check.py](record-remove-check.py) |
+| `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
+| `future-stamp-write.py` | `ef77dd879701dfbaad1e4bc883bc727473a3538b57bed6538cf7da315b76e72d` | [future-stamp-write.py](future-stamp-write.py) |
+| `record-remove-check.py` | `65823cc971b01678695962c999233196985eb528eaffe3e1c5b4d2d355fe95e8` | [record-remove-check.py](record-remove-check.py) |
 | `stamp-truth-stop.py` | `662c8dd6e0a0faf0297c25b804d0b1389ab5e14573432350b3772c04ffc070d0` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `0b2d195d592e1c55d6eab90cd1ffb7691578ae1f3f4d1a565f5a32b8174c8b6b` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `c3d0536a2219b4dc010ea0e7c6d5cbb8a9b257247a5bbb93aea57c5770d2ca0b` | [ungated-record.py](ungated-record.py) |
+| `unbounded-wait.py` | `7498431b9c94f3cdc91b4389500f80517a6b894fb992216d60cf4cf526e4d58b` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `a744149afd8d22aa6318a3835d178ba3a2bcbba89a91989687e824a508e8b470` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -158,7 +158,8 @@ fails and report it; do not work around a failed check.
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
      on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer,
      which step 3 checks. On an older interpreter that can start the hook, each hook reads no input,
-     writes one `error: <file> requires Python 3.14 or newer` line to standard error, and exits.
+     writes one line beginning `error: <file> requires Python 3.14 or newer` to standard error, and
+     exits.
      Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
      `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
      assistant and nothing is blocked; for the four `PreToolUse` hooks the exit is 2 and every matching

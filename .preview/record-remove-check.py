@@ -113,10 +113,13 @@ THREAT MODEL
     destroys or recreates a record without first looking at what it holds; nothing here resists a caller that
     sets out to destroy a file. So every internal error, every input the reading cannot follow, and every
     malformed payload fails OPEN: no output, exit 0.
-    The one exception is an interpreter older than Python 3.14: the guard at the top of this file reads no
-    input, writes one `error: record-remove-check.py requires Python 3.14 or newer` line to stderr and exits 2,
-    which PreToolUse treats as a deny, so every Bash call is denied until Python is upgraded or the hook's
-    entry is removed.
+    The one exception is an interpreter older than Python 3.14 that can start the hook: the guard at the top
+    of this file reads no input, writes one line beginning
+    `error: record-remove-check.py requires Python 3.14 or newer` to stderr and exits 2, which PreToolUse
+    treats as a deny, so every Bash call is denied until Python is upgraded or the hook's entry is removed. An
+    older interpreter that cannot start the hook never reaches the guard and fails with Python's own error
+    first, so this deny does not hold for it; .preview/README.md (Installing a hook, step 4) describes those
+    cases.
     The hook also stays silent for a verification worker
     process (AIQT_HOOKS_WORKER set to "1"; or the legacy names, ORCH_WORKER set to "1" or ORCH_VERIFY_OWNER
     present at all, even empty), for a tool_name other than Bash, for an event other than PreToolUse, for a

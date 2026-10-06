@@ -50,7 +50,9 @@ from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+except ModuleNotFoundError as exc:  # not a version problem: every Python 3.14 ships tomllib
+    if exc.name != "tomllib":
+        raise  # a dependency missing while tomllib loads keeps its own diagnostic
     sys.stderr.write(
         "error: pin.py cannot import tomllib, part of the Python standard library; "
         "this installation is incomplete. Nothing was run (cannot evaluate).\n")
@@ -1403,6 +1405,45 @@ def self_test():
               "{} with {!r}".format(nt_outcome, nt_lines),
               nt_outcome == 2 and len(nt_lines) == 1 and nt_lines[0].startswith("error: pin.py cannot import "
               "tomllib, part of the Python standard library") and "requires Python" not in nt_lines[0])
+
+        # ---- TNESTED: a ModuleNotFoundError for a DIFFERENT module, raised while tomllib is being imported
+        # (a missing dependency of tomllib), is not a missing tomllib: it propagates unchanged (the same
+        # exception object, no error line, no exit). tomllib is taken out of sys.modules and a finder placed
+        # first on sys.meta_path fails its load with that error; both are put back afterwards. ----
+        nd_exc = ModuleNotFoundError("No module named '_aiqt_absent_dependency'", name="_aiqt_absent_dependency")
+
+        class _NestedMissingFinder:
+            def find_spec(self, name, path=None, target=None):
+                return importlib.util.spec_from_loader(name, self) if name == "tomllib" else None
+
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                raise nd_exc
+
+        nd_err = io.StringIO()
+        nd_finder = _NestedMissingFinder()
+        nd_saved = sys.modules.pop("tomllib", None), list(sys.path)
+        sys.meta_path.insert(0, nd_finder)
+        try:
+            nd_spec = importlib.util.spec_from_file_location("_pin_nested_missing", os.path.abspath(__file__))
+            with redirect_stderr(nd_err):
+                nd_spec.loader.exec_module(importlib.util.module_from_spec(nd_spec))
+            nd_outcome = "loaded"
+        except SystemExit as exc:
+            nd_outcome = "exit {}".format(exc.code)
+        except ModuleNotFoundError as exc:
+            nd_outcome = exc
+        finally:
+            sys.meta_path.remove(nd_finder)
+            sys.modules.pop("tomllib", None)
+            if nd_saved[0] is not None:
+                sys.modules["tomllib"] = nd_saved[0]
+            sys.path[:] = nd_saved[1]
+        check("TNESTED: a missing dependency raised while tomllib loads propagates unchanged, got {!r} with "
+              "{!r}".format(nd_outcome, nd_err.getvalue()),
+              nd_outcome is nd_exc and nd_exc.name == "_aiqt_absent_dependency" and nd_err.getvalue() == "")
 
         # ---- TBIG (F-TOML-BARE-VALUEERROR-CLASS): an integer literal past CPython's 4300-digit int-string
         # limit makes tomllib raise a BARE ValueError (not TOMLDecodeError); the contained TOML reader must
