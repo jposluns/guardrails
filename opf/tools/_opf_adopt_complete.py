@@ -931,6 +931,9 @@ _EXTRA_ENTRIES = ()
 # Extra empty_directories paths, and (path, changes) edits to existing entry rows, sealed and bound alike.
 _EXTRA_EMPTY = ()
 _ENTRY_EDITS = ()
+# Extra (platform, path, bytes) enforcement members a vector appends after that platform's canonical members;
+# the fixture plants them and its plan records them (the install-pack op included), so they are digest-bound.
+_EXTRA_MEMBERS = ()
 # The planner's recorded source roots for the fixture (sorted, non-overlapping, as _opf_adopt_plan._roots).
 _SOURCE_ROOTS = ["adopter", "legacy", "notes"]
 _CI_PATH = ".github/workflows/opf.yml"
@@ -1034,6 +1037,8 @@ def _fixture(root):
                               dict(path=_CI_RECIPE_REL, digest=_digest(recipe))]
         else:
             row["members"] = [dict(path=m["path"], digest=_digest(_PACK[m["path"]])) for m in row["members"]]
+            row["members"] += [dict(path=path, digest=_digest(data))
+                               for platform, path, data in _EXTRA_MEMBERS if platform == row["platform"]]
     init = schema.canonical_op("init-store")
     init["members"] = [dict(path=".working/toml/manifest.toml", digest=_digest(manifest))]
     render = schema.canonical_op("render-views")
@@ -1092,6 +1097,8 @@ def _fixture(root):
     _put(root, _CI_PATH, workflow)
     _put(root, _CI_RECIPE_REL, recipe)
     for rel, data in _PACK.items():
+        _put(root, rel, data)
+    for _platform, rel, data in _EXTRA_MEMBERS:
         _put(root, rel, data)
     return _emit(inventory)
 
@@ -1274,7 +1281,8 @@ def self_test():
 
     try:
         # The U25 switch as shipped (off): the genuine floor installed unmodified leaves check 4
-        # CANNOT-EVALUATE naming U25 and nothing else, every other check green; an earlier check-4 failure
+        # CANNOT-EVALUATE naming U25 and nothing else, checks 1, 2, 3 and 6 green and check 5 at its baseline
+        # (CANNOT-EVALUATE naming PR6 while that switch is off, see _only); an earlier check-4 failure
         # keeps its own reason (never U25), whether a finding (de-adopted), a modified live recipe, or a
         # reference file that does not match its embedded digest.
         def _u25_only(results):
@@ -1395,6 +1403,27 @@ def self_test():
                 check("check-5-member-" + label + "-red", _only(got, pair)
                       and _says(got, WIRING, "claude-code enforcement surface (deny-hook) is not installed")
                       and sorted(set(p for p, _probe in watched.calls)) == ["pre-commit"])
+            # Every member of a probed row is checked, not only the first: with a second pre-commit member
+            # planted and planned (frozen_plan accepts it) the surface is green, and either member absent or
+            # drifted reds checks 1 and 5 and leaves the pre-commit row unprobed. A loop over the first member
+            # alone (or the last alone) passes one of these vectors and fails another.
+            second = ".opf/hooks/zz-second-deny"
+            with mock.patch.object(here, "_EXTRA_MEMBERS", (("pre-commit", second, b"#!/bin/sh\nexit 1\n"),)):
+                watched = _Surface()
+                got = _case(lambda r, i, w=watched: dict(prober=w))
+                check("check-5-second-member-control-valid", got[WIRING].status == VALID and _only(got, {})
+                      and sorted(set(p for p, _probe in watched.calls)) == ["claude-code", "pre-commit"])
+                for label, member, mutate in (
+                        ("second-absent", second, lambda r: _remove(r, second)),
+                        ("second-drifted", second, lambda r: _put(r, second, b"tampered bytes\n")),
+                        ("first-absent", ".opf/hooks/pre-commit", lambda r: _remove(r, ".opf/hooks/pre-commit"))):
+                    watched = _Surface()
+                    got = _case(lambda r, i, m=mutate, w=watched: (m(r), dict(prober=w))[1])
+                    check("check-5-member-" + label + "-red", _only(got, pair)
+                          and _says(got, WIRING, "pre-commit enforcement surface (staged-pre-commit) is not installed")
+                          and _says(got, WIRING, "member {!r} is absent".format(member) if label.endswith("absent")
+                                    else "member {!r} does not hold its planned bytes".format(member))
+                          and sorted(set(p for p, _probe in watched.calls)) == ["claude-code"])
             # Instruction members are not the probed surface: their drift moves check 1 only, never check 5.
             check("check-5-instructions-member-not-probed", _only(_case(lambda r, i: _put(
                 r, "AGENTS.md", b"tampered\n")), _red(AUTHORITY)))
@@ -2001,6 +2030,27 @@ def self_test():
                     direct.cannot.append(str(exc))
                 check("check-5-no-render-target-cannot", direct.result().status == CANNOT_EVALUATE
                       and any("render probe has no target" in f for f in direct.result().findings))
+                # Each probe target is derived from the plan and the run, never a default path: by direct call
+                # (the plan validator refuses a store root other than ".") a store under nested with another machine
+                # directory, views rendered under nested/views and another run's id move every target with
+                # them, and the render probe takes the first planned view. Each literal is spelled out, so
+                # replacing store_manifest, the view composition or archive_rel with a default path fails.
+                other_run = "adopt-20261001T000000Z-fedcba9876543210"
+                rendered = [dict(op, store_root="nested/views", members=op["members"] + [dict(
+                    path=".working/LATER.md", digest=_digest(b"later\n"))]) if op["op"] == "render-views" else op
+                            for op in plan["ops"]]
+                ev.plan = dict(plan, store=dict(plan["store"], store_root="nested", machine_rel=".working/machine"),
+                               ops=rendered)
+                ev.run_id = other_run
+                try:
+                    targets = [(name, path) for name, _expect, _actor, _label, path in _wiring_probes(ev)]
+                finally:
+                    ev.run_id = _RUN
+                check("check-5-probe-targets-follow-plan", targets == [
+                    ("store-write", "nested/.working/machine/manifest.toml"),
+                    ("archive-write", ".working/archive/adoption/" + other_run + "/" + _ARCHIVE_PROBE),
+                    ("sanctioned-writer", "nested/.working/machine/manifest.toml"),
+                    ("render", "nested/views/.working/TODO.md")])
                 # Check 3 re-reads the bundle inventory after verify_bundle: that read is held to the apply
                 # shell's own inventory validator too (here verify_bundle is stubbed VALID, so only it grades).
                 ev.plan = plan
