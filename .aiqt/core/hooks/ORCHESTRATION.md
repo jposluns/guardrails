@@ -260,9 +260,18 @@ or nested below an orchestrated tree cannot hide its binding. This hook reads ea
 its own, so a local `.aiqt/orchestration.local.json` without a binding cannot hide a binding in the
 committed `.aiqt/orchestration.json`. In a bound session, a plain command that names a registry file
 or the `.aiqt` directory is refused unless its command word only reads (`cat`, `head`, `tail`, `wc`,
-`ls`, `stat`, `grep`, `jq`, `cmp`, `diff`). A command that changes the registry without naming it (a
-whole-tree checkout, reset, stash or clean, the removal of a parent directory, a script) is not seen
-and switches the hook off. When git cannot resolve the session
+`ls`, `stat`, `grep`, `jq`, `cmp`, `diff`). A git command whose allowlisted subcommand can write or
+remove work-tree files or the index (`add`, `rm`, `mv`, `stash`, `switch`, `checkout`, `restore`,
+`reset`, `merge`, `rebase`, `cherry-pick`, `revert`, `worktree`, `clone`) is judged by the registry
+files' git state, read at hook time: it is refused while either registry file is tracked or not
+ignored, so keep `.aiqt/orchestration.local.json` and `.aiqt/orchestration.json` untracked and listed
+in `.gitignore` or `.git/info/exclude`. With both untracked and ignored, only the forms that reach an
+ignored file are refused (`add --force`, `stash --all`, `worktree move` and `remove`, `mv` while the
+registry is below the top level, and a subcommand that writes a commit's tree into the work tree
+while a commit reachable from a ref, a reflog or `FETCH_HEAD` tracks a registry path, since git
+overwrites an ignored file such a tree tracks). A dangling commit named by its id is not searched. A
+command other than git that changes the registry without naming it (the removal of a parent
+directory, a script) is not seen and switches the hook off. When git cannot resolve the session
 repository (a broken configuration, a refused ownership check, a deleted cwd), or resolves one with
 no binding, the hook looks for the registry on the cwd's ancestors, so a `core.worktree` setting that
 moves the top level cannot turn the check off. If git cannot resolve the repository, or resolves one

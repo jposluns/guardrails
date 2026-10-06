@@ -324,6 +324,11 @@ class RdpFixture:
             reg["review_dispatch"] = binding
         (self.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(reg), encoding="utf-8")
 
+    def ignore_registry(self, patterns=(".aiqt/orchestration.local.json", ".aiqt/orchestration.json")):
+        exclude = self.root / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("".join(p + "\n" for p in patterns), encoding="utf-8")
+
     def authority(self, out, code=0, sleep=0):
         self.ctl.write_text(json.dumps(dict(out=out, exit=code, sleep=sleep)), encoding="utf-8")
 
@@ -1278,6 +1283,8 @@ def _rdp_scope_cases(base, plain):
             hook_event_name="PreToolUse", cwd=str(rg.root / ".aiqt" / "core"), session_id="s1", tool_name="Bash",
             tool_input=dict(command=c, run_in_background=False)))) for c in ("rm -rf ..", "git rm -rq -C..")],
         ["deny"] * 11)
+    # The registry ignored, so a git add or rm is judged by its words alone (_rdp_git_tree_write).
+    rg.ignore_registry()
     check("rdp/plain-aiqt-subpath-and-glob-prose-allow", [_rdp_kind(rg.run(c)) for c in (
         "git add .aiqt/core/x.toml", "git commit -m 'why?'", "touch .aiqt/core/x.toml", "git rm -q '*.py'")],
         ["allow"] * 4)
@@ -1390,6 +1397,7 @@ def _rdp_scope_cases(base, plain):
           ["unverifiable", "deny", "unverifiable", True])
     # The checks below use a fixture of their own, so a registry removed above cannot make them pass.
     go = RdpFixture(base, "gitops")
+    go.ignore_registry()
     programs = ("git grep -O'rm -rf x' a", "git grep -iO a", "git grep --open a", "git grep -e a -O",
                 "git -p status", "git --paginate log", "git diff --ext-diff", "git log --textconv",
                 "git cat-file --filters HEAD:seed.txt", "git log --show-signature", "git log --format='%G?'",
@@ -1424,7 +1432,8 @@ def _rdp_scope_cases(base, plain):
                 "git cat-file --filter=blob:none --batch-check", "git commit -m 'fix -x and %G'",
                 "git rebase -i HEAD", "git --exec-path", "git log --grep --ext-diff",
                 "git log --grep=--ext-diff", "git show --author --show-signature", "git commit -m --gpg-sign",
-                "git grep -A 1 -e -O", "git tag -m -s v1", "git log --grep --help", "git clone -o -u a b")
+                "git grep -A 1 -e -O", "git tag -m -s v1", "git log --grep --help", "git clone -o -u a b",
+                "git log --grep --format=%G --format=%s")
     check("rdp/plain-git-option-operands-parsed", [_rdp_kind(go.run(c)) for c in operands],
           ["allow"] * len(operands))
     patches = ("git log -Sx -p -- .aiqt", "git log -pSconfig -- .aiqt", "git log -cS x -- .aiqt",
@@ -1480,6 +1489,76 @@ def _rdp_scope_cases(base, plain):
                "git clone a b", "git", "git --version")
     check("rdp/plain-git-allowlisted-subcommand-allows", [_rdp_kind(go.run(c)) for c in allowed],
           ["allow"] * len(allowed))
+    # A git subcommand that can write or remove work-tree files or the index is judged by the registry's
+    # git state: with the registry tracked, git add -A then git rm -rf ., and git rm --pathspec-from-file
+    # naming it, are refused before either runs; with it untracked and ignored, each is allowed, runs, and
+    # leaves the registry in place, the binding still enforced.
+    def _tree_sequence(name, commands, track):
+        fx = RdpFixture(base, name)
+        (fx.root / "paths.txt").write_text(".aiqt/orchestration.local.json\n", encoding="utf-8")
+        if track:
+            _rdp_git(fx.root, "add", "-f", ".aiqt/orchestration.local.json")
+            _rdp_git(fx.root, "commit", "-q", "-m", "track the registry")
+        else:
+            fx.ignore_registry()
+        got = []
+        for c in commands:
+            got.append(_rdp_kind(fx.run(c)))
+            if got[-1] == "allow":
+                subprocess.run(["git", "-C", str(fx.root)] + c.split(" ")[1:], capture_output=True, timeout=30)
+        return got + [_rdp_kind(fx.dispatch("/missing")), (fx.root / ".aiqt" / "orchestration.local.json").is_file()]
+    rm_tree = ("git add -A", "git rm -rf .")
+    check("rdp/git-rm-tree-sequence-judged-by-registry-state",
+          [_tree_sequence("rmtree-tracked", rm_tree, True), _tree_sequence("rmtree-ignored", rm_tree, False)],
+          [["deny", "deny", "unverifiable", True], ["allow", "allow", "unverifiable", True]])
+    rm_list = ("git rm --pathspec-from-file=paths.txt",)
+    check("rdp/git-rm-pathspec-file-judged-by-registry-state",
+          [_tree_sequence("rmlist-tracked", rm_list, True), _tree_sequence("rmlist-ignored", rm_list, False)],
+          [["deny", "unverifiable", True], ["allow", "unverifiable", True]])
+    # Untracked but not ignored, the registry is refused the same, and the reason says how to fix it. With
+    # it untracked and ignored, only the forms that reach an ignored file are refused (add --force, stash
+    # --all, worktree move and remove, a subcommand pointed elsewhere), and a subcommand that writes a
+    # commit's tree into the work tree is refused while a commit the repository reaches tracks a registry
+    # path, since git overwrites an ignored file such a tree tracks.
+    nt = RdpFixture(base, "tree-unignored")
+    nt_result = nt.run("git add x")
+    nt_specific = nt_result[1].get("hookSpecificOutput") if isinstance(nt_result[1], dict) else None
+    nt_reason = nt_specific.get("permissionDecisionReason", "") if isinstance(nt_specific, dict) else ""
+    check("rdp/git-tree-write-unignored-registry-denies",
+          (_rdp_kind(nt_result), "(not ignored)" in nt_reason, "untracks each registry file" in nt_reason),
+          ("deny", True, True))
+    reach = ("git add -f x", "git add --forc x", "git add -Af", "git stash -a", "git stash push --all",
+             "git stash -ka", "git worktree remove ../x", "git worktree move a b", "git -C . add x",
+             "git --work-tree=. rm x")
+    check("rdp/git-tree-write-ignored-reaching-forms-deny", [_rdp_kind(go.run(c)) for c in reach],
+          ["deny"] * len(reach))
+    keep = ("git add -A", "git add .", "git rm -r --cached .", "git stash -u", "git stash -m all",
+            "git reset --hard", "git checkout -- .", "git restore .", "git worktree add ../wt-x")
+    check("rdp/git-tree-write-ignored-plain-forms-allow", [_rdp_kind(go.run(c)) for c in keep],
+          ["allow"] * len(keep))
+    hx = RdpFixture(base, "tree-history")
+    _rdp_git(hx.root, "switch", "-q", "-c", "evil")
+    (hx.root / "evil.txt").write_text("x\n", encoding="utf-8")
+    _rdp_git(hx.root, "add", "-f", "evil.txt", ".aiqt/orchestration.local.json")
+    _rdp_git(hx.root, "commit", "-q", "-m", "evil")
+    _rdp_git(hx.root, "switch", "-q", "main")
+    (hx.root / ".aiqt").mkdir(exist_ok=True)
+    hx.write_registry(hx.binding)
+    hx.ignore_registry()
+    checkouts = ("git checkout evil", "git switch evil", "git reset --hard evil", "git restore --source=evil .",
+                 "git merge evil", "git cherry-pick evil", "git rebase evil", "git stash")
+    hx_got = [_rdp_kind(hx.run(c)) for c in checkouts] + [_rdp_kind(hx.run("git add x"))]
+    check("rdp/git-tree-checkout-reachable-registry-denies", hx_got, ["deny"] * len(checkouts) + ["allow"])
+    # A registry below the top level of its work tree: git mv of a directory carries the ignored files
+    # inside it, so mv is refused there.
+    mv = RdpFixture(base, "tree-mv")
+    (mv.root / "proj" / ".aiqt").mkdir(parents=True)
+    (mv.root / ".aiqt" / "orchestration.local.json").replace(mv.root / "proj" / ".aiqt" / "orchestration.local.json")
+    mv.ignore_registry(("orchestration.local.json", "orchestration.json"))
+    mv_got = [_rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(mv.root / "proj"), session_id="s1", tool_name="Bash",
+        tool_input=dict(command=c)))) for c in ("git mv a b", "git rm a")]
+    check("rdp/git-mv-registry-below-top-denies", mv_got, ["deny", "allow"])
     # A linked worktree beside a main worktree whose git directory is separated (core.worktree naming the
     # main worktree): a dispatch is withheld, and the two calls that would point core.worktree at an empty
     # directory META/get, and so unscope the session, end at the config write, whose trailing word is a
