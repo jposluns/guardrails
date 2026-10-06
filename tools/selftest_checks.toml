@@ -504,6 +504,11 @@ expected-check-ids = [
   "ci/scan-mixed-page-continues",
   "ci/scan-malformed-identity-fail-closed",
   "ci/single-source-malformed-run-fail-closed",
+  "ci/duplicate-run-id-fail-closed",
+  "ci/scan-end-unique-count-fail-closed",
+  "ci/scan-page-count-below-position-fail-closed",
+  "ci/scan-short-middle-page-fail-closed",
+  "ci/scan-created-at-calendar-valid",
   "ci/filtered-only-failure-reported",
   "ci/jq-step-direct-cases",
 ]

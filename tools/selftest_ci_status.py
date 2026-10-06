@@ -356,7 +356,7 @@ def main(report_path=None):
             conflict = run_jq(program, [page([success_a, conflict_a], 1)], head_sha)
             mismatched = run_jq(program, [page([success_a], 2)], head_sha)
             differing = run_jq(
-                program, [page([success_a], 1), page([success_a], 2)], head_sha)
+                program, [page([success_a], 2), page([success_b], 3)], head_sha)
             successful = run_jq(program, [page([success_b, success_a], 2)], head_sha)
             too_many = run_jq(program, [page(overfull, 101)], head_sha)
             wrong_target = run_jq(program, [page([wrong_head], 1)], head_sha)
@@ -505,6 +505,9 @@ def main(report_path=None):
 
         # The unfiltered listing failing or stopping short is an API error (fail closed), both when
         # the filter found nothing and when it found only green runs.
+        more_commits = [workflow_run(6000 + index, "completed", "success",
+                                     "More commit run {}".format(index), "e" * 40)
+                        for index in range(40)]
         scan_closed = []
         for filtered in ([page([])], [page([success_a])]):
             rc, output, _calls = fixture.invoke([{
@@ -512,7 +515,7 @@ def main(report_path=None):
             scan_closed.append((rc, "could not read workflow runs" in output))
             rc, output, _calls = fixture.invoke([{
                 "filtered": filtered,
-                "scan": [page(other_commits, 250), page(other_commits[:40], 250)]}])
+                "scan": [page(other_commits, 250), page(more_commits, 250)]}])
             scan_closed.append((rc, "incomplete unfiltered workflow-runs listing" in output))
         check("ci/scan-unanswered-fail-closed", scan_closed, [(2, True)] * 4)
 
@@ -620,6 +623,78 @@ def main(report_path=None):
         malformed_run_seen.append((rc, "malformed workflow run record" in output))
         check("ci/single-source-malformed-run-fail-closed", malformed_run_seen, [(2, True)] * 2)
 
+        # Round 2 MAJOR: completeness counts unique run IDs, not rows. A run ID listed twice by one source
+        # means offset pagination shifted between page reads and some other run went unseen: a scan page
+        # [ok, ok] with total_count 2 must not be green, two copies of another commit's run must not read
+        # as "no run", a duplicate on full pages that the age bound ended must not pass, and neither may
+        # a duplicate within the filtered source. Each is re-read once in one-shot mode, then exit 2.
+        old_tail = other_commits[1:] + [dict(old_commits[0])]
+        duplicates = []
+        for polls, source in (
+                ([{"filtered": [page([success_a])], "scan": [page([success_a, success_a])]}],
+                 "unfiltered"),
+                ([{"filtered": [page([])], "scan": [page([other, other])]}], "unfiltered"),
+                ([{"filtered": [page([success_a])],
+                   "scan": [page(old_tail, 300), page(old_commits, 300)]}], "unfiltered"),
+                ([{"filtered": [page([success_a, success_a], 1)], "scan": [page([success_a])]}],
+                 "head_sha-filtered")):
+            rc, output, calls = fixture.invoke(polls)
+            duplicates.append(
+                (rc, calls, "duplicate run id within the {} listing".format(source) in output,
+                 "no workflow run registered" in output))
+        check("ci/duplicate-run-id-fail-closed", duplicates, [(2, 2, True, False)] * 4)
+
+        # A scan that reached the end of the listing reconciles unique run IDs against total_count even
+        # when every page's own count is in range.
+        rc, output, _calls = fixture.invoke([{
+            "filtered": [page([success_a])], "scan": [page([success_a], 2)]}])
+        check("ci/scan-end-unique-count-fail-closed",
+              (rc, "incomplete unfiltered workflow-runs listing" in output), (2, True))
+
+        # Round 2 MEDIUM: every scan page's total_count must cover the records up to and including it,
+        # full or short and whatever ended the scan: a single full page of runs older than the bound with
+        # total_count 0, a full second page below 200, and a full first page below 100 before a
+        # consistent short page. A rising count over full pages ended by the bound stays green.
+        overruns = []
+        for scan in ([page(old_commits, 0)],
+                     [page(other_commits, 101), page(old_commits, 150)],
+                     [page(other_commits, 50), page([success_a], 101)]):
+            rc, output, _calls = fixture.invoke([{"filtered": [page([success_a])], "scan": scan}])
+            overruns.append((rc, "incomplete unfiltered workflow-runs listing" in output))
+        rc, _output, _calls = fixture.invoke([{
+            "filtered": [page([success_a])],
+            "scan": [page(other_commits, 150), page(old_commits, 250)]}])
+        overruns.append((rc, fixture.scan_pages))
+        check("ci/scan-page-count-below-position-fail-closed", overruns,
+              [(2, True)] * 3 + [(0, [1, 2])])
+
+        # A short page before the last is incomplete even when every total_count covers its position
+        # and the page after it ends the scan at the age bound. The script's loop stops at any short
+        # page, so only the verdict program can be handed this shape: it is checked there directly.
+        try:
+            short_middle = run_jq(program, [page([success_a])], head_sha,
+                                  [page(other_commits[:50], 300), page(old_commits, 300)])
+            short_middle_result = (
+                short_middle.returncode != 0
+                and "incomplete unfiltered workflow-runs listing" in short_middle.stderr)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            short_middle_result = "jq-filter setup failed: {}".format(exc)
+        check("ci/scan-short-middle-page-fail-closed", short_middle_result, True)
+
+        # Round 2 MINOR: created_at must be calendar-valid (formats back to the same string). February
+        # 31st matches the pattern and parses, so only the round trip rejects it; an hour of 24 is
+        # refused by the parser itself.
+        bad_dates = []
+        for created_at in ("2026-02-31T00:00:00Z", "2026-01-01T24:00:00Z"):
+            for filtered in ([page([success_a])], [page([])]):
+                rc, output, _calls = fixture.invoke([{
+                    "filtered": filtered,
+                    "scan": [page([success_a, dict(other, created_at=created_at)])]}])
+                bad_dates.append(
+                    (rc, "malformed workflow run record" in output,
+                     "no workflow run registered" in output))
+        check("ci/scan-created-at-calendar-valid", bad_dates, [(2, True, False)] * 4)
+
         # A failure seen ONLY by the head_sha query is still reported.
         rc, output, _calls = fixture.invoke([{
             "filtered": [page([success_a, failed_b])], "scan": [page([success_a])]}])
@@ -638,6 +713,8 @@ def main(report_path=None):
                        [page([success_a, dict(other, head_sha="")])]),
                 run_jq(program, [page([success_a])], head_sha,
                        [page(other_commits[:50], 150), page(old_commits, 150)]),
+                run_jq(program, page([dict(other, created_at="2026-02-31T00:00:00Z")]), head_sha,
+                       mode="step"),
             )
             step_result = (
                 (steps[0].returncode, steps[0].stdout.split("\n")[0]),
@@ -648,11 +725,12 @@ def main(report_path=None):
                 steps[5].returncode != 0 and "malformed workflow run record" in steps[5].stderr,
                 steps[6].returncode != 0
                 and "incomplete unfiltered workflow-runs listing" in steps[6].stderr,
+                steps[7].returncode != 0 and "malformed workflow run record" in steps[7].stderr,
             )
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             step_result = "jq-step setup failed: {}".format(exc)
         check("ci/jq-step-direct-cases", step_result,
-              ((0, "stop"), (0, "more"), (0, "stop"), True, True, True, True))
+              ((0, "stop"), (0, "more"), (0, "stop"), True, True, True, True, True))
 
     if not _write_report(report_path):
         return 2

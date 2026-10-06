@@ -80,9 +80,10 @@ SCAN_MAX_PAGES=50
 SCAN_FROM="$COMMIT_TIME"
 [ "$NOW" -lt "$SCAN_FROM" ] && SCAN_FROM="$NOW"
 LOWER_BOUND=$(( SCAN_FROM - SCAN_MARGIN_SECONDS ))
-# One-shot mode re-reads once, after RETRY_SECONDS, when the sources disagree about a run or the
-# listing shrank between pages (both are the signature of a run changing state, or being deleted,
-# between requests); a disagreement that persists is reported as an API error (exit 2).
+# One-shot mode re-reads once, after RETRY_SECONDS, when the sources disagree about a run, the
+# listing shrank between pages, or one source listed a run ID twice (each is the signature of a run
+# changing state, being deleted, or being created between requests); a disagreement that persists is
+# reported as an API error (exit 2).
 RETRY_SECONDS=5
 
 POLL_SECONDS=15
@@ -117,12 +118,17 @@ SETTLE_OBSERVATIONS=5
 #
 # Fail closed (API error, never "no run" and never a verdict) when: either source fails; a page or any
 # record in either source is malformed (every scan record's id, head_sha, and created_at are validated
-# before it counts toward completeness or results, and a matching scan record is validated as fully
-# as a filtered one); the scan did not end on a terminal page within SCAN_MAX_PAGES; a page other than
-# the last is not full; a short last page disagrees with its own total_count; the listing's total_count
-# fell between two pages; the sources, or two pages, disagree about a run ID's head_sha (checked across
-# ALL records, BEFORE selecting this commit's runs); the filtered source's unique count differs from its
-# total_count; or two records of this commit's run disagree about status, conclusion, name, or URL.
+# before it counts toward completeness or results, created_at must be a calendar-valid UTC time that
+# formats back to the same string, and a matching scan record is validated as fully as a filtered one);
+# the scan did not end on a terminal page within SCAN_MAX_PAGES; a page other than the last is not full;
+# any scan page's total_count is below the number of records up to and including that page, whether the
+# page is full or short and whatever ended the scan; the listing's total_count fell between two pages;
+# the sources, or two pages, disagree about a run ID's head_sha (checked across ALL records, BEFORE
+# selecting this commit's runs); two records of this commit's run disagree about status, conclusion,
+# name, or URL; one source lists a run ID twice (offset pagination shifted between page reads, so some
+# other run went unseen); a scan that reached the end of the listing (a short last page) holds a number
+# of unique run IDs other than that page's total_count; or the filtered source's unique count differs
+# from its total_count.
 #
 # DELETION DURING THE SCAN. Offset pagination skips a run only when the runs ahead of the page boundary
 # shift up, which needs more deletions ahead of the boundary than insertions; new runs enter at the
@@ -151,8 +157,7 @@ def malformed_id:
 def malformed_scan_record:
   malformed_id
   or ((.created_at | type) != "string")
-  or ((.created_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) | not)
-  or ((.created_at | try fromdateiso8601 catch null) == null);
+  or ((.created_at | try (fromdateiso8601 | todateiso8601) catch null) != .created_at);
 def malformed_run:
   malformed_id
   or (.head_sha != $requested_sha)
@@ -167,17 +172,9 @@ def malformed_run:
 def terminal_page:
   ((.workflow_runs | length) < 100)
   or all(.workflow_runs[]; (.created_at | fromdateiso8601) < $lower_bound);
-def unique_records:
-  (sort_by(.id) | group_by(.id)) as $groups
-  | if any($groups[];
-      (([.[].status] | unique | length) > 1)
-      or (([.[].conclusion] | unique | length) > 1)) then
-      error("conflicting duplicate workflow-run records")
-    elif any($groups[]; ((unique | length) > 1)) then
-      error("non-identical duplicate workflow-run records")
-    else
-      $groups | map(.[0])
-    end;
+def unique_id_count: map(.id) | unique | length;
+def scan_page_overrun($index):
+  .total_count < (100 * $index + (.workflow_runs | length));
 def projection: [.head_sha, .status, .conclusion, .name, .html_url];
 if $mode == "step" then
   if (length != 1) or (.[0] | malformed_page) then
@@ -214,9 +211,7 @@ else
           error("unfiltered workflow-runs listing not bounded within the page limit")
         elif any($scan_pages[:-1][]; (.workflow_runs | length) != 100)
           or (($last | terminal_page) | not)
-          or ((($last.workflow_runs | length) < 100)
-              and ($last.total_count
-                   != (100 * ($page_count - 1) + ($last.workflow_runs | length)))) then
+          or any(range(0; $page_count); . as $index | $scan_pages[$index] | scan_page_overrun($index)) then
           error("incomplete unfiltered workflow-runs listing")
         elif any(range(1; $page_count);
             $scan_pages[.].total_count < $scan_pages[. - 1].total_count) then
@@ -226,22 +221,27 @@ else
           | if any($by_id[]; (([.[].head_sha] | unique | length) > 1)) then
               error("conflicting duplicate workflow-run records")
             else
-              ($filtered_all | unique_records) as $filtered_runs
+              [$by_id[] | select(.[0].head_sha == $requested_sha)] as $runs
               | ([$filtered_pages[].total_count] | unique) as $totals
-              | if (($totals | length) != 1) or (($filtered_runs | length) != $totals[0]) then
+              | if any($runs[]; ((map(projection) | unique | length) > 1)) then
+                  error("conflicting duplicate workflow-run records")
+                elif ($filtered_all | unique_id_count) != ($filtered_all | length) then
+                  error("duplicate run id within the head_sha-filtered listing")
+                elif ($scan_all | unique_id_count) != ($scan_all | length) then
+                  error("duplicate run id within the unfiltered listing")
+                elif (($last.workflow_runs | length) < 100)
+                  and ($last.total_count != ($scan_all | unique_id_count)) then
+                  error("incomplete unfiltered workflow-runs listing")
+                elif (($totals | length) != 1)
+                  or (($filtered_all | unique_id_count) != $totals[0]) then
                   error("inconsistent paginated workflow-runs snapshot")
+                elif ($runs | length) == 0 then
+                  "__NORUN__"
                 else
-                  [$by_id[] | select(.[0].head_sha == $requested_sha)] as $runs
-                  | if any($runs[]; ((map(projection) | unique | length) > 1)) then
-                      error("conflicting duplicate workflow-run records")
-                    elif ($runs | length) == 0 then
-                      "__NORUN__"
-                    else
-                      $runs[]
-                      | .[0]
-                      | [(.status // "-"), (.conclusion // "-"), (.id | tostring), .name, .html_url]
-                      | @tsv
-                    end
+                  $runs[]
+                  | .[0]
+                  | [(.status // "-"), (.conclusion // "-"), (.id | tostring), .name, .html_url]
+                  | @tsv
                 end
             end
         end
@@ -299,7 +299,8 @@ while :; do
   # deadline, keeping API diagnostics separate from display fields in successful run rows.
   if [ "$query_rc" -ne 0 ] || [ -z "$lines" ]; then
     case "$lines" in
-      *"conflicting duplicate workflow-run records"*|*"workflow-runs listing shrank during the scan"*)
+      *"conflicting duplicate workflow-run records"*|*"workflow-runs listing shrank during the scan"*|\
+      *"duplicate run id within the"*)
         if [ "$WAIT" != "--wait" ] && [ "$RETRIED" -eq 0 ]; then
           RETRIED=1
           echo "NOTE: workflow-run records changed between requests; re-reading once."
