@@ -265,19 +265,30 @@ command that writes or removes work-tree files, a checkout from a subtree, the r
 directory, a script) is not predicted. Instead, when the hook first sees a registry of the session
 repository, or of its main worktree, bind review dispatch, it records the binding (its digest, the binding
 and the registry paths) in hook-owned state outside the work tree:
-`GIT_COMMON_DIR/aiqt/review-dispatch-binding/KEY.json`, KEY the sha256 of the registry directory's real
-path, written without following a symbolic link, mode 0600 in directories of mode 0700. No allowlisted git
-subcommand writes there, and a plain command naming a `.git` component is refused in a bound session. While
-a record exists, a registry that is missing, unreadable, without a binding, or binding differently from the
-record withholds every dispatch as UNVERIFIABLE, naming the change and the record, and other plain commands
-are still judged under the recorded binding. An operator either restores the recorded binding or, outside
+`GIT_COMMON_DIR/aiqt/review-dispatch-binding/KEY.json` in the repository's resolved common git directory,
+KEY the sha256 of the worktree's identity there (`.` for the main worktree, `worktrees/NAME` for a linked
+one) and the registry's path relative to that worktree's top level, never an absolute path, so a renamed or
+moved repository keeps its record. It is written without following a symbolic link, mode 0600 in directories
+of mode 0700. The common git directory is resolved once per check; where git cannot name it, every Bash call
+is withheld. No allowlisted git subcommand writes there. In a bound session, a plain command other than a
+read is refused when one of its words, resolved against the cwd as written and with every symbolic link
+followed, is the resolved common git directory, lies inside it, or (for a program other than git) is a
+directory holding it, whatever its spelling: a separated git directory not named `.git` is protected like
+`.git`, and a parent directory cannot be removed or moved (`git add .` is not refused, since git writes its
+own directory through no pathspec). Where git cannot resolve the session repository, the git directory the
+raw `.git` and `commondir` files name is protected, and one they cannot locate refuses every command but a
+read. Each check reads each registry once: the record comparison and the enforcement use that one read, and
+an own registry with a record is enforced with the recorded binding, so a registry removed during a check
+cannot end it. While a record exists, a registry that is missing, unreadable, without a binding, or binding
+differently from the record withholds every dispatch as UNVERIFIABLE, naming the change and the record, and
+other plain commands are still judged under the recorded binding. An operator either restores the recorded binding or, outside
 the session, removes the record (`rm "$(git rev-parse --git-common-dir)/aiqt/review-dispatch-binding/KEY.json"`,
 the full path given in the refusal), and the next check records the binding then in force. A record that
 cannot be read withholds every Bash call, and a binding that cannot be recorded withholds every dispatch.
 Not caught: a process that removes both the registry and the record (an operator, a non-Bash tool, or a
-plain command naming the record through a separated git directory not named `.git`), and a registry
-changed before the hook first saw it bind, since a repository where no check ran while it was bound has no
-record; where git cannot resolve the session repository, no record is read. Ordinary git commands (`add`,
+command that reaches the record without naming it, such as an alias of the git directory through a bind
+mount), and a registry changed before the hook first saw it bind, since a repository where no check ran
+while it was bound has no record; where git cannot resolve the session repository, no record is read. Ordinary git commands (`add`,
 `commit`, `checkout`, `restore`, `reset`) are allowed whatever the registry's git state; `git clean`,
 `git am` and `git apply` are off the allowlist. When git cannot resolve the session
 repository (a broken configuration, a refused ownership check, a deleted cwd), or resolves one with

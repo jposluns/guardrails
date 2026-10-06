@@ -11127,6 +11127,41 @@ def _rdp_gitfile_main(cwd):
         path = parent
 
 
+def _rdp_raw_common(cwd):
+    """Where git cannot resolve the session repository: the git directory a bound session protects
+    (_rdp_names_common_dir), read from the raw files git itself reads on cwd's ancestors (the nearest .git
+    directory, or the git directory a .git file names, or the common directory its commondir file names).
+    (common, None) with common resolved; (None, None) when no ancestor carries .git, so there is no
+    repository to protect; (None, detail) when the raw files cannot say, which refuses every command but a
+    read."""
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or "\x00" in cwd:
+        return (None, "the session cwd {!r} is not an absolute path".format(cwd))
+    path = os.path.realpath(cwd)
+    while True:
+        dotgit = os.path.join(path, ".git")
+        try:
+            st = os.lstat(dotgit)
+        except (FileNotFoundError, NotADirectoryError):
+            st = None
+        except OSError as exc:
+            return (None, "the git metadata {} cannot be examined ({})".format(dotgit, exc))
+        if st is not None:
+            if stat.S_ISDIR(st.st_mode):
+                return (os.path.realpath(dotgit), None)
+            text = _rdp_read_small(dotgit) if stat.S_ISREG(st.st_mode) else None
+            if text is None or not text.startswith("gitdir: ") or not text[len("gitdir: "):].strip():
+                return (None, "the git file {} cannot be read as a gitdir pointer".format(dotgit))
+            gitdir = os.path.normpath(os.path.join(path, text[len("gitdir: "):].strip()))
+            common = _rdp_read_small(os.path.join(gitdir, "commondir"))
+            if common is not None and common.strip():
+                gitdir = os.path.normpath(os.path.join(gitdir, common.strip()))
+            return (os.path.realpath(gitdir), None)
+        parent = os.path.dirname(path)
+        if parent == path:
+            return (None, None)
+        path = parent
+
+
 def _rdp_decide_within(data):
     """_rdp_decide's body, run with the deadline set. The scope is the UNION of every way to the registry:
     the git-resolved top level, the main worktree of a linked worktree (through git, or through the raw
@@ -11140,13 +11175,32 @@ def _rdp_decide_within(data):
     cwd's ancestors are always read: where they bind and the git-resolved registries bind too, from a
     different directory (core.worktree moved the top level onto another bound tree, say), the cwd's binding
     still governs and the conflict is a cannot-evaluate: every command either binding would dispatch is
-    withheld, never checked against the other repository, and every other command is judged under both."""
+    withheld, never checked against the other repository, and every other command is judged under both.
+    Each registry is read ONCE per check (one snapshot): the record comparison and the enforcement use that
+    same read, and where an own registry has a record, the recorded binding is the one enforced."""
     cwd = data.get("cwd")
     tool_input = data.get("tool_input")
     root = _orch_root(data)
     withheld = None
     own = []
+    snapshot = {}
+
+    def scope(reg_dir):
+        # The check's single read of the registries at reg_dir: a registry removed or rewritten after it
+        # was compared with its record cannot change the binding this check enforces.
+        if reg_dir not in snapshot:
+            snapshot[reg_dir] = _rdp_scope(reg_dir)
+        return snapshot[reg_dir]
     if root is not None:
+        # The common git directory is resolved once: it holds the binding records and is the directory a
+        # bound session protects. Where git cannot name it, no record can be read, so every Bash call is
+        # withheld rather than judged as if the registry had never been bound.
+        common, identity, why_common = _rdp_record_home(root)
+        if common is None:
+            return _rdp_withhold(tool_input, "{}, so the review dispatch binding record kept there cannot be "
+                                 "read and a registry removed since it was recorded could not be seen".format(
+                                     why_common))
+        guard = (common, None)
         own.append(root)
         try:
             main_top, why = _rdp_main_worktree(root)
@@ -11164,14 +11218,23 @@ def _rdp_decide_within(data):
         main_top, withheld = _rdp_gitfile_main(cwd)
         if main_top is not None:
             own.append(main_top)
+    if root is None:
+        # No record is read where git cannot resolve the session repository; the git directory the raw
+        # files name is still protected, and one they cannot locate refuses every command but a read.
+        guard = _rdp_raw_common(cwd)
     # Each own registry's binding is compared with its record (a binding seen first is recorded), so a
-    # registry removed or rewritten since withholds every dispatch instead of switching the check off.
-    drift, recorded = (None, []) if root is None else _rdp_record_check(root, own)
+    # registry removed or rewritten since withholds every dispatch instead of switching the check off. The
+    # main worktree's registry is keyed as the main worktree's own top level, so every worktree shares it.
+    keyed = [(reg_dir, identity if reg_dir == root else ".", ".") for reg_dir in own]
+    drift, recorded = (None, []) if root is None else _rdp_record_check(
+        os.path.join(common, *_RDP_RECORD_DIR), keyed, scope)
     if drift == "withhold":
         return _rdp_withhold(tool_input, recorded)
     resolved = None
     for reg_dir in own:
-        binding, cfg = _rdp_scope(reg_dir)
+        # A recorded binding is the one enforced; it matches the snapshot here, since a difference is a drift.
+        rcfg = [c for c, d in recorded if d == reg_dir]
+        binding, cfg = ("ok", rcfg[0]) if rcfg else scope(reg_dir)
         if binding is not None:
             resolved = (binding, cfg, reg_dir)
             break
@@ -11186,7 +11249,7 @@ def _rdp_decide_within(data):
         return _rdp_withhold(tool_input, "the session repository cannot be discovered and " + found)
     near = None
     for found_dir in found:
-        binding, cfg = _rdp_scope(found_dir)
+        binding, cfg = scope(found_dir)
         if binding is not None:
             near = (binding, cfg, found_dir)
             break
@@ -11195,7 +11258,7 @@ def _rdp_decide_within(data):
         # declares is withheld, naming the change, and every other command is judged under each binding.
         judged = [("ok", rcfg, rdir) for rcfg, rdir in recorded] + [b for b in (near, resolved) if b is not None]
         for binding, cfg, reg_dir in judged:
-            result = _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign=drift)
+            result = _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, drift, guard)
             if result[0] != "allow":
                 return result
         return ("allow", "")
@@ -11206,15 +11269,15 @@ def _rdp_decide_within(data):
                     "this dispatch, and the repository it is checked in, cannot be known".format(
                         near[2], resolved[2]))
         for binding, cfg, reg_dir in (near, resolved):
-            result = _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign=conflict)
+            result = _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, conflict, guard)
             if result[0] != "allow":
                 return result
         return ("allow", "")
     if resolved is not None:
-        return _rdp_bound(data, tool_input, resolved[0], resolved[1], root, resolved[2], foreign=False)
+        return _rdp_bound(data, tool_input, resolved[0], resolved[1], root, resolved[2], False, guard)
     if near is not None:
         foreign = root is not None and os.path.realpath(near[2]) != os.path.realpath(root)
-        return _rdp_bound(data, tool_input, near[0], near[1], root, near[2], foreign=foreign)
+        return _rdp_bound(data, tool_input, near[0], near[1], root, near[2], foreign, guard)
     if withheld:
         return _rdp_withhold(tool_input, withheld)
     return ("allow", "")
@@ -11241,17 +11304,19 @@ def _rdp_scope(reg_dir):
 # The binding record. Predicting what a git command or a script does to the registry does not converge, so
 # the defence is inverted: when the hook first sees a registry of the session repository (its top level, or
 # its main worktree's) bind review dispatch, it records the binding in hook-owned state outside the work
-# tree, in the repository's common git directory (GIT_COMMON_DIR/aiqt/review-dispatch-binding/KEY.json,
-# KEY the sha256 of the registry directory's real path; mode 0600, written without following a symbolic
-# link). No git subcommand on the allowlist writes there (they write the work tree, the index, refs, the
-# object store and fixed files), and a plain command naming a .git component is refused in a bound session
-# (_rdp_names_git_dir). From then on a registry that is missing, unreadable, without a binding, or binding
+# tree, in the repository's resolved common git directory (GIT_COMMON_DIR/aiqt/review-dispatch-binding/
+# KEY.json, KEY the sha256 of the worktree's identity and the registry's path relative to its top level, so
+# the record depends on no absolute path and moves with the repository; mode 0600, written without following
+# a symbolic link). No git subcommand on the allowlist writes there (they write the work tree, the index,
+# refs, the object store and fixed files), and a plain command whose operand resolves to that directory,
+# inside it or (for a program other than git) to a directory holding it is refused in a bound session,
+# whatever its spelling (_rdp_names_common_dir). From then on a registry that is missing, unreadable, without a binding, or binding
 # differently from its record withholds every dispatch as UNVERIFIABLE until an operator restores the
 # recorded binding or removes the record, so removing or rewriting the registry can never switch the check
 # off; it can only block dispatch.
 _RDP_RECORD_DIR = ("aiqt", "review-dispatch-binding")
 _RDP_RECORD_MAX = 65536
-_RDP_RECORD_VERSION = 1
+_RDP_RECORD_VERSION = 2
 
 
 def _rdp_binding_doc(cfg):
@@ -11271,21 +11336,38 @@ def _rdp_binding_digest(cfg):
 
 
 def _rdp_record_home(root):
-    """The directory holding the binding records of the repository at root
-    (GIT_COMMON_DIR/aiqt/review-dispatch-binding, shared by every worktree of it), or None when git cannot
-    name the common git directory."""
-    p = _review_git(root, "rev-parse", "--git-common-dir")
+    """The repository at root as its binding records know it: (common, identity, None), common the RESOLVED
+    common git directory (every symbolic link followed; it holds the records and is the directory a bound
+    session protects, _rdp_names_common_dir) and identity the worktree's git directory relative to it ("."
+    for the main worktree, worktrees/NAME for a linked one); (None, None, detail) when git cannot name
+    them, which the caller withholds, since a record it cannot find cannot be compared. Asked once per
+    check, without --path-format (git before 2.31 does not know it) and resolved against root; git before
+    2.5 echoes the --git-common-dir it does not know, and has no linked worktree, so its git directory is
+    the common one."""
+    p = _review_git(root, "rev-parse", "--git-common-dir", "--git-dir")
     if p is None or p.returncode != 0:
-        return None
-    line = p.stdout.decode("utf-8", "surrogateescape").split("\n")[0]
-    if not line or line.startswith("-"):
-        return None
-    return os.path.join(os.path.normpath(os.path.join(root, line)), *_RDP_RECORD_DIR)
+        return (None, None, "git cannot name the common git directory of {}".format(root))
+    lines = p.stdout.decode("utf-8", "surrogateescape").split("\n")
+    if len(lines) >= 2 and lines[0] == "--git-common-dir":
+        lines = lines[1:2] + lines[1:]
+    if len(lines) < 3 or not all(line and not line.startswith("-") for line in lines[:2]):
+        return (None, None, "git printed no common git directory for {}".format(root))
+    try:
+        common = os.path.realpath(os.path.join(root, lines[0]))
+        identity = os.path.relpath(os.path.realpath(os.path.join(root, lines[1])), common)
+    except (OSError, ValueError) as exc:
+        return (None, None, "the common git directory of {} cannot be resolved ({})".format(root, exc))
+    if identity == ".." or identity.startswith("../"):
+        return (None, None, "the git directory of {} lies outside its common git directory {}".format(
+            root, common))
+    return (common, identity, None)
 
 
-def _rdp_record_path(home, reg_dir):
-    """The record of the registry at reg_dir: a file in home named by the sha256 of its real path."""
-    key = __import__("hashlib").sha256(os.path.realpath(reg_dir).encode("utf-8", "surrogateescape"))
+def _rdp_record_path(home, identity, rel):
+    """The record of the registry at rel, its path relative to the top level of the worktree whose identity
+    is identity (_rdp_record_home), in home: a file named by the sha256 of that pair alone, so the record
+    depends on no absolute path and moves with the repository (a renamed or moved repository keeps it)."""
+    key = __import__("hashlib").sha256(json.dumps([identity, rel]).encode("utf-8", "surrogateescape"))
     return os.path.join(home, key.hexdigest() + ".json")
 
 
@@ -11324,13 +11406,13 @@ def _rdp_record_read(path):
     return ("ok", (doc["digest"], cfg))
 
 
-def _rdp_record_write(home, path, reg_dir, cfg):
-    """Record cfg as the binding of the registry at reg_dir, at path in home, unless a record is there
+def _rdp_record_write(home, path, identity, rel, cfg):
+    """Record cfg as the binding of the registry at rel in the worktree identity, at path in home, unless a record is there
     already (a concurrent check wrote one first; the caller reads it back and compares). Each directory is
     made with mode 0700 and must be a directory, not a link to one; the record is written to a fresh
     temporary file (O_EXCL, O_NOFOLLOW, mode 0600) and linked into place, so a reader never sees a part of
     it. None when it is recorded, or the detail of the failure."""
-    doc = dict(version=_RDP_RECORD_VERSION, registry_dir=os.path.realpath(reg_dir),
+    doc = dict(version=_RDP_RECORD_VERSION, worktree=identity, registry_path=rel,
                registry_files=list(_ORCH_REGISTRY_FILES), digest=_rdp_binding_digest(cfg),
                binding=_rdp_binding_doc(cfg))
     blob = (json.dumps(doc, sort_keys=True, indent=1, ensure_ascii=True) + "\n").encode("ascii")
@@ -11362,33 +11444,26 @@ def _rdp_record_write(home, path, reg_dir, cfg):
     return None
 
 
-def _rdp_record_check(root, own):
-    """The binding record check for the session repository at root, whose own registries are at the
-    directories own (root, and its main worktree's top level): ("withhold", detail) when a record cannot be
-    read, which leaves the recorded dispatch commands unknown; otherwise (drift, recorded), recorded a
-    (cfg, reg_dir) pair for each record found, drift None when each own registry's live binding matches its
-    record, or the text naming the change and the operator action when one does not. A binding seen with
+def _rdp_record_check(home, own, scope):
+    """The binding record check for the session repository, whose records are in home and whose own
+    registries are own, (reg_dir, identity, rel) for each (the session worktree's top level, and its main
+    worktree's): ("withhold", detail) when a record cannot be read, which leaves the recorded dispatch
+    commands unknown; otherwise (drift, recorded), recorded a (cfg, reg_dir) pair for each record found,
+    drift None when each own registry's live binding matches its record, or the text naming the change and
+    the operator action when one does not. Each live binding is read through scope, the check's single
+    snapshot of each registry, so the comparison and the enforcement see the same read. A binding seen with
     no record is recorded here (its first observation); one that cannot be recorded is a drift too, so a
     binding the hook cannot record never leaves the registry unguarded."""
-    home = _rdp_record_home(root)
     drifts, recorded, seen = [], [], set()
-    for reg_dir in own:
-        real = os.path.realpath(reg_dir)
-        if real in seen:
+    for reg_dir, identity, rel in own:
+        path = _rdp_record_path(home, identity, rel)
+        if path in seen:
             continue
-        seen.add(real)
-        binding, cfg = _rdp_scope(reg_dir)
-        if home is None:
-            if binding == "ok":
-                drifts.append("git cannot name the common git directory of {}, so the review_dispatch "
-                              "binding of the registry at {} cannot be recorded and a later removal or "
-                              "rewrite of it could not be seen; an operator repairs the repository".format(
-                                  root, reg_dir))
-            continue
-        path = _rdp_record_path(home, reg_dir)
+        seen.add(path)
+        binding, cfg = scope(reg_dir)
         kind, rec = _rdp_record_read(path)
         if kind is None and binding == "ok":
-            failed = _rdp_record_write(home, path, reg_dir, cfg)
+            failed = _rdp_record_write(home, path, identity, rel, cfg)
             if failed is not None:
                 drifts.append("the review_dispatch binding of the registry at {} cannot be recorded in "
                               "the binding record {}: {}; an operator makes that directory "
@@ -11419,14 +11494,15 @@ def _rdp_record_check(root, own):
     return ("; ".join(drifts) or None, recorded)
 
 
-def _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign):
+def _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign, guard):
     """The decision in a session scoped by the binding of the registry at reg_dir. foreign is False, True
-    (the registry is not the session repository's own), or the text of a conflict between registries."""
+    (the registry is not the session repository's own), or the text of a conflict between registries;
+    guard is the session repository's git directory to protect (_rdp_names_common_dir)."""
     if binding == "bad":
         # A malformed binding cannot say which commands dispatch.
         return _rdp_withhold(tool_input, "the orchestration registry or its review_dispatch binding is "
                              "malformed ({})".format(cfg))
-    result = _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=foreign)
+    result = _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=foreign, guard=guard)
     if result[0] in ("allow", "note") and _rdp_overdue():
         # A read or probe that overran the deadline leaves a result that was not reached within the
         # budget: a cannot-evaluate, never an allow.
@@ -11926,6 +12002,44 @@ def _rdp_names_git_dir(words, cwd=None):
     return None
 
 
+def _rdp_names_common_dir(words, cwd, guard):
+    """The first word (with the reason, where it is not a path) of a plain command that may write, move or
+    remove the session repository's common git directory, which holds the binding record, judged by where
+    its words RESOLVE, whatever their spelling (a separated git directory not named .git, a symbolic link, a
+    relative path); None when the command only reads (_RDP_GIT_DIR_READERS, or a git read, judged by the
+    caller) or no word does. guard is (common, failure): common the resolved common git directory, or None
+    when there is no repository to protect; failure the detail when it cannot be located, which refuses
+    every command but a read. A word does when a value of it (_rdp_word_values), joined to the session cwd
+    and taken both as written and with every symbolic link followed, compared without regard to case, is
+    the common git directory or lies inside it, or, for a program other than git, is a directory holding
+    it (removing, moving or changing the mode of a parent reaches the record). Git writes its own
+    directory through no pathspec, so a git pathspec may name a parent (git add .)."""
+    if _rdp_basename(words[0]) in _RDP_GIT_DIR_READERS:
+        return None
+    common, failure = guard
+    if failure:
+        return "{}: {}".format(words[0], failure)
+    if common is None:
+        return None
+    if not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return "{}: the session cwd {!r} is not an absolute path, so its words cannot be resolved".format(
+            words[0], cwd)
+    git = _rdp_basename(words[0]).casefold() == "git"
+    held = common.casefold().rstrip("/") + "/"
+    for word in words[1:]:
+        for value in _rdp_word_values(word):
+            try:
+                joined = os.path.join(cwd, value)
+                forms = (os.path.normpath(joined), os.path.realpath(joined))
+            except (OSError, ValueError) as exc:
+                return "{}: it cannot be resolved ({})".format(word, exc)
+            for form in forms:
+                folded = form.casefold().rstrip("/") + "/"
+                if folded.startswith(held) or (not git and held.startswith(folded)):
+                    return word
+    return None
+
+
 def _rdp_not_plain(cfg, names, why):
     """The UNVERIFIABLE message for a command that is not a provably plain command, or a plain command that
     names a declared dispatch command other than as its command word."""
@@ -11941,7 +12055,7 @@ def _rdp_not_plain(cfg, names, why):
                 else "is not plain", why, name, cfg["brief_option"]))
 
 
-def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
+def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None, None)):
     """The decision for a Bash payload in a session with a well-formed binding. Every command that is not
     provably plain (_rdp_plain_words) is UNVERIFIABLE, whatever it names: a name assembled at run time
     (a variable joined to text, a glob, command output) cannot be seen in the raw text. A provably plain
@@ -12003,6 +12117,13 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
                 "({}); a configuration file or hook written there can make any git command, a read among "
                 "them, run a program, so in a session whose registry binds review dispatch only a read may "
                 "name one, and an operator changes them outside the session".format(gitdir))
+    common = None if reads else _rdp_names_common_dir(words, data.get("cwd"), guard)
+    if common is not None:
+        return ("deny", "the command may write, move or remove the repository's common git directory {} "
+                "({}), which holds the review dispatch binding record; in a session whose registry binds "
+                "review dispatch only a read may name it, a path inside it or a directory holding it, "
+                "however the path is spelled, and an operator changes it outside the session".format(
+                    guard[0] or "(which cannot be located)", common))
     moved = None if reads else _rdp_moves_repository(words)
     if moved is not None:
         return ("deny", "the git command changes where the repository or its work tree is ({}); in a session "

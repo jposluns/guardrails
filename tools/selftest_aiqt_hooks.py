@@ -1501,11 +1501,32 @@ def _main_with_recorder():
         monitor.stop()
 
 
+def _fixture_tmpdir(prefix):
+    """A fresh temporary directory for the fixtures, never under /dev or /proc: the review dispatch pin
+    refuses a brief there by design (a /dev/shm private to each process, as in a sandbox, names a different
+    file in the hook than in the dispatcher), so a TMPDIR under /dev or /proc is passed over for the first
+    writable system temporary directory outside both. Raises OSError when there is none."""
+    failures = []
+    for where in (None, "/var/tmp", "/tmp"):
+        try:
+            path = tempfile.mkdtemp(prefix=prefix, dir=where)
+        except OSError as exc:
+            failures.append(str(exc))
+            continue
+        real = os.path.realpath(path)
+        if real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
+            shutil.rmtree(path, ignore_errors=True)
+            failures.append("{} is under /dev or /proc".format(path))
+            continue
+        return Path(path)
+    raise OSError("no writable temporary directory outside /dev and /proc ({})".format("; ".join(failures)))
+
+
 def _main_isolated(monitor):
     scrub_git_environment()
     handler = aiqt_hooks.git_discard
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="aiqt-hooks-selftest-"))
+        tmp = _fixture_tmpdir("aiqt-hooks-selftest-")
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2

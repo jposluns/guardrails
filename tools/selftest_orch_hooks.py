@@ -1552,7 +1552,7 @@ def _rdp_scope_cases(base, plain):
     cleared = rb.run("other-dispatch --brief /missing")
     check("rdp/record-location-and-operator-clear",
           [len(records), modes,
-           doc.get("registry_dir") == str(rb.root.resolve()), doc.get("binding", {}).get("commands"),
+           [doc.get("worktree"), doc.get("registry_path")] == [".", "."], doc.get("binding", {}).get("commands"),
            in_session, still, _rdp_kind(cleared), "binding record" in _reason(cleared),
            json.loads(record.read_text(encoding="utf-8"))["binding"]["commands"] if record.is_file() else None],
           [1, ["0o700", "0o600"], True, ["orch-dispatch"], ["deny", "deny", "allow", "allow"], "unverifiable", "unverifiable",
@@ -1603,6 +1603,81 @@ def _rdp_scope_cases(base, plain):
     lw_after = aiqt_hooks.review_dispatch_pin(dict(linked))
     check("rdp/record-linked-worktree-main-registry-removed-withholds",
           [lw_first, _rdp_kind(lw_after), "binding record" in _reason(lw_after)], ["unverifiable", "unverifiable", True])
+    # The record is keyed by the worktree's identity in its common git directory and the registry's path
+    # relative to the top level, never an absolute path, so a renamed repository keeps its record: the
+    # bound registry is committed, reset away to the registry-free revision, the repository is renamed
+    # outside the session (in it, mv of a directory holding the git directory is refused), and the
+    # dispatch from the renamed repository is still withheld, naming the record.
+    rn = RdpFixture(base, "record-rename")
+    _tracked(rn)
+    rn_first = _rdp_kind(rn.dispatch("/missing"))
+    _rdp_git(rn.root, "reset", "-q", "--hard", "noreg")
+    renamed = base / "record-renamed"
+    rn_mv = _rdp_kind(rn.run("mv " + str(rn.root) + " " + str(renamed)))
+    os.rename(rn.root, renamed)
+    rn_after = aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(renamed), session_id="s1", tool_name="Bash",
+        tool_input=dict(command="orch-dispatch --brief /missing", run_in_background=False)))
+    check("rdp/record-renamed-repository-withholds",
+          [rn_first, rn_mv, _rdp_kind(rn_after), "binding record" in _reason(rn_after),
+           str(renamed / ".git" / "aiqt") in _reason(rn_after)], ["unverifiable", "deny", "unverifiable", True, True])
+    # The protected directory is the RESOLVED common git directory, whatever its spelling: with a separated
+    # git directory not named .git, every plain command but a read whose operand is it, lies inside it or
+    # holds it is refused (absolute, relative, through a symbolic link, a parent), a read and ordinary work
+    # are not, and a registry removed outside the session still withholds the dispatch through the record.
+    sg = RdpFixture(base, "record-sepgit")
+    sg_meta = base / "record-sepgit-meta"
+    _rdp_git(sg.root, "init", "-q", "--separate-git-dir=" + str(sg_meta))
+    sg_first = _rdp_kind(sg.dispatch("/missing"))
+    sg_home = sg_meta / "aiqt" / "review-dispatch-binding"
+    sg_records = sorted(sg_home.iterdir()) if sg_home.is_dir() else []
+    (base / "record-sepgit-alias").symlink_to(sg_meta)
+    refused = ["rm -rf " + str(sg_meta / "aiqt"), "rm -rf " + str(sg_meta), "rm -rf ../record-sepgit-meta/aiqt",
+               "rm -rf " + str(base / "record-sepgit-alias") + "/aiqt", "mv " + str(sg_meta) + " x",
+               "chmod -R 000 " + str(sg_meta), "rm -rf " + str(base), "touch " + str(sg_records[0] if sg_records
+                                                                                      else sg_home),
+               "cp seed.txt " + str(sg_home), "ln -sf /dev/null " + str(sg_home / "x.json"),
+               "rm -rf ../RECORD-SEPGIT-META/AIQT", "git -C " + str(sg_meta) + " rm -rq aiqt",
+               "git diff --output=" + str(sg_home / "x.json")]
+    allowed = ["ls " + str(sg_home), "cat " + str(sg_records[0] if sg_records else sg_home), "git add .",
+               "git status", "mkdir build", "rm -rf build", "touch seed.txt"]
+    sg_refused = [_rdp_kind(sg.run(c)) for c in refused]
+    sg_allowed = [_rdp_kind(sg.run(c)) for c in allowed]
+    shutil.rmtree(sg.root / ".aiqt")
+    sg_after = sg.dispatch("/missing")
+    check("rdp/record-separated-git-dir-protected-by-resolution",
+          [sg_first, len(sg_records), sg_refused, sg_allowed, _rdp_kind(sg_after), "binding record" in _reason(sg_after)],
+          ["unverifiable", 1, ["deny"] * len(refused), ["allow"] * len(allowed), "unverifiable", True])
+    # Where the git directory cannot be located, every plain command but a read is refused in a bound session.
+    check("rdp/record-unresolved-git-dir-refuses",
+          [aiqt_hooks._rdp_names_common_dir(["rm", "x"], str(sg.root), (None, "no git directory")) is not None,
+           aiqt_hooks._rdp_names_common_dir(["cat", "x"], str(sg.root), (None, "no git directory")),
+           aiqt_hooks._rdp_names_common_dir(["rm", "x"], str(sg.root), (None, None))], [True, None, None])
+    # One check reads each registry ONCE and enforces the recorded binding: a registry removed between the
+    # record comparison and the enforcement (the record check wrapped to remove .aiqt after it compares)
+    # still leaves the dispatch withheld, and no registry directory is read twice within one check.
+    il = RdpFixture(base, "record-interleave")
+    il_before = _rdp_kind(il.dispatch("/missing"))
+    real_check, real_scope = aiqt_hooks._rdp_record_check, aiqt_hooks._rdp_scope
+    reads = []
+
+    def _check_then_remove(*args, **kw):
+        out = real_check(*args, **kw)
+        shutil.rmtree(il.root / ".aiqt", ignore_errors=True)
+        return out
+
+    def _counted(reg_dir):
+        reads.append(os.path.realpath(reg_dir))
+        return real_scope(reg_dir)
+    try:
+        aiqt_hooks._rdp_record_check, aiqt_hooks._rdp_scope = _check_then_remove, _counted
+        il_mid = il.dispatch("/missing")
+    finally:
+        aiqt_hooks._rdp_record_check, aiqt_hooks._rdp_scope = real_check, real_scope
+    il_next = il.dispatch("/missing")
+    check("rdp/record-interleaved-removal-withholds",
+          [il_before, _rdp_kind(il_mid), len(reads) == len(set(reads)), _rdp_kind(il_next),
+           "binding record" in _reason(il_next)], ["unverifiable", "unverifiable", True, "unverifiable", True])
     # A linked worktree beside a main worktree whose git directory is separated (core.worktree naming the
     # main worktree): a dispatch is withheld, and the two calls that would point core.worktree at an empty
     # directory META/get, and so unscope the session, end at the config write, whose trailing word is a
@@ -1617,7 +1692,7 @@ def _rdp_scope_cases(base, plain):
         hook_event_name="PreToolUse", cwd=str(cv_wt), session_id="s1", tool_name="Bash",
         tool_input=dict(command=c, run_in_background=False)))) for c in (
             "orch-dispatch --brief /missing", "mkdir " + str(cv_meta / "get"), "git config core.worktree get")],
-        ["unverifiable", "allow", "deny"])
+        ["unverifiable", "deny", "deny"])
     # core.worktree moved onto ANOTHER bound tree: the binding above the session cwd still governs, and a
     # dispatch either binding declares is withheld, never checked against the other repository (before,
     # the redirected tree's binding decided and the cwd's dispatcher went undeclared, so it was allowed).
@@ -1668,7 +1743,30 @@ def _rdp_scope_cases(base, plain):
     finally:
         aiqt_hooks._orch_root, aiqt_hooks._rdp_main_worktree = real_root, real_main
         aiqt_hooks.os.lstat = real_lstat
-    check("rdp/raw-gitfile-cannot-say-withholds", raw_got, ["unverifiable", "unverifiable", "unverifiable", "deny"])
+    # The last: git cannot name the common git directory of the gitfile's root, so its binding record cannot
+    # be read and the call is withheld (before the record, the main worktree's binding refused it).
+    check("rdp/raw-gitfile-cannot-say-withholds", raw_got, ["unverifiable"] * 4)
+
+
+def _fixture_tmpdir(prefix):
+    """A fresh temporary directory for the fixtures, never under /dev or /proc: the review dispatch pin
+    refuses a brief there by design (a /dev/shm private to each process, as in a sandbox, names a different
+    file in the hook than in the dispatcher), so a TMPDIR under /dev or /proc is passed over for the first
+    writable system temporary directory outside both. Raises OSError when there is none."""
+    failures = []
+    for where in (None, "/var/tmp", "/tmp"):
+        try:
+            path = tempfile.mkdtemp(prefix=prefix, dir=where)
+        except OSError as exc:
+            failures.append(str(exc))
+            continue
+        real = os.path.realpath(path)
+        if real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
+            shutil.rmtree(path, ignore_errors=True)
+            failures.append("{} is under /dev or /proc".format(path))
+            continue
+        return Path(path)
+    raise OSError("no writable temporary directory outside /dev and /proc ({})".format("; ".join(failures)))
 
 
 def main(report_path=None):
@@ -1680,7 +1778,7 @@ def main(report_path=None):
 
 def _main_isolated(report_path=None):
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="aiqt-orch-selftest-"))
+        tmp = _fixture_tmpdir("aiqt-orch-selftest-")
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temp dir: {}".format(exc), file=sys.stderr)
         return 2
