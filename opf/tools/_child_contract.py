@@ -91,7 +91,7 @@ THE CONTRACT, in the order it runs:
        fires whatever hook is installed), and residual (a) (a thread's fault under a
        threading.excepthook replaced and put back) still applies to a thread started BEFORE the
        handler, while one started inside it is refused by the thread rule above.
-6. NOTHING THE CHECKED CODE CAN REACH RUNS AFTER THE DECISION, residuals (c), (e) and (f) apart
+6. NOTHING THE CHECKED CODE CAN REACH RUNS AFTER THE DECISION, residuals (c), (e), (f) and (g) apart
    (the ordering invariant; merge
    train 2 QA r9, codex MAJOR, reproduced: the re-check restored the machinery and settled the
    collection BEFORE its own sys.stdout and sys.stderr flushes, so a stdout wrapper whose SECOND
@@ -115,7 +115,16 @@ THE CONTRACT, in the order it runs:
    machinery and counts the thread starts once more, and only THEN reads the faults for the
    decision, so whatever the disarming itself ran (a callback firing on the disarming's own calls,
    a finalizer of a callback it released) is judged. When nothing is armed the disarming runs no
-   code the loaded or tested module controls (none of its calls raises an audit event). After the
+   code the loaded or tested module controls (none of its calls raises an audit event), and
+   neither does that last restore and comparison, nor anything after it: loaded code can replace
+   a module object's class with a ModuleType subclass whose attribute hooks run on every lookup
+   on that module (merge train 2 QA r11, claude MEDIUM, reproduced: a hook on threading that the
+   last restore's lookups ran armed a profile function after the second read, and one on os ran
+   on the seal's own os.write lookup; each child exited 0 with its seal), so the handler calls
+   the os, gc, sys and sys.monitoring functions it needs from here on through references bound
+   when this module is imported, and the restore reads and writes the namespaces taken at
+   construction, never the module objects, keeping each replacement it removes alive so no
+   finalizer runs. After the
    decision the handler runs only os.write on saved_stdout and saved_stderr (the seal, or a
    diagnostic) and os._exit; CPython 3.14 raises no audit event for either (measured), so an audit
    hook the loaded code added, which cannot be removed, does not run after the decision; no
@@ -173,6 +182,12 @@ callers' docstrings point here instead of restating them):
       make this interpreter run a script at its next eval-breaker check, which the seal loop
       reaches, so such a script can run after the decision; the children are not launched with
       -X disable_remote_debug (not reproduced).
+  (g) the handler trusts its own namespace, its class and the builtins it calls (len, all, type,
+      getattr, sorted and the like): loaded code that rebinds a name in this module, patches a
+      FailClosedChild method or replaces a builtin runs that code wherever the handler calls it,
+      after the decision included. That is code aimed at this contract, not cleanup left behind,
+      and the same reviewed, pinned loaded code could forge the record outright (the parents'
+      disclosed channel); not reproduced.
 
 The parent-side halves of the contract stay with the parents: what each accepts (a complete record
 bound to the child, an empty error stream), and the channel by which reviewed, pinned loaded code
@@ -204,11 +219,35 @@ REPORTING = (("sys", "stderr"), ("sys", "excepthook"), ("sys", "unraisablehook")
              ("threading", "excepthook"))
 
 
+# The functions the record handler calls once its final check has read the interpreter callbacks,
+# bound HERE, at import, before the loaded or tested code runs: an attribute lookup on a module
+# object runs that object's class hooks, and loaded code can reassign a module's __class__ to a
+# ModuleType subclass whose __getattribute__ then runs on the handler's own `os.write` (merge
+# train 2 QA r11, claude MEDIUM, reproduced: such a hook on the os module ran during the seal and
+# the child exited 0 with it).
+_write, _exit = os.write, os._exit
+_gc_disable, _gc_isenabled, _gc_callbacks = gc.disable, gc.isenabled, gc.callbacks
+_getprofile, _setprofile = sys.getprofile, sys.setprofile
+_gettrace, _settrace = sys.gettrace, sys.settrace
+_MONITORING = getattr(sys, "monitoring", None)
+_monitoring_get_tool, _monitoring_free_tool_id, _monitoring_clear = (
+    (None, None, None) if _MONITORING is None else (
+        _MONITORING.get_tool, _MONITORING.free_tool_id,
+        getattr(_MONITORING, "clear_tool_id", None)
+        or (lambda tool, set_events=_MONITORING.set_events: set_events(tool, 0))))
+
+
 def reporting_snapshot():
-    """The current reporting machinery, [(module, attribute, object)], for restore_reporting."""
+    """The current reporting machinery, [(module name, the module's own namespace, attribute,
+    object)], for restore_reporting. The namespace (the module's __dict__, which a module object
+    keeps for its lifetime) is taken HERE, before the loaded or tested code runs, so the restore
+    reads and writes it as a plain dictionary and never through the module object, whose class
+    loaded code can replace with one whose attribute hooks run code (merge train 2 QA r11; vars()
+    and object.__setattr__ do not avoid such hooks: vars() runs the class's __getattribute__, and
+    a data descriptor on the class takes the object.__setattr__ write)."""
     import threading
     owners = {"sys": sys, "threading": threading}
-    return [(owners[owner], name, getattr(owners[owner], name, None))
+    return [(owner, owners[owner].__dict__, name, getattr(owners[owner], name, None))
             for owner, name in REPORTING]
 
 
@@ -257,6 +296,7 @@ class FailClosedChild:
         self._fault_line = fault_line
         self._settled = []
         self._threads_started = []
+        self._held = []
         self._snapshot = reporting_snapshot()
 
     def register(self):
@@ -299,13 +339,24 @@ class FailClosedChild:
     def restore_reporting(self):
         """Put every piece of the reporting machinery back where cleanup code replaced it, and
         return what was found replaced (or the snapshot's error stream closed, which cannot be
-        undone), as names; an empty list means the machinery was intact."""
+        undone), as names; an empty list means the machinery was intact. It runs no code the
+        loaded or tested module controls (merge train 2 QA r11, claude MEDIUM): it works on the
+        namespaces taken at construction, never through the module objects; it looks a name up
+        only in a namespace whose keys are all plain strings (a key of a str subclass could run
+        its own __eq__ in the lookup, so such a namespace is itself reported, unrestored); and
+        it keeps every replacement it removes alive in self._held until the os._exit, so no
+        finalizer of a replaced hook or stream runs here."""
         swapped = []
-        for owner, name, original in self._snapshot:
-            if getattr(owner, name, None) is not original:
-                swapped.append("{}.{}".format(owner.__name__, name))
-                setattr(owner, name, original)
-        if getattr(self._snapshot[0][2], "closed", True):
+        for owner, namespace, name, original in self._snapshot:
+            if not all(type(key) is str for key in namespace):
+                swapped.append("{} (a namespace key that is not a plain string)".format(owner))
+                continue
+            current = namespace.get(name)
+            if current is not original:
+                swapped.append("{}.{}".format(owner, name))
+                self._held.append(current)
+                namespace[name] = original
+        if getattr(self._snapshot[0][3], "closed", True):
             swapped.append("sys.stderr (closed)")
         return swapped
 
@@ -359,21 +410,21 @@ class FailClosedChild:
                 stage = "sealing the record"
                 for fd, data in seal:
                     while data:
-                        data = data[os.write(fd, data):]
+                        data = data[_write(fd, data):]
         except BaseException as exc:
             # Never a `finally: os._exit(code)`: that swallowed the exception and kept the
             # success code (merge train 2 QA r7, codex MAJOR). A handler that did not return
             # normally exits fail_code, whatever the callback wrote before it raised.
             code = self.fail_code
             self._handler_fault(stage, exc)
-        os._exit(code)
+        _exit(code)
 
     def _callback_fault(self, faults):
         """The one-line diagnostic for a fault observed during a record callback that returned
         normally: best effort and itself guarded (the fail_code exit carries the failure whether
         or not this line is written)."""
         try:
-            os.write(self._error_fd(), ("child-contract-fault: a fault was observed during the record callback "
+            _write(self._error_fd(), ("child-contract-fault: a fault was observed during the record callback "
                          "({}), so any record it wrote is void; exit {} (secfcl)\n".format(
                              "; ".join(faults)[:1000], self.fail_code)).encode("utf-8", "replace"))
         except BaseException:
@@ -383,7 +434,7 @@ class FailClosedChild:
         """The one-line diagnostic for a record handler that raised: best effort and itself
         guarded (the fail_code exit carries the failure whether or not this line is written)."""
         try:
-            os.write(self._error_fd(), ("child-contract-fault: the record handler raised {} {}, so any record it "
+            _write(self._error_fd(), ("child-contract-fault: the record handler raised {} {}, so any record it "
                          "wrote is void; exit {} (secfcl)\n".format(
                              type(exc).__name__, stage, self.fail_code)).encode("utf-8", "replace"))
         except BaseException:
@@ -466,35 +517,31 @@ class FailClosedChild:
         calls runs here, before the decision, and the run is refused anyway. Every mechanism is
         read again once all are off, so one a callback re-armed meanwhile is refused too (residual
         (e) of the module docstring is the shape this second read cannot see)."""
-        gc.disable()
+        _gc_disable()
         armed = self._armed()
-        if gc.callbacks:
-            del gc.callbacks[:]
-        if sys.getprofile() is not None:
-            sys.setprofile(None)
-        if sys.gettrace() is not None:
-            sys.settrace(None)
-        monitoring = getattr(sys, "monitoring", None)
-        for tool in MONITORING_TOOLS if monitoring is not None else ():
-            if monitoring.get_tool(tool) is not None:
-                if hasattr(monitoring, "clear_tool_id"):
-                    monitoring.clear_tool_id(tool)
-                else:
-                    monitoring.set_events(tool, 0)
-                monitoring.free_tool_id(tool)
-        again = self._armed() + (["automatic garbage collection"] if gc.isenabled() else [])
+        if _gc_callbacks:
+            del _gc_callbacks[:]
+        if _getprofile() is not None:
+            _setprofile(None)
+        if _gettrace() is not None:
+            _settrace(None)
+        for tool in MONITORING_TOOLS if _MONITORING is not None else ():
+            if _monitoring_get_tool(tool) is not None:
+                _monitoring_clear(tool)
+                _monitoring_free_tool_id(tool)
+        again = self._armed() + (["automatic garbage collection"] if _gc_isenabled() else [])
         return armed + ["{} (re-armed while being disarmed)".format(name) for name in again]
 
     def _armed(self):
-        """The interpreter-level callback mechanisms armed right now, by name (reads only)."""
-        armed = ["gc.callbacks"] if gc.callbacks else []
-        if sys.getprofile() is not None:
+        """The interpreter-level callback mechanisms armed right now, by name (reads only, through
+        the functions bound at import, so no module object's attribute hook runs here)."""
+        armed = ["gc.callbacks"] if _gc_callbacks else []
+        if _getprofile() is not None:
             armed.append("sys.setprofile")
-        if sys.gettrace() is not None:
+        if _gettrace() is not None:
             armed.append("sys.settrace")
-        monitoring = getattr(sys, "monitoring", None)
-        for tool in MONITORING_TOOLS if monitoring is not None else ():
-            if monitoring.get_tool(tool) is not None:
+        for tool in MONITORING_TOOLS if _MONITORING is not None else ():
+            if _monitoring_get_tool(tool) is not None:
                 armed.append("sys.monitoring tool {}".format(tool))
         return armed
 
@@ -1103,6 +1150,33 @@ sys.monitoring.set_events(3, 0)
 sys.monitoring.free_tool_id(3)
 gc.set_threshold(1)
 """
+# QA r11, claude MEDIUM: loaded code replaces a module object's class with a ModuleType subclass
+# whose __getattribute__, once the handler is past the second read of its disarming (the last
+# restore's lookups on threading) or sealing (the seal's os.write lookup), reports that it ran and
+# arms a profile function that faults on the seal. On 160ebcbe both children exited 0 with their
+# seal and this report on the error stream; now the handler makes no lookup on a module object
+# after its final check, so the hook never runs there: exit 0, record, seal, empty error stream.
+_SEED_MODULE_CLASS_HOOK = """
+import threading
+import types
+
+getframe, setprofile, write = sys._getframe, sys.setprofile, os.write
+
+
+class Hooked(types.ModuleType):
+    def __getattribute__(self, name):
+        frame = getframe()
+        while frame is not None and frame.f_code.co_name != "_record_at_exit":
+            frame = frame.f_back
+        if frame is not None and not fired and frame.f_locals.get("stage") == {stage!r}:
+            write(2, b"loaded code ran after the final read\\n")
+            setprofile(lambda frame, event, arg: late_fault())
+        return types.ModuleType.__getattribute__(self, name)
+
+
+{target}.__class__ = Hooked
+"""
+_SEAL_FAULT = _CALLBACK_FAULT.format(skip="stage != \"sealing the record\"")
 _ARMED = ("a fault was observed during the record callback", "exit 2",
           "an interpreter callback was still armed after the final check")
 _IN_CHECK_FAULT = ("a fault was observed during the record callback",
@@ -1183,6 +1257,10 @@ _CASES = (
     ("gc-callback-faults-in-final-check", "", _CALLBACK_FAULT.format(skip=_IN_CHECK) + _ARM_GC, 2,
      "record 0", _IN_CHECK_FAULT, False),
     ("callbacks-removed-pass", "", _SEED_CALLBACKS_REMOVED, 0, "record 0", (), True),
+    ("threading-class-hook-after-final-read", "", _SEAL_FAULT + _SEED_MODULE_CLASS_HOOK.format(
+        stage="disarming the interpreter callbacks", target="threading"), 0, "record 0", (), True),
+    ("os-class-hook-on-seal", "", _SEAL_FAULT + _SEED_MODULE_CLASS_HOOK.format(
+        stage="sealing the record", target="os"), 0, "record 0", (), True),
 )
 
 
@@ -1216,7 +1294,8 @@ def self_test():
     failures = []
     for needle in ("DELETED sys.unraisablehook", "threading.excepthook", "SAME addresses",
                    "never finalized", "NOTHING THE CHECKED CODE CAN REACH RUNS AFTER THE DECISION",
-                   "CONCURRENTLY", "switches its OWN mechanism off", "sys.remote_exec"):
+                   "CONCURRENTLY", "switches its OWN mechanism off", "sys.remote_exec",
+                   "trusts its own namespace"):
         if needle not in (__doc__ or ""):
             failures.append("the module docstring no longer discloses {!r}".format(needle))
     for name, pre, body, want_code, want_record, needles, want_quiet in _CASES:
@@ -1271,7 +1350,8 @@ def self_test():
           "a sys.monitoring tool and a gc callback under a lowered threshold, each left armed to "
           "fault once the handler is past its final check (QA r10), exit 2 by name with no seal, "
           "while their in-check controls exit 2 and callbacks removed by the loaded code pass; "
-          "and every passing child's stdout ends with the seal written after the final check)")
+          "a ModuleType-subclass hook loaded code puts on threading or os never runs after the "
+          "final read (QA r11); and every passing child's stdout ends with the seal written after the final check)")
     return 0
 
 
