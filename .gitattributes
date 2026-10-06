@@ -163,6 +163,7 @@
 .aiqt/manifest.toml text eol=lf
 .aiqt/record-sections.toml.example text eol=lf
 .aiqt/release/announce-snippet.txt text eol=lf
+.aiqt/release/first-pin-demonstration.toml text eol=lf
 .aiqt/release/root.txt text eol=lf
 .aiqt/standards/README.md text eol=lf
 .aiqt/standards/atlas.toml text eol=lf
@@ -699,6 +700,7 @@ tools/gen_cursor.py text eol=lf
 tools/gen_disclosure.py text eol=lf
 tools/gen_enforceability.py text eol=lf
 tools/gen_enforcement_register.py text eol=lf
+tools/gen_first_pin_demo.py text eol=lf
 tools/gen_gensrc.py text eol=lf
 tools/gen_hooks.py text eol=lf
 tools/gen_install.py text eol=lf
