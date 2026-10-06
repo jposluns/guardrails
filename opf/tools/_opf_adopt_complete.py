@@ -59,8 +59,9 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     digest, and per CI row a digest-matched workflow member configures the store assertion in canonical
     form (adoption writes that step itself): a step whose run value is exactly one canonical assertion line
     (`opf doctor --require-store`, optionally with the recipe's `--root .`, or `sh` running a planned recipe
-    member of the same row that is the pack's shipped recipe) with no `if:`, no continue-on-error other
-    than false and a bash or sh shell (_ci_asserts_store). A step that mentions the assertion in any other
+    member of the same row that is the pack's shipped recipe) with no `if:`, every step key within its
+    value rule (continue-on-error only the plain literal false, timeout-minutes a positive integer literal)
+    and a bash shell (_ci_asserts_store). A step that mentions the assertion in any other
     form is CANNOT-EVALUATE, named, never VALID or INVALID, since this check proves nothing about other
     shell; with no step mentioning it the check is INVALID; undecodable or unparseable CI (a control
     character, an unparsed flow collection) is CANNOT-EVALUATE; every planned view
@@ -470,6 +471,16 @@ class _Flow:
         self.text = text
 
 
+class _Quoted(str):
+    """A single- or double-quoted scalar's decoded text: always a string, never a YAML null, bool or number."""
+    __slots__ = ()
+
+
+class _Block(str):
+    """A literal or folded block scalar's text: a string, but neither a plain nor a quoted scalar."""
+    __slots__ = ()
+
+
 class _Workflow:
     """A reader for the block-YAML subset CI workflows are written in: block mappings, block sequences,
     plain and quoted single-line scalars, literal and folded block scalars, and single-line flow collections
@@ -592,11 +603,15 @@ class _Workflow:
             self._unique(seen, key[0])
             out[key[0]] = self._value(indent, value)
 
-    def _sequence(self, indent):
+    def _sequence(self, indent, indentless=False):
         out = []
         while True:
             line = self._next()
             if line is None or line[0] < indent:
+                return out
+            if indentless and line[0] == indent and not _is_entry(line[1]):
+                # An indentless sequence (a mapping value at its key's indentation) ends at a line of that
+                # indentation that is not an entry: the parent mapping's next line, which it then reads.
                 return out
             if line[0] > indent or not _is_entry(line[1]):
                 self.fail("a block-sequence line that is not `- item` at the sequence's indentation")
@@ -622,7 +637,7 @@ class _Workflow:
         if not plain:
             line = self._next()
             if line is not None and line[0] == indent and _is_entry(line[1]):
-                return self._sequence(indent)
+                return self._sequence(indent, indentless=True)
             return self._node(indent + 1)
         if re.fullmatch(r"[|>](?:[+-]?[1-9]?|[1-9][+-])", plain):
             self._no_tab(rest[:_comment_start(rest)])
@@ -640,14 +655,18 @@ class _Workflow:
             if text is None or _strip_plain_comment(rest[j:]):
                 self.fail("an unterminated quoted scalar or content after its closing quote")
             self._no_tab(rest[j:j + _comment_start(rest[j:])])
-            return text
-        body = rest[:_comment_start(rest)]
+            return _Quoted(text)
         if head in "[{":
-            end = self._flow_node(body, 0, 0)
-            if body[end:].strip(_YAML_WHITE):
+            # The flow parser finds the collection's end itself, so a `#` inside a quoted entry is content;
+            # after the end only white space and a comment opened after white space may follow.
+            end = self._flow_node(rest, 0, 0)
+            tail = rest[end:]
+            cut = _comment_start(tail)
+            if tail[:cut].strip(_YAML_WHITE) or (cut == 0 and tail):
                 self.fail("content after a flow collection")
-            self._no_tab(body[end:])
-            return _Flow(plain)
+            self._no_tab(tail[:cut])
+            return _Flow(rest[:end])
+        body = rest[:_comment_start(rest)]
         self._no_tab(body)
         if (head in "&*!%@`|>,]}" or re.match(r"[-?:](?:[ \t]|$)", plain)
                 or re.search(r":(?:[ \t]|$)", plain)):
@@ -720,7 +739,7 @@ class _Workflow:
             self.i += 1
         content = [line for line in raw if line[1]]
         if not content:
-            return ""
+            return _Block("")
         digits = [ch for ch in indicator if ch.isdigit()]
         width = indent + int(digits[0]) if digits else content[0][0]
         if any(line[0] < width for line in content):
@@ -729,7 +748,7 @@ class _Workflow:
             self.fail("a leading blank line of a block scalar indented more than its content")
         lines = [line[2][width:] for line in raw]
         if indicator[0] == "|":
-            return "\n".join(lines)
+            return _Block("\n".join(lines))
         if any(line[0] > width or (not line[1] and len(line[2]) > width) for line in raw) or not raw[0][1]:
             self.fail("a more-indented or leading blank line in a folded block scalar")
         paragraphs, current = [], []
@@ -739,7 +758,7 @@ class _Workflow:
             elif current:
                 paragraphs.append(" ".join(current))
                 current = []
-        return "\n".join(paragraphs + ([" ".join(current)] if current else []))
+        return _Block("\n".join(paragraphs + ([" ".join(current)] if current else [])))
 
 
 def _is_entry(body):
@@ -748,7 +767,10 @@ def _is_entry(body):
 
 
 def _comment_start(rest):
-    """The index of the YAML comment in `rest` (a `#` at its start or after white space), else len(rest)."""
+    """The index of the YAML comment in `rest` (a `#` at its start or after white space), else len(rest).
+    It reads no quotes: `rest` is a plain scalar (where a quote is content, YAML opens no quoted span inside
+    one), a block-scalar header or the text after a quoted scalar; a flow collection finds its own end
+    (_Workflow._scalar), so a `#` inside its quoted entries is never cut."""
     for i, ch in enumerate(rest):
         if ch == "#" and (i == 0 or rest[i - 1] in _YAML_WHITE):
             return i
@@ -771,8 +793,11 @@ _CANONICAL_ROOT = "."
 _OPF_PY_RE = re.compile(r"(?:[A-Za-z0-9_-]+/)*opf\.py")
 _SHIPPED_RECIPE = Path(__file__).resolve().parent.parent / "enforcement" / "ci" / "opf-ci.sh"
 # The only keys a canonical step may carry: an `if:`, an `env:`, a `working-directory:` or a `uses:` can
-# skip the step, change the program it resolves or move the root `.` it asserts.
+# skip the step, change the program it resolves or move the root `.` it asserts. Each carries a value rule
+# (_canonical_value), and a value outside it is refused like a key outside the set.
 _CANONICAL_STEP_KEYS = frozenset(("name", "id", "run", "shell", "continue-on-error", "timeout-minutes"))
+# A step id: a letter or `_`, then letters, digits, `_` and `-`.
+_STEP_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 
 
 def _canonical_assertion(run, planned):
@@ -790,6 +815,35 @@ def _canonical_assertion(run, planned):
     else:
         return None
     return ("doctor", None) if args in (["doctor", flag], ["doctor", flag, "--root", _CANONICAL_ROOT]) else None
+
+
+def _string_scalar(value):
+    """Whether a reader value is a single-line scalar YAML reads as a string: a quoted scalar, or a plain one
+    that is not a null or bool word (_YAML_NULL_BOOL, `on`, `~`) and does not open like a number (a digit, a
+    sign or a dot). A block scalar, a flow collection, a mapping, a sequence and an empty value are not."""
+    if isinstance(value, _Quoted):
+        return True
+    return (type(value) is str and value not in _YAML_NULL_BOOL and value not in ("on", "~")
+            and value[:1] not in tuple("0123456789+-."))
+
+
+def _canonical_value(key, value):
+    """Whether `value` meets the value rule of canonical step key `key`: name a plain or quoted string
+    scalar (_string_scalar); id one that is an identifier (_STEP_ID_RE); run a string, whose command form
+    _canonical_assertion checks; shell exactly bash; timeout-minutes a plain positive integer literal; and
+    continue-on-error only the plain literal false (true, an expression or a quoted 'false' could let a
+    failed assertion pass). Any other value, an empty one included, and any other key are outside it."""
+    if key == "name":
+        return _string_scalar(value)
+    if key == "id":
+        return _string_scalar(value) and _STEP_ID_RE.fullmatch(value) is not None
+    if key == "run":
+        return isinstance(value, str)
+    if key == "shell":
+        return _string_scalar(value) and value == "bash"
+    if key == "timeout-minutes":
+        return type(value) is str and re.fullmatch(r"[1-9][0-9]*", value) is not None
+    return key == "continue-on-error" and type(value) is str and value == "false"
 
 
 def _mentions_assertion(run, planned):
@@ -810,8 +864,9 @@ def _shipped_recipe():
 
 
 def _gated(table):
-    """Whether a job or step can be skipped or its failure ignored (an `if:`, or continue-on-error not false)."""
-    return "if" in table or table.get("continue-on-error", "false") != "false"
+    """Whether a job can be skipped or its failure ignored: an `if:`, or a continue-on-error other than the
+    plain literal false (_canonical_value's rule: true, an expression or a quoted 'false' is refused)."""
+    return "if" in table or not _canonical_value("continue-on-error", table.get("continue-on-error", "false"))
 
 
 def _run_defaults(table, where):
@@ -824,7 +879,8 @@ def _run_defaults(table, where):
 
 
 def _shell_of(*tables):
-    """The step shell: the first `shell:` among the step and the job and workflow `defaults: run:`."""
+    """The step shell: the first `shell:` among the step and the job and workflow `defaults: run:`, else
+    bash (this check does not model the runner's own default)."""
     for table in tables:
         if "shell" in table:
             return table["shell"]
@@ -837,10 +893,11 @@ def _ci_asserts_store(path, data, recipes=None, planned=None):
     each live, digest-matched planned recipe path to its bytes; `planned` lists every planned recipe path of
     the row (default: the keys of `recipes`). A step asserts only in canonical form: its run value is
     exactly one canonical assertion line (_canonical_assertion), a recipe one naming a live recipe whose
-    bytes are the pack's shipped recipe; the step carries only _CANONICAL_STEP_KEYS, no `if:` and no
-    continue-on-error other than false; its job carries no `if:`, no such continue-on-error and no `env:`,
-    and neither the job nor the workflow sets `env:` or a default working directory; its shell (the step's,
-    else the job's and then the workflow's default) is bash or sh; and no earlier step of its job runs
+    bytes are the pack's shipped recipe; the step carries only _CANONICAL_STEP_KEYS, each value within its
+    rule (_canonical_value: continue-on-error only the plain literal false, timeout-minutes a positive
+    integer literal, shell bash); its job carries no `if:`, no other continue-on-error and no `env:`, and
+    neither the job nor the workflow sets `env:` or a default working directory; its shell (the step's,
+    else the job's and then the workflow's default) is bash; and no earlier step of its job runs
     shell (it could export variables or PATH entries into the step). `refused` names every other step whose
     run value mentions the assertion (_mentions_assertion): the caller reports those CANNOT-EVALUATE, never
     VALID and never INVALID, because this check proves nothing about what other shell text does. A step
@@ -878,15 +935,18 @@ def _ci_asserts_store(path, data, recipes=None, planned=None):
             why = None
             if form is None:
                 why = "its run value is not exactly one canonical assertion line"
-            elif not set(step) <= _CANONICAL_STEP_KEYS or _gated(step):
+            elif not set(step) <= _CANONICAL_STEP_KEYS:
                 why = "the step carries a key outside the canonical step ({})".format(
-                    ", ".join(sorted(set(step) - _CANONICAL_STEP_KEYS)) or "continue-on-error")
+                    ", ".join(sorted(set(step) - _CANONICAL_STEP_KEYS)))
+            elif not all(_canonical_value(key, value) for key, value in step.items()):
+                why = "the step's {} value is outside the canonical step's value rule".format(
+                    ", ".join(sorted(key for key, value in step.items() if not _canonical_value(key, value))))
             elif _gated(job) or "env" in job or "env" in doc:
                 why = "its job is conditional or continue-on-error, or the job or workflow sets env"
             elif any("working-directory" in table for table in defaults):
                 why = "a default working directory moves the root it asserts"
-            elif _shell_of(step, *defaults) not in ("bash", "sh"):
-                why = "its shell is not bash or sh"
+            elif _shell_of(step, *defaults) != "bash":
+                why = "its shell is not bash"
             elif earlier:
                 why = "an earlier step of its job runs shell"
             elif form[0] == "recipe" and form[1] not in recipes:
@@ -1573,7 +1633,17 @@ def self_test():
                 ("flow-overflow-inf-keys", b"permissions: {1.0e+309: read, .inf: write}\n" + _CI_BYTES,
                  CANNOT_EVALUATE),
                 ("key-256", b"k" * 256 + b": x\n" + _CI_BYTES, VALID),
-                ("key-257", b"k" * 257 + b": x\n" + _CI_BYTES, CANNOT_EVALUATE)):
+                ("key-257", b"k" * 257 + b": x\n" + _CI_BYTES, CANNOT_EVALUATE),
+                # Round 6: a step timeout-minutes outside its value rule refuses, a positive integer does
+                # not; a `#` inside a quoted flow entry is content; an indentless sequence returns to its
+                # parent mapping.
+                ("step-timeout-flow", _CI_BYTES.replace(b"        run: python3", b"        timeout-minutes: [abc]\n"
+                                                        b"        run: python3"), CANNOT_EVALUATE),
+                ("step-timeout-integer", _CI_BYTES.replace(b"        run: python3", b"        timeout-minutes: 5\n"
+                                                           b"        run: python3"), VALID),
+                ("flow-quoted-hash", _CI_BYTES.replace(b"[main]", b'["release # candidate"]'), VALID),
+                ("indentless-on", _CI_BYTES.replace(b"on:\n  push:\n    branches: [main]\n", b"on:\n- push\n"),
+                 VALID)):
             with mock.patch.object(here, "_CI_BYTES", ci_bytes):
                 got = _case()
             check("check-4-ci-" + label, _only(got, {} if want == VALID else _red(OPERATIONAL, want))
@@ -1617,13 +1687,18 @@ def self_test():
                 ("folded-scalar", steps + b"      - run: >\n          opf doctor\n          --require-store\n",
                  None, VALID),
                 ("root-dot", steps + b"      - run: opf doctor --require-store --root .\n", None, VALID),
-                ("sh-shell", steps + b"      - shell: sh\n        run: opf doctor --require-store\n", None, VALID),
                 ("bash-shell", steps + b"      - shell: bash\n        run: opf doctor --require-store\n", None,
                  VALID),
                 ("continue-on-error-false",
                  steps + b"      - continue-on-error: false\n        run: opf doctor --require-store\n", None, VALID),
-                ("canonical-keys", steps + b"      - name: n\n        id: i\n        timeout-minutes: 5\n"
+                ("canonical-keys", steps + b"      - name: OPF store\n        id: opf_store\n"
+                                           b"        timeout-minutes: 5\n        shell: bash\n"
+                                           b"        continue-on-error: false\n"
                                            b"        run: opf doctor --require-store\n", None, VALID),
+                ("job-continue-on-error-false", b"jobs:\n  t:\n    continue-on-error: false\n    steps:\n"
+                                                b"      - run: opf doctor --require-store\n", None, VALID),
+                ("job-default-shell-bash", b"jobs:\n  t:\n    defaults:\n      run:\n        shell: bash\n"
+                                           b"    steps:\n      - run: opf doctor --require-store\n", None, VALID),
                 ("after-uses-step", steps + b"      - uses: actions/checkout@v4\n"
                                             b"      - run: opf doctor --require-store\n", None, VALID),
                 ("sequence-at-key-indent", steps + b"    - run: opf doctor --require-store\n", None, VALID),
@@ -1694,6 +1769,14 @@ def self_test():
                                                    b"        run: opf doctor --require-store\n", None, CANNOT_EVALUATE),
                 ("other-shell", steps + b"      - shell: pwsh\n        run: opf doctor --require-store\n", None,
                  CANNOT_EVALUATE),
+                ("sh-shell", steps + b"      - shell: sh\n        run: opf doctor --require-store\n", None,
+                 CANNOT_EVALUATE),
+                ("job-default-shell-sh", b"jobs:\n  t:\n    defaults:\n      run:\n        shell: sh\n"
+                                         b"    steps:\n      - run: opf doctor --require-store\n", None,
+                 CANNOT_EVALUATE),
+                ("job-continue-on-error-quoted-false", b"jobs:\n  t:\n    continue-on-error: 'false'\n    steps:\n"
+                                                       b"      - run: opf doctor --require-store\n", None,
+                 CANNOT_EVALUATE),
                 ("custom-shell", steps + b"      - shell: bash {0}\n        run: opf doctor --require-store\n", None,
                  CANNOT_EVALUATE),
                 ("earlier-run-step", steps + b"      - run: echo PATH=x >> \"$GITHUB_ENV\"\n"
@@ -1733,6 +1816,30 @@ def self_test():
                 ("recipe-non-utf8", steps + delegating, {_CI_RECIPE_PATH: b"\xff\xfe run_step doctor\n"},
                  CANNOT_EVALUATE)):
             check("ci-" + label, ci(data, recipes) == want)
+        # Every allowed key of the canonical step has a value rule (_canonical_value): each value in the
+        # second tuple is CANNOT-EVALUATE, and each in the first, the same key and carrier, VALID.
+        def keyed(key, value):
+            return steps + b"      - " + key + (b": " + value if value else b":") + b"\n" \
+                + b"        run: opf doctor --require-store\n"
+
+        for key, within, outside in (
+                (b"name", (b"OPF store", b"'5'", b'"true"', b"x # c"),
+                 (b"[a]", b"{a: b}", b"|\n          x", b">\n          x", b"true", b"null", b"~", b"5", b"")),
+                (b"id", (b"opf_store", b"'opf-1'", b"_a"),
+                 (b"a.b", b"'a b'", b"1a", b"true", b"[a]", b"|\n          a", b"'${{ x }}'", b"")),
+                (b"shell", (b"bash", b"'bash'", b'"bash"'),
+                 (b"sh", b"'sh'", b"BASH", b"[bash]", b"bash {0}", b"pwsh", b"|\n          bash", b"")),
+                (b"timeout-minutes", (b"5", b"1", b"360"),
+                 (b"[abc]", b"0", b"05", b"'5'", b'"5"', b"1.5", b"-1", b"+1", b"0x10", b"1_0", b"5e1",
+                  b"${{ 5 }}", b"{a: b}", b"|\n          5", b"")),
+                (b"continue-on-error", (b"false",),
+                 (b"true", b"'false'", b'"false"', b"False", b"FALSE", b"no", b"0", b"${{ false }}", b"[false]",
+                  b"|\n          false", b""))):
+            for n, value in enumerate(within):
+                check("ci-step-value-within-{}-{}".format(key.decode(), n), ci(keyed(key, value)) == VALID)
+            for n, value in enumerate(outside):
+                check("ci-step-value-outside-{}-{}".format(key.decode(), n),
+                      ci(keyed(key, value)) == CANNOT_EVALUATE)
         # The pack's own workflow template (opf/enforcement/ci) is canonical with its recipe planned, and a
         # refused mention without it.
         template = (_SHIPPED_RECIPE.parent / "github-actions.yml").read_bytes()
@@ -1800,7 +1907,7 @@ def self_test():
                             ("flow-key-colon-tab", b"on: {a:\tb}\n" + good),
                             ("flow-duplicate-key", b"on: {a: x, a: y}\n" + good),
                             ("flow-duplicate-nested", b"on: [{a: x, b: [{c: 1, c: 2}]}]\n" + good),
-                            ("flow-duplicate-bool", b"on: {true: a, on: b}\n" + good),
+                            ("flow-duplicate-on", b"on: {on: a, on: b}\n" + good),
                             ("flow-duplicate-quoted", b"on: {a: x, 'a': y}\n" + good),
                             ("block-duplicate-quoted", b'name: x\n"name": y\n' + good),
                             ("block-duplicate-escaped", b'"a\\tb": x\n"a\tb": y\n' + good),
@@ -1857,11 +1964,29 @@ def self_test():
                             ("block-leading-blank-deeper", steps + b"      - run: |\n            \n"
                                                            b"          opf doctor --require-store\n"),
                             ("folded-leading-blank", steps + b"      - run: >\n\n          opf doctor --require-store\n"),
+                            ("flow-hash-no-space", b'on: ["a"]#c\n' + good),
+                            ("flow-hash-plain-entry", b"on: [a #c]\n" + good),
+                            ("flow-quoted-hash-unclosed", b'on: ["a # b]\n' + good),
+                            ("sequence-then-key", b"on:\n  - push\n  x: y\n" + good),
+                            ("indentless-deeper-line", b"on:\n- push\n  x: y\n" + good),
+                            ("top-sequence-then-key", b"- a\n" + good),
                             ("jobs-flow", b"jobs: {}\n"),
                             ("jobs-scalar", b"jobs: x\n"),
                             ("block-less-indented", steps + b"      - run: |\n            opf doctor --require-store\n"
                                                     b"          true\n")):
             check("ci-cannot-" + label, ci(data) == CANNOT_EVALUATE)
+        # The duplicate vectors are load-bearing for duplicate detection: with _Workflow._unique a no-op the
+        # accepted-key duplicate parses VALID.
+        with mock.patch.object(_Workflow, "_unique", lambda self, seen, key: None):
+            check("ci-duplicate-vector-discriminates", ci(b"on: {on: a, on: b}\n" + good) == VALID)
+        # Round 6 reader controls: a `#` inside a quoted flow entry is content, and an indentless sequence
+        # returns to its parent mapping, at the top level and inside a job.
+        check("ci-reader-round-6-valid", ci(b'on: ["release # candidate", \'a # b\'] # c\n' + good) == VALID
+              and ci(b'on: {a: "x # y"}\n' + good) == VALID
+              and ci(b"on:\n- push\n- pull_request\n" + good) == VALID
+              and ci(steps + b"    - run: opf doctor --require-store\n    timeout-minutes: 5\n") == VALID
+              and ci(b"jobs:\n  t:\n    needs:\n    - a\n    steps:\n      - run: opf doctor --require-store\n")
+              == VALID)
         # The reader vectors above are load-bearing: each carrier key alone leaves the canonical step VALID.
         check("ci-reader-carriers-valid", ci(b"on: [a, b]\n" + good) == VALID
               and ci(b"on: " + b"[" * 16 + b"]" * 16 + b"\n" + good) == VALID
