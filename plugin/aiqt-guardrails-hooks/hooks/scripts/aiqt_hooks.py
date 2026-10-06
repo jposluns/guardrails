@@ -164,6 +164,30 @@ manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own lo
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
 """
+import sys
+
+# PYTHON-FLOOR guard (the hook form of tools/check_python_floor.py). It runs before HANDLER_EVENT exists, so
+# it carries its own literal of the fail-open modes, which selftest_aiqt_hooks.py holds equal to the
+# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS. On an older interpreter such a mode WARNS on
+# exit 0 and never blocks (a Stop block here would re-fire with no cap); every other mode, PreToolUse and
+# an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
+FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
+                         "orch_stop_guard", "orch_teammate_idle")
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    _floor_refusal = (
+        "error: aiqt_hooks.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    sys.stderr.write(_floor_refusal)
+    if len(sys.argv) > 1 and sys.argv[1] in FLOOR_FAIL_OPEN_MODES:
+        import json
+        sys.stdout.write(json.dumps(dict(systemMessage=(
+            "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
+            "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\n")
+        raise SystemExit(0)
+    raise SystemExit(2)
+
 import collections
 import datetime
 import json
@@ -177,7 +201,6 @@ import signal
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import time
 

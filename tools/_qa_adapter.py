@@ -29,7 +29,7 @@ Two invariants the contract enforces, so a false green is unreachable:
 A REQUIRED surface that is disabled in config is a configuration fault (UNVERIFIABLE, malformed), kept
 distinct from an OPTIONAL-disabled SKIP.
 
-stdlib only (tomllib is stdlib on 3.11+). `--self-test` proves the discriminating property: the adapter
+stdlib only (Python 3.14 or newer). `--self-test` proves the discriminating property: the adapter
 returns UNVERIFIABLE (never PASS) on a missing REQUIRED surface, so deleting that guard fails the test.
 """
 import json

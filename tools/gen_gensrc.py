@@ -75,8 +75,7 @@ def _read_declaration(path, where):
     including a dotted-root `import GENSRC_OUTPUTS.child` and a fail-closed wildcard `from x import *`; a
     def/class; an except-as; and a match capture, including a MatchMapping `.rest`. A `type GENSRC_OUTPUTS
     = ...` statement needs no dedicated branch: its `.name` is itself a Store-context Name already caught
-    by the Name rule (and ast.TypeAlias exists only on py3.12+, so referencing it would break the py3.11
-    floor).
+    by the Name rule.
 
     Disclosed residual (this does NOT claim to catch any binding anywhere): (a) GENSRC_OUTPUTS is a
     RESERVED declaration name, so the walk is CONSERVATIVE and will also reject an unrelated reuse of the
@@ -86,9 +85,9 @@ def _read_declaration(path, where):
     scope; discovery never executes a generator, so such a binding cannot affect the static registry
     anyway. Per the GD-34 lesson, static enumeration of a dynamic surface is unbounded; this guard covers
     the realistic and statically-detectable forms and discloses the rest. (c) A PEP-695 type
-    parameter (def f[GENSRC_OUTPUTS](), class C[GENSRC_OUTPUTS], type X[GENSRC_OUTPUTS] = ...; py3.12+)
-    binds only in the type-parameter scope, is not inspected, cannot affect the module-level
-    declaration, and is a SyntaxError on the py3.11 floor: an accepted nested-scope residual."""
+    parameter (def f[GENSRC_OUTPUTS](), class C[GENSRC_OUTPUTS], type X[GENSRC_OUTPUTS] = ...)
+    binds only in the type-parameter scope, is not inspected, and cannot affect the module-level
+    declaration: an accepted nested-scope residual."""
     source = path.read_text(encoding="utf-8")  # OSError -> caller's fail-closed try
     try:
         tree = ast.parse(source, filename=str(path))
