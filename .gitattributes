@@ -648,6 +648,7 @@ tools/check_ci_parity.py text eol=lf
 tools/check_clauses.py text eol=lf
 tools/check_crosswalk.py text eol=lf
 tools/check_derived_command_parameters.py text eol=lf
+tools/check_entry_guard.py text eol=lf
 tools/check_footer.py text eol=lf
 tools/check_gensrc_failclose.py text eol=lf
 tools/check_git_option_table.py text eol=lf
