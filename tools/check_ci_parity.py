@@ -43,7 +43,10 @@ invocations cannot be detected if nobody runs the remaining file manually. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
-blocks or the top-level directory-binding line before the first gate, unbalanced
+blocks, the top-level directory-binding line before the first gate, or the reviewed
+special-file-precheck abort line (PRECHECK_ABORT_LINES, top level before the first
+gate; it stops the run, exit 2, on a refused tree so no later gate can block on a
+plain read of a FIFO), unbalanced
 if/fi nesting in the runner, a duplicate else or an empty then or else branch,
 any character outside printable ASCII (0x20-0x7E) plus tab and newline in
 either input file, job content without a job mapping, a run_gate()
@@ -61,9 +64,10 @@ not a blocklist of known-bad spellings. The only recognized [ ] tests are
 if [ "$failed" -ne 0 ]; then, if [ "$notrun" -ne 0 ]; then, and the two exact
 gitleaks lookup lines, so a -v operand (whose subscript can assign), any NAME[...]
 subscript operand, a bare [ ] line, and every unlisted test form are unclassified.
-set -uo pipefail or set -euo pipefail, and the directory-binding
-cd "$(dirname "$0")/.." || exit 2 line, are accepted only at top level before the
-first gate. A bare then or done is never a runner line, and else is accepted only
+set -uo pipefail or set -euo pipefail, the three checked directory-binding
+lines (LOCAL_BINDING_LINES), and the special-file-precheck abort line
+(registered as a roster member, so the CI workflow's matching first step keeps set
+parity), are accepted only at top level before the first gate. A bare then or done is never a runner line, and else is accepted only
 inside an open if block that holds at least one then-branch statement and is not
 already in its else branch. Every other assignment, export or echo line must be
 byte-for-byte one of the
@@ -245,6 +249,53 @@ MASKED_REF_EXPRESSIONS = frozenset({
 
 # One repository-local, non-shipped gate; no general .github executable allowance.
 REPO_GATE = ".github/check_newtab_contract.py"
+
+# D-400-SPECIAL-FILE-PRECHECK: the ONE accepted abort line outside the terminal summary
+# blocks and the directory binding, keyed by exact spelling (local runner, and the
+# standalone OPF runner AFTER adapt_standalone_runner rebases "$here/ to "opf/tools/).
+# Each runner runs its precheck FIRST and stops (exit 2) on a refusal, so no later gate
+# can block on a plain read of a FIFO. The line is accepted only at top level before any
+# gate, and it registers the mapped normalized command as a roster member, so the CI
+# workflow's matching first step keeps set parity by construction.
+PRECHECK_ABORT_LINES = dict((
+    ("python3 -I -B tools/_gen_common.py --precheck || exit 2",
+     "tools/_gen_common.py --precheck"),
+    ('python3 -I -B "opf/tools/_containment.py" --precheck || exit 2',
+     "opf/tools/_containment.py --precheck"),
+))
+
+# D-400-SPECIAL-FILE-PRECHECK bootstrap: the ONE accepted shell test-and-abort line that must run
+# BEFORE the precheck invocation itself, in each runner and in every CI precheck step: python3 would
+# block LOADING the precheck module if the script path were a FIFO, so a POSIX [ -f ] && [ ! -h ] test
+# refuses a non-regular or symlinked script by name first (the residual that remains is the
+# interpreter binary and the runner script itself, both read before this line can run). Keyed by exact
+# spelling (the local runner and the CI workflow share the tools/ spelling; the standalone OPF runner
+# matches AFTER adapt_standalone_runner rebases "$here/ to "opf/tools/); the value is the tools path
+# the shadow scan must see accounted for on that line. The line registers NO roster member: the member
+# is the precheck invocation itself, which the runners and the workflow carry right after it, and the
+# precheck-ORDER pass below holds every workflow job to the full two-line canonical step.
+PRECHECK_BOOTSTRAP_LINES = dict((
+    ('[ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
+     "tools/_gen_common.py"),
+    ('[ -f "opf/tools/_containment.py" ] && [ ! -h "opf/tools/_containment.py" ] || { echo "error: opf/tools/_containment.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
+     "opf/tools/_containment.py"),
+))
+
+# D-400-SPECIAL-FILE-PRECHECK order: the canonical precheck step body every workflow job must run
+# before any other post-checkout run step, exactly and in order: the bootstrap test-and-abort line,
+# then the precheck invocation.
+PRECHECK_STEP_RUN_LINES = (
+    '[ -f tools/_gen_common.py ] && [ ! -h tools/_gen_common.py ] || { echo "error: tools/_gen_common.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }',
+    "python3 -I -B tools/_gen_common.py --precheck",
+)
+
+# The only run line a workflow job may carry BEFORE its checkout step: it configures git ahead of
+# materializing the tree (the byte-canon matrix sets the hostile line-ending conversion before
+# checkout) and cannot read a tree that does not exist yet. Any other pre-checkout run line is a
+# finding, fail-loud.
+PRE_CHECKOUT_RUN_LINES = frozenset({
+    "git config --global core.autocrlf true",
+})
 
 ALLOWLIST = (
     {
@@ -451,6 +502,17 @@ def _operator(token):
     return bool(token) and all(char in "|&;<>()`" for char in token)
 
 
+# QA round 7 (claude B1): the ONE reviewed -X option pair every gate launch carries. CPython
+# reads __pycache__/<module>.pyc with a plain blocking open at import time (-B stops only the
+# writes), so a hostile pyc behind an accepted ignored link could park a gate; this option
+# redirects that read to a path under /dev/null, where NOTHING can exist (ENOTDIR on every
+# lookup, no privilege can create it), so the interpreter always compiles from source. The
+# value is byte-pinned: any other -X spelling stays cannot-evaluate. Identity-neutral like
+# -I and -B (PYCACHE_PREFIX_ARGS is removed from the normalized command), and the launcher
+# isolation remains check_python_launcher_isolation.py's question.
+PYCACHE_PREFIX_ARGS = ("-X", "pycache_prefix=/dev/null/aiqt-pycache")
+
+
 def _interpreter_flag(token):
     """Recognize only the disclosed, valueless interpreter flag set."""
     return bool(re.fullmatch(r"-[IBEsPu]+", token))
@@ -506,6 +568,18 @@ def normalize(tokens):
     if command in INTERPRETERS:
         index += 1
         while index < len(tokens) and tokens[index].startswith("-"):
+            if tokens[index] == PYCACHE_PREFIX_ARGS[0]:
+                if tuple(tokens[index:index + 2]) == PYCACHE_PREFIX_ARGS:
+                    index += 2
+                    continue
+                return Result(
+                    False,
+                    None,
+                    "interpreter-option",
+                    "unsupported -X value {!r}; only the reviewed pair {} is "
+                    "modelled".format(tokens[index:index + 2],
+                                      " ".join(PYCACHE_PREFIX_ARGS)),
+                )
             if not _interpreter_flag(tokens[index]):
                 return Result(
                     False,
@@ -926,7 +1000,20 @@ def _text_format_diagnostic(text, source):
 # them, so screening only the adapted text would validate lines bash never
 # runs.
 STANDALONE_SOURCE = "opf/tools/run_all_checks.sh"
-STANDALONE_BINDING = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
+# The checked directory binding: dirname's status, then a non-empty name, then
+# the cd; each guard exits 2 before any gate (vector 33 runs each guard red).
+# The cd runs with CDPATH cleared, so a relative start under a hostile CDPATH
+# never resolves into the CDPATH entry (vector 34 runs the bare cd red).
+STANDALONE_BINDING_LINES = (
+    'dir=$(dirname -- "$0") || exit 2',
+    '[ -n "$dir" ] || exit 2',
+    'here="$(CDPATH= cd -- "$dir/." && pwd)" || exit 2',
+)
+LOCAL_BINDING_LINES = (
+    'dir=$(dirname -- "$0") || exit 2',
+    '[ -n "$dir" ] || exit 2',
+    'CDPATH= cd -- "$dir/.." || exit 2',
+)
 
 
 # ONE byte-level reader for every runner or workflow file this module or
@@ -988,23 +1075,44 @@ def adapt_standalone_runner(text):
     if format_diagnostic is not None:
         return None, format_diagnostic
     lines = text.splitlines()
-    if lines.count(STANDALONE_BINDING) != 1 or lines[-1:] != ["exit 0"]:
+    width = len(STANDALONE_BINDING_LINES)
+    starts = [index for index in range(len(lines))
+              if tuple(lines[index:index + width]) == STANDALONE_BINDING_LINES]
+    if (len(starts) != 1
+            or any(lines.count(line) != 1 for line in STANDALONE_BINDING_LINES)
+            or lines[-1:] != ["exit 0"]):
         return None, _diagnostic(
             STANDALONE_SOURCE,
             0,
             "standalone-scaffold",
             "unsupported standalone runner scaffold: expected exactly one "
-            "directory-binding line and a terminal exit 0",
+            "checked directory binding and a terminal exit 0",
         )
-    lines[lines.index(STANDALONE_BINDING)] = (
-        "# validated standalone directory binding")
+    for index in range(starts[0], starts[0] + width):
+        lines[index] = "# validated standalone directory binding"
     lines[-1] = "# validated terminal exit"
     return "\n".join(lines).replace('"$here/', '"opf/tools/'), None
 
 
-def extract_local(text):
-    """Extract normalized members from tools/run_all_checks.sh."""
-    source = LOCAL_SOURCE
+def standalone_runner_diagnostics():
+    """Diagnostics for the LIVE standalone OPF runner under the shared grammar (claude m2, QA
+    round 5): raw-byte read, the shared adaptation, then extract_local with source=
+    STANDALONE_SOURCE. main() fails closed (exit 2) on any of them, so deleting the OPF runner's
+    bootstrap line turns the LIVE gate red, not only the self-test's adapted copy."""
+    runner, read_diagnostic = read_runner_text(
+        ROOT / "opf" / "tools" / "run_all_checks.sh", STANDALONE_SOURCE)
+    if read_diagnostic is not None:
+        return (read_diagnostic,)
+    adapted, adapter_diagnostic = adapt_standalone_runner(runner)
+    if adapter_diagnostic is not None:
+        return (adapter_diagnostic,)
+    return tuple(extract_local(adapted, STANDALONE_SOURCE).diagnostics)
+
+
+def extract_local(text, source=LOCAL_SOURCE):
+    """Extract normalized members from tools/run_all_checks.sh, or (claude m2, QA round 5) from
+    the ADAPTED standalone OPF runner when the caller passes source=STANDALONE_SOURCE, so a
+    diagnostic on that runner names opf/tools/run_all_checks.sh, never the tools runner."""
     diagnostics = []
     members = set()
     origins = {}
@@ -1047,6 +1155,7 @@ def extract_local(text):
     }
     initialized = set()
     gitleaks_updates = set()
+    precheck_bootstraps = set()
     for line_number, raw in enumerate(text.splitlines(), 1):
         if line_number == 1 and raw == "#!/usr/bin/env bash":
             continue
@@ -1369,8 +1478,8 @@ def extract_local(text):
             # Only where the real runners put it: top level, before any gate, where
             # a late -e cannot silently end a partially failed roster.
             scaffold = not if_stack and not members
-        elif stripped == 'cd "$(dirname "$0")/.." || exit 2':
-            # Only where the real runner puts it: top level, before any gate. A
+        elif stripped in LOCAL_BINDING_LINES:
+            # Only where the real runner puts them: top level, before any gate. A
             # second binding mid-roster would move the remaining gates to the
             # parent of the repository root when $0 is relative.
             scaffold = not if_stack and not members
@@ -1378,6 +1487,42 @@ def extract_local(text):
             # Only where the real runner puts it: top level, before any gate. A
             # later notrun=0 would clear the NOT RUN state and hide its disclaimer.
             scaffold = not if_stack and not members
+        elif stripped in PRECHECK_ABORT_LINES:
+            # Only where the real runners put it: top level, before any gate
+            # (D-400-SPECIAL-FILE-PRECHECK). The one accepted abort outside the
+            # terminal summaries: it stops the whole run (exit 2) on a refused tree,
+            # so no later gate can block on a plain read of a FIFO. A second
+            # spelling, or one after a gate, stays unclassified. The command is a
+            # roster member, keeping set parity with the CI workflow's first step.
+            scaffold = not if_stack and not members
+            if scaffold:
+                _add_member(members, origins, line_number,
+                            PRECHECK_ABORT_LINES[stripped])
+                script = PRECHECK_ABORT_LINES[stripped].rsplit(" --precheck", 1)[0]
+                if script not in precheck_bootstraps:
+                    # The bootstrap is REQUIRED, not merely accepted: without it python3 would block
+                    # LOADING a FIFO planted at the precheck script path before any line of the
+                    # precheck could run, and set parity alone cannot see the deletion (the bootstrap
+                    # registers no member).
+                    diagnostics.append(_diagnostic(
+                        source,
+                        line_number,
+                        "missing-bootstrap",
+                        "the precheck invocation runs without its bootstrap test-and-abort line "
+                        "ahead of it; python3 would block loading a FIFO planted at "
+                        "{}".format(script)))
+        elif stripped in PRECHECK_BOOTSTRAP_LINES:
+            # Only where the real runners put it: top level, before any gate, ahead of the precheck
+            # invocation it guards (D-400-SPECIAL-FILE-PRECHECK bootstrap). The one accepted shell
+            # test-and-abort besides the precheck abort line: python3 would block loading a FIFO at
+            # the precheck script path, so the shell refuses a non-regular or symlinked script by
+            # name first. It registers no member; the shadow scan sees its tools path through
+            # origins. A second spelling, or one after a gate, stays unclassified.
+            scaffold = not if_stack and not members
+            if scaffold:
+                origins.setdefault(line_number, set()).add(
+                    PRECHECK_BOOTSTRAP_LINES[stripped])
+                precheck_bootstraps.add(PRECHECK_BOOTSTRAP_LINES[stripped])
         elif stripped == PATH_APPEND_LINE:
             # Only where the real runner puts it: the HOME guard's then branch,
             # which has just proven HOME non-empty. The guard's else branch
@@ -1546,6 +1691,14 @@ def _classify_ci_command(
             "invoking or sourcing tools/run_all_checks.sh makes parity "
             "circular",
         ))
+        return
+
+    if stripped in PRECHECK_BOOTSTRAP_LINES:
+        # D-400-SPECIAL-FILE-PRECHECK bootstrap: the exact shell test-and-abort line each precheck
+        # step runs ahead of the precheck invocation (python3 would block loading a FIFO at the
+        # script path). It registers no member; the shadow scan sees its tools path through origins.
+        origins.setdefault(line_number, set()).add(
+            PRECHECK_BOOTSTRAP_LINES[stripped])
         return
 
     tokenized = _tokenize(stripped)
@@ -2448,6 +2601,10 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
         (root / "tools").mkdir()
         runner = root / "tools" / "run_all_checks.sh"
         runner.write_text(text, encoding="utf-8")
+        # The live runner's precheck BOOTSTRAP line tests this path with [ -f ] && [ ! -h ] before
+        # any stub can run; give the scratch tree a regular file there. Data only: the stub python3
+        # never reads its script argument, and nothing executes this file.
+        (root / "tools" / "_gen_common.py").write_text("", encoding="utf-8")
         log = root / "calls.log"
         log.write_text("", encoding="utf-8")
         env = dict(
@@ -2467,6 +2624,170 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
     return proc.returncode, proc.stdout.splitlines(), calls
 
 
+_STUB_DIRNAME = """#!/bin/sh
+printf '%s' "$stub_dirname_out"
+exit "$stub_dirname_rc"
+"""
+
+
+def _path_absent(path):
+    """True when nothing is at path, False when something is; any other
+    error (an unreadable parent, say) propagates, so it never reads as absent."""
+    import os
+
+    try:
+        os.lstat(str(path))
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def _without_precheck_bootstrap(text):
+    """The runner text with its special-file precheck BOOTSTRAP line removed, for the
+    directory-binding harnesses only (vectors 33 and 34). The bootstrap tests a real file
+    relative to wherever the binding left the runner, so a broken binding that lands at / or
+    in a decoy tree would exit 2 on that test alone and mask the guard under test; without
+    it, the precheck invocation that follows is the first stub python3 call, and its logged
+    working directory shows where the binding put the runner. Both spellings are removed:
+    the shared key, and the standalone runner's "$here/ form that adapt_standalone_runner
+    rebases. The live runners keep the line; vectors 30 and 30b hold it."""
+    for line in PRECHECK_BOOTSTRAP_LINES:
+        for spelling in (line, line.replace('"opf/tools/', '"$here/')):
+            text = text.replace(spelling + "\n", "")
+    return text
+
+
+def _dirname_guard_outcome(text, relative, scenario):
+    """Run a runner text from relative in a scratch tree under one dirname
+    scenario; return (rc, no gate launched).
+
+    Scenarios: "missing" (no dirname on PATH), "failed" (prints . and exits 7),
+    "empty" (prints nothing and exits 0) and "control" (prints the runner's true
+    directory). Every stub is written before the one launch, from this thread.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError("bash not found")
+    with tempfile.TemporaryDirectory(prefix="ci-parity-dirname-") as tmp:
+        root = Path(tmp)
+        bin_dir, functions = _prepare_stubs(root)
+        runner = root / "tree" / relative
+        runner.parent.mkdir(parents=True)
+        runner.write_text(_without_precheck_bootstrap(text), encoding="utf-8")
+        caller = root / "caller"
+        caller.mkdir()
+        path = [str(bin_dir)]
+        out, rc = {"failed": (".", "7"), "empty": ("", "0"),
+                   "control": (str(runner.parent), "0")}.get(scenario, ("", "0"))
+        if scenario != "missing":
+            dirname_dir = root / "dirname-bin"
+            dirname_dir.mkdir()
+            stub = dirname_dir / "dirname"
+            stub.write_text(_STUB_DIRNAME, encoding="utf-8")
+            stub.chmod(0o500)
+            path.insert(0, str(dirname_dir))
+        log = root / "calls.log"
+        env = dict(PATH=os.pathsep.join(path), BASH_ENV=str(functions),
+                   HOME=tmp, LC_ALL="C", stub_log=str(log),
+                   stub_fail_command="", stub_gitleaks_rc="0",
+                   stub_dirname_out=out, stub_dirname_rc=rc)
+        proc = subprocess.run(
+            [bash, "--noprofile", "--norc", str(runner)],
+            cwd=str(caller), env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=600)
+        return proc.returncode, _path_absent(log)
+
+
+def dirname_guard_problems(text, relative):
+    """The scenarios a runner text fails: each faulty dirname must exit 2
+    with no gate launched, and the control must launch gates."""
+    problems = []
+    for scenario in ("missing", "failed", "empty", "control"):
+        rc, absent = _dirname_guard_outcome(text, relative, scenario)
+        if scenario == "control":
+            if absent:
+                problems.append(scenario)
+        elif (rc, absent) != (2, True):
+            problems.append(scenario)
+    return problems
+
+
+# The python3 shell function for cdpath_problems: it also records the working
+# directory each gate launches from, so a moved root shows in the log.
+_STUB_PYTHON3_PWD_FUNCTION = """python3() {
+  printf '%s\\n' "$PWD python3 $*" >> "$stub_log" || return 2
+  return 0
+}
+"""
+
+
+def _cdpath_outcome(text, relative):
+    """Run a runner text by its RELATIVE path from its scratch tree's root
+    under a CDPATH naming a decoy tree that holds the same relative directory;
+    return (tree, decoy, logged gate lines).
+
+    dirname prints the relative directory, as the real one does for a relative
+    $0. Every stub is written before the one launch, from this thread.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError("bash not found")
+    with tempfile.TemporaryDirectory(prefix="ci-parity-cdpath-") as tmp:
+        root = Path(tmp)
+        bin_dir, _functions = _prepare_stubs(root)
+        functions = root / "stubs-pwd.bash"
+        functions.write_text(_STUB_PYTHON3_PWD_FUNCTION, encoding="utf-8")
+        functions.chmod(0o400)
+        tree = root / "tree"
+        runner = tree / relative
+        runner.parent.mkdir(parents=True)
+        runner.write_text(_without_precheck_bootstrap(text), encoding="utf-8")
+        decoy = root / "decoy"
+        (decoy / relative).parent.mkdir(parents=True)
+        dirname_dir = root / "dirname-bin"
+        dirname_dir.mkdir()
+        stub = dirname_dir / "dirname"
+        stub.write_text(_STUB_DIRNAME, encoding="utf-8")
+        stub.chmod(0o500)
+        log = root / "calls.log"
+        env = dict(PATH=os.pathsep.join([str(dirname_dir), str(bin_dir)]),
+                   BASH_ENV=str(functions), HOME=tmp, LC_ALL="C",
+                   CDPATH=str(decoy), stub_log=str(log),
+                   stub_fail_command="", stub_gitleaks_rc="0",
+                   stub_dirname_out=str(Path(relative).parent), stub_dirname_rc="0")
+        subprocess.run(
+            [bash, "--noprofile", "--norc", relative],
+            cwd=str(tree), env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=600)
+        calls = ([] if _path_absent(log)
+                 else log.read_text(encoding="utf-8").splitlines())
+        return str(tree), str(decoy), calls
+
+
+def cdpath_problems(text, relative):
+    """What a relative start under a hostile CDPATH does wrong: "no-gate" when
+    no gate launches from the true tree, "moved" when any logged gate line
+    names the decoy (a moved root, or a printed CDPATH match in a captured
+    directory)."""
+    tree, decoy, calls = _cdpath_outcome(text, relative)
+    problems = []
+    if not any(call.startswith(tree + " python3 ") for call in calls):
+        problems.append("no-gate")
+    if any(decoy in call for call in calls):
+        problems.append("moved")
+    return problems
+
+
 def _naming_scenarios(text):
     """Build the runtime scenarios; the module docstring discloses residual masks."""
     registered = []
@@ -2476,7 +2797,7 @@ def _naming_scenarios(text):
             registered.append((tokens[1], " ".join(tokens[3:])))
     scenarios = [
         ("passing", "", 0, ()),
-        ("combined failure", "-I -B tools/check_leaks.py", 1,
+        ("combined failure", "-I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_leaks.py", 1,
          (("secrets (gitleaks)", 1), ("leaks", 3))),
         ("gitleaks only", "", 1, (("secrets (gitleaks)", 1),)),
     ]
@@ -2507,12 +2828,18 @@ def runner_naming_problems(text, first_only=False):
                 return ["runner stub does not support {!r}".format(command)]
             registered.append((name, " ".join(command[1:])))
             roster.append((name, " ".join(command)))
+        elif raw.strip() in PRECHECK_ABORT_LINES:
+            # The precheck abort line: a stub python3 call with no run_gate header
+            # (D-400-SPECIAL-FILE-PRECHECK); the stub passes it, so the abort stays
+            # un-taken and the roster run continues.
+            roster.append((None, " ".join(raw.strip().split(" ")[:-3])))
         elif tokens[:2] == ["if", "gitleaks"]:
             roster.append(("secrets (gitleaks)", " ".join(tokens[1:-1]).rstrip(";")))
     if not registered:
         return ["runner has no registered gates"]
     expected_calls = [command for name, command in roster]
-    expected_headers = ["--- {} ---".format(name) for name, command in roster]
+    expected_headers = ["--- {} ---".format(name)
+                        for name, command in roster if name is not None]
     scenarios = _naming_scenarios(text)
     problems = []
     workers = 4
@@ -3643,11 +3970,39 @@ def self_test():
                     "26 standalone runner adapter: {!r}".format(
                         adapter_diagnostic))
             else:
-                adapted_diagnostics = extract_local(adapted).diagnostics
+                adapted_diagnostics = extract_local(
+                    adapted, STANDALONE_SOURCE).diagnostics
                 if adapted_diagnostics:
                     failures.append(
                         "26 adapted standalone runner: {!r}".format(
                             adapted_diagnostics))
+                else:
+                    # claude m2 (QA round 5): deleting the OPF runner's bootstrap must be a
+                    # missing-bootstrap diagnostic NAMING opf/tools/run_all_checks.sh, and the
+                    # LIVE gate path (standalone_runner_diagnostics, which main() fails closed
+                    # on) must extract the real runner cleanly. Fails without the source
+                    # parameter and the live check.
+                    opf_bootstrap_line = next(
+                        line for line in PRECHECK_BOOTSTRAP_LINES
+                        if PRECHECK_BOOTSTRAP_LINES[line] == "opf/tools/_containment.py")
+                    deleted_bootstrap = adapted.replace(opf_bootstrap_line + "\n", "", 1)
+                    if deleted_bootstrap == adapted:
+                        failures.append("26c standalone bootstrap fixture drift")
+                    else:
+                        got_deleted = extract_local(
+                            deleted_bootstrap, STANDALONE_SOURCE).diagnostics
+                        if not any(diagnostic.code == "missing-bootstrap"
+                                   and diagnostic.source == STANDALONE_SOURCE
+                                   for diagnostic in got_deleted):
+                            failures.append(
+                                "26c deleting the standalone bootstrap must be a "
+                                "missing-bootstrap diagnostic naming {}, got {!r}".format(
+                                    STANDALONE_SOURCE, got_deleted))
+                    live_standalone = standalone_runner_diagnostics()
+                    if live_standalone:
+                        failures.append(
+                            "26c the live standalone runner must extract cleanly on the live "
+                            "gate path, got {!r}".format(live_standalone))
             # codex qa9 MAJOR-1: the adapter screens the RAW text, so a
             # forbidden character cannot vanish in its splitlines() and
             # newline rejoin before extract_local's own screen. A form feed
@@ -3839,7 +4194,7 @@ def self_test():
             ("loop keyword outside the grammar",
              mutate((gitleaks, "done\n" + gitleaks))),
             ("directory rebinding below the first gate",
-             mutate((gitleaks, 'cd "$(dirname "$0")/.." || exit 2\n' + gitleaks))),
+             mutate((gitleaks, 'CDPATH= cd -- "$dir/.." || exit 2\n' + gitleaks))),
         )
         for name, mutant in allowlist_fixtures:
             if mutant is None:
@@ -3911,8 +4266,8 @@ def self_test():
                 failures.append(
                     "26 non-literal label was not rejected: " + name)
         glob_label = mutate((
-            'run_gate "dashes"    python3 -I -B tools/check_no_dashes.py',
-            "run_gate op[f]/tools/[or]* python3 -I -B tools/check_no_dashes.py"))
+            'run_gate "dashes"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_no_dashes.py',
+            "run_gate op[f]/tools/[or]* python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_no_dashes.py"))
         if glob_label is None:
             failures.append("26 label fixture drift: glob label")
         elif not any(item.code == "run-gate-label"
@@ -3968,7 +4323,7 @@ def self_test():
         # file; each fixture fails without it, on the runner and on the
         # workflow.
         dashes_line = (
-            'run_gate "dashes"    python3 -I -B tools/check_no_dashes.py')
+            'run_gate "dashes"    python3 -I -B -X pycache_prefix=/dev/null/aiqt-pycache tools/check_no_dashes.py')
         byte_fixtures = (
             ("form feed as a line break (qa8 P1)", "\f",
              mutate(("\n  notrun=1", "\fnotrun=1"))),
@@ -4237,7 +4592,8 @@ def self_test():
             if not (isinstance(problem, tuple) and problem[:1] == ("canary",)):
                 failures.append("26 live runner: " + problem)
         want_executed = ({("", "0"), ("", "1"),
-                          ("-I -B tools/check_leaks.py", "1")}
+                          ("-I -B -X pycache_prefix=/dev/null/aiqt-pycache "
+                           "tools/check_leaks.py", "1")}
                          | {(command, "0") for command in registered_commands})
         if set(executed) != want_executed:
             failures.append(
@@ -4403,6 +4759,9 @@ def self_test():
         return sites
     allowed_read_sites = {
         "tools/check_ci_parity.py": {
+            # The stub call log vector 34 writes, never a runner or workflow.
+            ("_cdpath_outcome", "read_text"): 1,
+            ("_cdpath_outcome", "splitlines"): 1,
             ("_naming_scenarios", "splitlines"): 1,
             ("_run_runner_copy", "read_text"): 1,
             ("_run_runner_copy", "splitlines"): 2,
@@ -4414,19 +4773,14 @@ def self_test():
             ("self_test", "splitlines"): 3,
         },
         "tools/selftest_git_fixture_env.py": {
-            ("_archive_reads_use_caller_env", "read_text"): 1,
+            # QA round 6 (claude B1): the five tree-scanning helpers now read through
+            # read_text_nonblocking, so their Path.read_text sites are gone from this pin; the
+            # two remaining read_text sites read a Trace2 event log and a copied fixture this
+            # suite itself created under tempfile, never the repository tree.
             ("_auto_maintenance_children", "read_text"): 1,
             ("_auto_maintenance_children", "splitlines"): 1,
-            ("_binding_calls", "read_text"): 1,
-            ("_caller_env_archive_only", "read_text"): 1,
-            ("_calls_any", "read_text"): 1,
-            ("_maintenance_pin_scan", "read_text"): 1,
-            ("_manifest_extra_setup_failures", "read_text"): 1,
-            ("_opf_home_lifecycles", "read_text"): 1,
             ("_registered_selftests", "splitlines"): 1,
             ("_require_wrapper_observed", "splitlines"): 1,
-            ("_scrub_scoped_first", "read_text"): 1,
-            ("_system_pin_checks", "read_text"): 1,
             ("_system_pin_probe", "splitlines"): 1,
             ("_write_report", "open-text"): 1,
             ("prepare", "read_text"): 1,
@@ -4446,6 +4800,775 @@ def self_test():
                     sorted(got_sites.items()),
                     sorted(allowed.items())))
 
+
+    # D-400-SPECIAL-FILE-PRECHECK bootstrap (runner side): the exact test-and-abort line is accepted
+    # only at top level before any gate, registers no member, and satisfies the shadow scan through
+    # origins; moved after the first gate it is unclassified (cannot-evaluate), so a runner that
+    # reorders the bootstrap behind a gate never reads as clean.
+    count += 1
+    bootstrap_tools = next(line for line in PRECHECK_BOOTSTRAP_LINES
+                           if PRECHECK_BOOTSTRAP_LINES[line] == "tools/_gen_common.py")
+    bootstrap_fixture = "\n".join((
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        *LOCAL_BINDING_LINES,
+        "export PYTHONDONTWRITEBYTECODE=1",
+        "failed=0",
+        'failed_names=""',
+        "notrun=0",
+        bootstrap_tools,
+        "python3 -I -B tools/_gen_common.py --precheck || exit 2",
+        "run_gate() {",
+        *EXPECTED_RUN_GATE_BODY,
+        "}",
+        'run_gate "a" python3 -I -B tools/a.py',
+        'if [ "$failed" -ne 0 ]; then',
+        'echo "FAILED GATES: ${failed_names}"',
+        'echo "RESULT: FAIL"',
+        "exit 1",
+        "fi",
+        'if [ "$notrun" -ne 0 ]; then',
+        'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
+        "exit 0",
+        "fi",
+        'echo "RESULT: PASS"',
+    )) + "\n"
+    got = extract_local(bootstrap_fixture)
+    if got.diagnostics or "tools/_gen_common.py --precheck" not in got.members:
+        failures.append(
+            "30 the in-place bootstrap line was not accepted cleanly: {!r}".format(
+                got.diagnostics))
+    moved = bootstrap_fixture.replace(bootstrap_tools + "\n", "", 1).replace(
+        'run_gate "a" python3 -I -B tools/a.py',
+        'run_gate "a" python3 -I -B tools/a.py\n' + bootstrap_tools, 1)
+    got = extract_local(moved)
+    if not any(diagnostic.code == "unclassified-line" for diagnostic in got.diagnostics):
+        failures.append(
+            "30 a bootstrap line after the first gate must be unclassified, got {!r}".format(
+                got.diagnostics))
+
+    # D-400-SPECIAL-FILE-PRECHECK bootstrap (runner side, QA round 4): the bootstrap line is REQUIRED
+    # ahead of the precheck invocation, not merely accepted; DELETING it must be a missing-bootstrap
+    # diagnostic (set parity alone cannot see the deletion, the bootstrap registers no member). This
+    # vector fails without the requirement.
+    count += 1
+    deleted = bootstrap_fixture.replace(bootstrap_tools + "\n", "", 1)
+    got = extract_local(deleted)
+    if not any(diagnostic.code == "missing-bootstrap" for diagnostic in got.diagnostics):
+        failures.append(
+            "30b deleting the bootstrap line must be a missing-bootstrap diagnostic, got {!r}".format(
+                got.diagnostics))
+
+    # D-400-SPECIAL-FILE-PRECHECK bootstrap (CI side): inside a literal run block the exact line is
+    # benign and shadow-clean; any respelling of it is unclassified-command, so a weakened CI
+    # bootstrap never reads as clean.
+    count += 1
+    ci_bootstrap_fixture = "\n".join((
+        "name: Quality",
+        "jobs:",
+        "  quality:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - name: Special-file precheck",
+        "        run: |",
+        "          " + bootstrap_tools,
+        "          python3 -I -B tools/_gen_common.py --precheck",
+    )) + "\n"
+    got = extract_ci(ci_bootstrap_fixture)
+    if got.diagnostics or "tools/_gen_common.py --precheck" not in got.members:
+        failures.append(
+            "31 the CI bootstrap line was not accepted cleanly: {!r}".format(got.diagnostics))
+    got = extract_ci(ci_bootstrap_fixture.replace("[ ! -h tools/_gen_common.py ]",
+                                                  "[ ! -h tools/x.py ]", 1))
+    if not any(diagnostic.code in ("unclassified-command", "shadow-miss")
+               for diagnostic in got.diagnostics):
+        failures.append(
+            "31 a respelled CI bootstrap line must be unclassified, got {!r}".format(
+                got.diagnostics))
+
+    # D-400-SPECIAL-FILE-PRECHECK order: the LIVE workflow files must order-check clean, and each
+    # mutation class (a missing precheck step, a gate step before the precheck, an unreviewed
+    # pre-checkout run line, a precheck ahead of checkout, a tools path outside captured run lines)
+    # must be caught. This vector fails without the order pass.
+    count += 1
+    live_problems, live_diagnostics = precheck_order_report()
+    if live_problems or live_diagnostics:
+        failures.append("32 live workflow files do not order-check clean: {!r} {!r}".format(
+            live_problems, live_diagnostics))
+    order_fixture = "\n".join((
+        "name: Quality",
+        "jobs:",
+        "  one:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - name: Hostile checkout line-ending setting (before checkout)",
+        "        run: git config --global core.autocrlf true",
+        "      - uses: actions/checkout@v4",
+        "      - uses: actions/setup-python@v5",
+        "        with:",
+        "          python-version: '3.14'",
+        "      - name: Special-file precheck",
+        "        run: |",
+        "          " + bootstrap_tools,
+        "          python3 -I -B tools/_gen_common.py --precheck",
+        "      - name: A gate",
+        "        run: python3 -I -B tools/a.py",
+    )) + "\n"
+    got_problems, got_diagnostics = workflow_precheck_order_problems(order_fixture, "fixture.yml")
+    if got_problems or got_diagnostics:
+        failures.append("32 the clean order fixture did not pass: {!r} {!r}".format(
+            got_problems, got_diagnostics))
+    order_mutations = (
+        ("missing precheck step",
+         order_fixture.replace("      - name: Special-file precheck\n        run: |\n"
+                               "          " + bootstrap_tools + "\n"
+                               "          python3 -I -B tools/_gen_common.py --precheck\n", ""),
+         "no canonical special-file precheck step"),
+        ("gate before precheck",
+         order_fixture.replace("      - name: Special-file precheck",
+                               "      - name: Early gate\n"
+                               "        run: python3 -I -B tools/b.py\n"
+                               "      - name: Special-file precheck", 1),
+         "before the special-file precheck"),
+        ("unreviewed pre-checkout run",
+         order_fixture.replace("git config --global core.autocrlf true",
+                               "python3 -I -B tools/a.py", 1),
+         "pre-checkout"),
+        ("precheck ahead of checkout",
+         order_fixture.replace("      - uses: actions/checkout@v4\n"
+                               "      - uses: actions/setup-python@v5\n        with:\n"
+                               "          python-version: '3.14'\n", "", 1).replace(
+                               "      - name: A gate",
+                               "      - uses: actions/checkout@v4\n"
+                               "      - name: A gate", 1),
+         "before checkout"),
+    )
+    for label, mutated_fixture, needle in order_mutations:
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(needle in problem for problem in got_problems):
+            failures.append("32 order mutation not caught ({}): {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    hidden = order_fixture.replace("      - name: A gate\n        run: python3 -I -B tools/a.py\n",
+                                   "      - name: A gate\n        with:\n"
+                                   "          arg: tools/a.py\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(hidden, "fixture.yml")
+    if not any(diagnostic.code == "order-shadow-miss" for diagnostic in got_diagnostics):
+        failures.append("32 a tools path outside captured run lines must be a diagnostic, got "
+                        "{!r}".format(got_diagnostics))
+
+    # D-400-SPECIAL-FILE-PRECHECK order (QA round 4): a step key the parse does not model can disable
+    # or soften the precheck step while its run body still matches the canonical lines (if: and
+    # continue-on-error: above all), so each such key, on the precheck step or any other, must be a
+    # step-key diagnostic (cannot-evaluate), never a clean order pass. An env:/with: mapping stays
+    # modelled (quality.yml carries both). These vectors fail without the step-key rule.
+    count += 1
+    for weakening in ("if: ${{ false }}", "continue-on-error: true", "shell: bash",
+                      "timeout-minutes: 1"):
+        neutered = order_fixture.replace(
+            "      - name: Special-file precheck\n",
+            "      - name: Special-file precheck\n        " + weakening + "\n", 1)
+        got_problems, got_diagnostics = workflow_precheck_order_problems(neutered, "fixture.yml")
+        if not any(diagnostic.code == "step-key" for diagnostic in got_diagnostics):
+            failures.append("32b a {!r} key on the precheck step must be a step-key diagnostic, "
+                            "got {!r} {!r}".format(weakening, got_problems, got_diagnostics))
+    enved = order_fixture.replace(
+        "      - name: A gate\n        run: python3 -I -B tools/a.py\n",
+        "      - name: A gate\n        env:\n          A_VALUE: one\n"
+        "        run: python3 -I -B tools/a.py\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(enved, "fixture.yml")
+    if got_problems or got_diagnostics:
+        failures.append("32b an env: mapping on a gate step stays modelled, got {!r} {!r}".format(
+            got_problems, got_diagnostics))
+
+    # D-400-SPECIAL-FILE-PRECHECK order (QA round 5, claude M1): GitHub applies workflow- and
+    # job-level env: and defaults: to every step, so a BASH_ENV, PATH or defaults.run.shell value
+    # there (or an env: mapping on the precheck step itself) neuters the canonical precheck step
+    # while its run body still matches. Each inherited execution control must be refused. These
+    # vectors fail without the workflow-key, job-key, env-override and precheck-env rules.
+    count += 1
+    for label, code_name, mutated_fixture in (
+        ("workflow env", "workflow-key",
+         order_fixture.replace("jobs:\n", "env:\n  BASH_ENV: .aiqt/neuter.sh\njobs:\n", 1)),
+        ("workflow defaults", "workflow-key",
+         order_fixture.replace("jobs:\n", "defaults:\n  run:\n    shell: bash\njobs:\n", 1)),
+        ("job env", "job-key",
+         order_fixture.replace(
+             "    runs-on: ubuntu-latest\n",
+             "    runs-on: ubuntu-latest\n    env:\n      BASH_ENV: .aiqt/neuter.sh\n", 1)),
+        ("job defaults shell", "job-key",
+         order_fixture.replace(
+             "    runs-on: ubuntu-latest\n",
+             "    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: bash\n", 1)),
+        ("job if", "job-key",
+         order_fixture.replace(
+             "    runs-on: ubuntu-latest\n",
+             "    runs-on: ubuntu-latest\n    if: false\n", 1)),
+        ("job continue-on-error", "job-key",
+         order_fixture.replace(
+             "    runs-on: ubuntu-latest\n",
+             "    runs-on: ubuntu-latest\n    continue-on-error: true\n", 1)),
+        ("step env PATH entry", "env-override",
+         order_fixture.replace(
+             "      - name: A gate\n        run: python3 -I -B tools/a.py\n",
+             "      - name: A gate\n        env:\n          PATH: /tmp/x\n"
+             "        run: python3 -I -B tools/a.py\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
+            failures.append("32c inherited execution control not refused ({}): {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    enved_precheck = order_fixture.replace(
+        "      - name: Special-file precheck\n        run: |\n",
+        "      - name: Special-file precheck\n        env:\n"
+        "          BASH_ENV: .aiqt/neuter.sh\n        run: |\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(
+        enved_precheck, "fixture.yml")
+    if not (any("env: mapping on the canonical special-file precheck step" in problem
+                for problem in got_problems)
+            and any(diagnostic.code == "env-override" for diagnostic in got_diagnostics)):
+        failures.append("32c an env: mapping on the precheck step must be refused, got "
+                        "{!r} {!r}".format(got_problems, got_diagnostics))
+
+    # QA round 6 (codex M3 = claude M1, claude M4): quoted and space-before-colon spellings are
+    # the SAME YAML key, so the workflow- and job-level checks are an allowlist over the
+    # NORMALIZED key, and ANY env: on a step at or before the precheck is refused (a NODE_OPTIONS
+    # on actions/setup-python runs committed code before the precheck). Each vector fails without
+    # the allowlist-and-normalization change or the at-or-before-precheck env rule.
+    count += 1
+    for label, code_name, mutated_fixture in (
+        ("quoted job env", "job-key",
+         order_fixture.replace("    runs-on: ubuntu-latest\n",
+                               "    runs-on: ubuntu-latest\n    \"env\":\n"
+                               "      BASH_ENV: .aiqt/n.sh\n", 1)),
+        ("spaced job env", "job-key",
+         order_fixture.replace("    runs-on: ubuntu-latest\n",
+                               "    runs-on: ubuntu-latest\n    env :\n"
+                               "      BASH_ENV: .aiqt/n.sh\n", 1)),
+        ("single-quoted job defaults", "job-key",
+         order_fixture.replace("    runs-on: ubuntu-latest\n",
+                               "    runs-on: ubuntu-latest\n    'defaults':\n      run:\n"
+                               "        shell: true {0}\n", 1)),
+        ("unmodelled job key", "job-key",
+         order_fixture.replace("    runs-on: ubuntu-latest\n",
+                               "    runs-on: ubuntu-latest\n    container: alpine\n", 1)),
+        ("quoted workflow env", "workflow-key",
+         order_fixture.replace("jobs:\n", "\"env\":\n  BASH_ENV: .aiqt/n.sh\njobs:\n", 1)),
+        ("quoted jobs spelling", "workflow-key",
+         order_fixture.replace("jobs:\n", "\"jobs\":\n", 1)),
+        ("unmodelled workflow key", "workflow-key",
+         order_fixture.replace("jobs:\n",
+                               "defaults:\n  run:\n    shell: true {0}\njobs:\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
+            failures.append("32d spelling/allowlist mutation not refused ({}): {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    for label, mutated_fixture in (
+        ("NODE_OPTIONS env on setup-python",
+         order_fixture.replace("      - uses: actions/setup-python@v5\n",
+                               "      - uses: actions/setup-python@v5\n        env:\n"
+                               "          NODE_OPTIONS: --require ./.aiqt/n.js\n", 1)),
+        ("env on checkout",
+         order_fixture.replace("      - uses: actions/checkout@v4\n",
+                               "      - uses: actions/checkout@v4\n        env:\n"
+                               "          HARMLESS: one\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any("at or before the special-file precheck" in problem
+                   for problem in got_problems):
+            failures.append("32d {} must be refused, got {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+
+    # QA round 7 (codex M2 = claude M1; claude m-a, m-c): the job SET comes only from canonical
+    # plain job ids, so EVERY other line above the job-content indent inside jobs: is a job-id
+    # refusal (a quoted or spaced id, a flow-style mapping, an anchor, an alias or a merge key
+    # could carry a WHOLE JOB the parse cannot see, and a duplicate id re-opens an ordered one);
+    # a modelled job-level key never carries an anchor, alias or flow value; and setup-python
+    # inputs at or before the precheck are an allowlist of the plain python-version: entry.
+    # Each vector fails without the round-7 change.
+    count += 1
+    evil_job = ("    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - name: Evil gate\n        run: python3 -I -B tools/b.py\n")
+    for label, code_name, mutated_fixture in (
+        ("quoted job id", "job-id", order_fixture + "  \"evil\":\n" + evil_job),
+        ("single-quoted job id", "job-id", order_fixture + "  'evil':\n" + evil_job),
+        ("spaced job id", "job-id", order_fixture + "  evil :\n" + evil_job),
+        ("flow-style job", "job-id",
+         order_fixture + "  evil: " + chr(123) + "runs-on: ubuntu-latest, steps: []" + chr(125)
+         + "\n"),
+        ("anchored job value", "job-id", order_fixture + "  evil: &e\n" + evil_job),
+        ("aliased job", "job-id", order_fixture + "  evil2: *e\n"),
+        ("merge key at job level", "job-id", order_fixture + "  <<: *base\n"),
+        ("duplicate job id", "job-id", order_fixture + "  one:\n" + evil_job),
+        ("anchor on a modelled job-level key", "job-key",
+         order_fixture.replace("    runs-on: ubuntu-latest\n",
+                               "    runs-on: &r ubuntu-latest\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
+            failures.append("32e unmodelled job structure not refused ({}): {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    for label, mutated_fixture in (
+        ("pip-install input on setup-python",
+         order_fixture.replace(
+             "          python-version: '3.14'\n",
+             "          python-version: '3.14'\n          pip-install: -e .\n", 1)),
+        ("python-version-file input on setup-python",
+         order_fixture.replace(
+             "          python-version: '3.14'\n",
+             "          python-version-file: .python-version\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any("setup-python input" in problem for problem in got_problems):
+            failures.append("32e unmodelled setup-python input not refused ({}): {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    versioned = order_fixture.replace(
+        "          python-version: '3.14'\n",
+        "          python-version: 3.14\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(versioned, "fixture.yml")
+    if got_problems or got_diagnostics:
+        failures.append("32e the plain python-version: input must stay modelled, got "
+                        "{!r} {!r}".format(got_problems, got_diagnostics))
+
+    # QA round 7 (claude B1): the ONE reviewed -X pair is identity-neutral like -I and -B, and
+    # any other -X value stays cannot-evaluate. Fails without the PYCACHE_PREFIX_ARGS handling.
+    count += 1
+    with_x = normalize(("python3", "-I", "-B", "-X", "pycache_prefix=/dev/null/aiqt-pycache",
+                        "tools/a.py"))
+    plain_x = normalize(("python3", "-I", "-B", "tools/a.py"))
+    if not (with_x.ok and plain_x.ok and with_x.value == plain_x.value):
+        failures.append("32f the reviewed -X pycache pair must be identity-neutral, got "
+                        "{!r} vs {!r}".format(with_x, plain_x))
+    rogue_x = normalize(("python3", "-I", "-B", "-X", "pycache_prefix=/tmp/evil", "tools/a.py"))
+    if rogue_x.ok or rogue_x.code != "interpreter-option":
+        failures.append("32f an unreviewed -X value must be cannot-evaluate, got "
+                        "{!r}".format(rogue_x))
+
+    # QA round 8 (codex 7 = claude M1): DUPLICATE keys at every modelled level, and a value this
+    # parse cannot read on a modelled line (a multi-line quoted scalar, a tag, a flow mapping on
+    # a repeated jobs: key, an anchor inside a with: entry), are refusals: each form below made
+    # the round-7 guard and the YAML engine read DIFFERENT workflows (the guard credited a
+    # precheck step the YAML did not have). Each vector fails without the round-8 change.
+    count += 1
+    swallowing_job = "\n".join((
+        "name: Quality",
+        "jobs:",
+        "  staleness:",
+        "    name: 'Offline staleness audit",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - name: Special-file precheck",
+        "        run: |",
+        "          " + bootstrap_tools,
+        "          python3 -I -B tools/_gen_common.py --precheck",
+        "      - name: end'",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - name: Unchecked read",
+        "        run: cat README.md",
+    )) + "\n"
+    for label, code_name, mutated_fixture in (
+        ("multi-line quoted job-level scalar swallowing the steps", "job-key", swallowing_job),
+        ("duplicate steps key in a job", "job-key",
+         order_fixture + "    steps:\n      - uses: actions/checkout@v4\n"
+         "      - name: Unchecked read\n        run: cat README.md\n"),
+        ("flow mapping on a repeated top-level jobs key", "workflow-key",
+         order_fixture + "jobs: " + chr(123) + "evil: " + chr(123)
+         + "runs-on: ubuntu-latest, steps: [" + chr(123) + "uses: actions/checkout@v4"
+         + chr(125) + ", " + chr(123) + "run: cat README.md" + chr(125) + "]" + chr(125)
+         + chr(125) + "\n"),
+        ("tagged flow sequence on a repeated steps key", "job-key",
+         order_fixture + "    steps: !!seq [" + chr(123) + "uses: actions/checkout@v4"
+         + chr(125) + "]\n"),
+        ("anchor inside a setup-python with entry", "step-key",
+         order_fixture.replace(
+             "          python-version: '3.14'\n",
+             "          python-version: &version '3.14'\n", 1)),
+        ("duplicate run key in one step", "step-key",
+         order_fixture.replace(
+             "      - name: A gate\n        run: python3 -I -B tools/a.py\n",
+             "      - name: A gate\n        run: python3 -I -B tools/a.py\n"
+             "        run: python3 -I -B tools/a.py\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
+            failures.append("32g duplicate or unreadable YAML structure not refused ({}): "
+                            "{!r} {!r}".format(label, got_problems, got_diagnostics))
+
+    # QA round 9 (codex 1 = claude MJ1, claude m2): the strict scalar allowlist, the
+    # inline-comment refusal and the post-precheck action refusal. In YAML a trailing doubled
+    # single quote is an ESCAPED QUOTE, not a close, so a step name ending in an escaped quote
+    # pair is an OPEN scalar that swallows the following lines (the round-8 endswith test called
+    # it closed and the guard credited a precheck step the YAML engine did not have). The quoted,
+    # plain-with-quote, comment, merge-key and post-precheck-action vectors fail without the
+    # round-9 change; the block-scalar, anchor, alias, tag and flow vectors prove the standing
+    # allowlist refuses every named form where a step or scalar is expected.
+    count += 1
+    for label, code_name, mutated_fixture in (
+        ("step name ending in an escaped quote pair", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: 'A gate''\n", 1)),
+        ("step name of one escaped quote", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: '''\n", 1)),
+        ("double-quoted step name with a backslash escape", "step-key",
+         order_fixture.replace("      - name: A gate\n",
+                               '      - name: "A ' + chr(92) + '" gate"\n', 1)),
+        ("quoted step name with content after the close", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: 'A' gate\n", 1)),
+        ("quote inside a quoted step name", "step-key",
+         order_fixture.replace("      - name: A gate\n",
+                               "      - name: 'A " + chr(34) + "quoted" + chr(34) + " gate'\n",
+                               1)),
+        ("quote inside a plain step name", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: don't stop\n", 1)),
+        ("backslash inside a plain step name", "step-key",
+         order_fixture.replace("      - name: A gate\n",
+                               "      - name: a" + chr(92) + " gate\n", 1)),
+        ("block scalar step name", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: |\n", 1)),
+        ("anchor as a step name", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: &x gate\n", 1)),
+        ("alias as a step name", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: *x\n", 1)),
+        ("tag as a step name", "step-key",
+         order_fixture.replace("      - name: A gate\n", "      - name: !!str gate\n", 1)),
+        ("inline comment on a step line", "step-comment",
+         order_fixture.replace("      - name: A gate\n", "      - name: A gate # note\n", 1)),
+        ("merge key in a with mapping", "step-key",
+         order_fixture.replace("          python-version: '3.14'\n",
+                               "          python-version: '3.14'\n"
+                               "          <<: python-version\n", 1)),
+        ("flow mapping where a step is expected", "step-shape",
+         order_fixture.replace("      - name: A gate\n        run: python3 -I -B tools/a.py\n",
+                               "      - " + chr(123) + "name: A gate, run: python3 -I -B "
+                               "tools/a.py" + chr(125) + "\n", 1)),
+        ("multi-line flow where steps are expected", "job-key",
+         order_fixture.replace("    steps:\n", "    steps: [\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(diagnostic.code == code_name for diagnostic in got_diagnostics):
+            failures.append("32h unmodelled scalar, comment or step form not refused ({}): "
+                            "{!r} {!r}".format(label, got_problems, got_diagnostics))
+    # QA round 10: inside a literal block a '#' is CONTENT, so a run body line is kept
+    # VERBATIM (never comment-stripped); a disguised precheck line therefore no longer matches
+    # the canonical body and the job fails the order question, in agreement with what the shell
+    # actually runs.
+    commented_body = order_fixture.replace(
+        "          python3 -I -B tools/_gen_common.py --precheck\n",
+        "          python3 -I -B tools/_gen_common.py --precheck # note\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(
+        commented_body, "fixture.yml")
+    if not any("no canonical special-file precheck step" in problem
+               for problem in got_problems):
+        failures.append("32h a '#' on a run body line is literal content; the disguised "
+                        "precheck must not be credited, got {!r} {!r}".format(
+                            got_problems, got_diagnostics))
+    replaced_tree = order_fixture + ("      - uses: actions/checkout@v4\n"
+                                     "        with:\n          ref: refs/heads/other\n")
+    got_problems, got_diagnostics = workflow_precheck_order_problems(replaced_tree, "fixture.yml")
+    if not any("after the special-file precheck" in problem for problem in got_problems):
+        failures.append("32h a post-precheck action (a second checkout above all) must be "
+                        "refused, got {!r} {!r}".format(got_problems, got_diagnostics))
+
+    # QA round 9 (codex 1 and claude MJ1, the filed reproduction shapes): a currency-shaped job
+    # whose precheck-looking lines sit INSIDE an open single-quoted step name must be refused,
+    # never a clean order pass; the clean currency shape must still pass. Both reproductions
+    # pass the round-8 guard (0 problems, 0 diagnostics) and fail without the round-9 change.
+    count += 1
+    currency_shape = "\n".join((
+        "name: Standards currency",
+        "jobs:",
+        "  staleness:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - uses: actions/setup-python@v5",
+        "        with:",
+        "          python-version: '3.14'",
+        "      - name: Special-file precheck",
+        "        run: |",
+        "          " + bootstrap_tools,
+        "          python3 -I -B tools/_gen_common.py --precheck",
+        "      - name: Standards staleness",
+        "        run: python3 -I -B tools/check_standards_currency.py",
+    )) + "\n"
+    got_problems, got_diagnostics = workflow_precheck_order_problems(
+        currency_shape, "currency-fixture.yml")
+    if got_problems or got_diagnostics:
+        failures.append("32i the clean currency-shaped fixture must pass, got {!r} {!r}".format(
+            got_problems, got_diagnostics))
+    codex_repro = currency_shape.replace(
+        "      - name: Special-file precheck\n",
+        "      - name: 'Swallow ''\n", 1).replace(
+        "          python3 -I -B tools/_gen_common.py --precheck\n",
+        "          python3 -I -B tools/_gen_common.py --precheck\n"
+        "      - name: end'\n        run: echo placeholder\n", 1)
+    claude_repro = currency_shape.replace(
+        "      - name: Special-file precheck\n",
+        "      - name: 'Prepare''\n      - name: Special-file precheck\n", 1).replace(
+        "      - name: Standards staleness\n",
+        "      - name: done'\n        run: cat README.md\n"
+        "      - name: Standards staleness\n", 1)
+    for label, mutated_fixture in (("escaped-quote swallow A", codex_repro),
+                                   ("escaped-quote swallow B", claude_repro)):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "currency-fixture.yml")
+        if not any(diagnostic.code == "step-key" for diagnostic in got_diagnostics):
+            failures.append("32i round-9 reproduction ({}) not refused: {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+
+    # QA round 10 (codex 1 and claude MJ1 of round 10, the whole-file line grammar): an
+    # env:/with: entry with NO colon used to receive an empty-value pass, so a quoted scalar
+    # opened there (or an escaped mapping key decoding to BASH_ENV, an anchored key, a quoted or
+    # exact duplicate key, a double-quoted value) let the round-9 guard and the YAML engine read
+    # DIFFERENT steps: each hostile fixture below returned ([], []) at the round-9 guard. Under
+    # the line grammar every such line is refused by name, and a simply single-quoted uses:
+    # value now DECODES to the same checkout as the plain spelling (round-10 codex minor).
+    # These vectors fail without the round-10 grammar change.
+    count += 1
+    for opener in ("            'x", "            - 'x", "            ? 'x",
+                   "            !!str 'x"):
+        no_colon = currency_shape.replace(
+            "      - uses: actions/checkout@v4\n",
+            "      - uses: actions/checkout@v4\n        with:\n"
+            "          fetch-depth:\n" + opener + "\n", 1).replace(
+            "          python3 -I -B tools/_gen_common.py --precheck\n",
+            "          python3 -I -B tools/_gen_common.py --precheck\n"
+            "      - name: Close\n        run: |\n          '\n", 1)
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            no_colon, "currency-fixture.yml")
+        if not any(diagnostic.code in ("step-key", "step-shape")
+                   for diagnostic in got_diagnostics):
+            failures.append("32j a no-colon with: entry opening a scalar ({!r}) must be "
+                            "refused, got {!r} {!r}".format(opener.strip(), got_problems,
+                                                            got_diagnostics))
+    for label, mutated_fixture in (
+        ("an escaped env key decoding to BASH_ENV",
+         currency_shape.replace(
+             "      - name: Standards staleness\n",
+             "      - name: Standards staleness\n        env:\n"
+             "          \"\\u0042ASH_ENV\": .github/skip.sh\n", 1)),
+        ("an anchored with: key",
+         currency_shape.replace(
+             "      - uses: actions/checkout@v4\n",
+             "      - uses: actions/checkout@v4\n        with:\n"
+             "          &foo fetch-depth: 0\n", 1)),
+        ("a quoted duplicate with: key",
+         currency_shape.replace(
+             "      - uses: actions/checkout@v4\n",
+             "      - uses: actions/checkout@v4\n        with:\n"
+             "          fetch-depth: 1\n          \"fetch-depth\": 0\n", 1)),
+        ("an escaped with: key",
+         currency_shape.replace(
+             "      - uses: actions/checkout@v4\n",
+             "      - uses: actions/checkout@v4\n        with:\n"
+             "          \"fetch-dep\\u0074h\": 0\n", 1)),
+        ("an exact duplicate with: key",
+         currency_shape.replace(
+             "      - uses: actions/checkout@v4\n",
+             "      - uses: actions/checkout@v4\n        with:\n"
+             "          fetch-depth: 1\n          fetch-depth: 0\n", 1)),
+        ("a double-quoted scalar value",
+         currency_shape.replace("          python-version: '3.14'\n",
+                                "          python-version: \"3.14\"\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "currency-fixture.yml")
+        if not any(diagnostic.code == "step-key" for diagnostic in got_diagnostics):
+            failures.append("32j {} must be a step-key refusal, got {!r} {!r}".format(
+                label, got_problems, got_diagnostics))
+    quoted_uses = currency_shape.replace("      - uses: actions/checkout@v4\n",
+                                         "      - uses: 'actions/checkout@v4'\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(
+        quoted_uses, "currency-fixture.yml")
+    if got_problems or got_diagnostics:
+        failures.append("32j a simply quoted uses: value must decode to the same checkout as "
+                        "the plain spelling, got {!r} {!r}".format(got_problems,
+                                                                   got_diagnostics))
+
+    # QA round 11 (claude m1, m3): setup-python at or before the precheck must carry EXACTLY ONE
+    # non-empty, literal python-version: input (with none, or an expression that evaluates
+    # empty, setup-python falls back to reading the checkout's .python-version file BEFORE the
+    # precheck step runs), and the KNOWN-REFUSED disclosure names the most common refused forms,
+    # the inline action-pin comment first, including the indentless-sequence and
+    # padded-flow-sequence layouts it previously left out. The three setup-python vectors return
+    # ([], []) without the round-11 change; the two layout vectors pin the disclosed refusals as
+    # refusals.
+    count += 1
+    for label, needle, mutated_fixture in (
+        ("no with: block on setup-python",
+         "without exactly one non-empty python-version",
+         order_fixture.replace("      - uses: actions/setup-python@v5\n        with:\n"
+                               "          python-version: '3.14'\n",
+                               "      - uses: actions/setup-python@v5\n", 1)),
+        ("empty python-version", "without exactly one non-empty python-version",
+         order_fixture.replace("          python-version: '3.14'\n",
+                               "          python-version: ''\n", 1)),
+        ("expression python-version", "can evaluate empty",
+         order_fixture.replace("          python-version: '3.14'\n",
+                               "          python-version: ${{ vars.AIQT_PYTHON }}\n", 1)),
+    ):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            mutated_fixture, "fixture.yml")
+        if not any(needle in problem for problem in got_problems):
+            failures.append("32k setup-python without a pinned literal python-version not "
+                            "refused ({}): {!r} {!r}".format(label, got_problems,
+                                                             got_diagnostics))
+    disclosure = " ".join(workflow_precheck_order_problems.__doc__.split())
+    comment_at = disclosure.find("inline comment")
+    indentless_at = disclosure.find("INDENTLESS sequence")
+    if (comment_at == -1 or indentless_at == -1 or comment_at > indentless_at
+            or "padded inside its brackets" not in disclosure):
+        failures.append("32k the KNOWN-REFUSED disclosure must name the inline action-pin "
+                        "comment first and include the indentless-sequence and padded "
+                        "flow-sequence layouts")
+    indentless = "\n".join((
+        "name: Quality",
+        "jobs:",
+        "  one:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "    - uses: actions/checkout@v4",
+        "    - name: Special-file precheck",
+        "      run: |",
+        "        " + bootstrap_tools,
+        "        python3 -I -B tools/_gen_common.py --precheck",
+    )) + "\n"
+    got_problems, got_diagnostics = workflow_precheck_order_problems(indentless, "fixture.yml")
+    if not got_diagnostics:
+        failures.append("32k the indentless steps: layout must be refused loudly, got {!r} "
+                        "{!r}".format(got_problems, got_diagnostics))
+    padded = order_fixture.replace("    steps:\n",
+                                   "    strategy:\n      matrix:\n"
+                                   "        os: [ ubuntu-latest ]\n    steps:\n", 1)
+    got_problems, got_diagnostics = workflow_precheck_order_problems(padded, "fixture.yml")
+    if not got_diagnostics:
+        failures.append("32k a flow sequence padded inside its brackets must be refused "
+                        "loudly, got {!r} {!r}".format(got_problems, got_diagnostics))
+
+    # QA round 12 (codex MEDIUM = claude m1): the grammar stores a PLAIN scalar as its text, so a
+    # plain null, Null or NULL reached the round-11 rule as a non-empty string, while YAML reads
+    # each as null and the Actions runner hands a null string input to setup-python as an empty
+    # one (its .python-version fallback, a read of the checkout before the precheck). The one
+    # modelled input must now be a literal VERSION STRING (_SETUP_PYTHON_VERSION_RE), which no
+    # YAML null spelling matches. Each null and non-version vector returns ([], []) without the
+    # round-12 rule; the version-string vectors pin the forms that stay accepted.
+    count += 1
+    for spelling in ("null", "Null", "NULL", "'null'", "true", "'~'", "'.python-version'"):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            order_fixture.replace("          python-version: '3.14'\n",
+                                  "          python-version: {}\n".format(spelling), 1),
+            "fixture.yml")
+        if not any("not a literal version string" in problem for problem in got_problems):
+            failures.append("32l setup-python python-version: {} must be refused as no literal "
+                            "version string, got {!r} {!r}".format(spelling, got_problems,
+                                                                   got_diagnostics))
+    for spelling, needle in (("~", "outside the modelled scalar forms"),
+                             ("", "must carry a modelled scalar value")):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            order_fixture.replace("          python-version: '3.14'\n",
+                                  "          python-version:{}\n".format(
+                                      " " + spelling if spelling else ""), 1),
+            "fixture.yml")
+        if not any(needle in diagnostic.message for diagnostic in got_diagnostics):
+            failures.append("32l setup-python python-version: {!r} (a YAML null) must be refused "
+                            "by the grammar, got {!r} {!r}".format(spelling, got_problems,
+                                                                   got_diagnostics))
+    for spelling in ("3.14", "'3.14'", "3.x", "'pypy3.10'", "3.13t", "'3.14.0-alpha.1'"):
+        got_problems, got_diagnostics = workflow_precheck_order_problems(
+            order_fixture.replace("          python-version: '3.14'\n",
+                                  "          python-version: {}\n".format(spelling), 1),
+            "fixture.yml")
+        if got_problems or got_diagnostics:
+            failures.append("32l setup-python python-version: {} is a literal version string and "
+                            "must stay accepted, got {!r} {!r}".format(spelling, got_problems,
+                                                                       got_diagnostics))
+    disclosure = " ".join(workflow_precheck_order_problems.__doc__.split())
+    if "${{ matrix.python-version }}" not in disclosure:
+        failures.append("32l the KNOWN-REFUSED disclosure must name the matrix python-version "
+                        "expression")
+
+    # codex round-4 finding 4: a workflows directory path no path call accepts (an embedded NUL) is a
+    # read-error diagnostic, never a raw ValueError. Fails without the (OSError, ValueError) arm.
+    count += 1
+    try:
+        nul_problems, nul_diagnostics = precheck_order_report("fixture\x00dir")
+    except ValueError as exc:
+        nul_problems, nul_diagnostics = ["raised {!r}".format(exc)], []
+    if nul_problems or not any(d.code == "read-error" for d in nul_diagnostics):
+        failures.append("32c a NUL workflows dir must be a read-error diagnostic, got {!r} {!r}".format(
+            nul_problems, nul_diagnostics))
+
+    # 33. Each runner's checked directory binding, RUN under bash: a missing
+    # dirname, one that fails (printing .) and one that prints nothing each
+    # exit 2 with no gate launched, while the true directory launches gates.
+    # Each guard is held by its own named mutant: without the status check
+    # the failing dirname runs every gate from the calling directory's
+    # parent (or from it, standalone); without the non-empty check the empty
+    # name runs every gate from /. The pinned lines are the live ones.
+    count += 1
+    for relative, binding in (("tools/run_all_checks.sh", LOCAL_BINDING_LINES),
+                              (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
+        runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
+        if runner_diagnostic is not None:
+            failures.append("33 cannot read {}: {!r}".format(relative, runner_diagnostic))
+            continue
+        problems = dirname_guard_problems(runner_text, relative)
+        if problems:
+            failures.append("33 {} dirname guard failed: {}".format(relative, problems))
+        for label, line, expected in (
+                ("status check removed", binding[0], ["failed"]),
+                ("non-empty check removed", binding[1], ["empty"])):
+            if runner_text.count(line + "\n") != 1:
+                failures.append("33 {} binding drift: {}".format(relative, line))
+                continue
+            mutant = runner_text.replace(
+                line + "\n",
+                ("" if line is binding[1] else line[:-len(" || exit 2")] + "\n"), 1)
+            got = dirname_guard_problems(mutant, relative)
+            if got != expected:
+                failures.append("33 {} mutant ({}) gave {}, expected {}".format(
+                    relative, label, got, expected))
+
+    # 34. Each runner's cd runs with CDPATH cleared, RUN under bash: started by
+    # its relative path from its tree's root under a CDPATH naming a decoy tree
+    # that holds the same relative directory, every gate still launches from the
+    # true tree and nothing names the decoy. The pinned line without its CDPATH=
+    # prefix is held red: the bare cd resolves through the decoy, moving the
+    # top-level runner's root there and printing the decoy into the standalone
+    # runner's captured directory.
+    count += 1
+    for relative, binding in (("tools/run_all_checks.sh", LOCAL_BINDING_LINES),
+                              (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
+        runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
+        if runner_diagnostic is not None:
+            failures.append("34 cannot read {}: {!r}".format(relative, runner_diagnostic))
+            continue
+        problems = cdpath_problems(runner_text, relative)
+        if problems:
+            failures.append("34 {} CDPATH binding failed: {}".format(relative, problems))
+        line = binding[2]
+        if runner_text.count(line + "\n") != 1 or line.count("CDPATH= cd -- ") != 1:
+            failures.append("34 {} binding drift: {}".format(relative, line))
+            continue
+        mutant = runner_text.replace(
+            line + "\n", line.replace("CDPATH= cd -- ", "cd -- ") + "\n", 1)
+        got = cdpath_problems(mutant, relative)
+        if "moved" not in got:
+            failures.append("34 {} mutant (CDPATH= removed) gave {}, expected moved".format(
+                relative, got))
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
@@ -4457,6 +5580,695 @@ def self_test():
         "including fail-without-the-change, passed".format(count)
     )
     return 0
+
+
+
+# D-400-SPECIAL-FILE-PRECHECK order, QA round 10 (premise change): rounds 8, 9 and 10 each
+# found a YAML form the piecemeal per-line value allowlist accepted while a real YAML parser read
+# it differently (escaped-quote names, escaped mapping keys decoding to BASH_ENV, a with: entry
+# with no colon opening a multi-line scalar that hid the precheck step). Extending that allowlist
+# one form per round was not converging, so the order guard now holds every line of each guarded
+# workflow file to a WHOLE-FILE LINE GRAMMAR (_workflow_line_grammar): a line that matches no
+# production is refused with its line number and a named reason, and the step model is built ONLY
+# from lines the grammar accepted.
+_GRAMMAR_ENTRY_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*):(.*)$")
+# A plain scalar: no quote character, no backslash, no '#', no ':', and none of the YAML
+# indicator characters & * ! | > % backtick [ ] ; '-' may lead only when not followed by a space
+# (a '- ' opens a sequence item), and braces, '@', ',', '(', ')', '=' may not LEAD the scalar
+# (GitHub expressions such as ${{ matrix.os }} and uses: values need them mid-scalar,
+# where YAML block context treats them as literal text).
+_GRAMMAR_PLAIN_RE = re.compile(
+    r"^(?:[A-Za-z0-9_/.$]|-(?=[^ ]))[A-Za-z0-9 _.,/=()@${}-]*$")
+# A single-quoted scalar: one opening quote, an interior with no quote character of EITHER kind
+# and no backslash (a doubled quote is a YAML ESCAPE that keeps the scalar open), one closing
+# quote, nothing after. Double-quoted scalars are not modelled at all.
+_GRAMMAR_QUOTED_RE = re.compile(r"""^'[^'"\\]*'$""")
+# A single-line flow sequence of plain items: the ONE flow form the real workflows use
+# (branches: [main]; types: [opened, synchronize, reopened, edited]; os: [ubuntu-latest,
+# macos-latest]).
+_GRAMMAR_FLOW_SEQ_RE = re.compile(r"^\[[A-Za-z0-9_.-]+(?:, [A-Za-z0-9_.-]+)*\]$")
+
+# QA round 12 (codex MEDIUM = claude m1): the setup-python python-version: value the order guard
+# accepts at or before the precheck: a literal version string (a letter or digit first, at least
+# one digit, then only letters, digits, '.', '_', '+' and '-'), such as 3.14, 3.x, 3.13t or
+# pypy3.10. No YAML null spelling (null, Null, NULL, ~, an empty value) and no boolean matches.
+_SETUP_PYTHON_VERSION_RE = re.compile(r"^(?=[^0-9]*[0-9])[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+WORKFLOW_LEVEL_KEYS = ("jobs", "name", "on", "permissions")
+JOB_LEVEL_KEYS = ("name", "runs-on", "steps", "strategy")
+STEP_KEYS = ("name", "uses", "run", "env", "with")
+
+
+def _grammar_context_code(indent):
+    """The diagnostic code for a grammar or structure refusal at a given indent: the code names
+    the modelled level the refused line sits at (workflow keys at indent 0, job ids at 2, job
+    keys at 4, step content deeper), matching the codes the earlier piecemeal parse used so the
+    vectors pin the same classifications."""
+    if indent <= 0:
+        return "workflow-key"
+    if indent == 2:
+        return "job-id"
+    if indent == 4:
+        return "job-key"
+    return "step-key"
+
+
+def _workflow_line_grammar(text, source):
+    """(root, diagnostics) for one workflow file under the QA round 10 LINE GRAMMAR. Every line
+    of the file must match exactly ONE production, or it is refused with its line number and a
+    named reason. The productions:
+
+      blank    an empty line;
+      comment  a full-line comment at any indent (spaces, then '#', then anything to the end);
+      mapping  '<indent><key>:' or '<indent><key>: <value>', where <key> matches
+               [A-Za-z0-9_][A-Za-z0-9_.-]* (plain only: no quotes, no escapes, no anchors, no
+               tags, no merge keys) and <value> is a plain scalar (_GRAMMAR_PLAIN_RE), a
+               single-quoted scalar with no quote inside (_GRAMMAR_QUOTED_RE, stored DECODED),
+               or a single-line flow sequence of plain items (_GRAMMAR_FLOW_SEQ_RE);
+      item     '<indent>- ' followed by exactly one mapping production (the item opens a nested
+               mapping two columns deeper);
+      block    '<indent><key>: |' or '<indent><key>: |-', then a literal block whose first line
+               sits exactly two spaces past the key (that sets the block's YAML indentation) and
+               whose lines are consumed as OPAQUE text, never comment-stripped (inside a literal
+               block a '#' is content), until the indent returns to the key's column.
+
+    Nothing else is accepted: no tabs, no trailing whitespace, no flow collections beyond the one
+    bracketed form above, no multi-line, folded ('>', '|+') or double-quoted scalars, no document
+    markers or directives, no anchors, aliases, tags or merge keys, no inline comments, and no
+    indentation that is not a multiple of two spaces with each nesting step exactly two columns.
+    Duplicate keys within one mapping (compared exactly, since keys are plain) are refused. A
+    refused line's deeper subtree is skipped: the file already fails, and the whole-file shadow
+    scan in workflow_precheck_order_problems still covers every skipped line.
+
+    root is ('map', entries); entries are (key, line, node) tuples where node is ('scalar', text
+    or None for a bare key with no nested content), ('flowseq', items), ('block', lines,
+    line_numbers), ('map', entries) or ('seq', ((line, map_node), ...))."""
+    diagnostics = []
+    toks = []
+
+    def refuse(number, raw, indent, dash, keyed, detail):
+        if "#" in raw:
+            code = "step-comment"
+            detail = ("inline comments are outside the line grammar, because where a comment "
+                      "starts depends on quote state this parse does not model; " + detail)
+        elif dash and not keyed:
+            code = "step-shape"
+        else:
+            code = _grammar_context_code(indent)
+        diagnostics.append(_diagnostic(source, number, code,
+                           "line outside the workflow line grammar: {!r}; {}".format(
+                               raw.strip(), detail)))
+        toks.append({"n": number, "ind": indent, "dash": dash, "bad": True})
+
+    lines = text.split("\n")
+    total = len(lines)
+    i = 0
+    while i < total:
+        raw = lines[i]
+        number = i + 1
+        i += 1
+        if raw == "":
+            continue
+        if "\t" in raw:
+            diagnostics.append(_diagnostic(source, number, "yaml-tab",
+                               "tabs are outside the supported YAML subset"))
+            toks.append({"n": number, "ind": len(raw) - len(raw.lstrip(" \t")),
+                         "dash": False, "bad": True})
+            continue
+        body = raw.lstrip(" ")
+        indent = len(raw) - len(body)
+        if body.startswith("#"):
+            continue
+        if body != body.rstrip(" "):
+            refuse(number, raw, indent, False, False, "trailing whitespace")
+            continue
+        if indent % 2:
+            refuse(number, raw, indent, False, False,
+                   "indentation is not a multiple of two spaces")
+            continue
+        dash = False
+        key_col = indent
+        if body == "-" or body.startswith("- "):
+            dash = True
+            key_col = indent + 2
+            body = body[2:]
+            if not body or body[0] in (" ", "-"):
+                refuse(number, raw, indent, True, False,
+                       "a sequence item must carry exactly one mapping entry after '- '")
+                continue
+        match = _GRAMMAR_ENTRY_RE.match(body)
+        if match is None:
+            refuse(number, raw, indent, dash, False,
+                   "only the mapping productions '<key>:' and '<key>: <value>' are modelled, "
+                   "with a plain key ([A-Za-z0-9_][A-Za-z0-9_.-]*): no quoted or escaped keys, "
+                   "no anchors, aliases, tags or merge keys, no flow collections, no document "
+                   "markers or directives")
+            continue
+        key, rest = match.group(1), match.group(2)
+        if rest == "":
+            vkind, value = "none", None
+        elif not rest.startswith(" "):
+            refuse(number, raw, indent, dash, True,
+                   "a mapping value must follow its key as ': <value>' (exactly one space)")
+            continue
+        else:
+            value = rest[1:]
+            if value in ("|", "|-"):
+                content, numbers = [], []
+                block_ind = key_col + 2
+                first = True
+                while i < total:
+                    nxt = lines[i]
+                    if nxt == "":
+                        i += 1
+                        continue
+                    if "\t" in nxt:
+                        diagnostics.append(_diagnostic(source, i + 1, "yaml-tab",
+                                           "tabs are outside the supported YAML subset"))
+                        i += 1
+                        continue
+                    nbody = nxt.lstrip(" ")
+                    nind = len(nxt) - len(nbody)
+                    if nind <= key_col:
+                        break
+                    if nxt != nxt.rstrip(" "):
+                        diagnostics.append(_diagnostic(source, i + 1, "step-key",
+                                           "trailing whitespace on a literal block line"))
+                    elif first and nind != block_ind:
+                        diagnostics.append(_diagnostic(source, i + 1, "step-key",
+                                           "the first line of a literal block must sit exactly "
+                                           "two spaces past its key; that first line sets the "
+                                           "block's YAML indentation"))
+                    elif nind < block_ind:
+                        diagnostics.append(_diagnostic(source, i + 1, "step-key",
+                                           "a literal block line shallower than the block's "
+                                           "first line; a YAML engine would end the block "
+                                           "there"))
+                    else:
+                        first = False
+                        content.append(nxt.strip())
+                        numbers.append(i + 1)
+                    i += 1
+                toks.append({"n": number, "ind": indent, "dash": dash, "bad": False,
+                             "key": key, "key_col": key_col, "vkind": "block",
+                             "value": (tuple(content), tuple(numbers))})
+                continue
+            if _GRAMMAR_FLOW_SEQ_RE.match(value):
+                vkind, value = "flowseq", tuple(value[1:-1].split(", "))
+            elif value.startswith("'") or value.startswith(chr(34)):
+                if _GRAMMAR_QUOTED_RE.match(value):
+                    vkind, value = "scalar", value[1:-1]
+                else:
+                    refuse(number, raw, indent, dash, True,
+                           "a quoted value is modelled only as ONE single-quoted scalar with "
+                           "no quote character of either kind, no backslash and no escape "
+                           "inside, and nothing after the close (a doubled quote is a YAML "
+                           "escape that keeps the scalar OPEN; double-quoted scalars are not "
+                           "modelled)")
+                    continue
+            elif _GRAMMAR_PLAIN_RE.match(value):
+                vkind = "scalar"
+            else:
+                refuse(number, raw, indent, dash, True,
+                       "the value is outside the modelled scalar forms: a plain scalar with no "
+                       "quote character, backslash, '#', ':' or YAML indicator (and no leading "
+                       "'&', '*', '!', '|', '>', '%', '@', backtick, flow bracket or "
+                       "brace), a single-quoted scalar with no quote inside, a literal block "
+                       "header '|' or '|-', or a single-line flow sequence of plain items")
+                continue
+        toks.append({"n": number, "ind": indent, "dash": dash, "bad": False, "key": key,
+                     "key_col": key_col, "vkind": vkind, "value": value})
+
+    pos = 0
+    tcount = len(toks)
+
+    def skip_deeper(limit):
+        nonlocal pos
+        while pos < tcount and toks[pos]["ind"] > limit:
+            pos += 1
+
+    def parse_nested(key_col):
+        if pos < tcount and toks[pos]["ind"] > key_col:
+            t = toks[pos]
+            if t["ind"] != key_col + 2:
+                diagnostics.append(_diagnostic(source, t["n"],
+                                   _grammar_context_code(t["ind"]),
+                                   "nested content must sit exactly two spaces past its parent "
+                                   "key (line at indent {}, parent key at indent {})".format(
+                                       t["ind"], key_col)))
+                skip_deeper(key_col)
+                return ("scalar", None)
+            if t["dash"]:
+                return parse_seq(key_col + 2)
+            return parse_map(key_col + 2, None)
+        return ("scalar", None)
+
+    def parse_seq(ind):
+        nonlocal pos
+        items = []
+        while pos < tcount:
+            t = toks[pos]
+            if t["ind"] < ind:
+                break
+            if t["ind"] > ind:
+                diagnostics.append(_diagnostic(source, t["n"],
+                                   _grammar_context_code(t["ind"]),
+                                   "line is indented past its sequence context"))
+                skip_deeper(ind)
+                continue
+            if t["bad"]:
+                pos += 1
+                skip_deeper(t["ind"])
+                continue
+            if not t["dash"]:
+                diagnostics.append(_diagnostic(source, t["n"], _grammar_context_code(ind),
+                                   "a mapping entry sits where a '- ' sequence item is "
+                                   "expected"))
+                pos += 1
+                skip_deeper(t["ind"])
+                continue
+            pos += 1
+            items.append((t["n"], parse_map(ind + 2, t)))
+        return ("seq", tuple(items))
+
+    def parse_map(ind, start):
+        nonlocal pos
+        entries = []
+        seen = set()
+
+        def add(t):
+            if t["vkind"] == "none":
+                child = parse_nested(t["key_col"])
+            elif t["vkind"] == "block":
+                child = ("block", t["value"][0], t["value"][1])
+            elif t["vkind"] == "flowseq":
+                child = ("flowseq", t["value"])
+            else:
+                child = ("scalar", t["value"])
+            if t["vkind"] != "none" and pos < tcount and toks[pos]["ind"] > t["key_col"]:
+                diagnostics.append(_diagnostic(source, toks[pos]["n"],
+                                   _grammar_context_code(toks[pos]["ind"]),
+                                   "content is nested under a key that already carries a "
+                                   "value"))
+                skip_deeper(t["key_col"])
+            if t["key"] in seen:
+                diagnostics.append(_diagnostic(source, t["n"],
+                                   _grammar_context_code(t["key_col"]),
+                                   "duplicate key {!r}; a repeated YAML key re-opens a mapping "
+                                   "this parse has already read, so the parse and the YAML "
+                                   "engine would read different workflows".format(t["key"])))
+            else:
+                seen.add(t["key"])
+                entries.append((t["key"], t["n"], child))
+
+        if start is not None:
+            add(start)
+        while pos < tcount:
+            t = toks[pos]
+            if t["ind"] < ind:
+                break
+            if t["ind"] > ind:
+                diagnostics.append(_diagnostic(source, t["n"],
+                                   _grammar_context_code(t["ind"]),
+                                   "line is indented past its mapping context"))
+                skip_deeper(ind)
+                continue
+            if t["bad"]:
+                pos += 1
+                skip_deeper(t["ind"])
+                continue
+            if t["dash"]:
+                diagnostics.append(_diagnostic(source, t["n"], _grammar_context_code(ind),
+                                   "a '- ' sequence item sits where a mapping entry is "
+                                   "expected"))
+                pos += 1
+                skip_deeper(t["key_col"])
+                continue
+            pos += 1
+            add(t)
+        return ("map", tuple(entries))
+
+    root = parse_map(0, None)
+    return root, diagnostics
+
+
+def _workflow_step(item_map, line, source, diagnostics, run_line_numbers):
+    """One step dict (uses, run, env, withs, keys, line) from a grammar-accepted step mapping.
+    Semantic rules on top of the grammar: the first entry must be a non-empty name: or a uses:;
+    only STEP_KEYS are modelled (an if:, continue-on-error:, shell: or timeout-minutes: above
+    all can disable, soften or reinterpret the step without touching its run body); name: and
+    uses: must carry a modelled scalar (stored DECODED, so a simply quoted
+    'actions/checkout@v4' is the same checkout as the plain spelling); run: must carry a
+    plain scalar or a literal block (its body OPAQUE, kept verbatim); env:/with: must be block
+    mappings of scalar entries, and an env entry naming an execution-control variable is
+    refused (env-override)."""
+    step = dict(uses=None, run=[], env=[], withs=[], keys=set(), line=line)
+    entries = item_map[1]
+    first = entries[0] if entries else None
+    if (first is None or first[0] not in ("name", "uses")
+            or (first[0] == "name" and (first[2][0] != "scalar" or not first[2][1]))):
+        diagnostics.append(_diagnostic(source, line, "step-shape",
+                           "step must begin with a non-empty name: or uses:"))
+    for key, number, child in entries:
+        if key not in STEP_KEYS:
+            diagnostics.append(_diagnostic(source, number, "step-key",
+                               "unsupported step key {!r}; a key this parse does not model "
+                               "(if:, continue-on-error:, shell:, timeout-minutes:, ...) could "
+                               "disable or soften the step".format(key)))
+            continue
+        step["keys"].add(key)
+        if key in ("name", "uses"):
+            if child[0] != "scalar" or not child[1]:
+                diagnostics.append(_diagnostic(source, number, "step-key",
+                                   "step key {}: must carry a modelled non-empty scalar "
+                                   "value".format(key)))
+            elif key == "uses":
+                step["uses"] = child[1]
+        elif key == "run":
+            if child[0] == "block":
+                step["run"].extend(child[1])
+                run_line_numbers.update(child[2])
+            elif child[0] == "scalar" and child[1]:
+                step["run"].append(child[1])
+                run_line_numbers.add(number)
+            else:
+                diagnostics.append(_diagnostic(source, number, "run-shape",
+                                   "run: must carry a plain scalar or a literal block"))
+        else:
+            if child[0] != "map":
+                diagnostics.append(_diagnostic(source, number, "step-key",
+                                   "{}: must be the bare key of a block mapping of KEY: value "
+                                   "entries".format(key)))
+                continue
+            for entry_key, entry_number, entry_child in child[1]:
+                if entry_child[0] != "scalar" or entry_child[1] is None:
+                    diagnostics.append(_diagnostic(source, entry_number, "step-key",
+                                       "{} entry {!r} must carry a modelled scalar "
+                                       "value".format(key, entry_key)))
+                    continue
+                if key == "with":
+                    step["withs"].append((entry_number, entry_key, entry_child[1]))
+                else:
+                    step["env"].append(entry_key)
+                    if (entry_key in ("BASH_ENV", "ENV", "SHELLOPTS", "PATH")
+                            or entry_key.startswith(("PYTHON", "LD_", "BASH_FUNC"))):
+                        diagnostics.append(_diagnostic(source, entry_number, "env-override",
+                                           "step env entry {!r} names an execution-control "
+                                           "variable; it can neuter a shell or python step "
+                                           "without touching its run body".format(entry_key)))
+    return step
+
+
+def _workflow_step_model(text, source):
+    """(jobs, run_line_numbers, diagnostics): the per-job step model, built ONLY from lines the
+    line grammar accepted. Semantic allowlists on top of the grammar, kept from the earlier
+    rounds: workflow-level keys must be the plain spellings of WORKFLOW_LEVEL_KEYS (an env: or
+    defaults: there is an inherited execution control that can neuter the precheck step without
+    touching its run body; QA round 5 claude M1, round 6 codex M3); jobs: must be a bare key
+    over a block mapping of job ids; job-level keys must be the plain spellings of
+    JOB_LEVEL_KEYS (an env:, defaults:, if:, continue-on-error: or container: above all); name:
+    and runs-on: must carry modelled scalars; steps: must be a block sequence of step mappings
+    (see _workflow_step). The strategy: subtree is grammar-parsed but not semantically modelled
+    (the byte-canon matrix uses it); the on: and permissions: subtrees likewise."""
+    root, diagnostics = _workflow_line_grammar(text, source)
+    jobs = {}
+    run_line_numbers = set()
+    jobs_node = None
+    for key, number, child in root[1]:
+        if key not in WORKFLOW_LEVEL_KEYS:
+            diagnostics.append(_diagnostic(source, number, "workflow-key",
+                               "unmodelled workflow-level key {!r}; only the plain spellings of "
+                               "{} are modelled, and anything else (an env: or defaults: above "
+                               "all) can neuter the precheck step without touching its run "
+                               "body".format(key, ", ".join(WORKFLOW_LEVEL_KEYS))))
+        elif key == "jobs":
+            if child[0] != "map" or not child[1]:
+                diagnostics.append(_diagnostic(source, number, "workflow-key",
+                                   "jobs: must be the bare key of a block mapping of job ids; "
+                                   "a value there can carry whole jobs this parse cannot see"))
+            else:
+                jobs_node = child
+    for job_id, job_line, job_child in (jobs_node[1] if jobs_node is not None else ()):
+        if job_child[0] != "map":
+            diagnostics.append(_diagnostic(source, job_line, "job-id",
+                               "job {!r} must be a block mapping of job-level "
+                               "keys".format(job_id)))
+            jobs[job_id] = []
+            continue
+        steps = []
+        jobs[job_id] = steps
+        for job_key, job_key_line, job_key_child in job_child[1]:
+            if job_key not in JOB_LEVEL_KEYS:
+                diagnostics.append(_diagnostic(source, job_key_line, "job-key",
+                                   "unmodelled job-level key {!r}; only the plain spellings of "
+                                   "{} are modelled, and anything else (an env:, defaults:, "
+                                   "if:, continue-on-error: or container: above all) can "
+                                   "disable the job or neuter its precheck step without "
+                                   "touching the step's run body".format(
+                                       job_key, ", ".join(JOB_LEVEL_KEYS))))
+            elif job_key == "steps":
+                if job_key_child[0] != "seq":
+                    diagnostics.append(_diagnostic(source, job_key_line, "job-key",
+                                       "steps: must be the bare key of a block sequence of "
+                                       "steps"))
+                else:
+                    for item_line, item_map in job_key_child[1]:
+                        steps.append(_workflow_step(item_map, item_line, source, diagnostics,
+                                                    run_line_numbers))
+            elif job_key in ("name", "runs-on"):
+                if job_key_child[0] != "scalar" or not job_key_child[1]:
+                    diagnostics.append(_diagnostic(source, job_key_line, "job-key",
+                                       "job-level key {}: must carry a modelled scalar "
+                                       "value".format(job_key)))
+    return jobs, run_line_numbers, diagnostics
+
+
+def workflow_precheck_order_problems(text, source):
+    """(problems, diagnostics) for ONE workflow file (D-400-SPECIAL-FILE-PRECHECK order): every
+    job must carry the canonical special-file precheck step (PRECHECK_STEP_RUN_LINES, exactly
+    those run lines in that order) as its first post-checkout run step. After the checkout step
+    and before the precheck only actions/setup-python may appear (with EXACTLY ONE non-empty,
+    literal python-version: input and no other input; QA round 11, claude m1: with no explicit
+    version, or an expression that can evaluate empty, setup-python falls back to READING the
+    checkout's .python-version file, a read of the checkout before the precheck step runs; QA
+    round 12, codex MEDIUM = claude m1: that value must be a literal VERSION STRING,
+    _SETUP_PYTHON_VERSION_RE, plain or simply single-quoted, because the grammar keeps a plain
+    scalar as its text and a plain null, Null or NULL is YAML null, which the Actions runner
+    passes to setup-python as an empty input; ~ and a bare key are refused by the grammar; and
+    NO env: mapping on any step at or before the precheck: a
+    NODE_OPTIONS or BASH_ENV value there runs uncertified code or poisons the environment
+    first; QA rounds 5 to 7); before checkout only PRE_CHECKOUT_RUN_LINES may run and no action
+    other than checkout itself; the precheck step itself may carry no env: mapping at all; and
+    after the precheck no ACTION step at all is modelled (QA round 9, claude m2: a second
+    actions/checkout above all replaces the certified tree; an actions/upload-artifact step
+    would be refused the same way and needs a reviewed guard change to adopt).
+
+    QA round 10 (premise change; the round 8 to 10 codex and claude majors): the per-line value
+    allowlist of rounds 8 and 9 is REPLACED by the whole-file line grammar in
+    _workflow_line_grammar. Every line of the file must match exactly one production there
+    (blank; full-line comment; plain-keyed mapping line carrying a restricted plain scalar, a
+    simple single-quoted scalar or a single-line flow sequence of plain items; a '- ' sequence
+    item of the same form; a literal block 'key: |' or 'key: |-' consumed as opaque text), or
+    the guard refuses with the line number and a named reason and the file cannot pass.
+    Indentation must step by exactly two spaces and duplicate keys within one mapping are
+    refused. The step model is built ONLY from accepted lines (_workflow_step_model), and this
+    ordering question runs on that model. A literal block body is OPAQUE: a '#' there is shell
+    content kept verbatim (never comment-stripped), so a disguised precheck run line simply
+    does not match the canonical body, in agreement with what the shell runs.
+
+    KNOWN-REFUSED COMMON FORMS (QA round 10 claude m1; QA round 11 claude m3): the grammar
+    refuses forms real-world workflows commonly use; this repository's own workflows use none
+    of them and every refusal is loud and named. The most common first: an inline comment on a
+    structural line (above all the 'uses: pkg@<sha> # vX.Y.Z' action SHA-pin idiom), an
+    INDENTLESS sequence (a '- ' item at the same column as its steps: key, the layout GitHub's
+    starter workflows generate; it is two-space indentation, so it is refused as a sequence
+    where a value is expected, not by an indent message), a double-quoted scalar, any quoted
+    scalar carrying a quote or backslash (a step name with an apostrophe; a one-line run: with
+    a quoted argument, which belongs in a literal block instead), a flow sequence padded inside
+    its brackets ('[ main ]'), folded ('>') and keep ('|+') block scalars, multi-line scalars
+    of every kind, flow mappings, flow sequences beyond one line of plain items, anchors,
+    aliases, tags, merge keys, directives, document markers, tabs, quoted or escaped mapping
+    keys, non-two-space indentation, and plain values carrying ':' or '#'. On a setup-python
+    step at or before the precheck, the matrix idiom python-version: ${{ matrix.python-version }}
+    (and every other expression) is refused, as is any python-version: value that is not a
+    literal version string: a range such as '>=3.9 <3.12', a YAML null and a boolean among them
+    (no action step after the precheck is modelled either, so a version matrix needs a reviewed
+    guard change). Refusal CODES name
+    the modelled level of the refused line's indent alone (_grammar_context_code), so a refused
+    line under a non-jobs subtree can carry a job-key or step-key code; the quoted line text in
+    the diagnostic is the authoritative locator.
+
+    INHERITED EXECUTION CONTROLS (QA round 5, claude M1; round 6, codex M3 = claude M1): GitHub
+    applies workflow- and job-level env: and defaults: (and a job-level if: or
+    continue-on-error:) to every step, so those levels are ALLOWLISTS over the grammar's plain
+    keys: a workflow-level key outside WORKFLOW_LEVEL_KEYS (workflow-key), a job-level key
+    outside JOB_LEVEL_KEYS (job-key), a step key outside STEP_KEYS (step-key), and a step env
+    entry naming an execution-control variable (BASH_ENV, ENV, SHELLOPTS, PATH, PYTHON*, LD_*
+    or BASH_FUNC*; env-override) are each refused, never a clean order pass. Residuals: an
+    execution-control variable that list does not name, and semantics GitHub adds later, stay
+    outside this parse (the canonical step body itself is pinned by PRECHECK_STEP_RUN_LINES);
+    and a post-precheck run: line that rewrites the tree before a later gate reads it stays
+    outside this ORDER question (QA round 9, claude m2). Full structural validation of
+    quality.yml stays extract_ci's job; this pass answers order, across every workflow file,
+    and the whole-file shadow scan (TOOL_RE over every line not captured as a run line) still
+    refuses a tools path wherever the model did not capture it."""
+    jobs, run_line_numbers, diagnostics = _workflow_step_model(text, source)
+    problems = []
+    for number, raw in enumerate(text.split("\n"), 1):
+        code = _strip_comment(raw)
+        if not code.strip() or number in run_line_numbers:
+            continue
+        if TOOL_RE.search(code):
+            diagnostics.append(_diagnostic(
+                source, number, "order-shadow-miss",
+                "a tools path sits on a line the precheck-order parse did not capture as a run "
+                "line: {!r}".format(code.strip())))
+    if not jobs:
+        diagnostics.append(_diagnostic(
+            source, 0, "jobs-missing", "workflow has no jobs with steps to order"))
+    for job in sorted(jobs):
+        where = "{}: job {}".format(source, job)
+        job_steps = jobs[job]
+        checkout = next((i for i, s in enumerate(job_steps)
+                         if s["uses"] and s["uses"].startswith("actions/checkout@")), None)
+        precheck = next((i for i, s in enumerate(job_steps)
+                         if tuple(s["run"]) == PRECHECK_STEP_RUN_LINES), None)
+        if checkout is None:
+            problems.append(where + " has no actions/checkout step, so what tree its steps read "
+                            "cannot be evaluated")
+            continue
+        if precheck is None:
+            problems.append(where + " has no canonical special-file precheck step (the bootstrap "
+                            "test-and-abort line, then python3 -I -B tools/_gen_common.py "
+                            "--precheck, exactly)")
+            continue
+        if precheck < checkout:
+            problems.append(where + " runs the special-file precheck before checkout, on a tree "
+                            "that does not exist yet")
+            continue
+        for s in job_steps[:precheck + 1]:
+            # QA round 7 (claude m-a, m-c): setup-python inputs at or before the precheck are an
+            # ALLOWLIST (the plain python-version: entry only). An unmodelled input (pip-install:,
+            # python-version-file:, ...) can install and run committed code or read the checkout
+            # before the precheck step runs.
+            if s["uses"] and s["uses"].startswith("actions/setup-python@"):
+                versions = []
+                for with_number, with_key, with_value in s["withs"]:
+                    if with_key != "python-version":
+                        problems.append(where + " passes setup-python input {!r} (line {}) at or "
+                                        "before the special-file precheck; only the plain "
+                                        "python-version: input is modelled there, because an "
+                                        "unmodelled input (pip-install:, python-version-file:, "
+                                        "...) can run committed code or read the checkout before "
+                                        "the precheck runs".format(with_key, with_number))
+                    else:
+                        versions.append((with_number, with_value))
+                # QA round 11 (claude m1): the one modelled input must be PRESENT, non-empty and
+                # literal. With no explicit version (or an expression that evaluates empty),
+                # setup-python falls back to READING THE CHECKOUT'S .python-version file, a read
+                # of the checkout before the precheck step runs, which is exactly what this
+                # allowlist exists to stop.
+                if len(versions) != 1 or not versions[0][1].strip():
+                    problems.append(where + " runs setup-python (step at line {}) at or before "
+                                    "the special-file precheck without exactly one non-empty "
+                                    "python-version: input; with no explicit version, "
+                                    "setup-python reads the checkout's .python-version file "
+                                    "before the precheck runs".format(s["line"]))
+                elif "${{" in versions[0][1]:
+                    problems.append(where + " passes setup-python python-version: {!r} (line {}) "
+                                    "at or before the special-file precheck; an expression "
+                                    "there can evaluate empty, and an empty version makes "
+                                    "setup-python read the checkout's .python-version file "
+                                    "before the precheck runs".format(versions[0][1],
+                                                                      versions[0][0]))
+                elif not _SETUP_PYTHON_VERSION_RE.match(versions[0][1]):
+                    # QA round 12 (codex MEDIUM = claude m1): the grammar keeps a plain scalar
+                    # as its text, so a plain null, Null or NULL arrives here as a non-empty
+                    # string while YAML reads it as null, and the Actions runner turns a null
+                    # string input into an empty one. Only a literal version string passes.
+                    problems.append(where + " passes setup-python python-version: {!r} (line {}) "
+                                    "at or before the special-file precheck, which is not a "
+                                    "literal version string (a letter or digit first, at least "
+                                    "one digit, then only letters, digits, '.', '_', '+' and "
+                                    "'-'); a plain null, Null or NULL is YAML null, which "
+                                    "reaches setup-python as an empty input, and an empty "
+                                    "version makes setup-python read the checkout's "
+                                    ".python-version file before the precheck "
+                                    "runs".format(versions[0][1], versions[0][0]))
+            if not s["env"]:
+                continue
+            if s is job_steps[precheck]:
+                problems.append(where + " carries an env: mapping on the canonical special-file "
+                                "precheck step; a BASH_ENV, ENV or PATH value there can neuter "
+                                "the precheck without touching its run body")
+            else:
+                # QA round 6 (claude M4): a NODE_OPTIONS value on actions/setup-python (or any
+                # variable on a pre-precheck step) can run committed code or poison GITHUB_ENV /
+                # GITHUB_PATH before the precheck step runs, so NO env: at all is modelled there.
+                problems.append(where + " carries an env: mapping on a step at or before the "
+                                "special-file precheck (step at line {}); any variable there can "
+                                "run uncertified code or poison the environment before the "
+                                "precheck runs".format(s["line"]))
+        for s in job_steps[:checkout]:
+            for line in s["run"]:
+                if line not in PRE_CHECKOUT_RUN_LINES:
+                    problems.append("{} runs {!r} before checkout, outside the reviewed "
+                                    "pre-checkout allowance".format(where, line))
+            if s["uses"]:
+                problems.append("{} runs action {!r} before checkout and before the special-file "
+                                "precheck".format(where, s["uses"]))
+        for s in job_steps[checkout + 1:precheck]:
+            if s["run"]:
+                problems.append("{} runs {!r} before the special-file precheck".format(
+                    where, s["run"][0]))
+            elif s["uses"] and not s["uses"].startswith("actions/setup-python@"):
+                problems.append("{} runs action {!r} between checkout and the special-file "
+                                "precheck".format(where, s["uses"]))
+        for s in job_steps[precheck + 1:]:
+            # QA round 9 (claude m2): an ACTION step after the precheck can replace or rewrite
+            # the certified tree (a second actions/checkout with another ref above all), so no
+            # action at all is modelled there; the steps after the precheck are the run: gates,
+            # whose command lines the parity extraction classifies (the residual is named in
+            # this function's docstring).
+            if s["uses"]:
+                problems.append("{} runs action {!r} (step at line {}) after the special-file "
+                                "precheck; an action there can replace or rewrite the certified "
+                                "tree (a second checkout above all), so the precheck would no "
+                                "longer cover what later steps read".format(
+                                    where, s["uses"], s["line"]))
+    return problems, diagnostics
+
+
+def precheck_order_report(workflows_dir=None):
+    """(problems, diagnostics) across EVERY workflow file (.github/workflows/*.yml and *.yaml,
+    sorted), each read through read_runner_text, the one byte-level reader. An unreadable directory
+    or an empty listing is a diagnostic (cannot-evaluate), never a clean pass: this is the check that
+    holds every CI job in every workflow file, not just quality.yml, to the precheck-first order
+    (D-400-SPECIAL-FILE-PRECHECK), so a job added in a NEW workflow file cannot run a gate on an
+    unchecked tree."""
+    import os
+    directory = Path(workflows_dir) if workflows_dir is not None else ROOT / ".github" / "workflows"
+    problems, diagnostics = [], []
+    try:
+        names = sorted(name for name in os.listdir(directory)
+                       if name.endswith(".yml") or name.endswith(".yaml"))
+    except (OSError, ValueError) as exc:  # ValueError: a directory path no path call accepts (a NUL)
+        return [], [_diagnostic(".github/workflows", 0, "read-error",
+                                "cannot list the workflows directory ({})".format(
+                                    type(exc).__name__))]
+    if not names:
+        return [], [_diagnostic(".github/workflows", 0, "empty-extraction",
+                                "no workflow files were found to order-check")]
+    for name in names:
+        source = ".github/workflows/" + name
+        file_text, diagnostic = read_runner_text(directory / name, source)
+        if diagnostic is not None:
+            diagnostics.append(diagnostic)
+            continue
+        file_problems, file_diagnostics = workflow_precheck_order_problems(file_text, source)
+        problems.extend(file_problems)
+        diagnostics.extend(file_diagnostics)
+    return problems, list(_dedupe_diagnostics(diagnostics))
 
 
 def _parse_args(argv):
@@ -4479,9 +6291,45 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+    precheck_special_files(ROOT)
     report = run_paths(LOCAL_PATH, CI_PATH)
     print(render(report))
-    return report.code
+    code = report.code
+    # claude m2 (QA round 5): the LIVE gate also holds the standalone OPF runner to the shared
+    # grammar (bootstrap REQUIRED ahead of its precheck invocation), so deleting the bootstrap
+    # line of opf/tools/run_all_checks.sh is a live exit 2, not only a self-test finding.
+    standalone = standalone_runner_diagnostics()
+    if standalone:
+        code = 2
+        print("CANNOT EVALUATE: the standalone OPF runner (opf/tools/run_all_checks.sh) did not "
+              "extract cleanly under the shared grammar.")
+        for diagnostic in standalone:
+            location = ("{}:{}".format(diagnostic.source, diagnostic.line)
+                        if diagnostic.line else diagnostic.source)
+            print("  {} [{}] {}".format(location, diagnostic.code, diagnostic.message))
+    else:
+        print("STANDALONE RUNNER: opf/tools/run_all_checks.sh carries the bootstrap and precheck "
+              "and extracts cleanly under the shared grammar.")
+    # D-400-SPECIAL-FILE-PRECHECK order: every job in every workflow file, precheck first.
+    order_problems, order_diagnostics = precheck_order_report()
+    if order_diagnostics:
+        code = 2
+        print("CANNOT EVALUATE: the precheck order across workflow files was not determined.")
+        for diagnostic in order_diagnostics:
+            location = ("{}:{}".format(diagnostic.source, diagnostic.line)
+                        if diagnostic.line else diagnostic.source)
+            print("  {} [{}] {}".format(location, diagnostic.code, diagnostic.message))
+    elif order_problems:
+        code = max(code, 1)
+        print("PRECHECK ORDER FINDINGS:")
+        for problem in order_problems:
+            print("  - " + problem)
+    else:
+        print("PRECHECK ORDER: every workflow job runs the canonical special-file precheck step "
+              "before any other post-checkout run step.")
+    return code
 
 
 if __name__ == "__main__":

@@ -24,7 +24,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
-import argparse
 import hashlib
 import re
 import tomllib
@@ -357,6 +356,16 @@ def _case_passes(case):
 _RUNNER_PATH_PIN = "readonly PATH\n"
 
 
+# The exact precheck abort line opf/tools/run_all_checks.sh carries before its first
+# run_gate registration (D-400-SPECIAL-FILE-PRECHECK).
+PRECHECK_LINE = 'python3 -I -B "$here/_containment.py" --precheck || exit 2'
+
+# The D-400 BOOTSTRAP line ahead of the precheck: a pure shell test-and-abort that refuses a
+# non-regular or symlinked precheck script by name BEFORE python3 could block loading it. It
+# calls no python3, so it adds no roster entry; any other spelling that names the precheck
+# module is refused below.
+PRECHECK_BOOTSTRAP_LINE = '[ -f "$here/_containment.py" ] && [ ! -h "$here/_containment.py" ] || { echo "error: opf/tools/_containment.py: not a regular non-symlink file; cannot run the special-file precheck; fail-closed" >&2; exit 2; }'
+
 def _runner_check(expected, text=None, *, fail_own=0):
     """Prove exact dispatch using the real shell text, as the P0 suite does.
 
@@ -421,10 +430,31 @@ def _runner_check(expected, text=None, *, fail_own=0):
     # This parser covers its one-line run_gate registrations, not general
     # shell; malformed registrations or unresolved dollars refuse before launch.
     own_argv = tuple(os.fsencode(arg) for arg in (
-        "-I", "-B", str(here / "_opf_pack_manifest.py"), "--self-test"))
+        "-I", "-B", "-X", "pycache_prefix=/dev/null/aiqt-pycache",
+        str(here / "_opf_pack_manifest.py"), "--self-test"))
     roster = []
     try:
         for line in runner.read_text(encoding="utf-8").splitlines():
+            if line.strip() == PRECHECK_LINE:
+                # D-400-SPECIAL-FILE-PRECHECK: the runner's first python3 call is the
+                # tree precheck, outside run_gate; it reaches the same executable
+                # fixture, so the recorded roster carries it in order.
+                roster.append(tuple(os.fsencode(word) for word in
+                                    ("-I", "-B", str(here / "_containment.py"),
+                                     "--precheck")))
+                continue
+            if line.strip() == PRECHECK_BOOTSTRAP_LINE:
+                # D-400 bootstrap: shell-only, calls no python3, so no roster entry.
+                continue
+            if line.strip().startswith("python3 "):
+                # Any OTHER bare python3 line (including a mutated precheck
+                # spelling) is an unrecognized invocation the fixture would
+                # record outside the roster: refuse before launch.
+                raise ValueError(line)
+            if "_containment.py" in line and not line.lstrip().startswith("#"):
+                # Any OTHER non-comment spelling that names the precheck module (a mutated
+                # bootstrap, a braced or renamed expansion) is unrecognized: refuse before launch.
+                raise ValueError(line)
             if line.lstrip().startswith("run_gate "):
                 words = [word.replace("$here", str(here)) for word in shlex.split(line)]
                 if (any("$" in word for word in words)
@@ -483,8 +513,9 @@ def _runner_check(expected, text=None, *, fail_own=0):
     # alone, is the basis for omitting isolation.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$manifest_log" || exit 2
-if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
-    && [ "$3" = "$manifest_test" ] && [ "$4" = "--self-test" ]; then
+if [ "$#" -eq 6 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
+    && [ "$3" = "-X" ] && [ "$4" = "pycache_prefix=/dev/null/aiqt-pycache" ] \
+    && [ "$5" = "$manifest_test" ] && [ "$6" = "--self-test" ]; then
   if [ "$manifest_fail_own" -ne 0 ]; then
     "$manifest_python" -I -B "$manifest_test" --self-test --vectors-only || exit "$?"
     exit "$manifest_fail_own"
@@ -1244,13 +1275,13 @@ def self_test(vectors_only=False):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--vectors-only", action="store_true", help=argparse.SUPPRESS)
-    args = parser.parse_args(argv)
-    if not args.self_test:
-        parser.error("--self-test is required; use the library for parsing")
-    return self_test(vectors_only=args.vectors_only)
+    # Exact argument lists from a closed set, never a parser: no prefix (`--self-t`), alias or extra token
+    # selects the self-test. `--vectors-only` is the variant this module's own runner fixture forwards.
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args not in (["--self-test"], ["--self-test", "--vectors-only"]):
+        print("usage: _opf_pack_manifest.py --self-test (use the library for parsing)", file=sys.stderr)
+        return 2
+    return self_test(vectors_only=args == ["--self-test", "--vectors-only"])
 
 
 if __name__ == "__main__":

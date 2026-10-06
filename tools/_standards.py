@@ -8,12 +8,15 @@ them. An id that is not in its manifest cannot ship, so a fabricated mapping is 
 
 Requires Python 3.11+ for tomllib (CI pins 3.14).
 """
+import io
 import os
 import re
 import stat
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
+
+from _gen_common import read_source_bytes  # the shared non-blocking, fstat-checked reader
 
 try:
     import tomllib
@@ -191,7 +194,13 @@ def load_manifests(std_dir):
     ensure_listable(std_dir)
     for path in sorted(std_dir.glob("*.toml")):
         _check_stem(path)
-        with open(path, "rb") as handle:
+        # read_source_bytes, never a plain open(): this glob picks up WHATEVER *.toml sits in the
+        # directory, a git-ignored drop-in the D-400 special-file precheck deliberately does not walk
+        # included, so a FIFO (or a symlinked, device, or otherwise non-regular) manifest must be the
+        # named refusal here (SourceReadRefused, an OSError the callers' fail-closed arm already
+        # maps to exit 2), never a blocking read that parks the gate (F-CORPUS-FIFO-HANG class).
+        raw = read_source_bytes(path)
+        with io.BytesIO(raw) as handle:
             try:
                 data = tomllib.load(handle)
             # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an

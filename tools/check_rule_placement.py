@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules  # noqa: E402  for MAP_KEYS/SEQ_KEYS rebind under --root
 from gen_rules import parse_source, derive  # noqa: E402
 from _standards import dir_present, map_keys  # noqa: E402
+from _gen_common import precheck_special_files  # D-400-SPECIAL-FILE-PRECHECK  # noqa: E402
 
 METADATA = {"PROVENANCE.md", "README.md"}
 BUILTIN_FAMILIES = {"aiqt", "security", "external"}
@@ -73,8 +74,11 @@ def check_name(family, name):
 
 def check_drift(f, rules):
     """Return a (code, detail) frontmatter-drift finding for file f, or None. Raises OSError on read."""
+    # ADOPTER MODE (gen_rules FRONTMATTER): an adopter's rule may use CRLF line endings and comment
+    # lines (spaces, then `#`) in its frontmatter; the pack's own corpus stays LF-only with no comment line.
+    # conformance --self-test pins this call (case 7b).
     try:
-        fm = parse_source(f)
+        fm = parse_source(f, adopter=True)
     except ValueError as exc:
         return ("frontmatter-drift", str(exc))
     try:
@@ -99,7 +103,7 @@ def main():
         else:
             print("usage: check_rule_placement.py [--root DIR]", file=sys.stderr)
             return 2
-    root = (root or repo_root_default()).resolve()
+    root = precheck_special_files((root or repo_root_default()).resolve())
     # gen_rules binds MAP_KEYS/SEQ_KEYS at import from ITS OWN repo_root(); derive() (called by
     # check_drift) validates a rule's map-* keys against them. Under --root against an adopter tree with
     # its own .aiqt/standards/, rebind from that root so their map-keys are judged against their

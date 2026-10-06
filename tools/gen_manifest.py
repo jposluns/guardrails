@@ -50,7 +50,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: gen_manifest.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
+from _gen_common import repo_root, load_toml, read_source_bytes, reconcile, precheck_special_files  # noqa: E402
 import check_versions  # noqa: E402  the ONE shared ASCII SemVer validator the release gates use
 
 # Static content-bearing inputs shared by manifest.toml/root.txt/announce-snippet.txt (VERSION ->
@@ -254,10 +254,17 @@ def git_tracked(root):
     """The tracked path set from `git ls-files -z --cached --stage`, strictly decoded and validated.
     Fail-closed (GateError) on an unusable repository, a nonzero exit, empty output, a duplicate path,
     a case-fold or NFC/NFD collision, a symlink (120000), a gitlink (160000), or an unknown mode.
-    NEVER a filesystem walk and never a silent empty tree."""
+    NEVER a filesystem walk and never a silent empty tree. Pinned like the release-gate funnels (QA
+    round-7 claude F3): core.fsmonitor=false (a repo-config fsmonitor hook is attacker-chosen code and
+    must never run under a gate read; the genesis and delta branches of check_release_delta consume
+    this enumerator), protocol.allow=never and GIT_NO_LAZY_FETCH=1 (a missing object is a refusal,
+    never a transport), atop the GIT_* environment scrub."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_LAZY_FETCH"] = "1"
     try:
-        proc = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--stage"],
+        proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false",
+                               "-c", "protocol.allow=never",
+                               "ls-files", "-z", "--cached", "--stage"],
                               capture_output=True, timeout=60, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("cannot run git ls-files ({}); fail-closed".format(exc))
@@ -299,10 +306,15 @@ def check_output_modes(root):
     otherwise a mode flip 100644->100755 on a generated output passes both gates unnoticed. Scoped STRICTLY
     to the generated outputs: run_all_checks.sh and other *.sh are legitimately executable and are NEVER
     touched. An output not yet tracked (genesis, before the release commit git-adds it) is not in the index
-    and is skipped, never an error. GateError (exit 2) on a non-100644 tracked output or an unusable git read."""
+    and is skipped, never an error. GateError (exit 2) on a non-100644 tracked output or an unusable git read.
+    Pinned exactly as git_tracked (QA round-7 claude F3, the sibling index read): core.fsmonitor=false,
+    protocol.allow=never and GIT_NO_LAZY_FETCH=1 atop the GIT_* scrub."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_LAZY_FETCH"] = "1"
     try:
-        proc = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--stage", "--",
+        proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false",
+                               "-c", "protocol.allow=never",
+                               "ls-files", "-z", "--cached", "--stage", "--",
                                *GENERATED_OUTPUTS_REL], capture_output=True, timeout=60, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("cannot run git ls-files for output modes ({}); fail-closed".format(exc))
@@ -399,7 +411,7 @@ def read_version(root):
     # embedded whitespace, no NBSP, no CR, exactly one final "\n"), the same standard check_versions holds the
     # on-disk VERSION to (both read raw bytes and reject anything but `latest + "\n"`); the two gates agree.
     try:
-        raw = (root / VERSION_REL).read_bytes().decode("utf-8")
+        raw = read_source_bytes(root / VERSION_REL).decode("utf-8")
     except UnicodeDecodeError as exc:
         raise GateError("VERSION is not valid UTF-8 ({})".format(exc))
     if not raw.endswith("\n") or raw.count("\n") != 1:
@@ -462,7 +474,7 @@ def managed_block_digest(root):
     """SHA-256 over CLAUDE.md's delimited block: from the start of the BEGIN marker through the last
     byte of the END marker, markers included, the following LF excluded. Exactly one pair, BEGIN before
     END, no nesting."""
-    raw = (root / "CLAUDE.md").read_bytes()
+    raw = read_source_bytes(root / "CLAUDE.md")
     begin, end = BLOCK_BEGIN.encode(), BLOCK_END.encode()
     if raw.count(begin) != 1 or raw.count(end) != 1:
         raise GateError("CLAUDE.md: expected exactly one {} / {} marker pair".format(
@@ -511,13 +523,13 @@ def build_artifacts(root, classes, renderers):
                         rid, target))
                 for leaf in leaves:
                     rows.append({"artifact-id": "{}:{}".format(rid, leaf), "path": leaf,
-                                 "kind": "file", "sha256": _sha256((root / leaf).read_bytes())})
+                                 "kind": "file", "sha256": _sha256(read_source_bytes(root / leaf))})
             else:
                 if target not in classes:
                     raise GateError("renderer {}: target {!r} is not a tracked in-scope path".format(
                         rid, target))
                 rows.append({"artifact-id": "{}:{}".format(rid, target), "path": target,
-                             "kind": "file", "sha256": _sha256((root / target).read_bytes())})
+                             "kind": "file", "sha256": _sha256(read_source_bytes(root / target))})
     rows.sort(key=lambda r: (r["path"], r["artifact-id"]))
     ids = [r["artifact-id"] for r in rows]
     if len(ids) != len(set(ids)):
@@ -601,7 +613,7 @@ def compute_all(root, write_mode):
             data = frozen_text.encode("utf-8")
         else:
             try:
-                data = (root / p).read_bytes()
+                data = read_source_bytes(root / p)  # a FIFO is refused, never blocks
             except OSError as exc:
                 raise GateError("cannot read tracked source {} ({}); fail-closed".format(p, exc))
         if p not in binary_set:
@@ -698,7 +710,7 @@ def main():
         if i + 1 >= len(args):
             print("usage: gen_manifest.py [--check] [--root DIR] | --self-test", file=sys.stderr)
             return 2
-        root = Path(args[i + 1]).resolve()
+        root = precheck_special_files(Path(args[i + 1]).resolve())
     return run(root, "--check" in args)
 
 

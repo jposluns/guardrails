@@ -22,10 +22,14 @@ mechanism ids, the ledger residues and class letters, the roadmap decisions, and
 template prose (the explainer, the page copy, the class legend) remain authored upstream and are reviewed
 as such.
 
-HONEST BOUNDARY. An "enforced" status records LINKAGE, not complete coverage: at least one shipped gate or
-hook cites the rule, and each mechanism carries its residual (what it does not catch) from the ledger. A
-linked mechanism may cover only part of a rule's violation surface. "none" and "pending" both mean
-enforcement is not built yet; "pending" adds the intended-build description.
+HONEST BOUNDARY. The roadmap's "enforced" decision records LINKAGE, not complete coverage: at least one
+shipped gate or hook cites the rule, and each mechanism carries its residual (what it does not catch) from
+the ledger. A linked mechanism may cover only part of a rule's violation surface. So the views never show the
+word Enforced as a status: a linked rule displays as "Gate-linked (class a)" when at least one linked gate is
+class a, "Gate-linked (class c only)" when every linked gate is class c, and "Hook-linked" when only hooks
+cite it (the ledger's own gate-linked / hook-linked precedence). "none" displays as "No control" and
+"pending" as "Pending"; both mean no shipped control cites the rule yet, and "pending" adds the
+intended-build description. The summary counts the same display labels, so it cannot disagree with the rows.
 
   gen_enforcement_register.py           regenerate ENFORCEMENT.md and the whole site/enforcement.html page
   gen_enforcement_register.py --check   fail (exit 1) on output drift; exit 2 on a bad or contradictory input
@@ -60,7 +64,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
+from _gen_common import repo_root, load_toml, read_source_text, reconcile  # noqa: E402
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402  canonical AIQT-priority rule order (as gen_mappings uses)
@@ -78,9 +82,9 @@ SHELL_REL = gen_site.SHELL_REL  # docs/_shell.html: the shared themed site chrom
 # These are the enforcement page's own frontmatter, kept here (not in a TOML) because this page's body
 # is generated from the ledger, not authored as Markdown. Each value is escaped for its shell sink by
 # gen_site._escape_field, exactly as the Markdown site pages are.
-PAGE_DESCRIPTION = ("Every rule and the shipped mechanical controls linked to it. An enforced status "
-                    "records linkage, not complete coverage; none and pending both mean enforcement is "
-                    "not built yet.")
+PAGE_DESCRIPTION = ("Every rule and the shipped mechanical controls linked to it. A link records that a "
+                    "control exists, not complete coverage; no control and pending both mean no shipped "
+                    "control cites the rule yet.")
 PAGE_URL = "https://aiqt.ai/enforcement"
 PAGE_FIELDS = {
     "title": "Guardrail Enforcement Register",
@@ -120,14 +124,23 @@ CLASS_LEGEND = (
 # The public explanatory paragraph carried inside BOTH generated views, so it cannot drift from the status
 # semantics. One string, rendered as Markdown and as HTML text.
 EXPLAINER = (
-    "This register lists every rule and the shipped mechanical controls linked to it. An enforced status "
-    "records linkage, not complete coverage: at least one shipped gate or hook cites the rule, and each "
-    "mechanism's class and residual describe the boundary of what it checks. A linked mechanism may cover "
-    "only part of a rule's violation surface. A status of none means enforcement has not been built yet; "
-    "pending also means enforcement has not been built yet, and its description states the intended build. "
+    "This register lists every rule and the shipped mechanical controls linked to it. A link records that "
+    "a control exists, not how much of the rule it covers, so none of the statuses means a rule is "
+    "enforced. Gate-linked means at least one shipped repository gate cites the rule: class a when at least "
+    "one of those gates is total for what it examines, class c only when every linked gate covers "
+    "just a recognizable subset of the surface. Hook-linked means at least one shipped runtime hook cites "
+    "the rule and no gate does. No control means no shipped control cites the rule yet; pending means the "
+    "same, and its description states the intended build. Each mechanism's class and residual describe the "
+    "boundary of what it checks, and a linked mechanism may cover only part of a rule's violation surface. "
     "The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim "
     "and not summarized. The class letter is a maintainer assessment of the check's decision procedure, "
     "not a coverage score.")
+
+# The rules table's fourth column heading and the text of a no-control row, single-sourced for both views.
+# Neither calls a linked control "enforcement": the column lists linked controls or a planned build, and a
+# no-control row says only that no shipped control cites the rule (not that one will be built).
+COLUMN_HEADING = "Linked controls or planned build"
+NO_CONTROL_TEXT = "No shipped control cites this rule."
 
 GENERATED_NOTE = (
     "This file is generated from the enforceability ledger, the enforcement roadmap, and the rule corpus "
@@ -367,7 +380,7 @@ def _rows_in_order(corpus, roadmap):
 def rule_title(path):
     """The rule's display title: the first body '# ' heading (the same convention gen_mappings uses; there
     is deliberately no frontmatter title key). Fail closed if none."""
-    text = path.read_text(encoding="utf-8")
+    text = read_source_text(path)
     end = text.find("\n---\n", 4)
     body = text[end + 5:] if end != -1 else text
     for line in body.splitlines():
@@ -379,8 +392,41 @@ def rule_title(path):
     raise ValueError("{}: no body '# ' heading to use as the rule title".format(path.name))
 
 
-def _status_word(status):
-    return {"enforced": "Enforced", "pending": "Pending", "none": "None"}[status]
+# The display labels, in summary order. A linked rule's label follows the ledger's precedence (any gate
+# makes it gate-linked) and carries the gate class, so a rule linked only through class c gates reads as
+# such; the summary counts these same labels, so it can never disagree with the per-rule rows.
+LABEL_GATE_A = "Gate-linked (class a)"
+LABEL_GATE_C = "Gate-linked (class c only)"
+LABEL_HOOK = "Hook-linked"
+LABEL_PENDING = "Pending"
+LABEL_NONE = "No control"
+STATUS_LABELS = (LABEL_GATE_A, LABEL_GATE_C, LABEL_HOOK, LABEL_PENDING, LABEL_NONE)
+
+
+def _status_label(row, controls):
+    """The display label for one roadmap row. load_roadmap has already bound an enforced row's mechanisms
+    to the ledger linkage, and the gates manifest admits only classes a and c, so a gate-linked rule is
+    either class a (at least one class a gate) or class c only. Any other gate class fails closed."""
+    status = row["status"]
+    if status == "pending":
+        return LABEL_PENDING
+    if status == "none":
+        return LABEL_NONE
+    classes = {controls[ref]["class"] for ref in row["mechanisms"] if controls[ref]["kind"] == "gate"}
+    if not classes:
+        return LABEL_HOOK
+    if "a" in classes:
+        return LABEL_GATE_A
+    if classes == {"c"}:
+        return LABEL_GATE_C
+    raise ValueError("gate class(es) {} have no register label".format(", ".join(sorted(classes))))
+
+
+def _label_counts(rows, roadmap, controls):
+    counts = {label: 0 for label in STATUS_LABELS}
+    for cid, _title, _fm in rows:
+        counts[_status_label(roadmap[cid], controls)] += 1
+    return counts
 
 
 def _classes_present(enforced_union, controls):
@@ -410,16 +456,13 @@ _MECH_FIELDS = (
 
 
 def render_md(rows, roadmap, controls, enforced_union):
-    counts = {"enforced": 0, "pending": 0, "none": 0}
-    for cid, _title, _fm in rows:
-        counts[roadmap[cid]["status"]] += 1
+    counts = _label_counts(rows, roadmap, controls)
     lines = ["# Guardrail Enforcement Register", "", GENERATED_NOTE, "", EXPLAINER, "",
-             "## Summary", "", "| Status | Rules |", "|---|---:|",
-             "| Enforced | {} |".format(counts["enforced"]),
-             "| Pending | {} |".format(counts["pending"]),
-             "| None | {} |".format(counts["none"]), "",
+             "## Summary", "", "| Status | Rules |", "|---|---:|"]
+    lines += ["| {} | {} |".format(label, counts[label]) for label in STATUS_LABELS]
+    lines += ["",
              "## Rules", "",
-             "| Rule | Corpus ID | Status | How enforced or intended |",
+             "| Rule | Corpus ID | Status | {} |".format(COLUMN_HEADING),
              "|---|---|---|---|"]
     for cid, title, _fm in rows:
         row = roadmap[cid]
@@ -429,9 +472,9 @@ def render_md(rows, roadmap, controls, enforced_union):
         elif status == "pending":
             how = row["description"]
         else:
-            how = "Enforcement has not been built yet."
+            how = NO_CONTROL_TEXT
         lines.append("| {} | `{}` | {} | {} |".format(
-            _md_cell(_no_ctrl(title, "rule title {}".format(cid))), cid, _status_word(status),
+            _md_cell(_no_ctrl(title, "rule title {}".format(cid))), cid, _status_label(row, controls),
             _md_cell(how)))
     lines += ["", "## Mechanisms", ""]
     classes_present = _classes_present(enforced_union, controls)
@@ -461,19 +504,15 @@ def _a(value):   # HTML attribute value
 
 
 def render_html(rows, roadmap, controls, enforced_union):
-    counts = {"enforced": 0, "pending": 0, "none": 0}
-    for cid, _title, _fm in rows:
-        counts[roadmap[cid]["status"]] += 1
+    counts = _label_counts(rows, roadmap, controls)
     out = []
     out.append('        <p>{}</p>'.format(_t(EXPLAINER)))
-    out.append('        <p class="lead">Summary: '
-               '<strong>{e}</strong> enforced, <strong>{p}</strong> pending, '
-               '<strong>{n}</strong> none.</p>'.format(
-                   e=counts["enforced"], p=counts["pending"], n=counts["none"]))
+    out.append('        <p class="lead">Summary: {}.</p>'.format("; ".join(
+        '{}: <strong>{}</strong>'.format(_t(label), counts[label]) for label in STATUS_LABELS)))
     out.append('        <div class="tablewrap">')
     out.append('          <table class="dtable">')
     out.append('            <thead><tr><th>Rule</th><th>Corpus ID</th><th>Status</th>'
-               '<th>How enforced or intended</th></tr></thead>')
+               '<th>{}</th></tr></thead>'.format(_t(COLUMN_HEADING)))
     out.append('            <tbody>')
     for cid, title, _fm in rows:
         row = roadmap[cid]
@@ -489,10 +528,10 @@ def render_html(rows, roadmap, controls, enforced_union):
         elif status == "pending":
             how = _t(row["description"])
         else:
-            how = "Enforcement has not been built yet."
+            how = NO_CONTROL_TEXT
         out.append('            <tr id="rule-{cid}"><td>{title}</td><td><code>{cid}</code></td>'
                    '<td>{status}</td><td>{how}</td></tr>'.format(
-                       cid=_a(cid), title=_t(title), status=_t(_status_word(status)), how=how))
+                       cid=_a(cid), title=_t(title), status=_t(_status_label(row, controls)), how=how))
     out.append('            </tbody>')
     out.append('          </table>')
     out.append('        </div>')
@@ -626,9 +665,9 @@ def _page_content(html_inner):
         '<div class="wrap pagehead">',
         '  <p class="eyebrow">Enforcement register</p>',
         '  <h1>Guardrail Enforcement Register</h1>',
-        '  <p class="lead">Which rules have shipped mechanical enforcement, and which do not yet. This page is',
-        '    generated from the enforceability ledger, so what it claims about linkage is always what the pack',
-        '    actually ships.</p>',
+        '  <p class="lead">Which rules have a shipped mechanical control linked to them, and which do not yet.',
+        '    This page is generated from the enforceability ledger, so its linkage claims match the controls',
+        '    declared in the pack\'s gates and hooks manifests when the page was generated.</p>',
         '</div>',
         "",
         '<section id="register">',
@@ -979,6 +1018,8 @@ def self_test_main():
                 return run(root, check)
             except SystemExit as exc:
                 return "raised SystemExit({!r})".format(exc.code)
+            except Exception as exc:  # noqa: BLE001  an escaped exception is a failure, not a crash
+                return "raised {}".format(type(exc).__name__)
 
     def replace_in(path, old, new):
         text = path.read_text(encoding="utf-8")
@@ -1006,14 +1047,29 @@ def self_test_main():
             failures.append("conformant tree: expected {} to be written".format(MD_REL))
         else:
             body = md.read_text(encoding="utf-8")
-            for token in ("Enforced | 3", "Pending | 1", "None | 1", "`gate:gate-alpha`",
-                          "`hook:hook-one`", "Enforcement has not been built yet.",
+            for token in ("| Gate-linked (class a) | 2 |", "| Gate-linked (class c only) | 0 |",
+                          "| Hook-linked | 1 |", "| Pending | 1 |", "| No control | 1 |", "`gate:gate-alpha`",
+                          "`hook:hook-one`", NO_CONTROL_TEXT,
                           "### `gate:gate-alpha`", RESIDUAL_HEADING,
                           "Class letters:", _ALPHA_RESIDUE, _HOOK_RESIDUE):
                 if token not in body:
                     failures.append("conformant tree: {!r} missing from ENFORCEMENT.md".format(token))
             # The three-backtick hook residue must be wrapped in a FOUR-backtick fence (lengthened past
             # the run) so it cannot break out of its code block.
+            # F1: no row and no summary line calls a linked rule Enforced; each row's status is the label
+            # derived from its own linkage (a class a gate, hooks only, pending, or no control).
+            row_status = {}
+            for line in body.split("\n"):
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                if len(cells) == 4 and cells[1].startswith("`") and cells[1].endswith("`"):
+                    row_status[cells[1].strip("`")] = cells[2]
+            want = {"ruleaa": LABEL_GATE_A, "rulebb": LABEL_GATE_A, "rulecc": LABEL_HOOK,
+                    "ruledd": LABEL_NONE, "apex01": LABEL_PENDING}
+            if row_status != want:
+                failures.append("conformant tree: per-rule status labels {!r}, expected {!r}".format(
+                    row_status, want))
+            if "Enforced" in body:
+                failures.append("conformant tree: ENFORCEMENT.md must not label any rule Enforced")
             if "````" not in body:
                 failures.append("conformant tree: expected a lengthened four-backtick fence in the Markdown")
             # MULTI-LINE RESIDUE: the hook residue is multi-paragraph, so it carries a blank line, and it
@@ -1042,6 +1098,28 @@ def self_test_main():
                 failures.append("conformant tree: {!r} missing from the generated page".format(token))
         # The whole page is composed from the shared shell, so the chrome (the substituted <title>) and
         # the page head band are present, not just the register block.
+        if "Enforced" in html_page or "enforced," in html_page:
+            failures.append("conformant tree: the page must not label any rule enforced")
+        # Neither view calls a linked control "enforcement" in the column heading or the no-control cell,
+        # the explainer says no status means enforced in unambiguous words and gives the class a criterion
+        # the rubric uses (totality, not determinism), and the page lead claims only what its inputs declare.
+        md_body = (good / MD_REL).read_text(encoding="utf-8") if (good / MD_REL).is_file() else ""
+        for view_name, view in (("ENFORCEMENT.md", md_body), ("the generated page", html_page)):
+            for banned in ("How enforced", "Enforcement has not been built", "no status here means",
+                           "deterministic check over what it examines"):
+                if banned in view:
+                    failures.append("conformant tree: {} still carries {!r}".format(view_name, banned))
+            for wanted in (COLUMN_HEADING, NO_CONTROL_TEXT, "none of the statuses means a rule is enforced",
+                           "class a when at least one of those gates is total for what it examines"):
+                if wanted not in view:
+                    failures.append("conformant tree: {!r} missing from {}".format(wanted, view_name))
+        if "always" in _page_content("") or "declared in the pack" not in _page_content(""):
+            failures.append("conformant tree: the page lead must scope its linkage claim to the declared "
+                            "inputs, with no unconditional 'always'")
+        for token in ("<td>Gate-linked (class a)</td>", "<td>Hook-linked</td>", "<td>No control</td>",
+                      "Gate-linked (class c only): <strong>0</strong>"):
+            if token not in html_page:
+                failures.append("conformant tree: {!r} missing from the generated page".format(token))
         for chrome_token in ("<title>Guardrail Enforcement Register</title>",
                              "<p class=\"eyebrow\">Enforcement register</p>"):
             if chrome_token not in html_page:
@@ -1117,6 +1195,25 @@ def self_test_main():
         if _md_mechanism_fence(fenced_md, "gate:beta") != "Beta real residue.":
             failures.append("fence-unaware heading: the heading lookup must skip fenced blocks so a prior "
                             "residue containing a heading-like line does not misdirect extraction (fix 3)")
+
+        # (a5) F2: a rule linked only through class c gates reads as such on both views, and the summary
+        # counts it under the same label. Flip the alpha gate to class c and rebuild the ledger to match.
+        ctree = _build(tmp / "class-c-only")
+        replace_in(ctree / GATES, "class = \"a\"\nresidue = \"" + _ALPHA_RESIDUE,
+                   "class = \"c\"\nresidue = \"" + _ALPHA_RESIDUE)
+        (ctree / LEDGER_REL).write_text(gen_enforceability.build_ledger(ctree), encoding="utf-8")
+        if run_quiet(ctree, check=False) != 0:
+            failures.append("class-c-only tree: generation expected exit 0")
+        else:
+            cmd = (ctree / MD_REL).read_text(encoding="utf-8")
+            chtml = (ctree / HTML_REL).read_text(encoding="utf-8")
+            for token in ("| Title of ruleaa | `ruleaa` | Gate-linked (class c only) |",
+                          "| Title of rulebb | `rulebb` | Gate-linked (class c only) |",
+                          "| Gate-linked (class a) | 0 |", "| Gate-linked (class c only) | 2 |"):
+                if token not in cmd:
+                    failures.append("class-c-only tree: {!r} missing from ENFORCEMENT.md".format(token))
+            if "<td>Gate-linked (class c only)</td>" not in chtml:
+                failures.append("class-c-only tree: the page must label a class c only rule as such")
 
         # (b) A drifted ENFORCEMENT.md fails --check (exit 1).
         if md.is_file():
@@ -1253,6 +1350,47 @@ def self_test_main():
                     t / ROADMAP,
                     'description = "A self-test intended build for the apex rule."',
                     'description = "   "'))
+        # (y) A published preview hook that does not parse fails closed with exit 2 through the reused
+        #     ledger build, rather than escaping as an uncaught SyntaxError (which --check would report as
+        #     exit 1, the drift code).
+        expect2("preview-syntax-error",
+                lambda t: ((t / ".preview").mkdir(),
+                           (t / ".preview" / "p-bad.py").write_text("def (:\n", encoding="utf-8"),
+                           (t / gen_enforceability.PREVIEW_DECL_REL).write_text(
+                               '[[preview]]\nid = "p-bad"\nrules = []\n', encoding="utf-8")))
+        # (z) A published preview hook too complex to parse (the parser's MemoryError, or the compiler's
+        #     RecursionError), one with an unknown coding cookie, one whose cookie names a codec that is not
+        #     a text encoding (rot13, a LookupError), and one with a latin-1 cookie on a lone-CR line 2 fail
+        #     closed with exit 2 the same way, never a traceback or exit 1, while cookie-like text inside a
+        #     lone-CR docstring is no cookie and is accepted. The setup refreshes the committed ledger whenever the
+        #     build accepts the file, so exit 2 can come only from the preview check, never from a stale
+        #     ledger; the valid control proves the refresh.
+        def add_preview(t, body):
+            (t / ".preview").mkdir()
+            (t / ".preview" / "p-bad.py").write_bytes(body)
+            (t / gen_enforceability.PREVIEW_DECL_REL).write_text(
+                '[[preview]]\nid = "p-bad"\nrules = []\n', encoding="utf-8")
+            try:
+                (t / ".aiqt" / "enforceability.json").write_text(
+                    gen_enforceability.build_ledger(t), encoding="utf-8")
+            except Exception:  # noqa: BLE001  a build that refuses the file leaves run() to refuse it
+                pass
+
+        expect2("preview-too-complex",
+                lambda t: add_preview(t, ('"""A doc."""\nx = ' + "-" * 100000 + "1\n").encode("utf-8")))
+        expect2("preview-unknown-cookie",
+                lambda t: add_preview(t, b'# coding: not_an_encoding\n"""No named rule."""\n'))
+        expect2("preview-too-deep",
+                lambda t: add_preview(t, ('"""A doc."""\nx = ' + "+".join(["1"] * 200000) + "\n").encode("utf-8")))
+        expect2("preview-rot13-cookie", lambda t: add_preview(t, b'# coding: rot13\n"""A doc."""\n'))
+        expect2("preview-lone-cr-cookie",
+                lambda t: add_preview(t, b'\r# coding: latin-1\r"""Doc caf\xc3\xa9."""\r'))
+        for zname, zbody in (("preview-valid", b'"""A valid preview hook."""\n'),
+                             ("preview-valid-lone-cr", b'# comment\r"""# coding: latin-1"""\r')):
+            ztree = _build(tmp / zname)
+            add_preview(ztree, zbody)
+            if run_quiet(ztree, check=False) != 0:
+                failures.append("{}: expected exit 0 (the refreshed ledger must be accepted)".format(zname))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1261,8 +1399,9 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: a conformant tree generates and regenerates drift-clean with enforced, none, "
-          "and pending all present, stable anchors, the composed page chrome, the class legend, and each "
+    print("SELF-TEST PASS: a conformant tree generates and regenerates drift-clean with gate-linked, "
+          "hook-linked, no control, and pending all present and no rule labelled Enforced, a class c only "
+          "gate link labelled as such in both views and the summary, stable anchors, the composed page chrome, the class legend, and each "
           "mechanism's ledger residual rendered VERBATIM (a tag-shaped token survives as visible text, a "
           "three-backtick run is wrapped in a lengthened fence, and a MULTI-PARAGRAPH residue round-trips "
           "verbatim inside its own Markdown fence and its HTML blockquote); the display-fidelity assertion "
@@ -1273,7 +1412,11 @@ def self_test_main():
           "description or carrying a mechanism or carrying only whitespace, a NEWLINE in a table-cell "
           "description, an unsupported lint: reference, a stale committed ledger, an en dash or a raw tab "
           "in a residue, a boolean roadmap version, a site shell missing its content token, and an "
-          "invalid-UTF-8 generated Markdown or HTML target all fail closed (exit 2)")
+          "invalid-UTF-8 generated Markdown or HTML target, and a published preview hook that does not "
+          "parse, is too complex to parse, or carries an unknown, non-text or lone-CR non-UTF-8 coding cookie "
+          "all fail closed (exit 2), while cookie-like text in a lone-CR docstring is accepted; "
+          "neither view calls a linked control enforcement, and the page "
+          "lead scopes its linkage claim to the declared inputs")
     return 0
 
 

@@ -2,152 +2,154 @@
 
 This file is generated from the enforceability ledger, the enforcement roadmap, and the rule corpus by tools/gen_enforcement_register.py. Do not edit it by hand; change the source and regenerate.
 
-This register lists every rule and the shipped mechanical controls linked to it. An enforced status records linkage, not complete coverage: at least one shipped gate or hook cites the rule, and each mechanism's class and residual describe the boundary of what it checks. A linked mechanism may cover only part of a rule's violation surface. A status of none means enforcement has not been built yet; pending also means enforcement has not been built yet, and its description states the intended build. The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim and not summarized. The class letter is a maintainer assessment of the check's decision procedure, not a coverage score.
+This register lists every rule and the shipped mechanical controls linked to it. A link records that a control exists, not how much of the rule it covers, so none of the statuses means a rule is enforced. Gate-linked means at least one shipped repository gate cites the rule: class a when at least one of those gates is total for what it examines, class c only when every linked gate covers just a recognizable subset of the surface. Hook-linked means at least one shipped runtime hook cites the rule and no gate does. No control means no shipped control cites the rule yet; pending means the same, and its description states the intended build. Each mechanism's class and residual describe the boundary of what it checks, and a linked mechanism may cover only part of a rule's violation surface. The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim and not summarized. The class letter is a maintainer assessment of the check's decision procedure, not a coverage score.
 
 ## Summary
 
 | Status | Rules |
 |---|---:|
-| Enforced | 34 |
+| Gate-linked (class a) | 8 |
+| Gate-linked (class c only) | 6 |
+| Hook-linked | 20 |
 | Pending | 0 |
-| None | 98 |
+| No control | 98 |
 
 ## Rules
 
-| Rule | Corpus ID | Status | How enforced or intended |
+| Rule | Corpus ID | Status | Linked controls or planned build |
 |---|---|---|---|
-| The AIQT principle (highest precedence) | `prjint1` | None | Enforcement has not been built yet. |
-| Citation only from a file opened at the reviewed commit | `citint` | None | Enforcement has not been built yet. |
-| Claims about the work rest on observation | `clmobs` | None | Enforcement has not been built yet. |
-| A completeness claim enumerates its set | `setcmp` | Enforced | `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
-| Corroborate external claims | `corrob` | None | Enforcement has not been built yet. |
-| A count carries its predicate | `cntprd` | None | Enforcement has not been built yet. |
-| Disclose a guard's residual coverage | `dscres` | None | Enforcement has not been built yet. |
-| Evidence-grounded completion | `evgcmp` | Enforced | `gate:selftest-execution`, class a |
-| A guard is only as good as its input | `grdinp` | Enforced | `gate:aei-enumerator-selftest`, class a; `gate:derived-command-parameters`, class c |
-| Measured and estimated figures stay separate | `estsep` | Enforced | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
-| No fabrication | `nofabr` | None | Enforcement has not been built yet. |
-| Observe before asserting behaviour | `obsbeh` | None | Enforcement has not been built yet. |
-| A partial read is not the whole | `prtwhl` | None | Enforcement has not been built yet. |
-| Read before characterizing | `rdbchr` | None | Enforcement has not been built yet. |
-| Capture the reference when the claim is made | `refcap` | None | Enforcement has not been built yet. |
-| Reproduce a defect before fixing it | `reprod` | None | Enforcement has not been built yet. |
-| A current timestamp is read from the clock | `tstamp` | Enforced | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
-| Validate an inferred premise before acting | `valinf` | None | Enforcement has not been built yet. |
-| Verify a fix is in its commit | `vfxcmt` | None | Enforcement has not been built yet. |
-| Anything wrong is fixed first | `actbef` | None | Enforcement has not been built yet. |
-| Attestation lines are harness-owned | `attint` | None | Enforcement has not been built yet. |
-| Branch and merge only on green | `artbr1` | Enforced | `hook:protected-line-guard`, class b |
-| Cut branches from the live protected line and re-home after a rewrite | `brnrot` | Enforced | `gate:branch-root`, class c; `hook:branch-root-guard`, class c |
-| A check fails closed on input it cannot read | `chkfcl` | None | Enforcement has not been built yet. |
-| Commit identity | `cmtidn` | Enforced | `hook:commit-identity`, class b |
-| Bind to the explicit target, not the ambient context | `expbnd` | Enforced | `hook:git-discard`, class b; `hook:git-explicit-binding`, class b; `hook:git-stash-ref`, class b; `hook:orch-dispatch-ledger`, class c |
-| Gate discipline | `gatdis` | Enforced | `gate:ci-parity`, class c; `hook:gate-weakening-guard`, class b |
-| A generated artefact is changed only through its source | `gensrc` | Enforced | `gate:adapters-drift`, class a; `gate:agents-drift`, class a; `gate:changelog-drift`, class a; `gate:claude-drift`, class a; `gate:crosswalk-schema-drift`, class a; `gate:cursor-drift`, class a; `gate:disclosure-drift`, class a; `gate:enforceability-drift`, class a; `gate:enforcement-register-drift`, class a; `gate:gensrc-failclose`, class a; `gate:gensrc-registry-drift`, class a; `gate:hooks-drift`, class a; `gate:install-drift`, class a; `gate:manifest-gen-drift`, class a; `gate:mappings-page-drift`, class a; `gate:notice-drift`, class a; `gate:reference-roster-drift`, class a; `gate:renderers-drift`, class a; `gate:roadmap-drift`, class a; `gate:rules-drift`, class a; `gate:secret-patterns-drift`, class a; `gate:skill-drift`, class a; `gate:worker-pack-drift`, class a; `hook:gensrc-edit-guard`, class c |
-| Verify licence compatibility before introducing third-party material | `liccmp` | None | Enforcement has not been built yet. |
-| No concealed failure | `nocncl` | Enforced | `hook:orch-truncation-guard`, class b |
-| Preserve uncommitted work | `prsunc` | Enforced | `hook:git-discard`, class b |
-| Protected-branch integrity | `prtbrn` | Enforced | `hook:protected-line-guard`, class b |
-| A required step remains required under friction | `reqstp` | None | Enforcement has not been built yet. |
-| A rerun pass does not erase an earlier failure | `rerunf` | None | Enforcement has not been built yet. |
-| A review in flight pins its artefact | `rvwpin` | None | Enforcement has not been built yet. |
-| Make retries safe to repeat | `rtsafe` | None | Enforcement has not been built yet. |
-| Separate task changes from pre-existing work | `septsk` | Enforced | `hook:write-scope`, class c |
-| Stage artefacts and promote only on green | `stgprm` | None | Enforcement has not been built yet. |
-| A launched task stays observable | `trkasy` | Enforced | `hook:orch-dispatch-ledger`, class c; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-truncation-guard`, class b; `hook:orch-untracked-wait-loop`, class b |
-| Validation is a gate on apply | `valgat` | None | Enforcement has not been built yet. |
-| Workers produce inert data | `wowo01` | Enforced | `hook:write-scope`, class c |
-| Use absolute paths, not relative | `abspth` | Enforced | `hook:abs-paths`, class b; `hook:abs-paths-bash`, class b |
-| A behavioural change carries a check that fails without it | `chgchk` | Enforced | `gate:selftest-execution`, class a |
-| Preserve compatibility or provide a migration path | `cmpmig` | None | Enforcement has not been built yet. |
-| Confirm the execution target before a side-effectful operation | `exetgt` | Enforced | `gate:derived-command-parameters`, class c; `hook:write-scope`, class c |
-| Defence in depth by default | `dfdpth` | None | Enforcement has not been built yet. |
-| A borrowed process timer is restored elapsed-aware | `tmrrst` | None | Enforcement has not been built yet. |
-| A verification finding is fixed, not argued away | `fndfix` | None | Enforcement has not been built yet. |
-| Goal fidelity across a long trajectory | `goalfd` | None | Enforcement has not been built yet. |
-| High-assurance verification | `hiasrv` | None | Enforcement has not been built yet. |
-| A kill timeout outlives the wait it bounds | `kltwat` | None | Enforcement has not been built yet. |
-| Isolate verifiers and judge by their result signal | `lvw001` | None | Enforcement has not been built yet. |
-| Match the surrounding code | `mtchcd` | None | Enforcement has not been built yet. |
-| Minimize external dependencies in favour of standard libraries | `mindep` | None | Enforcement has not been built yet. |
-| Propose a guardrail when an error reveals a gap | `slfgrd` | None | Enforcement has not been built yet. |
-| Prefer the smallest correct change | `smlcng` | None | Enforcement has not been built yet. |
-| Surface a counterproductive instruction before executing it | `srfcp1` | None | Enforcement has not been built yet. |
-| A test's verdict comes from the code, not its surroundings | `tsthrm` | None | Enforcement has not been built yet. |
-| A degraded verifier delivery is not a verdict | `vrfdlv` | Enforced | `hook:orch-truncation-guard`, class b |
-| Verifier diversity | `vrfdiv` | None | Enforcement has not been built yet. |
-| Maintain an AI toolchain register | `aitreg` | None | Enforcement has not been built yet. |
-| Assess and advise are discussion only | `asadv1` | None | Enforcement has not been built yet. |
-| Claim a pooled item atomically | `atmclm` | None | Enforcement has not been built yet. |
-| Change record | `chtrk1` | Enforced | `gate:record-drift`, class a |
-| Change record has a curated public face | `chgtrk` | None | Enforcement has not been built yet. |
-| Clarify before acting | `clrfy1` | None | Enforcement has not been built yet. |
-| Hold a concurrency lease to prevent double runs | `cnclse` | Enforced | `hook:orch-resume-audit`, class b; `hook:orch-stop-guard`, class b |
-| Continue by default | `cntdef` | Enforced | `hook:orch-ask-unattended`, class b; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
-| Express authorization before execution | `exauth` | None | Enforcement has not been built yet. |
-| Human oversight and the autonomy threshold | `humovs` | Enforced | `hook:orch-ask-unattended`, class b |
-| Do not bury the review surface under raw dumps | `cnsdif` | Enforced | `hook:diff-source`, class b; `hook:diff-wall-stop`, class b |
-| An orchestrator keeps a mistakes register | `mstreg` | Enforced | `gate:mistakes-register`, class a |
-| Reconcile the record against reality | `recncl` | Enforced | `gate:record-drift`, class a; `gate:record-sections`, class c; `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
-| Records first | `recfst` | Enforced | `hook:orch-ask-unattended`, class b; `hook:orch-dispatch-ledger`, class c |
-| Close each session on green | `sescls` | None | Enforcement has not been built yet. |
-| Resume from the durable handoff | `sesres` | Enforced | `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
-| A standing constraint persists across context loss | `cnstpr` | None | Enforcement has not been built yet. |
-| Trust recovery and escalation | `trstre` | None | Enforcement has not been built yet. |
-| Autonomy steps down after a confirmed trust loss | `trsrcv` | None | Enforcement has not been built yet. |
-| Decision classification before enacting | `deccls` | None | Enforcement has not been built yet. |
-| Repeated failure triggers premise review | `rpfail` | None | Enforcement has not been built yet. |
-| Background work during CI waits | `bgcwai` | None | Enforcement has not been built yet. |
-| Cost tier | `csttir` | None | Enforcement has not been built yet. |
-| Classify content by sensitivity tier | `datbnd` | None | Enforcement has not been built yet. |
-| Egress goes only to expected destinations | `secegr` | None | Enforcement has not been built yet. |
-| Keep secrets out | `secsec` | Enforced | `gate:secrets-scan`, class c; `hook:secrets-shift-left`, class c |
-| Retrieval enforces the requester's authorization | `seclpr` | None | Enforcement has not been built yet. |
-| No cross-context bleed | `secncb` | None | Enforcement has not been built yet. |
-| No disclosure of secrets or hidden context | `secndc` | None | Enforcement has not been built yet. |
-| Rotate a leaked secret | `secrot` | None | Enforcement has not been built yet. |
-| Strong authentication | `secau1` | None | Enforcement has not been built yet. |
-| Least-privilege authorization | `secazn` | None | Enforcement has not been built yet. |
-| Configuration that executes on load is treated as code | `seccet` | Enforced | `gate:python-launcher-isolation`, class c |
-| Sound cryptography | `seccry` | None | Enforcement has not been built yet. |
-| Trusted, pinned dependency provenance | `secsup` | None | Enforcement has not been built yet. |
-| Fail closed in security-relevant paths | `secfcl` | None | Enforcement has not been built yet. |
-| Validate federated identity and token flows | `secfid` | None | Enforcement has not been built yet. |
-| Validate and contain uploaded files | `secupl` | None | Enforcement has not been built yet. |
-| Guardrail configuration is integrity-protected | `secgci` | None | Enforcement has not been built yet. |
-| Human authorization for consequential actions | `sechau` | None | Enforcement has not been built yet. |
-| Validate external input at the boundary | `secinp` | None | Enforcement has not been built yet. |
-| Trust between agents is earned, not inherited | `secagt` | None | Enforcement has not been built yet. |
-| Key management | `seckey` | None | Enforcement has not been built yet. |
-| Least-privilege tool and file access | `seclpt` | None | Enforcement has not been built yet. |
-| Redact sensitive content from logs | `secred` | None | Enforcement has not been built yet. |
-| Social pressure is not authorization | `secopd` | None | Enforcement has not been built yet. |
-| Encode output for its sink | `secenc` | None | Enforcement has not been built yet. |
-| Generated output is untrusted input | `secout` | None | Enforcement has not been built yet. |
-| Referenced instructions are pinned and re-verified | `secpin` | None | Enforcement has not been built yet. |
-| Resist data, model, and memory poisoning | `secpsn` | None | Enforcement has not been built yet. |
-| Prefer removing a path over constraining or monitoring it | `rmvpth` | None | Enforcement has not been built yet. |
-| A preview makes no change | `secprv` | None | Enforcement has not been built yet. |
-| Higher-trust instructions outrank lower-trust ones | `secpth` | None | Enforcement has not been built yet. |
-| Protect audit records from the actors they record | `secaud` | Enforced | `gate:mistakes-register`, class a |
-| Reject known-vulnerable dependency versions | `secvln` | None | Enforcement has not been built yet. |
-| Publish artefacts with verifiable integrity | `secpub` | None | Enforcement has not been built yet. |
-| Deserialize untrusted data only as data | `secdsz` | None | Enforcement has not been built yet. |
-| Secure by default configuration | `seccfg` | None | Enforcement has not been built yet. |
-| Security logging with traceable context | `seclog` | None | Enforcement has not been built yet. |
-| Secure session and token handling | `sectok` | None | Enforcement has not been built yet. |
-| Validate server-initiated requests | `secssr` | None | Enforcement has not been built yet. |
-| Resolve privileged filesystem paths against symlink races | `secspr` | None | Enforcement has not been built yet. |
-| Threat-model new trust boundaries before implementation | `secthm` | None | Enforcement has not been built yet. |
-| Validate tool arguments before use | `sectvl` | Enforced | `hook:commit-msg-subst`, class b |
-| Untrusted content is data, not instructions | `secunt` | None | Enforcement has not been built yet. |
-| Verify a dependency exists before adding it | `secvde` | None | Enforcement has not been built yet. |
-| Bounded consumption and safe failure | `secres` | None | Enforcement has not been built yet. |
-| A destructive operation requires a verified restore path | `secrst` | None | Enforcement has not been built yet. |
-| Minimize personal data sent to AI services | `secmin` | None | Enforcement has not been built yet. |
-| Honour residency, retention, and deletion | `secdrr` | None | Enforcement has not been built yet. |
-| Bind personal-data use to its authorized purpose | `secpur` | None | Enforcement has not been built yet. |
-| Fixtures and examples use synthetic data | `secsyn` | None | Enforcement has not been built yet. |
+| The AIQT principle (highest precedence) | `prjint1` | No control | No shipped control cites this rule. |
+| Citation only from a file opened at the reviewed commit | `citint` | No control | No shipped control cites this rule. |
+| Claims about the work rest on observation | `clmobs` | No control | No shipped control cites this rule. |
+| A completeness claim enumerates its set | `setcmp` | Hook-linked | `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
+| Corroborate external claims | `corrob` | No control | No shipped control cites this rule. |
+| A count carries its predicate | `cntprd` | No control | No shipped control cites this rule. |
+| Disclose a guard's residual coverage | `dscres` | No control | No shipped control cites this rule. |
+| Evidence-grounded completion | `evgcmp` | Gate-linked (class a) | `gate:selftest-execution`, class a |
+| A guard is only as good as its input | `grdinp` | Gate-linked (class a) | `gate:aei-enumerator-selftest`, class a; `gate:derived-command-parameters`, class c |
+| Measured and estimated figures stay separate | `estsep` | Hook-linked | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
+| No fabrication | `nofabr` | No control | No shipped control cites this rule. |
+| Observe before asserting behaviour | `obsbeh` | No control | No shipped control cites this rule. |
+| A partial read is not the whole | `prtwhl` | No control | No shipped control cites this rule. |
+| Read before characterizing | `rdbchr` | No control | No shipped control cites this rule. |
+| Capture the reference when the claim is made | `refcap` | No control | No shipped control cites this rule. |
+| Reproduce a defect before fixing it | `reprod` | No control | No shipped control cites this rule. |
+| A current timestamp is read from the clock | `tstamp` | Gate-linked (class c only) | `gate:hook-scripts`, class c; `hook:clock-inject`, class c; `hook:future-stamp-write`, class c; `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
+| Validate an inferred premise before acting | `valinf` | No control | No shipped control cites this rule. |
+| Verify a fix is in its commit | `vfxcmt` | No control | No shipped control cites this rule. |
+| Anything wrong is fixed first | `actbef` | No control | No shipped control cites this rule. |
+| Attestation lines are harness-owned | `attint` | No control | No shipped control cites this rule. |
+| Branch and merge only on green | `artbr1` | Hook-linked | `hook:protected-line-guard`, class b |
+| Cut branches from the live protected line and re-home after a rewrite | `brnrot` | Gate-linked (class c only) | `gate:branch-root`, class c; `hook:branch-root-guard`, class c |
+| A check fails closed on input it cannot read | `chkfcl` | No control | No shipped control cites this rule. |
+| Commit identity | `cmtidn` | Hook-linked | `hook:commit-identity`, class b |
+| Bind to the explicit target, not the ambient context | `expbnd` | Hook-linked | `hook:git-discard`, class b; `hook:git-explicit-binding`, class b; `hook:git-stash-ref`, class b; `hook:orch-dispatch-ledger`, class c |
+| Gate discipline | `gatdis` | Gate-linked (class c only) | `gate:ci-parity`, class c; `hook:gate-weakening-guard`, class b |
+| A generated artefact is changed only through its source | `gensrc` | Gate-linked (class a) | `gate:adapters-drift`, class a; `gate:agents-drift`, class a; `gate:changelog-drift`, class a; `gate:claude-drift`, class a; `gate:crosswalk-schema-drift`, class a; `gate:cursor-drift`, class a; `gate:disclosure-drift`, class a; `gate:enforceability-drift`, class a; `gate:enforcement-register-drift`, class a; `gate:gensrc-failclose`, class a; `gate:gensrc-registry-drift`, class a; `gate:hooks-drift`, class a; `gate:install-drift`, class a; `gate:manifest-gen-drift`, class a; `gate:mappings-page-drift`, class a; `gate:notice-drift`, class a; `gate:reference-roster-drift`, class a; `gate:renderers-drift`, class a; `gate:roadmap-drift`, class a; `gate:rules-drift`, class a; `gate:secret-patterns-drift`, class a; `gate:skill-drift`, class a; `gate:worker-pack-drift`, class a; `hook:gensrc-edit-guard`, class c |
+| Verify licence compatibility before introducing third-party material | `liccmp` | No control | No shipped control cites this rule. |
+| No concealed failure | `nocncl` | Hook-linked | `hook:orch-truncation-guard`, class b |
+| Preserve uncommitted work | `prsunc` | Hook-linked | `hook:git-discard`, class b |
+| Protected-branch integrity | `prtbrn` | Hook-linked | `hook:protected-line-guard`, class b |
+| A required step remains required under friction | `reqstp` | No control | No shipped control cites this rule. |
+| A rerun pass does not erase an earlier failure | `rerunf` | No control | No shipped control cites this rule. |
+| A review in flight pins its artefact | `rvwpin` | No control | No shipped control cites this rule. |
+| Make retries safe to repeat | `rtsafe` | No control | No shipped control cites this rule. |
+| Separate task changes from pre-existing work | `septsk` | Hook-linked | `hook:write-scope`, class c |
+| Stage artefacts and promote only on green | `stgprm` | No control | No shipped control cites this rule. |
+| A launched task stays observable | `trkasy` | Hook-linked | `hook:orch-dispatch-ledger`, class c; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-truncation-guard`, class b; `hook:orch-untracked-wait-loop`, class b |
+| Validation is a gate on apply | `valgat` | No control | No shipped control cites this rule. |
+| Workers produce inert data | `wowo01` | Hook-linked | `hook:write-scope`, class c |
+| Use absolute paths, not relative | `abspth` | Hook-linked | `hook:abs-paths`, class b; `hook:abs-paths-bash`, class b |
+| A behavioural change carries a check that fails without it | `chgchk` | Gate-linked (class a) | `gate:selftest-execution`, class a |
+| Preserve compatibility or provide a migration path | `cmpmig` | No control | No shipped control cites this rule. |
+| Confirm the execution target before a side-effectful operation | `exetgt` | Gate-linked (class c only) | `gate:derived-command-parameters`, class c; `hook:write-scope`, class c |
+| Defence in depth by default | `dfdpth` | No control | No shipped control cites this rule. |
+| A borrowed process timer is restored elapsed-aware | `tmrrst` | No control | No shipped control cites this rule. |
+| A verification finding is fixed, not argued away | `fndfix` | No control | No shipped control cites this rule. |
+| Goal fidelity across a long trajectory | `goalfd` | No control | No shipped control cites this rule. |
+| High-assurance verification | `hiasrv` | No control | No shipped control cites this rule. |
+| A kill timeout outlives the wait it bounds | `kltwat` | No control | No shipped control cites this rule. |
+| Isolate verifiers and judge by their result signal | `lvw001` | No control | No shipped control cites this rule. |
+| Match the surrounding code | `mtchcd` | No control | No shipped control cites this rule. |
+| Minimize external dependencies in favour of standard libraries | `mindep` | No control | No shipped control cites this rule. |
+| Propose a guardrail when an error reveals a gap | `slfgrd` | No control | No shipped control cites this rule. |
+| Prefer the smallest correct change | `smlcng` | No control | No shipped control cites this rule. |
+| Surface a counterproductive instruction before executing it | `srfcp1` | No control | No shipped control cites this rule. |
+| A test's verdict comes from the code, not its surroundings | `tsthrm` | No control | No shipped control cites this rule. |
+| A degraded verifier delivery is not a verdict | `vrfdlv` | Hook-linked | `hook:orch-truncation-guard`, class b |
+| Verifier diversity | `vrfdiv` | No control | No shipped control cites this rule. |
+| Maintain an AI toolchain register | `aitreg` | No control | No shipped control cites this rule. |
+| Assess and advise are discussion only | `asadv1` | No control | No shipped control cites this rule. |
+| Claim a pooled item atomically | `atmclm` | No control | No shipped control cites this rule. |
+| Change record | `chtrk1` | Gate-linked (class a) | `gate:record-drift`, class a |
+| Change record has a curated public face | `chgtrk` | No control | No shipped control cites this rule. |
+| Clarify before acting | `clrfy1` | No control | No shipped control cites this rule. |
+| Hold a concurrency lease to prevent double runs | `cnclse` | Hook-linked | `hook:orch-resume-audit`, class b; `hook:orch-stop-guard`, class b |
+| Continue by default | `cntdef` | Hook-linked | `hook:orch-ask-unattended`, class b; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
+| Express authorization before execution | `exauth` | No control | No shipped control cites this rule. |
+| Human oversight and the autonomy threshold | `humovs` | Hook-linked | `hook:orch-ask-unattended`, class b |
+| Do not bury the review surface under raw dumps | `cnsdif` | Hook-linked | `hook:diff-source`, class b; `hook:diff-wall-stop`, class b |
+| An orchestrator keeps a mistakes register | `mstreg` | Gate-linked (class a) | `gate:mistakes-register`, class a |
+| Reconcile the record against reality | `recncl` | Gate-linked (class a) | `gate:record-drift`, class a; `gate:record-sections`, class c; `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
+| Records first | `recfst` | Hook-linked | `hook:future-stamp-write`, class c; `hook:orch-ask-unattended`, class b; `hook:orch-dispatch-ledger`, class c |
+| Close each session on green | `sescls` | No control | No shipped control cites this rule. |
+| Resume from the durable handoff | `sesres` | Hook-linked | `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
+| A standing constraint persists across context loss | `cnstpr` | No control | No shipped control cites this rule. |
+| Trust recovery and escalation | `trstre` | No control | No shipped control cites this rule. |
+| Autonomy steps down after a confirmed trust loss | `trsrcv` | No control | No shipped control cites this rule. |
+| Decision classification before enacting | `deccls` | No control | No shipped control cites this rule. |
+| Repeated failure triggers premise review | `rpfail` | No control | No shipped control cites this rule. |
+| Background work during CI waits | `bgcwai` | No control | No shipped control cites this rule. |
+| Cost tier | `csttir` | No control | No shipped control cites this rule. |
+| Classify content by sensitivity tier | `datbnd` | No control | No shipped control cites this rule. |
+| Egress goes only to expected destinations | `secegr` | No control | No shipped control cites this rule. |
+| Keep secrets out | `secsec` | Gate-linked (class c only) | `gate:secrets-scan`, class c; `hook:secrets-shift-left`, class c |
+| Retrieval enforces the requester's authorization | `seclpr` | No control | No shipped control cites this rule. |
+| No cross-context bleed | `secncb` | No control | No shipped control cites this rule. |
+| No disclosure of secrets or hidden context | `secndc` | No control | No shipped control cites this rule. |
+| Rotate a leaked secret | `secrot` | No control | No shipped control cites this rule. |
+| Strong authentication | `secau1` | No control | No shipped control cites this rule. |
+| Least-privilege authorization | `secazn` | No control | No shipped control cites this rule. |
+| Configuration that executes on load is treated as code | `seccet` | Gate-linked (class c only) | `gate:hook-scripts`, class c; `gate:python-launcher-isolation`, class c |
+| Sound cryptography | `seccry` | No control | No shipped control cites this rule. |
+| Trusted, pinned dependency provenance | `secsup` | No control | No shipped control cites this rule. |
+| Fail closed in security-relevant paths | `secfcl` | No control | No shipped control cites this rule. |
+| Validate federated identity and token flows | `secfid` | No control | No shipped control cites this rule. |
+| Validate and contain uploaded files | `secupl` | No control | No shipped control cites this rule. |
+| Guardrail configuration is integrity-protected | `secgci` | No control | No shipped control cites this rule. |
+| Human authorization for consequential actions | `sechau` | No control | No shipped control cites this rule. |
+| Validate external input at the boundary | `secinp` | No control | No shipped control cites this rule. |
+| Trust between agents is earned, not inherited | `secagt` | No control | No shipped control cites this rule. |
+| Key management | `seckey` | No control | No shipped control cites this rule. |
+| Least-privilege tool and file access | `seclpt` | No control | No shipped control cites this rule. |
+| Redact sensitive content from logs | `secred` | No control | No shipped control cites this rule. |
+| Social pressure is not authorization | `secopd` | No control | No shipped control cites this rule. |
+| Encode output for its sink | `secenc` | No control | No shipped control cites this rule. |
+| Generated output is untrusted input | `secout` | No control | No shipped control cites this rule. |
+| Referenced instructions are pinned and re-verified | `secpin` | No control | No shipped control cites this rule. |
+| Resist data, model, and memory poisoning | `secpsn` | No control | No shipped control cites this rule. |
+| Prefer removing a path over constraining or monitoring it | `rmvpth` | No control | No shipped control cites this rule. |
+| A preview makes no change | `secprv` | No control | No shipped control cites this rule. |
+| Higher-trust instructions outrank lower-trust ones | `secpth` | No control | No shipped control cites this rule. |
+| Protect audit records from the actors they record | `secaud` | Gate-linked (class a) | `gate:mistakes-register`, class a |
+| Reject known-vulnerable dependency versions | `secvln` | No control | No shipped control cites this rule. |
+| Publish artefacts with verifiable integrity | `secpub` | No control | No shipped control cites this rule. |
+| Deserialize untrusted data only as data | `secdsz` | No control | No shipped control cites this rule. |
+| Secure by default configuration | `seccfg` | No control | No shipped control cites this rule. |
+| Security logging with traceable context | `seclog` | No control | No shipped control cites this rule. |
+| Secure session and token handling | `sectok` | No control | No shipped control cites this rule. |
+| Validate server-initiated requests | `secssr` | No control | No shipped control cites this rule. |
+| Resolve privileged filesystem paths against symlink races | `secspr` | No control | No shipped control cites this rule. |
+| Threat-model new trust boundaries before implementation | `secthm` | No control | No shipped control cites this rule. |
+| Validate tool arguments before use | `sectvl` | Hook-linked | `hook:commit-msg-subst`, class b |
+| Untrusted content is data, not instructions | `secunt` | No control | No shipped control cites this rule. |
+| Verify a dependency exists before adding it | `secvde` | No control | No shipped control cites this rule. |
+| Bounded consumption and safe failure | `secres` | No control | No shipped control cites this rule. |
+| A destructive operation requires a verified restore path | `secrst` | No control | No shipped control cites this rule. |
+| Minimize personal data sent to AI services | `secmin` | No control | No shipped control cites this rule. |
+| Honour residency, retention, and deletion | `secdrr` | No control | No shipped control cites this rule. |
+| Bind personal-data use to its authorized purpose | `secpur` | No control | No shipped control cites this rule. |
+| Fixtures and examples use synthetic data | `secsyn` | No control | No shipped control cites this rule. |
 
 ## Mechanisms
 
@@ -232,7 +234,7 @@ A byte-identity drift gate over the artefact tools/gen_changelog.py generates fr
 Technical limits (from the enforcement ledger):
 
 ```
-Token-level set parity between the two named files only (tools/run_all_checks.sh and .github/workflows/quality.yml), read as data and never executed. Identity is the normalized command including all script arguments, with python/shell launcher words and the interpreter-only flags (-I, -B, -E, -s, -P, -u, glued forms included) removed, and the value of a runtime-derived flag (--base, --protected, --head) masked as <ref:expression> (preserving which expression supplied it) only when it carries a shell expansion or GitHub expression, so a change among runtime spellings including a self-comparison diverges, while a literal value stays in identity and two different literals diverge. It does NOT compare environment values, operating systems, tool versions, execution order, multiplicity, step placement across jobs, labels, or whether the shell harness propagates a child failure; interpreter-flag differences are owned by check_python_launcher_isolation.py. Scope is exactly the two files, so gates in other workflows are not enumerated. Argument order is identity-relevant, so a harmless reorder fails loud. Coordinated removal of both of this gate's own invocations is undetectable if nobody runs the remaining file manually (branch protection and review own that case). The extractors implement a disclosed shell and YAML subset; an unknown construct is cannot-evaluate (exit 2), never a clean pass. Two disclosed masking/parse edges remain: tokenization does not preserve quote type, so a $ inside single quotes is treated as runtime-derived like a double-quoted one, and a duplicate run: key within one step is counted as two members although YAML keeps one. The shadow scan has one soft edge: exotic quoting outside the supported grammar could hide a tools/ path from comment stripping. It fails closed (cannot-evaluate) on an unknown top-level or job-level workflow key, a top-level unconditional exit that would strand later local gates, unbalanced if/fi nesting in the runner, job content without a job mapping, and a run_gate() body outside its recognized shape; deeper nested non-gate YAML (under on:, env:, with:, strategy:) is structurally recognized but not exhaustively schema-validated, though the shadow scan still blocks a hidden tools/ gate and reachability is outside token-parity scope: a gate counts as declared regardless of an enclosing conditional (a job-level if:, a shell conditional inside a run: block, or an if/fi in the local runner) that could keep it from running, validating a single gate's own argument semantics beyond the runtime expression is that gate's responsibility. Intended local-vs-CI asymmetries are reconciled through a reviewed in-gate allowlist, not silently ignored.
+Token-level set parity between the two named files only (tools/run_all_checks.sh and .github/workflows/quality.yml), read as data and never executed. Identity is the normalized command including all script arguments, with python/shell launcher words and the interpreter-only flags (-I, -B, -E, -s, -P, -u, glued forms included) removed, and the value of a runtime-derived flag (--base, --protected, --head) masked as <ref:expression> (preserving which expression supplied it) only when it carries a shell expansion or GitHub expression, so a change among runtime spellings including a self-comparison diverges, while a literal value stays in identity and two different literals diverge. It does NOT compare environment values, operating systems, tool versions, execution order, multiplicity, step placement across jobs, labels, or whether the shell harness propagates a child failure; interpreter-flag differences are owned by check_python_launcher_isolation.py. Scope is exactly the two files, so gates in other workflows are not enumerated. Argument order is identity-relevant, so a harmless reorder fails loud. Coordinated removal of both of this gate's own invocations is undetectable if nobody runs the remaining file manually (branch protection and review own that case). The extractors implement a disclosed shell and YAML subset; an unknown construct is cannot-evaluate (exit 2), never a clean pass. Two disclosed masking/parse edges remain: tokenization does not preserve quote type, so a $ inside single quotes is treated as runtime-derived like a double-quoted one, and a duplicate run: key within one step is counted as two members although YAML keeps one. The shadow scan has one soft edge: exotic quoting outside the supported grammar could hide a tools/ path from comment stripping. It fails closed (cannot-evaluate) on an unknown top-level or job-level workflow key, a top-level unconditional exit that would strand later local gates (the one reviewed exception is the special-file-precheck abort line, which deliberately stops the whole run, exit 2, before any gate on a refused tree and is registered as a roster member on both sides), unbalanced if/fi nesting in the runner, job content without a job mapping, and a run_gate() body outside its recognized shape; deeper nested non-gate YAML (under on:, env:, with:, strategy:) is structurally recognized but not exhaustively schema-validated, though the shadow scan still blocks a hidden tools/ gate and reachability is outside token-parity scope: a gate counts as declared regardless of an enclosing conditional (a job-level if:, a shell conditional inside a run: block, or an if/fi in the local runner) that could keep it from running, validating a single gate's own argument semantics beyond the runtime expression is that gate's responsibility. Intended local-vs-CI asymmetries are reconciled through a reviewed in-gate allowlist, not silently ignored.
 ```
 
 ### `gate:claude-drift`
@@ -350,6 +352,19 @@ Technical limits (from the enforcement ledger):
 
 ```
 A byte-identity drift gate over the artefact tools/gen_gensrc.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.
+```
+
+### `gate:hook-scripts`
+
+- Platform: `ci`
+- Default: `block`
+- Entry point: `tools/check_hook_scripts.py`
+- Class: `c`
+
+Technical limits (from the enforcement ledger):
+
+```
+A behaviour gate over the pack's standalone hook scripts (the hooks-manifest rows with a script key: clock-inject.py and future-stamp-write.py). It claims two rules, each in part. tstamp: the clock hooks it ships stay warn-only and launch. It runs each script's own --self-test isolated (python -I -S -B, a fresh temporary working directory, AIQT_, ORCH_ and CLAUDE_ variables and CDPATH removed, TZ=UTC); runs the plugin copy through its rendered entry on a fixed set of fixtures and requires exit 0 with no decision, permissionDecision, continue or stopReason key, a record-hook warning of one line of at most 100 characters, and the expected silent, warn or context class; and reruns the fixtures with the named worker markers set and requires the same reduced outcome. It does not judge whether a timestamp the assistant writes was read from the clock, or whether the model reads the clock line; that stays with the hooks. seccet: their isolated, non-blocking launch, the hook definitions checked as code. Every hooks.json entry naming one of the scripts, in its command or any arg and in any spelling of its path (matched by resolved path, symlinks followed, or by file name, so ./, //, .., a symlinked plugin root, a symlink under another name and a relative path all count), must be, counted, exactly one entry per manifest row: under the row's event and matcher, type command, command python3, args -I -S -B -c <launcher> <file>, the row's timeout and no other key. Each such entry is then run against a missing file, an unreadable file, a directory, a syntax error, a raised error and an exit 2, and must exit exactly 1 (never the blocking 2) with the reason on stderr and nothing on stdout. The dispatcher rows' isolation is the python-launcher-isolation gate's. It also flags a script name present in .preview/ too, and compares the listed shared functions, regexes and constants with .preview/stamp-truth-stop.py and the shared _cfg between the two pack copies. Class c, partial: the fixtures are a fixed sample, so a deny reached only by another input is not seen, and the output shape is judged, not whether a warning is correct; a self-test is judged by its exit status only; only the named variables are tried for inertness; only the listed shared names are compared; in the parity child, loaded code that itself prints a forged result line and its terminator with a clean error stream and a zero exit replaces the reporting machinery (the secfcl carve-out for reviewed, pinned loaded code, disclosed as a residual), and a cleanup fault reported with no audit event into a stream or hook that loaded code replaced and put back before the result is not seen: a thread's uncaught exception through sys.stderr or threading.excepthook, or an unraisable fault (an exit handler's or a finalizer's exception) while loaded code has deleted sys.unraisablehook and replaced sys.stderr (a finalizer runs before the result, which the child ends with os._exit, and an audit hook refuses every unraisable or excepthook event raised while a hook is installed, so a silenced hook or a replaced stream alone hides no other cleanup fault); the scripts run under the gate's own interpreter, not the host's python3 lookup; a python3 older than 3.4, a script that ends the process with os._exit(2), and a host that runs args through a shell are not exercised; and an entry that reaches a script without naming it (a path built at run time, a relative path to a copy under another name) is not matched. A missing input, an unloadable parity file, a timeout, or a script without a fixture set is a cannot-evaluate (exit 2).
 ```
 
 ### `gate:hooks-drift`
@@ -625,6 +640,19 @@ Technical limits (from the enforcement ledger):
 Lexical trigger over an open command grammar. NO-ASK posture: this guard never returns an ask; branch rooting is a hazard class, so read every ASK, fail-SAFE ASK, and routes-to-ASK below as a DENY-and-educate fail-safe (a confirmed orphan start and any creation form this guard cannot prove rooted both DENY, naming the reachable correct action; the authoritative CI branch-root gate judges the actual post-creation ancestry). A branch created through a wrapper, alias, script, or shell indirection is not seen. When a later construct makes the whole command unparseable (a heredoc, a process substitution), the guard still PARTIAL-lexes and judges the creation recovered in the parseable prefix, so a proven orphan creation followed by an unsupported construct still DENIES (DENY outranks the parse error); only a creation lying ENTIRELY within the unparseable syntax stays unseen (the open-grammar residual), and only creation forms are checked, so switching to an existing orphaned branch, continuing work on the current branch, or RENAMING a branch (-m/-M/--move, which reuses an existing branch's commits under a new name and so creates no new orphan-rootable ref) passes to the CI gate. It probes a creation's ancestry (and can DENY an orphaned start) ONLY for a CLEAN canonical creation: a create trigger (checkout -b/-B; switch -c/-C or --create/--force-create; a bare `git branch <name>`; a `git branch -c/-C/--copy` copy whose start is the SOURCE, an explicit <src> else the current HEAD; or `git worktree add -b/-B`), its operands, and NOTHING ELSE except a tiny allowlist of VALUELESS booleans (--quiet/--force, short q/f; git branch additionally exposes --verbose/-v, which checkout/switch/worktree do not). A confidently-recognized non-creation ACTION (git branch -d/-D/--delete, -m/-M/--move rename, -u/--set-upstream-to/--unset-upstream, --edit-description, --show-current) or a LISTING form (--list, -a/-r/--all/--remotes and the unambiguous listing letters) is ALLOWED. EVERY OTHER shape routes to a fail-SAFE ASK, never a silent allow of a possible creation and never a probe-based DENY of a non-creation: any value-taking option (--contains/--merged/--points-at/--recurse-submodules), any unknown option, any abbreviated (--cre, --orp, --tr) or negated form whose meaning is order- or version-dependent (--no-detach, `--list --no-list`, a clustered -l), any tracking/orphan/detach form (--track/-t/--orphan/--guess/--detach/-d), a copy combined with any non-clean option (git branch --format main -c ...), a bare `git worktree add <path> [<commit-ish>]` without -b, and any short cluster carrying a letter outside the clean/listing set. This MAXIMALLY-CONSERVATIVE posture (maintainer-approved 2026-09-02, after the round-7 simplify-to-ASK cap) trades precision for robustness: an exotic or option-laden git command earns an ASK rather than a precise allow or deny, and the authoritative CI branch-root gate judges the actual post-creation ancestry regardless. DISCLOSED residual: the classifier accepts any nonempty operand as a branch name, so a creation carrying a git-INVALID name (spaces, a `..`, a control character - forms git rejects with `check-ref-format` and creates nothing) can still receive a probe-based deny of that orphaned start; this is a safe-direction false-deny of a no-op command (re-issue with a valid name), and full git ref-name validation is out of this lexical classifier's scope (tracked as HYG-2). What it PROVES at creation time is only that the start point is ORPHANED (no merge base with origin/HEAD); a rooted-but-STALE or old start point (for example checkout -b x origin/HEAD~1) still has a merge base and PASSES this hook, and its staleness is caught only by the CI gate's configured --max-lag first-parent-lag threshold, not here. Replace refs are neutralized on the probe (GIT_NO_REPLACE_OBJECTS=1) so a grafted parent cannot make an orphan look rooted; the on-disk .git/info/grafts residual is out of scope (an accidental-case guardrail). A shallow clone cannot distinguish a missing merge base from unfetched history, so a merge-base miss in a shallow repository routes to ASK, never a deny; a FAILURE of the shallow-status probe itself (a non-zero or unreadable result) likewise routes to ASK, matching the CI gate's cannot-evaluate posture, never a false orphaned deny. A cd/pushd in an earlier segment of the compound command or a non-cosmetic ambient GIT_* variable leaves the target repository unreconcilable with the session cwd, so the creation routes to a fail-safe deny. A command-local redirect is resolved to the REPOSITORY the branch is created in and its ancestry probed THERE: a resolvable -C target is probed, and --work-tree is worktree-only so the repository is resolved from -C or the ambient cwd, never from the --work-tree value (round-7 codex finding 2); only a --git-dir/GIT_DIR/-c form or an unresolvable -C target cannot be pinned and allow-notes (the CI branch-root gate remains the backstop). The ancestry answer comes from the clone's remote-tracking state, which can be stale until the next fetch. The hook derives its PROTECTED ref from the clone's origin/HEAD (the local default-branch pointer), which may differ from the actual protected target the CI gate judges against (the PR base branch): where origin/HEAD points at a non-default branch, the hook can ALLOW a creation the CI gate later reports ORPHANED against the true protected line, since the hook has no PR/target context at creation time; the CI branch-root gate is the authoritative check on the actual post-creation ancestry. The hook resolves the `git` executable through the ambient PATH (a trusted-toolchain boundary, as the sibling gate residue discloses): a hostile PATH entry shadowing `git` could spoof the probe, an adversarial execution-environment concern outside this accidental-case hook's threat model, not a bypass it defends against. The env-assignment command form is best-effort, as for the sibling git hooks. The hook catches only EXPLICIT-start creation forms; an IMPLICIT-start (DWIM) form where git auto-creates a branch from a matching remote-tracking ref (a bare git checkout/switch <name> whose name matches a remote branch, or a --guess/--guess-remote guess) has a start git resolves at runtime and not lexically visible here, so it is routed to ASK where a guess flag is present and otherwise passes the hook and is caught by the authoritative CI branch-root gate, which judges the actual post-creation ancestry.
 ```
 
+### `hook:clock-inject`
+
+- Platform: `claude-code`
+- Default: `warn`
+- Entry point: `PostToolUse on .*`
+- Class: `c`
+
+Technical limits (from the enforcement ledger):
+
+```
+An INFORMING hook, not an enforcement point: after a tool call that succeeded it adds one line to the assistant context, CLOCK (read by hook, authoritative): <local time> <zone> | <UTC time>, plus the session elapsed time when AIQT_LEASE_FILE names a valid lease. It blocks nothing and denies nothing; the assistant can still ignore or mis-copy the line. It reproduces the host clock and the lease faithfully, so a wrong host clock or a wrong lease gives a wrong reading, and TZ changes the local field and zone name. It is registered on PostToolUse only: a failed tool call (the PostToolUseFailure event, whose name is not yet verified against the host) gets no clock line, and neither does a tool call rejected before it ran or a stretch of prose with no tool call. The matcher .* is taken to mean every tool name; that host behaviour is not verified here. No worker-marker bypass remains, and no legacy ORCH_ variable is read, so a setup that set only ORCH_LEASE_FILE now gets no elapsed segment while a retained preview Stop hook may still read that lease. It is launched through the fixed python3 -I -S -B -c launcher described for future-stamp-write, so a missing, unreadable, unparsable or crashing script, or an exit code other than 0 reached through sys.exit or by returning, gives exit 1 with the reason on stderr; on PostToolUse the tool call has already run, so a launch failure is a hook error, not an undo. A script that ends the process itself with os._exit bypasses the launcher and its code reaches the host unchanged (the shipped script calls os._exit only with 0). A python3 older than 3.4 rejects -I with a usage error, exit 2 (from Python's option history, not run here), and a directory as a standard stream makes Python exit 1 at startup (the preview channel launch guard is not carried into the plugin).
+```
+
 ### `hook:commit-identity`
 
 - Platform: `claude-code`
@@ -675,6 +703,19 @@ Technical limits (from the enforcement ledger):
 
 ```
 This Stop layer is a NON-BLOCKING surfacing WARN (systemMessage, exit 0), not a hard block: by Stop time the wall has already rendered, and with no stop_hook_active field and no documented loop bound a hard block could wedge the session, so hard prevention lives in the PreToolUse diff-source layer instead. It catches only a unified-diff wall in the final assistant message of a turn: diff --git headers, paired @@ hunk headers, fenced diff/patch/udiff blocks (backtick or tilde) of 10 or more lines, and mixed +/- runs of 8 or more lines. It does not catch a diff dumped mid-turn between tool calls, side-by-side or word-diff renderings, or raw log or patch walls that carry none of those markers; a mixed +/- Markdown checklist can rarely trip the +/- run detector (accepted residual).
+```
+
+### `hook:future-stamp-write`
+
+- Platform: `claude-code`
+- Default: `warn`
+- Entry point: `PreToolUse on Write|Edit|MultiEdit|Bash`
+- Class: `c`
+
+Technical limits (from the enforcement ledger):
+
+```
+WARN ONLY (stage bake, a label with no flip criteria and no observations collected): when a Write, Edit, MultiEdit, or Bash call would record an ISO-like timestamp literal that lies ahead of the clock into a folder named by AIQT_STORE_ROOT, it emits one systemMessage line of at most 100 characters (future-stamp-write: future stamp <literal> (+N more); now <UTC minute>; run date -u) and exits 0. Its code never denies or blocks; the launch paths that could are listed at the end. Unset or empty AIQT_STORE_ROOT makes it inert. It is not established whether the model sees a PreToolUse systemMessage, and there is no cap across calls. Not covered: NotebookEdit, MCP tools, outbound tools, writes made inside a script, time-only stamps, a time built from parts, a time in a quote or code span in a record, and a time just after a scheduling word. An unzoned literal counts as future only when both its UTC and its local (TZ) reading are; CDPATH can make a relative cd target unknown and keep it silent. Known over-warnings: a bare future literal written to a store by Bash, a literal piped through a filter that removes it, a run a later source: line demotes, and an append that lands in a blockquote. Final prose is not checked by the pack. No worker-marker bypass remains and no legacy ORCH_ variable is read; a retained preview copy keeps the older deny and worker bypass. The plugin does not run the file as python3 <file>, which exits 2 on a missing file, and on PreToolUse the host treats exit 2 as blocking. It runs a fixed launcher, python3 -I -S -B -c <launcher> <file>, which runs the file with runpy and exits 1 with the reason on stderr when the file is missing, unreadable, unparsable or crashing, or exits through sys.exit or by returning with any code other than 0; the host treats exit 1 as a non-blocking error (both taken from the host hook documentation, not a live probe). The launcher takes the file from sys.argv[1], the position the generator fixes, so an argument a host appended is ignored. The hook-scripts gate requires every hooks.json entry naming this file, in any spelling of its path (resolved path or file name), to match the manifest, counted, and runs each such entry against a missing file, an unreadable file, a directory, a syntax error, a raised error and an exit 2, requiring exit 1 each time (an unreadable file is readable to a privileged user, so there that case runs as an exit 2). The args reach the launcher as separate argv elements only if the host runs them without a shell, which is the repository's 2026-08-17 reading of the host hook documentation, not re-checked for the launcher; joined into a shell string, the launcher would be a shell syntax error, exit 2. Not covered by the launcher: a python3 older than 3.4 rejects -I with a usage error, exit 2, which blocks (from Python's option history, not run here); a python3 that cannot be found or started has whatever outcome the host gives it (not verified); a script that ends the process itself with os._exit(2) bypasses the launcher (the shipped script calls os._exit only with 0); and a directory as a standard stream makes Python exit 1 at startup. A run past the 30 second timeout is ended by the host, which the host documentation describes as non-blocking (not verified here).
 ```
 
 ### `hook:gate-weakening-guard`

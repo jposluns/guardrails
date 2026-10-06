@@ -1,0 +1,29 @@
+# The hooks published in .preview/ and the rules each one's own module docstring names.
+#
+# A preview hook is not a shipped control: it is not part of the plugin and nothing installs it.
+# tools/gen_enforceability.py reads this file and lists every entry in .aiqt/enforceability.json under
+# "previews"; a preview never changes a rule's status. Every hook file in .preview/ must have exactly one
+# entry here and every entry must name a published file. A hook's module docstring NAMES a rule when the
+# rule's slug appears in it, its letters in either case, with no letter, digit, underscore, hyphen or
+# combining mark directly on either side. Each rule listed must be named, and each rule named must be
+# listed, so an entry whose docstring names no rule lists none. Every declared hook file is validated
+# whether or not its entry lists rules: the file itself (the final path component) must be a regular
+# file, so a symlink or a directory is rejected; it must be readable, valid UTF-8 with no coding cookie
+# other than UTF-8, parse as Python, and carry a non-blank module docstring. Edit this file, then run
+# tools/gen_enforceability.py.
+
+[[preview]]
+id = "record-remove-check"
+rules = []
+
+[[preview]]
+id = "stamp-truth-stop"
+rules = ["clmobs", "tstamp"]
+
+[[preview]]
+id = "unbounded-wait"
+rules = []
+
+[[preview]]
+id = "ungated-record"
+rules = []

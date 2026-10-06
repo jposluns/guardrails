@@ -16,6 +16,7 @@ unaffected: a header-only record at Step 2 is not yet a complete attestation rec
 gates run AFTER attestation, where every PRESENT release row is a post-QA attestation row carrying the
 complete record (spec 2.4 / releases.toml header / VER-CORE-SPEC.md:254), so here every field is required.
 """
+import hashlib
 import ipaddress
 import os
 import re
@@ -354,6 +355,10 @@ ORDER_FAMILY_VOCAB = frozenset({"apex", "aiqt", "security"})
 ORDER_TIE_BREAKERS = frozenset({"slug-bytewise"})
 CLAUSE_ROW_KEYS = frozenset({"clause-id", "corpus-id", "source-path", "start-line", "end-line",
                              "canonical-text", "source-digest"})
+# The clause layer field (the two-layer split): head inventories carry it on every row (check_clauses
+# requires it and derives its value); an inventory from before the field existed carries none, so a row
+# holds either the base keyset or the base keyset plus `layer`, and a present layer is core or detail.
+CLAUSE_LAYERS = frozenset({"core", "detail"})
 IDHISTORY_ROW_KEYS = {"born": {"id", "born-release"}, "tombstone": {"id", "retired-release"},
                       "successor": {"id", "retired-release", "successor-id"}}
 
@@ -432,7 +437,7 @@ def strict_order(data, where):
 
 def strict_clause_inventory(data, where):
     """EXHAUSTIVE 7.2 clause-inventory schema (round-4 finding 2): a [[clause]] array of tables, each with
-    EXACTLY the 7.2 keyset; a well-formed clause-id (UNIQUE) whose corpus part equals a well-formed
+    EXACTLY the 7.2 keyset, or that keyset plus a layer of core or detail; a well-formed clause-id (UNIQUE) whose corpus part equals a well-formed
     corpus-id field; a non-empty source-path; positive integer start-line/end-line with end >= start; a
     non-empty canonical-text; and a 64-lowercase-hex source-digest. The full source-file span/text/digest
     CONSISTENCY (reading the rule sources) stays check_clauses'; this validates the record's own structure
@@ -451,9 +456,11 @@ def strict_clause_inventory(data, where):
         rw = "{} clause row #{}".format(where, i)
         if not isinstance(row, dict):
             raise SchemaError("{}: not a table".format(rw))
-        if set(row) != CLAUSE_ROW_KEYS:
-            raise SchemaError("{}: keys are not exactly the 7.2 clause schema {}".format(
-                rw, sorted(CLAUSE_ROW_KEYS)))
+        if set(row) not in (CLAUSE_ROW_KEYS, CLAUSE_ROW_KEYS | {"layer"}):
+            raise SchemaError("{}: keys are not exactly the 7.2 clause schema {} (plus an optional "
+                              "layer)".format(rw, sorted(CLAUSE_ROW_KEYS)))
+        if "layer" in row and (not isinstance(row["layer"], str) or row["layer"] not in CLAUSE_LAYERS):
+            raise SchemaError("{}: layer {!r} is not one of {}".format(rw, row["layer"], sorted(CLAUSE_LAYERS)))
         cid = row["clause-id"]
         parsed = split_clause_id(cid) if isinstance(cid, str) else None
         if parsed is None:
@@ -625,16 +632,65 @@ def default_correction_evidence_findings(row, where):
 
 # --- filter-free tree materialization (round-4 finding 1) -------------------------------------------
 
-def _cat_file_batch(root, shas):
-    """{sha: raw bytes} for the given blob shas via ONE `git cat-file --batch` process (no checkout, so no
-    smudge/clean filter and no gitattributes transformation runs). SchemaError on any git or protocol
-    failure or a missing object (cannot-evaluate)."""
+def _substitution_free_env():
+    """Replace refs and grafts disabled, and the inherited git environment NEUTRALIZED, for every raw
+    object read (QA round-3 codex R3-1; QA round-4 codex R4-2 / claude m2). The environment is first
+    stripped of EVERY GIT_-prefixed variable (the same allowlist scrub gen_manifest.git_tracked and the
+    throwaway-index builder use), so an inherited GIT_DIR cannot point the reads at a decoy repository
+    and GIT_OBJECT_DIRECTORY / GIT_ALTERNATE_OBJECT_DIRECTORIES cannot overlay a forged object store;
+    dropping a GIT_ variable can at most make a read FAIL (a refusal), never substitute bytes. Then
+    exactly the two pins are set: GIT_NO_REPLACE_OBJECTS=1 disables refs/replace/* object substitution
+    and GIT_GRAFT_FILE pinned to os.devnull disables <GIT_DIR>/info/grafts parent rewriting,
+    belt-and-braces with the --no-replace-objects argv option the launches also pass. The launches also
+    pin core.fsmonitor=false (QA round 5): a repo-config fsmonitor program is attacker-chosen code that a
+    worktree-scanning git call runs; these object reads scan no worktree, so the pin is defence in
+    depth that keeps a future funneled call from running it. `git cat-file
+    --batch` follows refs/replace/* by default AND echoes the REQUESTED oid over the substituted body,
+    so the batch protocol check alone cannot catch a replacement; the pins plus the per-object re-hash
+    (_assert_object_hash) can."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = os.devnull
+    # QA round-6 (codex blocker 2): set AFTER the scrub (the scrub would otherwise drop an inherited
+    # copy), GIT_NO_LAZY_FETCH=1 forbids on-demand object fetching in a promisor/partial-clone
+    # repository, so a MISSING object is answered as missing (a refusal upstream) and no transport,
+    # and with it no core.sshCommand, remote helper, or credential helper, can start mid-read. The
+    # launches additionally pin -c protocol.allow=never, belt-and-braces: even a git too old to honor
+    # the variable refuses every transport protocol outright.
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    return env
+
+
+def _assert_object_hash(osha, otype, body):
+    """Re-hash a returned object (git\x27s own object hash: the type, a space, the decimal body length,
+    a NUL, then the body) against the REQUESTED id and fail closed on any mismatch (QA round-4 codex
+    R4-2 / claude m2): git does not verify a loose object\x27s hash on read, so a tampered file under
+    .git/objects, or an object-directory overlay serving different bytes under the requested id, would
+    otherwise substitute content silently. 40-hex ids are SHA-1, 64-hex ids are SHA-256."""
+    algo = hashlib.sha1 if len(osha) == 40 else hashlib.sha256
+    digest = algo(otype.encode("ascii") + b" " + str(len(body)).encode("ascii") + b"\x00"
+                  + body).hexdigest()
+    if digest != osha:
+        raise SchemaError("git object {} re-hash mismatch: the returned {} body does not hash to its "
+                          "requested id (a tampered loose object or an object-store overlay substituted "
+                          "the bytes); fail-closed".format(osha, otype))
+
+
+def _cat_file_batch_typed(root, shas):
+    """{sha: (object type, raw bytes)} for the given object shas via ONE `git cat-file --batch` process (no checkout, so no
+    smudge/clean filter and no gitattributes transformation runs), with replace objects, grafts, and the
+    commit-graph cache disabled (QA round-3 codex R3-1: a refs/replace/* blob mapping must never
+    substitute the recorded bytes). SchemaError on any git or protocol failure or a missing object
+    (cannot-evaluate)."""
     uniq = list(dict.fromkeys(shas))
     if not uniq:
         return {}
     try:
-        proc = subprocess.run(["git", "-C", str(root), "cat-file", "--batch"],
-                              input=("\n".join(uniq) + "\n").encode("ascii"), capture_output=True)
+        proc = subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                               "-C", str(root), "cat-file", "--batch"],
+                              input=("\n".join(uniq) + "\n").encode("ascii"), capture_output=True,
+                              env=_substitution_free_env())
     except OSError as exc:
         raise SchemaError("cannot launch git cat-file --batch ({})".format(exc))
     if proc.returncode != 0:
@@ -670,7 +726,11 @@ def _cat_file_batch(root, shas):
         if i + size > len(out):
             raise SchemaError("git cat-file --batch: short body for {} (declared {} bytes)".format(
                 osha, size))
-        result[osha] = out[i:i + size]
+        body = out[i:i + size]
+        # Re-hash EVERY returned object against the id that requested it (QA round-4 codex R4-2 /
+        # claude m2): the batch header echo proves nothing about the body bytes.
+        _assert_object_hash(osha, otype, body)
+        result[osha] = (otype, body)
         i += size
         if out[i:i + 1] != b"\n":
             raise SchemaError("git cat-file --batch: missing trailing delimiter after {}".format(osha))
@@ -684,40 +744,212 @@ def _cat_file_batch(root, shas):
     return result
 
 
+def _cat_file_batch(root, shas):
+    """{sha: raw bytes}: the body-only view of _cat_file_batch_typed, kept for body-oriented callers.
+    Every body is already re-hashed against its requested id by the typed reader."""
+    return {osha: body for osha, (_otype, body) in _cat_file_batch_typed(root, shas).items()}
+
+
+# A process-lifetime cache of VERIFIED commit/tree/tag bodies keyed by object id: safe because every
+# cached body has been re-hashed against its id (content addressing makes the body the unique preimage,
+# whatever repository or object store served it), and it keeps the verified tree walks from re-reading
+# the same small objects run after run. Blob bodies are never cached (size).
+_VERIFIED_OBJECT_CACHE = {}
+
+
+def verified_object(root, oid):
+    """(type, body) of the full object id `oid`, read through the pinned, environment-scrubbed
+    cat-file --batch funnel and RE-HASHED against `oid` (QA round-4 codex R4-2 / claude m2).
+    SchemaError on any failure or mismatch (cannot-evaluate)."""
+    if not isinstance(oid, str) or not OBJECTID_RE.fullmatch(oid):
+        raise SchemaError("verified_object needs a full lowercase object id, not {!r}".format(oid))
+    cached = _VERIFIED_OBJECT_CACHE.get(oid)
+    if cached is not None:
+        return cached
+    otype, body = _cat_file_batch_typed(root, [oid])[oid]
+    if otype in ("commit", "tree", "tag") and len(_VERIFIED_OBJECT_CACHE) < 65536:
+        _VERIFIED_OBJECT_CACHE[oid] = (otype, body)
+    return otype, body
+
+
+def _resolve_commit_oid(root, commit):
+    """The full object id `commit` already is, or the pinned rev-parse resolution of the ref to one.
+    Resolution reads refs (an INPUT the verdict is bound to, not a substitutable object); every object
+    body read downstream is then re-hashed against the id this returns."""
+    if isinstance(commit, str) and OBJECTID_RE.fullmatch(commit):
+        return commit
+    try:
+        proc = subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                               "-C", str(root), "rev-parse", "--verify", "--quiet",
+                               str(commit) + "^{object}"],
+                              capture_output=True, env=_substitution_free_env())
+    except OSError as exc:
+        raise SchemaError("cannot launch git rev-parse ({})".format(exc))
+    if proc.returncode != 0:
+        raise SchemaError("cannot resolve {!r} to an object".format(commit))
+    try:
+        oid = proc.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        raise SchemaError("git rev-parse output for {!r} is not valid ASCII".format(commit))
+    if not OBJECTID_RE.fullmatch(oid):
+        raise SchemaError("git rev-parse output {!r} is not a full object id".format(oid))
+    return oid
+
+
+def _verified_tag_peel(oid, body):
+    """The object id an annotated tag body points at, parsed from the RE-HASHED tag body itself (never
+    a rev-parse peel, which reads the object store unverified). SchemaError on a malformed header."""
+    for line in body.split(b"\n\n", 1)[0].split(b"\n"):
+        if line.startswith(b"object "):
+            try:
+                target = line[7:].decode("ascii")
+            except UnicodeDecodeError:
+                break
+            if OBJECTID_RE.fullmatch(target):
+                return target
+            break
+    raise SchemaError("tag object {} carries no well-formed object header; fail-closed".format(oid))
+
+
+def _verified_commit_tree(root, commit):
+    """The root tree id of `commit`, parsed from the RE-HASHED commit object body (tags are peeled
+    through their verified bodies, at most 8 levels). SchemaError on any mismatch or malformation."""
+    oid = _resolve_commit_oid(root, commit)
+    for _level in range(8):
+        otype, body = verified_object(root, oid)
+        if otype != "tag":
+            break
+        oid = _verified_tag_peel(oid, body)
+    else:
+        raise SchemaError("tag chain at {} does not peel to a commit within 8 levels".format(commit))
+    if otype != "commit":
+        raise SchemaError("object {} is a {}, not a commit".format(oid, otype))
+    line = body.split(b"\n", 1)[0]
+    if not line.startswith(b"tree "):
+        raise SchemaError("commit {} body does not start with a tree header".format(oid))
+    try:
+        tree = line[5:].decode("ascii")
+    except UnicodeDecodeError:
+        raise SchemaError("commit {} tree header is not ASCII".format(oid))
+    if not OBJECTID_RE.fullmatch(tree):
+        raise SchemaError("commit {} tree header {!r} is not a full object id".format(oid, tree))
+    return tree
+
+
+def _verified_tree_entries(root, tree_oid):
+    """[(mode, name bytes, child id)] parsed from the RE-HASHED raw tree object under the exact git
+    tree grammar (mode, space, name, NUL, then the raw child id of the repository hash width)."""
+    otype, body = verified_object(root, tree_oid)
+    if otype != "tree":
+        raise SchemaError("object {} is a {}, not a tree".format(tree_oid, otype))
+    oid_len = len(tree_oid) // 2
+    entries, i = [], 0
+    while i < len(body):
+        sp = body.find(b" ", i)
+        nul = body.find(b"\x00", sp + 1) if sp != -1 else -1
+        if sp == -1 or nul == -1 or len(body) < nul + 1 + oid_len:
+            raise SchemaError("malformed tree object {}".format(tree_oid))
+        try:
+            mode = body[i:sp].decode("ascii")
+        except UnicodeDecodeError:
+            raise SchemaError("malformed tree object {} (non-ASCII mode)".format(tree_oid))
+        name = body[sp + 1:nul]
+        if not name or b"/" in name or name in (b".", b".."):
+            raise SchemaError("malformed tree object {} (bad entry name {!r})".format(tree_oid, name))
+        entries.append((mode, name, body[nul + 1:nul + 1 + oid_len].hex()))
+        i = nul + 1 + oid_len
+    return entries
+
+
+def walk_tree_verified(root, commit):
+    """Every leaf entry (mode, oid, utf-8 path) of the tree at `commit`, enumerated EXCLUSIVELY from
+    re-hashed commit and tree objects, never from `git ls-tree` output (QA round-4 codex R4-2 / claude
+    m2): a tampered loose tree object or an object-store overlay cannot add, drop, or re-point an entry
+    without failing the per-object re-hash. SchemaError on any failure (cannot-evaluate)."""
+    out = []
+    stack = [(_verified_commit_tree(root, commit), "")]
+    while stack:
+        tree_oid, prefix = stack.pop()
+        for mode, name_b, child in _verified_tree_entries(root, tree_oid):
+            try:
+                name = name_b.decode("utf-8")
+            except UnicodeDecodeError:
+                raise SchemaError("non-UTF-8 path in tree {}".format(tree_oid))
+            path = prefix + name
+            if mode == "40000":
+                stack.append((child, path + "/"))
+            else:
+                out.append((mode, child, path))
+    return out
+
+
+def _verified_entry_at(root, commit, path):
+    """(mode, oid) of the tree entry at `path` in `commit`, resolved component by component through
+    re-hashed tree objects only, or None when no entry exists at that path. A NON-TREE entry occupying
+    a leading component is returned AS the entry (fail-closed presence: the path prefix exists as a
+    recorded entry). SchemaError on any read failure or a non-canonical path."""
+    if not is_canonical_relpath(path):
+        raise SchemaError("{!r} is not a canonical repo-relative path".format(path))
+    tree = _verified_commit_tree(root, commit)
+    parts = path.split("/")
+    for k, comp in enumerate(parts):
+        hit = None
+        for mode, name_b, child in _verified_tree_entries(root, tree):
+            if name_b == comp.encode("utf-8"):
+                hit = (mode, child)
+                break
+        if hit is None:
+            return None
+        if k == len(parts) - 1 or hit[0] != "40000":
+            return hit
+        tree = hit[1]
+    return None
+
+
+def verified_path_blob(root, commit, path):
+    """The raw committed bytes of the regular blob at `path` in `commit`, resolved and read ONLY
+    through re-hashed objects (the commit, every tree component, and the blob itself; QA round-4 codex
+    R4-2 / claude m2). SchemaError when the path is absent, is not a regular blob, or any object fails
+    its re-hash (cannot-evaluate, mapped by callers to exit 2)."""
+    entry = _verified_entry_at(root, commit, path)
+    if entry is None:
+        raise SchemaError("{} at {} is unreachable (no such committed tree entry)".format(path, commit))
+    mode, oid = entry
+    if mode not in ("100644", "100755"):
+        raise SchemaError("{} at {} is not a regular blob (mode {}); fail-closed".format(
+            path, commit, mode))
+    otype, body = verified_object(root, oid)
+    if otype != "blob":
+        raise SchemaError("{} at {} resolves to a {}, not a blob".format(path, commit, otype))
+    return body
+
+
+def verified_tree_entry_exists(root, commit, path):
+    """True when ANY committed tree entry exists at `path` in `commit` (a blob, an executable, a
+    symlink, a gitlink, or a tree), resolved through re-hashed objects only; a non-tree entry occupying
+    a leading component counts as present (fail-closed). SchemaError on any read failure."""
+    return _verified_entry_at(root, commit, path) is not None
+
+
 def materialize_tree_raw(root, commit, dest):
     """Write the committed tree at `commit` into `dest` from RAW blob bytes only (git ls-tree + cat-file),
     applying NO checkout smudge/clean filter and NO gitattributes transformation, so a hostile filter cannot
     substitute old bytes during a checkout the way `git worktree add`/`git checkout` would (round-4 finding
-    1). Symlinks and gitlinks are rejected. Returns the set of written repo-relative paths. SchemaError on
-    any git/materialization failure (cannot-evaluate)."""
-    try:
-        ls = subprocess.run(["git", "-C", str(root), "ls-tree", "-r", "-z", commit], capture_output=True)
-    except OSError as exc:
-        raise SchemaError("cannot launch git ls-tree ({})".format(exc))
-    if ls.returncode != 0:
-        raise SchemaError("cannot list tree {}: {}".format(
-            commit, ls.stderr.decode("utf-8", "replace").strip()))
+    1). Symlinks and gitlinks are rejected. Replace objects, grafts, and the commit-graph cache are
+    disabled on both the tree listing and the blob reads (QA round-3 codex R3-1 / claude F1), so a
+    refs/replace/* or grafts substitution of the commit, its tree, or any blob cannot alter the
+    materialized bytes. Returns the set of written repo-relative paths. SchemaError on any
+    git/materialization failure (cannot-evaluate)."""
     entries = []
-    for rec in ls.stdout.split(b"\x00"):
-        if not rec:
-            continue
-        meta, _tab, path_b = rec.partition(b"\t")
-        fields = meta.split(b" ")
-        if len(fields) != 3:
-            raise SchemaError("malformed ls-tree record in {}".format(commit))
-        mode, otype, osha = fields[0].decode("ascii"), fields[1].decode("ascii"), fields[2].decode("ascii")
+    # The tree is enumerated from RE-HASHED commit and tree objects (walk_tree_verified, QA round-4
+    # codex R4-2 / claude m2), never from `git ls-tree` output, and every blob body below is re-hashed
+    # against its id by the batch reader, so a tampered object store cannot steer the materialization.
+    for mode, osha, path in walk_tree_verified(root, commit):
         if mode in ("120000", "160000"):
-            raise SchemaError("tree {} contains a symlink/gitlink {!r}; rejected".format(
-                commit, path_b.decode("utf-8", "replace")))
-        if otype != "blob":
-            continue
+            raise SchemaError("tree {} contains a symlink/gitlink {!r}; rejected".format(commit, path))
         if mode not in ("100644", "100755"):
-            raise SchemaError("tree {} blob {!r} has unsupported mode {}".format(
-                commit, path_b.decode("utf-8", "replace"), mode))
-        try:
-            path = path_b.decode("utf-8")
-        except UnicodeDecodeError:
-            raise SchemaError("non-UTF-8 path in tree {}".format(commit))
+            raise SchemaError("tree {} blob {!r} has unsupported mode {}".format(commit, path, mode))
         entries.append((mode, osha, path))
     blobs = _cat_file_batch(root, [osha for _mode, osha, _path in entries])
     dest_root = Path(dest).resolve()

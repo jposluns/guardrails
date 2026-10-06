@@ -26,6 +26,7 @@ from pathlib import Path
 # enforces this by flagging a reintroduced index-0 insertion in this file.
 sys.path.append(str(Path(__file__).resolve().parent))
 import _qa_adapter as qa  # noqa: E402
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 
 AUDIT_ID = "reference"
@@ -57,6 +58,10 @@ def _resolve(explicit):
 
 
 def main():
+    # D-400-SPECIAL-FILE-PRECHECK runs FIRST, before the config resolution below reads any repository
+    # file (.aiqt/assurance.toml above all), so neither the digest nor the normal audit path can block
+    # on a plain read of a FIFO planted in the tree.
+    precheck_special_files(Path(__file__).resolve().parents[1])
     argv = sys.argv[1:]
     # ARGUMENT VALIDATION precedes the --self-test dispatch: a malformed --config operand (empty, an
     # =-joined empty value, a next-flag that must not be swallowed as the path, or a duplicate) is a loud
@@ -191,11 +196,17 @@ def _self_test():
             #    index-0 insertion lets the sibling shadow _qa_adapter's `import json` under -I and silently
             #    exit 0 before the self-test runs, so no marker appears. The child carries the sentinel so it
             #    skips this (and the other subprocess) case rather than recursing.
-            sib = Path(tempfile.mkdtemp(prefix="aiqt-audit-reference-sibling-"))
+            # The copies live under <fixture>/tools/ so the copy's main() resolves its repository
+            # root (parents[1] of the script) to the FIXTURE root and its D-400 special-file precheck
+            # walks only that hermetic tree, never the system temp directory; _gen_common.py rides
+            # along because the gate imports precheck_special_files from it.
+            sib = Path(tempfile.mkdtemp(prefix="aiqt-audit-reference-sibling-")) / "tools"
             try:
+                sib.mkdir()
                 srcdir = Path(__file__).resolve().parent
                 shutil.copy(str(srcdir / "audit_reference.py"), str(sib / "audit_reference.py"))
                 shutil.copy(str(srcdir / "_qa_adapter.py"), str(sib / "_qa_adapter.py"))
+                shutil.copy(str(srcdir / "_gen_common.py"), str(sib / "_gen_common.py"))
                 for hostile in ("json.py", "hashlib.py"):
                     (sib / hostile).write_text("raise SystemExit(0)\n", encoding="utf-8")
                 proc = subprocess.run([sys.executable, "-I", "-B", str(sib / "audit_reference.py"),
@@ -205,7 +216,7 @@ def _self_test():
                                     "prevented the self-test from running (finding-6): rc={} out={!r} "
                                     "err={!r}".format(proc.returncode, proc.stdout, proc.stderr))
             finally:
-                shutil.rmtree(sib, ignore_errors=True)
+                shutil.rmtree(sib.parent, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

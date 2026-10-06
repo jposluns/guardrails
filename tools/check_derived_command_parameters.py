@@ -60,6 +60,7 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _gen_common import precheck_special_files, read_source_bytes  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 CONFIG_REL = ".aiqt/derived-command-parameters.toml"
 ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")           # a kebab-case binding identifier
@@ -390,7 +391,11 @@ def scan_file(root, path, binding, telemetry):
     literal value (it may be sensitive). telemetry accumulates the commands and options actually matched,
     so run() can reconcile the config's selectors against the real source."""
     try:
-        raw = path.read_bytes()
+        # read_source_bytes, never a plain read: the surface walk picks up WHATEVER sits under the
+        # declared prefix, a git-ignored drop-in the D-400 precheck deliberately does not walk
+        # included, so a FIFO there is the named refusal (SourceReadRefused -> GateError, exit 2),
+        # never a blocking read (F-CORPUS-FIFO-HANG class).
+        raw = read_source_bytes(path)
     except OSError as exc:
         raise GateError("configuration {} binding {!r}: cannot read declared surface {} ({})".format(
             CONFIG_REL, binding["id"], path.relative_to(root), exc))
@@ -883,7 +888,7 @@ def main():
     (self_test,) = parsed
     if self_test:
         return self_test_main()
-    root = Path(__file__).resolve().parents[1]
+    root = precheck_special_files(Path(__file__).resolve().parents[1])
     return run(root)
 
 

@@ -32,16 +32,43 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
+import io
+import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_store as store  # noqa: E402
+import _containment  # noqa: E402  precheck_special_files (D-400-SPECIAL-FILE-PRECHECK)
 
 SPEC = Path(__file__).resolve().parents[1] / "spec" / "OPF-SPEC.md"
 QUICKSTART = SPEC.parent / "OPF-QUICKSTART.md"
 DISCLOSURE = SPEC.parents[1] / "site" / "disclosure.html"
+
+
+def _spec_text(path):
+    """SPEC (and each _SURFACE file) read through ONE O_NONBLOCK descriptor, fstat-checked S_ISREG:
+    defence in depth behind the D-400 special-file precheck, so a special file reached at such a path (for example through a
+    directory link the walk's git-ignored exemptions leave uncertified) is the named OSError refusal
+    (main() maps it to exit 2), never a blocking read. On a regular file the bytes and strict-UTF-8
+    universal-newline decode equal path.read_text(encoding="utf-8")."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+                 | getattr(os, "O_BINARY", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("{}: refused, not a regular file (a FIFO, device, socket, or directory); a "
+                          "plain read of it could block forever".format(path))
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return io.TextIOWrapper(io.BytesIO(b"".join(chunks)), encoding="utf-8").read()
 
 
 class _Descriptive(str):
@@ -67,7 +94,7 @@ _CONTRACT = {
         _D('Public brand: OPFiles (opfiles.ai).'),
         _D('Base discovery token: opf.'),
         _D('Status: draft (specification only; schemas and the reference tooling, the scaffolder opf init, the adopter opf adopt, the post-adoption importer opf import, the validator opf doctor, the renderer opf render, the relocator opf migrate, the synchronizer opf sync, the schema-upgrader opf upgrade, the absorber opf absorb, and the record author opf record, ship in later releases).'),
-        _D('Date: 2026-10-03 (UTC).'),
+        _D('Date: 2026-10-05 (UTC).'),
         _D('OPFiles is a neutral, self-contained operational-files standard published under the Apache License 2.0 (except vendored third-party material, which remains under its own terms).'),
         _D('AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand, not a legal entity, and the standard is authored and maintained by its lead maintainer.'),
         _D('A project conforms to OPFiles with this specification and its own checks; the AIQT Guardrails pack is the reference enforcement suite and a consumer of the standard, not its definition.'),
@@ -100,11 +127,15 @@ _CONTRACT = {
         _D('The section 9 manifest example describes the 1.3.0 target on legacy homes.'),
         _D('The homes-2 requirements in sections 4.2, 9.2, 12, 14.1, 14.2, and 15 describe the target contract, not an activated runtime guarantee.'),
         _D('<product repository root>/ .opf.toml # committed store pointer (section 4.3) CHANGELOG.md # curated public changelog (deliverable; section 6.3) VERSION # deterministic render from version.toml (deliverable) .working/ # the store; present here under the default in-repo configuration <store repository root>/ # the product repository itself, by default .working/ README.md # ownership and regeneration note (deliverable) WORKLOG.md # deterministic render of worklog.toml VERSION.md # optional human view of version.toml TODO.md BACKLOG.md PIPELINE.md DONE.md FINDINGS.md DECISIONS.md BLOCKS.md HANDOFF.md REFERENCES.md CONTRIBUTIONS.md DECISIONS.toml # machine projection (deterministic; section 10.5) <TYPE>-INDEX.md ...'),
-        _D('# optional 1:1 index mirrors (section 10.1) IMPORT-REPORT.md # legacy import report (pre-1.3.0 runs only; section 14.1) toml/ manifest.toml # store manifest and discovery marker (section 9) counters.toml # per-namespace ID high-water marks (section 8.2) version.toml # version and release ledger (section 6.1) worklog.toml # durable operational record (section 6.2) <type>.imported.index.toml # separate imported records of each enabled type (section 8.3) worklog.imported.toml # imported worklog, on its own ID number line lease.toml # single-writer lease, present only while held (section 5.7) init.toml # bootstrap provenance of a coupled init (section 9.2), if present backlog_item.index.toml # typed record files (section 8) done.index.toml finding.index.toml pending_decision.index.toml autonomous_decision.index.toml block.index.toml handoff.index.toml reference.index.toml contribution.index.toml maintainer_decision.index.toml preference_pattern.index.toml archive/ 2026/ archive.toml # enumerates rotated IDs and spans (section 12) done.index.toml worklog.toml archive/ moved/<source-path> # default Move destinations (section 14.2) adoption/<run-id>/ # retire preimages and archived occupying sources (section 14.2) imported/<kind>/<run-id>/ # durable originals, inventories, approvals and receipts (section 14) staging/<kind>/<run-id>/ # short-lived staging, evidence-gated reclamation (section 14.1) journals/<kind>/ # reserved recovery state, never a view or ordinary op target journal/ # crash-durable frames runs/<run-id>/transaction.toml # gate-readable projections allocations/<run-id>.toml # irrevocable ID reservations (section 8.2) When the store has been relocated, the .working/ tree lives at the store repository root exactly as drawn, and the product repository keeps only the pointer and the public deliverables.'),
+        _D('# optional 1:1 index mirrors (section 10.1) IMPORT-REPORT.md # legacy import report (pre-1.3.0 runs only; section 14.1) toml/ manifest.toml # store manifest and discovery marker (section 9) counters.toml # per-namespace ID high-water marks (section 8.2) version.toml # version and release ledger (section 6.1) worklog.toml # durable operational record (section 6.2) <type>.imported.index.toml # imported records per enabled type except LF (section 8.3) worklog.imported.toml # imported worklog, on its own ID number line lease.toml # single-writer lease, present only while held (section 5.7) init.toml # bootstrap provenance of a coupled init (section 9.2), if present backlog_item.index.toml # typed record files (section 8) done.index.toml finding.index.toml pending_decision.index.toml autonomous_decision.index.toml block.index.toml handoff.index.toml reference.index.toml contribution.index.toml maintainer_decision.index.toml preference_pattern.index.toml archive/ 2026/ archive.toml # enumerates rotated IDs and spans (section 12) done.index.toml worklog.toml archive/ moved/<source-path> # default Move destinations (section 14.2) adoption/<run-id>/ # retire preimages and archived occupying sources (section 14.2) imported/<kind>/<run-id>/ # durable originals, inventories, approvals and receipts (section 14) staging/<kind>/<run-id>/ # short-lived staging, evidence-gated reclamation (section 14.1) journals/<kind>/ # reserved recovery state, never a view or ordinary op target journal/ # crash-durable frames runs/<run-id>/transaction.toml # gate-readable projections allocations/<run-id>.toml # irrevocable ID reservations (section 8.2) When the store has been relocated, the .working/ tree lives at the store repository root exactly as drawn, and the product repository keeps only the pointer and the public deliverables.'),
         _D('The per-record layout (section 9) additionally places one file per record under .working/toml/<type>/, with each <type>.index.toml acting as the registry.'),
-        _D('The imported files are registered managed leaves beside the clean-series files, using the same enabled-type roster; worklog uses worklog.imported.toml instead of an imported index.'),
+        _D('The imported files are registered managed leaves beside the clean-series files, using the same enabled-type roster except legacy_fragment; worklog uses worklog.imported.toml instead of an imported index.'),
         'Their manifest, emitter, upgrade and containment registrations MUST agree.',
-        'A 1.3.0 opf init and the section 9.2 upgrade MUST create the imported leaves for every enabled type, create-only and empty; enabling a further type or module later MUST create its imported leaf in the same act as its clean index.',
+        'A 1.3.0 opf init and the section 9.2 upgrade MUST create the imported leaves for every enabled type except legacy_fragment, create-only and empty; enabling a further type or module other than legacy_fragment later MUST create its imported leaf in the same act as its clean index.',
+        _D('legacy_fragment has no imported leaf and no imported counter row, since the imported series refuses the LF namespace (section 8.2).'),
+        'A 1.3.0 opf init MUST write at zero the imported counter row of each type that has an imported leaf (section 8.2).',
+        'In a store that declares spec_version 1.3.0 or later, enabling a further type or module other than legacy_fragment MUST also add its imported counter row in the same act as its clean index, at zero only where no imported ancestry exists, as in the section 9.2 upgrade.',
+        _D('Both counter-row duties follow from the section 8.2 rule that requires the imported counter rows once the store declares spec_version 1.3.0 or later.'),
         _D('They are machine records, distinct from the original-source evidence under .working/imported/.'),
         'The first imported-series release MUST keep these files inline in either store layout and MUST NOT provide views over imported data; assistants read the TOML.',
         _D('Historical releases remain in version.toml (section 14.3); there is no version.imported.toml or CHANGELOG.toml.'),
@@ -248,7 +279,7 @@ _CONTRACT = {
         'New imports MUST use the imported series and verbatim unparsed text (section 8.3), not LF quarantine.',
         'LF MUST NOT be scaffolded.',
         'A fresh-only implementation (section 16.1) provides no legacy LF validation and MUST refuse a store that declares the legacy_fragment type or holds an LF record.',
-        _D('- Imported history uses the same enabled types in a separate series, not additional record types.'),
+        _D('- Imported history uses the same enabled types except legacy_fragment (section 8.2) in a separate series, not additional record types.'),
         _D('Reserved namespaces remain reserved.'),
         _D('Imported states describe history and confer no current authority (section 8.6).'),
         '- done is a durable completion receipt linked one-to-one to a backlog item reaching ratified done; a standalone receipt MUST be imported history with provenance.',
@@ -266,8 +297,10 @@ _CONTRACT = {
         _D('Clean record IDs have the form <NS>-<n>; imported IDs have the form imported:<NS>-<n>, for example imported:BI-7.'),
         "The complete lexical grammar is ^(?:imported:)?[A-Z]{2}-[1-9][0-9]*$, and the namespace MUST additionally name the record's enabled type in section 8.1.",
         _D('Namespaces map one-to-one to types within each series.'),
-        'counters.toml MUST hold independent monotonic high-water values per series and namespace: BI for clean backlog items and the quoted TOML key "imported:BI" for imported backlog items.',
+        'The imported series MUST refuse the LF namespace, since new imports do not use LF quarantine (section 8.1).',
+        'counters.toml MUST hold independent monotonic high-water values per series and namespace, BI for clean backlog items and the quoted TOML key "imported:BI" for imported backlog items, with the imported series\' rows required once the store declares spec_version 1.3.0 or later, one for each enabled type except legacy_fragment, since the imported series refuses LF and so has no "imported:LF" row.',
         'The same rule includes "imported:WL"; clean release spans MUST tile only the clean WL number line.',
+        'The doctor MUST require the imported counter rows once the store declares spec_version 1.3.0 or later, whether a 1.3.0 opf init or the section 9.2 upgrade created them.',
         "Uniqueness, counter high-water, contiguity and no-deletion checks MUST evaluate each series independently; allocation MUST increment its counter under the store's lock as one atomic claim, so no gap between choosing and reserving can double-allocate.",
         'Counters MUST NOT be reset and IDs MUST NOT be reused, even when a record is superseded, refuted, or its work reverted.',
         'Rotation, index rewrites, and store relocation MUST NOT touch counters.toml.',
@@ -288,9 +321,11 @@ _CONTRACT = {
         _D('Standalone imported done receipts are legal history.'),
         "Historical created_at, updated_at, date and decided_at are optional; when present they MUST be valid RFC 3339 UTC and no later than the writer's import clock instant.",
         'Import time MUST NOT stand in for event time.',
-        'Other historical type fields MUST NOT be absent without an explicit missingness row.',
+        "An imported record MUST give a missingness row in unrecorded = [{field, reason}] to each field of its type's schema that it omits, including optional type fields and each historical timestamp above that its type's schema carries.",
+        _D("The only exempt fields are proposed_from, summary, links, refs and registered x-<vendor> tables, which the envelope table above marks optional, each where the type's own schema does not require it; an imported record never carries proposed_from, since its status never takes /proposed."),
+        _D("An imported worklog row's summary is therefore never exempt, since the worklog schema requires it (section 6.2)."),
+        'unrecorded MUST hold exactly one row for each omitted field that is not exempt, and no row that repeats a field or claims a supplied field absent.',
         'Supplied fields MUST retain their declared value types and vocabularies; unknown keys still fail.',
-        'Missing historical timestamps and type fields MUST be accounted for in unrecorded = [{field, reason}], with one row per absent field, no duplicate fields and no row claiming a supplied field absent.',
         "field MUST name a field in that type's schema.",
         _D('The closed reasons are not_recorded_in_source, unparsed, ambiguous, conflicting, and not_applicable.'),
         _D('The first means "never recorded historically in the supplied source", not a claim about all history.'),
@@ -301,6 +336,8 @@ _CONTRACT = {
         'Optional import.history retains verbatim source-precision values that cannot be losslessly normalized, such as a date-only string; a UTC midnight MUST NOT be fabricated.',
         _D('Optional import.unparsed holds verbatim source text that cannot be mapped.'),
         'The assistant MUST retain such text rather than drop it.',
+        'When present, import.span MUST be an array of two integers, import.history an array of tables, and import.unparsed an array of strings.',
+        "Each import.history table MUST hold exactly two keys, field (a field named in the type's schema) and value (its verbatim source value as a string).",
         _D('The writer performs no byte-tiling or leftover accounting: byte-level coverage and semantic fidelity are not machine-proven.'),
         _D('Preserved originals remain the restoration authority.'),
         'Imported records and their worklog entries MUST be immutable after publication; corrections MUST be a fresh import run retaining the old evidence.',
@@ -527,7 +564,7 @@ _CONTRACT = {
         'For the 1.1.0 to 1.2.0 upgrade the allowed schema delta is the spec_version bump alone: no other manifest field, schema file, or counter changes, and the upgrade MUST NOT create provenance for an existing store (none is ever fabricated).',
         _D('Declared views are then regenerated, so a stale committed view can change.'),
         _D('A 1.0.0 store takes the 1.0.0 delta above directly to 1.2.0.'),
-        _D('For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration and create-only initialization of missing imported managed leaves for enabled types, and addition of missing imported counter rows at zero only where no imported ancestry exists.'),
+        _D('For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration and create-only initialization of missing imported managed leaves for enabled types other than legacy_fragment, and addition of missing imported counter rows at zero only where no imported ancestry exists, never an "imported:LF" row.'),
         'Existing records, evidence, clean counters and imported high-water values MUST be preserved; a populated collision, missing ancestral counter or unprovable prestate refuses.',
         "The upgrade MUST refuse before any write a store whose [unmanaged] entry equals or contains a discovery candidate (section 14.2), which an earlier store can carry, naming the entry and the candidate; the remedy is the adopter's own fresh plan re-dispositioning that candidate (section 14.2), recorded before the upgrade is retried.",
         'The upgrade MUST NOT create historical records, adoption approval or provenance, MUST NOT change posture or import status, and MUST NOT add imported views.',
@@ -753,8 +790,9 @@ _CONTRACT = {
         _D("The reference tooling targets the upgrade-capable class: its opf upgrade, in the repository's reference code, carries a store from base 1.0.0 or 1.1.0 to base 1.2.0, within its disclosed residuals, and its upgrade into base 1.3.0 remains a target contract (section 9.2)."),
         _D('A fresh-only implementation supports exactly one base spec_version, one homes generation, and one worklog storage generation, initializes stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.'),
         'An implementation MUST declare, in the documentation of each release and in every conformance report it emits, its release identity, its class, and its supported spec_version, homes generation, and worklog storage generation.',
-        'An implementation that declares no class MUST be treated as upgrade-capable, and every upgrade requirement binds it.',
+        'An implementation whose declaration lacks only its class MUST be treated as upgrade-capable, and every upgrade requirement binds it.',
         'An unreadable, malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
+        _D('A missing declaration is malformed, since it states none of the release identity, class, spec_version, and generations required above, so it yields cannot-evaluate.'),
         'A fresh-only implementation MUST run an admission check in every command that resolves a store, at every posture, before any other grading and before any write, the claim of the single-writer lease (section 5.7) included, apart from the lease reconciliation and recovery that the recovery bound below leaves to sections 5.7, 8.8, 14.1, and 14.2, which the read-only pre-scan below precedes.',
         "The check MUST run after any section 5.7 comparison against the sync target that the command performs, over the state that comparison found, and a fresh-only implementation's opf sync MUST NOT bring in, by a fast-forward, a state that the check, run first over the fetched target state, refuses or cannot evaluate, nor send, by a push of pending local commits (section 5.7), a state that the check, run first over the local state it would push, refuses or cannot evaluate.",
         'A command that writes, and does not already hold the lease from the recovery below, MUST, after admission, take the lease.toml that section 5.7 has it take in the machine store and make it observable at the sync target where the store has one (section 5.7) before any other write, the session_lease record that section 5.7 has it record for that lease where the concurrent-operation module is enabled included.',
@@ -901,7 +939,7 @@ def _surface_text(text):
 
 
 def surface_findings(texts=None):
-    texts = {path: path.read_text(encoding="utf-8") for path in _SURFACE} if texts is None else texts
+    texts = {path: _spec_text(path) for path in _SURFACE} if texts is None else texts
     findings = []
     for path, fragments in _SURFACE.items():
         body = _surface_text(texts[path])
@@ -2723,10 +2761,10 @@ def _self_test_vectors():
     check("inert-import", lambda: doctor.IMPORTS_REL == ".working/imports"
           and doctor._is_import_run_id("imp" + suffix) and not doctor._is_import_run_id("adopt" + suffix))
     check("inert-root-exclusions", lambda: store.STORE_ROOT_CONTROL_DIRS == (".git", ".aiqt"))
-    source = Path(store.__file__).read_text(encoding="utf-8")
+    source = _spec_text(Path(store.__file__))
     check("transitional-comment", lambda: "In homes 2, .aiqt is AIQT-only" in source
           and "Until homes 2 is activated, legacy import state still" in source)
-    text = SPEC.read_text(encoding="utf-8")
+    text = _spec_text(SPEC)
     check("spec-contract", lambda: not contract_findings(text))
     # The journal-only record kind is spec-pinned through the kind loop: deleting `record` from the
     # section 4.2 vocabulary sentence turns the gate red with the kind's own finding.
@@ -2785,7 +2823,7 @@ def _self_test_vectors():
                   nb.count(frag) == 1 and f in contract_findings(m))
     # Surface pins: the live files are green, each pin occurs exactly once in its normalized
     # text, and deleting that occurrence turns the gate red with the pin's own finding.
-    surfaces = {path: path.read_text(encoding="utf-8") for path in _SURFACE}
+    surfaces = {path: _spec_text(path) for path in _SURFACE}
     check("surface-contract", lambda: not surface_findings(surfaces))
     for path, fragments in _SURFACE.items():
         normalized = _surface_text(surfaces[path])
@@ -2848,6 +2886,61 @@ def _self_test_vectors():
                   not any(f.startswith("spec " + s + " missing contract") for f in contract_findings(m)))
         check("keyword-revert-spec-" + section + "-" + old, lambda p=pin, m=mutated, s=section:
               len(p) == 1 and "spec {} missing contract: {}".format(s, p[0]) in contract_findings(m))
+    # D-400-SPECIAL-FILE-PRECHECK: a copy of the opf/ subtree whose spec is a FIFO with no writer makes the
+    # default entry exit 2 naming it, bounded by the subprocess timeout (the alarm on a child). MUTATION:
+    # dropping the _containment.precheck_special_files call leaves SPEC.read_text blocked until the timeout.
+    if hasattr(os, "mkfifo"):
+        import shutil
+        import subprocess
+
+        def fifo_spec_refused():
+            with tempfile.TemporaryDirectory() as scratch:
+                tree = Path(scratch) / "opf"
+                shutil.copytree(SPEC.parents[1], tree, symlinks=True,
+                                ignore=shutil.ignore_patterns("__pycache__"))
+                spec = tree / SPEC.relative_to(SPEC.parents[1])
+                spec.unlink()
+                os.mkfifo(spec)
+                try:
+                    proc = subprocess.run([sys.executable, "-I", "-B", str(tree / "tools" / "check_opf_homes.py")],
+                                          cwd=scratch, capture_output=True, text=True, timeout=30)
+                except subprocess.TimeoutExpired:
+                    return False
+                return proc.returncode == 2 and str(spec) in proc.stderr
+        check("special-file-precheck-fifo-spec", fifo_spec_refused)
+
+        # The reader itself (defence in depth behind the precheck): _spec_text on a FIFO must be the
+        # named OSError refusal within the alarm, never a blocking read. MUTATION: reverting main()'s
+        # read (or this helper) to a plain read_text blocks; the alarm records the hang.
+        import signal
+
+        def fifo_spec_read_refused():
+            if not hasattr(signal, "SIGALRM"):
+                return True
+
+            class _Hang(Exception):
+                pass
+
+            def _on_alarm(_signum, _frame):
+                raise _Hang()
+
+            with tempfile.TemporaryDirectory() as scratch:
+                fifo = Path(scratch) / "spec.md"
+                os.mkfifo(fifo)
+                previous = signal.signal(signal.SIGALRM, _on_alarm)
+                signal.alarm(10)
+                try:
+                    try:
+                        _spec_text(fifo)
+                        return False
+                    except OSError as exc:
+                        return "not a regular file" in str(exc)
+                    except _Hang:
+                        return False
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous)
+        check("special-file-nonblocking-spec-read", fifo_spec_read_refused)
     for failure in failures:
         print("FAIL: " + failure)
     print("OPF-HOMES SELF-TEST: {} ({} checks)".format("FAILED" if failures else "OK", checked))
@@ -2862,8 +2955,8 @@ def main(argv=None):
         if args:
             print("check_opf_homes: unexpected arguments", file=sys.stderr)
             return 2
-        findings = (contract_findings(SPEC.read_text(encoding="utf-8")) + keyword_findings()
-                    + surface_findings())
+        _containment.precheck_special_files(SPEC.parents[1])
+        findings = contract_findings(_spec_text(SPEC)) + keyword_findings() + surface_findings()
         for finding in findings:
             print("check_opf_homes: " + finding)
         return 1 if findings else 0
@@ -2873,6 +2966,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # QA r5: self_test() itself maps an OSError out of a self-test read (for example the non-blocking
+    # SPEC reader refusing a FIFO reached through an accepted directory link) to the NAMED
+    # cannot-evaluate exit 2, never a raw traceback or a blocking read, as main() does.
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
     sys.exit(main())

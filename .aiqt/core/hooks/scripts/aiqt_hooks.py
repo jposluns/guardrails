@@ -8087,7 +8087,9 @@ _ORCH_WALK_BOUND = 4096  # ancestor-chain safety bound; a deeper chain is a walk
 # O_PATH (Linux): a walk step then needs only SEARCH permission on the chain, exactly as path resolution
 # itself does, so a search-only (execute-only) ancestor such as a shared parent directory does not fail the
 # walk; where O_PATH is unavailable the O_RDONLY fallback additionally requires read permission on each
-# ancestor, an over-DENY in the fail direction (never an allow) on such platforms.
+# ancestor, an over-DENY in the fail direction (never an allow) on such platforms. Every walk open also
+# passes O_NONBLOCK, a no-op on the directories it opens (O_PATH ignores it; a directory open never blocks),
+# so each open carries the non-blocking flag the D-400 raw-read lint reads at the call site.
 _ORCH_O_WALK = getattr(os, "O_PATH", os.O_RDONLY)
 
 
@@ -8102,7 +8104,8 @@ def _orch_dirfd_has_registry(dirfd):
     symlink the O_NOFOLLOW open refuses, a regular file, an unreadable directory, or any other fault),
     which must never read as absent - that would silently disarm an orchestrated tree."""
     try:
-        aiqt_fd = os.open(".aiqt", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
+        aiqt_fd = os.open(".aiqt", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                          dir_fd=dirfd)
     except FileNotFoundError:
         return False
     except OSError:
@@ -8179,7 +8182,7 @@ def _orch_registry_walk(cwd):
         # the walk runs to its depth bound and FAILS (a deny), never misreading a mount edge as the top.
         root_id = None
     try:
-        fd = os.open(cwd, _ORCH_O_WALK | os.O_DIRECTORY)
+        fd = os.open(cwd, _ORCH_O_WALK | os.O_DIRECTORY | os.O_NONBLOCK)
     except OSError as exc:
         return ("fail", ("could not be opened for the registry walk ({})".format(type(exc).__name__),
                          "Re-issue the call from a directory this process can open."))
@@ -8190,7 +8193,8 @@ def _orch_registry_walk(cwd):
             if _orch_dirfd_has_registry(fd):
                 return ("found", None)
             try:
-                parent = os.open("..", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                parent = os.open("..", _ORCH_O_WALK | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                 dir_fd=fd)
             except OSError as exc:
                 return ("fail", ("has an ancestor directory this walk cannot open ({})"
                                  .format(type(exc).__name__),
@@ -8254,7 +8258,7 @@ def _orch_walk_recheck(cwd, chain):
     seen = []
     for _ in range(_ORCH_WALK_BOUND + 1):
         try:
-            fd = os.open(path, _ORCH_O_WALK | os.O_DIRECTORY)
+            fd = os.open(path, _ORCH_O_WALK | os.O_DIRECTORY | os.O_NONBLOCK)
         except OSError as exc:
             return ("fail", ("has an ancestor chain this walk's recheck cannot re-resolve ({})"
                              .format(type(exc).__name__),
@@ -8307,7 +8311,7 @@ def _orch_git_toplevel_has_registry(cwd):
     if top is None:
         return False
     try:
-        fd = os.open(top, _ORCH_O_WALK | os.O_DIRECTORY)
+        fd = os.open(top, _ORCH_O_WALK | os.O_DIRECTORY | os.O_NONBLOCK)
     except FileNotFoundError:
         return False
     except (OSError, ValueError):

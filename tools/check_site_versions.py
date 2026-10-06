@@ -54,8 +54,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
-from _gen_common import load_toml  # noqa: E402
+from _walk import read_text_nonblocking, walk_files  # noqa: E402  fail-closed tree walk and reader
+from _gen_common import load_toml, precheck_special_files  # noqa: E402
 
 SKIP_DIRS = set()  # scan the whole of site/ (matching check_newtab); skipping no content directory means a
 # page under a node_modules/, __pycache__/, or similar cannot escape the currency check.
@@ -187,7 +187,10 @@ def _scan_root(root, subdir, valid):
                       f.relative_to(root), subdir), file=sys.stderr)
             return 2
         try:
-            text = f.read_text(encoding="utf-8")
+            # read_text_nonblocking, not read_text: this walk reads WHATEVER .html it meets, a
+            # git-ignored page the D-400 special-file precheck deliberately does not walk included,
+            # so a FIFO page must be the named refusal (OSError, exit 2 below), never a blocking read.
+            text = read_text_nonblocking(f)
         except (OSError, UnicodeDecodeError) as exc:
             print("error: cannot load {} ({}); fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
             return 2
@@ -308,6 +311,34 @@ def _self_test():
         if got != 2:
             failures.append("h: page-less site/ expected exit 2 got {}".format(got))
 
+    # F-CORPUS-FIFO-HANG (QA round 4): a FIFO at an .html page (the shape a git-ignored plant takes,
+    # which the D-400 precheck deliberately does not walk) must be the named refusal (exit 2), never a
+    # blocking read. MUTATION: reverting the page read to Path.read_text blocks here; the alarm turns
+    # that into a recorded failure. POSIX only (os.mkfifo, SIGALRM).
+    import os
+    import signal
+    if hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"):
+        class _Hang(Exception):
+            pass
+
+        def _on_alarm(_signum, _frame):
+            raise _Hang()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = build(tmp, good_toml, {"i.html": "<p>AIQT 1.0.0</p>"})
+            os.mkfifo(root / "site" / "fifo.html")
+            previous = signal.signal(signal.SIGALRM, _on_alarm)
+            signal.alarm(10)
+            try:
+                got = run_quiet(root)
+            except _Hang:
+                got = "hung"
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, previous)
+            if got != 2:
+                failures.append("y: a FIFO site page expected the named refusal exit 2, got {}".format(got))
+
     # a symlinked site page fails closed rather than being followed outside site/.
     with tempfile.TemporaryDirectory() as tmp:
         root = build(tmp, good_toml, {"real.html": "<p>AIQT 1.0.0</p>"})
@@ -374,7 +405,7 @@ def _self_test():
 def main():
     if "--self-test" in sys.argv[1:]:
         return _self_test()
-    return run(Path(__file__).resolve().parents[1])
+    return run(precheck_special_files(Path(__file__).resolve().parents[1]))
 
 
 if __name__ == "__main__":
