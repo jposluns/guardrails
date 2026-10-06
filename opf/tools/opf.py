@@ -126,7 +126,7 @@ def _bootstrap():
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
         import _opf_write_guard  # the in-place writers' shared cleanliness gate and single-writer lease
         import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
-        import _opf_adopt_apply  # OPF-ADOPT U1+U3+U5+U7: the apply shell (init-store, enable-hook and the three finish ops execute)
+        import _opf_adopt_apply  # OPF-ADOPT U1+U3+U4+U5+U7: the apply shell (init-store, the registration ops, enable-hook and the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
         import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
     except ImportError as exc:

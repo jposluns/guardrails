@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "880d2ada7d77267e32a5d2515cebf122ccff2b0a92b537905363b5a66c4cf660"
+tree-sha256 = "ec7b14b49fbbdff03fbb92d432e13f825cdab25feba15fcaa5ebded1b2fdba1e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 298775
-sha256 = "7f9c007dd11356c63409eba02de5936d03b308084602933240f9bf38b1393cbc"
+bytes = 302177
+sha256 = "5af8d0cc01ff85084425765a8175a8a25c207393f6d3654bd9bf67785af58f93"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2596,13 +2596,13 @@ sha256 = "dffd776380014e2ba701f1050050c2ba13d2f912b5ff3bf503fd847eead91684"
 
 [[sources]]
 path = "opf/tools/_opf_adopt.py"
-bytes = 182121
-sha256 = "c810d6059007a1862b2a91ff775a258e554950871944a8a362fd3af16c1db587"
+bytes = 186545
+sha256 = "54468bab0cbdba57fd576c249a274517f482aede242eeb3aa909cce99a5a794c"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 758650
-sha256 = "1c5688ba3c21b67ccc11cc71f29b0d13e1cbd7ee5ae72948687fc88b5f49fcfa"
+bytes = 814813
+sha256 = "199066507015d2ac609d44c950a5c9991c9fb5b776cf39c348836616e7d59bb5"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_hook.py"
@@ -2616,8 +2616,8 @@ sha256 = "6d33ec961adbb0562589616b6995e2ff013216d3f3d1fafec188e7bc11b59a91"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_plan.py"
-bytes = 105696
-sha256 = "4a93cd242035437c5562d4506bb7a48e24f91b011a585e0aeab46c797bfac61a"
+bytes = 106238
+sha256 = "8a1beaf83ceabc35f91e6296b88199b43b09b6ddb273606a8d2967bd5b52de2d"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_state.py"
@@ -2951,8 +2951,8 @@ sha256 = "bd9f2ed39cb01c64e41cb355c7ef3c4a1d3b89265e51c66e39163c6eb9a855e7"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 919881
-sha256 = "d7f8f3b6c3ade7c086551a65258568a874a456948ad2256fdc57113f913d43ed"
+bytes = 919906
+sha256 = "12498d4bffe28135bee7dd64171967643de51d311d95aeaaf6530356b0d2bc9a"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"

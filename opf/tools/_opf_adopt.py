@@ -606,7 +606,33 @@ def store_manifest(store):
     return _compose(store["store_root"], store["machine_rel"] + "/" + MANIFEST_NAME)
 
 
-def derive_effects(ops, sources, manifest=None):
+def rewrite_preservations(ops, manifest, run_id, root="."):
+    """The preserve-first archive copies the apply engine creates for the registration ops it executes
+    (spec 14.2: a live file is overwritten only after its byte-identical copy lands at the run's adoption
+    archive): one per repoint-consumer row, of the consumer's old bytes, and one for the frozen store
+    manifest when a register-unmanaged chain rewrites a LIVE manifest, of the first link's old bytes. A
+    manifest an init-store member scaffolds in this program is created, not overwritten, so its chain
+    preserves nothing. Each copy lies at the run's adoption preimage home composed under the frozen store
+    root, as a source preservation does. Without a usable run id (already a finding) or manifest path, the
+    rows that need one add nothing. enable-hook, the one other rewriting op, executes in no slice yet; its
+    slice settles its own preservation."""
+    out = []
+    created = set(_compose(row["store_root"], m["path"]) for row in ops if row["op"] == "init-store"
+                  for m in row["members"])
+    chain = [row for row in ops if row["op"] == "register-unmanaged"]
+    if manifest is not None and chain and manifest not in created:
+        home = _preimage_home(run_id, manifest)
+        if home is not None:
+            out.append({"path": _compose(root, home), "digest": chain[0]["old_digest"]})
+    for row in ops:
+        if row["op"] == "repoint-consumer":
+            home = _preimage_home(run_id, row["path"])
+            if home is not None:
+                out.append({"path": _compose(root, home), "digest": row["old_digest"]})
+    return out
+
+
+def derive_effects(ops, sources, manifest=None, run_id=None, root="."):
     """The exact file-level effects a plan names (spec 14.1: creations, replacements, removals and consumer
     repointings), derived purely from already-VALID op and source rows so the bound summary cannot drift
     from the program. Every member an install-pack, init-store or render-views row writes is a creation at
@@ -616,9 +642,11 @@ def derive_effects(ops, sources, manifest=None):
     (`manifest`, from store_manifest), so it is a replacement there from its old to its new digest; with no
     usable manifest path (a malformed store table, already a finding) it adds nothing. A source preserved
     under the adoption archive (every retire and migrate source, and every occupying source, spec 14.2) adds
-    that archive copy as a creation, and a migrate source's later removal is a removal. Each list is sorted,
-    so the derivation is deterministic. Which stage performs an effect (apply, or the recorded retirement
-    after a green check) is the engine's, not recorded here."""
+    that archive copy as a creation, and a migrate source's later removal is a removal. Given the plan's
+    `run_id` and frozen store `root`, the preserve-first archive copy of each file a registration op
+    overwrites (rewrite_preservations) is a creation too, so every file apply creates is bound. Each list is
+    sorted, so the derivation is deterministic. Which stage performs an effect (apply, or the recorded
+    retirement after a green check) is the engine's, not recorded here."""
     creations, replacements, removals, repointings = [], [], [], []
     for row in ops:
         name = row["op"]
@@ -649,6 +677,7 @@ def derive_effects(ops, sources, manifest=None):
             creations.append({"path": row["preservation"], "digest": row["digest"]})
         if row["disposition"] == "migrate":
             removals.append({"path": row["path"], "digest": row["digest"]})
+    creations += rewrite_preservations(ops, manifest, run_id, root)
 
     def order(rows):
         return sorted(rows, key=lambda r: sorted(r.items()))
@@ -1267,7 +1296,7 @@ def _cross_check_plan(plan, missing, sources_clean, findings):
             if protected is not None:
                 findings.append("plan source {!r} preservation is protected: {}".format(
                     row["path"], protected))
-    effects = derive_effects(ops, sources, store_manifest(plan.get("store")))
+    effects = derive_effects(ops, sources, store_manifest(plan.get("store")), run_id, root)
     if "effects" not in missing and plan["effects"] != effects:
         findings.append("plan effects do not equal the effects its ops and sources name")
     _effect_collision_findings(plan, effects, findings)
@@ -1489,16 +1518,19 @@ def _effect_collision_findings(plan, effects, findings):
 
 def _control_area_effect_findings(plan, effects, findings):
     """No effect writes the store control area, in any homes generation (spec 14.2), save the plan's own
-    preservation copies at this run's adoption preimage homes and move destinations strictly beneath the Move
-    archive. Any other creation, replacement or repointing that equals, contains or lies within a control
-    root is refused, so a committed adoption-archive or Move-archive original is never overwritten and
-    nothing unbound is planted there. Removals are source paths, which _validate_plan_sources keeps out of
-    the control area. Called only on clean source rows and run id."""
+    preservation copies at this run's adoption preimage homes (its sources' and its rewrite_preservations)
+    and move destinations strictly beneath the Move archive. Any other creation, replacement or repointing
+    that equals, contains or lies within a control root is refused, so a committed adoption-archive or
+    Move-archive original is never overwritten and nothing unbound is planted there. Removals are source
+    paths, which _validate_plan_sources keeps out of the control area. Called only on clean source rows and
+    run id."""
     frozen = _frozen_store(plan)
     root = frozen[0] if frozen is not None else "."
     moved_root = _compose(root, ARCHIVE_REL + "/moved") + "/"
     allowed = set(row["preservation"] for row in plan["sources"]
                   if row["disposition"] in ("retire", "migrate") or row["occupying"])
+    allowed.update(row["path"] for row in rewrite_preservations(
+        plan["ops"], store_manifest(plan.get("store")), plan["run_id"], root))
     allowed.update(row["destination"] for row in plan["ops"]
                    if row["op"] == "move-file" and row["destination"].startswith(moved_root))
     for kind in ("creations", "replacements", "repointings"):
@@ -2232,7 +2264,8 @@ def self_test():
         p = copy.deepcopy(base)
         mutate(p)
         if refresh:  # re-derive effects, so the vector isolates the one check it names
-            p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p.get("store")))
+            p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p.get("store")),
+                                          p.get("run_id"), (_frozen_store(p) or (".",))[0])
         return validate_plan(p, homes=homes).status
     _D5 = "sha256:" + "5" * 64
     _extra_retire = {"op": "retire-file", "path": "legacy/OTHER.md", "preimage_digest": _D5}
@@ -2545,7 +2578,8 @@ def self_test():
     def _sub_findings(base, mutate=lambda p: None):
         p = copy.deepcopy(base)
         mutate(p)
-        p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p["store"]))
+        p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p["store"]), p["run_id"],
+                                      _frozen_store(p)[0])
         findings = []
         _validate_plan_sources(p["sources"], p["run_id"], 1, findings, _frozen_store(p)[0])
         _cross_check_plan(p, [], not findings, findings)
@@ -2645,6 +2679,34 @@ def self_test():
     check("plan-v2-re-adoption-keep-chain-valid", _mutated(re_create, lambda p: None, True) == VALID)
     check("plan-v2-re-adoption-manifest-creation-invalid",
           _mutated(re_create, lambda p: p["ops"].append(_create(_MANIFEST)), True) == INVALID)
+    # 17c: every file apply creates is a bound effect (spec 14.1 exact creations). Apply archives each file a
+    # registration op overwrites before it writes (spec 14.2), so a repointed consumer and a LIVE manifest a
+    # keep chain rewrites each add their archive copy at the run's preimage home, of the old bytes; the
+    # manifest init-store scaffolds is created, so its chain adds none. A plan whose effects omit either copy
+    # is refused, and with them the copies sit in the control area as the plan's own preservations.
+    _rid = base_plan["run_id"]
+    _reg = {"op": "register-unmanaged", "entry": "adopter/KEEP.md", "old_digest": _D0, "new_digest": _D4}
+    check("effects-repoint-preserves-consumer", derive_effects(
+        [_repoint("docs/consumer.md")], [], _MANIFEST, _rid)["creations"]
+        == [{"path": retire_preimage(_rid, "docs/consumer.md"), "digest": _D5}])
+    check("effects-live-manifest-chain-preserves-manifest", derive_effects(
+        [_reg, dict(_reg, entry="adopter/KEEP2.md", old_digest=_D4, new_digest=_D7)], [], _MANIFEST,
+        _rid)["creations"] == [{"path": retire_preimage(_rid, _MANIFEST), "digest": _D0}])
+    check("effects-scaffolded-manifest-chain-preserves-nothing", derive_effects(
+        [base_plan["ops"][1], _reg], [], _MANIFEST, _rid)["creations"]
+        == derive_effects([base_plan["ops"][1]], [], _MANIFEST, _rid)["creations"])
+    check("effects-sub-store-preservation-composed", derive_effects(
+        [_repoint("docs/consumer.md")], [], _MANIFEST, _rid, "sub")["creations"]
+        == [{"path": "sub/" + retire_preimage(_rid, "docs/consumer.md"), "digest": _D5}])
+
+    def _unpreserved(p):
+        p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p["store"]))
+    _repointed = copy.deepcopy(base_plan)
+    _repointed["ops"].append(_repoint("docs/consumer.md"))
+    check("plan-v2-effects-omit-consumer-preservation-invalid",
+          _mutated(_repointed, _unpreserved) == INVALID)
+    check("plan-v2-effects-omit-manifest-preservation-invalid",
+          _mutated(re_create, _unpreserved) == INVALID)
 
     # 18: K1 fix round 1. Each refusal vector FAILS if its fix is reverted; the counter-vectors guard the
     # predicate against over-refusal. (Fix 1, the product-root store_root gate, is plan-v2-sub-store-root-
