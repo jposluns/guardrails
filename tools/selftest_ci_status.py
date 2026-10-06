@@ -2,9 +2,10 @@
 """Behavioural self-test for tools/ci-status.sh.
 
 Every case runs the real script in a throwaway git repository with controlled gh, date, and sleep
-executables. The gh fixture emits paginated JSON for the script's real jq executable, and a separate check
-extracts that expression from ci-status.sh and exercises it directly against crafted JSON. Verdicts
-use the child's return code and complete captured output, never a success token.
+executables. The gh fixture emits paginated JSON for the script's real jq executable, separately for the
+head_sha-filtered query and the unfiltered run listing, and a separate check extracts that expression
+from ci-status.sh and exercises it directly against crafted JSON. Verdicts use the child's return code
+and complete captured output, never a success token.
 
   selftest_ci_status.py                              exit 0 on self-test pass, 1 on assertion failure
   selftest_ci_status.py --execution-report ABS_PATH  also write the executed check IDs as JSON
@@ -59,26 +60,44 @@ FAKE_GH = r"""import json
 import os
 import sys
 
+# A poll is either a list of pages served to BOTH the head_sha query and the unfiltered listing, a
+# dict with "filtered" and "scan" page lists, or a dict with "error" (first query fails) or
+# "scan_error" (only the unfiltered listing fails). Only the head_sha query advances the poll counter.
 args = sys.argv[1:]
+endpoint = next((arg for arg in args if arg.startswith("repos/")), "")
+if (endpoint.startswith("repos/fixture/repository/actions/runs?head_sha=")
+        and endpoint.endswith("&per_page=100")):
+    source = "filtered"
+elif endpoint == "repos/fixture/repository/actions/runs?per_page=100":
+    source = "scan"
+else:
+    print("gh fixture: query must request head_sha with per_page=100, "
+          "or the unfiltered listing with only per_page=100", file=sys.stderr)
+    sys.exit(1)
 with open(os.environ["MOCK_GH_COUNTER"], "r", encoding="utf-8") as handle:
     call = int(handle.read().strip())
-call += 1
-with open(os.environ["MOCK_GH_COUNTER"], "w", encoding="utf-8") as handle:
-    handle.write(str(call) + "\n")
+if source == "filtered":
+    call += 1
+    with open(os.environ["MOCK_GH_COUNTER"], "w", encoding="utf-8") as handle:
+        handle.write(str(call) + "\n")
+elif call == 0:
+    print("gh fixture: unfiltered listing requested before the head_sha query", file=sys.stderr)
+    sys.exit(1)
 with open(os.environ["MOCK_GH_RESPONSE"], "r", encoding="utf-8") as handle:
     polls = json.load(handle)["polls"]
 poll = polls[min(call - 1, len(polls) - 1)]
 if isinstance(poll, dict) and "error" in poll:
     print(poll["error"], file=sys.stderr)
     sys.exit(poll.get("exit", 1))
+if isinstance(poll, dict) and source == "scan" and "scan_error" in poll:
+    print(poll["scan_error"], file=sys.stderr)
+    sys.exit(1)
+if isinstance(poll, dict):
+    poll = poll.get(source)
 if not isinstance(poll, list) or not poll:
     print("gh fixture: malformed poll", file=sys.stderr)
     sys.exit(1)
 
-endpoint = next((arg for arg in args if arg.startswith("repos/")), "")
-if "?head_sha=" not in endpoint or "&per_page=100" not in endpoint:
-    print("gh fixture: query must request head_sha with per_page=100", file=sys.stderr)
-    sys.exit(1)
 pages = poll if "--paginate" in args else poll[:1]
 payload = pages if "--slurp" in args else pages[0]
 print(json.dumps(payload))
@@ -140,7 +159,7 @@ def page(runs, total_count=None):
 
 def jq_program():
     source = SCRIPT.read_text(encoding="utf-8")
-    prefix = '      jq --arg requested_sha "$SHA" -r \'\n'
+    prefix = '      jq -s --arg requested_sha "$SHA" -r \'\n'
     suffix = "'\n  } 2>&1\n}"
     if source.count(prefix) != 1:
         raise ValueError("ci-status.sh must contain exactly one jq program")
@@ -149,10 +168,12 @@ def jq_program():
     return source[start:end]
 
 
-def run_jq(program, pages, requested_sha):
+def run_jq(program, pages, requested_sha, scan_pages=None):
+    # The script slurps two documents: the head_sha-filtered pages, then the unfiltered listing's pages.
+    scan = pages if scan_pages is None else scan_pages
     return subprocess.run(
-        [JQ, "--arg", "requested_sha", requested_sha, "-r", program],
-        input=json.dumps(pages), text=True,
+        [JQ, "-s", "--arg", "requested_sha", requested_sha, "-r", program],
+        input=json.dumps(pages) + "\n" + json.dumps(scan) + "\n", text=True,
         capture_output=True, timeout=10,
         env={"PATH": SYSTEM_PATH, "LC_ALL": "C", "TZ": "UTC"},
     )
@@ -272,6 +293,11 @@ def main(report_path=None):
                                  "Run {}".format(index), head_sha)
                     for index in range(101)]
         wrong_head = dict(success_a, head_sha="f" * 40)
+        # A full first page of the unfiltered listing holding only other commits' runs, so this
+        # commit's run sits on page 2: outside the first page of the response.
+        other_commits = [workflow_run(5000 + index, "completed", "success",
+                                      "Other commit run {}".format(index), "e" * 40)
+                         for index in range(100)]
         try:
             program = jq_program()
             conflict = run_jq(program, [page([success_a, conflict_a], 1)], head_sha)
@@ -281,6 +307,9 @@ def main(report_path=None):
             successful = run_jq(program, [page([success_b, success_a], 2)], head_sha)
             too_many = run_jq(program, [page(overfull, 101)], head_sha)
             wrong_target = run_jq(program, [page([wrong_head], 1)], head_sha)
+            scan_found = run_jq(program, [page([])], head_sha,
+                                [page(other_commits, 101), page([success_a], 101)])
+            scan_short = run_jq(program, [page([])], head_sha, [page(other_commits, 101)])
             expected_rows = "\n".join(
                 "completed\tsuccess\t{}\t{}\t{}".format(
                     run["id"], run["name"], run["html_url"])
@@ -298,11 +327,16 @@ def main(report_path=None):
                 and "malformed workflow-runs response" in too_many.stderr,
                 wrong_target.returncode != 0
                 and "malformed workflow run record" in wrong_target.stderr,
+                (scan_found.returncode, scan_found.stdout)
+                == (0, "completed\tsuccess\t101\tWeb generator health\t"
+                    "https://example.invalid/runs/101\n"),
+                scan_short.returncode != 0
+                and "incomplete unfiltered workflow-runs listing" in scan_short.stderr,
             )
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             direct_result = "jq-filter setup failed: {}".format(exc)
         check("ci/jq-filter-direct-cases", direct_result,
-              (True, True, True, True, True, True))
+              (True, True, True, True, True, True, True, True))
 
         rc, _output, _calls = fixture.invoke([[page([wrong_head])]])
         check("ci/mismatched-head-sha-exit2", rc, 2)
@@ -397,6 +431,43 @@ def main(report_path=None):
         rc, _output, _calls = fixture.invoke(
             [[page([success_a], 3), page([success_b], 3)]])
         check("ci/pagination-count-mismatch-not-green", rc, 2)
+
+        # FIX-CI-STATUS-MISSES-COMPLETED-RUN: the head_sha filter answered zero runs while the
+        # unfiltered listing held this commit's completed/success run on its SECOND page. The run
+        # must be found and reported, never "no workflow run registered".
+        rc, output, _calls = fixture.invoke([{
+            "filtered": [page([])],
+            "scan": [page(other_commits, 101), page([success_a], 101)]}])
+        check("ci/scan-finds-run-beyond-first-page",
+              (rc, "Web generator health" in output, "no workflow run registered" in output),
+              (0, True, False))
+
+        # A failed run missing from the head_sha filter but present beyond the first page of the
+        # unfiltered listing must still fail the check, not leave only its green sibling.
+        rc, output, _calls = fixture.invoke([{
+            "filtered": [page([success_a])],
+            "scan": [page(other_commits, 102), page([success_a, failed_b], 102)]}])
+        check("ci/scan-finds-dropped-failure",
+              (rc, "Repository quality checks" in output and "failure" in output), (1, True))
+
+        # The unfiltered listing failing or stopping short is an API error (fail closed), both when
+        # the filter found nothing and when it found only green runs.
+        scan_closed = []
+        for filtered in ([page([])], [page([success_a])]):
+            rc, output, _calls = fixture.invoke([{
+                "filtered": filtered, "scan_error": "gh: HTTP 502"}])
+            scan_closed.append((rc, "could not read workflow runs" in output))
+            rc, output, _calls = fixture.invoke([{
+                "filtered": filtered, "scan": [page(other_commits, 250)]}])
+            scan_closed.append((rc, "incomplete unfiltered workflow-runs listing" in output))
+        check("ci/scan-unanswered-fail-closed", scan_closed, [(2, True)] * 4)
+
+        # The two sources disagreeing about one run's state is an API error, never a verdict.
+        rc, output, _calls = fixture.invoke([{
+            "filtered": [page([success_a, success_b])],
+            "scan": [page([success_a, failed_b])]}])
+        check("ci/scan-source-conflict-fail-closed",
+              (rc, "conflicting duplicate workflow-run records" in output), (2, True))
 
     if not _write_report(report_path):
         return 2

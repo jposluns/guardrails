@@ -15,7 +15,9 @@
 # 2026-08-08 against commit 7666cff, whose Quality run had concluded `success`.
 # Anything treating it as the green signal hangs; anything inverting it merges on a lie.
 #
-# This reads every paginated run from `actions/runs?head_sha=`, which needs only Actions: Read.
+# This reads every paginated run from `actions/runs?head_sha=` AND every page of the unfiltered
+# `actions/runs` listing, keeping the runs whose head_sha is exactly this commit. Both need only
+# Actions: Read.
 #
 # Usage:
 #   tools/ci-status.sh                 # current HEAD, report once
@@ -72,64 +74,110 @@ query() {
   # gating field. Name and URL remain display-only.
   # The no-run case (empty array) gets an explicit sentinel rather than a rendered "null", because
   # a real run's .status is nullable in the schema and must not be mistaken for "no run yet".
-  # Pagination is part of the verdict: reject non-identical records sharing a run ID, collapse only
-  # identical duplicates, then reconcile the unique count with the reported total_count. This detects
-  # count changes and conflicting duplicates, but cannot detect the same-count replacement race
-  # described above.
+  #
+  # TWO SOURCES, BOTH READ TO EXHAUSTION. The server-side head_sha filter alone is not a complete
+  # answer: on 2026-10-06 it returned zero runs for commit 0a0c0ca3 while the repository's run listing
+  # showed run 37498869615 for that exact head_sha as completed/success, an hour after the same filtered
+  # query had listed that run as in_progress. Trusting the filter alone misreported "no workflow run
+  # registered", and a failed run dropping out the same way would leave only its green siblings. So
+  # this also reads every page of the unfiltered listing (no branch, event, status, or created filter),
+  # selects runs whose head_sha equals the requested SHA client-side, and merges both sets by run ID.
+  # Either source failing, a malformed page or record in either, an unfiltered listing that returned
+  # fewer unique runs than its smallest reported total_count, or the two sources disagreeing about a
+  # run's status, conclusion, name, URL, or head_sha is an API error (fail closed), never "no run".
+  #
+  # Pagination is part of the verdict: within each source, reject non-identical records sharing a run
+  # ID and collapse only identical duplicates; reconcile the filtered source's unique count with its
+  # reported total_count. This detects count changes and conflicting duplicates, but cannot detect the
+  # same-count replacement race described above.
   {
-    gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" --paginate --slurp |
-      jq --arg requested_sha "$SHA" -r '
-      . as $pages
-      | if (($pages | type) != "array") or (($pages | length) == 0) then
-          error("malformed workflow-runs response")
-        elif any($pages[];
+    {
+      gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" --paginate --slurp &&
+        gh api "repos/${REPO}/actions/runs?per_page=100" --paginate --slurp
+    } |
+      jq -s --arg requested_sha "$SHA" -r '
+      def malformed_pages:
+        (type != "array")
+        or (length == 0)
+        or any(.[];
             (type != "object")
             or ((.total_count | type) != "number")
             or (.total_count < 0)
             or ((.total_count | floor) != .total_count)
             or ((.workflow_runs | type) != "array")
-            or ((.workflow_runs | length) > 100)) then
-          error("malformed workflow-runs response")
-        else
-          ([$pages[] | .workflow_runs[]]) as $all_runs
-          | if any($all_runs[];
-              ((.id | type) != "number")
-              or (.id <= 0)
-              or ((.id | floor) != .id)
-              or ((.head_sha | type) != "string")
-              or (.head_sha != $requested_sha)
-              or ((.status != null)
-                  and (((.status | type) != "string") or ((.status | length) == 0)))
-              or ((.conclusion != null)
-                  and (((.conclusion | type) != "string") or ((.conclusion | length) == 0)))
-              or ((.name | type) != "string")
-              or ((.name | length) == 0)
-              or ((.html_url | type) != "string")
-              or ((.html_url | length) == 0)) then
-              error("malformed workflow run record")
-            else
-              ([$pages[].total_count] | unique) as $totals
-              | ($all_runs | sort_by(.id) | group_by(.id)) as $run_groups
-              | if any($run_groups[];
-                  (([.[].status] | unique | length) > 1)
-                  or (([.[].conclusion] | unique | length) > 1)) then
-                  error("conflicting duplicate workflow-run records")
-                elif any($run_groups[]; ((unique | length) > 1)) then
-                  error("non-identical duplicate workflow-run records")
-                else
-                  ($run_groups | map(.[0]) | sort_by(.id)) as $runs
-                  | if (($totals | length) != 1) or (($runs | length) != $totals[0]) then
-                    error("inconsistent paginated workflow-runs snapshot")
-                elif ($runs | length) == 0 then
-                  "__NORUN__"
-                else
-                  $runs[]
-                  | [(.status // "-"), (.conclusion // "-"), (.id | tostring), .name, .html_url]
-                  | @tsv
+            or ((.workflow_runs | length) > 100));
+      def malformed_id:
+        (type != "object")
+        or ((.id | type) != "number")
+        or (.id <= 0)
+        or ((.id | floor) != .id)
+        or ((.head_sha | type) != "string");
+      def malformed_run:
+        malformed_id
+        or (.head_sha != $requested_sha)
+        or ((.status != null)
+            and (((.status | type) != "string") or ((.status | length) == 0)))
+        or ((.conclusion != null)
+            and (((.conclusion | type) != "string") or ((.conclusion | length) == 0)))
+        or ((.name | type) != "string")
+        or ((.name | length) == 0)
+        or ((.html_url | type) != "string")
+        or ((.html_url | length) == 0);
+      def unique_records:
+        (sort_by(.id) | group_by(.id)) as $groups
+        | if any($groups[];
+            (([.[].status] | unique | length) > 1)
+            or (([.[].conclusion] | unique | length) > 1)) then
+            error("conflicting duplicate workflow-run records")
+          elif any($groups[]; ((unique | length) > 1)) then
+            error("non-identical duplicate workflow-run records")
+          else
+            $groups | map(.[0])
+          end;
+      def projection: [.status, .conclusion, .name, .html_url, .head_sha];
+      if ((type != "array") or (length != 2)) then
+        error("malformed workflow-runs response")
+      else
+        .[0] as $filtered_pages
+        | .[1] as $scan_pages
+        | if ($filtered_pages | malformed_pages) or ($scan_pages | malformed_pages) then
+            error("malformed workflow-runs response")
+          else
+            ([$filtered_pages[] | .workflow_runs[]]) as $filtered_all
+            | ([$scan_pages[] | .workflow_runs[]]) as $scan_all
+            | if any($filtered_all[]; malformed_run) or any($scan_all[]; malformed_id) then
+                error("malformed workflow run record")
+              else
+                ([$scan_all[] | select(.head_sha == $requested_sha)]) as $scan_matching
+                | if any($scan_matching[]; malformed_run) then
+                    error("malformed workflow run record")
+                  else
+                    ($filtered_all | unique_records) as $filtered_runs
+                    | ($scan_matching | unique_records) as $scan_runs
+                    | ([$filtered_pages[].total_count] | unique) as $totals
+                    | ([$scan_pages[].total_count] | min) as $scan_floor
+                    | ([$scan_all[].id] | unique | length) as $scanned
+                    | if (($totals | length) != 1) or (($filtered_runs | length) != $totals[0]) then
+                        error("inconsistent paginated workflow-runs snapshot")
+                      elif $scanned < $scan_floor then
+                        error("incomplete unfiltered workflow-runs listing")
+                      else
+                        (($filtered_runs + $scan_runs) | sort_by(.id) | group_by(.id)) as $runs
+                        | if any($runs[]; ((map(projection) | unique | length) > 1)) then
+                            error("conflicting duplicate workflow-run records")
+                          elif ($runs | length) == 0 then
+                            "__NORUN__"
+                          else
+                            $runs[]
+                            | .[0]
+                            | [(.status // "-"), (.conclusion // "-"), (.id | tostring), .name, .html_url]
+                            | @tsv
+                          end
+                      end
                   end
-                end
-            end
-        end'
+              end
+          end
+      end'
   } 2>&1
 }
 
