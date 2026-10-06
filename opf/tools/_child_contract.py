@@ -1,0 +1,584 @@
+#!/usr/bin/env python3
+"""The fail-closed child contract (secfcl), implemented ONCE (OPF-SELF-CONTAIN; merge train 2 QA r6).
+
+Two children in this repository run other code and must prove the structured verdict their parent
+accepts survived that code's cleanup: the OPF self-test unit child (opf/tools/opf.py,
+_cmd_self_test_unit) and the hook-scripts parity child (tools/check_hook_scripts.py, parity_child).
+Through merge train 2 QA rounds 2 to 5 each carried its OWN copy of the contract, and every round's
+fix had to reach every copy; round 6 found the round-5 settle rule still accepting incomplete
+cleanup in both copies at once. This module is the single implementation, extracted on the _semver
+precedent: it lives under opf/tools/ so the OPF subtree stays dependency-closed (hold H-12; the
+standalone-closure gate observes it), and tools/ callers import it from here, one source and no
+fork. Its own self-test (python3 -I -B _child_contract.py --self-test, also registered as the
+opf-child-contract unit of `opf.py --self-test`) exercises every channel below through real child
+interpreters.
+
+THE CONTRACT, in the order it runs:
+
+1. RECORD FROM AN EXIT HANDLER REGISTERED FIRST. register() registers the record handler and
+   requires it to be the only one (another exit handler already registered would be skipped by the
+   handler's own os._exit, so register() unregisters and returns False and the caller refuses by
+   name). Exit handlers run last-registered-first, so being first puts the record AFTER every
+   cleanup handler the loaded or tested code registers, and code that ends the process from its
+   cleanup -- an os._exit, a fault that kills the process, a signal -- prevents the record, and the
+   parent fails closed on the missing record (merge train 2 QA r2, codex MAJOR).
+2. CLEANUP PROVEN COMPLETE. The handler collects cyclic garbage REPEATEDLY, at most GC_PASS_BOUND
+   passes, until one pass CHANGES NOTHING: gc.collect() freed no object AND the identity set of
+   gc-tracked objects is the same after the pass as before it (collection_pass_changed_nothing;
+   the measurement's own artefacts are excluded). A pass that frees nothing does NOT settle on its
+   own, and neither does one that leaves no more objects tracked than before it: a finalizer that
+   RESURRECTS its object is not counted as freed (QA r5), and one that also RELEASES other tracked
+   objects while it creates new cyclic cleanup work leaves the tracked COUNT equal or lower
+   (QA r6), so both count rules accepted incomplete cleanup; the identity comparison sees the
+   released and the created objects themselves, the pass does not settle, and the next pass
+   collects the new work, running its finalizers before the record (QA r4). Between passes the
+   reporting machinery is re-checked and restored, so a finalizer that replaces a stream or hook
+   mid-collection is found. A run that never settles inside the bound is a fault, by name, never
+   a verdict over cleanup work that cannot be shown complete.
+3. REPORTING MACHINERY GUARDED. The reporting snapshot (sys.stderr, sys.excepthook,
+   sys.unraisablehook, threading.excepthook) is taken at construction, before the loaded or tested
+   code runs. arm_audit() arms an audit hook that sees every FAULT_EVENTS event: CPython raises
+   `sys.unraisablehook` and `sys.excepthook` audit events BEFORE it calls whatever hook is
+   installed, and an audit hook cannot be removed, so a silenced hook or a replaced stream cannot
+   hide such a fault from it (merge train 2 QA r3, claude MINORs 1 and 2). restore_reporting()
+   puts every replaced piece back and names it; the record handler runs it before, between and
+   after the collection passes, and any replacement it finds, the original stderr closed, a fault
+   event the audit hook saw, or a stream flush failure is a fault.
+4. OS._EXIT WITH THE DECIDED CODE. With the collection settled and the machinery restored, the
+   handler writes the caller's fault line (file descriptor 2) when there are faults, calls the
+   caller's record callback with the decided code (the settled code, or fail_code when any fault
+   was recorded), and ends the process ITSELF with os._exit(code), so no interpreter finalization
+   runs after the record.
+
+DISCLOSED RESIDUALS -- the channels this contract CANNOT close, disclosed here ONCE (the two
+callers' docstrings point here instead of restating them):
+
+  (a) a THREAD's uncaught exception reaches threading.excepthook with no audit event before it, so
+      cleanup code that replaces that hook and puts it back before the record hides the fault from
+      this child; a replacement still in place at the record is found and refused, and the default
+      hook's report lands on the child's error stream, which both parents refuse.
+  (b) while cleanup code has DELETED sys.unraisablehook, CPython reports an unraisable fault (an
+      exit handler's exception, a finalizer's) by writing it to sys.stderr with no audit event, so
+      cleanup code that deletes that hook, replaces sys.stderr and restores both before the record
+      hides such a fault (merge train 2 QA r5, codex MEDIUM, reproduced; the self-test measures
+      it: the same fault with the hook present, even silenced, is caught by the audit event, so
+      DELETED is the precise wording).
+  (c) an object still REACHABLE at the record is never finalized (the os._exit ends the child), so
+      its finalizer neither runs nor faults.
+  (d) the identity comparison is by id(): a finalizer that frees tracked objects and creates
+      replacements that receive the SAME addresses within one pass, the counts equal, reads as a
+      pass that changed nothing (CPython reuses freed addresses; not reproduced -- the probing
+      hosts allocated fresh addresses for the reproduction shapes, which free list objects and
+      create instances of new classes).
+
+The parent-side halves of the contract stay with the parents: what each accepts (a complete record
+bound to the child, an empty error stream), and the channel by which reviewed, pinned loaded code
+replaces the reporting machinery outright (a forged record over a clean exit), each disclosed
+there. Offline, stdlib only; imported by opf.py as a sibling and by tools/ callers through an
+explicit opf/tools path insert.
+"""
+import gc
+import os
+import sys
+
+# How many collection passes the record handler may make before one settles (changes nothing). A
+# deeper chain of finalizers that keep creating work is refused by name, never shown complete.
+GC_PASS_BOUND = 10
+# The audit events CPython raises BEFORE it hands an exception to the reporting machinery
+# (Python/errors.c: `sys.unraisablehook`; Python/pythonrun.c: `sys.excepthook`).
+FAULT_EVENTS = frozenset(("sys.unraisablehook", "sys.excepthook"))
+# The reporting machinery a cleanup fault is reported through: the error stream and the three
+# hooks CPython hands an uncaught or unraisable exception.
+REPORTING = (("sys", "stderr"), ("sys", "excepthook"), ("sys", "unraisablehook"),
+             ("threading", "excepthook"))
+
+
+def reporting_snapshot():
+    """The current reporting machinery, [(module, attribute, object)], for restore_reporting."""
+    import threading
+    owners = {"sys": sys, "threading": threading}
+    return [(owners[owner], name, getattr(owners[owner], name, None))
+            for owner, name in REPORTING]
+
+
+def _tracked_ids():
+    """The id set of every gc-tracked object. gc.get_objects() excludes the list it returns, and
+    the set is built only after that snapshot, so neither artefact is in it."""
+    objects = gc.get_objects()
+    ids = set(map(id, objects))
+    del objects
+    return ids
+
+
+def collection_pass_changed_nothing():
+    """One garbage-collection pass; True when it CHANGED NOTHING: it freed no object and the
+    identity set of tracked objects after it equals the set before it. The before-set, alive
+    across the pass, is discarded from the after side (it is this function's own artefact). A
+    resurrecting finalizer frees nothing, and one that releases tracked objects while creating
+    new cyclic work keeps the count equal or lower, but either way the SET differs, so the pass
+    does not read as settled (merge train 2 QA r5 and r6, codex MEDIUMs); residual (d) of the
+    module docstring is the one shape this comparison cannot see. CPython's collector also
+    untracks eligible tuples and dicts during a pass, which reads as a change; that settles by
+    itself on a following pass."""
+    before = _tracked_ids()
+    freed = gc.collect()
+    after = _tracked_ids()
+    after.discard(id(before))
+    return freed == 0 and after == before
+
+
+class FailClosedChild:
+    """One child's contract instance (the module docstring states the contract). `record(code)`
+    writes the caller's structured verdict (the OPF completion record; the parity result and its
+    terminator -- it may write nothing for a failing code when the failure is carried by the exit
+    alone); `fault_line(faults)` returns the caller's named fault bytes for file descriptor 2;
+    `fail_code` is the caller's cannot-evaluate exit. The reporting snapshot is taken HERE, at
+    construction, before the loaded or tested code runs."""
+
+    def __init__(self, record, fault_line, fail_code=2):
+        self.faults = []
+        self.fail_code = fail_code
+        self._record = record
+        self._fault_line = fault_line
+        self._settled = []
+        self._snapshot = reporting_snapshot()
+
+    def register(self):
+        """Register the record handler FIRST, before the caller imports or runs anything that
+        registers an exit handler. True when it is the only exit handler; otherwise it is
+        unregistered and False returned, and the caller refuses by name (an earlier handler would
+        be skipped by the record's os._exit)."""
+        import atexit
+        atexit.register(self._record_at_exit)
+        if getattr(atexit, "_ncallbacks", lambda: 1)() != 1:
+            atexit.unregister(self._record_at_exit)
+            return False
+        return True
+
+    def arm_audit(self):
+        """Arm the audit hook that sees every FAULT_EVENTS event, whatever hook or stream is
+        installed. Callers arm it at their guard's start: the parity child before it loads either
+        file, the unit child when the unit returns (a unit may legitimately exercise those hooks
+        while it runs). An arming failure is itself a fault."""
+        def audit(event, _args):
+            if event in FAULT_EVENTS:
+                self.faults.append("a cleanup fault reached {}".format(event))
+        try:
+            sys.addaudithook(audit)
+        except Exception as exc:
+            self.faults.append("the cleanup audit hook could not be armed ({})".format(
+                type(exc).__name__))
+
+    def restore_reporting(self):
+        """Put every piece of the reporting machinery back where cleanup code replaced it, and
+        return what was found replaced (or the snapshot's error stream closed, which cannot be
+        undone), as names; an empty list means the machinery was intact."""
+        swapped = []
+        for owner, name, original in self._snapshot:
+            if getattr(owner, name, None) is not original:
+                swapped.append("{}.{}".format(owner.__name__, name))
+                setattr(owner, name, original)
+        if getattr(self._snapshot[0][2], "closed", True):
+            swapped.append("sys.stderr (closed)")
+        return swapped
+
+    def settle(self, code):
+        """The caller's verdict is in: the record handler may now write. An unsettled child leaves
+        no record, and the parent fails closed on its absence."""
+        self._settled.append(code)
+
+    def _record_at_exit(self):
+        # Registered FIRST, so it runs LAST among the exit handlers: after every cleanup handler
+        # the loaded or tested code registered. An earlier handler that ends the process prevents
+        # this write, and the parent fails closed on the missing record (secfcl).
+        if not self._settled:
+            return   # never settled: no record, and the parent fails closed
+        code = self._settled[0]
+        replaced = self.restore_reporting()
+        settled = False
+        for _ in range(GC_PASS_BOUND):
+            if collection_pass_changed_nothing():
+                settled = True
+                break
+            replaced += self.restore_reporting()
+        if not settled:
+            self.faults.append(
+                "garbage collection still freed or created objects after {} passes, so cleanup "
+                "work its finalizers keep creating cannot be shown complete".format(GC_PASS_BOUND))
+        replaced += self.restore_reporting()
+        if replaced:
+            self.faults.append("cleanup code replaced the reporting machinery ({})".format(
+                ", ".join(sorted(set(replaced)))))
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception as exc:
+            self.faults.append("the streams could not be flushed ({})".format(type(exc).__name__))
+        if self.faults:
+            code = self.fail_code
+            try:
+                os.write(2, self._fault_line(self.faults))
+            except OSError:
+                pass
+        try:
+            self._record(code)
+        finally:
+            os._exit(code)
+
+
+# --- self-test -----------------------------------------------------------------------------------
+# Every channel of the contract, exercised through REAL child interpreters: each case seeds one
+# shape of loaded-code cleanup into a child built on this module (the same record/fault-line
+# wiring both callers use) and asserts the child's exit code, the record it left (or provably did
+# not leave), and its error stream. The disclosed-window case (b) is MEASURED, not assumed: the
+# deleted-hook window passes (the residual), and the same fault with the hook present, or merely
+# silenced, is caught.
+
+_CASE_HEAD = (
+    "import atexit\n"
+    "import gc\n"
+    "import io\n"
+    "import os\n"
+    "import sys\n"
+    "sys.path.insert(0, sys.argv[2])\n"
+    "import _child_contract\n"
+    "\n"
+    "\n"
+    "def record(code):\n"
+    "    with open(sys.argv[1], \"w\", encoding=\"utf-8\") as handle:\n"
+    "        handle.write(\"record {}\\n\".format(code))\n"
+    "\n"
+    "\n"
+    "def fault_line(faults):\n"
+    "    return (\"child-contract-fault: {}; failing closed (secfcl)\\n\"\n"
+    "            .format(\"; \".join(faults)[:1000])).encode(\"utf-8\", \"replace\")\n"
+    "\n"
+    "\n"
+    "contract = _child_contract.FailClosedChild(record=record, fault_line=fault_line)\n")
+
+_CASE_REGISTER = (
+    "if not contract.register():\n"
+    "    print(\"refused: another exit handler came first\", file=sys.stderr)\n"
+    "    sys.exit(3)\n"
+    "contract.arm_audit()\n")
+
+_CASE_SETTLE = "contract.settle(0)\n"
+
+# One seed per channel: the loaded-code cleanup shape a child runs after the contract is armed.
+_SEED_BENIGN = """
+class Benign:
+    def __init__(self):
+        self.cycle = self
+
+    def __del__(self):
+        pass
+
+
+Benign()
+atexit.register(lambda: None)
+"""
+
+_SEED_FAULT = "atexit.register(os.remove, \"/nonexistent-child-contract-selftest\")\n"
+
+_SEED_CHAIN = """
+class Inner:
+    def __init__(self):
+        self.cycle = self
+        self.remove = os.remove
+
+    def __del__(self):
+        self.remove("/nonexistent-child-contract-chain")
+
+
+class Outer:
+    def __init__(self):
+        self.cycle = self
+        self.inner = Inner
+
+    def __del__(self):
+        self.inner()
+
+
+atexit.register(Outer)
+"""
+
+# Merge train 2 QA r5 (codex MEDIUM): the finalizer resurrects its object, so the pass frees
+# nothing, while it creates new cyclic cleanup work whose finalizer faults.
+_SEED_RESURRECT = """
+held = []
+
+
+class Inner:
+    def __init__(self):
+        self.cycle = self
+        self.remove = os.remove
+
+    def __del__(self):
+        self.remove("/nonexistent-child-contract-resurrect")
+
+
+class Outer:
+    def __init__(self):
+        self.cycle = self
+        self.held = held
+        self.inner = Inner
+
+    def __del__(self):
+        self.held.append(self)
+        self.inner()
+
+
+def setup():
+    gc.collect()
+    gc.disable()
+    Outer()
+
+
+atexit.register(setup)
+"""
+
+# Merge train 2 QA r6 (codex MEDIUM): the resurrecting finalizer also RELEASES tracked objects
+# while it creates the new work, so the tracked count stays equal or lower and the round-5
+# count rule settled over the pending faulting Inner.
+_SEED_NET_RELEASE = """
+held = []
+
+
+class Inner:
+    def __init__(self):
+        self.cycle = self
+
+    def __del__(self):
+        raise RuntimeError("new cyclic cleanup failed")
+
+
+class Outer:
+    def __init__(self):
+        self.cycle = self
+        self.held = held
+        self.spare = [[] for _ in range(100)]
+        self.inner = Inner
+
+    def __del__(self):
+        self.held.append(self)
+        self.spare.clear()
+        self.inner()
+
+
+def setup():
+    gc.collect()
+    gc.disable()
+    Outer()
+
+
+atexit.register(setup)
+"""
+
+# Merge train 2 QA r6 (claude MINOR): the narrower variant, dropping exactly one tracked object.
+_SEED_NET_SWAP = """
+held = []
+
+
+class Inner:
+    def __init__(self):
+        self.cycle = self
+
+    def __del__(self):
+        raise RuntimeError("new cyclic cleanup failed")
+
+
+class Outer:
+    def __init__(self):
+        self.cycle = self
+        self.held = held
+        self.buf = [[]]
+        self.inner = Inner
+
+    def __del__(self):
+        self.held.append(self)
+        self.buf = None
+        self.inner()
+
+
+def setup():
+    gc.collect()
+    gc.disable()
+    Outer()
+
+
+atexit.register(setup)
+"""
+
+_SEED_UNSETTLED = """
+def make_link(depth):
+    class Link:
+        def __init__(self, depth):
+            self.cycle = self
+            self.depth = depth
+            self.make = make_link
+
+        def __del__(self):
+            if self.depth > 0:
+                self.make(self.depth - 1)
+
+    Link(depth)
+
+
+atexit.register(make_link, _child_contract.GC_PASS_BOUND + 2)
+"""
+
+# Residual (b), measured: cleanup deletes the hook, replaces the stream, faults, restores both.
+_SEED_WINDOW = """
+saved = []
+
+
+def hide():
+    saved.append(sys.stderr)
+    saved.append(sys.unraisablehook)
+    sys.stderr = io.StringIO()
+    del sys.unraisablehook
+
+
+def fault():
+    raise RuntimeError("hidden cleanup fault")
+
+
+def restore():
+    sys.stderr = saved[0]
+    sys.unraisablehook = saved[1]
+
+
+atexit.register(restore)
+atexit.register(fault)
+atexit.register(hide)
+"""
+
+# The control: the same fault with the hook PRESENT (stream still replaced and restored); the
+# audit event fires, so only the DELETED hook opens the window.
+_SEED_WINDOW_CONTROL = """
+saved = []
+
+
+def hide():
+    saved.append(sys.stderr)
+    sys.stderr = io.StringIO()
+
+
+def fault():
+    raise RuntimeError("hidden cleanup fault")
+
+
+def restore():
+    sys.stderr = saved[0]
+
+
+atexit.register(restore)
+atexit.register(fault)
+atexit.register(hide)
+"""
+
+# (name, source before register(), source after arm_audit(), expected exit, expected record line
+# or None for provably no record, needles the error stream must carry, whether it must be empty).
+_CASES = (
+    ("clean", "", "", 0, "record 0", (), True),
+    ("benign-cyclic-finalizer", "", _SEED_BENIGN, 0, "record 0", (), True),
+    ("another-handler-first", "atexit.register(lambda: None)\n", "", 3, None,
+     ("refused: another exit handler came first",), False),
+    ("cleanup-exit-no-record", "", "atexit.register(os._exit, 0)\n", 0, None, (), True),
+    ("builtin-cleanup-fault", "", _SEED_FAULT, 2, "record 2",
+     ("child-contract-fault", "a cleanup fault reached sys.unraisablehook"), False),
+    ("silenced-unraisablehook-fault", "",
+     "sys.unraisablehook = lambda unraisable: None\n" + _SEED_FAULT, 2, "record 2",
+     ("a cleanup fault reached sys.unraisablehook",), False),
+    ("stderr-replaced-by-cleanup", "",
+     "atexit.register(setattr, sys, \"stderr\", io.StringIO())\n", 2, "record 2",
+     ("cleanup code replaced the reporting machinery (sys.stderr)",), False),
+    ("excepthook-replaced-by-cleanup", "",
+     "atexit.register(setattr, sys, \"excepthook\", print)\n", 2, "record 2",
+     ("replaced the reporting machinery (sys.excepthook)",), False),
+    ("chained-finalizer-fault", "", _SEED_CHAIN, 2, "record 2",
+     ("a cleanup fault reached sys.unraisablehook",), False),
+    ("resurrecting-finalizer-fault", "", _SEED_RESURRECT, 2, "record 2",
+     ("a cleanup fault reached sys.unraisablehook",), False),
+    ("net-release-resurrecting-fault", "", _SEED_NET_RELEASE, 2, "record 2",
+     ("a cleanup fault reached sys.unraisablehook",), False),
+    ("net-swap-resurrecting-fault", "", _SEED_NET_SWAP, 2, "record 2",
+     ("a cleanup fault reached sys.unraisablehook",), False),
+    ("unsettled-finalizer-chain", "", _SEED_UNSETTLED, 2, "record 2",
+     ("still freed or created objects after",), False),
+    ("stdout-closed-by-cleanup", "", "atexit.register(sys.stdout.close)\n", 2, "record 2",
+     ("could not be flushed",), False),
+    ("deleted-hook-window-passes", "", _SEED_WINDOW, 0, "record 0", (), True),
+    ("kept-hook-window-fault", "", _SEED_WINDOW_CONTROL, 2, "record 2",
+     ("a cleanup fault reached sys.unraisablehook",), False),
+)
+
+
+def _run_case(pre, body):
+    """Run one seeded child; returns (exit code, the record line or None, stderr text). The child
+    is a real `python3 -I -B -c` interpreter wired exactly as the callers wire the contract."""
+    import subprocess
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    source = _CASE_HEAD + pre + _CASE_REGISTER + body + _CASE_SETTLE
+    with tempfile.TemporaryDirectory(prefix="child-contract-selftest-") as box:
+        result = os.path.join(box, "record")
+        proc = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", source, result, here],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+        record = None
+        if os.path.exists(result):
+            with open(result, "r", encoding="utf-8") as handle:
+                record = handle.read().strip()
+    return proc.returncode, record, proc.stderr.decode("utf-8", "replace")
+
+
+def self_test():
+    """Every channel of the contract through real children (_CASES), plus the disclosure floor:
+    the module docstring must keep naming each channel the contract cannot close."""
+    failures = []
+    for needle in ("DELETED sys.unraisablehook", "threading.excepthook", "SAME addresses",
+                   "never finalized"):
+        if needle not in (__doc__ or ""):
+            failures.append("the module docstring no longer discloses {!r}".format(needle))
+    for name, pre, body, want_code, want_record, needles, want_quiet in _CASES:
+        try:
+            code, record, err = _run_case(pre, body)
+        except Exception as exc:
+            failures.append("{}: the child could not be driven ({})".format(
+                name, type(exc).__name__))
+            continue
+        if code != want_code:
+            failures.append("{}: exit {} (expected {}); stderr tail {!r}".format(
+                name, code, want_code, err[-240:]))
+        if record != want_record:
+            failures.append("{}: record {!r} (expected {!r})".format(name, record, want_record))
+        missing = [needle for needle in needles if needle not in err]
+        if missing:
+            failures.append("{}: stderr lacks {!r} (tail {!r})".format(name, missing, err[-240:]))
+        if want_quiet and err.strip():
+            failures.append("{}: expected an empty error stream, got {!r}".format(
+                name, err[-240:]))
+    if failures:
+        print("child-contract self-test: FAIL", file=sys.stderr)
+        for failure in failures:
+            print("  - " + failure, file=sys.stderr)
+        return 1
+    print("child-contract self-test: PASS (a clean child and a benign cyclic finalizer pass with "
+          "their record; an exit handler registered before the record handler refuses by name; a "
+          "cleanup os._exit leaves no record, so the parent fails closed on its absence; a "
+          "builtin cleanup fault, the same fault under a silenced unraisablehook, a stderr or "
+          "excepthook left replaced by cleanup, a finalizer-created cyclic fault, a resurrecting "
+          "finalizer whose new work faults, one that also releases tracked objects while it "
+          "creates that work (QA r6), its single-object swap variant, a finalizer chain "
+          "outlasting the collection bound, and a closed stdout each fail closed by name with "
+          "the exit-2 record; and the deleted-unraisablehook window passes exactly as residual "
+          "(b) discloses while its kept-hook control is caught by the audit event)")
+    return 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
+    print("usage: _child_contract.py --self-test", file=sys.stderr)
+    sys.exit(2)

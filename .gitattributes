@@ -515,6 +515,7 @@ opf/spec/OPF-INIT-D2B.md text eol=lf
 opf/spec/OPF-QUICKSTART.md text eol=lf
 opf/spec/OPF-SPEC.md text eol=lf
 opf/tools/_byte_canon.py text eol=lf
+opf/tools/_child_contract.py text eol=lf
 opf/tools/_commonmark_headings.py text eol=lf
 opf/tools/_containment.py text eol=lf
 opf/tools/_journal.py text eol=lf

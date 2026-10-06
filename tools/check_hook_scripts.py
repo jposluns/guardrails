@@ -50,13 +50,17 @@ reviewed edit here. Six legs:
       [sys.executable, "-I", "-S", "-B", <this file>, "--parity-child", ...] that loads both files with
       importlib. The child writes its structured result at interpreter shutdown, AFTER the loaded
       files' own cleanup (non-daemon threads joined, their atexit hooks run, pending cyclic-garbage
-      finalizers collected REPEATEDLY until a pass frees nothing and leaves no more objects
-      tracked than before it, within _GC_PASS_BOUND passes, past which the child refuses by
-      name -- merge train 2 QA r4, codex MEDIUM: a collected finalizer may create NEW cyclic
-      cleanup work, which one collection left for the ending os._exit to skip; QA r5, codex
-      MEDIUM: a finalizer that resurrects its object while creating that work makes a pass
-      free nothing), and then ends ITSELF with os._exit, so no interpreter finalization
-      runs after the result (merge train 2 QA r3); a fault the loaded code reports into a replaced
+      finalizers collected REPEATEDLY until a pass CHANGES NOTHING: frees no object and leaves
+      the identity set of tracked objects unchanged, within _child_contract.GC_PASS_BOUND
+      passes, past which the child refuses by name -- merge train 2 QA r4, codex MEDIUM: a
+      collected finalizer may create NEW cyclic cleanup work, which one collection left for the
+      ending os._exit to skip; QA r5, codex MEDIUM: a finalizer that resurrects its object
+      while creating that work makes a pass free nothing; QA r6, codex MEDIUM: one that also
+      RELEASES other tracked objects kept the tracked count equal or lower, so the count rules
+      settled over its pending work), and then ends ITSELF with os._exit, so no interpreter
+      finalization runs after the result (merge train 2 QA r3; the child half of this discipline
+      is the shared fail-closed child contract, opf/tools/_child_contract.py, implemented once
+      for this child and the OPF unit child); a fault the loaded code reports into a replaced
       or silenced reporting machinery is seen by an audit hook and makes the child exit 2, and
       reporting machinery left replaced is put back and refused the same way. The parent accepts
       a verdict only with the zero exit, the complete result ending in its terminator line, and
@@ -95,19 +99,12 @@ DISCLOSED RESIDUALS (what this gate does not catch):
     a residual (merge train 2 QA r2, claude MINOR).
   - Leg (p): the r2 finalization residual is closed (merge train 2 QA r3: pending finalizers run
     before the result and the child ends with os._exit at it, so a finalizer that ends the child
-    silently leaves no result). What remains: a fault reported through a path that raises no
-    audit event, into a stream or hook that loaded code replaced and then put back before the
-    result is written, is not seen (a replacement still in place then is refused). Two such
-    paths exist: a THREAD's uncaught exception reaches threading.excepthook with no audit event
-    before it; and while loaded code has DELETED sys.unraisablehook, CPython reports an
-    unraisable fault (an exit handler's exception, a finalizer's) by writing it to sys.stderr
-    with no audit event, so loaded code that deletes that hook, replaces sys.stderr and
-    restores both before the result hides such a fault (merge train 2 QA r5, codex MEDIUM,
-    reproduced). An object still reachable at the result is never finalized (os._exit), so its
-    finalizer neither runs nor faults; and the repeated collection settles on a pass that
-    frees nothing and leaves no more objects tracked than before it, so a finalizer in that
-    pass that creates new cyclic garbage while releasing at least as many other tracked
-    objects is not collected again.
+    silently leaves no result). The remaining channels are the shared child contract's, disclosed
+    ONCE in opf/tools/_child_contract.py (its DISCLOSED RESIDUALS section): a thread's uncaught
+    exception raising no audit event; the window while loaded code has DELETED sys.unraisablehook
+    with sys.stderr replaced, both restored before the result (merge train 2 QA r5, codex MEDIUM,
+    reproduced); an object still reachable at the result, never finalized (os._exit); and the
+    address-reuse edge of the identity-set settle comparison (merge train 2 QA r6).
   - The scripts run under this gate's interpreter (sys.executable), not the host's `python3` lookup.
     Not exercised: a python3 too old to accept -I (before 3.4), which exits 2 with a usage error before
     the launcher runs; a python3 that cannot be found or started (the outcome is the host's); and a
@@ -124,7 +121,6 @@ fixture set and manifest mismatch).
   check_hook_scripts.py             run the gate
   check_hook_scripts.py --self-test seeded faults against copies of the real files
 """
-import atexit
 import datetime
 import importlib.util
 import inspect
@@ -182,14 +178,10 @@ ABSENT_IN_PACK = ("_is_worker", "_sibling_or_skip")
 # Leg (p): the parity child's completeness terminator, written after the JSON result line at
 # the child's shutdown; a result without it was cut short by the loaded code's cleanup (secfcl).
 PARITY_COMPLETE = "AIQT-PARITY-RESULT-COMPLETE"
-# How many garbage-collection passes the parity child's emit may make before one SETTLES: frees
-# nothing AND leaves no more objects tracked than before it (merge train 2 QA r4, codex MEDIUM: a
-# collected finalizer may CREATE new cyclic cleanup work, which the r3 single collection left
-# for the ending os._exit to skip; QA r5, codex MEDIUM: a finalizer that resurrects its own
-# object, which a pass then does not count as freed, can still create that work); a run that
-# never settles inside this bound is refused by name, never a result over cleanup work that
-# cannot be shown complete.
-_GC_PASS_BOUND = 10
+# The parity child's record handler, settling collection, guarded reporting machinery and ending
+# os._exit are the shared fail-closed child contract's, implemented once in
+# opf/tools/_child_contract.py (merge train 2 QA r6; parity_child wires it to this gate's result
+# and fault line).
 
 
 class GateError(Exception):
@@ -658,92 +650,60 @@ def leg_parity(root, findings):
 
 
 def parity_child(spec):
-    """Child mode: load both files and compare the named objects. The structured result (one JSON
-    line holding the list of names that differ, then the PARITY_COMPLETE line) is written at
-    interpreter shutdown by an exit handler registered FIRST, before either file is loaded: exit
-    handlers run last-registered-first, after non-daemon threads are joined, so the write comes
-    after every cleanup handler the loaded files registered, and loaded code that ends the child
-    from its cleanup suppresses the result
-    instead of leaving an already-reported pass standing (the fail-closed child-process rule,
-    secfcl; merge train 2 QA rounds 1 and 2). What runs after the exit handlers -- interpreter
-    finalization: cyclic-garbage finalizers, module teardown -- can still follow the emitted
-    result; the parent therefore refuses ANY bytes on the child's error stream, so a finalizer
-    that writes or raises is caught, and only one that ends the child silently over the
-    already-complete result remains, disclosed in DISCLOSED RESIDUALS above, as is the channel by
-    which loaded code replaces this reporting machinery outright (a forged result plus terminator
-    on a clean exit). Merge train 2 QA r3 closes that finalizer: emit collects the cyclic garbage
-    BEFORE the result, so pending finalizers run first -- r4 collects REPEATEDLY, until a pass
-    frees nothing, within _GC_PASS_BOUND passes, past which emit refuses by name (codex MEDIUM:
-    a collected finalizer that creates new cyclic cleanup work needs more than one pass), and
-    r5 also requires that settling pass to leave no more objects tracked than before it (codex
-    MEDIUM: a finalizer that resurrects its object while creating that work frees nothing) -- and
-    then ends the child ITSELF with os._exit(0), so no interpreter finalization runs after the
-    result (codex MEDIUM). The
-    reporting machinery is guarded (claude MINOR 2): an audit hook armed before either file loads
-    sees every `sys.unraisablehook` and `sys.excepthook` event (CPython raises them before it
-    calls whatever hook is installed), and sys.stderr, sys.excepthook, sys.unraisablehook and
-    threading.excepthook are checked against the objects this child started with, and put back,
-    once the comparison is done and again around the collection; any such event, replacement or a
-    closed sys.stderr writes a named fault line to fd 2 and exits 2 with no result. Exit 2 if a
-    file cannot be loaded, or if another exit handler was registered before emit (its os._exit
-    would skip that one)."""
-    import gc
-    import threading
+    """Child mode: load both files and compare the named objects. The verdict discipline is the
+    shared fail-closed child contract, implemented ONCE in opf/tools/_child_contract.py (the
+    _semver single-source idiom: the one implementation lives in the dependency-closed opf/
+    subtree, this gate imports it from there, and its module docstring states the contract and
+    discloses, once, the channels it cannot close). The structured result (one JSON line holding
+    the list of names that differ, then the PARITY_COMPLETE line) is written by the contract's
+    record handler, registered FIRST, before either file is loaded: exit handlers run
+    last-registered-first, after non-daemon threads are joined, so the write comes after every
+    cleanup handler the loaded files registered, and loaded code that ends the child from its
+    cleanup suppresses the result instead of leaving an already-reported pass standing (the
+    fail-closed child-process rule, secfcl; merge train 2 QA rounds 1 to 6). Before the result
+    the handler collects pending cyclic-garbage finalizers REPEATEDLY until a pass CHANGES
+    NOTHING (frees no object and leaves the identity set of tracked objects unchanged), within
+    _child_contract.GC_PASS_BOUND passes, past which it refuses by name (r4: a collected
+    finalizer may create new cyclic cleanup work; r5: a resurrecting finalizer frees nothing in
+    its pass; r6: one that also releases other tracked objects keeps the tracked count equal or
+    lower, so both count rules settled over its pending faulting work, where the identity
+    comparison does not), restores the guarded reporting machinery (sys.stderr, sys.excepthook,
+    sys.unraisablehook and threading.excepthook, checked against the objects this child started
+    with, before, between and after the passes; an audit hook armed before either file loads
+    sees every `sys.unraisablehook` and `sys.excepthook` event, which CPython raises before it
+    calls whatever hook is installed), writes the result only on a fault-free settle, and ends
+    the child ITSELF with os._exit, so no interpreter finalization runs after the result. Any
+    such event, any machinery replacement, a closed original stderr, an unsettled collection or
+    a flush failure writes the named fault line to fd 2 and exits 2 with no result. Exit 2 also
+    if a file or the contract module cannot be loaded, or if another exit handler was registered
+    before the record handler (its os._exit would skip that one)."""
+    sys.path.insert(0, str(ROOT / "opf" / "tools"))
+    try:
+        import _child_contract  # the shared fail-closed child contract (one source, no fork)
+    except ImportError as exc:
+        print("cannot load the shared child contract (opf/tools/_child_contract.py): %s"
+              % _bounded(exc))
+        return 2
+    finally:
+        sys.path.pop(0)
     path_a, path_b, funcs, regexes, consts = json.loads(spec)
     outcome = []
-    faults = []
-    machinery = [(owner, name, getattr(owner, name)) for owner, name in (
-        (sys, "stderr"), (sys, "excepthook"), (sys, "unraisablehook"), (threading, "excepthook"))]
 
-    def restore():
-        for owner, name, original in machinery:
-            if getattr(owner, name, None) is not original:
-                faults.append("%s.%s replaced" % (owner.__name__, name))
-                setattr(owner, name, original)
-        if getattr(machinery[0][2], "closed", True):
-            faults.append("sys.stderr closed")
+    def record(code):
+        if code == 0:
+            sys.stdout.write(json.dumps(outcome[0]) + "\n" + PARITY_COMPLETE + "\n")
+            sys.stdout.flush()
 
-    def audit(event, _args):
-        if event in ("sys.unraisablehook", "sys.excepthook"):
-            faults.append("a fault reached %s" % event)
+    def fault_line(faults):
+        return ("parity child: a fault in loaded code's cleanup or its reporting "
+                "machinery: %s; no result (secfcl)\n"
+                % "; ".join(sorted(set(faults)))[:1000]).encode("utf-8", "replace")
 
-    def emit():
-        if not outcome:
-            return
-        restore()
-        # Collect REPEATEDLY until a pass SETTLES: frees nothing and leaves no more objects
-        # tracked than before it (merge train 2 QA r4, codex MEDIUM: a collected finalizer may
-        # create NEW cyclic cleanup work, which a single collection left for the os._exit below
-        # to skip; QA r5, codex MEDIUM: a finalizer that resurrects its own object frees nothing
-        # in that pass, so the count of freed objects alone missed the new work it created);
-        # exceeding _GC_PASS_BOUND fails closed.
-        for _ in range(_GC_PASS_BOUND):
-            tracked = len(gc.get_objects())
-            if gc.collect() == 0 and len(gc.get_objects()) <= tracked:
-                break
-        else:
-            faults.append("garbage collection still freed or created objects after %d passes, "
-                          "so cleanup work finalizers keep creating cannot be shown complete"
-                          % _GC_PASS_BOUND)
-        restore()
-        if faults:
-            try:
-                os.write(2, ("parity child: a fault in loaded code's cleanup or its reporting "
-                             "machinery: %s; no result (secfcl)\n"
-                             % "; ".join(sorted(set(faults)))[:1000]).encode("utf-8", "replace"))
-            except OSError:
-                pass
-            os._exit(2)
-        sys.stdout.write(json.dumps(outcome[0]) + "\n" + PARITY_COMPLETE + "\n")
-        sys.stdout.flush()
-        os._exit(0)
-
-    atexit.register(emit)
-    if getattr(atexit, "_ncallbacks", lambda: 1)() != 1:
-        atexit.unregister(emit)
+    contract = _child_contract.FailClosedChild(record=record, fault_line=fault_line)
+    if not contract.register():
         print("another exit handler was registered before the result's; refusing")
         return 2
-    sys.addaudithook(audit)
+    contract.arm_audit()
     mods = []
     for i, path in enumerate((path_a, path_b)):
         try:
@@ -768,6 +728,7 @@ def parity_child(spec):
             elif kind == "const" and a != b:
                 diffs.append(name)
     outcome.append(diffs)
+    contract.settle(0)
     return 0
 
 
@@ -1207,7 +1168,7 @@ def self_test_main():
                 # Merge train 2 QA r4 (codex MEDIUM): a collected finalizer that creates NEW
                 # cyclic cleanup work whose own finalizer faults -- one collection missed it and
                 # the child passed -- and a finalizer chain no collection pass inside
-                # _GC_PASS_BOUND ends, which must refuse by name, never emit a result.
+                # _child_contract.GC_PASS_BOUND ends, which must refuse by name, never emit a result.
                 ("finalizer-chained-fault", "\n\nimport atexit as _seeded_atexit\n"
                  "import os as _seeded_os\n"
                  "\n\nclass _SeededInner:\n"
@@ -1243,7 +1204,7 @@ def self_test_main():
                 # Merge train 2 QA r5 (codex MEDIUM): an Outer finalizer that RESURRECTS its
                 # object while building a cyclic Inner whose finalizer faults made the first pass
                 # free nothing, and the r4 loop emitted a result over the Inner's pending cleanup;
-                # automatic collection is disabled so the Outer is still pending at emit.
+                # automatic collection is disabled so the Outer is still pending at the record.
                 ("finalizer-resurrecting-fault", "\n\nimport atexit as _seeded_atexit\n"
                  "import gc as _seeded_gc\nimport os as _seeded_os\n"
                  "_seeded_held = []\n"
@@ -1266,6 +1227,34 @@ def self_test_main():
                  "    _seeded_gc.disable()\n"
                  "    _SeededResurrectOuter()\n"
                  "\n\n_seeded_atexit.register(_seeded_setup)\n",
+                 "Exception ignored"),
+                # Merge train 2 QA r6 (codex MEDIUM): the r5 settle rule (frees nothing AND no
+                # more objects tracked than before) still passed a resurrecting finalizer that
+                # also RELEASES other tracked objects while creating the new faulting work; the
+                # shared contract settles only on a pass whose tracked identity SET is unchanged.
+                ("finalizer-net-release-fault", "\n\nimport atexit as _seeded_atexit\n"
+                 "import gc as _seeded_gc\n"
+                 "_seeded_net_held = []\n"
+                 "\n\nclass _SeededNetInner:\n"
+                 "    def __init__(self):\n"
+                 "        self.cycle = self\n"
+                 "\n    def __del__(self):\n"
+                 "        raise RuntimeError('new cyclic cleanup failed')\n"
+                 "\n\nclass _SeededNetOuter:\n"
+                 "    def __init__(self):\n"
+                 "        self.cycle = self\n"
+                 "        self.held = _seeded_net_held\n"
+                 "        self.spare = [[] for _ in range(100)]\n"
+                 "        self.inner = _SeededNetInner\n"
+                 "\n    def __del__(self):\n"
+                 "        self.held.append(self)\n"
+                 "        self.spare.clear()\n"
+                 "        self.inner()\n"
+                 "\n\ndef _seeded_net_setup():\n"
+                 "    _seeded_gc.collect()\n"
+                 "    _seeded_gc.disable()\n"
+                 "    _SeededNetOuter()\n"
+                 "\n\n_seeded_atexit.register(_seeded_net_setup)\n",
                  "Exception ignored"),
         ):
             root = fresh("p-" + name)
@@ -1301,7 +1290,8 @@ def self_test_main():
           "sys.excepthook, a seeded finalizer whose newly created cyclic cleanup work faults "
           "under the repeated collection, a seeded finalizer chain outlasting the bounded "
           "collection, a seeded resurrecting finalizer whose newly created cyclic cleanup work "
-          "faults, and a seeded cleanup exit that cuts "
+          "faults, the same with other tracked objects released alongside (the identity-set "
+          "settle rule, merge train 2 QA r6), and a seeded cleanup exit that cuts "
           "off its shutdown-written result are cannot-evaluate (secfcl)")
     return 0
 
