@@ -584,83 +584,6 @@ def _target_class(target, t_opaque):
     return "file-real"
 
 
-# Single-character ANSI-C escapes bash decodes inside $'...' (its ansicstr table, not echo -e's).
-_ANSI_C_SIMPLE_ESCAPES = {
-    "a": "\x07", "b": "\x08", "e": "\x1b", "E": "\x1b", "f": "\x0c", "n": "\n", "r": "\r", "t": "\t",
-    "v": "\x0b", "\\": "\\", "'": "'", '"': '"', "?": "?"}
-# Numeric ANSI-C escapes: the leading character and the most digits bash reads after it (\NNN octal takes the
-# first digit itself plus two more; \xHH two hex digits; \uHHHH four; \UHHHHHHHH eight).
-_ANSI_C_NUMERIC_ESCAPES = {"x": (16, 2), "u": (16, 4), "U": (16, 8)}
-_OCTAL_DIGITS = "01234567"
-_HEX_DIGITS = "0123456789abcdefABCDEF"
-
-
-def _decode_ansi_c_fragment(command, start, n):
-    """Decode the body of an ANSI-C $'...' quote whose content begins at index `start` (just past the "$'").
-    Returns (text, next_i), next_i just past the closing quote, or None when the quote never closes or holds
-    an escape this decoder cannot reproduce EXACTLY as bash does. The closing quote is the first "'" not
-    consumed by a backslash escape, as bash's parser finds it. Decoded exactly: the single-character escapes
-    (\\a \\b \\e \\E \\f \\n \\r \\t \\v \\\\ \\' \\" \\?), octal \\N to \\NNN (the value taken modulo 256),
-    hex \\xH or \\xHH, \\uH to \\uHHHH and \\UH to \\UHHHHHHHH, the control form \\cX for a printable ASCII X
-    other than a backslash (\\c? is DEL), a \\x, \\u, \\U, or \\c with no digit or character after it (kept
-    literally, backslash included), and an unrecognised escape of a printable ASCII character (kept with its
-    backslash, \\q stays \\q). NOT decoded (None, the caller's fail-closed path): any escape whose value is
-    NUL (bash cuts the string there) or 0x80 and above (a raw byte, or a character whose bytes depend on the
-    locale), a backslash-newline, \\c followed by a backslash or a character outside printable ASCII, and an
-    escape of a non-ASCII character. Raw characters between the quotes are kept as they are. A decoded 0x01 or
-    0x7f is returned, but _parse_heredoc_delim rejects every quoted delimiter that carries one."""
-    out = []
-    k = start
-    while k < n:
-        c = command[k]
-        if c == "'":
-            return "".join(out), k + 1
-        if c != "\\":
-            out.append(c)
-            k += 1
-            continue
-        if k + 1 >= n:
-            return None
-        e = command[k + 1]
-        k += 2
-        if e in _ANSI_C_SIMPLE_ESCAPES:
-            out.append(_ANSI_C_SIMPLE_ESCAPES[e])
-            continue
-        if e in _OCTAL_DIGITS:
-            m = 0
-            while m < 2 and k + m < n and command[k + m] in _OCTAL_DIGITS:
-                m += 1
-            value = int(e + command[k:k + m], 8) & 0xFF
-            k += m
-        elif e in _ANSI_C_NUMERIC_ESCAPES:
-            base, most = _ANSI_C_NUMERIC_ESCAPES[e]
-            m = 0
-            while m < most and k + m < n and command[k + m] in _HEX_DIGITS:
-                m += 1
-            if m == 0:
-                out.append("\\" + e)  # no digit follows: bash keeps the escape literally
-                continue
-            value = int(command[k:k + m], base)
-            k += m
-        elif e == "c":
-            if k < n and command[k] == "'":
-                out.append("\\c")  # \c at the end of the quote: bash keeps it literally
-                continue
-            if k >= n or command[k] == "\\" or not "!" <= command[k] <= "~":
-                return None
-            value = 0x7F if command[k] == "?" else ord(command[k].upper()) & 0x1F
-            k += 1
-        elif "!" <= e <= "~":
-            out.append("\\" + e)  # an unrecognised escape: bash keeps the backslash and the character
-            continue
-        else:
-            return None  # a backslash-newline, or an escape of a blank, control, or non-ASCII character
-        if value == 0 or value >= 0x80:
-            return None
-        out.append(chr(value))
-    return None
-
-
 def _parse_heredoc_delim(command, at, n):
     """ROUND-2 FINDING 17. Parse a heredoc delimiter spec starting immediately after '<<' (index `at`).
     Returns (quoted, delim, strip_tabs, next_i) or None when it cannot be parsed (so the caller keeps the
@@ -727,17 +650,19 @@ def _parse_heredoc_delim(command, at, n):
             # bash ANSI-C-expands the word, so <<$'EOF' resolves to the LITERAL delimiter EOF, and its body
             # is literal (quoted). Treating '$' as an ordinary char (the pre-round-6 bug) built the delimiter
             # "$EOF", which never matched the real EOF line, so the lexer SWALLOWED every following executable
-            # line as heredoc body and hid a later --no-verify commit / lossy discard. The escapes bash
-            # decodes the same way in every locale are decoded (_decode_ansi_c_fragment), so <<$'E\x4fF'
-            # resolves to EOF; an escape it does not decode exactly returns None (the FAIL-CLOSED backstop:
-            # the caller then raises/scans the remainder as still-executable rather than swallowing it
-            # under a guessed delimiter).
+            # line as heredoc body and hid a later --no-verify commit / lossy discard. We resolve only the
+            # ESCAPE-FREE content to its literal; a backslash inside the ANSI-C body is a form this parser does
+            # not fully decode, so it returns None (the FAIL-CLOSED backstop: the caller then raises/scans the
+            # remainder as still-executable rather than swallowing it under a guessed delimiter).
             quoted = True
-            decoded = _decode_ansi_c_fragment(command, j + 2, n)
-            if decoded is None:
-                return None  # an ANSI-C escape we do not decode exactly -> fail closed (scan the remainder)
-            delim_chars.append(decoded[0])
-            j = decoded[1]
+            k = command.find("'", j + 2)
+            if k < 0:
+                return None
+            frag = command[j + 2:k]
+            if "\\" in frag:
+                return None  # an ANSI-C escape we do not decode -> fail closed (scan the remainder)
+            delim_chars.append(frag)
+            j = k + 1
             continue
         if c == "$" and j + 1 < n and command[j + 1] == '"':
             # $"..." locale translation as (part of) a heredoc delimiter word: bash quote-removal yields the
@@ -763,62 +688,22 @@ def _parse_heredoc_delim(command, at, n):
         j += 1
     if not started:
         return None
-    delim = "".join(delim_chars)
-    if quoted and ("\x01" in delim or "\x7f" in delim):
-        # bash marks quoted text internally with the bytes 0x01 and 0x7f, so a QUOTED delimiter carrying one
-        # (written raw or produced by an ANSI-C escape) is not the line bash compares against: <<'E<0x01>F'
-        # ends at a line E<0x01><0x01>F, and a 0x7f matches no line this parser can predict. Fail closed.
-        return None
-    return (quoted, delim, strip_tabs, j)
-
-
-def _heredoc_body_bounds(command, i, n, delim, strip_tabs):
-    """Find the end of one here-document body that starts at `i`, read by PHYSICAL lines: the body ends at
-    the first physical line that is EXACTLY `delim` (leading tabs stripped first for the <<- form; the
-    terminator may be the final line with no trailing newline). Returns (body_end, next_i): body_end is the
-    index where that terminator line starts and next_i is just past it, or (-1, n) when no physical line
-    matches. bash's backslash-newline line continuations in an UNQUOTED delimiter's body are NOT emulated
-    (whether a backslash continues a line depends on how many backslashes precede it, and a continuation
-    can move the terminator line or join a substitution opener across lines), so a caller that reads an
-    unquoted body must not trust these bounds when the body holds a backslash
-    (_heredoc_unquoted_backslash)."""
-    while i < n:
-        nl = command.find("\n", i)
-        next_i = n if nl == -1 else nl + 1
-        line = command[i:(n if nl == -1 else nl)]
-        cand = line.lstrip("\t") if strip_tabs else line
-        if cand == delim:
-            return i, next_i
-        i = next_i
-    return -1, n
-
-
-def _heredoc_unquoted_backslash(command, i, n, heredocs):
-    """True when, reading the run of here-document bodies that starts at `i` by physical lines
-    (_heredoc_body_bounds), the body of an UNQUOTED delimiter holds ANY backslash in its text up to the first
-    physical line equal to its delimiter (or up to the end of the command when no such line exists).
-    `heredocs` is a list of (delim, strip_tabs, quoted). Such a body cannot be read as data here: bash's
-    backslash handling in it is not emulated (_heredoc_body_bounds), so callers fall back toward the deny
-    (the disclosed over-refusal UNQUOTED HERE-DOCUMENT BODY WITH A BACKSLASH)."""
-    for delim, strip_tabs, quoted in heredocs:
-        body_end, next_i = _heredoc_body_bounds(command, i, n, delim, strip_tabs)
-        if not quoted and "\\" in command[i:(n if body_end == -1 else body_end)]:
-            return True
-        i = next_i
-    return False
+    return (quoted, "".join(delim_chars), strip_tabs, j)
 
 
 def _skip_heredoc_bodies(command, i, n, heredocs):
-    """Advance past the bodies of a run of heredocs (in the order their '<<' operators appeared on the line),
-    each ending at the first PHYSICAL line that is EXACTLY its delimiter (_heredoc_body_bounds; leading tabs
-    stripped for the <<- form). `heredocs` is a list of (delim, strip_tabs, quoted). An unterminated heredoc
-    consumes the rest of the command (bash would still be reading input). Returns the index just past the
-    last consumed body. The bodies are data and are excluded from analysis. bash's backslash-newline
-    continuations in an UNQUOTED delimiter's body are NOT emulated, so for an unquoted body holding a
-    backslash the end returned here may not be bash's; a caller that can meet one checks
-    _heredoc_unquoted_backslash first (_orch_cmdsub_end does)."""
-    for delim, strip_tabs, _quoted in heredocs:
-        _body_end, i = _heredoc_body_bounds(command, i, n, delim, strip_tabs)
+    """Advance past the bodies of a run of QUOTED heredocs (in the order their '<<' operators appeared on the
+    line), each ending at a line that is EXACTLY its delimiter (leading tabs stripped for the <<- form). An
+    unterminated heredoc consumes the rest of the command (bash would still be reading input). Returns the
+    index just past the last consumed body. The bodies are literal data and are excluded from analysis."""
+    for delim, strip_tabs in heredocs:
+        while i < n:
+            nl = command.find("\n", i)
+            line = command[i:(nl if nl != -1 else n)]
+            cand = line.lstrip("\t") if strip_tabs else line
+            i = n if nl == -1 else nl + 1
+            if cand == delim:
+                break
     return i
 
 
@@ -850,7 +735,7 @@ def _strip_quoted_heredoc_bodies(command):
             i = next_i
             continue
         out.append(command[i:nl + 1])        # keep through the opening line's newline
-        i = _skip_heredoc_bodies(command, nl + 1, n, [(delim, strip_tabs, True)])  # drop the body region
+        i = _skip_heredoc_bodies(command, nl + 1, n, [(delim, strip_tabs)])  # drop the body region
     return "".join(out)
 
 
@@ -877,7 +762,7 @@ def _lex_command(command, partial=False):
     redirects = []
     opaque = [False]
     seg_start = [0]
-    pending_heredocs = []  # queued (delim, strip_tabs, quoted) for QUOTED heredocs whose bodies to skip (finding 17)
+    pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
 
     def end_segment(sep, op_start, next_start):
         segments.append(_Segment(list(argv), sep, list(redirects),
@@ -946,7 +831,7 @@ def _lex_command(command, partial=False):
                             # remaining tokens (e.g. 'cat <<'EOF' > out') keep being lexed normally. An
                             # UNQUOTED heredoc (parsed[0] False) interpolates and stays the unsupported raise.
                             _quoted, _delim, _strip, _next_i = parsed
-                            pending_heredocs.append((_delim, _strip, True))
+                            pending_heredocs.append((_delim, _strip))
                             i = _next_i
                             continue
                     raise ValueError("unsupported shell construct: {}".format(op))
@@ -9718,58 +9603,103 @@ _ORCH_SHELL_KEYWORDS = frozenset((
 _ORCH_BASH_WORD_BREAKS = frozenset(" \t\n;&|()<>")
 
 
-def _orch_arith_end(command, j, n, subs=None):
-    """Index just past the `))` that closes an arithmetic span (a `$((...))` expansion or a `((...))`
-    arithmetic command) whose CONTENT starts at `j` (just past the two opening parens), or -1 when no
-    `))` closes it at depth zero (a `$( (subshell) ...)` form, or a construct that never closes): the
-    caller then falls back to the plain character scan, which reads any `&` inside as a potential detach
-    (the over-deny direction, never a silent allow). Inner parens nest; quoting inside arithmetic is rare
-    and deliberately NOT modelled (a `)` inside a quoted arithmetic string can end the span early, which
-    again only falls back to the plain scan). Only the ARITHMETIC TEXT is non-detach: bash still RUNS a
-    `$(...)` or backtick command substitution written inside the span, so each one is skipped
-    structurally (_orch_cmdsub_end, _orch_backtick_end; a paren or quote inside it never closes the
-    span) and, when `subs` is a list, its CONTENT bounds (start, end) are appended for the caller to
-    scan as code (_orch_scan_arith_substitutions). A nested `$((` is read as nested arithmetic when a
-    `))` closes it, and otherwise as a `$(` substitution whose content opens with a subshell paren, as
-    bash reads it. A substitution that cannot be closed makes the whole span -1 (the plain scan)."""
-    depth = 0
-    while j < n:
-        c = command[j]
-        if c == "$" and command[j + 1:j + 2] == "(":
-            if command[j + 2:j + 3] == "(":
-                inner = []
-                end = _orch_arith_end(command, j + 3, n, inner)
-                if end != -1:  # nested arithmetic: its own substitutions are collected too
-                    if subs is not None:
-                        subs.extend(inner)
-                    j = end
-                    continue
-            end = _orch_cmdsub_end(command, j + 2, n)
-            if end == -1:
-                return -1
-            if subs is not None:
-                subs.append((j + 2, end - 1))
-            j = end
-            continue
-        if c == "`":
-            end = _orch_backtick_end(command, j + 1, n)
-            if end == -1:
-                return -1
-            if subs is not None:
-                subs.append((j + 1, end - 1))
-            j = end
-            continue
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            if depth:
-                depth -= 1
-            elif j + 1 < n and command[j + 1] == ")":
-                return j + 2
-            else:
-                return -1
+def _heredoc_body_bounds(command, i, n, delim, strip_tabs):
+    """Find the end of one here-document body that starts at `i`, read by PHYSICAL lines: the body ends at
+    the first physical line that is EXACTLY `delim` (leading tabs stripped first for the <<- form; the
+    terminator may be the final line with no trailing newline). Returns (body_end, next_i): body_end is the
+    index where that terminator line starts and next_i is just past it, or (-1, n) when no physical line
+    matches. bash's backslash-newline line continuations in an UNQUOTED delimiter's body are NOT emulated
+    (whether a backslash continues a line depends on how many backslashes precede it, and a continuation
+    can move the terminator line or join a substitution opener across lines), so a caller that reads an
+    unquoted body must not trust these bounds when the body holds a backslash
+    (_heredoc_unquoted_backslash). Used only by the detach scan."""
+    while i < n:
+        nl = command.find("\n", i)
+        next_i = n if nl == -1 else nl + 1
+        line = command[i:(n if nl == -1 else nl)]
+        cand = line.lstrip("\t") if strip_tabs else line
+        if cand == delim:
+            return i, next_i
+        i = next_i
+    return -1, n
+
+
+def _heredoc_unquoted_backslash(command, i, n, heredocs):
+    """True when, reading the run of here-document bodies that starts at `i` by physical lines
+    (_heredoc_body_bounds), the body of an UNQUOTED delimiter holds ANY backslash in its text up to the first
+    physical line equal to its delimiter (or up to the end of the command when no such line exists).
+    `heredocs` is a list of (delim, strip_tabs, quoted). Such a body cannot be read as data here: bash's
+    backslash handling in it is not emulated (_heredoc_body_bounds), so callers fall back toward the deny
+    (the disclosed over-refusal UNQUOTED HERE-DOCUMENT BODY WITH A BACKSLASH)."""
+    for delim, strip_tabs, quoted in heredocs:
+        body_end, next_i = _heredoc_body_bounds(command, i, n, delim, strip_tabs)
+        if not quoted and "\\" in command[i:(n if body_end == -1 else body_end)]:
+            return True
+        i = next_i
+    return False
+
+
+_ORCH_HEREDOC_DELIM_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+
+
+def _orch_simple_heredoc_delim(command, at, n):
+    """Parse the delimiter word of a `<<` or `<<-` operator for the detach scan ONLY; `at` is the index just
+    past the `<<`. A here-document is recognised only when the word is SIMPLE: one or more ASCII letters,
+    digits, and underscores, optionally wrapped WHOLE in one pair of single or double quotes (EOF, 'EOF',
+    "EOF", END_1), after an optional `-` (the `<<-` form) and optional blanks, and followed by the end of
+    the command or a bash word break. Returns (quoted, delim, strip_tabs, next_i) or None. None means the
+    `<<` is NOT read as a here-document: any other delimiter word (one holding `$`, a backtick, a
+    backslash, an ANSI-C or locale quote, partial quoting, or any other character) leaves the lines after
+    it scanned as code, the deny direction (a disclosed over-refusal). The lexer keeps its own
+    _parse_heredoc_delim; this scan does not use it."""
+    j = at
+    strip_tabs = command[j:j + 1] == "-"
+    if strip_tabs:
         j += 1
-    return -1
+    while j < n and command[j] in " \t":
+        j += 1
+    quote = command[j:j + 1]
+    if quote in ("'", '"'):
+        j += 1
+    else:
+        quote = ""
+    k = j
+    while k < n and command[k] in _ORCH_HEREDOC_DELIM_CHARS:
+        k += 1
+    if k == j:
+        return None
+    delim = command[j:k]
+    if quote:
+        if command[k:k + 1] != quote:
+            return None
+        k += 1
+    if k < n and command[k] not in _ORCH_BASH_WORD_BREAKS:
+        return None
+    return (bool(quote), delim, strip_tabs, k)
+
+
+def _orch_untracked_at(command, i, in_double):
+    """True when the character at `i` opens a construct whose nesting the detach scan does not track, so a
+    `<<` after it may sit in text bash does not read as an operator (an arithmetic left shift, a subscript,
+    parameter-expansion text, a command substitution or backtick string), and a closing paren found after
+    it may not be the one bash finds. Unquoted: a backtick; a `$` before `{`, `[`, or `'`; a `[`; a `(`
+    after a character other than a blank, newline, `;`, `&`, `|`, `(`, or `)` (a `$(` substitution, a
+    `<(` or `>(` process substitution, a function name, an array assignment, an extended glob) or before
+    another `(` (arithmetic). Inside double quotes: a backtick, or a `$` before `(`, `{`, or `[`. The scan
+    stops recognising here-documents for the rest of the command once it meets one (the deny direction)."""
+    ch = command[i]
+    if ch == "`":
+        return True
+    nxt = command[i + 1:i + 2]
+    if in_double:
+        return ch == "$" and nxt in ("(", "{", "[")
+    if ch == "$":
+        return nxt in ("{", "[", "'")
+    if ch == "[":
+        return True
+    if ch == "(":
+        return nxt == "(" or (i > 0 and command[i - 1] not in " \t\n;&|()")
+    return False
 
 
 def _orch_backtick_end(text, j, n):
@@ -9788,21 +9718,22 @@ def _orch_backtick_end(text, j, n):
 
 
 def _orch_cmdsub_end(command, j, n):
-    """Index just past the `)` that closes a `$(` command substitution whose content starts at `j`, read
-    STRUCTURALLY (quotes, backslash escapes, word-start `#` comments, nested parens, backtick spans, and
-    here-document bodies, whose lines are data and never toggle quotes or close parens), or -1 when the
-    walk cannot close the span (an unterminated quote, comment, backtick, or here-document, or an
-    UNQUOTED-delimiter here-document whose body holds a backslash, whose end this walk does not predict:
-    _heredoc_unquoted_backslash). The double-quoted caller in _orch_foreground_scan DENIES on -1 (kind
-    "unclosed-substitution"): it never resumes a character scan that could stay inside the balanced outer
-    double quotes and allow. This finds
-    only the span END; the content is NOT judged here. It exists for the `$(...)`-inside-double-quotes
-    case, where the content is already the disclosed false-allow residual (1): skipping the span whole
-    keeps that residual exactly as it is, while stopping quotes inside the span (above all a
-    here-document body in the double-quoted commit-message form) from shifting the OUTER scan state."""
+    """Walk a `$(` command substitution whose content starts at `j` to its closing `)`. Returns
+    (end, heredoc_seen, exact). `end` is the index just past the closing paren, or -1 when the walk cannot
+    close the span (an unterminated quote, comment, backtick, or here-document, or an UNQUOTED-delimiter
+    here-document whose body holds a backslash, whose end this walk does not predict:
+    _heredoc_unquoted_backslash). `heredoc_seen` is True when a here-document was recognised inside the
+    span (its body lines are skipped as data). `exact` is False when the span holds a construct whose
+    nesting this walk does not track (_orch_untracked_at), an unquoted `case` word (a pattern's `)` is not
+    a closing paren), or a here-document still awaiting its body when the span closes: the end found may
+    then not be bash's. The walk models only quotes, backslash escapes, word-start `#` comments, parens,
+    backtick spans (skipped whole), here-strings, and here-documents with a simple delimiter
+    (_orch_simple_heredoc_delim) met before any untracked construct. The content is NOT judged here."""
     in_single = in_double = escaped = False
     depth = 0
     pending = []  # (delim, strip_tabs, quoted) for here-documents opened inside the span; bodies skipped as data
+    heredoc_seen = False
+    exact = True
     word_start = True
     while j < n:
         c = command[j]
@@ -9817,6 +9748,8 @@ def _orch_cmdsub_end(command, j, n):
             j += 1
             continue
         if in_double:
+            if _orch_untracked_at(command, j, True):
+                exact = False
             if c == "\\":
                 escaped = True
             elif c == '"':
@@ -9827,16 +9760,25 @@ def _orch_cmdsub_end(command, j, n):
         if c == "#" and word_start:
             nl = command.find("\n", j)
             if nl == -1:
-                return -1
+                return -1, heredoc_seen, exact
             j = nl
             continue
         if c == "\n" and pending:
-            if _heredoc_unquoted_backslash(command, j + 1, n, pending):
-                return -1  # an unquoted body holding a backslash: its end is not predictable here
-            j = _skip_heredoc_bodies(command, j + 1, n, pending)
-            del pending[:]
-            word_start = True
-            continue
+            if exact:
+                if _heredoc_unquoted_backslash(command, j + 1, n, pending):
+                    return -1, heredoc_seen, exact  # an unquoted body holding a backslash: end unpredictable
+                j += 1
+                for delim, strip_tabs, _quoted in pending:
+                    j = _heredoc_body_bounds(command, j, n, delim, strip_tabs)[1]
+                del pending[:]
+                word_start = True
+                continue
+            del pending[:]  # an untracked construct followed the operator: the lines are walked as code
+        if word_start and command.startswith("case", j) and (
+                j + 4 >= n or command[j + 4] in _ORCH_BASH_WORD_BREAKS):
+            exact = False
+        if _orch_untracked_at(command, j, False):
+            exact = False
         if c.isspace():
             word_start = True
             j += 1
@@ -9856,7 +9798,7 @@ def _orch_cmdsub_end(command, j, n):
         if c == "`":
             end = _orch_backtick_end(command, j + 1, n)
             if end == -1:
-                return -1
+                return -1, heredoc_seen, exact
             j = end
             word_start = False
             continue
@@ -9868,9 +9810,10 @@ def _orch_cmdsub_end(command, j, n):
                 j += run  # consume the whole here-string run; its word is ordinary span text
                 word_start = False
                 continue
-            parsed = _parse_heredoc_delim(command, j + 2, n)
+            parsed = _orch_simple_heredoc_delim(command, j + 2, n) if exact else None
             if parsed is not None:
                 pending.append((parsed[1], parsed[2], parsed[0]))
+                heredoc_seen = True
                 j = parsed[3]
                 word_start = False
                 continue
@@ -9884,64 +9827,37 @@ def _orch_cmdsub_end(command, j, n):
             continue
         if c == ")":
             if depth == 0:
-                return j + 1
+                return j + 1, heredoc_seen, exact and not pending
             depth -= 1
             word_start = False
             j += 1
             continue
         word_start = c in _ORCH_BASH_WORD_BREAKS
         j += 1
-    return -1
-
-
-def _orch_scan_arith_substitutions(command, subs, bash_word_starts):
-    """Scan as CODE each command substitution that _orch_arith_end found inside an arithmetic span
-    (`subs` holds their content bounds): the arithmetic text is non-detach (its `&` is bitwise-AND), but
-    bash runs these substitutions, so a bare `&` inside one is a real detach
-    ($(( $(job & wait; printf 0) )), (( $(job & wait; printf 1) ))). Returns the first non-None kind of
-    _orch_foreground_scan, or None."""
-    for start, end in subs:
-        kind = _orch_foreground_scan(command[start:end], bash_word_starts)
-        if kind is not None:
-            return kind
-    return None
+    return -1, heredoc_seen, exact
 
 
 def _orch_scan_body_substitutions(body, bash_word_starts):
     """Scan ONLY the substitution spans of an UNQUOTED-delimiter here-document body: bash still runs
     `$(...)` and backtick substitutions inside such a body, so a real detach there is real, while the
-    plain body text is DATA and is never quote-balanced or `&`-scanned. The text of a `$((...))`
-    arithmetic span is non-detach (its `&` is bitwise-AND), but each `$(...)` or backtick substitution
-    nested in it is scanned as code (_orch_scan_arith_substitutions); a `$((` that no `))` closes is read
-    as a `$(` substitution, as bash reads it. A `$(...)` or backtick span content is re-scanned as code by
-    _orch_foreground_scan, so a detach inside it stays caught; a span that never closes is scanned to
-    the end of the body (the over-deny direction). A body that holds any backslash never reaches this
-    scan (_orch_scan_heredoc_bodies denies it first, the disclosed over-refusal UNQUOTED HERE-DOCUMENT BODY
-    WITH A BACKSLASH); the backslash branch below is kept only as a defensive skip. Returns the inner
-    scan's "detach"/"unbalanced"/"unterminated"/"unclosed-substitution", or None."""
+    plain body text is DATA and is never quote-balanced or `&`-scanned. A backtick span's content, and a
+    `$(...)` span's content when _orch_cmdsub_end closes it EXACTLY with no here-document inside, is
+    re-scanned as code by _orch_foreground_scan. Otherwise (a `$(` the walk cannot close, holds a
+    here-document, or holds a construct it does not track, such as a parameter expansion, arithmetic, or a
+    `case` pattern) the rest of the body from that `$(` is scanned as code (the over-deny direction). A
+    `$((...))` is read as a `$(` substitution, as on main, so an `&` in its arithmetic denies. A body that
+    holds any backslash never reaches this scan (_orch_scan_heredoc_bodies denies it first). Returns the
+    inner scan's "detach"/"unbalanced"/"unterminated"/"unclosed-substitution", or None."""
     i, n = 0, len(body)
     while i < n:
         ch = body[i]
-        if ch == "\\":
-            i += 2
-            continue
-        if ch == "$" and body[i + 1:i + 3] == "((":
-            subs = []
-            end = _orch_arith_end(body, i + 3, n, subs)
-            if end != -1:
-                kind = _orch_scan_arith_substitutions(body, subs, bash_word_starts)
-                if kind is not None:
-                    return kind
-                i = end
-                continue
-            # no `))` closes it: bash reads `$((...); ...)` as a substitution, so the `$(` branch scans it
         if ch == "$" and body[i + 1:i + 2] == "(":
-            end = _orch_cmdsub_end(body, i + 2, n)
-            content = body[i + 2:end - 1] if end != -1 else body[i + 2:]
-            kind = _orch_foreground_scan(content, bash_word_starts)
-            if kind is not None:
+            end, heredoc_seen, exact = _orch_cmdsub_end(body, i + 2, n)
+            bounded = end != -1 and exact and not heredoc_seen
+            kind = _orch_foreground_scan(body[i + 2:end - 1] if bounded else body[i + 2:], bash_word_starts)
+            if kind is not None or not bounded:
                 return kind
-            i = end if end != -1 else n
+            i = end
             continue
         if ch == "`":
             end = _orch_backtick_end(body, i + 1, n)
@@ -9971,10 +9887,9 @@ def _orch_scan_heredoc_bodies(command, i, n, pending, bash_word_starts):
     "body-backslash" when that scan finds nothing, so a safe body holding a backslash is DENIED too. A
     quoted delimiter's body is literal and is never affected. Returns (next_i, kind): kind is
     "detach"/"unbalanced"/"unterminated"/"unclosed-substitution" from a substitution span or the code
-    fallback, "body-backslash"
-    from the fallback, "unterminated" when the command ends before a terminator line (bash would still be
-    reading here-document input, so the scan cannot see what follows; it fails toward the deny), or
-    None."""
+    fallback, "body-backslash" from the fallback, "unterminated" when the command ends before a terminator
+    line (bash would still be reading here-document input, so the scan cannot see what follows; it fails
+    toward the deny), or None."""
     for delim, strip_tabs, literal in pending:
         body_start = i
         body_end, i = _heredoc_body_bounds(command, i, n, delim, strip_tabs)
@@ -9993,35 +9908,36 @@ def _orch_foreground_scan(command, bash_word_starts):
     """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
     unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or
     double quote, "unterminated" when it ends with a here-document still awaiting its terminator line,
-    "unclosed-substitution" when a `$(` opened inside double quotes cannot be closed structurally (below),
-    None otherwise. A HERE-DOCUMENT BODY IS DATA: a `<<`/`<<-` operator queues its delimiter
-    (_parse_heredoc_delim resolves quoted, partially quoted, ANSI-C, and locale delimiter words; a word it
-    cannot resolve exactly leaves the `<<` unrecognised, so what follows is scanned as code, the deny
-    direction), and after the next unquoted newline the body lines up to the terminator line are consumed
-    with no quote balancing and no `&` detection; several here-documents on one line consume their bodies
-    in operator order. For an UNQUOTED delimiter the body's `$(...)`/backtick substitution spans (which
-    bash still runs) are re-scanned as code, as are the substitutions nested in `$((...))` arithmetic
-    inside the body (_orch_scan_body_substitutions); an unquoted body that holds ANY backslash is not read as data at all
-    (the disclosed over-refusal UNQUOTED HERE-DOCUMENT BODY WITH A BACKSLASH, _orch_scan_heredoc_bodies):
-    the rest of the command is scanned as code and the result is never None ("body-backslash" when that
-    code scan finds nothing). The TEXT of a `$((...))` arithmetic expansion and of a `((...))`
-    arithmetic command, in the command itself or inside double quotes, is likewise non-detach (its `&` is
-    bitwise-AND and a `<<` inside it is a left shift), but every `$(...)` and backtick command
-    substitution nested in the span (bash runs it) is scanned as code (_orch_arith_end,
-    _orch_scan_arith_substitutions); a `$((` that no `))` closes falls back to the plain character scan
-    (over-deny, never a silent allow). A `$(...)` opened INSIDE DOUBLE QUOTES is skipped structurally to
-    its closing paren (_orch_cmdsub_end): its content stays the disclosed false-allow residual (1), and
-    quotes inside it (above all a here-document body in the double-quoted commit-message form) no longer
-    shift the outer quote state; when _orch_cmdsub_end cannot close it (an unterminated quote, comment,
-    backtick, or here-document inside it, or an unquoted-delimiter here-document body holding a
-    backslash), the scan returns "unclosed-substitution" at once (fail closed: where the substitution
-    ends, and what follows it, are unseen). bash_word_starts selects where a `#` opens a comment: False keeps the historical rule
-    (after any str.isspace() character), True uses bash's rule (_ORCH_BASH_WORD_BREAKS). The guard runs
-    BOTH and denies when either reports, so the bash rule can only ADD denies."""
+    "unclosed-substitution" when a `$(` opened inside double quotes that holds a here-document cannot be
+    read exactly (below), None otherwise. A HERE-DOCUMENT BODY IS DATA, but only for a SIMPLE delimiter
+    word (_orch_simple_heredoc_delim: letters, digits, and underscores, optionally wrapped whole in single
+    or double quotes; `<<-` included): a `<<`/`<<-` operator with such a word queues it, and after the
+    next unquoted newline the body lines up to the terminator line are consumed with no quote balancing
+    and no `&` detection; several here-documents on one line consume their bodies in operator order. Any
+    other delimiter word leaves the `<<` unrecognised, so the lines after it are scanned as code (the
+    deny direction, as on main). Once the scan meets a construct whose nesting it does not track
+    (_orch_untracked_at: a backtick, `${`, `$[`, `$'`, `$(`, `[`, `((`, or a word-internal `(`), it
+    recognises no further here-document in this command and drops any still awaiting its body, so a `<<`
+    that bash reads as a left shift, a subscript, or expansion text never hides the lines after it. For an
+    UNQUOTED delimiter the body's `$(...)`/backtick substitution spans (which bash still runs) are
+    re-scanned as code (_orch_scan_body_substitutions); an unquoted body that holds ANY backslash is not
+    read as data at all (the disclosed over-refusal UNQUOTED HERE-DOCUMENT BODY WITH A BACKSLASH,
+    _orch_scan_heredoc_bodies): the rest of the command is scanned as code and the result is never None
+    ("body-backslash" when that code scan finds nothing). ARITHMETIC IS READ AS ON MAIN: an `&` in a
+    `$((...))` expansion or a `((...))` command is scanned as a detach (the disclosed over-refusal). A
+    `$(...)` opened INSIDE DOUBLE QUOTES that holds a here-document is skipped to its closing paren when
+    _orch_cmdsub_end reads it exactly (its content stays the disclosed false-allow residual (1), and the
+    body's quotes no longer shift the outer quote state); when the walk cannot close it, or reads a span
+    holding a here-document only inexactly, the scan returns "unclosed-substitution" at once (fail
+    closed). A double-quoted `$(...)` with no here-document inside is scanned character by character as on
+    main. bash_word_starts selects where a `#` opens a comment: False keeps the historical rule (after
+    any str.isspace() character), True uses bash's rule (_ORCH_BASH_WORD_BREAKS). The guard runs BOTH and
+    denies when either reports, so the bash rule can only ADD denies."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
     word_start = True  # the next unquoted char begins a word (start of string, or after a word break)
     pending_heredocs = []  # (delim, strip_tabs, literal) queued by `<<`/`<<-` operators on this line
+    heredocs_off = False  # set once the scan meets a construct whose nesting it does not track
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -10036,24 +9952,27 @@ def _orch_foreground_scan(command, bash_word_starts):
             i += 1
             continue
         if in_double:
-            if ch == "$" and command[i + 1:i + 3] == "((":
-                subs = []
-                end = _orch_arith_end(command, i + 3, n, subs)
-                if end != -1:  # a balanced arithmetic expansion: its text is non-detach data to this scan
-                    kind = _orch_scan_arith_substitutions(command, subs, bash_word_starts)
-                    if kind is not None:  # but a substitution nested in it runs: scanned as code
-                        return kind
-                    i = end
-                    continue
-            if ch == "$" and command[i + 1:i + 2] == "(":
-                end = _orch_cmdsub_end(command, i + 2, n)
-                if end == -1:
-                    # The structural reader cannot close this double-quoted substitution, so where it ends
-                    # and what follows it are unseen: fail closed with a reason naming it, never continue
-                    # a character scan that could stay inside the balanced outer quotes and allow.
-                    return "unclosed-substitution"
-                i = end  # skip the whole substitution span: residual (1) content, outer state kept
-                continue
+            if _orch_untracked_at(command, i, True):
+                heredocs_off = True
+                if command[i:i + 2] == "$(":
+                    end, heredoc_seen, exact = _orch_cmdsub_end(command, i + 2, n)
+                    inner = command[i + 2:(end - 1 if end != -1 else n)]
+                    if inner[:1] == "(" and ("$(" in inner or "`" in inner):
+                        # A double-quoted $((...)) holding a substitution: its text is scanned as code,
+                        # as unquoted arithmetic is, so a detach in the nested substitution denies.
+                        kind = _orch_foreground_scan(inner, bash_word_starts)
+                        if kind is not None:
+                            return kind
+                    if end == -1 or (heredoc_seen and not exact):
+                        # The walk cannot close this double-quoted substitution, or cannot read exactly
+                        # one that holds a here-document, so where it ends and what follows it are unseen:
+                        # fail closed with a reason naming it, never continue a character scan that could
+                        # stay inside the balanced outer quotes and allow.
+                        return "unclosed-substitution"
+                    if heredoc_seen:
+                        i = end  # skip the span: residual (1) content, body quotes never shift the outer state
+                        continue
+                    # no here-document inside: scanned character by character inside the quotes, as on main
             if ch == "\\":
                 escaped = True
             elif ch == '"':
@@ -10071,6 +9990,8 @@ def _orch_foreground_scan(command, bash_word_starts):
                 break  # no later line: the comment runs to the end of the string, nothing more to scan
             i = nl  # resume at the newline; the newline/whitespace branches consume it and begin a new line
             continue
+        if ch == "\n" and pending_heredocs and heredocs_off:
+            del pending_heredocs[:]  # an untracked construct followed the operator: the lines are code
         if ch == "\n" and pending_heredocs:
             # The line that opened one or more here-documents ends here: what follows is their BODIES,
             # which are data, not code (a body apostrophe or `&` is never an open quote or a detach),
@@ -10097,28 +10018,8 @@ def _orch_foreground_scan(command, bash_word_starts):
             in_double, prev_dup, word_start = True, False, False
             i += 1
             continue
-        if ch == "$" and command[i + 1:i + 3] == "((":
-            subs = []
-            end = _orch_arith_end(command, i + 3, n, subs)
-            if end != -1:  # `$((3 & 1))` is bitwise arithmetic and `$((1<<2))` a left shift: non-detach
-                kind = _orch_scan_arith_substitutions(command, subs, bash_word_starts)
-                if kind is not None:  # a substitution nested in the arithmetic runs: scanned as code
-                    return kind
-                i = end
-                prev_dup, word_start = False, bash_word_starts
-                continue
-            # no `))` closes it (a `$( (subshell) ...)` form): scan the characters plainly (over-deny)
-        if ch == "(" and command[i + 1:i + 2] == "(":
-            subs = []
-            end = _orch_arith_end(command, i + 2, n, subs)
-            if end != -1:  # a `((...))` arithmetic command: non-detach, and its `<<` is a left shift
-                kind = _orch_scan_arith_substitutions(command, subs, bash_word_starts)
-                if kind is not None:  # a substitution nested in the arithmetic runs: scanned as code
-                    return kind
-                i = end
-                prev_dup, word_start = False, bash_word_starts
-                continue
-            # no `))` closes it (nested subshells): scan the characters plainly (over-deny direction)
+        if _orch_untracked_at(command, i, False):
+            heredocs_off = True
         if ch == "<" and command[i + 1:i + 2] == "<":
             run = 2  # count the whole run of `<` before deciding: `<<<` (3+) is a here-string, not a heredoc
             while command[i + run:i + run + 1] == "<":
@@ -10130,17 +10031,18 @@ def _orch_foreground_scan(command, bash_word_starts):
                 i += run
                 prev_dup, word_start = False, False
                 continue
-            parsed = _parse_heredoc_delim(command, i + 2, n)
+            parsed = None if heredocs_off else _orch_simple_heredoc_delim(command, i + 2, n)
             if parsed is not None:
-                # A here-document operator: queue (delim, strip_tabs, literal) and resume AFTER the
-                # delimiter word, so a quoted delimiter's quotes never toggle the scan's quote state.
-                # The body is consumed at the newline branch above. `literal` is True when ANY delimiter
-                # fragment was quoted or escaped (bash then expands nothing in the body).
+                # A here-document operator with a simple delimiter word: queue (delim, strip_tabs, literal)
+                # and resume AFTER the word, so a quoted delimiter's quotes never toggle the scan's quote
+                # state. The body is consumed at the newline branch above. `literal` is True for a quoted
+                # word (bash then expands nothing in the body).
                 pending_heredocs.append((parsed[1], parsed[2], parsed[0]))
                 i = parsed[3]
                 prev_dup, word_start = False, False
                 continue
-            # not a parseable here-document spec (`<<&`, end of string, ...): scan the `<` plainly
+            # not a here-document this scan recognises (any other delimiter word, or after an untracked
+            # construct): scan the `<` plainly, so the lines after it are read as code (deny direction)
         if ch == "&":
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt == "&":  # `&&` logical AND: not a detach
@@ -10195,19 +10097,21 @@ def _orch_foreground_detach(command):
     `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
     pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, an `&`
     inside an unquoted, word-start `#` comment (comment text dropped only to the END OF ITS LINE, so a
-    real `&` on a later line of a multi-line command is still caught), an `&` in the arithmetic text of a
-    `$((...))` expansion or a `((...))` command (bitwise-AND, read so when a `))` closes the span; a
-    `$(...)` or backtick substitution nested in the span still runs and is scanned as code, so
-    $(( $(job & wait; printf 0) )) DENIES), and an `&` inside a HERE-DOCUMENT BODY, which is data. A dedicated quote- and
+    real `&` on a later line of a multi-line command is still caught), and an `&` inside a HERE-DOCUMENT
+    BODY under a simple delimiter word, which is data. Arithmetic is read as on main: an `&` in a
+    `$((...))` expansion or a `((...))` command is scanned as a detach (a disclosed over-refusal for a
+    bitwise AND, echo $((3 & 1)) DENIES). A dedicated quote- and
     escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
     classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. Where a `#`
     starts a comment is read under two rules, the historical one (after any str.isspace() character) and
     bash's (after a space, tab, newline, or metacharacter), and either rule's detach denies
     (_orch_foreground_detach_kind).
 
-    A HERE-DOCUMENT BODY IS DATA (the over-refusal and the here-document quote-shift, both withdrawn):
-    the lines after a `<<WORD` or `<<-WORD` operator, up to the terminator line (quoted or unquoted
-    delimiter, several here-documents per command), are read as the data bash treats them as. Neither
+    A HERE-DOCUMENT BODY IS DATA (the over-refusal and the here-document quote-shift, both withdrawn for
+    SIMPLE delimiter words): the lines after a `<<WORD` or `<<-WORD` operator whose WORD is letters,
+    digits, and underscores, optionally wrapped whole in single or double quotes (EOF, 'EOF', "EOF",
+    END_1), up to the terminator line (quoted or unquoted delimiter, several here-documents per command),
+    are read as the data bash treats them as. Neither
     quote balancing nor `&` detection sees them, so a safe body carrying an unquoted `&` (`Fix A & B`),
     an apostrophe (`the user's file`), or stray double quotes is no longer denied, and no longer shifts
     the scan's quote state, so a real bare `&` AFTER a here-document (between two here-documents, or
@@ -10234,14 +10138,18 @@ def _orch_foreground_detach(command):
     literal (a quoted delimiter's body is never affected), and a body with no backslash is read as data
     as above.
 
-    DELIMITER WORDS THE PARSER CANNOT RESOLVE EXACTLY (a disclosed over-refusal, deny direction): an
-    ANSI-C `$'...'` delimiter is decoded as bash decodes it (the single-character escapes, octal `\\NNN`,
-    `\\xHH`, `\\uHHHH`, `\\UHHHHHHHH`, and `\\cX`), so `cat <<$'E\\x4fF'` ends at the line `EOF`. A
-    delimiter word holding an escape with no exact, locale-independent decoding (a NUL, a value of 0x80 or
-    above, a backslash-newline, `\\c` before a backslash or a non-printable character, an escaped
-    non-ASCII character), and a quoted delimiter carrying the byte 0x01 or 0x7f (which bash rewrites
-    internally), is NOT read as a here-document: the `<<` is left unrecognised and the lines after it are
-    scanned as code, so a safe body there can still be DENIED (never a silent allow).
+    DELIMITER WORDS THAT ARE NOT SIMPLE, AND UNTRACKED CONSTRUCTS (disclosed over-refusals, deny
+    direction): any other delimiter word (one holding `$`, a backtick, a backslash, an ANSI-C `$'...'` or
+    locale quote, partial quoting such as E'OF', or any other character) is NOT read as a here-document:
+    the `<<` is left unrecognised and the lines after it are scanned as code, as on main, so a safe body
+    there can be DENIED (never a silent allow). Once the scan meets a construct whose nesting it does not
+    track (a backtick, `${`, `$[`, `$'`, `$(`, `[`, `((`, a word-internal `(`, or inside double quotes a
+    backtick, `${`, `$[`, or `$(`), it recognises no further here-document in that command, because a `<<`
+    after it may be a left shift, a subscript, or expansion text to bash; the lines after such a `<<` are
+    scanned as code. In an unquoted body, a `$(...)` whose end the walk cannot read exactly (it holds such
+    a construct, a `case` word, or a here-document) is scanned as code to the end of the body. A
+    double-quoted `$((...))` whose text holds a `$(` or backtick is scanned as code, so its bitwise `&`
+    denies too.
 
     A SCAN THAT ENDS INSIDE A QUOTE FAILS TOWARD DENY: a scan that ends still inside an unbalanced single
     or double quote cannot prove that a later `&` is quoted rather than an operator (an unbalanced quote,
@@ -10264,14 +10172,14 @@ def _orch_foreground_detach(command):
     same cases): the scan reads only the outer quoting level, and its quote and comment tracking can
     diverge from bash's in further ways than those listed here, so this list is NOT complete. Known cases
     include a real detach that is NOT seen (1) when its `&` sits inside a command substitution or backtick
-    wrapped in double quotes (echo "$(job &)"; the `$(...)` span is skipped structurally to its closing
-    paren, so its content, including a here-document inside it, is never judged); (2) inside a string that
+    wrapped in double quotes (echo "$(job &)"; a `$(...)` span holding a here-document is skipped to its
+    closing paren, and any other is read as double-quoted text as on main, so its content is never judged
+    as code); (2) inside a string that
     eval or quote removal re-reads as code (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3)
     after an ANSI-C $'...' quote with an escaped quote that leaves the scan balanced but misaligned; (4)
     inside a string that ARITHMETIC re-reads as code: a variable whose value is an array subscript
     holding a substitution (x='a[$(job & wait)]'; echo $((x))), whose `&` sits in quotes the scan reads
-    as data (a substitution WRITTEN inside a `$((...))` or `((...))` span is scanned as code and is not
-    this residual); (5) QUOTE SHIFT, NARROWED: after a quote character that bash reads as data but the scan
+    as data; (5) QUOTE SHIFT, NARROWED: after a quote character that bash reads as data but the scan
     reads as a quote. The here-document body cases (an apostrophe or double quote in a body, quoted
     delimiter or not, including the double-quoted commit-message form) are CLOSED: a body is data and a
     quoted delimiter's quotes are consumed by the delimiter parser, so neither flips the quote state any
@@ -10401,10 +10309,11 @@ def orch_truncation_guard(data):
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
     and wait); every other foreground call remains out of scope (the harness returns its output directly).
-    The detach scan reads a HERE-DOCUMENT BODY as DATA (no quote balancing or '&' detection sees it; for
+    The detach scan reads a HERE-DOCUMENT BODY under a simple delimiter word as DATA (no quote balancing or '&' detection sees it; for
     an unquoted delimiter only the body's command/backtick substitution spans are re-scanned as code, and an
     unquoted body holding any backslash is scanned as code and denied, a disclosed over-refusal) and
-    reads arithmetic ('$((...))' and '((...))') as non-detach; a foreground command whose scan ends inside
+    recognises a here-document only under a simple delimiter word (letters, digits, underscores,
+    optionally wrapped whole in quotes) and reads arithmetic as code, as on main; a foreground command whose scan ends inside
     an open quote, or with a here-document still awaiting its terminator line, DENIES with a reason naming
     that defect (fail-toward-deny, never a silent allow).
 
@@ -10587,9 +10496,10 @@ def orch_truncation_guard(data):
                 "(run_in_background) and collect its completion, or keep the command in the foreground and "
                 "wait for it. If the detached result and completion are genuinely not needed, drop the '&' "
                 "and run it foreground. If this '&' is not a detach at all (a construct this scan does not "
-                "model that leaves it looking like an unquoted operator; a '$((...))' bitwise AND and a "
-                "here-document body's '&' are already read as non-detach, except in an unquoted-delimiter "
-                "body holding a backslash, which is scanned as code), write the text to a file and "
+                "model that leaves it looking like an unquoted operator, such as a '$((...))' bitwise AND, or "
+                "a here-document body whose delimiter word is not simple letters, digits, and underscores, "
+                "or an unquoted-delimiter body holding a backslash, all scanned as code; a body under a "
+                "simple delimiter such as 'EOF' is read as data), write the text to a file and "
                 "pass the file instead; the background-dispatch advice applies only to a real detach.",
                 "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
                 "trkasy); use the tracked background dispatch or run it in the foreground.")
