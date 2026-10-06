@@ -1423,7 +1423,8 @@ def _rdp_scope_cases(base, plain):
                 "git commit -m -- -S", "git commit --mess -- --gpg-sign", "git diff --cached --ext-diff",
                 "git grep -e -e -e -- -O", "git commit --mess -m -m -- -S", "git blame -n -L -- --ext-diff",
                 "git stash show -- --ext-diff", "git clone -- evil::x d", "git commit --mess --mess --mess -- -S",
-                "git blame -L -- --ext-diff", "git shortlog --committer --grep -- --ext-diff")
+                "git blame -L -- --ext-diff", "git shortlog --committer --grep -- --ext-diff",
+                "git commit --allow-empty --mess --mess --mess -- -S", "git blame -CS --ext-diff f")
     pr_got = []
     for c in programs:
         result = go.run(c)
@@ -1451,7 +1452,9 @@ def _rdp_scope_cases(base, plain):
                 "git commit -a -- -S", "git grep -e -e -- -O", "git grep -e-e -- -O",
                 "git log --grep --author -- --show-signature", "git log --grep=--author -- --show-signature",
                 "git log -S -n -- --ext-diff", "git log -S-n -- --ext-diff", "git commit --mess --mess -- -S",
-                "git blame -n -- --ext-diff", "git blame -L 1,2 -- --ext-diff", "git shortlog -n -- --ext-diff")
+                "git blame -n -- --ext-diff", "git blame -L 1,2 -- --ext-diff", "git shortlog -n -- --ext-diff",
+                "git blame -G -G -- --ext-diff", "git commit --mess --gpg-sign", "git shortlog -G -G -- --ext-diff",
+                "git blame -I -O -- --ext-diff")
     check("rdp/plain-git-option-operands-parsed", [_rdp_kind(go.run(c)) for c in operands],
           ["allow"] * len(operands))
     patches = ("git log -Sx -p -- .aiqt", "git log -pSconfig -- .aiqt", "git log -cS x -- .aiqt",

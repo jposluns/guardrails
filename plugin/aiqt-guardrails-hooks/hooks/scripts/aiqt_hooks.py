@@ -11671,7 +11671,10 @@ _RDP_GIT_DIFF_NEXT_LONG = frozenset((
 # -e -O searches for -O; and the long options taking the next word when written without =, so git log
 # --grep --ext-diff searches for --ext-diff. Only an option whose value git requires is listed: a word
 # taken as a value is not judged, while a word wrongly judged only refuses. A subcommand not listed has
-# no short option that runs a program or takes the next word.
+# no short option that runs a program or takes the next word. For blame and shortlog the letters taking the
+# next word are those git 2.53 refused when given last for want of a value (_RDP_GIT_DASHDASH_TAKES reads
+# them from here), and the letters taking the rest of the word add those whose value git takes only glued,
+# found by git 2.53 reading blame -CS f and -MS f as a score and the file f, and refusing shortlog -wG.
 _RDP_GIT_PROGRAM_LETTERS = {
     "grep": ("O", "efABCm", "efABCm"), "rebase": ("xsS", "CX", "CX"), "difftool": ("x", "t", ""),
     "clone": ("uc", "job", "job"), "tag": ("suv", "mF", "mF"), "commit": ("Sp", "FmcCtU", "FmcCtU"),
@@ -11679,7 +11682,8 @@ _RDP_GIT_PROGRAM_LETTERS = {
     "add": ("pi", "U", "U"), "checkout": ("p", "bBU", "bBU"), "restore": ("p", "sU", "sU"),
     "reset": ("p", "U", "U"), "stash": ("p", "", ""), "switch": ("", "cC", "cC"), "push": ("", "o", "o"),
     "fetch": ("", "jo", "jo"), "branch": ("", "u", "u"), "ls-files": ("", "xX", "xX"),
-    "blame": ("", "SL", "SL"), "log": ("", _RDP_GIT_DIFF_VALUED + "L", _RDP_GIT_DIFF_NEXT + "L"),
+    "blame": ("", "GILOSCM", "GILOS"), "shortlog": ("", "GIOSlw", "GIOSl"),
+    "log": ("", _RDP_GIT_DIFF_VALUED + "L", _RDP_GIT_DIFF_NEXT + "L"),
     "show": ("", _RDP_GIT_DIFF_VALUED + "L", _RDP_GIT_DIFF_NEXT + "L"),
     "diff": ("", _RDP_GIT_DIFF_VALUED, _RDP_GIT_DIFF_NEXT),
     "rev-list": ("", _RDP_GIT_DIFF_VALUED, _RDP_GIT_DIFF_NEXT)}
@@ -11736,11 +11740,12 @@ _RDP_GIT_DASHDASH_TAKES = {
     "show": (_RDP_GIT_NEXT_LONG["show"], _RDP_GIT_PROGRAM_LETTERS["show"][2]),
     "diff": (_RDP_GIT_NEXT_LONG["diff"], _RDP_GIT_PROGRAM_LETTERS["diff"][2]),
     "rev-list": (_RDP_GIT_NEXT_LONG["rev-list"], _RDP_GIT_PROGRAM_LETTERS["rev-list"][2]),
-    "shortlog": ((_RDP_GIT_REV_TAKES[0] - frozenset(("--committer",))) | frozenset(("--group",)), "GIOSl"),
+    "shortlog": ((_RDP_GIT_REV_TAKES[0] - frozenset(("--committer",))) | frozenset(("--group",)),
+                 _RDP_GIT_PROGRAM_LETTERS["shortlog"][2]),
     "ls-files": (frozenset(("--exclude", "--exclude-from", "--exclude-per-directory", "--format",
                             "--with-tree")), "xX"),
     "blame": (_RDP_GIT_REV_TAKES[0] | frozenset(("--contents", "--diff-algorithm", "--ignore-rev",
-                                                 "--ignore-revs-file")), "GILOS"),
+                                                 "--ignore-revs-file")), _RDP_GIT_PROGRAM_LETTERS["blame"][2]),
     "grep": (frozenset(("--after-context", "--before-context", "--context", "--max-count", "--max-depth",
                         "--threads")), "ABCefm"),
     "add": (frozenset(("--chmod", "--inter-hunk-context", "--pathspec-from-file", "--unified")), "U"),
@@ -11879,7 +11884,8 @@ def _rdp_git_program_under(sub, before, after):
         # an abbreviation of a value-taking option included (git commit --mess --mess -- -S gives the second
         # --mess as the message, and -- ends the options); possibly one after any word that may take one (a
         # word naming both a value-taking option and one taking none, an option of a word that may itself be
-        # a value).
+        # a value). Only a word surely a value is skipped unjudged (git commit --mess --gpg-sign gives
+        # --gpg-sign as the message); a word possibly one is still judged, which only refuses.
         takes = _rdp_git_takes_next(sub, word)
         held, data = (False, False) if data else (
             takes or _rdp_git_takes_dashdash(sub, word), (takes or _rdp_git_waits(sub, word)) and not held)
@@ -11897,7 +11903,7 @@ def _rdp_git_program_under(sub, before, after):
         if name.startswith("--") and name not in _RDP_GIT_NOT_PROGRAM_OPTIONS and word != "--exec-path" and (
                 _rdp_long_option(name, _RDP_GIT_PROGRAM_OPTIONS + owned)):
             return word
-        skip = takes
+        skip = data
         if len(word) > 1 and word.startswith("-") and not word.startswith("--"):
             for ch in word[1:]:
                 if ch in letters:
@@ -12497,6 +12503,9 @@ def review_dispatch_pin(data):
     A refusal denies and names its reason; a cannot-evaluate denies with an UNVERIFIABLE: prefix; a
     declared non-revision target, or a branch label that does not resolve to the pin, is allowed with a
     note. A crash reaches main's PreToolUse fail-closed exit 2.
+    Residual (disclosed in the manifest residue): a git command whose operand is spelled like an option
+    after option-value consumption may be falsely denied (git stash push -m --patch, whose message --patch
+    is judged as the patch option); a fail-safe refusal of a harmless form, never an allow.
     Hookless dispatchers run it as a preflight: `aiqt_hooks.py review_dispatch_pin` with the payload on
     stdin."""
     tool_name = data.get("tool_name")
