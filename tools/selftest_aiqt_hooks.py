@@ -2779,8 +2779,10 @@ def _main_isolated(monitor):
         # === table (plus directory-shape rows) against the classifier itself. The second runs the
         # === handler: every off-allowlist command word is possibly discarding (deny with no cwd,
         # === snapshot-then-allow with a dirty one), and this hook's own semantic check makes an opf
-        # === command and a sort carrying a --c option (GNU sort --compress-program=bash runs the
-        # === sorted data as a script) possibly discarding too. On the round-8 bytes every
+        # === command possibly discarding too. Round 11 removed sort from the allowlist, following the
+        # === shared spec (GNU sort --compress-program=bash runs the sorted data as a script), so EVERY
+        # === sort is not plain and possibly discarding; on the round-10 bytes the spec's sort row was
+        # === plain and sort -r notes.txt was a silent allow. On the round-8 bytes every
         # === possibly-discarding row below except awk (already on the removed deny list) was a
         # === silent allow with no snapshot.
         if hasattr(aiqt_hooks, "_PLAIN_WRAPPER_WORDS"):
@@ -2807,7 +2809,10 @@ def _main_isolated(monitor):
             ("printf -v 'a[$(x)]' y", False), ("test -v 'a[$(x)]'", False),
             ("echo 'a$b'", False), ("echo 'a`b'", False), ("grep 'a[b' f", False),
             ("grep 'a]' f", False), ("echo 'a\\b'", False), ("echo 'a; b | c & d'", True),
-            ("echo 'x' 'y'", True))
+            ("echo 'x' 'y'", True),
+            # round 11: sort is off the rule-4 allowlist (the spec's sort row first), bare or by path
+            ("sort -S 4K --compress-program=bash f", False), ("sort -r notes.txt", False),
+            ("/usr/bin/sort notes.txt", False))
         for _pv_cmd, _pv_want in _np10_plain_vectors:
             _pv_got = aiqt_hooks._command_is_plain(_pv_cmd)
             if _pv_got is not _pv_want:
@@ -2830,7 +2835,10 @@ def _main_isolated(monitor):
             ("sort-compress-abbrev", "sort --com'press'=bash payload.txt", "deny", 0, "allow-note", 1),
             ("ls-plain", "ls -la docs/x.md", "allow", 0, "allow", 0),
             ("abs-ls-plain", "/usr/bin/ls docs", "allow", 0, "allow", 0),
-            ("sort-plain", "sort -r notes.txt", "allow", 0, "allow", 0),
+            # round 11: every sort is possibly discarding (the disclosed over-refusal of the spec)
+            ("sort-plain", "sort -r notes.txt", "deny", 0, "allow-note", 1),
+            ("sort-check", "sort --check notes.txt", "deny", 0, "allow-note", 1),
+            ("sort-abs", "/usr/bin/sort notes.txt", "deny", 0, "allow-note", 1),
             ("rm-plain-scope", "rm notes.txt", "allow", 0, "allow", 0),
         )
         aiqt_hooks._record_recovery = _npnc_count

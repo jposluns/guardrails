@@ -5483,13 +5483,14 @@ _PLAIN_CMDWORD_CHARS = frozenset(
 # list of interpreter names was bypassed by a versioned path (/usr/bin/python3.14), so every word not
 # listed here (a shell, an interpreter at any version, awk, sed, find, xargs, env, tar, make, an
 # editor, a wrapper) is NOT plain. git and opf CAN run other programs: membership only means the
-# hook judges them by its own semantic check (git_discard treats both as possibly discarding).
+# hook judges them by its own semantic check (git_discard treats both as possibly discarding). sort is
+# NOT listed (round 11, following the shared spec): GNU sort --compress-program=PROG runs PROG, so
+# every sort is not plain and therefore possibly discarding.
 _PLAIN_COMMAND_WORDS = frozenset((
     "git", "opf",
     "ls", "cat", "echo", "printf", "pwd", "true", "false", "test", "head", "tail", "wc", "grep",
     "egrep", "fgrep", "diff", "cmp", "stat", "du", "df", "date", "basename", "dirname", "realpath",
-    "readlink", "sort", "uniq", "cut", "tr", "mkdir", "rmdir", "touch", "cp", "mv", "rm", "ln",
-    "chmod"))
+    "readlink", "uniq", "cut", "tr", "mkdir", "rmdir", "touch", "cp", "mv", "rm", "ln", "chmod"))
 # A command word with a slash is plain only when its directory is EXACTLY one of these (rule 4): a
 # relative path, ./x, or any other absolute directory (/tmp/x/ls) is not plain.
 _PLAIN_COMMAND_DIRS = frozenset(("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin"))
@@ -5581,11 +5582,9 @@ def _command_is_plain(command):
 def _plain_command_runs_program(command):
     """git_discard's OWN semantic check for a PROVABLY-PLAIN command (the shared spec leaves it to each
     hook): True when the allowlisted command word can still run another program, so the command is
-    possibly discarding. opf runs git and other programs (snapshot or deny, like git). sort runs the
-    program named by --compress-program, feeding it the data being sorted on its standard input
-    (observed with GNU sort: sort -S 4K --compress-program=bash file executed the lines of file); getopt
-    accepts any unambiguous prefix of the long option, so every sort argument starting with --c is
-    treated as that option (a --check is over-refused, the safe direction). The bash printf builtin
+    possibly discarding. opf runs git and other programs (snapshot or deny, like git). sort needs no
+    case here: it is off the _PLAIN_COMMAND_WORDS allowlist (its --compress-program runs a program), so
+    a sort is never plain and never reaches this check. The bash printf builtin
     with -v assigns the named variable, and an assignment to RANDOM, SRANDOM, OPTIND or HISTCMD is
     evaluated as arithmetic, which expands a variable named in the value recursively: with an ambient
     X holding a[$(cmd)], printf -v OPTIND X runs cmd (observed on bash 5.3.9), so every printf
@@ -5598,8 +5597,6 @@ def _plain_command_runs_program(command):
     name = words[0].rsplit("/", 1)[-1]
     if name == "opf":
         return True
-    if name == "sort":
-        return any(w.startswith("--c") for w in words[1:])
     if name == "printf":
         return any(w.startswith("-v") for w in words[1:])
     return False
@@ -5626,10 +5623,9 @@ def git_discard(data):
     command is ALLOWED with no snapshot ONLY when all three hold: it is PROVABLY PLAIN
     (_command_is_plain, decided on the raw bytes before any lexing; its command word is an allowlisted
     name, bare or in exactly /usr/bin, /bin, /usr/local/bin or /usr/sbin, so an interpreter at any
-    version or path is not plain); it names no git program in any word (_command_names_git); and this
-    hook's own semantic check finds no way for it to run another program (_plain_command_runs_program:
-    an opf command, a sort carrying a --c option prefix such as --compress-program, or a printf
-    carrying a -v option). EVERY other
+    version or path, and every sort, is not plain); it names no git program in any word
+    (_command_names_git); and this hook's own semantic check finds no way for it to run another program
+    (_plain_command_runs_program: an opf command or a printf carrying a -v option). EVERY other
     command is POSSIBLY DISCARDING (_possibly_discarding), whatever verbs it names: there is no
     read-only fast path, no pristine bare-git handling, no lossy-verb keyword trigger, no whole-tree
     clobber deny, and no GUARDRAIL_ALLOW_DISCARD opt-out (those helpers are no longer reached from
@@ -5682,7 +5678,7 @@ def git_discard(data):
     # can prove it is neither a discard nor able to hide one - ONLY when it is PROVABLY PLAIN under the
     # shared classifier (_command_is_plain, PLAIN-CLASSIFIER-SPEC, decided on the raw bytes before any
     # lexing), names no git program in any word (_command_names_git), AND cannot run another program
-    # (_plain_command_runs_program: opf, sort with a --c option, or printf with -v). EVERY other command - not plain,
+    # (_plain_command_runs_program: opf, or printf with -v). EVERY other command - not plain,
     # OR plain and naming git or able to run a program - is POSSIBLY DISCARDING: with a usable session cwd it is
     # snapshot-backed then allowed; without one it is denied. _possibly_discarding carries the
     # git-specific denies (a GIT_* assignment/export, a git submodule foreach, a -c/--config-env value
