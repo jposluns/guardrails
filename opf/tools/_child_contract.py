@@ -52,7 +52,10 @@ THE CONTRACT, in the order it runs:
    was recorded), and ends the process ITSELF with os._exit(code), so no interpreter finalization
    runs after the record. The callback writes through the Python-level streams only what may come
    BEFORE the final check, and RETURNS the SEAL: the (descriptor, bytes) pairs that must come
-   after it (a result's completeness terminator, written to saved_stdout), which the handler writes
+   after it (the parity child's completeness terminator, written to saved_stdout; the OPF unit
+   child's whole completion record, written to the record file's descriptor, which
+   _cmd_self_test_unit opens and truncates before the unit runs, so the file stays empty unless
+   the seal is written; merge train 2 QA r10), which the handler writes
    with os.write only when the record stands (step 6). The decided code is used ONLY when the callback RETURNED NORMALLY: an
    exception the callback raises (a stdout flush that fails after the result was written), or
    one raised anywhere in the handler before it, is caught, named in a one-line diagnostic on
@@ -193,9 +196,10 @@ def collection_pass_changed_nothing():
 
 class FailClosedChild:
     """One child's contract instance (the module docstring states the contract). `record(code)`
-    writes the caller's structured verdict (the OPF completion record; the parity result and its
-    terminator -- it may write nothing for a failing code when the failure is carried by the exit
-    alone); `fault_line(faults)` returns the caller's named fault bytes for file descriptor 2;
+    produces the caller's structured verdict (the OPF unit child RETURNS its whole completion
+    record as the seal and writes nothing, merge train 2 QA r10; the parity child writes its
+    result line and returns its terminator as the seal -- it may write nothing for a failing code
+    when the failure is carried by the exit alone); `fault_line(faults)` returns the caller's named fault bytes for file descriptor 2;
     `fail_code` is the caller's cannot-evaluate exit. The reporting snapshot is taken HERE, at
     construction, before the loaded or tested code runs. `record` may RETURN the seal, a sequence
     of (descriptor, bytes) pairs written with os.write after the final check when the record

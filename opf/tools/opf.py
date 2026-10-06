@@ -22744,13 +22744,62 @@ def _unit_copy_capped(stream, path, label, kind, ident, allowed=None):
     return (None, tainted, tail, foreign[0])
 
 
-def _unit_write_record(label, code):
-    """The child half's completion record: ONE line, `<label> <code> <pid>`, written to the result
-    file the runner named in OPF_SELF_TEST_RESULT (absent when the unit entry is run by hand: then
-    there is nothing to write) by _cmd_self_test_unit's FIRST-registered exit handler, which runs
-    LAST among the exit handlers -- after every cleanup handler the unit registered (merge train 2
-    QA r2, codex MAJOR: written inline before interpreter shutdown, the record let an exit that
-    interrupted later cleanup pass). The pid is this writer's own, and the parent requires label,
+def _unit_open_record():
+    """Open the completion record's file, the result path the runner named in OPF_SELF_TEST_RESULT,
+    for _cmd_self_test_unit at register time, BEFORE any unit code runs, and return the descriptor
+    (None when the variable is absent, the unit entry run by hand, so there is nothing to write).
+    The open is O_WRONLY|O_CREAT|O_TRUNC, mode 0600 (the watchdog's record convention), guarded by
+    _unit_guard_flags() (a symlink is not followed, a FIFO never blocks the open) and required
+    regular by fstat on the opened descriptor, so the file is EMPTY from here until the seal is
+    written after the contract's final check (merge train 2 QA r10). An open that fails, or a
+    path that is not a regular file, is a named line on stderr and None: no record is ever
+    written, and the parent's missing-record check fails the unit closed. The descriptor is held
+    until the record handler's os._exit ends the child (or, on a path that never reaches the
+    handler, interpreter exit), never closed by this module."""
+    path = os.environ.get("OPF_SELF_TEST_RESULT")
+    if not path:
+        return None
+    guard = _unit_guard_flags()
+    if guard is None:
+        print("opf --self-test-unit: the completion record cannot be opened guarded on this "
+              "platform (no O_NOFOLLOW or O_NONBLOCK); no record will be written, failing closed",
+              file=sys.stderr)
+        return None
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | guard, 0o600)
+    except OSError as exc:
+        print("opf --self-test-unit: the completion record could not be opened ({}); no record "
+              "will be written, failing closed".format(exc), file=sys.stderr)
+        return None
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except OSError:
+        regular = False
+    if not regular:
+        os.close(fd)
+        print("opf --self-test-unit: the completion record path is not a regular file; no record "
+              "will be written, failing closed", file=sys.stderr)
+        return None
+    return fd
+
+
+def _unit_write_record(label, code, fd):
+    """The child half's completion record: ONE line, `<label> <code> <pid>`, for the result file
+    the runner named in OPF_SELF_TEST_RESULT, RETURNED as the seal [(fd, bytes)] (fd from
+    _unit_open_record, opened before any unit code ran; nothing, (), when fd is None) and NEVER
+    written here. _cmd_self_test_unit's record callback returns it to _child_contract's record
+    handler, which writes it with os.write only AFTER its final check passes and then ends the
+    child with os._exit (contract step 6; merge train 2 QA r10: this function used to open and
+    write the file inside the callback, BEFORE the final check, whose own stream flushes run a
+    wrapper the unit left installed, so a stdout wrapper whose flush called os._exit(0) there
+    ended the child with exit 0 over a matching record, and the parent passed it). Until the seal
+    is written the file is EMPTY (_unit_open_record truncated it), so a run that ends before the
+    seal -- an os._exit anywhere in the unit, its cleanup or the final check, a fault that kills
+    the process, a signal -- leaves no record. The handler is _cmd_self_test_unit's
+    FIRST-registered exit handler, which runs LAST among the exit handlers -- after every cleanup
+    handler the unit registered (merge train 2 QA r2, codex MAJOR: written inline before
+    interpreter shutdown, the record let an exit that interrupted later cleanup pass). The pid is
+    this writer's own, and the parent requires label,
     code AND pid to match its direct child's exit and pid exactly (QA28: the record is BOUND to the
     leader), so an ACCIDENTAL early end of the child -- an os._exit(0) inside a unit included --
     cannot pass, and neither can a stale record or one carrying another process's pid. The record
@@ -22758,16 +22807,22 @@ def _unit_write_record(label, code):
     line from any process -- a fork of the leader knows the path and the pid -- ends its captured
     stderr with the matching cleanup boundary line and then exits 0
     early passes (the disclosed forged-record sabotage residual, D-385-ACCIDENTAL-UNIT, QA31 codex;
-    _run_unit_subprocess (h)). A write failure is left to the parent's missing-record check (fail
-    closed)."""
-    path = os.environ.get("OPF_SELF_TEST_RESULT")
-    if not path:
-        return
-    try:
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write("{} {} {}\n".format(label, code, os.getpid()))
-    except OSError:
-        pass
+    _run_unit_subprocess (h)). The r10 seal does NOT narrow that residual: such a unit writes the
+    line through the path itself, after the register-time truncation, and the parent reads the
+    path; the seal closes only the ACCIDENTAL end after the record (the record is now never on
+    disk before the final check). A seal write that fails is the contract's named fail_code exit,
+    and a missing or empty record the parent's missing-record check (fail closed). Before it
+    returns the seal it truncates the file and rewinds the descriptor (os.ftruncate, os.lseek; no
+    unit code runs in either): a process the unit launched inherits OPF_SELF_TEST_RESULT and may
+    have written there meanwhile (the opf-unit-bound watchdog vectors do), bytes the retired
+    truncating open used to replace, so the file is EMPTY again from here to the seal, which then
+    makes it exactly the record. A truncate that fails raises in the callback: the contract's named
+    fail_code exit."""
+    if fd is None:
+        return ()
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return [(fd, "{} {} {}\n".format(label, code, os.getpid()).encode("utf-8"))]
 
 
 def _unit_internal_watchdog(label, budget):
@@ -22932,7 +22987,13 @@ def _unit_internal_watchdog(label, budget):
 
 def _cmd_self_test_unit(label):
     """The child half of the subprocess unit runner (D-385-SUBPROCESS-RUNNER): run ONE registered
-    unit in THIS dedicated process and exit with its code. The completion record is written by an
+    unit in THIS dedicated process and exit with its code. The completion record's file is opened
+    (and truncated, _unit_open_record) right after that handler is registered, before any unit code
+    runs, and the record is the handler's SEAL: the record callback returns its bytes and the
+    handler writes them with os.write only after its FINAL check, then os._exit (contract step 6;
+    merge train 2 QA r10: the callback used to write the record before the final check, whose
+    stream flushes run a stdout wrapper the unit left installed, so a wrapper calling os._exit(0)
+    there passed). The completion record is written by an
     exit handler registered FIRST, before any unit code runs: exit handlers run
     last-registered-first, so the record write comes AFTER every cleanup handler the unit
     registered, and a unit whose cleanup ends the process early -- an os._exit, a fault that kills
@@ -22958,7 +23019,8 @@ def _cmd_self_test_unit(label):
     where the identity comparison sees the released and created objects themselves) -- so
     pending finalizers run before
     the record, flushes the
-    streams, writes the record and then ends the process ITSELF with os._exit(code), so no
+    streams, re-runs the same checks after the record callback (the final check), only then writes
+    the sealed record and then ends the process ITSELF with os._exit(code), so no
     interpreter finalization runs after it (an object still reachable then is never finalized,
     so its finalizer neither runs nor faults). The child half of this contract is implemented
     ONCE in the sibling _child_contract module (shared with the hook-scripts parity child) and
@@ -22990,7 +23052,9 @@ def _cmd_self_test_unit(label):
         return EXIT_MALFORMED
 
     def unit_record(code):
-        _unit_write_record(label, code)
+        # The seal (merge train 2 QA r10): the record bytes are RETURNED, and the contract writes
+        # them on the descriptor opened below only after its final check, then os._exit.
+        return _unit_write_record(label, code, record_fd[0])
 
     def unit_fault_line(faults):
         return ("opf-unit-cleanup-fault {} {}: {}; failing closed (secfcl)\n".format(
@@ -22999,6 +23063,7 @@ def _cmd_self_test_unit(label):
     # The record handler, the settling collection, the guarded reporting machinery and the ending
     # os._exit are _child_contract.FailClosedChild's (the shared fail-closed child contract);
     # register() refuses when another exit handler came first (its os._exit would skip it).
+    record_fd = [None]
     contract = _child_contract.FailClosedChild(
         record=unit_record, fault_line=unit_fault_line, fail_code=EXIT_MALFORMED)
     if not contract.register():
@@ -23006,6 +23071,9 @@ def _cmd_self_test_unit(label):
               "completion record's, and the record's os._exit would skip it; refusing, exit 2 "
               "(merge train 2 QA r3)".format(label), file=sys.stderr)
         return EXIT_MALFORMED
+    # Opened (and truncated) BEFORE any unit code runs, held until the handler's os._exit: the file
+    # stays EMPTY unless the final check passes and the seal is written (merge train 2 QA r10).
+    record_fd[0] = _unit_open_record()
     import tempfile
     from unittest.mock import patch
     code = EXIT_MALFORMED
@@ -23718,7 +23786,12 @@ def _unit_bound_self_test():
     QA r5, codex MEDIUM). The r6 leg: (43) a resurrecting finalizer that also RELEASES other
     tracked objects while creating that work, so the tracked count stays equal or lower and the
     r5 settle rule passed it, fails closed under the shared contract's identity-set rule (merge
-    train 2 QA r6, codex MEDIUM). Returns 0 clean, 1 on a failure."""
+    train 2 QA r6, codex MEDIUM). The r10 leg: (44) through the real child entry, a stdout
+    wrapper the unit leaves installed whose flush calls os._exit(0) inside the contract's FINAL
+    check (after the record callback) leaves the record file empty and fails closed by name, and
+    (45) an os._exit(0) inside the unit body does too; the benign controls (30c) and (41) still
+    pass (merge train 2 QA r10: the record was written inside the callback, before the final
+    check, and (44) passed). Returns 0 clean, 1 on a failure."""
     import contextlib
     import inspect
     import io
@@ -24970,6 +25043,42 @@ def _unit_bound_self_test():
                       "{!r}): a collection pass settles only when it changes nothing (merge "
                       "train 2 QA r6, codex MEDIUM)".format(code, err_text[-240:]))
 
+    # (44) merge train 2 QA r10: the record was written inside the record callback, BEFORE the
+    # contract's final check, whose stream flushes run a wrapper the unit left on sys.stdout; a
+    # flush that called os._exit(0) there ended the child with exit 0 over a matching record and
+    # the boundary as its last stderr line, and the parent passed it. The record is now the
+    # contract's seal, written by os.write only after that check, so the file the child truncated
+    # before the unit ran is still empty. The wrapper fires only in the FINAL check: a `_check`
+    # frame called directly by the record handler (the first check is called through `_decide`).
+    # (45) an os._exit(0) inside the unit body leaves the same empty record.
+    for case, body in (
+            ("synthetic-final-check-exit",
+             "    class Exiting:\n"
+             "        def __init__(self, stream):\n"
+             "            self.stream = stream\n"
+             "            self.getframe = sys._getframe\n"
+             "            self.exit = os._exit\n"
+             "        def write(self, text):\n"
+             "            return self.stream.write(text)\n"
+             "        def flush(self):\n"
+             "            self.stream.flush()\n"
+             "            frame = self.getframe(1)\n"
+             "            while frame is not None:\n"
+             "                caller = frame.f_back\n"
+             "                if (frame.f_code.co_name == '_check' and caller is not None\n"
+             "                        and caller.f_code.co_name == '_record_at_exit'):\n"
+             "                    self.exit(0)\n"
+             "                frame = caller\n"
+             "    sys.stdout = Exiting(sys.stdout)\n"),
+            ("synthetic-body-exit",
+             "    os._exit(0)\n"),
+    ):
+        code, _took, _out_text, err_text = run_vector(case, 30.0, child_entry(case, body))
+        if code != EXIT_MALFORMED or "completion record" not in err_text or "got ''" not in err_text:
+            faults.append("{} was not the named missing-record exit 2 over an empty record file "
+                          "(code {}, stderr tail {!r}): the record is sealed after the final "
+                          "check (merge train 2 QA r10)".format(case, code, err_text[-240:]))
+
     # (41) the declared-allowlist contract, both ways (merge train 2 QA r4, codex MAJOR): a unit
     # writing EXACTLY its declared row still passes (no over-rejection; the parent-side table is
     # patched for this label and restored in the finally), and an undeclared line -- here the
@@ -25044,7 +25153,9 @@ def _unit_bound_self_test():
           "newly created cyclic cleanup work whose finalizer faults fails closed; and the r6 "
           "leg holds: a resurrecting finalizer that also releases tracked objects while "
           "creating that work fails closed under the shared contract's identity-set settle "
-          "rule)")
+          "rule; and the r10 leg holds: a stdout wrapper calling os._exit(0) in the contract's "
+          "final check, and an os._exit(0) in the unit body, each leave the record file empty "
+          "and fail closed, the record sealed after the final check)")
     return EXIT_OK
 
 
