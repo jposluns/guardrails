@@ -11687,7 +11687,7 @@ _RDP_GIT_NEXT_LONG = {
     "log": _RDP_GIT_DIFF_NEXT_LONG | frozenset(("--decorate-refs", "--decorate-refs-exclude")),
     "show": _RDP_GIT_DIFF_NEXT_LONG | frozenset(("--decorate-refs", "--decorate-refs-exclude")),
     "diff": _RDP_GIT_DIFF_NEXT_LONG, "rev-list": _RDP_GIT_DIFF_NEXT_LONG,
-    "shortlog": _RDP_GIT_DIFF_NEXT_LONG | frozenset(("--group",)),
+    "shortlog": (_RDP_GIT_DIFF_NEXT_LONG - frozenset(("--committer",))) | frozenset(("--group",)),
     "ls-files": frozenset(("--exclude", "--exclude-from", "--exclude-per-directory", "--with-tree", "--format")),
     "ls-tree": frozenset(("--format",)), "cat-file": frozenset(("--path", "--filter")),
     "blame": frozenset(("--diff-algorithm", "--ignore-rev", "--ignore-revs-file", "--contents")),
@@ -11723,7 +11723,11 @@ _RDP_GIT_NEXT_LONG = {
 # from the next word when none is written with the option: (the long options, the short letters). Read
 # from git SUB --help-all (git 2.53), which lists the hidden options too, for status (none), ls-files,
 # grep, add, rm, commit, checkout, restore and reset, and for blame and shortlog, whose words git passes
-# to the revision options when they are not their own, joined with those of log; for log, show, diff and
+# to the revision options when they are not their own, joined with those of log (their short letters are
+# their own, not those of log: blame takes -L and -S by git blame -h and -G, -I and -O through the revision
+# options, shortlog -G, -I, -O, -S and -l through the revision options, each found by git 2.53 refusing the
+# letter given last for want of a value; blame -n and -l and shortlog -n take none, as shortlog --committer
+# does); for log, show, diff and
 # rev-list (whose -h lists no option) the git-log, git-show, git-diff and git-rev-list documentation
 # pages, as _RDP_GIT_NEXT_LONG and the next-word letters of _RDP_GIT_PROGRAM_LETTERS hold them.
 _RDP_GIT_REV_TAKES = (_RDP_GIT_NEXT_LONG["log"], _RDP_GIT_PROGRAM_LETTERS["log"][2])
@@ -11732,11 +11736,11 @@ _RDP_GIT_DASHDASH_TAKES = {
     "show": (_RDP_GIT_NEXT_LONG["show"], _RDP_GIT_PROGRAM_LETTERS["show"][2]),
     "diff": (_RDP_GIT_NEXT_LONG["diff"], _RDP_GIT_PROGRAM_LETTERS["diff"][2]),
     "rev-list": (_RDP_GIT_NEXT_LONG["rev-list"], _RDP_GIT_PROGRAM_LETTERS["rev-list"][2]),
-    "shortlog": (_RDP_GIT_REV_TAKES[0] | frozenset(("--group",)), _RDP_GIT_REV_TAKES[1]),
+    "shortlog": ((_RDP_GIT_REV_TAKES[0] - frozenset(("--committer",))) | frozenset(("--group",)), "GIOSl"),
     "ls-files": (frozenset(("--exclude", "--exclude-from", "--exclude-per-directory", "--format",
                             "--with-tree")), "xX"),
     "blame": (_RDP_GIT_REV_TAKES[0] | frozenset(("--contents", "--diff-algorithm", "--ignore-rev",
-                                                 "--ignore-revs-file")), _RDP_GIT_REV_TAKES[1] + "LS"),
+                                                 "--ignore-revs-file")), "GILOS"),
     "grep": (frozenset(("--after-context", "--before-context", "--context", "--max-count", "--max-depth",
                         "--threads")), "ABCefm"),
     "add": (frozenset(("--chmod", "--inter-hunk-context", "--pathspec-from-file", "--unified")), "U"),
@@ -11749,6 +11753,15 @@ _RDP_GIT_DASHDASH_TAKES = {
     "restore": (frozenset(("--conflict", "--inter-hunk-context", "--pathspec-from-file", "--source",
                            "--unified")), "Us"),
     "reset": (frozenset(("--inter-hunk-context", "--pathspec-from-file", "--unified")), "U")}
+# For each subcommand of _RDP_GIT_DASHDASH_TAKES, its options taking no value, or one only glued after =,
+# that git 2.53 reads from a word naming (or abbreviating) one of its value-taking long options: git log
+# --decorate is no --decorate-refs, git shortlog --summary and blame --root no revision option. Every
+# other long word a value-taking option of the set begins with takes the next word or stops git with an
+# error (an unknown or ambiguous option, or one missing its value), found by giving git 2.53 each such word
+# last.
+_RDP_GIT_DASHDASH_FREE = {
+    "log": ("--decorate",), "show": ("--decorate",), "shortlog": ("--email", "--summary"),
+    "blame": ("--abbrev", "--incremental", "--line-porcelain", "--minimal", "--root")}
 # The subcommands that reach a remote, where a URL written TRANSPORT::ADDRESS runs the remote helper
 # git-remote-TRANSPORT found on PATH.
 _RDP_GIT_TRANSPORTS = frozenset(("fetch", "push", "clone", "remote"))
@@ -11811,6 +11824,15 @@ def _rdp_git_takes_dashdash(sub, word):
     return False
 
 
+def _rdp_git_waits(sub, word):
+    """Whether the long option word, given to the git subcommand sub, surely takes the next word as its
+    value or stops git: written without = and beginning one of the value-taking long options of
+    _RDP_GIT_DASHDASH_TAKES, it is none of the options taking no value that begin with it
+    (_RDP_GIT_DASHDASH_FREE), so git either takes the next word (git commit --mess) or refuses the word."""
+    return word.startswith("--") and sub in _RDP_GIT_DASHDASH_TAKES and _rdp_git_takes_dashdash(sub, word) and \
+        not any(option.startswith(word) for option in _RDP_GIT_DASHDASH_FREE.get(sub, ()))
+
+
 def _rdp_git_takes_next(sub, word):
     """Whether the option word surely takes the next word as its value when given to the git subcommand
     sub, by the tables the scan reads operands with: a long option of _RDP_GIT_NEXT_LONG written whole, or
@@ -11839,7 +11861,7 @@ def _rdp_git_program_under(sub, before, after):
     owned = _RDP_GIT_SUB_PROGRAM_OPTIONS.get(sub, ())
     letters, valued, _nexts = _RDP_GIT_PROGRAM_LETTERS.get(sub, ("", "", ""))
     # held: the word may be an option's value; data: it surely is one (the word before it, itself surely
-    # free, surely takes it). A -- ends the options only when reached neither.
+    # free, surely takes it or stops git, _rdp_git_waits). A -- ends the options only when reached neither.
     skip = form = ended = held = data = False
     for word in after:
         if form and ("%G" in word or "%(signature" in word):
@@ -11853,12 +11875,14 @@ def _rdp_git_program_under(sub, before, after):
             # The end of the options (_RDP_GIT_DASHDASH_ENDS): every word after it is a path.
             ended = True
             continue
-        # The next word: free after a value; surely a value after a surely free word that surely takes one;
-        # possibly one after any word that may take one (an abbreviation, an option whose value is
-        # optional, an option of a word that may itself be a value).
+        # The next word: free after a value; surely a value after a surely free word that surely takes one,
+        # an abbreviation of a value-taking option included (git commit --mess --mess -- -S gives the second
+        # --mess as the message, and -- ends the options); possibly one after any word that may take one (a
+        # word naming both a value-taking option and one taking none, an option of a word that may itself be
+        # a value).
         takes = _rdp_git_takes_next(sub, word)
         held, data = (False, False) if data else (
-            takes or _rdp_git_takes_dashdash(sub, word), takes and not held)
+            takes or _rdp_git_takes_dashdash(sub, word), (takes or _rdp_git_waits(sub, word)) and not held)
         if skip:
             # An option's operand is data, a format-looking one included (git log --grep --format=%G
             # searches for --format=%G); a URL operand was judged above, since git still reaches it.
