@@ -11628,6 +11628,18 @@ _RDP_GIT_SUB_PROGRAM_OPTIONS = {
     "--interactive"), "checkout": ("--patch",), "restore": ("--patch",), "reset": ("--patch",),
     "stash": ("--patch",)}
 _RDP_GIT_NOT_PROGRAM_OPTIONS = frozenset(("--text", "--filter", "--to", "--cc"))
+# The subcommands whose grammar ends their options at a -- ([--] [<pathspec>...]), so a word after it is a
+# path, never an option: on git 2.53, git SUB -- --bogus and git SUB WORD -- --bogus take --bogus as a
+# path or revision for each of them (no unknown-option error), and git diff, log -p and show run no
+# diff.external for -- --ext-diff while they do for --ext-diff. log, show, diff, rev-list and shortlog end
+# at the first -- whatever comes before it (git log --grep -- x lacks a --grep value); the others end at a
+# -- not taken as an option's value. The -- is read as ending them only where it comes first or follows a
+# word that is no option (a word the hook does not know to take the next word could still take it), and a
+# TRANSPORT::ADDRESS after it is still judged. Any other subcommand (stash, whose show passes its words to
+# a diff, config, remote, worktree, cat-file, mv, cherry-pick, revert, merge-base and the rest) judges a
+# word after -- as before, which only refuses.
+_RDP_GIT_DASHDASH_ENDS = frozenset(("status", "log", "diff", "show", "rev-list", "shortlog", "ls-files",
+                                    "blame", "grep", "add", "rm", "commit", "checkout", "restore", "reset"))
 # The subcommands that run a command given as their words: bisect run, submodule foreach (also through
 # submodule--helper) and filter-branch, whose filters and setup are shell text.
 _RDP_GIT_PROGRAM_SUBCOMMANDS = {"bisect": "run", "submodule": "foreach", "submodule--helper": "foreach",
@@ -11761,13 +11773,20 @@ def _rdp_git_program_under(sub, before, after):
     owned = _RDP_GIT_SUB_PROGRAM_OPTIONS.get(sub, ())
     letters, valued, nexts = _RDP_GIT_PROGRAM_LETTERS.get(sub, ("", "", ""))
     longs = _RDP_GIT_NEXT_LONG.get(sub, frozenset())
-    skip = form = False
-    for word in after:
+    skip = form = ended = False
+    for k, word in enumerate(after):
         if form and ("%G" in word or "%(signature" in word):
             return word
         name = word.split("=", 1)[0]
         if sub in _RDP_GIT_TRANSPORTS and _rdp_git_helper_url(word):
             return word
+        if ended:
+            continue
+        if word == "--" and not skip and sub in _RDP_GIT_DASHDASH_ENDS and (
+                k == 0 or not after[k - 1].startswith("-")):
+            # The end of the options (_RDP_GIT_DASHDASH_ENDS): every word after it is a path.
+            ended = True
+            continue
         if skip:
             # An option's operand is data, a format-looking one included (git log --grep --format=%G
             # searches for --format=%G); a URL operand was judged above, since git still reaches it.
@@ -11827,8 +11846,10 @@ def _rdp_git_runs_program(words):
     for a subcommand of _RDP_GIT_TRANSPORTS, or a subcommand of _RDP_GIT_PROGRAM_SUBCOMMANDS. Options are
     read with their operands first: a word taken as the value of an option before it (attached, or the
     next word after one of _RDP_GIT_PROGRAM_LETTERS or _RDP_GIT_NEXT_LONG) is no option, so git log --grep
-    --ext-diff searches for --ext-diff. Every other word is judged, a word after -- included. Behind a
-    global option this hook does not know, every word that may be the subcommand is tried."""
+    --ext-diff searches for --ext-diff. Every other word is judged up to a -- ending the options of a
+    subcommand of _RDP_GIT_DASHDASH_ENDS (first, or after a word that is no option), after which a word is a
+    path (git diff -- --ext-diff); for any other subcommand, a word after -- is judged too. Behind a global
+    option this hook does not know, every word that may be the subcommand is tried."""
     if _rdp_basename(words[0]).casefold() != "git":
         return None
     at, _configured = _rdp_git_subcommand(words)
@@ -12138,7 +12159,7 @@ def _rdp_writer_reaches(name, parsed, words, relation):
     return None
 
 
-def _rdp_names_common_dir(words, cwd, guard):
+def _rdp_names_common_dir(words, cwd, guard, dispatch=False):
     """The first word (with the reason, where it is not a path) of a plain command that may write, move or
     remove the session repository's common git directory, which holds the binding record, judged by where
     its words RESOLVE, whatever their spelling (a separated git directory not named .git, a symbolic link, a
@@ -12151,8 +12172,10 @@ def _rdp_names_common_dir(words, cwd, guard):
     can delete, move or recursively rewrite it (_rdp_writer_reaches, for cp, mv, ln, rm and rmdir); a
     program of _RDP_HOLDER_SAFE never can, so writing a new file or directory into it (touch ./f, mkdir d,
     cp x .) is not refused, and any other program but git (chmod, whose mode alone can cut every path to
-    the git directory, opf, a dispatch command) is refused whenever a value of a word holds it. Git writes
-    its own directory through no pathspec, so a git pathspec may name a parent (git add .)."""
+    the git directory, opf) is refused whenever a value of a word holds it. Git writes its own directory
+    through no pathspec, so a git pathspec may name a parent (git add .), and a declared dispatch command
+    (dispatch true) writes no git directory, so its words may name a holding directory (--workdir . or the
+    repository root); a word that is the git directory or lies inside it is refused to both."""
     if _rdp_basename(words[0]) in _RDP_GIT_DIR_READERS:
         return None
     common, failure = guard
@@ -12188,7 +12211,7 @@ def _rdp_names_common_dir(words, cwd, guard):
                 return word
             if found == "holds" and holds is None:
                 holds = word
-    if git or name in _RDP_HOLDER_SAFE:
+    if git or dispatch or name in _RDP_HOLDER_SAFE:
         return None
     parsed = _rdp_writer_parse(name, words[1:])
     if parsed is None:
@@ -12276,7 +12299,8 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None,
                 "({}); a configuration file or hook written there can make any git command, a read among "
                 "them, run a program, so in a session whose registry binds review dispatch only a read may "
                 "name one, and an operator changes them outside the session".format(gitdir))
-    common = None if reads else _rdp_names_common_dir(words, data.get("cwd"), guard)
+    dispatch = _rdp_basename(words[0]).casefold() in {name.casefold() for name in commands}
+    common = None if reads else _rdp_names_common_dir(words, data.get("cwd"), guard, dispatch)
     if common is not None:
         return ("deny", "the command may write, move or remove the repository's common git directory {} "
                 "({}), which holds the review dispatch binding record; in a session whose registry binds "

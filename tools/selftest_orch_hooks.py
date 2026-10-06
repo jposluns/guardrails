@@ -1418,7 +1418,9 @@ def _rdp_scope_cases(base, plain):
                 "git revert --gpg-sign y", "git push --signed origin", "git add -p", "git add -i",
                 "git add --interactive", "git checkout -p", "git restore --patch x", "git reset -p",
                 "git stash -p", "git fetch evil::x", "git clone evil::x d", "git remote add o evil::x",
-                "git push --repo=evil::x", "git log --help")
+                "git push --repo=evil::x", "git log --help", "git diff --ext-diff --",
+                "git log --show-signature --", "git log --grep -- --ext-diff", "git diff --cached -- --ext-diff",
+                "git stash show -- --ext-diff", "git clone -- evil::x d")
     pr_got = []
     for c in programs:
         result = go.run(c)
@@ -1436,7 +1438,8 @@ def _rdp_scope_cases(base, plain):
                 "git rebase -i HEAD", "git --exec-path", "git log --grep --ext-diff",
                 "git log --grep=--ext-diff", "git show --author --show-signature", "git commit -m --gpg-sign",
                 "git grep -A 1 -e -O", "git tag -m -s v1", "git log --grep --help", "git clone -o -u a b",
-                "git log --grep --format=%G --format=%s")
+                "git log --grep --format=%G --format=%s", "git diff -- --ext-diff",
+                "git log -- --show-signature", "git log HEAD -- --show-signature", "git grep a -- -O")
     check("rdp/plain-git-option-operands-parsed", [_rdp_kind(go.run(c)) for c in operands],
           ["allow"] * len(operands))
     patches = ("git log -Sx -p -- .aiqt", "git log -pSconfig -- .aiqt", "git log -cS x -- .aiqt",
@@ -1678,6 +1681,27 @@ def _rdp_scope_cases(base, plain):
     check("rdp/record-ancestor-only-destructive-forms-refused",
           [an_first, an_refused, an_allowed],
           ["unverifiable", ["deny"] * len(refused), ["allow"] * len(allowed)])
+    # A declared dispatch command writes no git directory, so a word of it may name a directory holding
+    # the git directory (--workdir ., the repository root) and the dispatch reaches the pin check; a
+    # word naming the git directory or a path inside it is still refused, and so is a holding directory
+    # to a program the option tables do not model (opf).
+    dw = RdpFixture(base, "dispatch-workdir")
+    dw_good = dw.good()
+    dw_allowed = [_rdp_kind(dw.run(c)) for c in ("orch-dispatch --brief " + dw_good,
+                                                "orch-dispatch --workdir . --brief " + dw_good,
+                                                "orch-dispatch --workdir " + str(dw.root) + " --brief " + dw_good)]
+    dw_inside = [dw.run(c) for c in ("orch-dispatch --workdir .git/aiqt --brief " + dw_good,
+                                     "orch-dispatch --workdir " + str(dw.root / ".git") + " --brief " + dw_good)]
+    dw_guard = (os.path.realpath(dw.root / ".git"), None)
+    check("rdp/dispatch-workdir-holding-dir-allowed-inside-refused",
+          [dw_allowed, [_rdp_kind(r) for r in dw_inside],
+           aiqt_hooks._rdp_names_common_dir(["orch-dispatch", "--workdir", "."], str(dw.root), dw_guard, True),
+           aiqt_hooks._rdp_names_common_dir(["orch-dispatch", "--workdir", ".git/aiqt"], str(dw.root), dw_guard,
+                                            True),
+           aiqt_hooks._rdp_names_common_dir(["orch-dispatch", "--workdir", str(dw.root / ".git")], str(dw.root),
+                                            dw_guard, True),
+           aiqt_hooks._rdp_names_common_dir(["opf", "."], str(dw.root), dw_guard)],
+          [["allow"] * 3, ["deny", "deny"], None, ".git/aiqt", str(dw.root / ".git"), "."])
     # One check reads each registry ONCE and enforces the recorded binding: a registry removed between the
     # record comparison and the enforcement (the record check wrapped to remove .aiqt after it compares)
     # still leaves the dispatch withheld, and no registry directory is read twice within one check.
