@@ -82,7 +82,10 @@ requires the gh view, the gh list and the remote tip to agree on the PR head, me
 base tip M in the private checkout with `git merge --no-commit --no-ff`, takes the base's side for
 conflicted generated paths, refuses any other conflict, refuses a declared generated path that is
 (or sits under) a symlink or resolves outside the checkout, always runs the regenerate commands,
-runs the check commands, proves nothing outside the generated set differs from the automatic merge,
+runs the check commands (each regenerate and check command is accepted only with exit 0 and no
+fault on stderr, such as a Python traceback or an "Exception ignored" line from an atexit callback,
+since such a fault leaves the exit status 0), proves nothing outside the generated set differs from
+the automatic merge,
 then proves that EVERY blob of the validated tree is byte-identical to the private-checkout file
 the checks read (what was validated is what is pushed; a clean filter or autocrlf transform cannot
 smuggle unvalidated bytes), commits with `git commit-tree` against that validated tree (no commit
@@ -615,16 +618,61 @@ def guard_source_conflict(unmerged, generated):
             ", ".join(outside[:10])))
 
 
-def guard_regenerate_exit(code, command, err):
+# The stderr text by which a Python child reports a fault it survived with exit status 0: an
+# exception raised in an atexit callback, a finalizer, a thread or an unraisable-hook path is
+# printed and does NOT change the exit status (observed on Python 3.14: atexit 1/0 exits 0 after
+# "Exception ignored in atexit callback ...", a thread's exception after "Exception in thread",
+# and a finalizer's under sys.tracebacklimit=0 after "Exception ignored while calling deallocator"
+# with no Traceback line).
+CHILD_FAULT_MARKERS = ("Traceback (most recent call last):", "Exception ignored",
+                       "Exception in thread ", "Fatal Python error")
+
+
+def guard_child_fault(err):
+    """The first stderr line of a configured command that reports a fault (see
+    CHILD_FAULT_MARKERS), or None. Every place this tool accepts a child's result as success was
+    enumerated (QA train 5, codex blocker: a validator whose atexit callback raised exited 0 and the
+    train pushed). The children that decide a merge (the [generated].regenerate commands, the
+    [generated].check commands in the private checkout, and the same check commands in the fresh
+    normal checkout) are code the PR and the base carry: each is accepted only with exit 0 AND no
+    fault on stderr (_child_failure, used by guard_regenerate_exit, guard_check_exit and
+    guard_fresh_checkout). Every other subprocess result is NOT such a validator and keeps its own
+    rule: the git children (config-source, branch-name, branch-match, ancestry, _remote_head, the
+    _git ok=(0,) funnel) are the operator's pinned git, not code a PR or base supplies, run with
+    hooks, filters and fsmonitor disabled, and the git reads whose exit 0 can hide an incomplete
+    evaluation already refuse ANY stderr (fixpoint, scratch-complete, the fresh checkout itself)
+    or treat a non-answer as an error (ancestry); _gh_json runs the operator's gh, whose result is
+    structured JSON parsed and shape-checked before use. Disclosed residual: a configured command
+    has no structured-result channel, and code it loads can still silence its own stderr (replace
+    sys.unraisablehook or close descriptor 2); the exit status and the stderr scan are the two
+    channels this tool can read."""
+    for line in err.splitlines():
+        if any(marker in line for marker in CHILD_FAULT_MARKERS):
+            return line.strip()[:300]
+    return None
+
+
+def _child_failure(code, command, err):
+    """The refusal reason for a configured command's result; None only for exit 0 with no fault on
+    stderr (see guard_child_fault). A timeout or launch failure arrives as code None."""
     if code != 0:
-        raise Refuse("regenerate-failed", "%s exited %s: %s" % (" ".join(command), code,
-                                                               err.strip()[:300]))
+        return "%s exited %s: %s" % (" ".join(command), code, err.strip()[:300])
+    fault = _guard("child-fault")(err)
+    if fault is not None:
+        return "%s exited 0 with a fault on stderr: %s" % (" ".join(command), fault)
+    return None
+
+
+def guard_regenerate_exit(code, command, err):
+    reason = _child_failure(code, command, err)
+    if reason is not None:
+        raise Refuse("regenerate-failed", reason)
 
 
 def guard_check_exit(code, command, err):
-    if code != 0:
-        raise Refuse("check-failed", "%s exited %s: %s" % (" ".join(command), code,
-                                                          err.strip()[:300]))
+    reason = _child_failure(code, command, err)
+    if reason is not None:
+        raise Refuse("check-failed", reason)
 
 
 def guard_fixpoint(wt):
@@ -777,7 +825,8 @@ def guard_fresh_checkout(ctx, scratch, new):
     on git 2.53.0: with a blob of the candidate missing from, or unreadable in, the shared object
     store, this checkout prints "error: unable to read sha1 file" on stderr, EXITS 0 and leaves
     the path out of the worktree, so the checks would run over an incomplete tree): a nonzero
-    exit or ANY stderr output is refused as normal-checkout-failed before any check runs."""
+    exit or ANY stderr output is refused as normal-checkout-failed before any check runs. Each
+    check there is accepted only with exit 0 and no fault on stderr (see guard_child_fault)."""
     fresh_root = tempfile.mkdtemp(prefix="merge-train-fresh-")
     SCRATCHES.append(fresh_root)
     try:
@@ -794,10 +843,10 @@ def guard_fresh_checkout(ctx, scratch, new):
         for command in ctx["cfg"]["generated"]["check"]:
             code, _out, err = _run_external(command, fresh, ctx["cmd_timeout"],
                                             dict(PYTHONDONTWRITEBYTECODE="1"))
-            if code != 0:
+            reason = _child_failure(code, command, err)
+            if reason is not None:
                 raise Refuse("normal-checkout-failed",
-                             "%s exited %s in a fresh normal checkout of the candidate: %s" % (
-                                 " ".join(command), code, err.strip()[:300]))
+                             "in a fresh normal checkout of the candidate, %s" % reason)
     finally:
         _cleanup(lambda: shutil.rmtree(fresh_root, ignore_errors=True))
 
@@ -873,6 +922,7 @@ GUARDS = dict([
     ("branch-name", guard_branch_name),
     ("branch-match", guard_branch_match),
     ("source-conflict", guard_source_conflict),
+    ("child-fault", guard_child_fault),
     ("regenerate-exit", guard_regenerate_exit),
     ("check-exit", guard_check_exit),
     ("fixpoint", guard_fixpoint),
@@ -3955,6 +4005,63 @@ def case_rename(tmp):
     check("fixpoint/base-rename-invariants", _invariants(fx), [])
 
 
+def case_faultscan(_tmp):
+    # The stderr fault scan alone, per marker: each fault shape below was observed with exit 0.
+    scan = _guard("child-fault")
+    check("childfault/scan-atexit", scan(
+        "Exception ignored in atexit callback <function <lambda>>:\n"
+        "Traceback (most recent call last):\nZeroDivisionError: division by zero\n"),
+        "Exception ignored in atexit callback <function <lambda>>:")
+    check("childfault/scan-traceback", scan("note\nTraceback (most recent call last):\n"),
+          "Traceback (most recent call last):")
+    check("childfault/scan-ignored-no-traceback", scan(
+        "Exception ignored while calling deallocator <function A.__del__>:\n"
+        "ZeroDivisionError: division by zero\n"),
+        "Exception ignored while calling deallocator <function A.__del__>:")
+    check("childfault/scan-thread", scan("Exception in thread Thread-1:\nValueError: x\n"),
+          "Exception in thread Thread-1:")
+    check("childfault/scan-fatal", scan("Fatal Python error: Aborted\n"),
+          "Fatal Python error: Aborted")
+    check("childfault/scan-clean", (scan(""), scan("warning: regenerated 3 files\n")),
+          (None, None))
+
+
+# Prepended to the fixture generator: an exception in an atexit callback, which Python prints and
+# then exits 0 (the QA train 5 codex reproduction), raised only where WHEN holds.
+FAULTY_GEN = "import os, sys, atexit\nif %s: atexit.register(lambda: 1/0)\n"
+# A finalizer fault under sys.tracebacklimit=0: "Exception ignored ..." with no Traceback line.
+QUIET_FAULT_GEN = ("import sys\nclass _F:\n    def __del__(self): 1/0\n"
+                   "if '--check' in sys.argv:\n    sys.tracebacklimit = 0\n    _f = _F(); del _f\n")
+
+
+def case_childfault(tmp):
+    # Every route by which a configured command's result decides a merge, each with a child that
+    # exits 0 after a fault on stderr: the train must refuse by that route's name and push nothing.
+    routes = [
+        ("check-atexit", FAULTY_GEN % "'--check' in sys.argv", "check-failed"),
+        ("check-ignored-no-traceback", QUIET_FAULT_GEN, "check-failed"),
+        ("regenerate-atexit",
+         FAULTY_GEN % "'--check' not in sys.argv and 'merge-train-scratch-' in os.getcwd()",
+         "regenerate-failed"),
+        ("fresh-checkout-atexit",
+         FAULTY_GEN % "'--check' in sys.argv and 'merge-train-fresh-' in os.getcwd()",
+         "normal-checkout-failed"),
+    ]
+    seen = []
+    for name, prefix, status in routes:
+        fx = _fixture(tmp, "childfault-" + name)
+        seen.append(fx)
+        wt = fx.add_pr(1, "feat/x", dict([("src/b.txt", "bravo\n"),
+                                          ("tools/gen.py", prefix + TOY_GEN)]))
+        fx.advance_main(dict([("src/c.txt", "charlie\n")]))
+        before = _snapshot(wt)
+        rc, reports, fatal = fx.run(apply=True)
+        check("childfault/" + name, (rc, _result(reports, 1), fatal, fx.pushes(),
+                                     _snapshot_diff(before, _snapshot(wt))),
+              (1, status, None, [], []))
+    check("childfault/invariants", _invariants(*seen), [])
+
+
 CASES = dict([
     ("config", case_config), ("absent", case_absent), ("frombase", case_frombase),
     ("dry", case_dry), ("happy", case_happy), ("carry", case_carry), ("discover", case_discover),
@@ -3970,6 +4077,7 @@ CASES = dict([
     ("leak", case_leak), ("partial", case_partial), ("signal", case_signal),
     ("crlf", case_crlf), ("latepush", case_latepush), ("rename", case_rename),
     ("gitread", case_gitread), ("ancestry", case_ancestry), ("rootskip", case_rootskip),
+    ("faultscan", case_faultscan), ("childfault", case_childfault),
 ])
 
 
@@ -3996,6 +4104,7 @@ REVERTS = dict([
     ("branch-name", (_noop, "badname")),
     ("branch-match", (_noop, "branch")),
     ("source-conflict", (_noop, "conflict")),
+    ("child-fault", (_noop, "childfault")),
     ("regenerate-exit", (_noop, "regen")),
     ("check-exit", (_noop, "regen")),
     ("fixpoint", (_noop, "regen")),
