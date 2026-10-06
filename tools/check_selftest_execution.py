@@ -23,7 +23,8 @@ The child is launched [sys.executable, -I, -B, -c, <shim>, <runner's directory>,
 abs path>]: the shim imports tools/_selftest_exit_report.py from beside the runner and hands it
 control, so that module's observation hooks (its audit hook, threading.excepthook wrapper, and
 threading._shutdown wrapper) are installed BEFORE any runner statement, import-time included, and the
-runner then executes as __main__ with [<runner>, --execution-report, <private abs path>] as its argv.
+runner then executes as __main__ (the real sys.modules["__main__"] for the whole run, exit handlers
+included) with [<runner>, --execution-report, <private abs path>] as its argv.
 The child runs with
 cwd at the repo root and a git-neutral environment built in two layers: HOME and XDG_CONFIG_HOME are
 pinned to a fresh empty directory, so the per-user global config, ignore, and attributes surfaces are
@@ -133,8 +134,9 @@ outside this repo's sole-orchestrator threat model (the runtime layer still reco
 actually ran). The fail-closed child contract's one permitted residual is loaded code replacing the
 reporting machinery: code running inside the child can write a complete finalized-shape report itself
 (for example, then os._exit(0), whether or not it armed the finalizer), or replace sys.stderr,
-sys.unraisablehook, threading.excepthook, threading._shutdown, threading.Thread._bootstrap,
-os._exit, the atexit registrations, or the finalizer's state; this gate sees the child only from outside and no in-process secret is hidden from that code,
+sys.unraisablehook, threading.excepthook, threading._shutdown, threading.Thread._bootstrap
+or the private per-thread run machinery it calls (a threading.Thread subclass overriding
+_bootstrap_inner, a replaced _invoke_excepthook), os._exit, the atexit registrations, or the finalizer's state; this gate sees the child only from outside and no in-process secret is hidden from that code,
 so the channel is closed only by the suite's own source being reviewed and pinned. The child runs un-timed
 (parity with the roster's other selftest steps; the CI job timeout is the outer bound).
 """
@@ -1296,6 +1298,63 @@ def self_test():
                "observation hooks were not installed"
                in direct.stderr.decode("utf-8", errors="replace"), True)
         expect("st/arm-without-bootstrap-no-report", direct_report.exists(), False)
+        # 25d (round 4): no hook trusts code the suite controls before its fault is recorded. A thread
+        # exception whose __repr__ raises SystemExit(0), and a SystemExit subclass with a nonzero code
+        # whose code property raises SystemExit(0), are still recorded (the end is classified by real
+        # type and SystemExit's own code slot, and the fixed fault precedes any description); a raw
+        # _thread target that supplies its own __func__, and a genuine Thread._bootstrap bound to an
+        # object that is not a threading.Thread, are raw starts; a str-subclass module name whose own
+        # hashing hides it from the membership test is still the subinterpreter import; a finalizer
+        # failure whose exception's repr raises is still named; and an exit handler that imports
+        # __main__ sees the runner's module, as under a direct launch
+        evil_repr = ("class _Fault(RuntimeError):\n    def __repr__(self):\n"
+                     "        raise SystemExit(0)\n")
+        unclean = "other than a clean SystemExit"
+        for label, body, named in (
+                ("thread-repr-raises", arm_line + "import threading\n" + evil_repr
+                 + "def _worker():\n    raise _Fault('ST_REPR_FAULT')\n"
+                 "_t = threading.Thread(target=_worker)\n_t.start()\n_t.join()\n"
+                 "_selftest_exit_report.exit_with(0)\n", unclean),
+                ("thread-code-property-raises", arm_line + "import threading\n"
+                 "class _Exit(SystemExit):\n    @property\n    def code(self):\n"
+                 "        raise SystemExit(0)\n"
+                 "def _worker():\n    raise _Exit(1)\n"
+                 "_t = threading.Thread(target=_worker)\n_t.start()\n_t.join()\n"
+                 "_selftest_exit_report.exit_with(0)\n", unclean),
+                ("raw-thread-forged-func", arm_line + "import _thread, threading\n"
+                 "class _Worker:\n    __func__ = staticmethod(threading.Thread._bootstrap)\n"
+                 "    def __call__(self):\n        sys.exit(1)\n"
+                 "_thread.start_new_thread(_Worker(), ())\n" + raw_wait
+                 + "_selftest_exit_report.exit_with(0)\n", unobserved),
+                ("raw-thread-bootstrap-non-thread", arm_line + "import _thread, threading, types\n"
+                 "class _NotThread:\n    _daemonic = False\n"
+                 "    def _bootstrap_inner(self):\n        sys.exit(1)\n"
+                 "_thread.start_new_thread(types.MethodType(threading.Thread._bootstrap, "
+                 "_NotThread()), ())\n" + raw_wait
+                 + "_selftest_exit_report.exit_with(0)\n", unobserved),
+                ("subinterp-import-str-subclass", "class _Name(str):\n"
+                 "    def __hash__(self):\n        return 1\n"
+                 "    def __eq__(self, other):\n        return False\n"
+                 "try:\n    __import__(_Name('_interpreters'))\nexcept ImportError:\n"
+                 "    __import__(_Name('_xxsubinterpreters'))\n"
+                 + arm_line + "_selftest_exit_report.exit_with(0)\n",
+                 "cannot be observed from this one"),
+                ("finalize-repr-raises", evil_repr
+                 + "class _Ids:\n    def __iter__(self):\n        raise _Fault('ST_FINALIZE')\n"
+                 "_selftest_exit_report.arm(report, 'demo', _Ids())\n"
+                 "_selftest_exit_report.exit_with(0)\n", "cannot finalize execution report")):
+            code, _out, err = run(build(_manifest_text(), body))
+            expect("st/finalizer-{}-2".format(label), code, 2)
+            expect("st/finalizer-{}-named".format(label), named in err, True)
+        expect("st/finalizer-finalize-repr-raises-guarded",
+               "the finalizer's failure could not be described" in err, True)
+        code, _out, err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0, before_exit=(
+            "import atexit\nMARKER = 42\n"
+            "def _late():\n    import __main__\n"
+            "    if getattr(__main__, 'MARKER', None) != 42 or __main__.__file__ != __file__:\n"
+            "        raise RuntimeError('ST_MAIN_LOST')\n"
+            "atexit.register(_late)\n"))))
+        expect("st/main-module-at-exit-passes", (code, err), (0, ""))
 
         # 26: the declared stderr allowance is byte-exact over the WHOLE stream: the declared bytes
         # pass, and a repetition, a line-separator variant (CRLF, vertical tab, file separator), a
@@ -1362,9 +1421,11 @@ def self_test():
           "duplicate-member, non-regular, in-band, unfinalized, or exit-status-mismatched report as no "
           "verdict, refuses an atexit, destructor, or thread fault the child survived (an error stream "
           "differing by any byte from the declared bytes) while each fault-free twin passes, refuses a "
-          "silent failure SystemExit in a non-daemon thread, a thread started through _thread "
-          "directly at any moment from process start, a thread or atexit callback added after the "
-          "exit-time join, an import of subinterpreter machinery, and an armed child whose "
+          "silent failure SystemExit in a non-daemon thread, a thread fault whose repr or code "
+          "property raises, a thread started through _thread directly at any moment from process "
+          "start (a forged or non-Thread bootstrap target included), a thread or atexit callback "
+          "added after the exit-time join, an import of subinterpreter machinery (a str-subclass "
+          "name included), a finalizer failure whose repr raises, and an armed child whose "
           "observation hooks were not installed at process start, refuses an armed "
           "child whose status or report bypassed the exit finalizer, whose recorded status the "
           "interpreter's own exit did not confirm, or whose report's exit_code differs from the "
@@ -1383,7 +1444,7 @@ def self_test():
           "treats unavailable temp storage as "
           "cannot-evaluate, refuses to guess its repo root when run outside a checkout, and catches the "
           "near-miss (a green child that never executed a registered check) while its complete-report "
-          "twin passes")
+          "twin passes, and keeps the runner's module as __main__ for its exit handlers")
     return 0
 
 

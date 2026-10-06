@@ -15,7 +15,10 @@ finalized report:
                                          registered runner as __main__ with [<runner>,
                                          --execution-report, <report>] as its argv; NO runner
                                          statement, import-time included, precedes the hooks, so
-                                         there is no pre-arm window under the gate
+                                         there is no pre-arm window under the gate; the
+                                         runner's module is the real sys.modules["__main__"]
+                                         for the whole run, exit handlers included, compiled
+                                         from its source as a direct launch compiles it
   arm(report_path, suite_id, executed)   register the finalizer; it must be the FIRST atexit
                                          registration of the process (atexit runs last-registered
                                          first, so the first registration runs after every other
@@ -43,11 +46,19 @@ including a silent SystemExit(1), is recorded as a fault whenever it ends, befor
 audit hook (which cannot be removed) records as a fault every thread started through _thread
 directly, outside threading, at any moment from installation on (by any name and with any target,
 including a C callable: _thread ignores such a thread's SystemExit silently, so its exit status
-cannot be observed), every thread started after the exit-time thread join (it is never joined), and
-every import of an interpreter-creating module (_interpreters, _xxsubinterpreters, _testcapi,
-_testinternalcapi): every hook here is per-interpreter, so code in another interpreter is invisible
-to all of them, and the import of the machinery that could create one is therefore itself the
-fault; and threading._shutdown, the exit-time join, is wrapped to mark when it has finished.
+cannot be observed; a start is threading's own only when its target is exactly a bound method
+whose function is threading.Thread._bootstrap and whose instance is a threading.Thread, read through
+the method type's own slots, so no attribute the target supplies is trusted), every thread started
+after the exit-time thread join (it is never joined), and every import of an interpreter-creating
+module (_interpreters, _xxsubinterpreters, _testcapi, _testinternalcapi; the name is compared as an
+exact str, so a str subclass's own hashing or equality cannot hide it): every hook here is
+per-interpreter, so code in another interpreter is invisible to all of them, and the import of the
+machinery that could create one is therefore itself the fault; and threading._shutdown, the
+exit-time join, is wrapped to mark when it has finished. A hook that meets a fault records it FIRST,
+with a fixed message that runs no code the suite controls, and only then attempts a richer
+description (an exception's repr, a thread's name) inside a guard whose own failure is recorded
+too, so a raising __repr__ or code property cannot erase the fault; a thread's end is classified
+without running such code (by the exception's real type and SystemExit's own code slot).
 
 At exit the interpreter joins every non-daemon thread (a thread fault reaches stderr through
 threading.excepthook, and the wrapper above records it), runs every atexit callback registered after
@@ -78,15 +89,18 @@ such late code (rewriting the report, calling os._exit itself) is the same tier 
 replacing the reporting machinery; and an execution context created below the audited Python
 surface (a C extension or ctypes creating an interpreter or an OS thread directly) is that same
 tier. Loaded code replacing the reporting machinery (including
-this module's state, threading._shutdown, or threading.Thread._bootstrap) is the gate's one
-in-process residual, disclosed there.
+this module's state, threading._shutdown, threading.Thread._bootstrap, or the private per-thread
+run machinery _bootstrap calls, such as a threading.Thread subclass overriding _bootstrap_inner or a
+replaced _invoke_excepthook) is the gate's one in-process residual, disclosed there.
 """
 import atexit
 import gc
+import importlib.machinery
 import json
 import os
 import sys
 import threading
+import types
 
 FORMAT_VERSION = 2
 GC_PASSES = 3            # the bounded collection: stop early once a pass frees nothing
@@ -98,7 +112,10 @@ _THREAD_START_EVENTS = ("_thread.start_new_thread", "_thread.start_joinable_thre
 # code in another interpreter is unobservable from this one.
 _SUBINTERP_MODULES = frozenset(
     ("_interpreters", "_xxsubinterpreters", "_testcapi", "_testinternalcapi"))
-_BOOTSTRAP = threading.Thread._bootstrap   # every thread threading starts runs this bound method
+_BOOTSTRAP = threading.Thread._bootstrap   # every thread threading starts runs this, bound
+# SystemExit's own code slot, read through the base descriptor so that a subclass's code property
+# (code the exception controls) never runs while a thread's end is classified
+_SYSTEM_EXIT_CODE = SystemExit.__dict__["code"]
 _STATE = {"installed": False, "armed": False, "code": None, "raised": None, "confirmed": None,
           "joined": False, "callbacks_at_join": None, "main_ident": None, "faults": [],
           "thread_hook": None}
@@ -119,7 +136,7 @@ class _SuiteExit(SystemExit):
         except ValueError:
             if not _STATE["joined"] and threading.get_ident() == _STATE["main_ident"]:
                 _STATE["confirmed"] = self
-        return SystemExit.__dict__["code"].__get__(self, SystemExit)
+        return _SYSTEM_EXIT_CODE.__get__(self, SystemExit)
 
 
 def _harness_error(message):
@@ -136,12 +153,34 @@ def _clean_status(code):
 
 def _thread_hook(args):
     """threading.excepthook while installed: record every thread exception except a clean SystemExit,
-    then defer to the hook it replaced (which still writes the traceback to stderr)."""
-    exc = args.exc_value
-    if not (isinstance(exc, SystemExit) and _clean_status(exc.code)):
-        name = args.thread.name if args.thread is not None else "<unknown>"
-        _STATE["faults"].append("thread {} ended with {!r}".format(name, exc))
+    then defer to the hook it replaced (which still writes the traceback to stderr). The end is
+    classified by the exception's real type and SystemExit's own code slot, so no code the exception
+    controls runs (a failure to classify is a fault); a fault is recorded FIRST with a fixed message,
+    and only then are the thread's name and the exception's repr (both code the suite controls)
+    described, inside a guard whose own failure is recorded too."""
+    try:
+        exc = args.exc_value
+        clean = (issubclass(type(exc), SystemExit)
+                 and _clean_status(_SYSTEM_EXIT_CODE.__get__(exc, SystemExit)))
+    except BaseException:
+        clean = False
+    if not clean:
+        _STATE["faults"].append("a thread ended with an exception other than a clean SystemExit")
+        try:
+            name = args.thread.name if args.thread is not None else "<unknown>"
+            _STATE["faults"].append("thread {} ended with {!r}".format(name, args.exc_value))
+        except BaseException:
+            _STATE["faults"].append("the exception a thread ended with could not be described")
     _STATE["thread_hook"](args)
+
+
+def _genuine_bootstrap(target):
+    """Whether a thread-start target is threading's own: exactly a bound method (its type, never an
+    attribute the target supplies) whose function is threading.Thread._bootstrap itself and whose
+    instance's real type is a threading.Thread. Every read is a slot of the exact method type or a
+    real type, so no code the target controls runs."""
+    return (type(target) is types.MethodType and target.__func__ is _BOOTSTRAP
+            and issubclass(type(target.__self__), threading.Thread))
 
 
 def _audit(event, args):
@@ -152,17 +191,20 @@ def _audit(event, args):
     the audited operation instead)."""
     try:
         if event == "import":
-            if args[0] in _SUBINTERP_MODULES:
+            # the exact str of the name: a str subclass's own __hash__ or __eq__ would otherwise
+            # decide the membership test (a name that is not a str is unclassifiable, so a fault)
+            name = str.__str__(args[0])
+            if name in _SUBINTERP_MODULES:
                 _STATE["faults"].append(
                     "the interpreter-creating module {} was imported; code in another interpreter "
-                    "cannot be observed from this one".format(args[0]))
+                    "cannot be observed from this one".format(name))
             return
         if event not in _THREAD_START_EVENTS:
             return
         if _STATE["joined"]:
             _STATE["faults"].append("a thread was started after the exit-time thread join, so it is "
                                     "never joined ({})".format(event))
-        elif getattr(args[0], "__func__", None) is not _BOOTSTRAP:
+        elif not _genuine_bootstrap(args[0]):
             _STATE["faults"].append("a thread was started through {} directly, outside threading, so "
                                     "its exit status cannot be observed".format(event))
     except BaseException:
@@ -197,16 +239,31 @@ def _install():
     sys.addaudithook(_audit)
 
 
+class _RunnerLoader(importlib.machinery.SourceFileLoader):
+    """Loads the registered runner from its source only, as a direct launch does: no bytecode cache
+    is read (path_stats is what the source loader consults before reading one)."""
+
+    def path_stats(self, path):
+        raise OSError("the runner is compiled from its source, never from a bytecode cache")
+
+
 def _bootstrap_main():
     """The gate's child entry point: install the observation hooks, then run the registered runner
     as __main__ with the argv contract it expects ([<runner>, --execution-report, <report>]). The
     gate launches [python, -I, -B, -c, <import this module and call _bootstrap_main>, <this
-    module's directory>, <runner>, <report>], so sys.argv here is [-c, <dir>, <runner>, <report>]."""
+    module's directory>, <runner>, <report>], so sys.argv here is [-c, <dir>, <runner>, <report>].
+    The runner's module REPLACES sys.modules["__main__"] and is never restored, so an exit handler
+    or destructor that imports __main__ sees the runner's module, as under a direct launch (a
+    runpy.run_path run restores the bootstrap's __main__ as the runner's exit unwinds)."""
     runner, report = sys.argv[2], sys.argv[3]
     _install()
     sys.argv[:] = [runner, "--execution-report", report]
-    import runpy
-    runpy.run_path(runner, run_name="__main__")
+    loader = _RunnerLoader("__main__", runner)
+    main = types.ModuleType("__main__")
+    main.__file__ = runner
+    main.__loader__ = loader
+    sys.modules["__main__"] = main
+    loader.exec_module(main)
 
 
 def _finalize(report_path, suite_id, executed):
@@ -244,7 +301,13 @@ def _finalize(report_path, suite_id, executed):
             status = None   # defer to the interpreter's own exit status
     except BaseException as exc:
         status = HARNESS_ERROR
-        _harness_error("cannot finalize execution report {}: {!r}".format(report_path, exc))
+        # the fixed message first: the report path and the exception are the suite's objects, and
+        # describing them runs its code, whose own failure is recorded rather than erasing this one
+        _harness_error("cannot finalize execution report; no execution report is written")
+        try:
+            _harness_error("the finalizer failed for {}: {!r}".format(report_path, exc))
+        except BaseException:
+            _harness_error("the finalizer's failure could not be described")
     finally:
         if status is not None:
             os._exit(status)
