@@ -1653,6 +1653,31 @@ def _rdp_scope_cases(base, plain):
           [aiqt_hooks._rdp_names_common_dir(["rm", "x"], str(sg.root), (None, "no git directory")) is not None,
            aiqt_hooks._rdp_names_common_dir(["cat", "x"], str(sg.root), (None, "no git directory")),
            aiqt_hooks._rdp_names_common_dir(["rm", "x"], str(sg.root), (None, None))], [True, None, None])
+    # A directory HOLDING the git directory (the repository root, for .git inside it) is refused only to a
+    # command that can delete, move or recursively rewrite it: rm -r or -d, rmdir, mv of it, mv --exchange,
+    # chmod, cp -r or -a of it, a write whose path merges into it (x/., -T) or resolves into the git
+    # directory through a link, and a word the option tables do not model. Writing a new file or directory
+    # into it, and ln naming it (ln never recurses), are allowed.
+    an = RdpFixture(base, "record-ancestor")
+    an_first = _rdp_kind(an.dispatch("/missing"))
+    (base / "record-ancestor-src" / "g").mkdir(parents=True)
+    (an.root / "sub").mkdir()
+    (an.root / "sub" / "g").symlink_to(an.root / ".git")
+    ext = str(base / "record-ancestor-src")
+    refused = ["rm -rf .", "rm -r " + str(an.root), "rm -d .", "rmdir .", "rm --rec .", "rm -rf -- ../record-ancestor",
+               "mv " + str(an.root) + " " + str(base / "record-ancestor-moved"), "mv -t " + str(base) + " .",
+               "mv --exchange seed.txt .", "chmod -R 755 .", "chmod 755 .", "cp -a . " + ext + "/copy",
+               "cp -rl . " + ext + "/links", "cp -r " + ext + "/. .", "cp -rT " + ext + " .",
+               "cp -r " + ext + "/g sub", "ln -sfT seed.txt .", "cp -b -S /../x seed.txt .",
+               "cp --frob seed.txt ."]
+    allowed = ["cp seed.txt .", "touch .", "touch ./f", "touch " + str(an.root), "mkdir newdir", "mkdir -p .",
+               "ln -s seed.txt ./l", "ln -s . self", "ln -sr . self2", "cp -r src .", "mv seed.txt .",
+               "cp -t . seed.txt", "rm -f .", "rm -rf build", "mv -- old.txt .", "cp -a src " + ext + "/s"]
+    an_refused = [_rdp_kind(an.run(c)) for c in refused]
+    an_allowed = [_rdp_kind(an.run(c)) for c in allowed]
+    check("rdp/record-ancestor-only-destructive-forms-refused",
+          [an_first, an_refused, an_allowed],
+          ["unverifiable", ["deny"] * len(refused), ["allow"] * len(allowed)])
     # One check reads each registry ONCE and enforces the recorded binding: a registry removed between the
     # record comparison and the enforcement (the record check wrapped to remove .aiqt after it compares)
     # still leaves the dispatch withheld, and no registry directory is read twice within one check.

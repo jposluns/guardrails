@@ -12002,6 +12002,142 @@ def _rdp_names_git_dir(words, cwd=None):
     return None
 
 
+# The writers of rule 4's allowlist that never recurse into, move or remove a directory named as an
+# operand, so a directory holding the common git directory may be one of their operands: touch sets its
+# times, mkdir leaves an existing directory as it is (its -m applies only to a directory it makes), uniq
+# writes one output file, and cut, tr, egrep and fgrep write only their standard output.
+_RDP_HOLDER_SAFE = frozenset(("touch", "mkdir", "uniq", "cut", "tr", "egrep", "fgrep"))
+# The options of the writers whose effect on a directory holding the common git directory depends on them
+# (cp, mv and rm of GNU coreutils 9.7; ln of GNU coreutils and of the Rust coreutils a host may install;
+# rmdir), read from each --help: a short option is LETTER, LETTER/NAME (no value) or LETTER:NAME (a value,
+# glued or the next word); a long option is NAME, NAME: (a value, after = or the next word) or NAME= (a
+# value only after =). A long option may be abbreviated to a unique prefix. A word that is no option of
+# the table leaves the command unmodelled, and every directory holding the git directory among its words
+# is refused.
+_RDP_WRITER_OPTIONS = dict((
+    ("cp", ("a/archive b d f H i l L n P p r/recursive R/recursive s S:suffix t:target-directory "
+            "T/no-target-directory u v x Z",
+            "archive attributes-only backup= copy-contents debug force interactive link dereference no-clobber "
+            "no-dereference preserve= no-preserve: parents recursive reflink= remove-destination sparse: "
+            "strip-trailing-slashes symbolic-link suffix: target-directory: no-target-directory update= "
+            "verbose keep-directory-symlink one-file-system context= help version")),
+    ("mv", ("b f i n u v Z S:suffix t:target-directory T/no-target-directory",
+            "backup= debug exchange force interactive no-clobber no-copy strip-trailing-slashes suffix: "
+            "target-directory: no-target-directory update= verbose context= help version")),
+    ("ln", ("b d F f i L n P r s v h V S:suffix t:target-directory T/no-target-directory",
+            "backup= directory force interactive logical no-dereference physical relative symbolic suffix: "
+            "target-directory: no-target-directory verbose help version")),
+    ("rm", ("f i I r/recursive R/recursive d/dir v",
+            "force interactive= one-file-system no-preserve-root preserve-root= recursive dir verbose help "
+            "version")),
+    ("rmdir", ("p v h V", "ignore-fail-on-non-empty parents verbose help version"))))
+
+
+def _rdp_writer_parse(name, args):
+    """The words args of the writer name (_RDP_WRITER_OPTIONS) as its option parser reads them, options and
+    operands in any order until --: (options, operands, targets, values), options the long names given,
+    targets the -t values, values the (name, value) pairs of every other option given a value; None when
+    the program is not in the table or a word is no option of it (an unknown, ambiguous or misused one)."""
+    spec = _RDP_WRITER_OPTIONS.get(name)
+    if spec is None:
+        return None
+    short = dict((token[0], (token[2:] or token[0], token[1:2] == ":")) for token in spec[0].split())
+    longs = dict((token.rstrip(":="), token[-1] if token[-1] in ":=" else "") for token in spec[1].split())
+    options, operands, targets, values = set(), [], [], []
+    i, ended = 0, False
+    while i < len(args):
+        word = args[i]
+        i += 1
+        if ended or word == "-" or not word.startswith("-"):
+            operands.append(word)
+            continue
+        if word == "--":
+            ended = True
+            continue
+        if word.startswith("--"):
+            key, eq, value = word[2:].partition("=")
+            matches = [n for n in longs if n == key] or [n for n in longs if n.startswith(key)]
+            if len(matches) != 1 or (eq and not longs[matches[0]]):
+                return None
+            key = matches[0]
+            if longs[key] == ":" and not eq:
+                if i >= len(args):
+                    return None
+                value, eq = args[i], "="
+                i += 1
+            options.add(key)
+            if eq:
+                (targets if key == "target-directory" else values).append((key, value))
+            continue
+        for k in range(1, len(word)):
+            if word[k] not in short:
+                return None
+            key, valued = short[word[k]]
+            options.add(key)
+            if valued:
+                value = word[k + 1:]
+                if not value:
+                    if i >= len(args):
+                        return None
+                    value = args[i]
+                    i += 1
+                (targets if key == "target-directory" else values).append((key, value))
+                break
+    return (options, operands, [value for _key, value in targets], values)
+
+
+def _rdp_writer_reaches(name, parsed, words, relation):
+    """The first word of the parsed (_rdp_writer_parse) cp, mv, ln, rm or rmdir command that can delete,
+    move or recursively rewrite the common git directory, or write a path that is it or lies inside it;
+    None when it cannot. relation(path) says whether path is the git directory or inside it ("inside"),
+    a directory holding it ("holds"), or neither (None). A holding directory (an ancestor) is reached only
+    by rm with -r, -R or -d (--recursive, --dir), rmdir of it, mv of it as a source (or as the destination
+    of --exchange, which swaps the two), and cp of it as a source with -r, -R or -a (a copy elsewhere, from
+    which a later copy back, or a hard link made with -l, would rewrite the git directory). Every path cp,
+    mv and ln write (the destination itself under -T, else the destination joined to each source's last
+    component, or to the whole source under cp --parents, and the working directory for ln with one
+    operand) may be neither the git directory, inside it, nor a holding directory (x/. merges into the
+    destination itself). ln never recurses (its -r is --relative), so its sources may hold the git
+    directory. A word whose value is not modelled (a holding directory spelled as an option, which a
+    POSIXLY_CORRECT parser reads as an operand, or a backup suffix holding a slash) is refused."""
+    options, operands, targets, values = parsed
+    for word in words[1:]:
+        if word.startswith("-") and word not in operands and word not in targets and relation(word):
+            return word
+    for key, value in values:
+        if relation(value) or (key == "suffix" and "/" in value):
+            return value
+    if name == "rmdir" or (name == "rm" and options & frozenset(("recursive", "dir"))):
+        return next((word for word in operands if relation(word)), None)
+    if name == "rm":
+        return None
+    if targets:
+        dests, sources = targets, operands
+    elif len(operands) >= 2:
+        dests, sources = operands[-1:], operands[:-1]
+    else:
+        dests, sources = (["."], operands) if name == "ln" else ([], operands)
+    if name == "mv" or (name == "cp" and options & frozenset(("recursive", "archive"))):
+        hit = next((word for word in sources if relation(word)), None)
+        if hit is not None:
+            return hit
+    if name == "mv" and "exchange" in options:
+        hit = next((word for word in dests if relation(word)), None)
+        if hit is not None:
+            return hit
+    for dest in dests:
+        for source in sources:
+            if "no-target-directory" in options:
+                result = dest
+            elif "parents" in options:
+                result = os.path.join(dest, source.lstrip("/"))
+            else:
+                result = os.path.join(dest, os.path.basename(source.rstrip("/")))
+            if relation(result):
+                return source
+    return None
+
+
 def _rdp_names_common_dir(words, cwd, guard):
     """The first word (with the reason, where it is not a path) of a plain command that may write, move or
     remove the session repository's common git directory, which holds the binding record, judged by where
@@ -12011,9 +12147,12 @@ def _rdp_names_common_dir(words, cwd, guard):
     when there is no repository to protect; failure the detail when it cannot be located, which refuses
     every command but a read. A word does when a value of it (_rdp_word_values), joined to the session cwd
     and taken both as written and with every symbolic link followed, compared without regard to case, is
-    the common git directory or lies inside it, or, for a program other than git, is a directory holding
-    it (removing, moving or changing the mode of a parent reaches the record). Git writes its own
-    directory through no pathspec, so a git pathspec may name a parent (git add .)."""
+    the common git directory or lies inside it. A directory HOLDING it is refused only where the program
+    can delete, move or recursively rewrite it (_rdp_writer_reaches, for cp, mv, ln, rm and rmdir); a
+    program of _RDP_HOLDER_SAFE never can, so writing a new file or directory into it (touch ./f, mkdir d,
+    cp x .) is not refused, and any other program but git (chmod, whose mode alone can cut every path to
+    the git directory, opf, a dispatch command) is refused whenever a value of a word holds it. Git writes
+    its own directory through no pathspec, so a git pathspec may name a parent (git add .)."""
     if _rdp_basename(words[0]) in _RDP_GIT_DIR_READERS:
         return None
     common, failure = guard
@@ -12024,20 +12163,40 @@ def _rdp_names_common_dir(words, cwd, guard):
     if not isinstance(cwd, str) or not os.path.isabs(cwd):
         return "{}: the session cwd {!r} is not an absolute path, so its words cannot be resolved".format(
             words[0], cwd)
-    git = _rdp_basename(words[0]).casefold() == "git"
+    name = _rdp_basename(words[0])
+    git = name.casefold() == "git"
     held = common.casefold().rstrip("/") + "/"
+
+    def relation(value):
+        joined = os.path.join(cwd, value)
+        found = None
+        for form in (os.path.normpath(joined), os.path.realpath(joined)):
+            folded = form.casefold().rstrip("/") + "/"
+            if folded.startswith(held):
+                return "inside"
+            if held.startswith(folded):
+                found = "holds"
+        return found
+    holds = None
     for word in words[1:]:
         for value in _rdp_word_values(word):
             try:
-                joined = os.path.join(cwd, value)
-                forms = (os.path.normpath(joined), os.path.realpath(joined))
+                found = relation(value)
             except (OSError, ValueError) as exc:
                 return "{}: it cannot be resolved ({})".format(word, exc)
-            for form in forms:
-                folded = form.casefold().rstrip("/") + "/"
-                if folded.startswith(held) or (not git and held.startswith(folded)):
-                    return word
-    return None
+            if found == "inside":
+                return word
+            if found == "holds" and holds is None:
+                holds = word
+    if git or name in _RDP_HOLDER_SAFE:
+        return None
+    parsed = _rdp_writer_parse(name, words[1:])
+    if parsed is None:
+        return holds
+    try:
+        return _rdp_writer_reaches(name, parsed, words, relation)
+    except (OSError, ValueError) as exc:
+        return "{}: a path it writes cannot be resolved ({})".format(words[0], exc)
 
 
 def _rdp_not_plain(cfg, names, why):
@@ -12121,8 +12280,9 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None,
     if common is not None:
         return ("deny", "the command may write, move or remove the repository's common git directory {} "
                 "({}), which holds the review dispatch binding record; in a session whose registry binds "
-                "review dispatch only a read may name it, a path inside it or a directory holding it, "
-                "however the path is spelled, and an operator changes it outside the session".format(
+                "review dispatch only a read may name it or a path inside it, and a directory holding "
+                "it only a command that cannot delete, move or recursively rewrite that directory, however "
+                "the path is spelled; an operator changes it outside the session".format(
                     guard[0] or "(which cannot be located)", common))
     moved = None if reads else _rdp_moves_repository(words)
     if moved is not None:

@@ -602,6 +602,7 @@ expected-check-ids = [
   "rdp/record-renamed-repository-withholds",
   "rdp/record-separated-git-dir-protected-by-resolution",
   "rdp/record-unresolved-git-dir-refuses",
+  "rdp/record-ancestor-only-destructive-forms-refused",
   "rdp/record-interleaved-removal-withholds",
   "rdp/config-value-word-cannot-unscope-linked-worktree",
   "rdp/redirected-bound-tree-conflict-withholds",

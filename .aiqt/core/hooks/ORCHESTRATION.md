@@ -272,10 +272,15 @@ moved repository keeps its record. It is written without following a symbolic li
 of mode 0700. The common git directory is resolved once per check; where git cannot name it, every Bash call
 is withheld. No allowlisted git subcommand writes there. In a bound session, a plain command other than a
 read is refused when one of its words, resolved against the cwd as written and with every symbolic link
-followed, is the resolved common git directory, lies inside it, or (for a program other than git) is a
-directory holding it, whatever its spelling: a separated git directory not named `.git` is protected like
-`.git`, and a parent directory cannot be removed or moved (`git add .` is not refused, since git writes its
-own directory through no pathspec). Where git cannot resolve the session repository, the git directory the
+followed, is the resolved common git directory or lies inside it, whatever its spelling: a separated git
+directory not named `.git` is protected like `.git`. A directory holding it is refused only to a command
+that can delete, move or recursively rewrite it: `rm` with `-r`, `-R` or `-d`, `rmdir`, `mv` of it (or
+`mv --exchange` into it), `chmod` in any form (a mode alone can cut every path to the git directory),
+`cp -r` or `cp -a` of it, a `cp`, `mv` or `ln` whose written path merges into it (`x/.`, `-T`) or
+resolves into the git directory, `opf` or a dispatch command naming it, and an option word the coreutils
+option tables do not model. Writing a new file or directory into it (`cp x .`, `touch ./f`, `mkdir d`,
+`ln -s t ./l`) is allowed, and `git add .` is not refused, since git writes its own directory through no
+pathspec. Where git cannot resolve the session repository, the git directory the
 raw `.git` and `commondir` files name is protected, and one they cannot locate refuses every command but a
 read. Each check reads each registry once: the record comparison and the enforcement use that one read, and
 an own registry with a record is enforced with the recorded binding, so a registry removed during a check
