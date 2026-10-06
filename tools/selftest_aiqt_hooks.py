@@ -2738,7 +2738,9 @@ def _main_isolated(monitor):
         # === capture (deny); a -c/--config-env value carrying a repository-view redirect injects an
         # === opaque command (deny); an attached option value is scanned for a path target EVEN when it
         # === also contains "=" (snapshot the named repo); and a -S/-G pickaxe search string with a
-        # === mid-word slash is NOT a path target (no false deny). Each row flips on the pinned bytes.
+        # === mid-word slash is NOT a path target (no false deny). Every row except c-benign changes
+        # === its dirty-cwd outcome against the round-7 bytes (with no cwd every row denies on both);
+        # === c-benign is an unchanged control: a -c value with no redirect marker still snapshots.
         _np9_cases = (
             ("submod-foreach", "git submodule foreach -q git checkout -- .", "deny", 0, "deny", 0),
             ("submod-foreach-recursive",
@@ -2765,6 +2767,77 @@ def _main_isolated(monitor):
                 _got_c = _npnc_run(_cmd, str(_npnc))
                 if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
                     failures.append("(np9-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
+                                                                      _got_c[0], _got_c[2]))
+        finally:
+            aiqt_hooks._record_recovery = _orig_npnc_rec
+
+        # === Round 9 (np10): rule 4 of the shared classifier (PLAIN-CLASSIFIER-SPEC, REVISED) is an
+        # === ALLOWLIST of command words; the interpreter deny list is gone, because a versioned path
+        # === (/usr/bin/python3.14 -c ...) passed it and discarded uncommitted work with no snapshot (the
+        # === round-9 codex blocker). The first table carries every row of the spec's shared vector
+        # === table (plus directory-shape rows) against the classifier itself. The second runs the
+        # === handler: every off-allowlist command word is possibly discarding (deny with no cwd,
+        # === snapshot-then-allow with a dirty one), and this hook's own semantic check makes an opf
+        # === command and a sort carrying a --c option (GNU sort --compress-program=bash runs the
+        # === sorted data as a script) possibly discarding too. On the round-8 bytes every
+        # === possibly-discarding row below except awk (already on the removed deny list) was a
+        # === silent allow with no snapshot.
+        if hasattr(aiqt_hooks, "_PLAIN_WRAPPER_WORDS"):
+            failures.append("(np10-denylist-removed) rule 4 is an allowlist; the interpreter deny list "
+                            "_PLAIN_WRAPPER_WORDS must no longer exist on the module")
+        _np10_plain_vectors = (
+            ("git status", True), ("git commit -m 'fix: a; b'", True), ("ls -la docs/x.md", True),
+            ("opf record --type finding", True), ("git status; rm x", False),
+            ("git $'re\\x00set'", False), ('git commit -m "$(id)"', False),
+            ("python3 -c 'print(1)'", False), ("env GIT_DIR=x git log", False),
+            ("GIT_DIR=x git log", False), ("git log --output=f", True), ("git st*", False),
+            ("git log \\\n", False), ("ls \u0661", False), ("bash -c 'x'", False),
+            ("xargs git reset", False), ("/usr/bin/python3.14 -c 'x'", False),
+            ("python3.14 -c 'x'", False), ("awk -f p", False), ("sed -n p f", False),
+            ("find . -delete", False), ("tar -xf a", False), ("./ls", False), ("/tmp/x/ls", False),
+            ("nodejs -e x", False), ("/usr/bin/ls docs", True), ("rm notes.txt", True),
+            # directory shapes beyond the shared table: only an EXACT listed directory is plain
+            ("/bin/cat f", True), ("/usr/local/bin/git status", True), ("/usr/sbin/ls", True),
+            ("/usr/bin/./ls", False), ("/usr//bin/ls", False), ("//usr/bin/ls", False),
+            ("usr/bin/ls", False), ("/usr/bin/", False), ("/usr/bin/perl -e x", False),
+            ("LS -la", False), ("make all", False))
+        for _pv_cmd, _pv_want in _np10_plain_vectors:
+            _pv_got = aiqt_hooks._command_is_plain(_pv_cmd)
+            if _pv_got is not _pv_want:
+                failures.append("(np10-plain) _command_is_plain({!r}): expected {}, got {!r}".format(
+                    _pv_cmd, "plain" if _pv_want else "not plain", _pv_got))
+        _np10_cases = (
+            ("py-versioned-abs",
+             "/usr/bin/python3.14 -c 'import os; os.system(\"g\"+\"it reset --hard\")'",
+             "deny", 0, "allow-note", 1),
+            ("py-versioned-bare", "python3.14 -c 'x'", "deny", 0, "allow-note", 1),
+            ("nodejs", "nodejs -e x", "deny", 0, "allow-note", 1),
+            ("awk", "awk -f p", "deny", 0, "allow-note", 1),
+            ("sed", "sed -n p f", "deny", 0, "allow-note", 1),
+            ("tar", "tar -xf a", "deny", 0, "allow-note", 1),
+            ("dot-slash", "./ls", "deny", 0, "allow-note", 1),
+            ("tmp-path", "/tmp/x/ls", "deny", 0, "allow-note", 1),
+            ("opf", "opf record --type finding", "deny", 0, "allow-note", 1),
+            ("sort-compress", "sort -S 4K --compress-program=bash payload.txt", "deny", 0,
+             "allow-note", 1),
+            ("sort-compress-abbrev", "sort --com'press'=bash payload.txt", "deny", 0, "allow-note", 1),
+            ("ls-plain", "ls -la docs/x.md", "allow", 0, "allow", 0),
+            ("abs-ls-plain", "/usr/bin/ls docs", "allow", 0, "allow", 0),
+            ("sort-plain", "sort -r notes.txt", "allow", 0, "allow", 0),
+            ("rm-plain-scope", "rm notes.txt", "allow", 0, "allow", 0),
+        )
+        aiqt_hooks._record_recovery = _npnc_count
+        try:
+            for _lab, _cmd, _w_nc, _n_nc, _w_c, _n_c in _np10_cases:
+                _got_nc = _npnc_run(_cmd, None)
+                if (_got_nc[0], _got_nc[2]) != (_w_nc, _n_nc):
+                    failures.append("(np10-{}-nocwd) {!r} with no session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_nc, _n_nc,
+                                                                      _got_nc[0], _got_nc[2]))
+                _got_c = _npnc_run(_cmd, str(_npnc))
+                if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
+                    failures.append("(np10-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
                                     "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
                                                                       _got_c[0], _got_c[2]))
         finally:
