@@ -134,7 +134,11 @@ def _self_test():
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
                         GIT_CONFIG_NOSYSTEM="1"):
-            return _self_test_isolated()
+            code = _self_test_isolated()
+    failures = _fault_channel_vectors()
+    for failure in failures:
+        print("check_opf_drift self-test: FAIL: {}".format(failure), file=sys.stderr)
+    return code or (1 if failures else 0)
 
 
 def _self_test_isolated():
@@ -494,6 +498,279 @@ def main(argv=None):
               "closed to exit 2".format(exc), file=sys.stderr)
         return EXIT_ERROR
 
+# --- background fault channels of code loaded in process (atexit, worker thread, destructor) ----------
+# Fail-closed settlement for the background fault channels of the code this gate loads and runs in
+# process. _fail_closed_main installs the recorders BEFORE the gate's work (so before any in-process
+# load) and settles them AFTER it: a fault the interpreter reports only to stderr (a destructor, weakref
+# or similar callback through sys.unraisablehook; an unhandled exception ending a worker thread through
+# threading.excepthook) is recorded and forces exit 2 over a passing verdict, never a silent pass; the
+# verdict then ends the process with os._exit, so an atexit callback registered by loaded code can never
+# run after it (that channel is unreachable, not merely disclosed). Only a SystemExit with code None
+# or 0 ending a worker thread is the interpreter's normal SUCCESSFUL thread exit (default-hook parity)
+# and is not recorded; any other code is an unsuccessful exit a worker reported, so it is recorded.
+# Each recorder chains to the hook it wrapped, so the usual traceback still reaches stderr after the
+# marker line. The settle re-checks the record after the exit flushes, so a fault recorded while a
+# flush was blocked on a full pipe still fails the verdict.
+# Paths that end outside _gate_exit (a propagating KeyboardInterrupt, an escaping exception) already end
+# non-zero, and an ACCIDENTAL fault in an atexit callback cannot turn that non-zero end into exit 0, so
+# no background fault reads as a pass there. Residual: loaded code replacing these hooks, this record or
+# the exit itself is the reporting-machinery channel disclosed once in the _opf_views class disclosure
+# (D-411-HOSTILE-DISCLOSED).
+_LOADED_FAULTS = []
+_FAULT_MARKER = "LOADED-CODE-FAULT"
+
+
+def _install_fault_hooks():
+    import threading
+
+    previous_unraisable = sys.unraisablehook
+    previous_thread = threading.excepthook
+
+    def _record(channel, chained, args):
+        _LOADED_FAULTS.append(channel)
+        try:
+            sys._loaded_code_fault = True
+            sys.stderr.write("{}: a {} fault was recorded; a passing verdict will fail closed\n".format(
+                _FAULT_MARKER, channel))
+        finally:
+            chained(args)
+
+    def _record_unraisable(args):
+        _record("destructor-or-callback", previous_unraisable, args)
+
+    def _benign_thread_exit(args):
+        # Only a worker thread ending by SystemExit(None) or SystemExit(0) is the interpreter's normal
+        # SUCCESSFUL thread exit (default-hook parity). Any other SystemExit code is an unsuccessful exit
+        # a worker reported, recorded like any other fault (never a silent pass); the code is read
+        # through exact built-in types alone and never formatted.
+        if args.exc_type is None or not issubclass(args.exc_type, SystemExit):
+            return False
+        code = getattr(args.exc_value, "code", None) if args.exc_value is not None else None
+        return code is None or (type(code) is int and code == 0)
+
+    def _record_thread(args):
+        if _benign_thread_exit(args):
+            previous_thread(args)
+        else:
+            _record("worker-thread", previous_thread, args)
+
+    sys.unraisablehook = _record_unraisable
+    threading.excepthook = _record_thread
+
+
+def _gate_exit(code):
+    """Settle and END the process: force a recorded background fault to exit 2 over a passing verdict,
+    flush both streams, re-check the record AFTER the flushes (a fault recorded while a flush was blocked,
+    on a full pipe say, must still fail the verdict; its late marker is written straight to fd 2, past the
+    buffers), then os._exit, so no atexit callback registered by loaded code runs after the verdict (the
+    gate's own cleanup runs inside its work; this gate registers no atexit work of its own)."""
+    import os
+    if type(code) is bool:
+        code = 1 if code else 0
+    elif code is None:
+        code = 0
+    elif type(code) is not int:
+        # The code object is never formatted: a loaded object's __str__ must not run here.
+        sys.stderr.write("{}: a non-int SystemExit code at the gate entry; exit 1\n".format(_FAULT_MARKER))
+        code = 1
+    if code == 0 and (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False)):
+        sys.stderr.write("{}: {} background fault(s) from loaded code over a passing verdict; "
+                         "fail-closed\n".format(_FAULT_MARKER, len(_LOADED_FAULTS) or 1))
+        code = 2
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        if code == 0:
+            code = 2
+    if code == 0 and (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False)):
+        try:
+            os.write(2, ("{}: a background fault was recorded during the exit flush; "
+                         "fail-closed\n".format(_FAULT_MARKER)).encode("utf-8"))
+        except OSError:
+            pass
+        code = 2
+    os._exit(code)
+
+
+def _fail_closed_main(run):
+    """The canonical process entry: install the fault recorders, run the gate's own work, settle, end."""
+    _install_fault_hooks()
+    try:
+        code = run()
+    except SystemExit as exc:
+        code = exc.code
+    _gate_exit(code)
+
+
+# The background fault channels, each driven through the gate's REAL _fail_closed_main in a child that
+# loads one fixture the way this gate loads code in process: a clean load passes; an atexit callback
+# registered by loaded code never runs (unreachable behind os._exit); a worker-thread fault and a
+# destructor fault are recorded and force exit 2.
+_FAULT_CHANNEL_PROBE = """import importlib.util, sys
+tool, fixture = sys.argv[1:3]
+sys.path.insert(0, tool.rsplit("/", 1)[0])
+spec = importlib.util.spec_from_file_location("_fault_channel_probe_target", tool)
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+def load():
+    case = importlib.util.spec_from_file_location("_fault_channel_fixture", fixture)
+    module = importlib.util.module_from_spec(case)
+    case.loader.exec_module(module)
+    return 0
+gate._fail_closed_main(load)
+"""
+
+# (label, fixture source, expected exit, marker required, text that must NOT appear on stderr)
+_FAULT_CHANNEL_CASES = (
+    ("clean", "x = 1\n", 0, False, None),
+    ("atexit", "import atexit, sys\n"
+     "def callback():\n"
+     "    sys.stderr.write('FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "    raise RuntimeError('fault-fixture-atexit')\n"
+     "atexit.register(callback)\n", 0, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("joined-thread", "import threading\n"
+     "def fault():\n"
+     "    raise RuntimeError('fault-fixture-thread')\n"
+     "worker = threading.Thread(target=fault)\n"
+     "worker.start()\n"
+     "worker.join()\n", 2, True, None),
+    ("destructor", "import gc\n"
+     "class Fault:\n"
+     "    def __del__(self):\n"
+     "        raise RuntimeError('fault-fixture-destructor')\n"
+     "Fault()\n"
+     "gc.collect()\n", 2, True, None),
+    ("thread-systemexit", "import threading\n"
+     "def fault():\n"
+     "    raise SystemExit(7)\n"
+     "worker = threading.Thread(target=fault)\n"
+     "worker.start()\n"
+     "worker.join()\n", 2, True, None),
+    ("thread-systemexit-zero", "import sys\nimport threading\n"
+     "def done():\n"
+     "    sys.exit(0)\n"
+     "worker = threading.Thread(target=done)\n"
+     "worker.start()\n"
+     "worker.join()\n", 0, False, None),
+)
+
+
+# The flush-window channel: _gate_exit's fault decision must hold across the exit flushes. The fixture
+# fills the child's stdout pipe to its exact capacity (F_GETPIPE_SZ) and leaves one byte in the stream's
+# buffer, then starts a worker that faults after a delay, so the fault is recorded while the exit flush is
+# blocked on the full pipe; the parent drains stdout only after stderr shows the fault marker. Exit 2 with
+# the marker is required. Red when the fault decision runs only before the flushes: the child then ends 0
+# with the marker on stderr.
+_FLUSH_WINDOW_FIXTURE = """import fcntl, os, sys, threading, time
+os.write(1, b"x" * fcntl.fcntl(1, fcntl.F_GETPIPE_SZ))
+sys.stdout.write("y")
+def fault():
+    time.sleep(1.0)
+    raise RuntimeError("fault-fixture-flush-window")
+threading.Thread(target=fault).start()
+"""
+
+
+def _flush_window_failures():
+    """One failure string per flush-window requirement the child missed (see _FLUSH_WINDOW_FIXTURE)."""
+    import subprocess
+    import tempfile
+    import threading
+    failures = []
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="opf-drift-flush-window-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
+        case = Path(tmp) / "flush_window.py"
+        case.write_text(_FLUSH_WINDOW_FIXTURE, encoding="utf-8")
+        try:
+            child = subprocess.Popen([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return ["fault-channel/flush-window: probe did not run ({})".format(type(exc).__name__)]
+        with child:
+            killer = threading.Timer(120, child.kill)
+            killer.start()
+            try:
+                header = b""
+                while (_FAULT_MARKER + ":").encode("ascii") not in header:
+                    line = child.stderr.readline()
+                    if not line:
+                        break
+                    header += line
+                child.stdout.read()
+                trailer = child.stderr.read()
+                code = child.wait()
+            finally:
+                killer.cancel()
+        stderr_text = (header + trailer).decode("utf-8", "replace")
+        if code != 2:
+            failures.append("fault-channel/flush-window: expected exit 2, got {}".format(code))
+        elif (_FAULT_MARKER + ":") not in stderr_text:
+            failures.append("fault-channel/flush-window: fault marker absent")
+    return failures
+
+
+# The entry wiring, checked statically on this file's own source: the final __main__ block must be
+# exactly _ENTRY_WIRING by AST (spacing and comments aside), so a rewiring that keeps _fail_closed_main
+# defined but routes an entry branch around it (a plain sys.exit around the work, say) is red even though
+# the channel probes above drive _fail_closed_main directly.
+_ENTRY_WIRING = '''if __name__ == "__main__":
+    _fail_closed_main(main)
+'''
+
+
+def _entry_wiring_failures():
+    """One failure string per entry-wiring requirement this file's own source misses (see _ENTRY_WIRING)."""
+    import ast
+    failures = []
+    try:
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError) as exc:
+        return ["fault-channel/entry-wiring: this file could not be parsed ({})".format(type(exc).__name__)]
+    last = tree.body[-1] if tree.body else None
+    expected = ast.parse(_ENTRY_WIRING).body[0]
+    if last is None or ast.dump(last) != ast.dump(expected):
+        failures.append("fault-channel/entry-wiring: the final __main__ block is not the expected "
+                        "fail-closed form")
+    return failures
+
+def _fault_channel_vectors():
+    """One failure string per fault-channel case whose child did not end as required: the expected exit
+    code, the fault marker exactly when a fault must be recorded, and for the atexit case no trace of the
+    callback (it must never run). Red without the entry wrapper (the probe then ends 1, AttributeError on
+    _fail_closed_main, where clean and atexit expect 0) and red with the wrapper reverted to a plain exit
+    (the thread and destructor children then end 0 with the default hooks' output alone, where exit 2 with
+    the marker is required, and the atexit child then runs the callback)."""
+    import subprocess
+    import tempfile
+    failures = []
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="opf-drift-fault-channel-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
+        for index, (label, body, expected, marked, absent) in enumerate(_FAULT_CHANNEL_CASES):
+            case = Path(tmp) / "fault_channel_{}.py".format(index)
+            case.write_text(body, encoding="utf-8")
+            try:
+                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                       capture_output=True, text=True, timeout=120)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("fault-channel/{}: probe did not run ({})".format(label, type(exc).__name__))
+                continue
+            if child.returncode != expected:
+                failures.append("fault-channel/{}: expected exit {}, got {}".format(
+                    label, expected, child.returncode))
+            elif marked != ((_FAULT_MARKER + ":") in child.stderr):
+                failures.append("fault-channel/{}: fault marker {}".format(
+                    label, "absent" if marked else "present"))
+            elif absent is not None and absent in child.stderr:
+                failures.append("fault-channel/{}: the atexit callback ran".format(label))
+    failures.extend(_flush_window_failures())
+    failures.extend(_entry_wiring_failures())
+    return failures
+
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _fail_closed_main(main)

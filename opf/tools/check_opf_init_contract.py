@@ -21,7 +21,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
     raise SystemExit(2)
 
 import re
-import runpy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -75,12 +74,12 @@ def _drift(msg):
     sys.exit(1)
 
 
-# Threat model: the validator this gate loads in-process (_opf_init_contract.py) is reviewed in-repo code; the
+# Threat model: the validator this gate verifies (_opf_init_contract.py) is reviewed in-repo code; the
 # guard catches an ACCIDENTAL process ending from it (a stray sys.exit, SystemExit, KeyboardInterrupt,
-# GeneratorExit, or any other BaseException) at load and in every later call this gate makes into it. A
-# KeyboardInterrupt (an operator's Ctrl-C and one raised by loaded code are not told apart) is re-raised as a
-# fresh KeyboardInterrupt, so it stops the gate runner instead of reading as this gate's exit 2.
-_PROCESS_ENDING = (BaseException,)
+# GeneratorExit, an os._exit with ANY status, any other BaseException, or a background fault) at load
+# and in the membership test, because the validator is loaded in a CHILD process under the fail-closed
+# child contract (_validator_missing), never in this gate's process. An operator's Ctrl-C reaches THIS
+# process (the signal goes to the process group) and propagates to stop the gate runner.
 
 
 def _ending_kind(exc):
@@ -95,42 +94,66 @@ def _ending_kind(exc):
     return "BaseException"
 
 
-def _in_loaded(what, call, *args):
-    """Run `call` (a load of in-repo code in this process, or a call this gate makes into it) so that the
-    loaded code can never end the gate with its own status: ANY exception (every BaseException, SystemExit
-    0, None or a non-int code included) becomes CANNOT-EVALUATE (exit 2) with a fixed message naming `what`,
-    except a KeyboardInterrupt, which is re-raised after a fixed message as a fresh KeyboardInterrupt (its
-    context suppressed) so it stops the runner. Background fault channels are settled at this gate's entry
-    (_fail_closed_main): a fault ending a worker thread or a destructor is recorded by the hooks installed
-    there and forces exit 2 over a passing verdict, and the verdict ends the process with os._exit, so an
-    atexit callback registered by loaded code never runs after it. Residuals, not covered: os._exit called
-    by the loaded code itself, signal handlers it installs, mutation of sys or of this module's globals by
-    the loaded code, deliberately
-    hostile objects (the one residual stated in the _opf_views class disclosure), and a
-    process exit raised while this module's own top-level imports run, before this guard is entered."""
-    try:
-        return call(*args)
-    except KeyboardInterrupt:
-        sys.stderr.write("INTERRUPTED: {}: KeyboardInterrupt re-raised to stop the run\n".format(what))
-        raise KeyboardInterrupt from None
-    except _PROCESS_ENDING as exc:
-        _cant("{} raised {}; fail-closed".format(what, _ending_kind(exc)))
-
-
-def _missing_views(live_reserved, views):
-    """The pinned views whose .working/ path is not a member of the loaded validator's _RESERVED tuple."""
-    return [view for view in views if (".working/" + view) not in live_reserved]
+# The child that loads the validator: it computes the whole result, writes it LAST (after the load and
+# the membership test, so any earlier ending of the loaded code leaves no result), and ends 0 with both
+# streams untouched. The parent accepts only that exact outcome.
+_LOADED_CHILD = """import json, runpy, sys
+validator, out = sys.argv[1], sys.argv[2]
+views = sys.argv[3:]
+ns = runpy.run_path(validator)
+live = ns.get("_RESERVED")
+if type(live) is not tuple:
+    payload = {"not_tuple": True}
+else:
+    payload = {"missing": [view for view in views if (".working/" + view) not in live]}
+with open(out, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+"""
 
 
 def _validator_missing(path, views):
-    """Load the validator at `path` and return the views missing from its ACTUAL _RESERVED tuple. The load
-    and the membership test run through _in_loaded; the type test is `type(...) is tuple`, which reads no
-    attribute of the loaded value (isinstance would read its __class__)."""
-    ns = _in_loaded("loading the validator to verify _RESERVED membership", runpy.run_path, path)
-    live_reserved = ns.get("_RESERVED")
-    if type(live_reserved) is not tuple:
-        _cant("validator _RESERVED is not a tuple at load time")
-    return _in_loaded("the validator _RESERVED membership test", _missing_views, live_reserved, views)
+    """Load the validator at path in a CHILD process under the fail-closed child contract and return the
+    views missing from its ACTUAL _RESERVED tuple. The contract: the child computes the result, writes it
+    LAST (after the load and the membership test), and ends with exit 0 and both streams empty; this gate
+    accepts only that exact outcome. ANY other ending of the loaded code, an os._exit with ANY status, a
+    sys.exit or SystemExit (0 or None included), a KeyboardInterrupt, a signal handler it installs, any
+    other BaseException, or a background fault (its traceback reaches the child's stderr), leaves a
+    missing result, a non-zero exit, or a non-empty stream, and is CANNOT-EVALUATE (exit 2), never this
+    gate's pass: the loaded code never runs in this gate's process, so the os._exit channel of the
+    in-process load is unreachable here, not disclosed. An operator's Ctrl-C is a KeyboardInterrupt in
+    THIS process (the signal reaches the whole group) and propagates to stop the runner. Residual:
+    deliberately hostile loaded code forging the child contract (writing the result file itself and
+    ending cleanly) is the reporting-machinery channel disclosed once in the _opf_views class disclosure
+    (D-411-HOSTILE-DISCLOSED), with the hostile-object residual stated there."""
+    import json
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="opf-init-contract-loaded-") as tmp:
+        child_py = Path(tmp) / "loaded_child.py"
+        child_py.write_text(_LOADED_CHILD, encoding="utf-8")
+        out = Path(tmp) / "result.json"
+        try:
+            child = subprocess.run(
+                [sys.executable, "-I", "-B", str(child_py), str(path), str(out)] + [str(v) for v in views],
+                capture_output=True, timeout=600)
+        except (OSError, subprocess.SubprocessError):
+            _cant("loading the validator to verify _RESERVED membership: the child did not complete")
+        if child.returncode != 0 or child.stdout or child.stderr:
+            _cant("loading the validator to verify _RESERVED membership: the child ended outside the "
+                  "fail-closed contract (the loaded code ended it, or a fault was reported); fail-closed")
+        try:
+            payload = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _cant("loading the validator to verify _RESERVED membership: the child wrote no result "
+                  "(the loaded code ended the child before the verdict); fail-closed")
+        if type(payload) is not dict or ("missing" in payload) == ("not_tuple" in payload):
+            _cant("loading the validator to verify _RESERVED membership: the child result is malformed")
+        if payload.get("not_tuple"):
+            _cant("validator _RESERVED is not a tuple at load time")
+        missing = payload["missing"]
+        if type(missing) is not list or any(type(view) is not str for view in missing):
+            _cant("loading the validator to verify _RESERVED membership: the child result is malformed")
+        return missing
 
 
 def _read(rel):
@@ -234,10 +257,11 @@ def _checks():
     if con_views != src_views:
         _drift("validator view tuple diverges from _opf_init.py: {} vs {}".format(con_views, src_views))
 
-    # Value-based membership: load the pure validator and confirm the ACTUAL _RESERVED tuple contains
-    # every pinned view path (the source-text checks above cannot see the view comprehension). runpy sets
-    # __name__ to the module path, not "__main__", so the self-test does not run on load; any load failure,
-    # including the loaded module ending the process (SystemExit 0 or None too), is fail-closed (exit 2).
+    # Value-based membership: load the pure validator IN A CHILD process under the fail-closed child
+    # contract and confirm the ACTUAL _RESERVED tuple contains every pinned view path (the source-text
+    # checks above cannot see the view comprehension). The child never sets __name__ to __main__, so the
+    # validator self-test does not run on load; ANY other ending of the loaded code, an os._exit with any
+    # status included, is fail-closed (exit 2), never this gate's status (_validator_missing).
     for view in _validator_missing(str(ROOT / "opf/tools/_opf_init_contract.py"), src_views):
         _drift("pinned view not a member of the validator _RESERVED set: .working/{}".format(view))
 
@@ -290,78 +314,59 @@ def _expect(condition, message=None):
         raise AssertionError(message)
 
 
-# The KeyboardInterrupt the self-test's interrupt fixtures raise on purpose. Only the fresh KeyboardInterrupt
-# _in_loaded raises for it is recorded; any other propagates, so an operator's Ctrl-C is never recorded.
-_LOADED_INTERRUPT = "opf-init-contract-selftest-loaded-interrupt"
-
-
-def _is_loaded_interrupt(exc, sent):
-    """True only for the fresh KeyboardInterrupt _in_loaded raises for a loaded KeyboardInterrupt(sent): an
-    exact KeyboardInterrupt with its context suppressed whose context is an exact KeyboardInterrupt with args
-    exactly (sent,), read through exact built-in types alone. An operator's Ctrl-C carries no args, so it never
-    matches: in the loaded code its replacement's context has no args, in _in_loaded's handler it is not
-    context-suppressed, and later its context is the fresh one."""
-    if type(exc) is not KeyboardInterrupt or exc.__suppress_context__ is not True:
-        return False
-    context = exc.__context__
-    if type(context) is not KeyboardInterrupt:
-        return False
-    args = context.args
-    return len(args) == 1 and type(args[0]) is str and args[0] == sent
-
-
-def _loaded_exit_failure(label, path):
-    """None when _validator_missing over the validator at `path` ends as the case `label` requires, else the
-    failure. A label naming KeyboardInterrupt requires the fresh KeyboardInterrupt _in_loaded raises for a
-    loaded KeyboardInterrupt(_LOADED_INTERRUPT), with the INTERRUPTED line; any other requires exit 2 with
-    the CANNOT-EVALUATE line. Every other KeyboardInterrupt (an operator's Ctrl-C included) propagates
-    unchanged; any other escape is recorded, never this test's own end."""
+def _loaded_exit_failure(label, path, expect_missing=None):
+    """None when _validator_missing over the validator at path ends as the case requires, else the failure.
+    A refused case (expect_missing is None) must end exit 2 with the CANNOT-EVALUATE line (the child
+    contract refuses the loaded code's ending, an os._exit with any status included), never this
+    process's own end and never a pass; a clean case must return exactly expect_missing. The
+    CANNOT-EVALUATE line is captured and required, never printed, so a passing self-test shows none. An
+    operator's Ctrl-C propagates (nothing here catches KeyboardInterrupt)."""
     import contextlib
     import io
     captured = io.StringIO()
     try:
         with contextlib.redirect_stderr(captured):
-            _validator_missing(str(path), ("a.md",))
-    except KeyboardInterrupt as exc:
-        if not _is_loaded_interrupt(exc, _LOADED_INTERRUPT):
-            raise
-        if "KeyboardInterrupt" not in label:
-            return "{}: expected exit 2, got the loaded KeyboardInterrupt".format(label)
-        if not captured.getvalue().startswith("INTERRUPTED: "):
-            return "{}: a fresh KeyboardInterrupt without the INTERRUPTED line".format(label)
-    except BaseException as exc:  # noqa: BLE001  any other escape is recorded, never the test's own end
-        if "KeyboardInterrupt" in label:
-            return "{}: expected a fresh KeyboardInterrupt, got {}".format(label, _ending_kind(exc))
+            got = _validator_missing(str(path), ("a.md",))
+    except SystemExit as exc:
+        if expect_missing is not None:
+            return "{}: expected a clean child run, got SystemExit".format(label)
         if not (type(exc) is SystemExit and type(exc.code) is int and exc.code == 2):
-            return "{}: expected exit 2, got {}".format(label, _ending_kind(exc))
+            return "{}: expected exit 2, got another SystemExit".format(label)
         if not captured.getvalue().startswith("CANNOT-EVALUATE: "):
             return "{}: exit 2 without the CANNOT-EVALUATE line".format(label)
-    else:
-        return "{}: the loaded code's exit was not reached".format(label)
+        return None
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001  any other escape is recorded, never the test's own end
+        return "{}: expected exit 2, got {}".format(label, _ending_kind(exc))
+    if expect_missing is None:
+        return "{}: the loaded code's ending was not refused".format(label)
+    if got != expect_missing:
+        return "{}: wrong missing-views result from the clean child".format(label)
     return None
 
 
 def _self_test_loaded_exit():
-    """A loaded validator that ends the process, at load or in a later call the gate makes into it, yields
-    this gate's CANNOT-EVALUATE exit 2 through _validator_missing (the function _checks calls), never its
-    own status. Any exception escaping is recorded by _loaded_exit_failure, so the vector is red if the guard
-    is reverted (_PROCESS_ENDING emptied) or removed from _validator_missing. A case whose label names
-    KeyboardInterrupt must instead re-raise a fresh KeyboardInterrupt with the INTERRUPTED line, so the
-    vector is red if the interrupt is absorbed as exit 2. Any other KeyboardInterrupt (one carrying another
-    value, standing in for an operator's Ctrl-C) must propagate, so the vector is red if the recorder records
-    it. The CANNOT-EVALUATE line each
-    case is expected to write is captured and required, never printed, so a passing self-test shows none."""
+    """A loaded validator that ends the child, at load or in the membership test, an os._exit(0) included,
+    yields this gate's CANNOT-EVALUATE exit 2 through _validator_missing (the function _checks calls),
+    never its own status and never a pass: the fail-closed child contract (exit 0, a result written after
+    the load and the membership test, both streams empty) leaves every such ending refusable. Red if a
+    contract leg is relaxed: a missing result read as clean fails the os._exit cases, an accepted non-zero
+    exit or non-empty stream fails the exception and fault cases. A clean child must still return the
+    exact missing-views list, red if the child result is not read back."""
     import tempfile
     repr_exits = "class R:\n    def __repr__(self):\n        raise SystemExit(0)\n    __str__ = __repr__\n"
     cases = (
         ("load SystemExit(0)", "raise SystemExit(0)\n"),
         ("load SystemExit(None)", "raise SystemExit\n"),
-        ("load KeyboardInterrupt", "raise KeyboardInterrupt({!r})\n".format(_LOADED_INTERRUPT)),
-        ("call KeyboardInterrupt in a member __eq__",
-         "class M:\n    def __eq__(self, other):\n        raise KeyboardInterrupt({!r})\n    __hash__ = None\n"
-         "_RESERVED = (M(),)\n".format(_LOADED_INTERRUPT)),
+        ("load KeyboardInterrupt", "raise KeyboardInterrupt\n"),
+        ("load KeyboardInterrupt subclass", "class K(KeyboardInterrupt):\n    pass\nraise K()\n"),
         ("load GeneratorExit", "raise GeneratorExit\n"),
         ("load BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n"),
+        ("load os._exit(0)", "import os\nos._exit(0)\n"),
+        ("load os._exit(0) from a joined thread",
+         "import os\nimport threading\nworker = threading.Thread(target=lambda: os._exit(0))\n"
+         "worker.start()\nworker.join()\n"),
         ("load SystemExit(code whose repr exits 0)", repr_exits + "raise SystemExit(R())\n"),
         ("load Exception whose str exits 0",
          "class E(Exception):\n    def __str__(self):\n        raise SystemExit(0)\n    __repr__ = __str__\n"
@@ -371,6 +376,16 @@ def _self_test_loaded_exit():
         ("call SystemExit(0) in a member __eq__",
          "class M:\n    def __eq__(self, other):\n        raise SystemExit(0)\n    __hash__ = None\n"
          "_RESERVED = (M(),)\n"),
+        ("call KeyboardInterrupt in a member __eq__",
+         "class M:\n    def __eq__(self, other):\n        raise KeyboardInterrupt\n    __hash__ = None\n"
+         "_RESERVED = (M(),)\n"),
+        ("load atexit fault",
+         "import atexit\ndef callback():\n    raise RuntimeError('loaded-atexit')\natexit.register(callback)\n"),
+        ("load stdout noise", "_RESERVED = ()\nprint('loaded noise')\n"),
+    )
+    clean_cases = (
+        ("clean with the view present", '_RESERVED = (".working/a.md",)\n', []),
+        ("clean with the view missing", "_RESERVED = ()\n", ["a.md"]),
     )
     failures = []
     with tempfile.TemporaryDirectory(prefix="opf-init-contract-selftest-") as tmp:
@@ -380,20 +395,12 @@ def _self_test_loaded_exit():
             failure = _loaded_exit_failure(label, path)
             if failure is not None:
                 failures.append(failure)
-        # A KeyboardInterrupt carrying another value (standing in for an operator's Ctrl-C) propagates out of
-        # the recorder, in a KeyboardInterrupt case and in an exit-2 case. Red if the recorder records it.
-        other = _LOADED_INTERRUPT + "-other"
-        for label, body in (("load KeyboardInterrupt", "raise KeyboardInterrupt({!r})\n".format(other)),
-                            ("load SystemExit(0)", "raise KeyboardInterrupt({!r})\n".format(other))):
-            path = Path(tmp) / "loaded_exit_other.py"
+        for index, (label, body, expected) in enumerate(clean_cases):
+            path = Path(tmp) / "loaded_clean_{}.py".format(index)
             path.write_text(body, encoding="utf-8")
-            try:
-                _loaded_exit_failure(label, path)
-            except KeyboardInterrupt as exc:
-                if not _is_loaded_interrupt(exc, other):
-                    raise
-            else:
-                failures.append("{}: another KeyboardInterrupt was recorded, not propagated".format(label))
+            failure = _loaded_exit_failure(label, path, expect_missing=expected)
+            if failure is not None:
+                failures.append(failure)
     _expect(not failures, "loaded-exit vectors: " + "; ".join(failures))
 
 
@@ -432,9 +439,12 @@ def _self_test():
 # or similar callback through sys.unraisablehook; an unhandled exception ending a worker thread through
 # threading.excepthook) is recorded and forces exit 2 over a passing verdict, never a silent pass; the
 # verdict then ends the process with os._exit, so an atexit callback registered by loaded code can never
-# run after it (that channel is unreachable, not merely disclosed). A SystemExit ending a worker thread
-# is the interpreter's normal thread exit (default-hook parity) and is not recorded. Each recorder
-# chains to the hook it wrapped, so the usual traceback still reaches stderr after the marker line.
+# run after it (that channel is unreachable, not merely disclosed). Only a SystemExit with code None
+# or 0 ending a worker thread is the interpreter's normal SUCCESSFUL thread exit (default-hook parity)
+# and is not recorded; any other code is an unsuccessful exit a worker reported, so it is recorded.
+# Each recorder chains to the hook it wrapped, so the usual traceback still reaches stderr after the
+# marker line. The settle re-checks the record after the exit flushes, so a fault recorded while a
+# flush was blocked on a full pipe still fails the verdict.
 # Paths that end outside _gate_exit (a propagating KeyboardInterrupt, an escaping exception) already end
 # non-zero, and an ACCIDENTAL fault in an atexit callback cannot turn that non-zero end into exit 0, so
 # no background fault reads as a pass there. Residual: loaded code replacing these hooks, this record or
@@ -462,8 +472,18 @@ def _install_fault_hooks():
     def _record_unraisable(args):
         _record("destructor-or-callback", previous_unraisable, args)
 
+    def _benign_thread_exit(args):
+        # Only a worker thread ending by SystemExit(None) or SystemExit(0) is the interpreter's normal
+        # SUCCESSFUL thread exit (default-hook parity). Any other SystemExit code is an unsuccessful exit
+        # a worker reported, recorded like any other fault (never a silent pass); the code is read
+        # through exact built-in types alone and never formatted.
+        if args.exc_type is None or not issubclass(args.exc_type, SystemExit):
+            return False
+        code = getattr(args.exc_value, "code", None) if args.exc_value is not None else None
+        return code is None or (type(code) is int and code == 0)
+
     def _record_thread(args):
-        if args.exc_type is not None and issubclass(args.exc_type, SystemExit):
+        if _benign_thread_exit(args):
             previous_thread(args)
         else:
             _record("worker-thread", previous_thread, args)
@@ -473,9 +493,11 @@ def _install_fault_hooks():
 
 
 def _gate_exit(code):
-    """Settle and END the process: flush both streams, force a recorded background fault to exit 2 over a
-    passing verdict, then os._exit, so no atexit callback registered by loaded code runs after the verdict
-    (the gate's own cleanup runs inside its work; this gate registers no atexit work of its own)."""
+    """Settle and END the process: force a recorded background fault to exit 2 over a passing verdict,
+    flush both streams, re-check the record AFTER the flushes (a fault recorded while a flush was blocked,
+    on a full pipe say, must still fail the verdict; its late marker is written straight to fd 2, past the
+    buffers), then os._exit, so no atexit callback registered by loaded code runs after the verdict (the
+    gate's own cleanup runs inside its work; this gate registers no atexit work of its own)."""
     import os
     if type(code) is bool:
         code = 1 if code else 0
@@ -495,6 +517,13 @@ def _gate_exit(code):
     except Exception:
         if code == 0:
             code = 2
+    if code == 0 and (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False)):
+        try:
+            os.write(2, ("{}: a background fault was recorded during the exit flush; "
+                         "fail-closed\n".format(_FAULT_MARKER)).encode("utf-8"))
+        except OSError:
+            pass
+        code = 2
     os._exit(code)
 
 
@@ -508,20 +537,24 @@ def _fail_closed_main(run):
     _gate_exit(code)
 
 
-# The background fault channels, each driven through this gate's REAL entry in a child: the probe runs
-# this file with run_name "__main__" and wraps runpy.run_path so the gate's own validator load is followed
-# by a load of one fixture, the way a validator fault would arrive. An atexit callback registered by
-# loaded code never runs (unreachable behind os._exit); a worker-thread fault and a destructor fault are
-# recorded by the hooks installed before the load and force exit 2 over the passing verdict.
-_FAULT_CHANNEL_PROBE = """import runpy, sys
-gate, fixture = sys.argv[1:3]
-real = runpy.run_path
-def hooked(path, *args, **kwargs):
-    loaded = real(path, *args, **kwargs)
-    real(fixture)
-    return loaded
-runpy.run_path = hooked
-real(gate, run_name="__main__")
+# The background fault channels, each driven through the gate's REAL _fail_closed_main in a child that
+# loads one fixture the way in-process code would fault in this gate's own process (the validator
+# itself now loads in a grandchild under the fail-closed child contract, so a validator fault arrives as
+# that child's refused contract instead, covered by the loaded-exit vectors): a clean load passes; an
+# atexit callback registered by loaded code never runs (unreachable behind os._exit); a worker-thread
+# fault and a destructor fault are recorded and force exit 2.
+_FAULT_CHANNEL_PROBE = """import importlib.util, sys
+tool, fixture = sys.argv[1:3]
+sys.path.insert(0, tool.rsplit("/", 1)[0])
+spec = importlib.util.spec_from_file_location("_fault_channel_probe_target", tool)
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+def load():
+    case = importlib.util.spec_from_file_location("_fault_channel_fixture", fixture)
+    module = importlib.util.module_from_spec(case)
+    case.loader.exec_module(module)
+    return 0
+gate._fail_closed_main(load)
 """
 
 # (label, fixture source, expected exit, marker required, text that must NOT appear on stderr)
@@ -544,15 +577,146 @@ _FAULT_CHANNEL_CASES = (
      "        raise RuntimeError('fault-fixture-destructor')\n"
      "Fault()\n"
      "gc.collect()\n", 2, True, None),
+    ("thread-systemexit", "import threading\n"
+     "def fault():\n"
+     "    raise SystemExit(7)\n"
+     "worker = threading.Thread(target=fault)\n"
+     "worker.start()\n"
+     "worker.join()\n", 2, True, None),
+    ("thread-systemexit-zero", "import sys\nimport threading\n"
+     "def done():\n"
+     "    sys.exit(0)\n"
+     "worker = threading.Thread(target=done)\n"
+     "worker.start()\n"
+     "worker.join()\n", 0, False, None),
 )
+
+
+# The flush-window channel: _gate_exit's fault decision must hold across the exit flushes. The fixture
+# fills the child's stdout pipe to its exact capacity (F_GETPIPE_SZ) and leaves one byte in the stream's
+# buffer, then starts a worker that faults after a delay, so the fault is recorded while the exit flush is
+# blocked on the full pipe; the parent drains stdout only after stderr shows the fault marker. Exit 2 with
+# the marker is required. Red when the fault decision runs only before the flushes: the child then ends 0
+# with the marker on stderr.
+_FLUSH_WINDOW_FIXTURE = """import fcntl, os, sys, threading, time
+os.write(1, b"x" * fcntl.fcntl(1, fcntl.F_GETPIPE_SZ))
+sys.stdout.write("y")
+def fault():
+    time.sleep(1.0)
+    raise RuntimeError("fault-fixture-flush-window")
+threading.Thread(target=fault).start()
+"""
+
+
+def _flush_window_failures():
+    """One failure string per flush-window requirement the child missed (see _FLUSH_WINDOW_FIXTURE)."""
+    import subprocess
+    import tempfile
+    import threading
+    failures = []
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="opf-init-contract-flush-window-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
+        case = Path(tmp) / "flush_window.py"
+        case.write_text(_FLUSH_WINDOW_FIXTURE, encoding="utf-8")
+        try:
+            child = subprocess.Popen([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return ["fault-channel/flush-window: probe did not run ({})".format(type(exc).__name__)]
+        with child:
+            killer = threading.Timer(120, child.kill)
+            killer.start()
+            try:
+                header = b""
+                while (_FAULT_MARKER + ":").encode("ascii") not in header:
+                    line = child.stderr.readline()
+                    if not line:
+                        break
+                    header += line
+                child.stdout.read()
+                trailer = child.stderr.read()
+                code = child.wait()
+            finally:
+                killer.cancel()
+        stderr_text = (header + trailer).decode("utf-8", "replace")
+        if code != 2:
+            failures.append("fault-channel/flush-window: expected exit 2, got {}".format(code))
+        elif (_FAULT_MARKER + ":") not in stderr_text:
+            failures.append("fault-channel/flush-window: fault marker absent")
+    return failures
+
+
+# The entry wiring, checked statically on this file's own source: the final __main__ block must be
+# exactly _ENTRY_WIRING by AST (spacing and comments aside), so a rewiring that keeps _fail_closed_main
+# defined but routes an entry branch around it (a plain sys.exit around the work, say) is red even though
+# the channel probes above drive _fail_closed_main directly.
+_ENTRY_WIRING = '''if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        _fail_closed_main(_self_test)
+    _fail_closed_main(_checks)
+'''
+
+
+def _entry_wiring_failures():
+    """One failure string per entry-wiring requirement this file's own source misses (see _ENTRY_WIRING)."""
+    import ast
+    failures = []
+    try:
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError) as exc:
+        return ["fault-channel/entry-wiring: this file could not be parsed ({})".format(type(exc).__name__)]
+    last = tree.body[-1] if tree.body else None
+    expected = ast.parse(_ENTRY_WIRING).body[0]
+    if last is None or ast.dump(last) != ast.dump(expected):
+        failures.append("fault-channel/entry-wiring: the final __main__ block is not the expected "
+                        "fail-closed form")
+    return failures
+
+def _fault_channel_vectors():
+    """One failure string per fault-channel case whose child did not end as required: the expected exit
+    code, the fault marker exactly when a fault must be recorded, and for the atexit case no trace of the
+    callback (it must never run). Red without the entry wrapper (the probe then ends 1, AttributeError on
+    _fail_closed_main, where clean and atexit expect 0) and red with the wrapper reverted to a plain exit
+    (the thread and destructor children then end 0 with the default hooks' output alone, where exit 2 with
+    the marker is required, and the atexit child then runs the callback)."""
+    import subprocess
+    import tempfile
+    failures = []
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="check-footer-fault-channel-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
+        for index, (label, body, expected, marked, absent) in enumerate(_FAULT_CHANNEL_CASES):
+            case = Path(tmp) / "fault_channel_{}.py".format(index)
+            case.write_text(body, encoding="utf-8")
+            try:
+                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                       capture_output=True, text=True, timeout=120)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("fault-channel/{}: probe did not run ({})".format(label, type(exc).__name__))
+                continue
+            if child.returncode != expected:
+                failures.append("fault-channel/{}: expected exit {}, got {}".format(
+                    label, expected, child.returncode))
+            elif marked != ((_FAULT_MARKER + ":") in child.stderr):
+                failures.append("fault-channel/{}: fault marker {}".format(
+                    label, "absent" if marked else "present"))
+            elif absent is not None and absent in child.stderr:
+                failures.append("fault-channel/{}: the atexit callback ran".format(label))
+    failures.extend(_flush_window_failures())
+    failures.extend(_entry_wiring_failures())
+    return failures
 
 
 def _self_test_fault_channels():
     """Each fault-channel case must end the child as required: the expected exit code, the fault marker
     exactly when a fault must be recorded, and for the atexit case no trace of the callback (it must never
-    run). Red without the entry wrapper: the gate then ends 0 for every channel (the atexit child with the
-    callback's trace on stderr, the thread and destructor children with the default hooks' output alone),
-    where the atexit case requires a clean stderr and the other two require exit 2 with the marker."""
+    run). Red without the entry wrapper (the probe then ends 1, AttributeError on _fail_closed_main, where
+    clean and atexit expect 0) and red with the wrapper reverted to a plain exit (the thread and destructor
+    children then end 0 with the default hooks' output alone, where exit 2 with the marker is required,
+    and the atexit child then runs the callback)."""
     import subprocess
     import tempfile
     failures = []
@@ -577,6 +741,8 @@ def _self_test_fault_channels():
                     label, "absent" if marked else "present"))
             elif absent is not None and absent in child.stderr:
                 failures.append("fault-channel/{}: the atexit callback ran".format(label))
+    failures.extend(_flush_window_failures())
+    failures.extend(_entry_wiring_failures())
     _expect(not failures, "fault-channel vectors: " + "; ".join(failures))
 
 
