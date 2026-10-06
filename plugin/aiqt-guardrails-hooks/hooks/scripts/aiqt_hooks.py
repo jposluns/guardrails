@@ -11315,25 +11315,48 @@ _RDP_GIT_GLOBAL_VALUED = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--n
 _RDP_GIT_GLOBAL_FLAGS = frozenset(("-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--bare",
                                    "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
                                    "--icase-pathspecs", "--no-optional-locks"))
+# The git subcommands a plain git command may run in a bound session, each matched exactly (git runs a
+# built-in only under its exact name, and an alias never hides one). Every other subcommand (instaweb,
+# difftool, mergetool, send-email, filter-branch, bisect, submodule, daemon, web--browse, the credential
+# commands, help, an alias, an external git-NAME program found on PATH, and one behind a global option this
+# hook does not know) is refused: no option table over git's open set of subcommands closes the programs
+# they run (instaweb --httpd names its server's command). _RDP_GIT_INFO_OPTIONS are the global options
+# that, as the only word after git, print a fact and run nothing.
+_RDP_GIT_ALLOWED = frozenset((
+    "status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree", "cat-file", "blame", "grep",
+    "describe", "shortlog", "merge-base", "rev-list", "for-each-ref", "show-ref", "branch", "tag", "remote",
+    "config", "add", "rm", "mv", "commit", "push", "fetch", "stash", "switch", "checkout", "restore", "reset",
+    "merge", "rebase", "cherry-pick", "revert", "worktree", "clone"))
+_RDP_GIT_INFO_OPTIONS = frozenset(("--version", "--exec-path", "--html-path", "--man-path", "--info-path"))
 # The options that make a git command run a program, named in it or configured, whatever its subcommand
 # (each matched abbreviated or not): an external diff (diff.external, a diff driver's command), a textconv
 # filter, a signature check running gpg.program, grep's pager on the matches, rebase's exec lines,
 # difftool's command, the upload, receive and archive programs of a remote, send-email's commands and
 # server, and the global --exec-path=DIR, from which git runs its own programs (a bare --exec-path only
 # prints it). A word naming an option of its own that shares a prefix with one of them (--text, --to,
-# --cc, --filter) is not one. _RDP_GIT_SUB_PROGRAM_OPTIONS holds those of one subcommand only: cat-file's
-# smudge and clean filters (its --filter is an object filter) and clone's --config, which sets
-# configuration in the new repository.
+# --cc, --filter) is not one. _RDP_GIT_SUB_PROGRAM_OPTIONS holds those of one subcommand only, read from
+# git SUB -h (git 2.53) for each allowlisted subcommand: cat-file's smudge and clean filters (its --filter
+# is an object filter); clone's --config, which sets configuration in the new repository; signing and
+# signature verification, which run gpg.program (commit, merge, rebase, cherry-pick and revert --gpg-sign,
+# tag --sign, --local-user and --verify, merge --verify-signatures, push --signed); a merge strategy, which
+# may name a git-merge-NAME program on PATH (merge, rebase, cherry-pick and revert --strategy); patch and
+# interactive modes, which run interactive.diffFilter (add, commit, checkout, restore, reset and stash
+# --patch, add and commit --interactive); and commit and tag --trailer, which run trailer commands. The
+# other allowlisted subcommands have no such option of their own (status, log, diff, show, rev-parse,
+# ls-files, ls-tree, blame, grep, describe, shortlog, merge-base, rev-list, for-each-ref, show-ref, branch,
+# remote, config, rm, mv, fetch, switch, worktree); git runs the editor by default (git commit without -m,
+# git revert), so an option asking for it is not counted, as configuration is not.
 _RDP_GIT_PROGRAM_OPTIONS = ("--ext-diff", "--textconv", "--show-signature", "--open-files-in-pager", "--exec",
                             "--extcmd", "--upload-pack", "--receive-pack", "--exec-path", "--sendmail-cmd",
                             "--to-cmd", "--cc-cmd", "--header-cmd", "--smtp-server")
-_RDP_GIT_SUB_PROGRAM_OPTIONS = {"cat-file": ("--filters",), "clone": ("--config",)}
+_RDP_GIT_SUB_PROGRAM_OPTIONS = {
+    "cat-file": ("--filters",), "clone": ("--config",), "commit": ("--gpg-sign", "--patch", "--interactive",
+    "--trailer"), "tag": ("--sign", "--local-user", "--verify", "--trailer"), "merge": ("--gpg-sign",
+    "--verify-signatures", "--strategy"), "rebase": ("--gpg-sign", "--strategy"), "cherry-pick": ("--gpg-sign",
+    "--strategy"), "revert": ("--gpg-sign", "--strategy"), "push": ("--signed",), "add": ("--patch",
+    "--interactive"), "checkout": ("--patch",), "restore": ("--patch",), "reset": ("--patch",),
+    "stash": ("--patch",)}
 _RDP_GIT_NOT_PROGRAM_OPTIONS = frozenset(("--text", "--filter", "--to", "--cc"))
-# The short options that run a program, by subcommand: (the letters that do, the letters taking a value,
-# after which the rest of the word is that value), so -eOops is a pattern but -iO runs the pager. grep's
-# -e and -f take the next word when nothing is glued to them (git grep -e -O searches for -O).
-_RDP_GIT_PROGRAM_LETTERS = {"grep": ("O", "efABCm"), "rebase": ("x", "sXS"), "difftool": ("x", "t"),
-                            "clone": ("uc", "obj")}
 # The subcommands that run a command given as their words: bisect run, submodule foreach (also through
 # submodule--helper) and filter-branch, whose filters and setup are shell text.
 _RDP_GIT_PROGRAM_SUBCOMMANDS = {"bisect": "run", "submodule": "foreach", "submodule--helper": "foreach",
@@ -11359,6 +11382,63 @@ _RDP_GIT_DIFF_NEXT_LONG = frozenset((
 # The git config read actions, each with the least and most operands it takes; the options that may
 # precede one, or a key read alone, without changing what it does; and those of them taking a value, glued
 # after = or as the next word (--file PATH, --type bool).
+# The short options of each subcommand, from git SUB -h (git 2.53): (the letters that run a program, the
+# letters taking a value, after which the rest of the word is that value, and those of them taking the
+# next word when nothing is glued to them), so -eOops is a pattern but -iO runs the pager, and git grep
+# -e -O searches for -O; and the long options taking the next word when written without =, so git log
+# --grep --ext-diff searches for --ext-diff. Only an option whose value git requires is listed: a word
+# taken as a value is not judged, while a word wrongly judged only refuses. A subcommand not listed has
+# no short option that runs a program or takes the next word.
+_RDP_GIT_PROGRAM_LETTERS = {
+    "grep": ("O", "efABCm", "efABCm"), "rebase": ("xsS", "CX", "CX"), "difftool": ("x", "t", ""),
+    "clone": ("uc", "job", "job"), "tag": ("suv", "mF", "mF"), "commit": ("Sp", "FmcCtU", "FmcCtU"),
+    "merge": ("sS", "XmF", "XmF"), "cherry-pick": ("S", "mX", "mX"), "revert": ("S", "mX", "mX"),
+    "add": ("pi", "U", "U"), "checkout": ("p", "bBU", "bBU"), "restore": ("p", "sU", "sU"),
+    "reset": ("p", "U", "U"), "stash": ("p", "", ""), "switch": ("", "cC", "cC"), "push": ("", "o", "o"),
+    "fetch": ("", "jo", "jo"), "branch": ("", "u", "u"), "ls-files": ("", "xX", "xX"),
+    "blame": ("", "SL", "SL"), "log": ("", _RDP_GIT_DIFF_VALUED + "L", _RDP_GIT_DIFF_NEXT + "L"),
+    "show": ("", _RDP_GIT_DIFF_VALUED + "L", _RDP_GIT_DIFF_NEXT + "L"),
+    "diff": ("", _RDP_GIT_DIFF_VALUED, _RDP_GIT_DIFF_NEXT),
+    "rev-list": ("", _RDP_GIT_DIFF_VALUED, _RDP_GIT_DIFF_NEXT)}
+_RDP_GIT_NEXT_LONG = {
+    "log": _RDP_GIT_DIFF_NEXT_LONG | frozenset(("--decorate-refs", "--decorate-refs-exclude")),
+    "show": _RDP_GIT_DIFF_NEXT_LONG | frozenset(("--decorate-refs", "--decorate-refs-exclude")),
+    "diff": _RDP_GIT_DIFF_NEXT_LONG, "rev-list": _RDP_GIT_DIFF_NEXT_LONG,
+    "shortlog": _RDP_GIT_DIFF_NEXT_LONG | frozenset(("--group",)),
+    "ls-files": frozenset(("--exclude", "--exclude-from", "--exclude-per-directory", "--with-tree", "--format")),
+    "ls-tree": frozenset(("--format",)), "cat-file": frozenset(("--path", "--filter")),
+    "blame": frozenset(("--diff-algorithm", "--ignore-rev", "--ignore-revs-file", "--contents")),
+    "grep": frozenset(("--max-depth", "--context", "--before-context", "--after-context", "--threads",
+                       "--max-count")),
+    "describe": frozenset(("--candidates", "--match", "--exclude")),
+    "for-each-ref": frozenset(("--count", "--format", "--start-after", "--exclude", "--sort", "--points-at",
+                               "--merged", "--no-merged", "--contains", "--no-contains")),
+    "branch": frozenset(("--set-upstream-to", "--contains", "--no-contains", "--merged", "--no-merged", "--sort",
+                         "--points-at", "--format")),
+    "tag": frozenset(("--message", "--file", "--cleanup", "--contains", "--no-contains", "--merged",
+                      "--no-merged", "--sort", "--points-at", "--format")),
+    "add": frozenset(("--unified", "--inter-hunk-context", "--chmod", "--pathspec-from-file")),
+    "commit": frozenset(("--file", "--author", "--date", "--message", "--reedit-message", "--reuse-message",
+                         "--fixup", "--squash", "--template", "--cleanup", "--unified", "--inter-hunk-context",
+                         "--pathspec-from-file")),
+    "push": frozenset(("--repo", "--recurse-submodules", "--push-option")),
+    "fetch": frozenset(("--jobs", "--depth", "--shallow-since", "--shallow-exclude", "--deepen", "--refmap",
+                        "--server-option", "--negotiation-tip", "--filter")),
+    "switch": frozenset(("--create", "--force-create", "--conflict", "--orphan")),
+    "checkout": frozenset(("--conflict", "--orphan", "--unified", "--inter-hunk-context", "--pathspec-from-file")),
+    "restore": frozenset(("--source", "--conflict", "--unified", "--inter-hunk-context", "--pathspec-from-file")),
+    "reset": frozenset(("--unified", "--inter-hunk-context", "--pathspec-from-file")),
+    "merge": frozenset(("--cleanup", "--strategy-option", "--message", "--file", "--into-name")),
+    "rebase": frozenset(("--onto", "--whitespace", "--empty", "--strategy-option")),
+    "cherry-pick": frozenset(("--cleanup", "--mainline", "--strategy-option", "--empty")),
+    "revert": frozenset(("--cleanup", "--mainline", "--strategy-option")),
+    "clone": frozenset(("--jobs", "--template", "--reference", "--reference-if-able", "--origin", "--branch",
+                        "--revision", "--depth", "--shallow-since", "--shallow-exclude", "--separate-git-dir",
+                        "--ref-format", "--server-option", "--filter", "--bundle-uri")),
+    "rm": frozenset(("--pathspec-from-file",))}
+# The subcommands that reach a remote, where a URL written TRANSPORT::ADDRESS runs the remote helper
+# git-remote-TRANSPORT found on PATH.
+_RDP_GIT_TRANSPORTS = frozenset(("fetch", "push", "clone", "remote"))
 _RDP_GIT_CONFIG_READS = {"--get": (1, 2), "--get-all": (1, 2), "--get-regexp": (1, 2), "--list": (0, 0),
                          "-l": (0, 0)}
 _RDP_GIT_CONFIG_MODIFIERS = frozenset(("--local", "--global", "--system", "--worktree", "--show-origin",
@@ -11408,7 +11488,8 @@ def _rdp_git_program_under(sub, before, after):
     if run is None or (run and run in after):
         return sub if run is None else run
     owned = _RDP_GIT_SUB_PROGRAM_OPTIONS.get(sub, ())
-    letters, valued = _RDP_GIT_PROGRAM_LETTERS.get(sub, ("", ""))
+    letters, valued, nexts = _RDP_GIT_PROGRAM_LETTERS.get(sub, ("", "", ""))
+    longs = _RDP_GIT_NEXT_LONG.get(sub, frozenset())
     skip = form = False
     for word in after:
         if form and ("%G" in word or "%(signature" in word):
@@ -11418,20 +11499,49 @@ def _rdp_git_program_under(sub, before, after):
         if form and ("%G" in word or "%(signature" in word):
             return word
         form = form and name == word
+        if sub in _RDP_GIT_TRANSPORTS and _rdp_git_helper_url(word):
+            return word
         if skip:
             skip = False
             continue
+        if word == "--help":
+            return word
         if name.startswith("--") and name not in _RDP_GIT_NOT_PROGRAM_OPTIONS and word != "--exec-path" and (
                 _rdp_long_option(name, _RDP_GIT_PROGRAM_OPTIONS + owned)):
             return word
+        skip = word in longs
         if len(word) > 1 and word.startswith("-") and not word.startswith("--"):
             for k, ch in enumerate(word[1:], 1):
                 if ch in letters:
                     return word
                 if ch in valued:
-                    skip = sub == "grep" and ch in "ef" and k == len(word) - 1
+                    skip = ch in nexts and k == len(word) - 1
                     break
     return None
+
+
+def _rdp_git_helper_url(word):
+    """Whether a word (or the value of an option word, after =) is a URL written TRANSPORT::ADDRESS, for
+    which git runs the remote helper git-remote-TRANSPORT found on PATH."""
+    value = word.split("=", 1)[-1] if word.startswith("-") else word
+    head, sep, _rest = value.partition("::")
+    return bool(sep) and head != "" and all(ch.isascii() and (ch.isalnum() or ch in "+.-") for ch in head)
+
+
+def _rdp_git_off_allowlist(words):
+    """The word of a plain git command that names a subcommand off _RDP_GIT_ALLOWED (matched exactly), or
+    the global option this hook does not know that hides the subcommand; None when the command is no git
+    command, runs an allowlisted subcommand, or is git alone or with one of _RDP_GIT_INFO_OPTIONS only."""
+    if _rdp_basename(words[0]).casefold() != "git":
+        return None
+    if len(words) == 1 or (len(words) == 2 and words[1] in _RDP_GIT_INFO_OPTIONS):
+        return None
+    at, _configured = _rdp_git_subcommand(words)
+    if at is None:
+        return next((word for word in words[1:] if word.startswith("-") and word not in _RDP_GIT_GLOBAL_VALUED
+                     and word not in _RDP_GIT_GLOBAL_FLAGS and not (
+                         word.startswith("--") and word.split("=", 1)[0] in _RDP_GIT_GLOBAL_VALUED)), words[-1])
+    return None if words[at] in _RDP_GIT_ALLOWED else words[at]
 
 
 def _rdp_git_runs_program(words):
@@ -11439,8 +11549,12 @@ def _rdp_git_runs_program(words):
     when the command is no git command or runs none that way: a global -p or --paginate (the pager), an
     option of _RDP_GIT_PROGRAM_OPTIONS or of the subcommand's _RDP_GIT_SUB_PROGRAM_OPTIONS (abbreviated or
     not), a %G placeholder or %(signature) atom in a --format or --pretty value (gpg.program), a short
-    option of _RDP_GIT_PROGRAM_LETTERS (grep -O, rebase and difftool -x, clone -u and -c), or a
-    subcommand of _RDP_GIT_PROGRAM_SUBCOMMANDS. Every word is judged, a word after -- included. Behind a
+    option of _RDP_GIT_PROGRAM_LETTERS (grep -O, rebase and difftool -x, clone -u and -c, commit -S and
+    -p, tag -s, -u and -v), a --help after the subcommand (git help's viewer), a TRANSPORT::ADDRESS URL
+    for a subcommand of _RDP_GIT_TRANSPORTS, or a subcommand of _RDP_GIT_PROGRAM_SUBCOMMANDS. Options are
+    read with their operands first: a word taken as the value of an option before it (attached, or the
+    next word after one of _RDP_GIT_PROGRAM_LETTERS or _RDP_GIT_NEXT_LONG) is no option, so git log --grep
+    --ext-diff searches for --ext-diff. Every other word is judged, a word after -- included. Behind a
     global option this hook does not know, every word that may be the subcommand is tried."""
     if _rdp_basename(words[0]).casefold() != "git":
         return None
@@ -11652,10 +11766,23 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
         return ("deny", "the git command runs a program ({}): an option or subcommand that runs a program "
                 "named in it or configured (the pager of -p, --paginate or grep -O, an external diff, a "
                 "textconv or smudge filter, a signature check, rebase or difftool -x, an upload, receive or "
-                "archive program, an exec path, bisect run, submodule foreach, filter-branch) can run shell "
+                "archive program, an exec path, a signing or signature program, a merge strategy, a patch "
+                "mode's diff filter, a trailer command, a remote helper, git help's viewer, bisect run, "
+                "submodule foreach, filter-branch) can run shell "
                 "text that writes, moves or removes the registry, so in a session whose registry binds "
                 "review dispatch it is refused whatever it names, and an operator runs it outside the "
                 "session".format(program))
+    # A git subcommand off the allowlist may run a program by an option no table here holds (instaweb
+    # --httpd), so it is refused whatever it names.
+    off = _rdp_git_off_allowlist(words)
+    if off is not None:
+        return ("deny", "the git command runs no subcommand on the allowlist ({}): in a session whose "
+                "registry binds review dispatch a git command may run only {}, since any other subcommand "
+                "(instaweb, difftool, mergetool, send-email, filter-branch, bisect, submodule, daemon, "
+                "web--browse, the credential commands, help, an alias, an external git-NAME program, or one "
+                "behind a global option this hook does not know) can run a program whose shell text writes, "
+                "moves or removes the registry, and an operator runs it outside the session".format(
+                    off, ", ".join(sorted(_RDP_GIT_ALLOWED))))
     # A git command that only reads treats every word as data: it neither writes the registry nor moves
     # the repository, whatever its words name.
     reads = _rdp_git_reads(words)

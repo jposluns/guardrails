@@ -1399,7 +1399,15 @@ def _rdp_scope_cases(base, plain):
                 "git fetch --upload-pack=x origin", "git push --receive-pack=x origin",
                 "git archive --remote=x --exec=y HEAD", "git send-email --sendmail-cmd=x a",
                 "git --exec-path=/x status", "git bisect run x", "git submodule foreach x",
-                "git filter-branch --tree-filter x", "git --no-advice rebase -x x HEAD")
+                "git filter-branch --tree-filter x", "git --no-advice rebase -x x HEAD",
+                "git commit -S -m x", "git commit --gpg-sign -m x", "git commit -p", "git commit --trailer a=b -m x",
+                "git tag -s v1 -m x", "git tag -v v1", "git tag -u k v1", "git tag --sign v1",
+                "git merge -s x y", "git merge --strategy=x y", "git merge --verify-signatures y", "git merge -S y",
+                "git rebase -s x y", "git rebase -S y", "git cherry-pick --strategy=x y", "git cherry-pick -S y",
+                "git revert --gpg-sign y", "git push --signed origin", "git add -p", "git add -i",
+                "git add --interactive", "git checkout -p", "git restore --patch x", "git reset -p",
+                "git stash -p", "git fetch evil::x", "git clone evil::x d", "git remote add o evil::x",
+                "git push --repo=evil::x", "git log --help")
     pr_got = []
     for c in programs:
         result = go.run(c)
@@ -1414,7 +1422,9 @@ def _rdp_scope_cases(base, plain):
                 "git log --grep -c -- .aiqt", "git log --author -p -- .aiqt", "git log -n 3 -- .aiqt",
                 "git log -- .aiqt -p", "git grep -e -O -- .aiqt", "git grep -eOops -- .aiqt",
                 "git cat-file --filter=blob:none --batch-check", "git commit -m 'fix -x and %G'",
-                "git rebase -i HEAD", "git --exec-path", "git send-email --to=a --cc=b x")
+                "git rebase -i HEAD", "git --exec-path", "git log --grep --ext-diff",
+                "git log --grep=--ext-diff", "git show --author --show-signature", "git commit -m --gpg-sign",
+                "git grep -A 1 -e -O", "git tag -m -s v1", "git log --grep --help", "git clone -o -u a b")
     check("rdp/plain-git-option-operands-parsed", [_rdp_kind(go.run(c)) for c in operands],
           ["allow"] * len(operands))
     patches = ("git log -Sx -p -- .aiqt", "git log -pSconfig -- .aiqt", "git log -cS x -- .aiqt",
@@ -1435,6 +1445,41 @@ def _rdp_scope_cases(base, plain):
                      "git config --type bool core.bare true", "git config --file x --unset core.bare")
     check("rdp/plain-git-config-trailing-word-still-writes", [_rdp_kind(go.run(c)) for c in config_writes],
           ["deny"] * len(config_writes))
+    # A git subcommand off the allowlist is refused whatever it names: the instaweb sequence (its --httpd
+    # set to rm -rf .aiqt, run only where the hook allows it) would delete the registry and let a
+    # missing-brief dispatch through.
+    iw = RdpFixture(base, "instaweb")
+    iw_got = [_rdp_kind(iw.dispatch("/missing")),
+              _rdp_kind(iw.run("git instaweb --httpd='rm -rf .aiqt lighttpd' --start"))]
+    if iw_got[-1] == "allow":
+        subprocess.run(["git", "-C", str(iw.root), "instaweb", "--httpd=rm -rf .aiqt lighttpd", "--start"],
+                       capture_output=True, timeout=30)
+    iw_got += [_rdp_kind(iw.dispatch("/missing")), (iw.root / ".aiqt" / "orchestration.local.json").is_file()]
+    check("rdp/git-instaweb-sequence-cannot-remove-registry", iw_got, ["unverifiable", "deny", "unverifiable", True])
+    off_list = (("git instaweb --start", "instaweb"), ("git difftool", "difftool"), ("git mergetool", "mergetool"),
+                ("git send-email --to=a x", "send-email"), ("git filter-branch", "filter-branch"),
+                ("git bisect start", "bisect"), ("git submodule status", "submodule"), ("git daemon", "daemon"),
+                ("git web--browse x", "web--browse"), ("git credential fill", "credential"),
+                ("git credential-store get", "credential-store"), ("git credential-cache exit", "credential-cache"),
+                ("git help log", "help"), ("git co main", "co"), ("git my-external", "my-external"),
+                ("git LOG", "LOG"), ("git --no-advice status", "--no-advice"), ("git init", "init"),
+                ("git clean -n", "clean"), ("git gc", "gc"), ("git --help", "--help"))
+    off_got = []
+    for c, word in off_list:
+        result = go.run(c)
+        specific = result[1].get("hookSpecificOutput") if isinstance(result[1], dict) else None
+        reason = specific.get("permissionDecisionReason", "") if isinstance(specific, dict) else ""
+        off_got.append((_rdp_kind(result), "({})".format(word) in reason))
+    check("rdp/plain-git-off-allowlist-subcommand-denies", off_got, [("deny", True)] * len(off_list))
+    allowed = ("git status", "git log", "git diff", "git show", "git rev-parse HEAD", "git ls-files", "git ls-tree HEAD",
+               "git cat-file -t HEAD", "git blame seed.txt", "git grep x", "git describe", "git shortlog",
+               "git merge-base HEAD HEAD", "git rev-list HEAD", "git for-each-ref", "git show-ref", "git branch",
+               "git tag", "git remote", "git config --list", "git add x", "git rm x", "git mv x y", "git commit -m x",
+               "git push", "git fetch", "git stash", "git switch main", "git checkout main", "git restore x",
+               "git reset", "git merge x", "git rebase x", "git cherry-pick x", "git revert x", "git worktree list",
+               "git clone a b", "git", "git --version")
+    check("rdp/plain-git-allowlisted-subcommand-allows", [_rdp_kind(go.run(c)) for c in allowed],
+          ["allow"] * len(allowed))
     # A linked worktree beside a main worktree whose git directory is separated (core.worktree naming the
     # main worktree): a dispatch is withheld, and the two calls that would point core.worktree at an empty
     # directory META/get, and so unscope the session, end at the config write, whose trailing word is a
