@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "91a7cee71ee1cce507e61e539f3fb256c37ecedb6425e295c9329c1fb323e686"
+tree-sha256 = "494e3a1fb8f1a03ed538b8110bc5b6cb3280e24db4e6a5358fca2b076960e84a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 257040
-sha256 = "17e36c68bec776308b7b88a798a592d2669bf9964fe0b58169d4c4fad483213b"
+bytes = 257131
+sha256 = "ea9843b39ec24d882616e428712c2934ab484b3ff69e92da084472a5fe943e52"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -806,8 +806,8 @@ sha256 = "c24eca7f5f6af796c69a0796d6f99586bbce90c6b9a11d2e60232f1942440c8c"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 347453
-sha256 = "47665eb85006f10b167e079b3a7e02949a1c88b6920c88a8347c58cf286dcff0"
+bytes = 347635
+sha256 = "40afaf817def554b17c6f1032cd053201274bb0fb34e0223e36d44b2aefb4276"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2306,8 +2306,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 197462
-sha256 = "e3594f9231902f30e66ddec7acfd9db26818a6724e2416c98eefc32937493473"
+bytes = 197553
+sha256 = "b3cf0c86bc3e9b4fe0baea0db3c046e1b4f38cabcd5b84935a6068afa3be1595"
 
 [[sources]]
 path = "GEMINI.md"
@@ -2566,8 +2566,8 @@ sha256 = "d2247bf246136735bef911aa3129a9e2895c0bc2297a0480b9d1daf2d8fdbd99"
 
 [[sources]]
 path = "opf/tools/_child_contract.py"
-bytes = 66993
-sha256 = "2afe2591277acb00c6a67747a994af0aa31fb379e480fdbc202efeb79a517a2c"
+bytes = 75740
+sha256 = "c72cf15344a00baaa96e5d9245638d50cbeca57475892af599115df7eeba40e9"
 
 [[sources]]
 path = "opf/tools/_commonmark_headings.py"
@@ -3071,8 +3071,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 246489
-sha256 = "9b6aa7d34317b60384b38a4fee57481037dd20079975c2f5c40f36921e9b64ce"
+bytes = 246580
+sha256 = "6ceb0ab4e59517fb1681abee265b4b1b981f99acbe4b6e83026bd581d9a368ec"
 
 [[sources]]
 path = "site/evidence.html"

@@ -124,7 +124,15 @@ THE CONTRACT, in the order it runs:
    the os, gc, sys and sys.monitoring functions it needs from here on through references bound
    when this module is imported, and the restore reads and writes the namespaces taken at
    construction, never the module objects, keeping each replacement it removes alive so no
-   finalizer runs. After the
+   finalizer runs. The same holds for the objects the snapshot keeps: loaded code can
+   re-initialise the original sys.stderr over a stream written in Python, whose `closed`
+   property then runs on a read of that attribute (merge train 2 QA r12, claude MEDIUM 1,
+   reproduced: such a property armed a profile function during the last restore and the child
+   exited 0 with its seal), so the last restore reads no attribute of any snapshotted object; it
+   reads whether the original error stream is closed on the file object under it, captured at
+   construction, through the C getter bound at import. Nor does anything after the second read
+   create a function, generator or lambda (a function watcher runs on each creation; QA r12,
+   claude MINOR 2), and the self-test checks that statically. After the
    decision the handler runs only os.write on saved_stdout and saved_stderr (the seal, or a
    diagnostic) and os._exit; CPython 3.14 raises no audit event for either (measured), so an audit
    hook the loaded code added, which cannot be removed, does not run after the decision; no
@@ -182,12 +190,17 @@ callers' docstrings point here instead of restating them):
       make this interpreter run a script at its next eval-breaker check, which the seal loop
       reaches, so such a script can run after the decision; the children are not launched with
       -X disable_remote_debug (not reproduced).
-  (g) the handler trusts its own namespace, its class and the builtins it calls (len, all, type,
-      getattr, sorted and the like): loaded code that rebinds a name in this module, patches a
-      FailClosedChild method or replaces a builtin runs that code wherever the handler calls it,
-      after the decision included. That is code aimed at this contract, not cleanup left behind,
-      and the same reviewed, pinned loaded code could forge the record outright (the parents'
-      disclosed channel); not reproduced.
+  (g) the handler trusts its own namespace, its class, its instance's own state (faults, the
+      snapshot list, the held list, the saved descriptors and the rest of the instance's
+      attributes) and the builtins it calls (len, type, getattr, sorted and the like): loaded code
+      that rebinds a name in this module, patches a FailClosedChild method, replaces or tampers
+      with the instance's state or replaces a builtin runs that code wherever the handler calls
+      it, after the decision included. The objects the snapshot keeps are NOT trusted: after the
+      second read the handler only compares their identities, reads the module namespaces as
+      plain dictionaries and reads the original error stream's file object through a C getter.
+      That is code aimed at this contract, not cleanup left behind, and the same reviewed, pinned
+      loaded code could forge the record outright (the parents' disclosed channel); not
+      reproduced.
 
 The parent-side halves of the contract stay with the parents: what each accepts (a complete record
 bound to the child, an empty error stream), and the channel by which reviewed, pinned loaded code
@@ -196,6 +209,7 @@ there. Offline, stdlib only; imported by opf.py as a sibling and by tools/ calle
 explicit opf/tools path insert.
 """
 import gc
+import io
 import os
 import signal
 import sys
@@ -226,6 +240,10 @@ REPORTING = (("sys", "stderr"), ("sys", "excepthook"), ("sys", "unraisablehook")
 # train 2 QA r11, claude MEDIUM, reproduced: such a hook on the os module ran during the seal and
 # the child exited 0 with it).
 _write, _exit = os.write, os._exit
+# The C getter of io.FileIO.closed, for the last restore's read of whether the original error
+# stream is closed: reading `closed` on the stream object itself runs whatever the loaded code
+# re-initialised that object over (merge train 2 QA r12, claude MEDIUM 1, reproduced).
+_FileIO, _fileio_closed = io.FileIO, io.FileIO.closed.__get__
 _gc_disable, _gc_isenabled, _gc_callbacks = gc.disable, gc.isenabled, gc.callbacks
 _getprofile, _setprofile = sys.getprofile, sys.setprofile
 _gettrace, _settrace = sys.gettrace, sys.settrace
@@ -249,6 +267,15 @@ def reporting_snapshot():
     owners = {"sys": sys, "threading": threading}
     return [(owner, owners[owner].__dict__, name, getattr(owners[owner], name, None))
             for owner, name in REPORTING]
+
+
+def _file_under(stream):
+    """The io.FileIO object under a text stream (its buffer's raw file, or its buffer when that
+    is unbuffered), or None when it has none. Called at construction, before the loaded or tested
+    code runs, so the attribute reads here run no code that code controls."""
+    buffer = getattr(stream, "buffer", None)
+    raw = getattr(buffer, "raw", buffer)
+    return raw if isinstance(raw, _FileIO) else None
 
 
 def _tracked_ids():
@@ -298,6 +325,7 @@ class FailClosedChild:
         self._threads_started = []
         self._held = []
         self._snapshot = reporting_snapshot()
+        self._stderr_file = _file_under(self._snapshot[0][3])
 
     def register(self):
         """Register the record handler FIRST, before the caller imports or runs anything that
@@ -336,19 +364,33 @@ class FailClosedChild:
             self.faults.append("the cleanup audit hook could not be armed ({})".format(
                 type(exc).__name__))
 
-    def restore_reporting(self):
+    def restore_reporting(self, last=False):
         """Put every piece of the reporting machinery back where cleanup code replaced it, and
         return what was found replaced (or the snapshot's error stream closed, which cannot be
-        undone), as names; an empty list means the machinery was intact. It runs no code the
-        loaded or tested module controls (merge train 2 QA r11, claude MEDIUM): it works on the
-        namespaces taken at construction, never through the module objects; it looks a name up
-        only in a namespace whose keys are all plain strings (a key of a str subclass could run
-        its own __eq__ in the lookup, so such a namespace is itself reported, unrestored); and
+        undone), as names; an empty list means the machinery was intact. The restore itself runs
+        no code the loaded or tested module controls (merge train 2 QA r11, claude MEDIUM): it
+        works on the namespaces taken at construction, never through the module objects; it
+        looks a name up only in a namespace whose keys are all plain strings, checked by a plain
+        loop that creates no function (a key of a str subclass could run its own __eq__ in the
+        lookup, so such a namespace is itself reported, unrestored; QA r12, claude MINOR 2); and
         it keeps every replacement it removes alive in self._held until the os._exit, so no
-        finalizer of a replaced hook or stream runs here."""
+        finalizer of a replaced hook or stream runs here. The closed read differs by caller.
+        The checks' restores (last False) read `closed` on the original error stream object,
+        which CAN run loaded code (a stream re-initialised over one written in Python); that is
+        before the decision, and the disarming and the last restore that follow judge whatever
+        it did. The last restore, after the disarming (last True), reads no attribute of that
+        object: it reads the file object under it, captured at construction, through the C
+        getter bound at import (QA r12, claude MEDIUM 1); with no such file object (an error
+        stream that was not file-backed at construction) it reads nothing there, and the final
+        check's own read stands."""
         swapped = []
         for owner, namespace, name, original in self._snapshot:
-            if not all(type(key) is str for key in namespace):
+            plain = True
+            for key in namespace:
+                if type(key) is not str:
+                    plain = False
+                    break
+            if not plain:
                 swapped.append("{} (a namespace key that is not a plain string)".format(owner))
                 continue
             current = namespace.get(name)
@@ -356,7 +398,10 @@ class FailClosedChild:
                 swapped.append("{}.{}".format(owner, name))
                 self._held.append(current)
                 namespace[name] = original
-        if getattr(self._snapshot[0][3], "closed", True):
+        if not last:
+            if getattr(self._snapshot[0][3], "closed", True):
+                swapped.append("sys.stderr (closed)")
+        elif self._stderr_file is not None and _fileio_closed(self._stderr_file):
             swapped.append("sys.stderr (closed)")
         return swapped
 
@@ -380,7 +425,9 @@ class FailClosedChild:
             code = self._decide(self._settled[0], len(self._threads_started))
             seen, threads = len(self.faults), len(self._threads_started)
             stage = "in the record callback"
-            seal = [(fd, bytes(data)) for fd, data in (self._record(code) or ())]
+            seal = []
+            for fd, data in self._record(code) or ():
+                seal.append((fd, bytes(data)))
             # The callback returned normally, but it may have faulted without raising (module
             # docstring, contract step 5): the same checks again, the FINAL check, and a fault new
             # since the callback started voids the record (merge train 2 QA r8, codex MAJOR).
@@ -399,7 +446,7 @@ class FailClosedChild:
                 self.faults.append(
                     "an interpreter callback was still armed after the final check ({}), so it "
                     "could run after the decision unjudged".format(", ".join(armed)))
-            self._judge(self.restore_reporting(), threads)
+            self._judge(self.restore_reporting(last=True), threads)
             # From here on only os.write on the saved descriptors and the os._exit (contract
             # step 6, merge train 2 QA r9 and r10): no flush, no collection, no callback, and no
             # audit event (CPython raises none for os.write or os._exit).
@@ -530,7 +577,9 @@ class FailClosedChild:
                 _monitoring_clear(tool)
                 _monitoring_free_tool_id(tool)
         again = self._armed() + (["automatic garbage collection"] if _gc_isenabled() else [])
-        return armed + ["{} (re-armed while being disarmed)".format(name) for name in again]
+        for name in again:
+            armed.append("{} (re-armed while being disarmed)".format(name))
+        return armed
 
     def _armed(self):
         """The interpreter-level callback mechanisms armed right now, by name (reads only, through
@@ -1176,7 +1225,90 @@ class Hooked(types.ModuleType):
 
 {target}.__class__ = Hooked
 """
+# QA r12, claude MEDIUM 1: loaded code re-initialises the original sys.stderr over a stream
+# written in Python whose `closed` property, read in the stage the case names, reports that it
+# ran and arms a profile function that faults on the seal (the closing variant instead closes the
+# original file object under the stream, keeping its own flushes quiet). On 87dd2a59 the last
+# restore read `closed` on that object after the second read, and the child exited 0 with its
+# seal and this report; now the last restore reads the original file object through the C
+# getter, so the property never runs there, and a close the final check's own read made is
+# found by that last restore.
+_SEED_STDERR_CLOSED_PROPERTY = """
+getframe, setprofile, write = sys._getframe, sys.setprofile, os.write
+ran = []
+real = sys.stderr.buffer
+real_file = real.raw
+
+
+class Stream(io.RawIOBase):
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def write(self, data):
+        return len(data) if real_file.closed else real.write(data)
+
+    def flush(self):
+        if not real_file.closed:
+            real.flush()
+
+    @property
+    def closed(self):
+        frame = getframe()
+        while frame is not None and frame.f_code.co_name != "_record_at_exit":
+            frame = frame.f_back
+        if frame is not None and not ran and frame.f_locals.get("stage") == {stage!r}:
+            ran.append("closed")
+            if {close}:
+                real.flush()
+                real_file.close()
+            else:
+                write(2, b"loaded code ran after the final read\\n")
+                setprofile(lambda frame, event, arg: late_fault())
+        return False
+
+
+sys.stderr.__init__(Stream(), encoding="utf-8", line_buffering=True)
+"""
+# QA r12, claude MINOR 2: a function watcher (a Python callable through the test-only _testcapi
+# module) that, once the handler is in its disarming stage or sealing, reports that it ran and
+# arms a profile function that faults on the seal. On 87dd2a59 the last restore's generator
+# expression created a function after the second read and the child exited 0 with its seal and
+# this report; now nothing after the second read creates a function. Run only where _testcapi
+# exists; the static check in self_test() covers the same rule everywhere.
+_SEED_FUNC_WATCHER = """
+import _testcapi
+
+getframe, setprofile, write = sys._getframe, sys.setprofile, os.write
+ran = []
+
+
+def watcher(event, func, new_value):
+    if ran:
+        return
+    frame = getframe()
+    while frame is not None and frame.f_code.co_name != "_record_at_exit":
+        frame = frame.f_back
+    if frame is not None and frame.f_locals.get("stage") in (
+            "disarming the interpreter callbacks", "sealing the record"):
+        ran.append("watcher")
+        write(2, b"loaded code ran after the final read\\n")
+        setprofile(lambda frame, event, arg: late_fault())
+
+
+_testcapi.add_func_watcher(watcher)
+"""
 _SEAL_FAULT = _CALLBACK_FAULT.format(skip="stage != \"sealing the record\"")
+# The handler's code after its final read of the interpreter callbacks (and on its failure paths
+# after the decision): none of it may create a function, generator or lambda (QA r12, claude
+# MINOR 2), so none of these code objects may hold a nested code object.
+_AFTER_FINAL_READ = ("_record_at_exit", "_disarm", "_armed", "restore_reporting", "_judge",
+                     "_callback_fault", "_handler_fault", "_error_fd")
 _ARMED = ("a fault was observed during the record callback", "exit 2",
           "an interpreter callback was still armed after the final check")
 _IN_CHECK_FAULT = ("a fault was observed during the record callback",
@@ -1261,7 +1393,18 @@ _CASES = (
         stage="disarming the interpreter callbacks", target="threading"), 0, "record 0", (), True),
     ("os-class-hook-on-seal", "", _SEAL_FAULT + _SEED_MODULE_CLASS_HOOK.format(
         stage="sealing the record", target="os"), 0, "record 0", (), True),
+    ("stderr-closed-property-after-final-read", "",
+     _SEAL_FAULT + _SEED_STDERR_CLOSED_PROPERTY.format(
+         stage="disarming the interpreter callbacks", close=False), 0, "record 0", (), True),
+    ("stderr-closed-by-final-check-read", "", _SEAL_FAULT + _SEED_STDERR_CLOSED_PROPERTY.format(
+        stage="after the record callback", close=True), 2, "record 0",
+     ("a fault was observed during the record callback", "sys.stderr (closed)", "exit 2"), False),
+    ("stderr-closed-by-cleanup", "", "atexit.register(sys.stderr.close)\n", 2, "record 2",
+     ("sys.stderr (closed)",), False),
 )
+# Run only where the test-only _testcapi module exists (self_test() reports the skip by name).
+_FUNC_WATCHER_CASE = ("function-watcher-after-final-read", "", _SEAL_FAULT + _SEED_FUNC_WATCHER,
+                      0, "record 0", (), True)
 
 
 def _run_case(pre, body):
@@ -1295,10 +1438,21 @@ def self_test():
     for needle in ("DELETED sys.unraisablehook", "threading.excepthook", "SAME addresses",
                    "never finalized", "NOTHING THE CHECKED CODE CAN REACH RUNS AFTER THE DECISION",
                    "CONCURRENTLY", "switches its OWN mechanism off", "sys.remote_exec",
-                   "trusts its own namespace"):
+                   "trusts its own namespace", "instance's own state",
+                   "snapshot keeps are NOT trusted"):
         if needle not in (__doc__ or ""):
             failures.append("the module docstring no longer discloses {!r}".format(needle))
-    for name, pre, body, want_code, want_record, needles, want_quiet in _CASES:
+    for method in _AFTER_FINAL_READ:
+        code = getattr(FailClosedChild, method).__code__
+        nested = [const for const in code.co_consts if isinstance(const, type(code))]
+        if nested:
+            failures.append("FailClosedChild.{} creates a function, generator or lambda ({}), "
+                            "which a function watcher can run code on".format(
+                                method, ", ".join(const.co_name for const in nested)))
+    import importlib.util
+    watcher = importlib.util.find_spec("_testcapi") is not None
+    for name, pre, body, want_code, want_record, needles, want_quiet in (
+            _CASES + ((_FUNC_WATCHER_CASE,) if watcher else ())):
         try:
             code, record, err, out = _run_case(pre, body)
         except Exception as exc:
@@ -1351,7 +1505,13 @@ def self_test():
           "fault once the handler is past its final check (QA r10), exit 2 by name with no seal, "
           "while their in-check controls exit 2 and callbacks removed by the loaded code pass; "
           "a ModuleType-subclass hook loaded code puts on threading or os never runs after the "
-          "final read (QA r11); and every passing child's stdout ends with the seal written after the final check)")
+          "final read (QA r11); a `closed` property on a re-initialised original stderr never "
+          "runs after the final read, a close it makes in the final check is refused by the last "
+          "restore, and a stderr closed by cleanup is refused by name (QA r12); no handler code "
+          "after the final read creates a function (checked statically, and through a function "
+          "watcher {}); and every passing child's stdout ends with the seal written after the "
+          "final check)".format("that never runs there" if watcher else
+                                "SKIPPED: _testcapi is not available here"))
     return 0
 
 
