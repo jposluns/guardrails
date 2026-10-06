@@ -484,16 +484,26 @@ per-platform residual coverage carry the same list):
 Offline, stdlib only (json, tomllib, os, re, stat, sys), no subprocess, no network. Launched isolated
 (python3 -I) so a file planted beside it cannot shadow a stdlib import. Exit statuses: 0 (with a deny
 decision or silent allow) and 2 (blocking error) only.
+
+PYTHON FLOOR: this hook requires Python 3.14 or newer, the pack floor that .aiqt/core/python-floor.toml
+states and tools/check_python_floor.py enforces; this file is a guarded-surfaces entry there. The guard at
+the top of this file is the gate's canonical CLI form with refusal exit 2, not its nonblocking (exit 1)
+form and not the aiqt_hooks.py hook form: this hook serves PreToolUse only, where exit 1 is a non-blocking
+error that lets the tool call proceed, while exit 2 blocks it and feeds standard error back to Claude. So
+an interpreter older than Python 3.14 that can start the hook reads no input, writes one line beginning
+`error: pretooluse_deny.py requires Python 3.14 or newer` to standard error and exits 2: the tool call is
+blocked (cannot evaluate), never waved through. An older interpreter that cannot start the hook (one that
+cannot compile this file, or a launch that fails before the guard runs) never reaches the guard and fails
+with its own error first; that exit status is not set by this hook, and an exit other than 2 lets the
+call proceed, so register the hook with an interpreter at or above the floor (the registration above
+names python3; point it at a 3.14 or newer interpreter where python3 is older).
 """
 import sys
 
-if tuple(sys.version_info[:2]) < (3, 11):
-    # tomllib (the plan and manifest reader) first ships in 3.11. A sub-floor interpreter cannot
-    # evaluate the rosters, so it must BLOCK (exit 2 is a blocking error), never wave the call through.
+if tuple(sys.version_info[:2]) < (3, 14):
     sys.stderr.write(
-        "opf-pretooluse-deny: cannot evaluate: this hook requires Python 3.11 or newer; this is "
-        "Python %d.%d.%d (%s). Failing closed: the tool call is blocked until the registration "
-        "launches a supported interpreter.\n"
+        "error: pretooluse_deny.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 

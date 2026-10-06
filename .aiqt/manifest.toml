@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "37747509db999c322a2bc330efb1d3f3f760ee44d5f0ce9f4791a7a332ed5d49"
+tree-sha256 = "faafa893a1e33fdc43ce742151bee3fcc90bf25579e89484f07e59c6eab22ec2"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 257151
-sha256 = "17979e5cdb527085cb44cdb60c968ee623e6b18245d21b1573c5444bcd585f82"
+bytes = 257178
+sha256 = "9c5db0e81686cb96932608eda107cb5d172f89d01c19036d102597c990a24c8a"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -111,8 +111,8 @@ sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 7067
-sha256 = "b32d53beba878d51c37b5b1fcf3e97fa6660f519b9ab422915b0d6f8ec4621cc"
+bytes = 7340
+sha256 = "b19fdc83888117d6d2cc4da220f9ff6051020f27bae4b5621fc846426eac1587"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2431,8 +2431,8 @@ sha256 = "0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104"
 
 [[sources]]
 path = "opf/enforcement/claude/pretooluse_deny.py"
-bytes = 177042
-sha256 = "b243bd374b063d6baf379d9f8bf562da1dcbee293dedabf4c30af3f2174ba011"
+bytes = 177979
+sha256 = "46c4b26a69defd748961e5b5057d380e06335f25077dd131412ceda9074694f0"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
@@ -3341,8 +3341,8 @@ sha256 = "5726920d74948592dd12b8cf3f115fc16f74f854d1a26cbe7384ec94520a7e20"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 130152
-sha256 = "bff17ed0699844d3f46b19b198db7aaaf68636ccc94722723793b72014ebfb32"
+bytes = 130179
+sha256 = "0e5a9e08bfe99a259f003f8f52eed169fb1aac1232f23064d9ef924e570644aa"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
