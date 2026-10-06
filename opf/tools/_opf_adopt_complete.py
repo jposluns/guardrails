@@ -122,20 +122,19 @@ _WIRING_NOTE = ("check 5 (wiring) is not evaluated by this slice: its enforcemen
 # YAML's in-line white space (s-white): every separator, indicator and comment-start test of the reader
 # treats a tab as a space, and the reader then refuses that tab (_Workflow._no_tab).
 _YAML_WHITE = " \t"
-# A block-mapping entry of the CI workflow subset: a plain key, a colon, white space and the rest of the line.
-_YAML_KEY_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_.-]*)[ \t]*:(?:[ \t]+(.*))?$")
+# A plain mapping key of the CI workflow subset (_Workflow._key): an identifier, of at most _YAML_KEY_MAX
+# characters as written (a quoted key counts its quotes and escapes), followed immediately by its colon.
+_YAML_KEY_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
+_YAML_KEY_MAX = 256
 # Characters the YAML reader refuses anywhere (CANNOT-EVALUATE): the C0 controls except tab, LF and CR (a
 # CR is refused on its own), DEL, the C1 controls, a byte-order mark, the two noncharacters, and the line
 # and paragraph separators (U+2028, U+2029), which YAML 1.1 reads as line breaks.
 _YAML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff]")
-# The plain scalars YAML 1.1 or the 1.2 core schema resolves to a null, bool, int or float, for key identity.
-_YAML_NULL_RE = re.compile(r"~|null|Null|NULL")
-_YAML_BOOL = {word: value for value, words in ((True, "y Y yes Yes YES true True TRUE on On ON"),
-                                               (False, "n N no No NO false False FALSE off Off OFF"))
-              for word in words.split()}
-_YAML_INT_RE = re.compile(r"([-+]?)(?:0b([01_]+)|0o?([0-7_]+)|0x([0-9a-fA-F_]+)|([0-9][0-9_]*))")
-_YAML_FLOAT_RE = re.compile(r"[-+]?(?:[0-9][0-9_]*(?:\.[0-9_]*)?|\.[0-9_]+)(?:[eE][-+]?[0-9]+)?")
-_YAML_SPECIAL_RE = re.compile(r"([-+]?)\.(?:(inf|Inf|INF)|nan|NaN|NAN)")
+# The identifier-shaped plain keys YAML 1.1 or the 1.2 core schema resolves to a null or a bool, refused as
+# keys (_Workflow._key) except `on`, the workflow trigger key: no other accepted plain key resolves to a bool,
+# so two keys of one mapping denote one node only when their strings are equal.
+_YAML_NULL_BOOL = frozenset("null Null NULL y Y yes Yes YES true True TRUE On ON "
+                            "n N no No NO false False FALSE off Off OFF".split())
 # A plain scalar inside a flow collection: no indicator, comma, bracket, colon or hash anywhere.
 _FLOW_PLAIN_RE = re.compile(r"[A-Za-z0-9_./+~][A-Za-z0-9_./+~*@-]*(?: +[A-Za-z0-9_./+~*@-]+)*")
 # The planning inventory's closed entry-kind vocabulary (_opf_adopt_plan's observation rows).
@@ -472,14 +471,20 @@ class _Flow:
 
 
 class _Workflow:
-    """A reader for the block-YAML subset CI workflows are written in: block mappings with plain keys,
-    block sequences, plain and quoted single-line scalars, literal and folded block scalars, and single-line
-    flow collections of plain and quoted scalars, parsed in full and kept opaque. Anything outside it (a
-    control character, a tab outside a quoted scalar, block-scalar content or a comment (in the indentation
-    or as a separator), a CR, an anchor, alias or tag, a quoted key, a duplicate key in any block or flow
-    mapping (_key_identities), a multi-line plain or quoted scalar, a document marker, a flow collection with an empty or trailing entry,
-    a flow pair outside a flow mapping) raises Unevaluable: CI this check cannot parse is CANNOT-EVALUATE,
-    never a pass and never a silent refusal."""
+    """A reader for the block-YAML subset CI workflows are written in: block mappings, block sequences,
+    plain and quoted single-line scalars, literal and folded block scalars, and single-line flow collections
+    of plain and quoted scalars, parsed in full and kept opaque. A mapping key (block or flow) is a plain
+    identifier [A-Za-z0-9_][A-Za-z0-9_.-]* or a single-line single- or double-quoted string, at most 256
+    characters as written (quotes and escapes included), followed immediately by `:` and then white space or
+    the end of the line; a plain key that begins with a digit (every YAML int, float and timestamp form) or
+    that YAML 1.1 or the 1.2 core schema reads as a null or a bool, except `on`, is refused (_Workflow._key).
+    Two keys of one mapping are a duplicate when their strings, after quote decoding, are equal. Anything
+    outside the subset (a control character, a tab outside a quoted scalar, block-scalar content or a comment
+    (in the indentation or as a separator), a CR, an anchor, alias or tag, any other key (white space before
+    its colon, a longer key, a numeric, null, bool, special-float or other non-identifier plain key), a
+    duplicate key in any block or flow mapping, a multi-line plain or quoted scalar, a document marker, a
+    flow collection with an empty or trailing entry, a flow pair outside a flow mapping) raises Unevaluable:
+    CI this check cannot parse is CANNOT-EVALUATE, never a pass and never a silent refusal."""
 
     def __init__(self, text, label):
         self.label, self.i, self.lines = label, 0, []
@@ -506,11 +511,49 @@ class _Workflow:
             self.fail("a tab as a separator")
 
     def _unique(self, seen, key):
-        """Record `key` in `seen`, the identities of the keys of one mapping; a duplicate fails."""
-        identities = _key_identities(key)
-        if identities & seen:
+        """Record `key` in `seen`, the decoded keys of one mapping; a duplicate fails."""
+        if key in seen:
             self.fail("duplicate key {!r}".format(key))
-        seen |= identities
+        seen.add(key)
+
+    def _key(self, text, j=0):
+        """The decoded mapping key at text[j] and the index just past its colon, or None where text[j:] is
+        not a key and a colon followed by white space or the end of the text. A key longer than
+        _YAML_KEY_MAX characters as written, or a plain key that begins with a digit or reads as a null or a
+        bool (other than `on`), fails: the reader accepts only the key subset the class docstring states."""
+        if text[j:j + 1] in ("'", '"'):
+            key, end = self._quoted(text, j)
+        else:
+            plain = _YAML_KEY_RE.match(text, j)
+            key, end = (plain.group(), plain.end()) if plain is not None else (None, j)
+        if key is None or text[end:end + 1] != ":" or text[end + 1:end + 2] not in ("", " ", "\t"):
+            return None
+        if end - j > _YAML_KEY_MAX:
+            self.fail("a mapping key longer than {} characters".format(_YAML_KEY_MAX))
+        if text[j] not in ("'", '"') and (key[0].isdigit() or key in _YAML_NULL_BOOL):
+            self.fail("a plain key {!r} YAML may read as a number, timestamp, null or bool".format(key))
+        return key, end + 1
+
+    def _quoted(self, text, j):
+        """The decoded single- or double-quoted scalar opening at text[j] and the index just past its closing
+        quote; None and len(text) when it is unterminated."""
+        head, out, j = text[j], [], j + 1
+        while j < len(text):
+            if head == "'" and text[j:j + 2] == "''":
+                out.append("'")
+                j += 2
+            elif text[j] == head:
+                return "".join(out), j + 1
+            elif head == '"' and text[j] == "\\":
+                escape = {"\\": "\\", '"': '"', "/": "/", "n": "\n", "t": "\t"}.get(text[j + 1:j + 2])
+                if escape is None:
+                    self.fail("a double-quoted escape outside the subset")
+                out.append(escape)
+                j += 2
+            else:
+                out.append(text[j])
+                j += 1
+        return None, j
 
     def _next(self):
         while self.i < len(self.lines) and (not self.lines[self.i][1] or self.lines[self.i][1][0] == "#"):
@@ -530,7 +573,7 @@ class _Workflow:
             return None
         if _is_entry(line[1]):
             return self._sequence(line[0])
-        if _YAML_KEY_RE.match(line[1]):
+        if self._key(line[1]) is not None:
             return self._mapping(line[0])
         return self.fail("a block-level scalar or an unsupported construct")
 
@@ -540,12 +583,14 @@ class _Workflow:
             line = self._next()
             if line is None or line[0] < indent:
                 return out
-            key = _YAML_KEY_RE.match(line[1]) if line[0] == indent else None
+            key = self._key(line[1]) if line[0] == indent else None
             if key is None:
                 self.fail("a mapping line that is not `key: value` at the mapping's indentation")
-            self._no_tab(line[1][:key.start(2) if key.start(2) >= 0 else key.end()])
-            self._unique(seen, key.group(1))
-            out[key.group(1)] = self._value(indent, key.group(2) or "")
+            rest = line[1][key[1]:]
+            value = rest.lstrip(_YAML_WHITE)
+            self._no_tab(rest[:len(rest) - len(value)])
+            self._unique(seen, key[0])
+            out[key[0]] = self._value(indent, value)
 
     def _sequence(self, indent):
         out = []
@@ -563,7 +608,7 @@ class _Workflow:
                 out.append(self._node(indent + 1))
             elif _is_entry(item):
                 self.fail("a nested inline sequence")
-            elif _YAML_KEY_RE.match(item):
+            elif self._key(item) is not None:
                 # `- key: value` opens a mapping whose keys align with this first key's column.
                 column = indent + 1 + len(rest) - len(item)
                 self.lines[self.i] = [column, item, line[2]]
@@ -591,26 +636,11 @@ class _Workflow:
     def _scalar(self, rest, plain):
         head = rest[0]
         if head in "'\"":
-            text, j = [], 1
-            while j < len(rest):
-                if head == "'" and rest[j:j + 2] == "''":
-                    text.append("'")
-                    j += 2
-                elif rest[j] == head:
-                    break
-                elif head == '"' and rest[j] == "\\":
-                    escape = {"\\": "\\", '"': '"', "/": "/", "n": "\n", "t": "\t"}.get(rest[j + 1:j + 2])
-                    if escape is None:
-                        self.fail("a double-quoted escape outside the subset")
-                    text.append(escape)
-                    j += 2
-                else:
-                    text.append(rest[j])
-                    j += 1
-            if j >= len(rest) or _strip_plain_comment(rest[j + 1:]):
+            text, j = self._quoted(rest, 0)
+            if text is None or _strip_plain_comment(rest[j:]):
                 self.fail("an unterminated quoted scalar or content after its closing quote")
-            self._no_tab(rest[j + 1:j + 1 + _comment_start(rest[j + 1:])])
-            return "".join(text)
+            self._no_tab(rest[j:j + _comment_start(rest[j:])])
+            return text
         body = rest[:_comment_start(rest)]
         if head in "[{":
             end = self._flow_node(body, 0, 0)
@@ -646,12 +676,11 @@ class _Workflow:
                     j = self._white(text, j + 1)
                 first = False
                 if head == "{":
-                    key = _FLOW_PLAIN_RE.match(text, j)
-                    if key is None or text[key.end():key.end() + 1] != ":" or \
-                            text[key.end() + 1:key.end() + 2] not in tuple(_YAML_WHITE):
+                    key = self._key(text, j)
+                    if key is None or text[key[1]:key[1] + 1] not in tuple(_YAML_WHITE):
                         self.fail("a flow mapping entry that is not `key: value`")
-                    self._unique(seen, key.group())
-                    j = key.end() + 1
+                    self._unique(seen, key[0])
+                    j = key[1]
                 j = self._flow_node(text, j, depth + 1)
         if head == "'":
             j += 1
@@ -730,37 +759,6 @@ def _strip_plain_comment(rest):
     """`rest` with a trailing YAML comment removed, stripped of YAML white space (space and tab) only: a
     no-break space or another Unicode space is content, never a separator."""
     return rest[:_comment_start(rest)].strip(_YAML_WHITE)
-
-
-def _key_identities(key):
-    """The nodes a plain mapping key can denote: itself as a string, and its YAML 1.1 or 1.2 core
-    resolution as a null, bool, int or float (`on` and `true`, `1`, `01`, `0x1` and `1.0` each denote one
-    node under some schema). Two keys of one mapping whose identities meet are a duplicate: an ambiguous
-    mapping is CANNOT-EVALUATE whichever schema a consumer reads it with."""
-    out = {("str", key)}
-    if _YAML_NULL_RE.fullmatch(key):
-        out.add(("value", None))
-    if key in _YAML_BOOL:
-        out.add(("value", _YAML_BOOL[key]))
-    number = _YAML_INT_RE.fullmatch(key)
-    if number is not None:
-        sign, digits = -1 if number.group(1) == "-" else 1, None
-        for group, base in ((2, 2), (3, 8), (4, 16), (5, 10)):
-            if number.group(group) is not None:
-                digits = number.group(group).replace("_", "")
-                if group == 3 and not key.lstrip("+-").startswith("0o"):
-                    out.add(("value", sign * int(key.lstrip("+-").replace("_", "") or "0", 10)))
-                if digits:
-                    out.add(("value", sign * int(digits, base)))
-    if _YAML_FLOAT_RE.fullmatch(key) and any(ch.isdigit() for ch in key):
-        try:
-            out.add(("value", float(key.replace("_", ""))))
-        except ValueError:
-            out.add(("value", key))
-    special = _YAML_SPECIAL_RE.fullmatch(key)
-    if special is not None:
-        out.add(("value", ("-" if special.group(1) == "-" else "+") + "inf" if special.group(2) else "nan"))
-    return out
 
 
 # The canonical CI assertion (spec 14.1 check 4). Adoption writes the CI step itself, so a step counts only
@@ -1536,7 +1534,10 @@ def self_test():
         # non-canonical form is CANNOT-EVALUATE, never VALID and never INVALID (unreachable after `exit 0` or
         # `set -n`, an `|| exit 256` or `|| exit "$ZERO"` handler, an interpreter option, an and-list, an
         # echo, a quoted hash); malformed YAML (an empty flow entry, a NUL byte, a colon and tab inside a plain
-        # scalar, a duplicate flow-mapping key) and undecodable or unparseable CI are CANNOT-EVALUATE.
+        # scalar, a duplicate flow-mapping key) and undecodable or unparseable CI are CANNOT-EVALUATE. So is
+        # every key outside the reader's key subset: the round-5 counterexamples (a key padded with white
+        # space past YAML's 1024-character implicit-key limit, and `1.0e+309` and `.inf` as keys of one flow
+        # mapping) and a 257-character key; a 256-character key is VALID.
         def _run_step(script):
             return _CI_BYTES.replace(b"        run: python3 -I -B opf/tools/opf.py doctor --require-store\n",
                                      b"        run: |\n" + b"".join(b"          " + line + b"\n"
@@ -1566,7 +1567,13 @@ def self_test():
                 ("nul-byte", _CI_BYTES.replace(b"name: OPF", b"name: O\x00PF"), CANNOT_EVALUATE),
                 ("plain-colon-tab", b"description: x:\ty\n" + _CI_BYTES, CANNOT_EVALUATE),
                 ("flow-duplicate-key", b"permissions: {contents: read, contents: write}\n" + _CI_BYTES,
-                 CANNOT_EVALUATE)):
+                 CANNOT_EVALUATE),
+                ("key-padded-past-1024", _CI_BYTES.replace(b"name: OPF", b"name" + b" " * 1021 + b": OPF", 1),
+                 CANNOT_EVALUATE),
+                ("flow-overflow-inf-keys", b"permissions: {1.0e+309: read, .inf: write}\n" + _CI_BYTES,
+                 CANNOT_EVALUATE),
+                ("key-256", b"k" * 256 + b": x\n" + _CI_BYTES, VALID),
+                ("key-257", b"k" * 257 + b": x\n" + _CI_BYTES, CANNOT_EVALUATE)):
             with mock.patch.object(here, "_CI_BYTES", ci_bytes):
                 got = _case()
             check("check-4-ci-" + label, _only(got, {} if want == VALID else _red(OPERATIONAL, want))
@@ -1794,11 +1801,57 @@ def self_test():
                             ("flow-duplicate-key", b"on: {a: x, a: y}\n" + good),
                             ("flow-duplicate-nested", b"on: [{a: x, b: [{c: 1, c: 2}]}]\n" + good),
                             ("flow-duplicate-bool", b"on: {true: a, on: b}\n" + good),
+                            ("flow-duplicate-quoted", b"on: {a: x, 'a': y}\n" + good),
+                            ("block-duplicate-quoted", b'name: x\n"name": y\n' + good),
+                            ("block-duplicate-escaped", b'"a\\tb": x\n"a\tb": y\n' + good),
                             ("flow-duplicate-number", b"on: {1: a, 1.0: b}\n" + good),
                             ("flow-duplicate-null", b"on: {~: a, null: b}\n" + good),
                             ("block-duplicate-number", b"1: a\n01: b\n" + good),
                             ("block-duplicate-hex", b"16: a\n0x10: b\n" + good),
                             ("block-duplicate-deep", b"x:\n  a:\n    - b: 1\n      b: 2\n" + good),
+                            ("key-padded-past-1024", b"name" + b" " * 1021 + b": x\n" + good),
+                            ("flow-key-padded-past-1024", b"on: {a" + b" " * 1021 + b": x}\n" + good),
+                            ("flow-overflow-inf-keys", b"on: {1.0e+309: a, .inf: b}\n" + good),
+                            ("key-space-colon", b"name : x\n" + good),
+                            ("key-space-colon-empty", b"name :\n  a: x\n" + good),
+                            ("entry-key-space-colon", steps + b"      - run : opf doctor --require-store\n"),
+                            ("quoted-key-space-colon", b'"name" : x\n' + good),
+                            ("flow-key-space-colon", b"on: {a : x}\n" + good),
+                            ("key-257", b"k" * 257 + b": x\n" + good),
+                            ("quoted-key-257", b'"' + b"k" * 255 + b'": x\n' + good),
+                            ("flow-key-257", b"on: {" + b"k" * 257 + b": x}\n" + good),
+                            ("entry-key-257", steps + b"      - " + b"k" * 257 + b": x\n"),
+                            ("key-int", b"1: a\n" + good),
+                            ("key-octal", b"0o17: a\n" + good),
+                            ("key-hex", b"0x10: a\n" + good),
+                            ("key-float", b"1.5: a\n" + good),
+                            ("key-exponent", b"1e5: a\n" + good),
+                            ("key-timestamp", b"2001-12-14: a\n" + good),
+                            ("key-digit-led", b"1password: a\n" + good),
+                            ("key-signed", b"+1: a\n" + good),
+                            ("key-null", b"null: a\n" + good),
+                            ("key-tilde", b"~: a\n" + good),
+                            ("key-bool-true", b"true: a\n" + good),
+                            ("key-bool-yes", b"yes: a\n" + good),
+                            ("key-bool-y", b"y: a\n" + good),
+                            ("key-bool-off", b"off: a\n" + good),
+                            ("key-bool-On", b"On: a\n" + good),
+                            ("key-inf", b".inf: a\n" + good),
+                            ("key-negative-inf", b"-.inf: a\n" + good),
+                            ("key-nan", b".nan: a\n" + good),
+                            ("key-slash", b"a/b: a\n" + good),
+                            ("key-inner-space", b"a b: a\n" + good),
+                            ("key-merge", b"<<: a\n" + good),
+                            ("key-explicit", b"? a\n: b\n" + good),
+                            ("flow-key-int", b"on: {1: a}\n" + good),
+                            ("flow-key-null", b"on: {null: a}\n" + good),
+                            ("flow-key-bool", b"on: {false: a}\n" + good),
+                            ("flow-key-inf", b"on: {.inf: a}\n" + good),
+                            ("flow-key-slash", b"on: {a/b: a}\n" + good),
+                            ("flow-key-inner-space", b"on: {a b: x}\n" + good),
+                            ("entry-key-int", steps + b"      - 1: x\n"),
+                            ("quoted-key-bad-escape", b'"a\\qb": x\n' + good),
+                            ("quoted-key-no-space", b'"a":x\n' + good),
                             ("no-break-space-tail", good.replace(b"--require-store\n", "--require-store\u00a0\n".encode())),
                             ("line-separator", good.replace(b"runs-on: x", "runs-on: x\u2028".encode())),
                             ("block-leading-blank-deeper", steps + b"      - run: |\n            \n"
@@ -1814,7 +1867,13 @@ def self_test():
               and ci(b"on: " + b"[" * 16 + b"]" * 16 + b"\n" + good) == VALID
               and ci(good.replace(b"runs-on: x", b'runs-on: "x\ty"')) == VALID and ci(b"name: x\n" + good) == VALID
               and ci(b"name: x #\tc\n" + good) == VALID and ci(b"on: {a: x, b: [{c: 1, d: 2}]}\n" + good) == VALID
-              and ci(b"x:\n  a:\n    - b: 1\n      c: 2\n1: a\n2: b\n" + good) == VALID)
+              and ci(b"x:\n  a:\n    - b: 1\n      c: 2\nk1: a\nk2: b\n" + good) == VALID
+              and ci(b"name: x\n" + good) == VALID and ci(b"on: {a: x}\n" + good) == VALID
+              and ci(b"k" * 256 + b": x\n" + good) == VALID and ci(b"on: {" + b"k" * 256 + b": x}\n" + good) == VALID
+              and ci(b'"' + b"k" * 254 + b'": x\n' + good) == VALID and ci(b"a1: a\n" + good) == VALID
+              and ci(b"name:\n  a: x\n" + good) == VALID and ci(b'"a b": x\n\'c\'\'d\': y\n' + good) == VALID
+              and ci(b"on: {'a': x, \"b\": y}\n" + good) == VALID and ci(b'"a\\tb": x\n"a\\nb": y\n' + good) == VALID
+              and ci(b"_1: a\nonly: b\n" + good) == VALID)
         # Check 3: archive preservation, bundle claims, the move source, and the restore exercise.
         corrupt = _case(lambda r, i: _put(r, apply.archive_rel(_RUN, "legacy/RULES.md"), b"other\n"))
         check("check-3-preimage-corrupted", _only(corrupt, _red(PRESERVATION))
