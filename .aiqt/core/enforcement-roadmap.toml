@@ -59,7 +59,7 @@ mechanisms = ["gate:branch-root", "hook:branch-root-guard"]
 [[rule]]
 corpus-id = "chgchk"
 status = "enforced"
-mechanisms = ["gate:selftest-execution"]
+mechanisms = ["gate:entry-guard", "gate:selftest-execution"]
 
 [[rule]]
 corpus-id = "chgtrk"

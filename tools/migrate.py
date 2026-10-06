@@ -7,7 +7,8 @@
   migrate.py status   --root DIR                          report journal / transaction state
   migrate.py --self-test                                  the MANDATORY crash-injection gate (9.3)
 
-Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition.
+Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition. An
+interpreter older than Python 3.14 is refused at exit 2 before anything runs.
 
 The engine consumes two interfaces owed by the adopter-experience spec and refuses without their evidence
 (fail-closed, never a silent proceed): QUIESCENCE of the effective tree (a `quiescence.ok` marker the
@@ -24,23 +25,27 @@ Staged-unit contract (the off-path tree a verified, green step-2/3 build produce
                                 with op one of write|create|remove|mkdir|rmdir
   <staged>/payload/<path>       the exact new bytes for every write and create op
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: migrate.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import json
 import os
 import stat
 import subprocess
-import sys
 import time
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: migrate.py requires Python 3.11+ (tomllib).")
 
 JOURNAL_REL = ".aiqt/migration/journal"
 CROSSWALK_REL = ".aiqt/migration/crosswalk.toml"

@@ -157,6 +157,13 @@ def _manifest_suites(manifest_path):
     except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         _cannot("expectation manifest {} is not valid TOML: {}".format(manifest_path, exc))
         return None
+    return _manifest_rows(data, manifest_path)
+
+
+def _manifest_rows(data, manifest_path):
+    """The strictly validated [[suite]] rows of an already-parsed expectation manifest, or None after
+    printing the violation (the caller exits 2). Shared with the entry-guard gate, so both gates hold the
+    registry to one schema."""
     if set(data) != MANIFEST_TOP_KEYS:
         _cannot("{}: top-level keys must be exactly {} (got {})".format(
             manifest_path, sorted(MANIFEST_TOP_KEYS), sorted(data)))

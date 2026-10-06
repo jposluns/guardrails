@@ -12,7 +12,8 @@ validation functions, re-orchestrated under --root. Offline, stdlib only, fail-c
 Exit convention (matches the repo's gates):
   0  clean, including a clean run where checks were NOT APPLICABLE
   1  a real conformance finding (drift, placement violation, mapping id not in its manifest)
-  2  malformed input or a read error (fail-closed)
+  2  malformed input or a read error (fail-closed), or an interpreter older than Python 3.14
+     (refused before anything runs)
 
 Design of record (see the GA-2 SYNTHESIS, sections 4 and 6, divergence D0): this suite reuses the
 repo's PARAMETERIZED validation functions, re-orchestrated under --root. It never calls the
@@ -32,8 +33,16 @@ Where an input an adopter lacks is absent, the check degrades to NOT APPLICABLE 
 nothing fakes a pass, and a check that validated nothing reports NOT APPLICABLE rather than a hollow
 PASS. Behaviour is never scored: it prints NOT PROVEN.
 """
-import os
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: conformance.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
+import os
 from pathlib import Path
 
 # Sibling-import idiom, identical to check_rule_placement.py / check_mappings.py: this file lives in
