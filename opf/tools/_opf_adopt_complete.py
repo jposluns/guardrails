@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
-"""OPF adoption completion evaluator, slice 1: the read-only deterministic checks 1 to 4 and 6 (OPF-SPEC 1.3.0).
+"""OPF adoption completion evaluator: the read-only deterministic checks 1 to 4 and 6 (slice 1) and the
+wiring probe frame of check 5 (slice 2) (OPF-SPEC 1.3.0).
 
 Spec sections implemented: 14.1 (the clean-start completion-check roster: checks 1 authority and freshness,
 2 discovery accounting, 3 preservation and restore, 4 operational readiness and 6 retirement readiness; a
 completion-check failure or cannot-evaluate reports incomplete and retires nothing), 14.1's homes-1 clause
 (the completion checks re-read inventories and payload digests themselves, because C-EVIDENCE-ENUM is
 inactive until homes 2) and 4.2 (C-EVIDENCE-ENUM MUST NOT run or read anything on homes 1; the section 14.1
-completion checks carry the evidence digest verification). Check 5 (wiring: the enforcement-pack probes) is
-NOT evaluated here: its probes run processes and land in a later slice, so the roster this module reports is
-never green on its own (roster_green requires all six checks VALID).
+completion checks carry the evidence digest verification). Check 5 (wiring) verifies the deny-capable
+enforcement surface is installed as planned and runs its four probes through a caller-supplied prober, but
+it is never VALID in this release: the shipped pack carries no deny program and no live probe adapter (the
+deferred enforcement pack, PR6), so with every other condition met it is CANNOT-EVALUATE naming PR6, and the
+roster this module reports is never green on its own (roster_green requires all six checks VALID).
 
 Read-only: every live read is contained and no-follow through the apply shell's own reader
 (_opf_adopt_apply._read_live, single-linked regular files only), nothing is written to the live tree, and no
-process is spawned. The one write is check 3's restore exercise, which copies archived bytes into a private
-TemporaryDirectory scratch and digest-verifies the copy there; it never restores over the live tree.
+process is spawned by this module: check 5's probes, the roster's one process-spawning harness, run only
+through the prober the caller supplies, as check 4's doctor run does. The one write is check 3's restore
+exercise, which copies archived bytes into a private TemporaryDirectory scratch and digest-verifies the copy
+there; it never restores over the live tree.
 
 Inputs: the product root, the adoption run id, the adopter-held planning inventory bytes
 (`opf.adoption.planning-inventory/v1`, the bytes the plan's inventory_digest seals; apply persists the plan
 and approval in the run's bundle, not the planning inventory), and a doctor callable (product_root to the
 _opf_check StoreValidation shape: status, findings, cannot_evaluate). The doctor's git observations are a
 process-spawning gather, so the caller supplies the run (store_doctor builds one from caller-supplied inert
-observations); with no doctor, check 4 is CANNOT-EVALUATE, never a pass.
+observations); with no doctor, check 4 is CANNOT-EVALUATE, never a pass. Check 5 takes a prober callable
+(product_root, surface, probe) answering "denied" or "allowed" for one probe against one installed surface,
+deciding and never writing; with no prober, check 5 is CANNOT-EVALUATE, never a pass.
 
 Outcome model (single-sourced from _opf_store): each check is VALID (green), INVALID (red, with findings) or
 CANNOT-EVALUATE (an input it cannot read or parse, never a pass). An absent required artefact (no approval,
@@ -91,6 +98,18 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     assertion is the deferred U25), so with every other condition met the check is CANNOT-EVALUATE naming
     U25; an earlier failure keeps its own reason. U25_CI_IDENTITY_ASSERTED is the one switch that lets
     it grade VALID, to be set only in the release that ships U25.
+  5 wiring: every member of each deny-capable enforcement row (a platform deny hook or the staged-snapshot
+    pre-commit check, PROBED_MEANS) is live at its plan digest, and the caller's prober answers the four
+    probes for each such row: a direct write to the planned store manifest and a direct write under this
+    run's adoption archive are denied, and the sanctioned writer (opf record) writing that manifest and the
+    renderer (opf render) writing a planned view destination are allowed. Both directions are required, so
+    a surface that denies nothing and an over-broad one that also blocks a sanctioned path are both red. A
+    probed row's member is also a check 1 planned destination, so its drift moves checks 1 and 5 together
+    (each from its own sentence: check 1 a destination, check 5 the installed surface it probes); instruction
+    rows deny nothing and are never probed, and the CI row is check 4's. Server-side branch protection is
+    adopter-attested on the plan's CI row (the plan validator requires that residual) and never probed. Check
+    5 is NEVER VALID in this release: with every other condition met it is CANNOT-EVALUATE naming the
+    deferred enforcement pack (PR6); PR6_DENY_PROBES_SHIPPED is the one switch that lets it grade VALID.
   6 retirement-readiness: each retire-disposed source that occupied no managed destination is present live
     with its plan digest; each archived occupying source still equals its plan digest in the archive.
 
@@ -113,7 +132,13 @@ that disable Actions or this workflow; it does not read the opf/tools/opf.py the
 remote actions the template names by tag (actions/checkout, actions/setup-python) or the runner image; it
 compares against the template beside this evaluator, so a later pack release that changes the template
 leaves a plan whose recorded workflow digest pins the earlier template CANNOT-EVALUATE until it is planned
-again; and it is not a run of CI.
+again; and it is not a run of CI. Check 5 is CANNOT-EVALUATE until PR6 ships the pack's deny programs and
+their probe adapters (PR6_DENY_PROBES_SHIPPED), so the roster cannot be green in this release on check 5
+alone either; its verdict is only as faithful as the caller's prober, which this module does not
+authenticate (in this release a prober can only be a fixture); a probe asks one representative target per
+probe (the store manifest, one file name under the run's adoption archive, one planned view), not every
+protected path; and the probes say nothing about shell or interpreter wrapping, per-clone hook installation
+or same-user tampering, which the plan discloses as residuals.
 
 Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
 modules, so the standalone-closure property holds.
@@ -143,13 +168,10 @@ import _opf_store as store           # noqa: E402
 from _opf_emit import EmitError, emit_checked  # noqa: E402
 
 VALID, INVALID, CANNOT_EVALUATE = store.VALID, store.INVALID, store.CANNOT_EVALUATE
-# The roster in the spec's numbered order (the plan's own vocabulary), and the five this slice evaluates.
+# The roster in the spec's numbered order (the plan's own vocabulary); this module evaluates all six.
 CHECKS = schema.COMPLETION_CHECKS
 AUTHORITY, DISCOVERY, PRESERVATION, OPERATIONAL, WIRING, RETIREMENT = CHECKS
-EVALUATED = (AUTHORITY, DISCOVERY, PRESERVATION, OPERATIONAL, RETIREMENT)
 PLANNING_INVENTORY_FORMAT = "opf.adoption.planning-inventory/v1"
-_WIRING_NOTE = ("check 5 (wiring) is not evaluated by this slice: its enforcement probes spawn processes; "
-                "the roster is incomplete until it runs (never a pass)")
 # The planning inventory's closed entry-kind vocabulary: the planner's own (_opf_adopt_plan's observation rows).
 ENTRY_KINDS = planner.ENTRY_KINDS
 
@@ -180,7 +202,7 @@ class _Report:
 
 
 class _Evaluation:
-    __slots__ = ("product_root", "root_fd", "run_id", "plan", "planning_inventory", "doctor")
+    __slots__ = ("product_root", "root_fd", "run_id", "plan", "planning_inventory", "doctor", "prober")
 
 
 def _digest(data):
@@ -713,6 +735,118 @@ def _check_operational(ev, rep):
         rep.cannot.append(_U25_DEFERRED)
 
 
+# --- check 5: wiring ----------------------------------------------------------------------------------
+
+# The enforcement means whose deny decision a probe drives (spec 14.1): a platform deny hook and the
+# staged-snapshot pre-commit check. An instructions row denies nothing (its required residual is unverified
+# platform denial) and the CI row is check 4's; server-side branch protection is adopter-attested, never
+# probed (the plan validator requires the CI row to disclose it, _opf_adopt.ENFORCEMENT_REQUIRED_RESIDUALS).
+PROBED_MEANS = ("deny-hook", "staged-pre-commit")
+# A prober's closed answer to one probe; any other answer is CANNOT-EVALUATE, never read as either.
+PROBE_OUTCOMES = ("denied", "allowed")
+# The four probes of spec 14.1 check 5, in the spec's order: (name, the answer the check requires, the actor
+# the probe stands for, the finding's label). "direct" is a plain file write (an assistant tool call or a
+# hand edit offered for commit); the other two actors are the sanctioned OPF writer and renderer.
+WIRING_PROBES = (("store-write", "denied", "direct", "a direct store write"),
+                 ("archive-write", "denied", "direct", "a direct write under this run's adoption archive"),
+                 ("sanctioned-writer", "allowed", "opf record", "the sanctioned writer"),
+                 ("render", "allowed", "opf render", "the render path"))
+# The file name the archive-write probe names under this run's adoption archive (a probe asks the surface
+# for its decision; nothing is written there).
+_ARCHIVE_PROBE = "opf-wiring-probe.md"
+# Spec 14.1 check 5 requires the installed pack probed on the live tree. The shipped pack carries no deny
+# program (opf/enforcement holds the CI floor only) and no live probe adapter for any platform; both are the
+# deferred enforcement pack (PR6). This is the one switch for it: while it is False, check 5 is
+# CANNOT-EVALUATE naming PR6 once every other check-5 condition holds, so no prober (a fixture included)
+# makes it VALID. Set it True only in the release that ships PR6's deny programs and probe adapters.
+PR6_DENY_PROBES_SHIPPED = False
+_PR6_DEFERRED = ("the shipped enforcement pack carries no deny program and no live probe adapter for any "
+                 "platform (opf/enforcement holds the CI floor only); spec 14.1 check 5 requires the installed "
+                 "pack probed on the live tree, which is the deferred enforcement pack (PR6), so this check "
+                 "cannot be VALID until PR6 ships")
+
+
+def _wiring_probes(ev):
+    """Each WIRING_PROBES entry for this plan as (name, required answer, actor, label, target path): a direct
+    write to the planned store manifest (_opf_adopt.store_manifest), a direct write under this run's
+    adoption archive (_opf_adopt_apply.archive_rel), the sanctioned writer writing that same manifest, and
+    the renderer writing the first planned view destination. A probe without a target is Unevaluable."""
+    plan = ev.plan
+    manifest = schema.store_manifest(plan["store"])
+    if manifest is None:
+        raise Unevaluable("the plan's store identity names no store manifest, so the store-write probe has "
+                          "no target")
+    views = [schema._compose(op[schema._MEMBER_ROOTS[op["op"]]], member["path"])
+             for op in plan["ops"] if op["op"] == "render-views" for member in op["members"]]
+    if not views:
+        raise Unevaluable("the plan renders no declared view, so the render probe has no target")
+    try:
+        archive = apply.archive_rel(ev.run_id, _ARCHIVE_PROBE)
+    except apply.AdoptApplyError as exc:
+        raise Unevaluable(str(exc))
+    targets = dict([("store-write", manifest), ("archive-write", archive), ("sanctioned-writer", manifest),
+                    ("render", views[0])])
+    return [(name, expect, actor, label, targets[name]) for name, expect, actor, label in WIRING_PROBES]
+
+
+def _check_wiring(ev, rep):
+    """Spec 14.1 check 5: 'Wiring: the enforcement pack is installed and probed, with a direct store write
+    denied, a write under `.working/archive/adoption/<run-id>/` denied, and sanctioned writer and render
+    paths succeeding on the live tree. Server-side branch protection is adopter-attested, explicitly outside
+    the local probe's guarantee.' Installed: every member of each deny-capable row (PROBED_MEANS) is live at
+    its plan digest; a row that is not is a finding and is not probed, since a probe proves only the surface
+    it runs against. Probed: the caller's prober answers each probe (_wiring_probes) for each installed row,
+    and both directions must hold, so neither a surface that denies nothing nor an over-broad one that also
+    blocks the sanctioned writer or renderer passes. A missing prober, a raising prober or an answer outside
+    PROBE_OUTCOMES is CANNOT-EVALUATE. While PR6_DENY_PROBES_SHIPPED is False a check with no other finding
+    or cannot-evaluate reason is CANNOT-EVALUATE naming PR6; an earlier failure keeps its own reason."""
+    rows = [row for row in ev.plan["enforcement"] if row["means"] in PROBED_MEANS]
+    if not rows:
+        rep.finding("the plan binds no deny-capable enforcement row ({}), so nothing denies a direct store "
+                    "write: an unprobed surface is never green".format(", ".join(PROBED_MEANS)))
+    installed = []
+    for row in rows:
+        why = []
+        for member in row["members"]:
+            data = _read(ev, member["path"])
+            if data is None:
+                why.append("member {!r} is absent".format(member["path"]))
+            elif _digest(data) != member["digest"]:
+                why.append("member {!r} does not hold its planned bytes".format(member["path"]))
+        if why:
+            rep.finding("the {} enforcement surface ({}) is not installed as planned: {}; it is not probed, "
+                        "since a probe proves only the surface it runs against".format(
+                            row["platform"], row["means"], "; ".join(why)))
+        else:
+            installed.append(row)
+    probes = _wiring_probes(ev)
+    if ev.prober is None:
+        raise Unevaluable("no wiring prober was supplied; a denial or a sanctioned path is never assumed")
+    for row in installed:
+        for name, expect, actor, label, path in probes:
+            surface = dict(platform=row["platform"], means=row["means"],
+                           members=[dict(member) for member in row["members"]])
+            try:
+                got = ev.prober(ev.product_root, surface, dict(probe=name, actor=actor, path=path))
+            except Exception as exc:  # noqa: BLE001  a raising prober fails closed, named
+                raise Unevaluable("the {} probe on the {} surface raised {!r}".format(name, row["platform"], exc))
+            if type(got) is not str or got not in PROBE_OUTCOMES:
+                raise Unevaluable("the {} probe on the {} surface answered {}, not one of {}".format(
+                    name, row["platform"], repr(got) if type(got) is str else "a " + type(got).__name__,
+                    ", ".join(PROBE_OUTCOMES)))
+            if got == expect:
+                continue
+            if expect == "denied":
+                rep.finding("the {} surface ({}) allows {} ({} writing {!r}): the enforcement pack does not "
+                            "deny it (spec 14.1 check 5)".format(row["platform"], row["means"], label, actor, path))
+            else:
+                rep.finding("the {} surface ({}) denies {} ({} writing {!r}): an over-broad deny blocks a "
+                            "sanctioned path (spec 14.1 check 5)".format(
+                                row["platform"], row["means"], label, actor, path))
+    if not PR6_DENY_PROBES_SHIPPED and not rep.findings and not rep.cannot:
+        rep.cannot.append(_PR6_DEFERRED)
+
+
 # --- check 6: retirement readiness --------------------------------------------------------------------
 
 def _check_retirement(ev, rep):
@@ -736,7 +870,7 @@ def _check_retirement(ev, rep):
 
 _CHECK_FUNCTIONS = {AUTHORITY: "_check_authority", DISCOVERY: "_check_discovery",
                     PRESERVATION: "_check_preservation", OPERATIONAL: "_check_operational",
-                    RETIREMENT: "_check_retirement"}
+                    WIRING: "_check_wiring", RETIREMENT: "_check_retirement"}
 
 
 def _run_check(name, ev):
@@ -750,11 +884,12 @@ def _run_check(name, ev):
     return rep.result()
 
 
-def evaluate(product_root, run_id, *, planning_inventory=None, doctor=None):
-    """The roster verdicts {check name: CheckResult} in the spec's order (spec 14.1). Check 5 is always
-    CANNOT-EVALUATE here. Read-only over the live tree; every unreadable input is CANNOT-EVALUATE."""
+def evaluate(product_root, run_id, *, planning_inventory=None, doctor=None, prober=None):
+    """The roster verdicts {check name: CheckResult} in the spec's order (spec 14.1). Check 5 is never VALID
+    while PR6_DENY_PROBES_SHIPPED is False. Read-only over the live tree; every unreadable input is
+    CANNOT-EVALUATE."""
     ev = _Evaluation()
-    ev.product_root, ev.run_id, ev.doctor = str(product_root), run_id, doctor
+    ev.product_root, ev.run_id, ev.doctor, ev.prober = str(product_root), run_id, doctor, prober
     ev.planning_inventory, ev.plan, ev.root_fd = planning_inventory, None, None
     try:
         ev.root_fd = apply._open_product_root(product_root)
@@ -769,8 +904,7 @@ def evaluate(product_root, run_id, *, planning_inventory=None, doctor=None):
             raise Unevaluable(str(exc))
         if ev.plan["run_id"] != run_id:
             raise Unevaluable("the bundle's plan names run {!r}".format(ev.plan["run_id"]))
-        results = {name: (CheckResult(CANNOT_EVALUATE, [_WIRING_NOTE]) if name == WIRING
-                          else _run_check(name, ev)) for name in CHECKS}
+        results = {name: _run_check(name, ev) for name in CHECKS}
     except (Unevaluable, apply.AdoptApplyError) as exc:
         results = {name: CheckResult(CANNOT_EVALUATE, ["cannot evaluate: {}".format(exc)]) for name in CHECKS}
     finally:
@@ -827,6 +961,36 @@ class _Doctor:
 
     def __call__(self, product_root):
         return self
+
+
+class _Surface:
+    """A fixture enforcement surface, the prober of the self-test: per probed platform a policy deciding each
+    probe. "guard" (the default) denies a direct write into the store's machine directory or under the
+    adoption archive and allows everything else; "none" is the deny hook removed (allows every probe); "all"
+    is an over-broad deny (denies every probe); "open-store", "open-archive", "deny-writer" and "deny-render"
+    each break exactly one probe; any other policy value is returned verbatim (a malformed prober). It records
+    every call and never writes."""
+
+    _BROKEN = dict([("open-store", ("store-write", "allowed")), ("open-archive", ("archive-write", "allowed")),
+                    ("deny-writer", ("sanctioned-writer", "denied")), ("deny-render", ("render", "denied"))])
+
+    def __init__(self, policies=None):
+        self.policies, self.calls = dict(policies or ()), []
+
+    def __call__(self, product_root, surface, probe):
+        self.calls.append((surface["platform"], dict(probe)))
+        policy = self.policies.get(surface["platform"], "guard")
+        if policy == "none":
+            return "allowed"
+        if policy == "all":
+            return "denied"
+        if policy in self._BROKEN and probe["probe"] == self._BROKEN[policy][0]:
+            return self._BROKEN[policy][1]
+        if policy != "guard" and policy not in self._BROKEN:
+            return policy
+        guarded = probe["actor"] == "direct" and probe["path"].startswith((".working/toml/",
+                                                                            ".working/archive/adoption/"))
+        return "denied" if guarded else "allowed"
 
 
 def _put(root, rel, data):
@@ -934,7 +1098,7 @@ def _fixture(root):
 
 def _case(mutate=None):
     with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
-        kwargs = dict(planning_inventory=_fixture(root), doctor=_Doctor())
+        kwargs = dict(planning_inventory=_fixture(root), doctor=_Doctor(), prober=_Surface())
         if mutate is not None:
             kwargs.update(mutate(root, kwargs["planning_inventory"]) or {})
         return evaluate(root, _RUN, **kwargs)
@@ -966,10 +1130,10 @@ def _reference_case(template=None, recipe=None, symlinked=()):
 
 
 def _only(results, expected):
-    """True when each evaluated check has its expected status (VALID unless named) and check 5 stays
-    CANNOT-EVALUATE."""
-    return (results[WIRING].status == CANNOT_EVALUATE
-            and all(results[name].status == expected.get(name, VALID) for name in EVALUATED))
+    """True when each roster check has its expected status: VALID unless named, except check 5, whose default
+    is its baseline (CANNOT-EVALUATE naming PR6 while PR6_DENY_PROBES_SHIPPED is False, VALID with it on)."""
+    wiring = VALID if PR6_DENY_PROBES_SHIPPED else CANNOT_EVALUATE
+    return all(results[name].status == expected.get(name, wiring if name == WIRING else VALID) for name in CHECKS)
 
 
 def _says(results, name, text):
@@ -1152,6 +1316,96 @@ def self_test():
         partial = dict(greenable)
         del partial[RETIREMENT]
         check("roster-red-on-missing-name", not roster_green(partial))
+        # Check 5 (wiring) with the PR6 switch as shipped (off): the genuine fixture surface leaves check 5
+        # CANNOT-EVALUATE with the PR6 reason alone, every other check as the baseline; a missing prober and a
+        # surface that denies nothing each keep their own reason and never name PR6.
+        check("check-5-pr6-off-genuine-cannot", not PR6_DENY_PROBES_SHIPPED and _only(base, {})
+              and base[WIRING].status == CANNOT_EVALUATE
+              and base[WIRING].findings == ["cannot evaluate: " + _PR6_DEFERRED] and _says(base, WIRING, "(PR6)"))
+        unprobed = _case(lambda r, i: dict(prober=None))
+        check("check-5-pr6-off-no-prober-keeps-reason", _only(unprobed, {})
+              and _says(unprobed, WIRING, "no wiring prober") and not _says(unprobed, WIRING, "PR6"))
+        opened = _case(lambda r, i: dict(prober=_Surface(dict([("claude-code", "none")]))))
+        check("check-5-pr6-off-finding-keeps-reason", _only(opened, _red(WIRING))
+              and not _says(opened, WIRING, "PR6"))
+        # Every other check-5 vector runs with the switch on, the state PR6 ships, so the probe machinery is
+        # graded as it will be then; the genuine fixture surface is then VALID.
+        with mock.patch.object(here, "PR6_DENY_PROBES_SHIPPED", True):
+            surface = _Surface()
+            green = _case(lambda r, i: dict(prober=surface))
+            check("check-5-switch-on-genuine-valid", green[WIRING].status == VALID and _only(green, {}))
+            check("roster-green-only-with-both-deferred-switches-on", roster_green(green))
+            probed = sorted(set(platform for platform, _probe in surface.calls))
+            check("check-5-probes-deny-capable-rows-only", probed == ["claude-code", "pre-commit"])
+            archive = apply.archive_rel(_RUN, _ARCHIVE_PROBE)
+            want = set([("store-write", "direct", ".working/toml/manifest.toml"),
+                        ("archive-write", "direct", archive),
+                        ("sanctioned-writer", "opf record", ".working/toml/manifest.toml"),
+                        ("render", "opf render", ".working/TODO.md")])
+            check("check-5-probe-targets", len(surface.calls) == 8
+                  and archive.startswith(".working/archive/adoption/" + _RUN + "/")
+                  and all(set((c["probe"], c["actor"], c["path"]) for p, c in surface.calls if p == platform)
+                          == want for platform in probed))
+            # The discriminating pair: the deny hook removed turns the negative probes red, and an over-broad
+            # deny that blocks the sanctioned writer turns the positive probes red (a check asserting denial
+            # alone would pass the over-broad surface).
+            for platform in ("claude-code", "pre-commit"):
+                removed = _case(lambda r, i, p=platform: dict(prober=_Surface(dict([(p, "none")]))))
+                check("flip-5-deny-removed-" + platform, _only(removed, _red(WIRING))
+                      and _says(removed, WIRING, "allows a direct store write")
+                      and _says(removed, WIRING, "allows a direct write under this run's adoption archive")
+                      and not _says(removed, WIRING, "over-broad"))
+                broad = _case(lambda r, i, p=platform: dict(prober=_Surface(dict([(p, "all")]))))
+                check("flip-5-over-broad-" + platform, _only(broad, _red(WIRING))
+                      and _says(broad, WIRING, "denies the sanctioned writer")
+                      and _says(broad, WIRING, "denies the render path") and not _says(broad, WIRING, "allows"))
+            # Each probe on its own: a surface that breaks exactly one probe is red with exactly that finding.
+            for policy, text in (("open-store", "allows a direct store write"),
+                                 ("open-archive", "allows a direct write under this run's adoption archive"),
+                                 ("deny-writer", "denies the sanctioned writer"),
+                                 ("deny-render", "denies the render path")):
+                got = _case(lambda r, i, q=policy: dict(prober=_Surface(dict([("claude-code", q)]))))
+                check("flip-5-one-probe-" + policy, _only(got, _red(WIRING)) and len(got[WIRING].findings) == 1
+                      and _says(got, WIRING, text))
+            # Fail closed: a missing or raising prober, or an answer outside PROBE_OUTCOMES, is CANNOT-EVALUATE.
+            check("check-5-no-prober-cannot", _only(_case(lambda r, i: dict(prober=None)),
+                                                    _red(WIRING, CANNOT_EVALUATE)))
+
+            def _raising_prober(product_root, surface, probe):
+                raise RuntimeError("probe harness crashed")
+
+            raised = _case(lambda r, i: dict(prober=_raising_prober))
+            check("check-5-prober-raises-cannot", _only(raised, _red(WIRING, CANNOT_EVALUATE))
+                  and _says(raised, WIRING, "raised"))
+            # A str subclass equal to "denied" is not the exact str the prober contract promises (the house
+            # entry-gate rule): it is refused, never compared.
+            subclassed = type("_Answer", (str,), dict())("denied")
+            for label, answer in (("none", None), ("true", True), ("bytes", b"denied"), ("other-word", "maybe"),
+                                  ("upper", "DENIED"), ("empty", ""), ("str-subclass", subclassed)):
+                got = _case(lambda r, i, a=answer: dict(prober=_Surface(dict([("claude-code", a)]))))
+                check("check-5-answer-" + label + "-cannot", _only(got, _red(WIRING, CANNOT_EVALUATE))
+                      and _says(got, WIRING, "not one of"))
+            # Installed: a probed row's member absent or drifted is red, and that row is not probed; the
+            # member is check 1's planned destination too, so check 1 moves with it.
+            pair = dict([(AUTHORITY, INVALID), (WIRING, INVALID)])
+            for label, mutate in (("absent", lambda r: _remove(r, ".claude/settings.json")),
+                                  ("drifted", lambda r: _put(r, ".claude/settings.json", b"tampered bytes\n"))):
+                watched = _Surface()
+                got = _case(lambda r, i, m=mutate, w=watched: (m(r), dict(prober=w))[1])
+                check("check-5-member-" + label + "-red", _only(got, pair)
+                      and _says(got, WIRING, "claude-code enforcement surface (deny-hook) is not installed")
+                      and sorted(set(p for p, _probe in watched.calls)) == ["pre-commit"])
+            # Instruction members are not the probed surface: their drift moves check 1 only, never check 5.
+            check("check-5-instructions-member-not-probed", _only(_case(lambda r, i: _put(
+                r, "AGENTS.md", b"tampered\n")), _red(AUTHORITY)))
+            # Server-side branch protection is adopter-attested on the plan's CI row and never probed.
+            check("check-5-branch-protection-attested-not-probed",
+                  "server-side-protection-adopter-attested" in schema.ENFORCEMENT_REQUIRED_RESIDUALS["ci-checks"]
+                  and "ci-checks" not in PROBED_MEANS and "ci" not in probed)
+            # The probe roster is load-bearing: emptied, a surface that denies nothing grades VALID.
+            with mock.patch.object(here, "WIRING_PROBES", ()):
+                check("check-5-probe-roster-load-bearing", _only(_case(lambda r, i: dict(
+                    prober=_Surface(dict([("claude-code", "none")])))), dict()))
         for name, flip in _FLIPS:
             check("flip-" + name + "-red-only", _only(_case(flip), _red(name)))
         check("flip-1-names-live-preimage", _says(_case(_flip_1), AUTHORITY, "live preimage 'notes/old.md'"))
@@ -1209,10 +1463,13 @@ def self_test():
         check("check-1-live-preimage-absent-red", _only(gone_pre, _red(AUTHORITY))
               and _says(gone_pre, AUTHORITY, "is absent from the live tree"))
         dest = _case(lambda r, i: _put(r, ".claude/settings.json", b"tampered bytes\n"))
-        check("flip-1-destination-drift", _only(dest, _red(AUTHORITY))
+        # A probed enforcement member is check 1's planned destination and check 5's installed surface, so
+        # its drift moves both (module docstring, check 5); check 1's own verdict is unchanged.
+        both = dict([(AUTHORITY, INVALID), (WIRING, INVALID)])
+        check("flip-1-destination-drift", _only(dest, both)
               and _says(dest, AUTHORITY, "planned destination '.claude/settings.json'"))
         check("flip-1-destination-absent", _only(_case(lambda r, i: _remove(r, ".opf/hooks/pre-commit")),
-                                                 _red(AUTHORITY)))
+                                                 both))
         drifted = _case(lambda r, i: _append(r, ".working/toml/manifest.toml", b"# drift\n"))
         check("check-1-manifest-drift-red", _only(drifted, _red(AUTHORITY))
               and _says(drifted, AUTHORITY, "planned destination '.working/toml/manifest.toml'"))
@@ -1539,7 +1796,7 @@ def self_test():
         check("check-6-occupying-archive-changed", _case(lambda r, i: _put(
             r, apply.archive_rel(_RUN, ".working/TODO.md"), b"x\n"))[RETIREMENT].status == INVALID)
         # Fail closed: unreadable or unparseable input is CANNOT-EVALUATE, never a pass.
-        every = dict((name, CANNOT_EVALUATE) for name in EVALUATED)
+        every = dict((name, CANNOT_EVALUATE) for name in CHECKS)
         check("closed-plan-garbage", _only(_case(lambda r, i: _put(r, apply.plan_rel(_RUN), b"x = [")), every))
         check("closed-plan-absent", _only(_case(lambda r, i: _remove(r, apply.plan_rel(_RUN))), every))
         check("closed-approval-garbage", _only(_case(lambda r, i: _put(r, apply.approval_rel(_RUN), b"= 1")),
@@ -1572,7 +1829,7 @@ def self_test():
         with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
             inv = _fixture(root)
             before = _tree(root)
-            evaluate(root, _RUN, planning_inventory=inv, doctor=_Doctor())
+            evaluate(root, _RUN, planning_inventory=inv, doctor=_Doctor(), prober=_Surface())
             check("read-only-live-tree", _tree(root) == before)
         # Direct-call vectors for legs a VALID frozen plan cannot reach end to end: a foreign preservation
         # destination and a missing CI row (frozen_plan refuses both plans), and check 2's accounting leg
@@ -1726,6 +1983,24 @@ def self_test():
                       and wanted.get(".working/toml/manifest.toml") == "sha256:" + "4" * 64
                       and _CI_PATH not in wanted and _CI_RECIPE_REL not in wanted
                       and ".working/TODO.md" not in wanted)
+                # Check 5's legs a VALID frozen plan cannot reach end to end (frozen_plan refuses both plans): no
+                # deny-capable row is red, never vacuously green, and no rendered view leaves the render probe
+                # without a target, CANNOT-EVALUATE.
+                ev.prober = _Surface()
+                ev.plan = dict(plan, enforcement=[row for row in plan["enforcement"]
+                                                 if row["means"] not in PROBED_MEANS])
+                direct = _Report()
+                _check_wiring(ev, direct)
+                check("check-5-no-deny-capable-row-red", direct.result().status == INVALID
+                      and any("no deny-capable enforcement row" in f for f in direct.findings))
+                ev.plan = dict(plan, ops=[op for op in plan["ops"] if op["op"] != "render-views"])
+                direct = _Report()
+                try:
+                    _check_wiring(ev, direct)
+                except Unevaluable as exc:
+                    direct.cannot.append(str(exc))
+                check("check-5-no-render-target-cannot", direct.result().status == CANNOT_EVALUATE
+                      and any("render probe has no target" in f for f in direct.result().findings))
                 # Check 3 re-reads the bundle inventory after verify_bundle: that read is held to the apply
                 # shell's own inventory validator too (here verify_bundle is stubbed VALID, so only it grades).
                 ev.plan = plan
@@ -1744,7 +2019,7 @@ def self_test():
                 store._close_fd_exc_safe(ev.root_fd)
         # Dispatch wiring: each roster name runs exactly its own check function. (These replace the former
         # removal-mutant vectors, which could not fail: an emptied check body always grades VALID.)
-        for name in EVALUATED:
+        for name in CHECKS:
             probe = "dispatch-probe-" + name
 
             def _probing(ev, rep, _probe=probe):
@@ -1754,7 +2029,7 @@ def self_test():
                 probed = _case()
             check("dispatch-" + name + "-load-bearing", probed[name].status == INVALID
                   and _says(probed, name, probe)
-                  and all(probed[n].status == VALID for n in EVALUATED if n != name))
+                  and all(probed[n].status == base[n].status for n in CHECKS if n != name))
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never an uncaught exit-1 escape
         print("OPF-ADOPT-COMPLETE SELF-TEST: harness error ({!r}); failing closed to exit 2".format(exc),
               file=sys.stderr)
