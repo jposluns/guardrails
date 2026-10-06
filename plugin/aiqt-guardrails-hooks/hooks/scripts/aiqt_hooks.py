@@ -174,7 +174,10 @@ import sys
 # An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
 # first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file exits
 # 1, a non-blocking error, so a PreToolUse call goes ahead unchecked; one that predates the -I option every
-# hook entry passes exits 2, which denies a PreToolUse call and blocks a Stop.
+# hook entry passes exits 2 on every event the plugin hooks.json registers. That denies every PreToolUse
+# call; blocks every UserPromptSubmit prompt, which FAIL_OPEN_EVENTS below says an error must never do;
+# and blocks every Stop, with no cap as above, and every TeammateIdle, the two events this file names
+# exit 2 as the block for. PostToolUse runs after its tool has run, and SessionStart cannot block at all.
 FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "orch_dispatch_ledger", "orch_prompt_stamp", "orch_resume_audit",
                          "orch_stop_guard", "orch_teammate_idle")
 
