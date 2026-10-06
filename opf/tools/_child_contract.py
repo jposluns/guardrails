@@ -132,7 +132,13 @@ THE CONTRACT, in the order it runs:
    reads whether the original error stream is closed on the file object under it, captured at
    construction, through the C getter bound at import. Nor does anything after the second read
    create a function, generator or lambda (a function watcher runs on each creation; QA r12,
-   claude MINOR 2), and the self-test checks that statically. After the
+   claude MINOR 2), and the self-test checks that statically. Nor does the seal loop call a
+   method of an object the record callback returned: each descriptor is converted to an exact int
+   and each payload copied to exact bytes before the final check (QA r13, claude MINOR 2,
+   reproduced: a bytes subclass whose __bytes__ returned itself ran its own slicing in the seal
+   loop). The price of reading no snapshotted object after the second read: a stream that reports
+   itself closed only through its own Python-level `closed`, and only after that read, is not
+   seen (restore_reporting states it; nothing writes the error stream after that read). After the
    decision the handler runs only os.write on saved_stdout and saved_stderr (the seal, or a
    diagnostic) and os._exit; CPython 3.14 raises no audit event for either (measured), so an audit
    hook the loaded code added, which cannot be removed, does not run after the decision; no
@@ -210,6 +216,7 @@ explicit opf/tools path insert.
 """
 import gc
 import io
+import operator
 import os
 import signal
 import sys
@@ -244,6 +251,13 @@ _write, _exit = os.write, os._exit
 # stream is closed: reading `closed` on the stream object itself runs whatever the loaded code
 # re-initialised that object over (merge train 2 QA r12, claude MEDIUM 1, reproduced).
 _FileIO, _fileio_closed = io.FileIO, io.FileIO.closed.__get__
+# The conversions the record handler makes BEFORE its final check, so that after it the seal loop
+# and the os._exit handle only an exact int and exact bytes: bytes() returns the very object a
+# __bytes__ returns when that is a bytes subclass, whose slicing, length and buffer then run its
+# own methods in the seal loop, and os.write and os._exit call __index__ on a descriptor or code
+# that is not an int (merge train 2 QA r13, claude MINOR 2). A copy through memoryview is always
+# exact bytes, and operator.index always returns an exact int.
+_bytes, _memoryview, _index = bytes, memoryview, operator.index
 _gc_disable, _gc_isenabled, _gc_callbacks = gc.disable, gc.isenabled, gc.callbacks
 _getprofile, _setprofile = sys.getprofile, sys.setprofile
 _gettrace, _settrace = sys.gettrace, sys.settrace
@@ -318,7 +332,7 @@ class FailClosedChild:
     def __init__(self, record, fault_line, fail_code=2):
         self.faults = []
         self.saved_stdout = self.saved_stderr = None
-        self.fail_code = fail_code
+        self.fail_code = _index(fail_code)
         self._record = record
         self._fault_line = fault_line
         self._settled = []
@@ -377,12 +391,17 @@ class FailClosedChild:
         finalizer of a replaced hook or stream runs here. The closed read differs by caller.
         The checks' restores (last False) read `closed` on the original error stream object,
         which CAN run loaded code (a stream re-initialised over one written in Python); that is
-        before the decision, and the disarming and the last restore that follow judge whatever
-        it did. The last restore, after the disarming (last True), reads no attribute of that
-        object: it reads the file object under it, captured at construction, through the C
-        getter bound at import (QA r12, claude MEDIUM 1); with no such file object (an error
-        stream that was not file-backed at construction) it reads nothing there, and the final
-        check's own read stands."""
+        before the decision. The last restore, after the disarming (last True), reads no
+        attribute of that object: it reads the file object under it, captured at construction,
+        through the C getter bound at import (QA r12, claude MEDIUM 1), so it judges a
+        replacement of any snapshotted object and a close of that original file object, made by
+        that read or anything since; with no such file object (an error stream that was not
+        file-backed at construction) it reads nothing there, and the final check's own read
+        stands. The price of running no loaded code after the final read (QA r13, claude MINOR
+        1, measured by the self-test): a stream that reports itself closed only at the Python
+        level, through its own `closed`, after the final check's last read is not seen, and the
+        record stands (on 87dd2a59 the last restore read that `closed` and refused). Nothing
+        writes the error stream after that read, so such a report hides no fault."""
         swapped = []
         for owner, namespace, name, original in self._snapshot:
             plain = True
@@ -422,12 +441,15 @@ class FailClosedChild:
                 # A signal handler the loaded code installed must not run after the final check
                 # (contract step 6): blocked here, a signal stays pending until the os._exit.
                 signal.pthread_sigmask(signal.SIG_BLOCK, signal.valid_signals())
-            code = self._decide(self._settled[0], len(self._threads_started))
+            code = self._decide(_index(self._settled[0]), len(self._threads_started))
             seen, threads = len(self.faults), len(self._threads_started)
             stage = "in the record callback"
             seal = []
             for fd, data in self._record(code) or ():
-                seal.append((fd, bytes(data)))
+                # An exact int and exact bytes, made here, before the final check: the seal loop
+                # below then runs no method of an object the callback returned (QA r13, claude
+                # MINOR 2; anything these conversions run is judged by the final check).
+                seal.append((_index(fd), _bytes(_memoryview(data))))
             # The callback returned normally, but it may have faulted without raising (module
             # docstring, contract step 5): the same checks again, the FINAL check, and a fault new
             # since the callback started voids the record (merge train 2 QA r8, codex MAJOR).
@@ -618,6 +640,11 @@ _CASE_HEAD = (
     "        handle.write(\"record {}\\n\".format(code))\n"
     "    sys.stdout.write(\"record {}\\n\".format(code))\n"
     "    sys.stdout.flush()\n"
+    "    return seal_pairs(code)\n"
+    "\n"
+    "\n"
+    "def seal_pairs(code):\n"
+    "    # The seal the callback returns; a case's loaded code may define it anew.\n"
     "    return [(contract.saved_stdout, \"seal {}\\n\".format(code).encode(\"ascii\"))]\n"
     "\n"
     "\n"
@@ -1262,7 +1289,8 @@ class Stream(io.RawIOBase):
         frame = getframe()
         while frame is not None and frame.f_code.co_name != "_record_at_exit":
             frame = frame.f_back
-        if frame is not None and not ran and frame.f_locals.get("stage") == {stage!r}:
+        stage = None if frame is None else frame.f_locals.get("stage")
+        if stage is not None and not ran and stage == {stage!r}:
             ran.append("closed")
             if {close}:
                 real.flush()
@@ -1270,7 +1298,7 @@ class Stream(io.RawIOBase):
             else:
                 write(2, b"loaded code ran after the final read\\n")
                 setprofile(lambda frame, event, arg: late_fault())
-        return False
+        return stage in {reports!r}
 
 
 sys.stderr.__init__(Stream(), encoding="utf-8", line_buffering=True)
@@ -1302,6 +1330,64 @@ def watcher(event, func, new_value):
 
 
 _testcapi.add_func_watcher(watcher)
+"""
+# QA r13, claude MINOR 1: the trade-off of reading no snapshotted object after the second read,
+# MEASURED. The same re-initialised stream's `closed` reports False up to the final check's last
+# read and True after it (in the disarming and the seal); on 87dd2a59 the last restore read it
+# there and the child exited 2 with no seal, and since 03a9ac46 nothing reads it there, so the
+# child exits 0 with its seal (the property never runs after the final read, so its report
+# below never appears either). Nothing writes the error stream after the final read.
+_LATE_STAGES = ("disarming the interpreter callbacks", "sealing the record")
+# QA r13, claude MINOR 2: the record callback returns what loaded code made: a bytes subclass
+# whose __bytes__ returns itself and whose slicing, length and buffer report that they ran and
+# arm a profile function that faults on the seal once the handler is past its final read (or a
+# descriptor that is not an int, whose __index__ does the same). On 03a9ac46 bytes() kept the
+# subclass and the seal loop ran its methods (the descriptor's __index__ ran in os.write), and the
+# child exited 0 with its seal and this report; now both are converted before the final check,
+# so those methods run only there: exit 0, record, seal, empty error stream.
+_SEED_SEAL_OBJECTS = """
+getframe, setprofile, write = sys._getframe, sys.setprofile, os.write
+ran = []
+
+
+def after_final_read():
+    frame = getframe()
+    while frame is not None and frame.f_code.co_name != "_record_at_exit":
+        frame = frame.f_back
+    if frame is not None and not ran and frame.f_locals.get("stage") in {late!r}:
+        ran.append("seal")
+        write(2, b"loaded code ran after the final read\\n")
+        setprofile(lambda frame, event, arg: late_fault())
+
+
+class Sealed(bytes):
+    def __bytes__(self):
+        return self
+
+    def __getitem__(self, key):
+        after_final_read()
+        return Sealed(bytes.__getitem__(self, key))
+
+    def __len__(self):
+        after_final_read()
+        return bytes.__len__(self)
+
+    def __buffer__(self, flags):
+        after_final_read()
+        return bytes.__buffer__(self, flags)
+
+
+class Descriptor:
+    def __init__(self, fd):
+        self.fd = fd
+
+    def __index__(self):
+        after_final_read()
+        return self.fd
+
+
+def seal_pairs(code):
+    return [({fd}, {data})]
 """
 _SEAL_FAULT = _CALLBACK_FAULT.format(skip="stage != \"sealing the record\"")
 # The handler's code after its final read of the interpreter callbacks (and on its failure paths
@@ -1395,10 +1481,21 @@ _CASES = (
         stage="sealing the record", target="os"), 0, "record 0", (), True),
     ("stderr-closed-property-after-final-read", "",
      _SEAL_FAULT + _SEED_STDERR_CLOSED_PROPERTY.format(
-         stage="disarming the interpreter callbacks", close=False), 0, "record 0", (), True),
+         stage="disarming the interpreter callbacks", close=False, reports=()), 0, "record 0", (),
+     True),
     ("stderr-closed-by-final-check-read", "", _SEAL_FAULT + _SEED_STDERR_CLOSED_PROPERTY.format(
-        stage="after the record callback", close=True), 2, "record 0",
+        stage="after the record callback", close=True, reports=()), 2, "record 0",
      ("a fault was observed during the record callback", "sys.stderr (closed)", "exit 2"), False),
+    ("stderr-closed-only-in-python-after-final-read-passes", "",
+     _SEAL_FAULT + _SEED_STDERR_CLOSED_PROPERTY.format(
+         stage="sealing the record", close=False, reports=_LATE_STAGES), 0, "record 0", (), True),
+    ("seal-bytes-subclass-after-final-read", "", _SEAL_FAULT + _SEED_SEAL_OBJECTS.format(
+        late=_LATE_STAGES, fd="contract.saved_stdout",
+        data="Sealed(\"seal {}\\n\".format(code).encode(\"ascii\"))"), 0, "record 0", (),
+     True),
+    ("seal-descriptor-index-after-final-read", "", _SEAL_FAULT + _SEED_SEAL_OBJECTS.format(
+        late=_LATE_STAGES, fd="Descriptor(contract.saved_stdout)",
+        data="\"seal {}\\n\".format(code).encode(\"ascii\")"), 0, "record 0", (), True),
     ("stderr-closed-by-cleanup", "", "atexit.register(sys.stderr.close)\n", 2, "record 2",
      ("sys.stderr (closed)",), False),
 )
@@ -1507,7 +1604,11 @@ def self_test():
           "a ModuleType-subclass hook loaded code puts on threading or os never runs after the "
           "final read (QA r11); a `closed` property on a re-initialised original stderr never "
           "runs after the final read, a close it makes in the final check is refused by the last "
-          "restore, and a stderr closed by cleanup is refused by name (QA r12); no handler code "
+          "restore, and a stderr closed by cleanup is refused by name (QA r12); a stream that "
+          "reports itself closed only through its own `closed` after the final read passes "
+          "with its seal, the measured price of not running it there, and a seal the callback "
+          "returns as a bytes subclass or on a descriptor that is not an int runs none of its "
+          "methods after the final read (QA r13); no handler code "
           "after the final read creates a function (checked statically, and through a function "
           "watcher {}); and every passing child's stdout ends with the seal written after the "
           "final check)".format("that never runs there" if watcher else
