@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "7ca2b2ed512e9ef5b418340660bb28523870c8da60a924103533ac1faeea52e1"
+tree-sha256 = "c854f94513b1ad1ad8bf79f9e0910ba93a2d9b2359c7e03a617d372907646a26"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3166,8 +3166,8 @@ sha256 = "e19ad231e932a8b9fb463c4bc4d2f5837742b563d7c9f8fd0bd775b6c8832ede"
 
 [[sources]]
 path = "tools/_selftest_exit_report.py"
-bytes = 25496
-sha256 = "7fb0d355226df4a2c04a1038af075867dade8ab76def41fe7e5353591b0d9a5b"
+bytes = 25746
+sha256 = "941ce2b43e17c9aa91d763703dcdb8c53213ae9633e82e691f5f1e644b637578"
 
 [[sources]]
 path = "tools/_standards.py"
@@ -3381,8 +3381,8 @@ sha256 = "683e94db8330824c5b73ee79164ec0d30ee555b2ba9b852af0a82e0a7b4b3f08"
 
 [[sources]]
 path = "tools/check_selftest_execution.py"
-bytes = 101761
-sha256 = "1a86ce135683ffd28bb18205430fc11670d735e9a3dd30733848f58623c3a35a"
+bytes = 102744
+sha256 = "df190c96ff1e39e5c719cffd7037f091739393d02779cade00a5410d4445f8fa"
 
 [[sources]]
 path = "tools/check_site.py"

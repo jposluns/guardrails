@@ -70,9 +70,9 @@ defined, every object it reads, builtins included, as a keyword-only default (th
 reads its factory's through its closure), and looks up no global or builtin name and imports
 nothing at call time (an import at teardown fails once sys.meta_path is cleared). A faulting late
 destructor reaches stderr through sys.unraisablehook, and is refused, only while sys.stderr still
-exists: CPython drops sys.stderr (and sys.__stderr__) before it frees some objects, so the destructor
-of an object held by the codec search registry, or of a cycle anchored on a sys attribute, runs and
-raises at late teardown with nothing written to stderr, and the run passes (DISCLOSED RESIDUAL).
+exists: CPython drops sys.stderr (and sys.__stderr__) before it clears some interpreter-level state,
+so the destructor of an object whose last reference that state holds runs and raises at late teardown
+with nothing written to stderr, and the run passes (DISCLOSED RESIDUAL, below).
 
 At exit the interpreter joins every non-daemon thread (a thread fault reaches stderr through
 threading.excepthook, and the wrapper above records it), runs every atexit callback registered after
@@ -108,13 +108,16 @@ status>, "finalized": true}.
 DISCLOSED RESIDUAL: a daemon thread still running at exit is killed, and its pending fault or
 message can be lost. Interpreter teardown after the report is written still runs destructors, and a
 destructor fault reaches stderr through sys.unraisablehook, refusing the verdict, only while
-sys.stderr still exists: CPython drops sys.stderr before it frees some objects, so a faulting
-destructor of an object held by the codec search registry (codecs.register), or of a cycle anchored
-on a sys attribute, runs and raises at late teardown with an empty error stream, and the run passes.
-No in-process fix is known (the report is already written, and a direct launch is equally silent);
-the gate's self-test pins both placements as a residual witness, so a change in this behaviour
-fails it. A fault the observation hooks record after the finalizer has run (a teardown destructor's
-import of an interpreter-creating module or atexit registration) refuses nothing, and the
+sys.stderr still exists. The residual is a CLASS, not a list of placements: a faulting destructor
+of an object whose last reference is held by interpreter-level state that CPython clears after it
+has dropped sys.stderr (for example the codec search registry (codecs.register), audit hooks
+(sys.addaudithook), and a cycle anchored on a sys attribute) runs and raises at late teardown with
+an empty error stream, and the run passes; such a fault is silent under the gate exactly as under a
+direct launch. The examples are not exhaustive and no further placement is enumerated. No
+in-process fix is known (the report is already written); the gate's self-test pins the three named
+examples as a residual witness, so a change in this behaviour for any of them fails it. A fault
+the observation hooks record after the finalizer has run (a teardown destructor's import of an
+interpreter-creating module or atexit registration) refuses nothing, and the
 finalizer's count comparison lets an atexit.unregister made after the exit-time join mask a later
 registration (above). A silent effect of such late code (rewriting the report, calling os._exit
 itself) is the same tier as loaded code replacing the reporting machinery; and an execution context

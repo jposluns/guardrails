@@ -137,11 +137,14 @@ proxy anchored to this gate's own file, not a full git-identity check; and the s
 launch read the runner's source at two moments, so a concurrent same-user writer between them is
 outside this repo's sole-orchestrator threat model (the runtime layer still reconciles what
 actually ran). The fail-closed child contract has two permitted residuals. First, a destructor fault
-at late interpreter teardown can pass silently: CPython drops sys.stderr before it frees some
-objects, so the faulting destructor of an object held by the codec search registry
-(codecs.register), or of a cycle anchored on a sys attribute, runs and raises after the report is
-written with an empty error stream, and this gate passes the run; no in-process fix is known (a
-direct launch is equally silent), and the self-test pins both placements as a residual witness.
+at late interpreter teardown can pass silently. The residual is a CLASS, not a list of placements: a
+destructor of an object whose last reference is held by interpreter-level state that CPython clears
+after it has dropped sys.stderr (for example the codec search registry (codecs.register), audit
+hooks (sys.addaudithook), and a cycle anchored on a sys attribute) runs and raises after the report
+is written with an empty error stream, and this gate passes the run; such a fault is silent under
+the gate exactly as under a direct launch. The examples are not exhaustive and no further placement
+is enumerated; no in-process fix is known, and the self-test pins the three named examples as a
+residual witness.
 Second, loaded code replacing the reporting machinery: code running inside the child can write a complete finalized-shape report itself
 (for example, then os._exit(0), whether or not it armed the finalizer), or replace sys.stderr,
 sys.unraisablehook, threading.excepthook, threading._shutdown, threading.Thread._bootstrap
@@ -496,7 +499,8 @@ def _stderr_fault(blob, suite_id):
     the suite declares none): None on equality, else a description of the first differing byte. No
     decoding, line splitting, repetition, or reordering is applied, and a declaration that is not a
     bytes value is itself a fault. A fault the child survived (an atexit callback, a destructor, a
-    thread) reaches only this stream, so it is never a pass."""
+    thread) that writes to the error stream reaches only this stream, so it is never a pass; a fault
+    that writes nothing (the disclosed late-teardown residual class) is invisible here."""
     allowed = DECLARED_STDERR.get(suite_id, b"")
     if type(allowed) is not bytes:
         return "the declared stderr for suite {!r} is not a bytes value".format(suite_id)
@@ -715,10 +719,12 @@ TEARDOWN_FAULT = ("class _LateFault:\n"
                   "    def __del__(self, op=open, dn=os.devnull, err=RuntimeError):\n"
                   "        with op(dn, 'w') as f:\n            f.write('ok')\n"
                   "        raise err('ST_TEARDOWN_FAULT')\n_late = _LateFault()\n")
-# The DISCLOSED late-teardown residual: a faulting destructor that CPython runs after it has dropped
-# sys.stderr, so its fault is reported nowhere. It records that it ran in a marker file beside the
-# runner before raising; the two placements are an object held by the codec search registry and a
-# cycle anchored on a sys attribute (TEARDOWN_FAULT, held by a module global, is the refused control).
+# The DISCLOSED late-teardown residual class: a faulting destructor of an object whose last reference
+# is held by interpreter-level state that CPython clears after it has dropped sys.stderr, so its fault
+# is reported nowhere. It records that it ran in a marker file beside the runner before raising; the
+# three witnessed examples are an object held by the codec search registry, one held by an audit hook,
+# and a cycle anchored on a sys attribute (TEARDOWN_FAULT, held by a module global, is the refused
+# control). The examples are not an exhaustive list of the class.
 RESIDUAL_LATE_FAULT = ("class _LateMarked:\n"
                        "    def __init__(self, path):\n        self.path = path\n"
                        "    def __del__(self, op=open, err=RuntimeError):\n"
@@ -728,6 +734,9 @@ RESIDUAL_LATE_FAULT = ("class _LateMarked:\n"
 RESIDUAL_CODEC_REGISTRY = ("class _Search:\n    def __init__(self, held):\n        self.held = held\n"
                            "    def __call__(self, name):\n        return None\n"
                            "import codecs\ncodecs.register(_Search(_LateMarked(_marker)))\n")
+RESIDUAL_AUDIT_HOOK = ("class _Audit:\n    def __init__(self, held):\n        self.held = held\n"
+                       "    def __call__(self, *args):\n        return None\n"
+                       "sys.addaudithook(_Audit(_LateMarked(_marker)))\n")
 RESIDUAL_SYS_CYCLE = ("_cycle = _LateMarked(_marker)\n_cycle.me = _cycle\n"
                       "sys._st_residual = [_cycle]\ndel _cycle\n")
 # Not residual: a faulting cycle anchored on a module global or a class attribute. It was silent
@@ -1465,10 +1474,12 @@ def self_test():
                [("_imports_from", "IMPORT_FROM", "path"), ("_imports_from", "IMPORT_NAME", "os")])
         # 25g (round 7), a RESIDUAL WITNESS, not a guarantee: a faulting destructor that CPython runs
         # at late teardown, after it has dropped sys.stderr, raises with an empty error stream, so
-        # the gate PASSES the run while the marker shows the destructor ran; both disclosed
-        # placements (the codec search registry, a cycle anchored on a sys attribute) are pinned, so
-        # if the interpreter ever reports such a fault this leg fails and the disclosure must change
+        # the gate PASSES the run while the marker shows the destructor ran; the three named
+        # examples of the disclosed class (the codec search registry, an audit hook (round 8), a
+        # cycle anchored on a sys attribute) are pinned, so if the interpreter ever reports such a
+        # fault this leg fails and the disclosure must change; the class is not enumerated further
         for label, placement in (("codec-registry", RESIDUAL_CODEC_REGISTRY),
+                                 ("audit-hook", RESIDUAL_AUDIT_HOOK),
                                  ("sys-attribute-cycle", RESIDUAL_SYS_CYCLE)):
             root = build(_manifest_text(), _report_body(
                 GOOD_IDS, 0, before_exit=RESIDUAL_LATE_FAULT + placement))
@@ -1582,10 +1593,10 @@ def self_test():
           "clean destructor run at interpreter teardown (a file open or a captured sys.audit) while "
           "refusing its faulting twin, every hook and the finalizer reading no module global or "
           "builtin and importing nothing at call time (an import named by the static witness), and "
-          "witnesses the disclosed late-teardown residual (a faulting destructor held by the codec "
-          "search registry, or in a cycle anchored on a sys attribute, passes while its marker "
-          "shows it ran) while refusing a faulting cycle anchored on a module global or a class "
-          "attribute")
+          "witnesses the disclosed late-teardown residual class (a faulting destructor held by the "
+          "codec search registry, by an audit hook, or in a cycle anchored on a sys attribute, "
+          "passes while its marker shows it ran) while refusing a faulting cycle anchored on a "
+          "module global or a class attribute")
     return 0
 
 
