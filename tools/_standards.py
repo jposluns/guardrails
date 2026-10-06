@@ -6,7 +6,7 @@ ids that a rule's `map-<key>` frontmatter is permitted to cite. `gen_rules` deri
 these files (a key exists only if its manifest does); `check_mappings` validates every mapped id against
 them. An id that is not in its manifest cannot ship, so a fabricated mapping is structurally impossible.
 
-Requires Python 3.11+ for tomllib (CI pins 3.14).
+Requires Python 3.14 or newer, the floor in .aiqt/core/python-floor.toml.
 """
 import os
 import re

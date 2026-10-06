@@ -154,16 +154,16 @@ fails and report it; do not work around a failed check.
      runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks do not define
      a `REGISTRATION` constant; use this same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
-     works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need Python
-     3.14 or newer as the `python3` on the `PATH` that Claude Code runs hook commands with; check it with
-     `python3 --version` before step 3. On an older interpreter each hook reads no input, writes one
-     `error: <file> requires Python 3.14 or newer` line to standard error, and exits. Claude Code reads
-     the exit by event: for `clock-inject.py` (`PostToolUse`, `PostToolUseFailure`) the exit is 2 and the
-     tool has already run, so the line only reaches the assistant and nothing is blocked; for the four
-     `PreToolUse` hooks the exit is 2 and every matching tool call is denied; for `stamp-truth-stop.py`
-     (`Stop`) the exit is 1, a non-blocking error, so every stop goes ahead unchecked (exit 2 would block
-     every stop with no block cap, since the hook stops before its loop guard runs). If you see that
-     line, upgrade Python or remove the hook's entry.
+     works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
+     on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer;
+     check that `python3` with `python3 --version` before step 3. On an older interpreter each hook reads
+     no input, writes one `error: <file> requires Python 3.14 or newer` line to standard error, and
+     exits. Claude Code reads the exit by event: for `clock-inject.py` (`PostToolUse`,
+     `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
+     assistant and nothing is blocked; for the four `PreToolUse` hooks the exit is 2 and every matching
+     tool call is denied; for `stamp-truth-stop.py` (`Stop`) the exit is 1, a non-blocking error, so
+     every stop goes ahead unchecked (exit 2 would block every stop with no block cap, since the hook
+     stops before its loop guard runs). If you see that line, upgrade Python or remove the hook's entry.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
