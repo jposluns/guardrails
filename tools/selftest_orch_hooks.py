@@ -1291,17 +1291,17 @@ def _rdp_scope_cases(base, plain):
         "git -c core.bare=true branch --list")],
         ["deny"] * 10)
     # git config is judged by position: only --get, --get-all, --get-regexp, --list or -l (after modifiers,
-    # --show-origin only before a list), with the operands each takes, or one key alone, reads.
+    # --show-origin among them), with the operands each takes, or one key alone, reads.
     reads = ("git config --get core.worktree", "git config --list", "git config core.bare",
              "git config --show-origin --list", "git config --global --get-all core.worktree",
-             "git config --get core.worktree get")
+             "git config --get core.worktree get", "git config --show-origin core.worktree")
     check("rdp/plain-git-repository-read-allows", [_rdp_kind(rg.run(c)) for c in reads], ["allow"] * len(reads))
     # Any other git config form naming repository configuration is a write: a word after the key is its
     # value (git config core.worktree get sets core.worktree to get), a rename into the core or include
     # section moves a key there, an edit action opens an editor that can set any key, and a subcommand
     # behind an unknown global option is judged the same way.
     writes = ("git config core.worktree get", "git config core.bare true list", "git config get core.bare",
-              "git config --worktree core.worktree /x get", "git config --show-origin core.worktree",
+              "git config --worktree core.worktree /x get", "git config --show-origin core.worktree /x",
               "git config core.worktree --get", "git config --worktree --rename-section x core",
               "git config --rename-section x Include", "git config rename-section x includeIf.gitdir:/x/",
               "git config --edit", "git config -e", "git config edit", "git config --ed",
@@ -1375,6 +1375,66 @@ def _rdp_scope_cases(base, plain):
              "git log --no-ext-diff --no-textconv -S x -- .aiqt", "git status")
     check("rdp/plain-git-read-without-program-allows", [_rdp_kind(ed.run(c)) for c in quiet],
           ["allow"] * len(quiet))
+    # A git option or subcommand that runs a program can run shell text no word check sees (.aiqt inside
+    # a pager command), so it is refused outright, whatever the command names: the pager sequence (grep's
+    # --open-files-in-pager set to rm -rf .aiqt), each call run only where the hook allows it, would delete
+    # the registry and let a missing-brief dispatch through.
+    pg = RdpFixture(base, "pager")
+    pg_got = [_rdp_kind(pg.dispatch("/missing"))]
+    pg_got.append(_rdp_kind(pg.run("git grep --open-files-in-pager='rm -rf .aiqt' a -- src/a.py")))
+    if pg_got[-1] == "allow":
+        subprocess.run(["git", "-C", str(pg.root), "grep", "--open-files-in-pager=rm -rf .aiqt", "a", "--",
+                        "src/a.py"], capture_output=True, timeout=30)
+    pg_got += [_rdp_kind(pg.dispatch("/missing")), (pg.root / ".aiqt" / "orchestration.local.json").is_file()]
+    check("rdp/git-pager-option-sequence-cannot-remove-registry", pg_got,
+          ["unverifiable", "deny", "unverifiable", True])
+    # The checks below use a fixture of their own, so a registry removed above cannot make them pass.
+    go = RdpFixture(base, "gitops")
+    programs = ("git grep -O'rm -rf x' a", "git grep -iO a", "git grep --open a", "git grep -e a -O",
+                "git -p status", "git --paginate log", "git diff --ext-diff", "git log --textconv",
+                "git cat-file --filters HEAD:seed.txt", "git log --show-signature", "git log --format='%G?'",
+                "git for-each-ref --format '%(signature)'", "git rebase -x 'rm -rf x' HEAD",
+                "git rebase --exec=x HEAD", "git difftool -x x", "git difftool --extcmd=x",
+                "git clone -u x a b", "git clone --config core.fsmonitor=x a b", "git clone -c x=y a b",
+                "git fetch --upload-pack=x origin", "git push --receive-pack=x origin",
+                "git archive --remote=x --exec=y HEAD", "git send-email --sendmail-cmd=x a",
+                "git --exec-path=/x status", "git bisect run x", "git submodule foreach x",
+                "git filter-branch --tree-filter x", "git --no-advice rebase -x x HEAD")
+    pr_got = []
+    for c in programs:
+        result = go.run(c)
+        specific = result[1].get("hookSpecificOutput") if isinstance(result[1], dict) else None
+        reason = specific.get("permissionDecisionReason", "") if isinstance(specific, dict) else ""
+        pr_got.append((_rdp_kind(result), "runs a program" in reason))
+    check("rdp/plain-git-program-option-denies", pr_got, [("deny", True)] * len(programs))
+    # Options are read with their operands: a search operand glued to -S or -G, or the next word of
+    # --grep, --author or -S, is no patch request (git log -Sconfig reads, its c no -c), and words after
+    # -- are paths; an option that shares a letter or prefix with a program-running one runs none.
+    operands = ("git log -Sconfig -- .aiqt", "git log -S config -- .aiqt", "git log -Gcmp -- .aiqt",
+                "git log --grep -c -- .aiqt", "git log --author -p -- .aiqt", "git log -n 3 -- .aiqt",
+                "git log -- .aiqt -p", "git grep -e -O -- .aiqt", "git grep -eOops -- .aiqt",
+                "git cat-file --filter=blob:none --batch-check", "git commit -m 'fix -x and %G'",
+                "git rebase -i HEAD", "git --exec-path", "git send-email --to=a --cc=b x")
+    check("rdp/plain-git-option-operands-parsed", [_rdp_kind(go.run(c)) for c in operands],
+          ["allow"] * len(operands))
+    patches = ("git log -Sx -p -- .aiqt", "git log -pSconfig -- .aiqt", "git log -cS x -- .aiqt",
+               "git show -U3 -- .aiqt", "git log --grep=x --patch -- .aiqt")
+    check("rdp/plain-git-patch-read-judged", [_rdp_kind(go.run(c)) for c in patches], ["deny"] * len(patches))
+    # A git config read keeps its scope options (--local, --global, --system, --worktree, --file PATH),
+    # --show-origin and --type before any read form; a trailing word after the key is still a value.
+    config_reads = ("git config --show-origin --get core.bare", "git config --local core.bare",
+                    "git config --local --show-origin core.bare", "git config --system --get core.bare",
+                    "git config --worktree core.bare", "git config --global --list",
+                    "git config --file other --get core.bare", "git config -f other core.bare",
+                    "git config --file=.git/config core.bare", "git config --type bool --get core.bare",
+                    "git config --show-scope --show-origin --get-all core.bare")
+    check("rdp/plain-git-config-read-modifiers-allow", [_rdp_kind(go.run(c)) for c in config_reads],
+          ["allow"] * len(config_reads))
+    config_writes = ("git config core.bare --local", "git config --local core.bare true",
+                     "git config --file core.bare", "git config --show-origin core.bare false",
+                     "git config --type bool core.bare true", "git config --file x --unset core.bare")
+    check("rdp/plain-git-config-trailing-word-still-writes", [_rdp_kind(go.run(c)) for c in config_writes],
+          ["deny"] * len(config_writes))
     # A linked worktree beside a main worktree whose git directory is separated (core.worktree naming the
     # main worktree): a dispatch is withheld, and the two calls that would point core.worktree at an empty
     # directory META/get, and so unscope the session, end at the config write, whose trailing word is a

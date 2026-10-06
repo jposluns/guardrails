@@ -11315,25 +11315,57 @@ _RDP_GIT_GLOBAL_VALUED = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--n
 _RDP_GIT_GLOBAL_FLAGS = frozenset(("-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--bare",
                                    "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
                                    "--icase-pathspecs", "--no-optional-locks"))
-# The options that make a read-only git subcommand run a configured or named program, so a read carrying
-# one (abbreviated or not) gets the full checks: an external diff (diff.external, a diff driver's command),
-# a textconv filter, cat-file's smudge and clean filters, and a signature check running gpg.program. For
-# log, show and diff, so does an option asking for patch output, to which a textconv filter applies, and a
-# %G format placeholder, which runs gpg.program; a global -p or --paginate runs the pager.
-_RDP_GIT_RUNS_PROGRAM = ("--ext-diff", "--textconv", "--filters", "--show-signature")
+# The options that make a git command run a program, named in it or configured, whatever its subcommand
+# (each matched abbreviated or not): an external diff (diff.external, a diff driver's command), a textconv
+# filter, a signature check running gpg.program, grep's pager on the matches, rebase's exec lines,
+# difftool's command, the upload, receive and archive programs of a remote, send-email's commands and
+# server, and the global --exec-path=DIR, from which git runs its own programs (a bare --exec-path only
+# prints it). A word naming an option of its own that shares a prefix with one of them (--text, --to,
+# --cc, --filter) is not one. _RDP_GIT_SUB_PROGRAM_OPTIONS holds those of one subcommand only: cat-file's
+# smudge and clean filters (its --filter is an object filter) and clone's --config, which sets
+# configuration in the new repository.
+_RDP_GIT_PROGRAM_OPTIONS = ("--ext-diff", "--textconv", "--show-signature", "--open-files-in-pager", "--exec",
+                            "--extcmd", "--upload-pack", "--receive-pack", "--exec-path", "--sendmail-cmd",
+                            "--to-cmd", "--cc-cmd", "--header-cmd", "--smtp-server")
+_RDP_GIT_SUB_PROGRAM_OPTIONS = {"cat-file": ("--filters",), "clone": ("--config",)}
+_RDP_GIT_NOT_PROGRAM_OPTIONS = frozenset(("--text", "--filter", "--to", "--cc"))
+# The short options that run a program, by subcommand: (the letters that do, the letters taking a value,
+# after which the rest of the word is that value), so -eOops is a pattern but -iO runs the pager. grep's
+# -e and -f take the next word when nothing is glued to them (git grep -e -O searches for -O).
+_RDP_GIT_PROGRAM_LETTERS = {"grep": ("O", "efABCm"), "rebase": ("x", "sXS"), "difftool": ("x", "t"),
+                            "clone": ("uc", "obj")}
+# The subcommands that run a command given as their words: bisect run, submodule foreach (also through
+# submodule--helper) and filter-branch, whose filters and setup are shell text.
+_RDP_GIT_PROGRAM_SUBCOMMANDS = {"bisect": "run", "submodule": "foreach", "submodule--helper": "foreach",
+                                "filter-branch": None}
+# For log, show and diff, an option asking for patch output, to which a textconv filter configured before
+# the session applies: such a read gets the full checks.
 _RDP_GIT_PATCH_OPTIONS = ("--patch", "--patch-with-raw", "--patch-with-stat", "--unified", "--cc", "--dd",
                           "--combined-all-paths", "--remerge-diff", "--diff-merges", "--word-diff",
                           "--word-diff-regex", "--color-words", "--function-context", "--binary")
 # The short options of log, show and diff that ask for patch output (-p, -u, -U, -c, -m, -W, -L), found
-# anywhere in a word of short options, a glued value included.
+# in a word of short options before any letter that takes a value: the rest of the word after one of
+# _RDP_GIT_DIFF_VALUED is its value (-Sconfig searches for config), and after one of _RDP_GIT_DIFF_NEXT
+# with nothing glued, so is the next word (-S -p searches for -p). _RDP_GIT_DIFF_NEXT_LONG holds the long
+# options that take the next word when written without = (--grep -c, --author -p).
 _RDP_GIT_PATCH_LETTERS = "pucmUWL"
-# The git config read actions, each with the least and most operands it takes, and the options that may
-# precede one without changing what it does (--show-origin only before a list).
+_RDP_GIT_DIFF_VALUED = "SGOIlnMCBX"
+_RDP_GIT_DIFF_NEXT = "SGOIln"
+_RDP_GIT_DIFF_NEXT_LONG = frozenset((
+    "--grep", "--author", "--committer", "--since", "--until", "--after", "--before", "--max-count", "--skip",
+    "--min-age", "--max-age", "--exclude", "--glob", "--encoding", "--date", "--src-prefix", "--dst-prefix",
+    "--line-prefix", "--diff-filter", "--find-object", "--ignore-matching-lines", "--anchored", "--skip-to",
+    "--rotate-to", "--diff-algorithm", "--inter-hunk-context", "--ws-error-highlight"))
+# The git config read actions, each with the least and most operands it takes; the options that may
+# precede one, or a key read alone, without changing what it does; and those of them taking a value, glued
+# after = or as the next word (--file PATH, --type bool).
 _RDP_GIT_CONFIG_READS = {"--get": (1, 2), "--get-all": (1, 2), "--get-regexp": (1, 2), "--list": (0, 0),
                          "-l": (0, 0)}
-_RDP_GIT_CONFIG_MODIFIERS = frozenset(("--local", "--global", "--system", "--worktree", "--show-scope", "-z",
-                                       "--null", "--name-only", "--includes", "--no-includes", "--bool",
-                                       "--int", "--bool-or-int", "--path", "--expiry-date", "--fixed-value"))
+_RDP_GIT_CONFIG_MODIFIERS = frozenset(("--local", "--global", "--system", "--worktree", "--show-origin",
+                                       "--show-scope", "-z", "--null", "--name-only", "--includes",
+                                       "--no-includes", "--bool", "--int", "--bool-or-int", "--path",
+                                       "--expiry-date", "--fixed-value", "--no-type"))
+_RDP_GIT_CONFIG_VALUED = frozenset(("--file", "-f", "--blob", "--type", "--default"))
 
 
 def _rdp_git_subcommand(words):
@@ -11366,54 +11398,135 @@ def _rdp_long_option(name, options):
         any(option.startswith(name) for option in options)
 
 
+def _rdp_git_program_under(sub, before, after):
+    """The first word that runs a program when the git subcommand sub is called with the words after,
+    after the global options before; None when none does (_rdp_git_runs_program)."""
+    for word in before:
+        if word in ("-p", "--paginate"):
+            return word
+    run = _RDP_GIT_PROGRAM_SUBCOMMANDS.get(sub, False)
+    if run is None or (run and run in after):
+        return sub if run is None else run
+    owned = _RDP_GIT_SUB_PROGRAM_OPTIONS.get(sub, ())
+    letters, valued = _RDP_GIT_PROGRAM_LETTERS.get(sub, ("", ""))
+    skip = form = False
+    for word in after:
+        if form and ("%G" in word or "%(signature" in word):
+            return word
+        name = word.split("=", 1)[0]
+        form = _rdp_long_option(name, ("--format", "--pretty"))
+        if form and ("%G" in word or "%(signature" in word):
+            return word
+        form = form and name == word
+        if skip:
+            skip = False
+            continue
+        if name.startswith("--") and name not in _RDP_GIT_NOT_PROGRAM_OPTIONS and word != "--exec-path" and (
+                _rdp_long_option(name, _RDP_GIT_PROGRAM_OPTIONS + owned)):
+            return word
+        if len(word) > 1 and word.startswith("-") and not word.startswith("--"):
+            for k, ch in enumerate(word[1:], 1):
+                if ch in letters:
+                    return word
+                if ch in valued:
+                    skip = sub == "grep" and ch in "ef" and k == len(word) - 1
+                    break
+    return None
+
+
+def _rdp_git_runs_program(words):
+    """The first word of a plain git command that makes it run a program, named in it or configured; None
+    when the command is no git command or runs none that way: a global -p or --paginate (the pager), an
+    option of _RDP_GIT_PROGRAM_OPTIONS or of the subcommand's _RDP_GIT_SUB_PROGRAM_OPTIONS (abbreviated or
+    not), a %G placeholder or %(signature) atom in a --format or --pretty value (gpg.program), a short
+    option of _RDP_GIT_PROGRAM_LETTERS (grep -O, rebase and difftool -x, clone -u and -c), or a
+    subcommand of _RDP_GIT_PROGRAM_SUBCOMMANDS. Every word is judged, a word after -- included. Behind a
+    global option this hook does not know, every word that may be the subcommand is tried."""
+    if _rdp_basename(words[0]).casefold() != "git":
+        return None
+    at, _configured = _rdp_git_subcommand(words)
+    candidates = [at] if at is not None else [j for j in range(1, len(words)) if not words[j].startswith("-")]
+    for j in candidates:
+        found = _rdp_git_program_under(words[j].casefold(), words[1:j], words[j + 1:])
+        if found is not None:
+            return found
+    if at is None:
+        return _rdp_git_program_under("", (), words[1:])
+    return None
+
+
 def _rdp_git_reads(words):
-    """Whether a plain command is a git command that only reads: its subcommand is on _RDP_GIT_READS, no
-    global option sets configuration or runs the pager (-p, --paginate), and no word is an --output option
-    (abbreviated or not), which writes a file, an option that runs a configured or named program
-    (_RDP_GIT_RUNS_PROGRAM), or, for grep, an -O or --open-files-in-pager option, which runs a program on
-    the matches, or, for log, show and diff, an option asking for patch output (_RDP_GIT_PATCH_OPTIONS,
-    _RDP_GIT_PATCH_LETTERS) or a %G placeholder. Configuration set before the session can still make such
-    a read run a program (git diff runs diff.external and textconv filters by default); see the residue."""
+    """Whether a plain command is a git command that only reads: its subcommand is on _RDP_GIT_READS, or is
+    config in a read form (_rdp_git_config_reads); no global option sets configuration, no word is an
+    --output option (abbreviated or not), which writes a file, and the command runs no program by its
+    options (_rdp_git_runs_program); and, for log, show and diff, no option asks for patch output
+    (_RDP_GIT_PATCH_OPTIONS, or _RDP_GIT_PATCH_LETTERS in a word of short options, each option taken with
+    its value, attached or the next word, so -Sconfig and --grep -p ask for none), up to the -- ending
+    the options. Configuration set before the session can still make such a read run a program (git diff
+    runs diff.external and textconv filters by default); see the residue."""
     if _rdp_basename(words[0]) != "git":
         return False
     at, configured = _rdp_git_subcommand(words)
-    if at is None or configured or words[at] not in _RDP_GIT_READS:
-        return False
-    if any(word in ("-p", "--paginate") for word in words[1:at]):
+    if at is None or configured or _rdp_git_runs_program(words) is not None:
         return False
     sub = words[at]
+    if sub == "config":
+        return _rdp_git_config_reads(words[at + 1:])
+    if sub not in _RDP_GIT_READS:
+        return False
     for word in words[at + 1:]:
         name = word.split("=", 1)[0]
         if len(name) > 2 and "--output".startswith(name):
             return False
-        if _rdp_long_option(name, _RDP_GIT_RUNS_PROGRAM):
-            return False
-        if sub == "grep" and ((len(name) > 3 and "--open-files-in-pager".startswith(name)) or
-                              (name.startswith("-") and not name.startswith("--") and "O" in name)):
-            return False
-        if sub in ("log", "show", "diff") and (
-                _rdp_long_option(name, _RDP_GIT_PATCH_OPTIONS) or "%G" in word or
-                (word.startswith("-") and not word.startswith("--") and
-                 any(ch in _RDP_GIT_PATCH_LETTERS for ch in word[1:]))):
-            return False
+    if sub not in ("log", "show", "diff"):
+        return True
+    skip = False
+    for word in words[at + 1:]:
+        if skip:
+            skip = False
+            continue
+        if word == "--":
+            break
+        name = word.split("=", 1)[0]
+        if name.startswith("--"):
+            if _rdp_long_option(name, _RDP_GIT_PATCH_OPTIONS):
+                return False
+            skip = name in _RDP_GIT_DIFF_NEXT_LONG and name == word
+            continue
+        if not word.startswith("-"):
+            continue
+        for k, ch in enumerate(word[1:], 1):
+            if ch in _RDP_GIT_PATCH_LETTERS:
+                return False
+            if ch in _RDP_GIT_DIFF_VALUED:
+                skip = ch in _RDP_GIT_DIFF_NEXT and k == len(word) - 1
+                break
     return True
 
 
 def _rdp_git_config_reads(args):
-    """Whether the words after git config only read, judged by position: exactly one key (no option, and
-    holding a dot, so no subcommand such as edit), the implicit read; or a read action of
-    _RDP_GIT_CONFIG_READS after modifiers only, followed by the number of operands it takes, none an
-    option. Every other form may write: a trailing word is a value there, so git config core.worktree get
-    sets core.worktree to get."""
-    if len(args) == 1 and not args[0].startswith("-"):
-        return "." in args[0]
+    """Whether the words after git config only read, judged by position: modifiers only
+    (_RDP_GIT_CONFIG_MODIFIERS, --type=TYPE, and _RDP_GIT_CONFIG_VALUED with their value, glued after = or
+    the next word), then exactly one key (no option, and holding a dot, so no subcommand such as edit), the
+    implicit read; or a read action of _RDP_GIT_CONFIG_READS followed by the number of operands it takes,
+    none an option. Every other form may write: git config stops reading options at its first operand, so
+    a trailing word is a value there (git config core.worktree get, and git config core.bare --local, set
+    the key)."""
     i = 0
-    while i < len(args) and (args[i] in _RDP_GIT_CONFIG_MODIFIERS or args[i] == "--show-origin" or
-                             args[i].startswith("--type=")):
-        i += 1
-    if i == len(args) or args[i] not in _RDP_GIT_CONFIG_READS:
+    while i < len(args):
+        name = args[i].split("=", 1)[0]
+        if args[i] in _RDP_GIT_CONFIG_MODIFIERS or (name in _RDP_GIT_CONFIG_VALUED and name != args[i] and
+                                                    name.startswith("--")):
+            i += 1
+        elif args[i] in _RDP_GIT_CONFIG_VALUED:
+            i += 2
+        else:
+            break
+    if i >= len(args):
         return False
-    if "--show-origin" in args[:i] and args[i] not in ("--list", "-l"):
+    if len(args) == i + 1 and not args[i].startswith("-"):
+        return "." in args[i]
+    if args[i] not in _RDP_GIT_CONFIG_READS:
         return False
     least, most = _RDP_GIT_CONFIG_READS[args[i]]
     operands = args[i + 1:]
@@ -11532,6 +11645,17 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
     words, why = _rdp_plain_words(command, commands)
     if words is None:
         return _rdp_not_plain(cfg, _rdp_mentions(command, commands), why)
+    # A git command that runs a program by its options or subcommand can run any shell text, which no word
+    # check sees (.aiqt inside a pager command), so it is refused whatever it names.
+    program = _rdp_git_runs_program(words)
+    if program is not None:
+        return ("deny", "the git command runs a program ({}): an option or subcommand that runs a program "
+                "named in it or configured (the pager of -p, --paginate or grep -O, an external diff, a "
+                "textconv or smudge filter, a signature check, rebase or difftool -x, an upload, receive or "
+                "archive program, an exec path, bisect run, submodule foreach, filter-branch) can run shell "
+                "text that writes, moves or removes the registry, so in a session whose registry binds "
+                "review dispatch it is refused whatever it names, and an operator runs it outside the "
+                "session".format(program))
     # A git command that only reads treats every word as data: it neither writes the registry nor moves
     # the repository, whatever its words name.
     reads = _rdp_git_reads(words)
