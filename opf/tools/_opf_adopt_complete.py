@@ -1206,6 +1206,11 @@ def _parity_trees():
     def plain(obs):
         return [dict(MAX_ENTRIES=planner.MAX_ENTRIES)]  # the shipped bounds
 
+    def at_depth(*bounds):
+        return lambda obs: [dict(MAX_DEPTH=d) for d in bounds]
+
+    claude31 = ".claude" + "/d" * 31
+    claude32 = ".claude" + "/d" * 32
     big = 8 * 1024 * 1024
     return (
         ("empty-product", {}, [], [], [], None, (plain,)),
@@ -1238,7 +1243,60 @@ def _parity_trees():
          [], [], (plain, lambda obs: [dict(MAX_TOTAL_BYTES=sizes(obs) - big)])),
         ("review-nested-depth", {chain32 + "/d/f": b"x"}, [], [], [chain32 + "/d"], [], (plain,)),
         ("review-nested-depth-control", {chain32 + "/f": b"x"}, [], [], [chain32], [], (plain,)),
-    )
+        # Absent roots: the walker probes each requested root at depth 0 and never lists an absent name, so
+        # an absent row beneath a recorded directory is no child of it (QA round 15: the 32-deep chain).
+        ("review-absent-under-depth-bound", {}, [claude32], [], [claude32 + "/missing"], None,
+         (plain, at_depth(31, 32, 33), entries, path_bytes)),
+        ("absent-deep-under-depth-bound", {}, [claude32], [], [claude32 + "/missing/x/y"], None,
+         (plain, at_depth(31, 32, 33), entries, path_bytes)),
+        ("absent-beside-depth-bound", {claude32 + "/f": b"f"}, [], [], [claude31 + "/missing"], None,
+         (plain, at_depth(31, 32), entries, path_bytes)),
+        ("absent-under-source", {"s/a/f": b"f", "s/g": b"g"}, [], ["s"], ["s/a/missing", "s/zz/y"], None,
+         (plain, depth, entries, path_bytes)),
+        ("absent-at-entry-bound", dict(("s/f{:02d}".format(i), b"x") for i in range(12)), [], ["s"],
+         ["s/missing", "t/u/v"], None, (plain, entries, path_bytes, total)),
+        ("absent-under-absent-parent", {"CLAUDE.md": b"c"}, [], [], [".github", "gone/x", "gone2"], None,
+         (plain, entries, path_bytes)),
+        ("absent-under-resolved-store", {".working/imports/a/f": b"f"}, [], [],
+         [".working/imports/a/missing", ".working/imports/b/c"], [], (plain, depth, entries, path_bytes)),
+    ) + _random_parity_trees(plain, entries, path_bytes, at_depth(1, 2, 3, 4, 5))
+
+
+def _random_parity_trees(*sweeps, count=16, seed=447):
+    """Seeded random producer-parity trees (storeless): one to six files and directories under the tops src,
+    legacy, .claude, .github and .gemini, a directory path at most five components long and a file path at
+    most six. Only .claude and .gemini are detection roots; .github content sits outside the .github/workflows
+    detection root. About half the trees declare one top as a source; the rest declare none, so their src,
+    legacy and .github content is never walked. Each tree requests one to three targets, none beneath
+    another, most of them absent (a missing name, or a missing chain, beneath an existing directory, beneath
+    the product root, or beneath another absent target's parent), so absent rows lie beside and beneath
+    walked directories routinely."""
+    import random
+    rng = random.Random(seed)
+    tops = ("src", "legacy", ".claude", ".github", ".gemini")
+    trees = []
+    for n in range(count):
+        files, dirs, existing = {}, [], set()
+        for i in range(rng.randint(1, 6)):
+            parts = [rng.choice(tops)] + [rng.choice("abc") for _ in range(rng.randint(0, 4))]
+            existing.update("/".join(parts[:k]) for k in range(1, len(parts) + 1))
+            if rng.random() < 0.6:
+                files["/".join(parts) + "/f{}".format(i)] = bytes(rng.randint(0, 3))
+            else:
+                dirs.append("/".join(parts))
+        sources = [rng.choice(sorted({p.split("/")[0] for p in existing}))] if rng.random() < 0.5 else []
+        targets = []
+        for k in range(rng.randint(1, 3)):
+            if rng.random() < 0.15:
+                path = rng.choice(sorted(existing))
+            else:
+                base = rng.choice(sorted(existing) + [""] + [t.rpartition("/")[0] for t in targets if "/" in t])
+                path = "/".join(([base] if base else []) +
+                                ["x{}{}{}".format(n, k, j) for j in range(rng.choice((1, 1, 2, 3)))])
+            if not any(planner._under(path, t) or planner._under(t, path) for t in targets):
+                targets.append(path)
+        trees.append(("random-{:02d}".format(n), files, dirs, sources, targets, None, sweeps))
+    return tuple(trees)
 
 
 def _parity_sweep():
@@ -1281,6 +1339,19 @@ def _parity_sweep():
                         agreed = agreed and problem is not None and got.findings[0] in problem
                     if not agreed:
                         return False, accepted, refused, "{} {} {} {}".format(label, bounds, got.findings, problem)
+            # Each absent target, declared a source instead: the producer refuses it, and the rebuild over
+            # the observation recording it so refuses with the producer's text.
+            kinds = {row["path"]: row["kind"] for row in sealed["entries"]}
+            for path in [t for t in sealed["targets"] if kinds.get(t) == "absent"]:
+                swapped = dict(sealed, sources=sorted(sealed["sources"] + [path]),
+                               targets=[t for t in sealed["targets"] if t != path])
+                with mock.patch.multiple(planner, **lifted):
+                    got = planner.investigate(root, sources=swapped["sources"], targets=swapped["targets"])
+                    problem = rebuilt_observation_problem(swapped)
+                refused += 1
+                agreed = agreed and got.status != VALID and problem is not None and got.findings[0] in problem
+                if not agreed:
+                    return False, accepted, refused, "{} source {} {} {}".format(label, path, got.findings, problem)
     return agreed, accepted, refused, len(trees)
 
 
@@ -1956,7 +2027,7 @@ def self_test():
               and dict(path="legacy", kind="directory") in built_obs.get("entries", []))
         # Producer parity: investigate() on a real tree and the rebuild over its sealed observation agree.
         agreed, accepted, refused_count, trees = _parity_sweep()
-        check("check-2-rebuild-producer-parity", agreed and accepted >= 10 and refused_count >= 10 and trees >= 20)
+        check("check-2-rebuild-producer-parity", agreed and accepted >= 100 and refused_count >= 100 and trees >= 45)
         # The walker stops early only where build_observation refuses (its docstring): on each tree the
         # producer's refusal is raised while the walker lists or reads, before it has listed or read it all,
         # and the rebuild over the observation sealed with the bounds lifted refuses with the same text.

@@ -382,16 +382,24 @@ BUILT_FIELDS = ("scope", "sources", "targets", "exclusions", "entries", "candida
 
 class RowListing:
     """A listing rebuilt from an observation's entry rows (path to row, each passing entry_row_problem) and
-    its recorded walk, for build_observation: a directory's names are the rows directly beneath it, a file
-    row gives its recorded size and digest, an excluded row stands for an entry present and never read, a
-    missing row reads as absent. A root's parent is missing when the nearest recorded ancestor is absent
-    or an enumerated directory not holding the next component, and present when it holds it; a top-level
-    root's parent (the product root) is always present; for any other root with no recorded ancestor, missing
-    exactly when the walk records the root unreached."""
+    its recorded walk, for build_observation, answering each question as _TreeListing answers it over the
+    recorded tree. A directory's names are the rows directly beneath it that record an entry present (a
+    directory, file or excluded row): the walker lists only names that are there, so an absent row is never
+    a name in a listing; it records a requested root that stat found missing, and is reached only as that
+    root (through at_root and stat at depth 0). A file row gives its recorded size and digest, an excluded
+    row stands for an entry present and never read, a missing or absent row reads as absent. A root's parent
+    is missing when the nearest recorded ancestor is absent or an enumerated directory not holding the next
+    component, and present when it holds it; a top-level root's parent (the product root) is always present;
+    for any other root with no recorded ancestor, missing exactly when the walk records the root unreached."""
 
     def __init__(self, rows, unreached):
         self.rows = rows
         self.unreached = set(unreached)
+        self.names = {}
+        for path, row in rows.items():
+            if row["kind"] != "absent":
+                parent, _sep, name = path.rpartition("/")
+                self.names.setdefault(parent, []).append(name)
 
     def at_root(self, path, visit):
         parts = path.split("/")
@@ -419,7 +427,7 @@ class RowListing:
 
     def children(self, handle, name, node, visit):
         path = node[1]["path"]
-        visit(path, [p.rpartition("/")[2] for p in self.rows if p.rpartition("/")[0] == path])
+        visit(path, list(self.names.get(path, ())))
 
     def read(self, handle, name, node, budget):
         return node[1]["size"], node[1]["digest"]
