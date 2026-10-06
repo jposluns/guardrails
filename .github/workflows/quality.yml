@@ -559,6 +559,12 @@ jobs:
       - name: Git option table
         run: python3 -I -B tools/check_git_option_table.py
 
+      - name: Dangerous-API lint self-test
+        run: python3 -I -B tools/check_dangerous_api.py --self-test
+
+      - name: Dangerous-API lint
+        run: python3 -I -B tools/check_dangerous_api.py
+
       # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit
       # that proves the harness end to end, and the internal-name leak gate. Mirrors the same legs in
       # tools/run_all_checks.sh (roster symmetry). The advisory digest runs last: audit_reference.py

@@ -2,15 +2,16 @@
 
 This file is generated from the enforceability ledger, the enforcement roadmap, and the rule corpus by tools/gen_enforcement_register.py. Do not edit it by hand; change the source and regenerate.
 
-This register lists every rule and the shipped mechanical controls linked to it. An enforced status records linkage, not complete coverage: at least one shipped gate or hook cites the rule, and each mechanism's class and residual describe the boundary of what it checks. A linked mechanism may cover only part of a rule's violation surface. A status of none means enforcement has not been built yet; pending also means enforcement has not been built yet, and its description states the intended build. The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim and not summarized. The class letter is a maintainer assessment of the check's decision procedure, not a coverage score.
+This register lists every rule and the shipped mechanical controls linked to it. An enforced status records linkage, not complete coverage: at least one shipped gate or hook cites the rule, and each mechanism's class and residual describe the boundary of what it checks. A linked mechanism may cover only part of a rule's violation surface. A partial status records the same linkage and states that the linked mechanisms are known to cover only part of the rule; their residuals name what they do not cover. A status of none means enforcement has not been built yet; pending also means enforcement has not been built yet, and its description states the intended build. The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim and not summarized. The class letter is a maintainer assessment of the check's decision procedure, not a coverage score.
 
 ## Summary
 
 | Status | Rules |
 |---|---:|
-| Enforced | 34 |
+| Enforced | 28 |
+| Partial | 9 |
 | Pending | 0 |
-| None | 98 |
+| None | 95 |
 
 ## Rules
 
@@ -38,7 +39,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Anything wrong is fixed first | `actbef` | None | Enforcement has not been built yet. |
 | Attestation lines are harness-owned | `attint` | None | Enforcement has not been built yet. |
 | Branch and merge only on green | `artbr1` | Enforced | `hook:protected-line-guard`, class b |
-| Cut branches from the live protected line and re-home after a rewrite | `brnrot` | Enforced | `gate:branch-root`, class c; `hook:branch-root-guard`, class c |
+| Cut branches from the live protected line and re-home after a rewrite | `brnrot` | Partial | `gate:branch-root`, class c; `hook:branch-root-guard`, class c |
 | A check fails closed on input it cannot read | `chkfcl` | None | Enforcement has not been built yet. |
 | Commit identity | `cmtidn` | Enforced | `hook:commit-identity`, class b |
 | Bind to the explicit target, not the ambient context | `expbnd` | Enforced | `hook:git-discard`, class b; `hook:git-explicit-binding`, class b; `hook:git-stash-ref`, class b; `hook:orch-dispatch-ledger`, class c |
@@ -52,15 +53,15 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | A rerun pass does not erase an earlier failure | `rerunf` | None | Enforcement has not been built yet. |
 | A review in flight pins its artefact | `rvwpin` | None | Enforcement has not been built yet. |
 | Make retries safe to repeat | `rtsafe` | None | Enforcement has not been built yet. |
-| Separate task changes from pre-existing work | `septsk` | Enforced | `hook:write-scope`, class c |
+| Separate task changes from pre-existing work | `septsk` | Partial | `hook:write-scope`, class c |
 | Stage artefacts and promote only on green | `stgprm` | None | Enforcement has not been built yet. |
 | A launched task stays observable | `trkasy` | Enforced | `hook:orch-dispatch-ledger`, class c; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-truncation-guard`, class b; `hook:orch-untracked-wait-loop`, class b |
 | Validation is a gate on apply | `valgat` | None | Enforcement has not been built yet. |
-| Workers produce inert data | `wowo01` | Enforced | `hook:write-scope`, class c |
+| Workers produce inert data | `wowo01` | Partial | `hook:write-scope`, class c |
 | Use absolute paths, not relative | `abspth` | Enforced | `hook:abs-paths`, class b; `hook:abs-paths-bash`, class b |
 | A behavioural change carries a check that fails without it | `chgchk` | Enforced | `gate:selftest-execution`, class a |
 | Preserve compatibility or provide a migration path | `cmpmig` | None | Enforcement has not been built yet. |
-| Confirm the execution target before a side-effectful operation | `exetgt` | Enforced | `gate:derived-command-parameters`, class c; `hook:write-scope`, class c |
+| Confirm the execution target before a side-effectful operation | `exetgt` | Partial | `gate:derived-command-parameters`, class c; `hook:write-scope`, class c |
 | Defence in depth by default | `dfdpth` | None | Enforcement has not been built yet. |
 | A borrowed process timer is restored elapsed-aware | `tmrrst` | None | Enforcement has not been built yet. |
 | A verification finding is fixed, not argued away | `fndfix` | None | Enforcement has not been built yet. |
@@ -101,22 +102,22 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Cost tier | `csttir` | None | Enforcement has not been built yet. |
 | Classify content by sensitivity tier | `datbnd` | None | Enforcement has not been built yet. |
 | Egress goes only to expected destinations | `secegr` | None | Enforcement has not been built yet. |
-| Keep secrets out | `secsec` | Enforced | `gate:secrets-scan`, class c; `hook:secrets-shift-left`, class c |
+| Keep secrets out | `secsec` | Partial | `gate:secrets-scan`, class c; `hook:secrets-shift-left`, class c |
 | Retrieval enforces the requester's authorization | `seclpr` | None | Enforcement has not been built yet. |
 | No cross-context bleed | `secncb` | None | Enforcement has not been built yet. |
 | No disclosure of secrets or hidden context | `secndc` | None | Enforcement has not been built yet. |
 | Rotate a leaked secret | `secrot` | None | Enforcement has not been built yet. |
 | Strong authentication | `secau1` | None | Enforcement has not been built yet. |
 | Least-privilege authorization | `secazn` | None | Enforcement has not been built yet. |
-| Configuration that executes on load is treated as code | `seccet` | Enforced | `gate:python-launcher-isolation`, class c |
-| Sound cryptography | `seccry` | None | Enforcement has not been built yet. |
+| Configuration that executes on load is treated as code | `seccet` | Partial | `gate:python-launcher-isolation`, class c |
+| Sound cryptography | `seccry` | Partial | `gate:dangerous-api`, class c |
 | Trusted, pinned dependency provenance | `secsup` | None | Enforcement has not been built yet. |
 | Fail closed in security-relevant paths | `secfcl` | None | Enforcement has not been built yet. |
 | Validate federated identity and token flows | `secfid` | None | Enforcement has not been built yet. |
 | Validate and contain uploaded files | `secupl` | None | Enforcement has not been built yet. |
 | Guardrail configuration is integrity-protected | `secgci` | None | Enforcement has not been built yet. |
 | Human authorization for consequential actions | `sechau` | None | Enforcement has not been built yet. |
-| Validate external input at the boundary | `secinp` | None | Enforcement has not been built yet. |
+| Validate external input at the boundary | `secinp` | Partial | `gate:dangerous-api`, class c |
 | Trust between agents is earned, not inherited | `secagt` | None | Enforcement has not been built yet. |
 | Key management | `seckey` | None | Enforcement has not been built yet. |
 | Least-privilege tool and file access | `seclpt` | None | Enforcement has not been built yet. |
@@ -132,7 +133,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Protect audit records from the actors they record | `secaud` | Enforced | `gate:mistakes-register`, class a |
 | Reject known-vulnerable dependency versions | `secvln` | None | Enforcement has not been built yet. |
 | Publish artefacts with verifiable integrity | `secpub` | None | Enforcement has not been built yet. |
-| Deserialize untrusted data only as data | `secdsz` | None | Enforcement has not been built yet. |
+| Deserialize untrusted data only as data | `secdsz` | Partial | `gate:dangerous-api`, class c |
 | Secure by default configuration | `seccfg` | None | Enforcement has not been built yet. |
 | Security logging with traceable context | `seclog` | None | Enforcement has not been built yet. |
 | Secure session and token handling | `sectok` | None | Enforcement has not been built yet. |
@@ -272,6 +273,19 @@ Technical limits (from the enforcement ledger):
 
 ```
 A byte-identity drift gate over the artefact tools/gen_cursor.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.
+```
+
+### `gate:dangerous-api`
+
+- Platform: `ci`
+- Default: `block`
+- Entry point: `tools/check_dangerous_api.py`
+- Class: `c`
+
+Technical limits (from the enforcement ledger):
+
+```
+Class c, partial: it covers part of each linked rule, and the clauses of each rule it does not cover are named below. An AST lint (tools/check_dangerous_api.py) over every *.py file under tools/, opf/tools/ (the vendored opf/tools/_vendor tree excluded; every other directory, __pycache__ included, is walked), .aiqt/core/hooks/scripts/ and each plugin/*/hooks/scripts/ tree, parsed and never imported or run. It fails on: a reference to a named unsafe deserializer (pickle, _pickle, cPickle, dill, cloudpickle load/loads/Unpickler and their private _load/_loads/_Unpickler, marshal load/loads, shelve open, Shelf classes and its Unpickler re-export, jsonpickle decode and its loads alias, the multiprocessing ForkingPickler.loads, pandas.read_pickle, joblib.load, torch.load, the yaml unsafe and full load functions, constructors and Loader classes), a yaml.load or yaml.load_all whose Loader is not proven a safe or base loader, an allow_pickle= that is not literal False, and a numpy.load whose third positional argument (allow_pickle) is not literal False or a * spread hides (secdsz); a verify= or verify_ssl= that is not a true-valued literal (False, 0, None and an empty string are false-valued), an ssl= that is False or 0, a .verify attribute set to anything but a true-valued literal, any reference to _create_unverified_context, _create_stdlib_context, _create_default_https_context, CERT_NONE, CERT_OPTIONAL or CLIENT_AUTH, an ssl.SSLContext whose protocol is not proven ssl.PROTOCOL_TLS_CLIENT, and a check_hostname or verify_mode (cert_reqs=) set, by assignment, any other store (an unpacked, for, with or comprehension target), literal setattr or keyword, to anything but True or a proven ssl.CERT_REQUIRED, and a standard-library client whose default context skips certificate checks (smtplib.SMTP_SSL, poplib.POP3_SSL and ftplib.FTP_TLS whose context=, imaplib.IMAP4_SSL whose ssl_context=, and any method named starttls or stls, called as x.starttls(...) or getattr(x, 'starttls')(...), whose context (called on an imported or locally defined class, as in smtplib.SMTP.starttls(server), the first positional argument is self) is not proven a verifying context: a call of ssl.create_default_context() (no purpose, or a proven ssl.Purpose.SERVER_AUTH) or ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT) with no * or unreadable ** spread, or a name every binding of which, in every scope Python may read it from, is such a call; so an absent or None context, a parameter (a None default included), an attribute (self.context), a name with any other binding (a walrus, a starred unpacking, a conditional rebinding, a copy of another name, an import) and any other expression are findings (a bare annotation such as ctx: object, or a del, is no binding); any ssl.get_server_certificate, which never checks the hostname whatever ca_certs it is given; a logging.handlers.SMTPHandler whose secure= is set or hidden by a spread), each also when referenced without a call, and a server_hostname= that is an empty literal (seccry); a subprocess run/call/check_call/check_output/Popen whose shell is on, or unseen through a non-literal ** spread, a * spread or a ninth positional argument, over a non-literal command, and os.system, os.popen, posix.system, nt.system, subprocess.getoutput/getstatusoutput, asyncio.create_subprocess_shell (asyncio.subprocess included) and loop.subprocess_shell over a non-literal command or one a spread hides (secinp); and any reference to eval or exec (builtins included), types.FunctionType and the runpy, timeit, cProfile, profile, pdb and code runners, and any call of or reference to a method named exec_module or load_module, whatever object it is called on (secinp); a method judged by its name alone (starttls, stls, subprocess_shell, exec_module, load_module) referenced without a call, as x.name or getattr(x, 'name'), is an alias and a finding. Names resolve per scope as Python binds them, so a binding in another function never hides the one in force, and every binding a module, class or comprehension scope may hold is a candidate; an unbound name falls back to the builtin of that name where one exists. A sink module reached as an attribute of another module names that module (shutil.os.system is os.system; from logging.handlers import pickle binds pickle), except an attribute named like the module holding it (timeit.timeit). getattr(x, 'name') is read as x.name, and so is a name or attribute directly followed by a string literal in a call's positional arguments or a tuple or list display (the monkeypatch idiom (os, 'system') reads os.system), except in setattr, delattr, hasattr and a mock patch.object, which store, delete or test the attribute. A sink module (every dotted prefix of every named sink, derived from the sink sets, so multiprocessing.reduction, logging.handlers and torch are included) used other than as an attribute base (m.x; the first argument of getattr, setattr, delattr or a mock patch.object with a literal name; the argument of hasattr; or the name so read with a string literal) is a finding: bound to another name in any form (assignment, unpacking, walrus, conditional or boolean expression, default parameter, match capture, for or with target), passed as an argument, returned, yielded, held in a container, or passed to getattr with a non-literal name, unless a string literal directly follows it (out of scope, below). A judged callable referenced without a call, a literal dynamic import of a sink module, and a star import from a named sink module are also findings. Keywords are read as Python binds them: a literal ** dict by its keys, and so a ** or dict(...) inside it at any depth, in overwrite order (a duplicate key keeping its last value; a non-literal spread inside it leaves the keys written before it unseen, though a literal verify, ssl, check_hostname, server_hostname, verify_mode, cert_reqs or allow_pickle written there is still judged), and dict(...) only where dict can only be the builtin. A safe value (a yaml Loader, an SSLContext protocol, a verify_mode or cert_reqs, a client's context) is proven only when every binding the name may hold names it (for a context, is a call of a verifying constructor); a name that may also hold an assignment, a parameter or any other value the lint cannot name, an unbound name, and an expression prove nothing, so they are findings. A current legitimate site is admitted only by a reviewed in-gate allowlist entry (path, enclosing qualname, kind, exact count, reason line), and a count that no longer matches is itself a finding; the shipped entries are self-test mutant, fixture, stub, fault-injection, deny-table, static-analysis and own-source loader sites over the repository's own source. Each file is decoded as Python decodes it (a BOM and a PEP 263 coding cookie honoured); a cookie other than utf-8, a file it cannot stat, read, decode or parse, a directory it cannot list or search (each plugin directory and its hooks directory included), any symlink inside a scanned root or directly under plugin/, a missing root and a non-regular *.py entry are cannot-evaluate (exit 2), never a clean pass. Per rule, NOT covered: for secdsz, deserialization in other languages and file formats, deserializers outside the named set, and dispatch the lint cannot see; for seccry, the choice of algorithm, mode, key size and other parameters, weak, deprecated or home-grown schemes, and protection of data at rest (only certificate and hostname verification in transit is linted); for secinp, validation of external input for type, range and format at the boundary, and the SQL, markup and template injection classes (only the operating-system command and code-execution sinks are linted, by literalness). Out of scope: this lint guards against ACCIDENTAL use of a dangerous API in the repository's own code written the ordinary way, so code deliberately built to hide a sink is not claimed: a string-assembled or string-literal module name (importlib or __import__ with a computed name, sys.modules[...]; a literal import of a sink module is a finding, but the module it returns is not followed), getattr with a computed name or a sink module followed by an adjacent string literal (f(os, 'x') and (pickle, 'x')[0] read the module as an attribute base, not an escape, and getattr(shutil, 'os') is not read as the os module), __builtins__ aliasing (m = __builtins__, __builtins__.exec, __builtins__[...]), a rewritten module attribute (ssl.PROTOCOL_TLS_CLIENT = 2 still proves the protocol) and dunder access (__getattribute__, __setattr__, object.__setattr__, __dict__). It also does NOT catch: dynamic dispatch (getattr with a non-literal name on an object other than a sink module, setattr with a non-literal name, globals() or vars() lookups); a numpy.load reached through an alias and given allow_pickle positionally; an attribute chain whose base is not an import binding (a parameter, self, a call result or a subscript, so self.os.system and sys.modules['os'].system are not resolved); a sink module re-exported under a name other than its own (mod._p.loads where mod binds pickle as _p); a sink function obtained from such an object or from a call; a method run on a profiler, debugger or trace object; a shell reached through an argv list that names a shell (sh -c) or a Python interpreter given code (sys.executable with -c or -m), an executable= override, or os.exec*, os.spawn* or pty.spawn of a shell; a verify, verify_ssl, ssl, check_hostname, server_hostname, verify_mode, cert_reqs or allow_pickle value hidden in, or overwritten by, a non-literal ** spread (a literal ** dict is read by its keys at any depth, in Python's overwrite order; only the subprocess shell switch and the command, Loader, protocol, context and secure= of the judged sinks are denied when unseen), and a verify given positionally (Session.merge_environment_settings(url, proxies, stream, verify, cert)); a verifying context changed after it is built other than by a check_hostname or verify_mode store (its trust store replaced through load_verify_locations, or a setattr with a computed name), and a context= given to a client whose default verifies (urllib, http.client, asyncio ssl=), judged only where the context is built; a starttls or stls called on a class reached other than through an import binding or a locally defined class (read as bound) and a client configured from logging.config data; TLS verification disabled inside a third-party library's defaults, through a library option it does not name, or through environment variables; a sink whose literal arguments are still attacker-shaped (the lint judges literalness, not data flow); and code outside the scanned roots (the vendored tree, .github, .preview, site, and Python embedded in a non-.py file). The allowlist reasons are maintainer-reviewed assertions; the gate checks their presence and count, not their truth, so a reviewed site replaced by an unsafe one in the same function at the same count passes. Its linkage to secenc (output encoded for its sink) and secout (generated output is untrusted input) is arguable, so none is claimed.
 ```
 
 ### `gate:derived-command-parameters`
