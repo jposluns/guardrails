@@ -1179,12 +1179,14 @@ guarantees:
 
 1. Resolve the store, then any interrupted authoring transaction MUST be reconciled first.
    Reconciliation writes the store, so it MUST run only under the single-writer lease that
-   publication uses: a lease held by a live or possibly-live holder MUST refuse before any recovery
-   write and MUST NOT be seized, and a leftover lease from a confirmed-dead run of the same verb
-   MAY be released through this reconciliation itself, as the section 5.7 live-holder rule grants.
-   Any other present lease, a confirmed-dead leftover of another verb included, MUST refuse before
-   any recovery write and MUST NOT be released by this reconciliation. An operand changed since the
-   interruption, to bytes that are neither its journaled prestate nor its
+   publication uses: when a live or possibly-live holder holds that lease, reconciliation MUST
+   refuse before any recovery write and MUST NOT seize the lease, and reconciliation MAY itself
+   release a leftover lease from a confirmed-dead run of the same verb, since that release is the
+   reconciliation on resume through which section 5.7 requires a leftover lease from a dead run to be
+   released.
+   When any other lease is present, a confirmed-dead leftover of another verb included,
+   reconciliation MUST refuse before any recovery write and MUST NOT release that lease.
+   An operand changed since the interruption, to bytes that are neither its journaled prestate nor its
    planned poststate nor a write of either torn by the interruption, MUST be reported and refused,
    never overwritten. A reconciled interruption MUST refuse the new operation, so the operator
    inspects it before anything new is written. A fresh-only implementation (section 16.1) performs

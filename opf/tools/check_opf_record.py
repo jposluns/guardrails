@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T77)
+  check_opf_record.py --self-test                    the fixture suite (T1-T83)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
+                                                     through an assertion (_discriminate)
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
 self-test. Every fixture is a real store built beneath this gate's own mkdtemp root: `opf init`, a commit,
@@ -24,7 +25,7 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T5  a kill at each journal step of create and of an assistant transition (three operands: counters,
       index, worklog) and of a maintainer done-with-receipt (four operands: counters, backlog index, done
       index, worklog) leaves the killed run's lease; the next run releases that confirmed-dead holder's
-      leftover lease through its own reconciliation (spec 5.7, the T74 live-holder rule) and reconciles,
+      leftover lease through its own reconciliation (spec 5.7, the T74 dead-run release clause) and reconciles,
       leaving the operands exactly the prestate or exactly the poststate, the poststate iff the transaction
       is COMPLETE, and no killed run reports an id (flip: write counters outside the journaled transaction)
   T6  an assistant `transition BI done` lands done/proposed with zero receipts; an assistant
@@ -343,8 +344,9 @@ Each case runs on its own copy of that template; the root is removed in a finall
       refused by the planner's own record validation, so the labelled step assertion turns red: the
       planner writes no delivery bundle, so the send is refused; the rejection of sent/proposed keeps
       the bundle; the rejection of acknowledged/proposed keeps the receipt keys)
-  T74 recovery applies the spec 5.7 live-holder rule: a leftover lease whose holder is confirmed dead on
-      this host is released through the reconciliation itself, in the same run, and the outcome names it;
+  T74 recovery applies the spec 5.7 never-seize and dead-run release clauses: a leftover lease whose
+      holder is confirmed dead on this host is released through the reconciliation itself, in the same
+      run, and the outcome names it;
       a LIVE local holder, a confirmed-dead holder on another host, a dead holder under a non-closed
       payload schema, a malformed oversized payload with a valid 64 KiB prefix, an EPERM liveness probe,
       and another verb's dead holder each refuse before any recovery write with every byte intact (never
@@ -366,7 +368,45 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T77 every failure after the leftover lease's release carries the released-lease report, whatever its
       type: an EMFILE on the retried O_EXCL claim, a JournalError reopening the lease directory, and an
       interrupt (the report attached as a note) (flip: the round-2 retry, which appended the report to a
-      WriteGuardError alone)
+      WriteGuardError alone); and an EIO or an interrupt at each fsync after the release (the release's
+      durability fsync, then the retried claim's payload and directory fsyncs) carries the report too
+      (flips: the round-2 retry; the durability fsync outside the reported window)
+  T78 a failed examination lock over a LIVE holder's lease names that holder and never calls its lease
+      leftover, and the plain live-holder refusal does not either, even when the holder's own host name
+      carries that word; the appended held-lease refusal opens its own sentence, a concurrently HELD lock
+      offers no confirmed-no-run-is-live remedy, and every remedy offered states the one case in which
+      opf removes another run's lease, never that it removes none (flips: the lock refusal without the
+      held-lease refusal appended; the lock messages calling the unexamined lease leftover; the held-lease
+      remedy calling a live holder's lease leftover; the round-1 join, lowercase and with that remedy; the
+      held-lease refusal claiming the tool never removes a foreign lease)
+  T79 a release that finds an oversized, non-regular (a directory or a symlink) or unreadable
+      replacement reports it as that, never as ABSENT, and a held-lease refusal over an oversized payload
+      reports it oversized, never naming a holder read from its prefix (flips: the release's cause
+      dropped; the single bounded prefix read restored; a symlink's ELOOP read as unreadable; an
+      unreadable entry read as absent)
+  T80 spec 8.8 item 1 makes reconciliation the agent that refuses and releases, and grounds the release
+      in the section 5.7 clause, naming the reconciliation on resume that clause means, never "that
+      reconciliation" read against the transaction reconciliation beside it (flips: the earlier wording,
+      under which the lease refuses and the grant cites a 5.7 "live-holder rule" that 5.7 does not name;
+      the round-1 citation, whose "that reconciliation" points at the wrong reconciliation)
+  T81 the held-lease refusal denies only the removal of the lease now present: when a peer takes the
+      pathname after recovery released a confirmed-dead leftover, the retried claim's refusal reports
+      that release and never says this run removed no lease, the peer's lease left byte for byte; a
+      holder quoting the remedy's words never cuts the refusal under a held examination lock; and the
+      holder diagnostic names an absent, non-regular, oversized or unreadable lease as what it is, or
+      says it was not read (flips: the run-wide denial; the first-occurrence split; the round-2
+      "absent or a non-regular entry" for every unread lease)
+  T82 the discriminator binds each flip to an assertion: a flipped run that goes red only through a
+      cannot-evaluate backstop (a crash the CLI turned into exit 2) or a harness exception never counts
+      as discriminating, while an assertion red, or a backstop caused by a recorded injection the flip
+      declares, does (flip: the round-2 discriminator, which refused only a signature TypeError at the
+      backstop and let a harness exception escape)
+  T83 a declared backstop is bound to the recorded injection that must cause it: an unrelated crash
+      under a declared flip, another exception type carrying the declared text, a twin of the injected
+      exception raised in its place, a crash the CLI turns into an unexpected-error refusal, and a
+      SystemExit from the flipped run each fail the discrimination (flip: the round-3 discriminator,
+      which matched each declared text as a substring of any backstop line and let a BaseException
+      escape)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -387,6 +427,7 @@ import errno
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import stat
@@ -504,12 +545,63 @@ def assert_no_auto_maintenance(env, base):
                       " repository" % (spawned,))
 
 
+# Any crash inside a CLI run (a flip's replacement raising NameError, or a TypeError once it no longer
+# matches its caller) meets that CLI's class-width backstop, which prints a cannot-evaluate line and exits
+# 2, an ordinary refusal exit that a test's assertion then reads as red. Every such line, from any verb
+# (record, render, doctor, upgrade, adopt) or the cli self-test, matches _BACKSTOP, as does the refusal a
+# store-resolution wrapper makes of a crash ("refused: unexpected error resolving the store ... (repr)").
+# While _discriminate runs a flip it pushes a list here, and cli, child and the T75 children add each
+# backstop line they print to the innermost list, so the flipped run's red is judged with every backstop
+# it met in view. A crash that production code swallows, or wraps in a refusal of any other wording,
+# prints no such line and is not seen here.
+_BACKSTOP = re.compile(r"(?:cannot evaluate|harness error|refused): unexpected error[^\n]*")
+_flip_watch = []
+
+# The exact line the record CLI's backstop prints for an exception object; a declared backstop is accepted
+# only as this line for a recorded injection (_bound_injection).
+_BACKSTOP_LINE = "cannot evaluate: unexpected error ({!r}); failing closed to exit 2"
+
+# While _discriminate runs a flip it also pushes a list here, and each injection site a declared backstop
+# may come from records (label, exception object) in the innermost list as it raises (_injected), or as a
+# reverted guard's crash passes its one expected point (_crash_point).
+_flip_injections = []
+
+
+def _note_backstops(text):
+    if _flip_watch and text:
+        _flip_watch[-1].extend(_BACKSTOP.findall(text))
+
+
+def _injected(label, exc):
+    """exc, recorded as injection `label` of the innermost discriminated run; the caller raises it."""
+    if _flip_injections:
+        _flip_injections[-1].append((label, exc))
+    return exc
+
+
+def _crash_point(label, owner, name, expected):
+    """owner.name, recording as injection `label` an exception it raises of exactly `expected`'s type
+    and args (the crash a reverted guard lets the code reach, bound to the point it must come from); any
+    other exception passes unrecorded."""
+    real = getattr(owner, name)
+
+    def observing(*args, **kwargs):
+        try:
+            return real(*args, **kwargs)
+        except BaseException as exc:
+            if type(exc) is type(expected) and exc.args == expected.args:
+                _injected(label, exc)
+            raise
+    return patch.object(owner, name, observing)
+
+
 def cli(env, argv):
     """Run `opf <argv>` in-process under the scrubbed environment: (rc, stdout, stderr)."""
     out, err = io.StringIO(), io.StringIO()
     with patch.dict(os.environ, env.vars, clear=True), contextlib.redirect_stdout(out), \
             contextlib.redirect_stderr(err):
         rc = opf.main(list(argv))
+    _note_backstops(err.getvalue())
     return rc, out.getvalue(), err.getvalue()
 
 
@@ -779,8 +871,10 @@ def child(env, root, args, kill=None, flip=""):
     child_env = dict(env.vars)
     if kill is not None:
         child_env[journal.KILL_ENV] = kill
-    return subprocess.run([sys.executable, "-I", "-B", "-c", script, str(root)] + list(args),
+    proc = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(root)] + list(args),
                           capture_output=True, text=True, timeout=180, env=child_env)
+    _note_backstops(proc.stderr)
+    return proc
 
 
 def journal_states(root, rel=None):
@@ -832,7 +926,7 @@ def _t5_matrix(fx, label, base, args, operands):
         assert proc.returncode == 137, ("T5 the child is killed at", point, proc.returncode, proc.stderr[-800:])
         assert '"event": "recorded"' not in proc.stdout, ("T5 a killed run reports no id", point)
         # The killed run leaves its lease; its holder is confirmed dead, so the next run releases that
-        # leftover through its own reconciliation (the T74 live-holder rule, spec 5.7) and reconciles.
+        # leftover through its own reconciliation (the T74 dead-run release clause, spec 5.7) and reconciles.
         assert (Path(root) / LEASE).exists(), ("T5 the killed run leaves its lease", point)
         result = record_cli(env, root, CREATE)
         refused(result, "was reconciled")
@@ -1525,14 +1619,18 @@ def t18_requires_options(fx):
         refused_unplanned(fx.env, root, ["transition", "PD-1", "decided"] + MAINTAINER, "requires --decision")
 
 
+@contextlib.contextmanager
 def flip_t18_requires():
-    """Drop the requires half of the option guard: a decide without the options is planned."""
+    """Drop the requires half of the option guard: a decide without the options is planned, and its
+    bundle's read of the missing --decision crashes (the injection its declared backstop is bound to)."""
     original = record._require_decision_options
 
     def apply_only(req, rid, rtype, cur_state, target, cur_qual):
         if "--decision" in req.values:
             original(req, rid, rtype, cur_state, target, cur_qual)
-    return patch.object(record, "_require_decision_options", apply_only)
+    with patch.object(record, "_require_decision_options", apply_only), \
+            _crash_point("t18-requires", record, "_resolution_bundle", KeyError("--decision")):
+        yield
 
 
 def t18_given_together(fx):
@@ -1544,9 +1642,13 @@ def t18_given_together(fx):
                              + MAINTAINER, "given together")
 
 
+@contextlib.contextmanager
 def flip_t18_together():
-    """Drop the parser's given-together check: one option alone reaches the store."""
-    return patch.object(record, "_require_decision_pair", lambda seen: None)
+    """Drop the parser's given-together check: one option alone reaches the store, and the bundle's read
+    of the missing --decided-by crashes (the injection its declared backstop is bound to)."""
+    with patch.object(record, "_require_decision_pair", lambda seen: None), \
+            _crash_point("t18-together", record, "_resolution_bundle", KeyError("--decided-by")):
+        yield
 
 
 def t18_apply_only_withdrawn(fx):
@@ -4553,7 +4655,7 @@ def t62_output_failure_not_release(fx):
     pre = read(root, BI_INDEX)
 
     def failing_emit(report):
-        raise BrokenPipeError(32, "synthetic output failure after the lease release")
+        raise _injected("t62-emit", BrokenPipeError(32, "synthetic output failure after the lease release"))
     with patch.object(record, "_emit_success", failing_emit):
         result = record_cli(env, root, CREATE)
     refused(result, T62_EMIT_FAILED)
@@ -4640,7 +4742,7 @@ def _t64_failing_print(marker):
     def failing(*args, **kwargs):
         if not fired and any(isinstance(a, str) and marker in a for a in args):
             fired.append(True)
-            raise OSError(5, T64_STDERR)
+            raise _injected("t64-stderr", OSError(5, T64_STDERR))
         return builtins.print(*args, **kwargs)
     return failing
 
@@ -4672,7 +4774,7 @@ def t64_diagnostic_failure_never_governs(fx):
     root = fx.case("t64-emit-then-stderr")
 
     def failing_emit(report):
-        raise BrokenPipeError(32, "synthetic emission failure")
+        raise _injected("t64-emit", BrokenPipeError(32, "synthetic emission failure"))
     with patch.object(record, "_emit_success", failing_emit), \
             patch.object(record, "print", _t64_failing_print("emitting the success report failed"),
                          create=True):
@@ -5005,7 +5107,8 @@ def t68_release_mark_before_acquisition(fx):
 
         def __iter__(self):
             if acquired:
-                raise MemoryError("synthetic allocation failure after the acquisition")
+                raise _injected("t68-mark-copy", MemoryError("synthetic allocation failure after the "
+                                                             "acquisition"))
             return iter((False,))
     with patch.object(record, "_RELEASE_PENDING", MarkCopyTrap()), \
             patch.object(guard, "acquire_lease", arming_acquire):
@@ -5085,7 +5188,7 @@ def t69_release_failure_closes_fd(fx):
     root = fx.case("t69-release-in-handler")
 
     def raising_release(_journal_root):
-        raise RuntimeError("fd release witness")
+        raise _injected("t69-release", RuntimeError("fd release witness"))
     with journal_fd_ledger() as ledger, patch.object(journal, "release_lock", raising_release):
         try:
             raise ValueError("the embedding caller's handled exception")
@@ -5119,7 +5222,7 @@ def t69_token_failure_closes_fd(fx):
     def urandom_trap(n):
         if sys._getframe(1).f_code is record._publish.__code__:
             fired.append(n)
-            raise MemoryError("synthetic token allocation failure")
+            raise _injected("t69-token", MemoryError("synthetic token allocation failure"))
         return real_urandom(n)
     with journal_fd_ledger() as ledger, patch.object(os, "urandom", urandom_trap):
         result = record_cli(env, root, CREATE)
@@ -5322,7 +5425,7 @@ def flip_t71():
 
 # --- the runner ------------------------------------------------------------------------------------------------
 
-# --- T74: recovery applies the live-holder rule to a leftover lease (spec 5.7) ---------------------------
+# --- T74: recovery applies the never-seize and dead-run release clauses to a leftover lease (spec 5.7) ---
 
 T74_UNSCOPED = "Nothing was written;"
 T74_SCOPED = "Nothing was written to the journal or to any operand; both are left exactly as found"
@@ -5371,7 +5474,7 @@ def _t74_refused_leg(fx, name, lease_bytes, needle=T74_HELD):
 
 
 def t74_live_holder_rule(fx):
-    """Recovery applies the spec 5.7 live-holder rule, each never-seize guard carrying its own
+    """Recovery applies the spec 5.7 never-seize and dead-run release clauses, each never-seize guard carrying its own
     discriminating leg: a leftover lease whose holder is confirmed dead on this host is released through
     the reconciliation itself, in the same run, with the outcome naming the released lease and its
     holder; a LIVE local holder refuses before any recovery write with every byte intact (the rule's
@@ -5439,8 +5542,8 @@ def t74_live_holder_rule(fx):
 
 def flip_t74_claim():
     """The pre-fix recovery claim: the plain atomic acquisition, under which ANY present lease refuses
-    (the pre-qualification reading of spec 8.8 item 1, which now grants the dead-run release through the
-    section 5.7 live-holder rule) and a dead run's leftover waits for the operator."""
+    (the pre-qualification reading of spec 8.8 item 1, which now grants the dead-run release, grounded in
+    the section 5.7 dead-run release clause) and a dead run's leftover waits for the operator."""
     return patch.object(guard, "acquire_lease_for_recovery",
                         lambda root_fd, machine_rel, verb: (guard.acquire_lease(root_fd, machine_rel, verb),
                                                             None))
@@ -5482,8 +5585,9 @@ def flip_t74_schema():
 
 
 def flip_t74_prefix():
-    """The pre-fix single bounded lease read: an oversized payload is judged by its first 64 KiB."""
-    def bounded(pfd, name):
+    """The pre-fix single bounded lease read: an oversized payload is judged by its first 64 KiB. It takes
+    the cause list its callers now pass and records no cause (the pre-fix read had none)."""
+    def bounded(pfd, name, why=None):
         try:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
         except OSError:
@@ -5636,6 +5740,8 @@ def t75_concurrent_recovery(fx):
             (sync / name).write_bytes(b"")
         out_a, err_a = a.communicate(timeout=180)
         out_b, err_b = b.communicate(timeout=180)
+        _note_backstops(err_a)
+        _note_backstops(err_b)
         assert not both_in_recovery, (
             "T75 two concurrent recoveries both entered journal recovery (the slower examination seized "
             "the faster recoverer's live lease)", err_a[-800:], err_b[-800:])
@@ -5762,8 +5868,9 @@ def t77_report_every_failure(fx):
     type: an EMFILE on the retried O_EXCL claim and a JournalError reopening the lease directory each
     refuse with the report appended (the lease left released, the journal left for the next run), and an
     interrupt propagates as itself with the report attached as a note."""
-    for name, injected in (("t77-emfile", lambda root: _t77_claim_failing(
-                                root, lambda: OSError(errno.EMFILE, os.strerror(errno.EMFILE)))),
+    for name, injected in (("t77-emfile", lambda root: _t77_claim_failing(root, lambda: _injected(
+                                "t77-emfile", OSError(errno.EMFILE, "T77 injected: EMFILE on the retried "
+                                                                    "claim")))),
                            ("t77-journal-error", _t77_reopen_failing)):
         root = _t74_interrupted(fx, name)
         with injected(root):
@@ -5800,6 +5907,705 @@ def flip_t77():
         except guard.WriteGuardError as exc:
             raise guard.WriteGuardError("{} Before that claim, {}.".format(exc, released)) from exc
     return patch.object(guard, "_claim_after_release", narrow)
+
+# T77 continued: the window around the release's durability fsync and the retried claim's own fsyncs.
+T77_FSYNC_DURABLE = "could not be made durable"
+
+
+def _t77_fsync_failing(root, make_exc, nth):
+    """os.fsync raising make_exc() at the `nth` fsync from the leftover lease's release on: 1 is the
+    release's durability fsync of the lease directory, 2 the retried claim's payload fsync, 3 its
+    directory fsync. Counting starts once the release is observed and continues after the retried claim
+    re-creates the lease."""
+    real = os.fsync
+    seen = [False, 0]
+
+    def failing(fd):
+        if seen[0] or _t77_released(root):
+            seen[0] = True
+            seen[1] += 1
+            if seen[1] == nth:
+                raise make_exc()
+        return real(fd)
+    return patch.object(os, "fsync", failing)
+
+
+def t77_fsync_window(fx):
+    """Every failure in the window around the release's durability fsync carries the released-lease
+    report: an EIO at that fsync refuses naming the undurable release, an EIO at the retried claim's
+    payload or directory fsync refuses with the claim's report, and an interrupt at each of the three
+    fsyncs propagates as itself with the report attached as a note."""
+    for nth, needle in ((1, T77_FSYNC_DURABLE), (2, "Before that claim,"), (3, "Before that claim,")):
+        name = "t77-fsync-eio-{}".format(nth)
+        root = _t74_interrupted(fx, name)
+        with _t77_fsync_failing(root, lambda nth=nth: _injected("t77-fsync-eio", OSError(
+                errno.EIO, "T77 injected: EIO at fsync {} of the window".format(nth))), nth):
+            result = record_cli(fx.env, root, CREATE)
+        refused(result, needle)
+        assert T77_REPORT in result[2], ("T77 the fsync failure carries the released-lease report", name,
+                                         result[2][-1600:])
+        assert any(st == "open" for st in journal_states(root).values()), (
+            "T77 the journal is left for the next run", name)
+    for nth in (1, 2, 3):
+        root = _t74_interrupted(fx, "t77-fsync-interrupt-{}".format(nth))
+        notes = None
+        root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with _t77_fsync_failing(root, KeyboardInterrupt, nth):
+                try:
+                    guard.acquire_lease_for_recovery(root_fd, MACH, record.VERB)
+                except KeyboardInterrupt as exc:
+                    notes = list(getattr(exc, "__notes__", ()))
+        finally:
+            os.close(root_fd)
+        assert notes is not None, ("T77 the fsync interrupt propagates as itself", nth)
+        assert any(T77_REPORT in note for note in notes), (
+            "T77 the fsync interrupt carries the report as a note", nth, notes)
+
+
+def flip_t77_fsync():
+    """The durability fsync outside the reported window: a failure or interrupt there carries no report."""
+    real = guard._claim_after_release
+
+    def unreported(pfd, *rest):
+        os.fsync(pfd)
+        return real(pfd, *rest)
+    return patch.object(guard, "_claim_after_release", unreported)
+
+
+# --- T78: a failed examination lock names the live holder, never calling its lease leftover (spec 5.7) --
+
+T78_HOST = "leftover.example"
+T78_REMEDY = "If you have confirmed NO opf run is live"
+T78_SCOPE = ("opf removes another run's lease only while reconciling an interrupted run of the same verb, once "
+             "that lease's holder is confirmed dead on this host")
+
+
+def _t78_holder():
+    return "opf-record:{}:{}".format(socket.gethostname(), os.getpid())
+
+
+def t78_lock_failure_names_holder(fx):
+    """A LIVE holder's lease (this process) under a failed examination lock, held (EWOULDBLOCK) or failed
+    (ENOLCK): the refusal names that holder and never calls its lease leftover, with every byte untouched;
+    with the lock taken, the plain live-holder refusal names the holder without calling it leftover. The
+    word is judged in the refusal's own wording, never in the echoed holder identity, so a last leg runs
+    the held lock under a host named T78_HOST. The appended held-lease refusal opens its own sentence;
+    under a HELD lock (a live reconciliation is running) it offers no confirmed-no-run-is-live remedy;
+    and every remedy offered states the one case in which opf removes another run's lease (T78_SCOPE),
+    never that the tool removes none."""
+    legs = ((errno.EWOULDBLOCK, T76_HELD_LOCK, None), (errno.ENOLCK, T76_LOCK_FAILURE, None),
+            (None, T74_HELD, None), (errno.EWOULDBLOCK, T76_HELD_LOCK, T78_HOST))
+    for code, needle, host in legs:
+        name = "t78-" + ("lock-taken" if code is None else errno.errorcode[code].lower()) + (
+            "" if host is None else "-host")
+        root = _t74_interrupted(fx, name)
+        with contextlib.ExitStack() as stack:
+            if host is not None:
+                stack.enter_context(patch.object(socket, "gethostname", lambda host=host: host))
+            holder = _t78_holder()
+            (Path(root) / LEASE).write_bytes(t74_lease_bytes(os.getpid()))
+            before = snapshot(root)
+            if code is not None:
+                stack.enter_context(_t76_flock_failing(code))
+            result = record_cli(fx.env, root, CREATE)
+        refused(result, needle)
+        err = result[2]
+        assert holder in err, ("T78 the refusal names the live holder", name, err[-1600:])
+        assert "leftover" not in err.replace(holder, ""), (
+            "T78 a live holder's lease is never called leftover", name, err[-1600:])
+        assert ". another opf run" not in err, (
+            "T78 the appended held-lease refusal opens its own sentence", name, err[-1600:])
+        assert (T78_REMEDY in err) == (code != errno.EWOULDBLOCK), (
+            "T78 the confirmed-no-run remedy is offered exactly when no reconciliation holds the lock", name,
+            err[-1600:])
+        assert (T78_SCOPE in err) == (T78_REMEDY in err) and "never removes a foreign lease" not in err, (
+            "T78 the remedy states the one case opf removes another run's lease", name, err[-1600:])
+        assert snapshot(root) == before, ("T78 refuses with every byte untouched", name)
+
+
+def flip_t78_unnamed():
+    """The lock refusal without the held-lease refusal appended: the holder goes unnamed."""
+    return patch.object(guard, "_lock_refusal", lambda exc, held: exc)
+
+
+def flip_t78_leftover():
+    """The lock messages calling the unexamined (possibly live) lease leftover."""
+    real = guard._exclusive_examination
+
+    def leftover(pfd, lease_rel, verb):
+        try:
+            real(pfd, lease_rel, verb)
+        except guard.WriteGuardError as exc:
+            raise guard.WriteGuardError(str(exc).replace("the present", "the leftover")) from exc
+    return patch.object(guard, "_exclusive_examination", leftover)
+
+
+def flip_t78_held():
+    """The held-lease remedy calling a live holder's lease leftover."""
+    real = guard.lease_held_message
+    return patch.object(guard, "lease_held_message", lambda *args: real(*args).replace(
+        "release that lease", "release the leftover lease"))
+
+
+def flip_t78_join():
+    """The round-1 join: the held-lease refusal appended lowercase, its remedy kept under a held lock."""
+    return patch.object(guard, "_lock_refusal", lambda exc, held: guard.WriteGuardError(
+        "{} {}".format(exc, held)))
+
+
+def flip_t78_foreign():
+    """The held-lease refusal claiming the tool never removes a foreign lease."""
+    real = guard.lease_held_message
+    return patch.object(guard, "lease_held_message", lambda *args: real(*args).replace(
+        T81_DENIAL + "; " + T78_SCOPE, "the tool never removes a foreign lease"))
+
+
+# --- T79: an oversized or non-regular replacement is reported as what it is, never ABSENT (spec 5.7) ------
+
+T79_LEASE = "lease.toml"
+
+
+def _t79_read_fault(fd):
+    raise OSError(errno.EIO, "injected read failure")
+
+
+def t79_replacement_named(fx):
+    """The ownership-verified release over an OVERSIZED replacement reports it oversized, over a
+    non-regular one (a directory, or a symlink, which the no-follow open meets as ELOOP) reports it
+    non-regular, over an unreadable one (a read failure) reports it unreadable, and over a missing lease
+    reports it ABSENT; no replacement is ever reported ABSENT, and each is left in place. The held-lease
+    refusal over an oversized payload whose first 64 KiB parse as a valid lease reports it oversized and
+    names no holder read from that prefix."""
+    base = tempfile.mkdtemp(prefix="t79-")
+    pfd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        path = os.path.join(base, T79_LEASE)
+        valid = t74_lease_bytes(1)
+        oversized = valid + b"#" * (65536 - len(valid) - 1) + b"\n" + b"schema = 1\n"
+        legs = (("oversized", lambda: Path(path).write_bytes(oversized), "OVERSIZED", None),
+                ("non-regular", lambda: os.mkdir(path), "non-regular entry", None),
+                ("symlink", lambda: os.symlink(T79_LEASE + ".elsewhere", path), "non-regular entry", None),
+                ("unreadable", lambda: Path(path).write_bytes(valid), "could not be read, unreadable (",
+                 _t79_read_fault),
+                ("absent", lambda: None, "ABSENT", None))
+        for name, plant, needle, read_fault in legs:
+            plant()
+            with (contextlib.nullcontext() if read_fault is None else
+                  patch.object(guard, "_read_capped", read_fault)):
+                try:
+                    guard.unlink_owned_lease(pfd, T79_LEASE, "m/" + T79_LEASE, b"this run's own", "record")
+                except guard.WriteGuardError as exc:
+                    message = str(exc)
+                else:
+                    raise AssertionError("T79 the release refuses a lease that is not its own ({})".format(
+                        name))
+            assert needle in message, ("T79 the release names the entry it found", name, message)
+            if name != "absent":
+                assert "ABSENT" not in message, ("T79 a replacement is never reported ABSENT", name, message)
+                assert os.path.lexists(path), ("T79 the replacement is left in place", name)
+            if name == "oversized":
+                held = guard.lease_held_message(pfd, T79_LEASE, "m/" + T79_LEASE, "record")
+                assert "OVERSIZED" in held and "opf-record:" not in held, (
+                    "T79 the held refusal reports the oversized payload, never its prefix's holder", held)
+            if name == "non-regular":
+                os.rmdir(path)
+            elif name != "absent":
+                os.unlink(path)
+    finally:
+        os.close(pfd)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def flip_t79_cause():
+    """The release's cause dropped: every unreadable entry reads alike."""
+    real = guard.read_lease_payload
+    return patch.object(guard, "read_lease_payload", lambda pfd, name, why=None: real(pfd, name))
+
+
+def flip_t79_prefix():
+    """The single bounded prefix read restored for the held-lease refusal."""
+    return patch.object(guard, "_read_capped", lambda fd: os.read(fd, 65536))
+
+
+def _t79_recause(pick):
+    """read_lease_payload with each recorded cause rewritten by pick(pfd, name, cause)."""
+    real = guard.read_lease_payload
+
+    def recaused(pfd, name, why=None):
+        found = []
+        raw = real(pfd, name, found)
+        if why is not None:
+            why.extend(pick(pfd, name, cause) for cause in found)
+        return raw
+    return patch.object(guard, "read_lease_payload", recaused)
+
+
+def flip_t79_eloop():
+    """A symlink's ELOOP read as unreadable, never non-regular."""
+    def pick(pfd, name, cause):
+        try:
+            link = stat.S_ISLNK(os.stat(name, dir_fd=pfd, follow_symlinks=False).st_mode)
+        except OSError:
+            link = False
+        return "unreadable (flipped)" if cause == "non-regular" and link else cause
+    return _t79_recause(pick)
+
+
+def flip_t79_unreadable():
+    """An unreadable entry read as absent, the reading before the release named its cause."""
+    return _t79_recause(lambda pfd, name, cause: "absent" if cause.startswith("unreadable") else cause)
+
+
+# --- T80: spec 8.8 item 1 names reconciliation as the agent and cites the real 5.7 clause ----------------
+
+T80_CLAUSE = "a leftover lease from a dead run MUST be released only through that reconciliation"
+T80_CITED = ("the reconciliation on resume through which section 5.7 requires a leftover lease from a dead "
+             "run to be released")
+T80_ROUND1 = ("because section 5.7 requires that a leftover lease from a dead run be released only through "
+              "that reconciliation")
+T80_FIXED = ("when a live or possibly-live holder holds that lease, reconciliation MUST refuse before any recovery "
+             "write and MUST NOT seize the lease, and reconciliation MAY itself release a leftover lease from a "
+             "confirmed-dead run of the same verb, since that release is " + T80_CITED + ". When any other "
+             "lease is present, a "
+             "confirmed-dead leftover of another verb included, reconciliation MUST refuse before any recovery "
+             "write and MUST NOT release that lease.")
+T80_EARLIER = ("a lease held by a live or possibly-live holder MUST refuse before any recovery write and MUST NOT "
+               "be seized, and a leftover lease from a confirmed-dead run of the same verb MAY be released through "
+               "this reconciliation itself, as the section 5.7 live-holder rule grants. Any other present lease, a "
+               "confirmed-dead leftover of another verb included, MUST refuse before any recovery write and MUST "
+               "NOT be released by this reconciliation.")
+
+
+def _t80_spec_text():
+    """Spec text with every whitespace run collapsed to one space (wrapping never decides a verdict)."""
+    return " ".join((TOOLS.parent / "spec" / "OPF-SPEC.md").read_text(encoding="utf-8").split())
+
+
+def _t80_section(text, start, end):
+    head = text.index(start)
+    return text[head:text.index(end, head)]
+
+
+def t80_spec_item_1_wording(fx):
+    """Spec 8.8 item 1: reconciliation, never the lease, refuses before any recovery write, under a live
+    or possibly-live holder and under any other present lease; reconciliation itself may release a
+    confirmed-dead same-verb leftover; and the grant identifies that release as the reconciliation on
+    resume through which the section 5.7 clause releases a dead run's leftover, never a 5.7
+    "live-holder rule" that 5.7 does not name, and never "that reconciliation", which item 1 would read
+    against its own transaction reconciliation."""
+    text = _t80_spec_text()
+    item = _t80_section(text, "1. Resolve the store, then any interrupted authoring", " 2. Precondition:")
+    s57 = _t80_section(text, "### 5.7 The store consistency contract", "### 5.8 ")
+    assert T80_CLAUSE in s57, "T80 section 5.7 carries the dead-run release clause"
+    assert T80_CITED in item, ("T80 item 1 cites the 5.7 clause by its text", item)
+    assert "live-holder rule" not in item, ("T80 item 1 cites no unnamed 5.7 rule", item)
+    assert "only through that reconciliation" not in item, (
+        "T80 item 1 names the reconciliation the 5.7 clause means", item)
+    assert "reconciled against recorded state on resume or close" in s57, (
+        "T80 section 5.7 places that reconciliation on resume or close")
+    assert item.count("reconciliation MUST refuse before any recovery write") == 2, (
+        "T80 reconciliation is the agent of both refusals", item)
+    assert "reconciliation MAY itself release" in item, ("T80 reconciliation is the releasing agent", item)
+    for wrong in ("holder MUST refuse", "another verb included, MUST refuse"):
+        assert wrong not in item, ("T80 no lease is the agent of a refusal", wrong, item)
+
+
+def flip_t80():
+    """The earlier wording: the lease refuses, and the grant cites a 5.7 "live-holder rule"."""
+    fixed = _t80_spec_text()
+    if T80_FIXED not in fixed:
+        raise Harness("T80 the flip found no fixed wording to revert")
+    earlier = fixed.replace(T80_FIXED, T80_EARLIER)
+    return patch.object(sys.modules[__name__], "_t80_spec_text", lambda: earlier)
+
+
+def flip_t80_round1():
+    """The round-1 citation: "that reconciliation", read against item 1's transaction reconciliation."""
+    fixed = _t80_spec_text()
+    current = "since that release is " + T80_CITED
+    if current not in fixed:
+        raise Harness("T80 the flip found no fixed citation to revert")
+    round1 = fixed.replace(current, T80_ROUND1)
+    return patch.object(sys.modules[__name__], "_t80_spec_text", lambda: round1)
+
+
+# --- T81: the held-lease refusal denies only the removal of the lease now present (spec 5.7) -------------
+
+T81_DENIAL = "this run has not removed the lease now present"
+T81_DENIAL_ROUND2 = "this run removed no lease"
+
+
+def _t81_peer_after_release(root):
+    """guard.acquire_lease planting a LIVE peer's lease (this process, this host) whenever it is called
+    with the lease absent: the claim retried after recovery released the confirmed-dead leftover meets
+    another writer that won the freed pathname first."""
+    real = guard.acquire_lease
+
+    def racing(root_fd, machine_rel, verb):
+        if not (Path(root) / LEASE).exists():
+            (Path(root) / LEASE).write_bytes(t74_lease_bytes(os.getpid()))
+        return real(root_fd, machine_rel, verb)
+    return patch.object(guard, "acquire_lease", racing)
+
+
+def t81_lease_denial_scoped(fx):
+    """The held-lease refusal denies only the removal of the lease now present. A peer that plants its
+    lease after recovery released the confirmed-dead leftover makes the retried claim refuse: that
+    refusal reports the release and never says this run removed no lease, and the peer's lease is left
+    byte for byte. A holder quoting the remedy's words never cuts the refusal under a held examination
+    lock (the remedy is cut at its last occurrence, so the never-seize sentence survives). The holder
+    diagnostic names each unread lease by its cause, or says it was not read."""
+    root = _t74_interrupted(fx, "t81-peer-after-release")
+    with _t81_peer_after_release(root):
+        result = record_cli(fx.env, root, CREATE)
+    refused(result, "Before that claim,")
+    err = result[2]
+    assert T77_REPORT in err, ("T81 the refusal reports this run's release", err[-1600:])
+    assert T81_DENIAL in err and T81_DENIAL_ROUND2 not in err, (
+        "T81 the denial names only the lease now present, never every removal by this run", err[-1600:])
+    assert read(root, LEASE) == t74_lease_bytes(os.getpid()), "T81 the peer's lease is left byte for byte"
+    base = tempfile.mkdtemp(prefix="t81-")
+    pfd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        crafted = "opf-record:h" + guard.HELD_REMEDY + " x:1"
+        Path(base, T79_LEASE).write_bytes('holder = "{}"\n'.format(crafted).encode("utf-8"))
+        held = guard.LeaseHeldError(guard.lease_held_message(pfd, T79_LEASE, "m/" + T79_LEASE, "record"))
+    finally:
+        os.close(pfd)
+        shutil.rmtree(base, ignore_errors=True)
+    lock = guard.WriteGuardError("another reconciliation is concurrently examining the lease")
+    lock.__cause__ = OSError(errno.EWOULDBLOCK, os.strerror(errno.EWOULDBLOCK))
+    text = str(guard._lock_refusal(lock, held))
+    assert crafted in text and "The lease is never seized (spec 5.7)." in text, (
+        "T81 a holder quoting the remedy never cuts the refusal", text)
+    assert T78_SCOPE not in text, ("T81 the remedy is still dropped under a held lock", text)
+    said = dict((cause, guard.lease_holder_of(None, cause)) for cause in (
+        "absent", "non-regular", "oversized", "unreadable (injected read failure)"))
+    assert len(set(said.values())) == len(said), ("T81 each unread lease is named distinctly", said)
+    for cause, words in said.items():
+        assert ("absent" in words) == (cause == "absent"), ("T81 only an absent lease reads absent", said)
+    assert "non-regular" in said["non-regular"] and "OVERSIZED" in said["oversized"] and \
+        "injected read failure" in said["unreadable (injected read failure)"], ("T81 each cause named", said)
+    unread = guard.lease_holder_of(None)
+    assert "not read" in unread and "absent" not in unread, ("T81 no cause reads not read", unread)
+
+
+def flip_t81_denial():
+    """The round-2 held-lease refusal: a run-wide denial, contradicting a release this run reports."""
+    real = guard.lease_held_message
+    return patch.object(guard, "lease_held_message", lambda *args: real(*args).replace(
+        T81_DENIAL, T81_DENIAL_ROUND2))
+
+
+def flip_t81_split():
+    """The round-2 cut at the FIRST occurrence of the remedy, inside a holder that quotes it."""
+    def first_cut(exc, held):
+        text = str(held)
+        cause = exc.__cause__
+        if isinstance(cause, OSError) and cause.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+            text = text.split(guard.HELD_REMEDY, 1)[0]
+        return guard.WriteGuardError("{} {}{}".format(exc, text[:1].upper(), text[1:]))
+    return patch.object(guard, "_lock_refusal", first_cut)
+
+
+def flip_t81_holder():
+    """The round-2 holder diagnostic: every unread lease called absent or a non-regular entry."""
+    real = guard.lease_holder_of
+    return patch.object(guard, "lease_holder_of", lambda raw, cause=None: (
+        "absent or a non-regular entry" if raw is None else real(raw)))
+
+
+# --- T82: the discriminator binds each flip to an assertion, never a backstop or harness fault ---------
+
+
+def _caught_at_backstop(exc):
+    """True when exc itself last propagated into a record CLI backstop's frame (its traceback's outermost
+    entry), so the line that backstop printed was made from this object."""
+    tb = exc.__traceback__
+    return tb is not None and tb.tb_frame.f_code in (record.cli.__code__, opf._cmd_record.__code__)
+
+
+def _bound_injection(line, injections, allowed):
+    """Consume and return the recorded injection that caused backstop `line`: one whose label the flip
+    declares, whose exact backstop line (type and message) is `line`, and which itself reached the
+    backstop. None when no recorded injection is the cause; each injection accounts for one line only."""
+    for index, (label, exc) in enumerate(injections):
+        if label in allowed and line == _BACKSTOP_LINE.format(exc) and _caught_at_backstop(exc):
+            del injections[index]
+            return exc
+    return None
+
+
+def _discriminate(name, test, flip):
+    """The flip must turn the test red through an assertion, and the unflipped test must stay green
+    around it. The flipped run is bound to that outcome: a backstop line (_BACKSTOP) printed by any CLI
+    run inside it (a crash the CLI turned into an ordinary exit 2, which an assertion then reads as red)
+    fails the discrimination unless a recorded injection the flip declares (_INTENDED_BACKSTOPS) is its
+    cause (_bound_injection), and any exception other than an assertion (the flip's own construction
+    included, a SystemExit too; an interrupt propagates) fails it by name; neither counts as a caught
+    defect. A crash production code swallows prints no backstop line and is outside this check."""
+    test()
+    faults, injections = [], []
+    _flip_watch.append(faults)
+    _flip_injections.append(injections)
+    try:
+        with flip():
+            test()
+    except AssertionError:
+        allowed = _INTENDED_BACKSTOPS.get(flip, ())
+        stray = [line for line in faults if _bound_injection(line, injections, allowed) is None]
+        if stray:
+            raise AssertionError("{} went red through the unexpected-error backstop (exit 2, cannot "
+                                 "evaluate), not an assertion: {}".format(name, stray[0])) from None
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001  a harness exception in the flipped run never discriminates
+        raise AssertionError("{} went red through a harness exception ({!r}), not an "
+                             "assertion".format(name, exc)) from None
+    else:
+        raise AssertionError(name + " survived its flip")
+    finally:
+        _flip_watch.pop()
+        _flip_injections.pop()
+        del injections[:]   # the recorded exceptions' tracebacks hold the flipped run's frames
+    test()
+
+
+# The round-2 discriminator's fault pattern: only a signature TypeError at the backstop.
+_FLIP_ARITY_ROUND2 = re.compile(r"cannot evaluate: unexpected error[^\n]*TypeError\([^\n]*"
+                                r"(?:positional argument|keyword argument)")
+
+
+def _discriminate_round2(name, test, flip):
+    """The round-2 discriminator (the T82 flip): a flipped run's red is refused only for a signature
+    TypeError at the backstop, and a harness exception escapes as itself."""
+    test()
+    faults = []
+    _flip_watch.append(faults)
+    try:
+        with flip():
+            test()
+    except AssertionError:
+        if any(_FLIP_ARITY_ROUND2.search(line) for line in faults):
+            raise AssertionError("{} went red through a harness fault, its flip's replacement no longer "
+                                 "matching its caller: {}".format(name, faults[0])) from None
+    else:
+        raise AssertionError(name + " survived its flip")
+    finally:
+        _flip_watch.pop()
+    test()
+
+
+def _t82_crash(*_args):
+    raise NameError("t82 broken flip fixture")
+
+
+def _t82_backstop_flip():
+    """A flip whose replacement crashes inside the CLI: the record backstop exits 2."""
+    return patch.object(guard, "acquire_lease", _t82_crash)
+
+
+def _t82_declared_crash(*_args):
+    raise _injected("t82-declared", NameError("t82 broken flip fixture"))
+
+
+def _t82_declared_flip():
+    """The same crash, recorded as an injection this flip declares in _INTENDED_BACKSTOPS."""
+    return patch.object(guard, "acquire_lease", _t82_declared_crash)
+
+
+def _t82_harness_flip():
+    """A flip whose replacement crashes the test itself, outside any CLI run."""
+    return patch.object(sys.modules[__name__], "recorded", _t82_crash)
+
+
+def _t82_held(*_args):
+    raise guard.LeaseHeldError("t82 a held lease refuses")
+
+
+def _t82_assertion_flip():
+    """A flip the CLI meets as an ordinary refusal: the test's own assertion turns red."""
+    return patch.object(guard, "acquire_lease", _t82_held)
+
+
+def t82_discrimination_bound(fx):
+    """The discriminator counts a flipped run as discriminating only when it goes red through an
+    assertion: a red met only through the CLI's cannot-evaluate backstop, or through a harness exception,
+    fails the discrimination naming which, while an assertion red, and a backstop caused by a recorded
+    injection the flip declares, discriminate."""
+    def test():
+        recorded(record_cli(fx.env, fx.case("t82-create"), CREATE))
+    for label, flip, needle in (("backstop", _t82_backstop_flip, "unexpected-error backstop"),
+                                ("harness", _t82_harness_flip, "harness exception"),
+                                ("assertion", _t82_assertion_flip, None),
+                                ("declared", _t82_declared_flip, None)):
+        outcome = None
+        try:
+            sys.modules[__name__]._discriminate("t82-" + label, test, flip)
+        except Exception as exc:  # noqa: BLE001  the verdict below reads which outcome was reached
+            outcome = exc
+        if needle is None:
+            assert outcome is None, ("T82 an intended red discriminates", label, repr(outcome))
+        else:
+            assert isinstance(outcome, AssertionError) and needle in str(outcome), (
+                "T82 a red through no assertion never discriminates", label, repr(outcome))
+
+
+def flip_t82():
+    """The round-2 discriminator."""
+    return patch.object(sys.modules[__name__], "_discriminate", _discriminate_round2)
+
+
+# --- T83: a declared backstop is bound to the recorded injection that must cause it ---------------------
+
+
+# The round-3 declarations: backstop texts each matched as a substring of any backstop line.
+_EIO = "OSError({}, ".format(errno.EIO)
+_ROUND3_BACKSTOPS = {
+    flip_t18_requires: ("KeyError('--decision')",),
+    flip_t18_together: ("KeyError('--decided-by')",),
+    flip_t62: ("BrokenPipeError(32, 'synthetic output failure after the lease release')",),
+    flip_t64_conclude: ("OSError(5, 'synthetic stderr failure')",),
+    flip_t64_recovery: ("BrokenPipeError(32, 'synthetic emission failure')",),
+    flip_t68: ("MemoryError('synthetic allocation failure after the acquisition')",),
+    flip_t69: ("RuntimeError('fd release witness')", "MemoryError('synthetic token allocation failure')"),
+    flip_t77: ("OSError({}, ".format(errno.EMFILE), _EIO),
+    flip_t77_fsync: (_EIO,),
+    _t82_declared_flip: ("NameError('t82 broken flip fixture')",),
+}
+_BACKSTOP_ROUND3 = re.compile(r"(?:cannot evaluate|harness error): unexpected error")
+
+
+def _discriminate_round3(name, test, flip):
+    """The round-3 discriminator (the T83 flip): a declared text accepts any backstop line containing it,
+    a store-resolution refusal is not a backstop, and a BaseException escapes as itself."""
+    test()
+    faults = []
+    _flip_watch.append(faults)
+    try:
+        with flip():
+            test()
+    except AssertionError:
+        allowed = _ROUND3_BACKSTOPS.get(flip, ())
+        stray = [line for line in faults if _BACKSTOP_ROUND3.match(line)
+                 and not any(needle in line for needle in allowed)]
+        if stray:
+            raise AssertionError("{} went red through the unexpected-error backstop (exit 2, cannot "
+                                 "evaluate), not an assertion: {}".format(name, stray[0])) from None
+    except Exception as exc:  # noqa: BLE001  the round-3 width
+        raise AssertionError("{} went red through a harness exception ({!r}), not an "
+                             "assertion".format(name, exc)) from None
+    else:
+        raise AssertionError(name + " survived its flip")
+    finally:
+        _flip_watch.pop()
+    test()
+
+
+def _t83_unrelated_eio(*_args):
+    raise OSError(errno.EIO, "UNRELATED crash in a broken flip; intended injection never reached")
+
+
+def _t83_unrelated_flip():
+    """A broken flip whose replacement crashes before its test's injection is reached."""
+    return patch.object(guard, "_claim_after_release", _t83_unrelated_eio)
+
+
+def _t83_mimic_crash(*_args):
+    raise RuntimeError("NameError('t82 broken flip fixture')")
+
+
+def _t83_twin_crash(*_args):
+    _injected("t82-declared", NameError("t82 broken flip fixture"))
+    raise NameError("t82 broken flip fixture")
+
+
+def _t83_resolver_crash(*_args):
+    raise NameError("t83 crash in the store resolver")
+
+
+def _t83_resolver_flip():
+    """A crash the record CLI turns into an unexpected-error refusal, never its cannot-evaluate line."""
+    return patch.object(record._opf_store, "resolve_store", _t83_resolver_crash)
+
+
+def _t83_exit(*_args):
+    raise SystemExit(0)
+
+
+def _t83_exit_flip():
+    """A flip whose replacement raises SystemExit(0) in the test itself."""
+    return patch.object(sys.modules[__name__], "recorded", _t83_exit)
+
+
+@contextlib.contextmanager
+def _t83_declared_as(probe, model):
+    """probe carries model's declarations, in this table and in the round-3 one."""
+    with patch.dict(_INTENDED_BACKSTOPS, {probe: _INTENDED_BACKSTOPS[model]}), \
+            patch.dict(_ROUND3_BACKSTOPS, {probe: _ROUND3_BACKSTOPS[model]}):
+        yield
+
+
+def t83_backstop_bound_to_injection(fx):
+    """A declared backstop is accepted only when the recorded injection the flip declares caused it: an
+    unrelated EIO under flip_t77's declarations, a RuntimeError carrying the declared NameError's text,
+    and a twin of the recorded NameError raised in its place each fail the discrimination as a backstop;
+    so does a crash the record CLI reports as an unexpected-error refusal, and a SystemExit(0) from the
+    flipped run fails it as a harness exception, never escaping."""
+    me = sys.modules[__name__]
+
+    def create():
+        recorded(record_cli(fx.env, fx.case("t83-create"), CREATE))
+    backstop, harness = "unexpected-error backstop", "harness exception"
+    legs = (("unrelated-eio", lambda: t77_report_every_failure(fx), _t83_unrelated_flip,
+             lambda: _t83_declared_as(_t83_unrelated_flip, flip_t77), backstop),
+            ("mimic-type", create, _t82_declared_flip,
+             lambda: patch.object(me, "_t82_declared_crash", _t83_mimic_crash), backstop),
+            ("twin-object", create, _t82_declared_flip,
+             lambda: patch.object(me, "_t82_declared_crash", _t83_twin_crash), backstop),
+            ("resolver-refusal", create, _t83_resolver_flip, contextlib.nullcontext, backstop),
+            ("system-exit", create, _t83_exit_flip, contextlib.nullcontext, harness))
+    for label, test, flip, setup, needle in legs:
+        outcome = None
+        try:
+            with setup():
+                me._discriminate("t83-" + label, test, flip)
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:  # noqa: BLE001  the verdict below reads which outcome was reached
+            outcome = exc
+        assert isinstance(outcome, AssertionError) and needle in str(outcome), (
+            "T83 a backstop or exception no declared injection caused never discriminates", label,
+            repr(outcome))
+
+
+def flip_t83():
+    """The round-3 discriminator."""
+    return patch.object(sys.modules[__name__], "_discriminate", _discriminate_round3)
+
+
+# The flips whose intended red is reached through a CLI backstop, each with the labels of the injections
+# that may cause it. A backstop line is accepted only when a recorded injection of a declared label is its
+# cause: the line is exactly that exception object's backstop line, and that object itself reached the
+# backstop (_bound_injection); any other backstop or exception in the flipped run fails the
+# discrimination. Each label is recorded by one test's injection site alone, so a declaration binds the
+# test, the flip and the injection together. Most label the synthetic failure their test injects, which
+# the reverted handling lets reach the backstop; the T18 flips drop an option guard and record the crash
+# the planner then meets reading the missing option; T64's emission leg reaches the backstop in every run,
+# so its recovery flip meets it too.
+_INTENDED_BACKSTOPS = {
+    flip_t18_requires: ("t18-requires",),
+    flip_t18_together: ("t18-together",),
+    flip_t62: ("t62-emit",),
+    flip_t64_conclude: ("t64-stderr",),
+    flip_t64_recovery: ("t64-emit",),
+    flip_t68: ("t68-mark-copy",),
+    flip_t69: ("t69-release", "t69-token"),
+    flip_t77: ("t77-emfile", "t77-fsync-eio"),
+    flip_t77_fsync: ("t77-fsync-eio",),
+    _t82_declared_flip: ("t82-declared",),
+}
 
 
 TESTS = (
@@ -5919,6 +6725,16 @@ TESTS = (
     ("T75-concurrent-recovery-single-writer", t75_concurrent_recovery, None),  # its flip runs inside the children
     ("T76-examination-lock-failure-diagnosed", t76_lock_failure_diagnosed, flip_t76),
     ("T77-release-report-every-failure", t77_report_every_failure, flip_t77),
+    ("T77-release-report-fsync-window", t77_fsync_window, (flip_t77, flip_t77_fsync)),
+    ("T78-lock-failure-names-live-holder", t78_lock_failure_names_holder, (flip_t78_unnamed, flip_t78_leftover,
+                                                                          flip_t78_held, flip_t78_join,
+                                                                          flip_t78_foreign)),
+    ("T79-replacement-named-not-absent", t79_replacement_named, (flip_t79_cause, flip_t79_prefix,
+                                                                 flip_t79_eloop, flip_t79_unreadable)),
+    ("T80-spec-8-8-item-1-wording", t80_spec_item_1_wording, (flip_t80, flip_t80_round1)),
+    ("T81-lease-denial-scoped", t81_lease_denial_scoped, (flip_t81_denial, flip_t81_split, flip_t81_holder)),
+    ("T82-discrimination-bound-to-assertion", t82_discrimination_bound, flip_t82),
+    ("T83-backstop-bound-to-injection", t83_backstop_bound_to_injection, flip_t83),
 )
 
 
@@ -5959,19 +6775,6 @@ def _self_test_isolated():
         except AssertionError as exc:
             failures.append("{}: {}".format(name, exc))
 
-    def discriminate(name, test, flip):
-        """The flip must turn the test red with an assertion (never an unrelated harness fault), and the
-        unflipped test must stay green around it."""
-        test()
-        try:
-            with flip():
-                test()
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError(name + " survived its flip")
-        test()
-
     base = Path(tempfile.mkdtemp(prefix="opf-record-gate-")).resolve()
     try:
         if opf._bootstrap() != 0:
@@ -5987,12 +6790,12 @@ def _self_test_isolated():
                 for flip in flips:
                     label = name if len(flips) == 1 else "{}:{}".format(name, flip.__name__)
                     check("red-on-revert-" + label,
-                          lambda name=label, test=test, flip=flip: discriminate(name, lambda: test(fx), flip))
+                          lambda name=label, test=test, flip=flip: _discriminate(name, lambda: test(fx), flip))
             check("red-on-revert-T5-crash-prestate-or-poststate",
-                  lambda: discriminate("T5", lambda: t5_crash(fx),
+                  lambda: _discriminate("T5", lambda: t5_crash(fx),
                                        lambda: _child_flip(fx)))
             check("red-on-revert-T75-concurrent-recovery-single-writer",
-                  lambda: discriminate("T75", lambda: t75_concurrent_recovery(fx),
+                  lambda: _discriminate("T75", lambda: t75_concurrent_recovery(fx),
                                        lambda: _t75_child_flip(fx)))
     except Exception as exc:  # noqa: BLE001  a harness fault is cannot-evaluate, never a verdict
         print("OPF-RECORD SELF-TEST ERROR: {!r}".format(exc), file=sys.stderr)
