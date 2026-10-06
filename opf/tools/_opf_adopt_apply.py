@@ -5558,6 +5558,19 @@ def _self_test_checks():
     census = Path("/proc/self/fd").is_dir()
     no_census = "no /proc/self/fd descriptor census on this platform"
 
+    def descriptors():
+        """The descriptors open now, by the census: compared at the end so this run leaves none behind for
+        the modules a self-test run loads after it."""
+        found = set()
+        for fd_name in os.listdir("/proc/self/fd"):
+            try:
+                os.fstat(int(fd_name))
+            except OSError:
+                continue
+            found.add(int(fd_name))
+        return found
+    entry_descriptors = descriptors() if census else None
+
     def check(name, cond, observed=None):
         checked[0] += 1
         if not cond:
@@ -8034,6 +8047,7 @@ def _self_test_checks():
             the close up to run_adopt_transaction (the close-site path, never the harness above it)."""
             name, compose_c, patches = scenario
             under = plan.get("under")
+            held = _fds_open()
             with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
                 root, files = fixture(temp)
                 real_close_c, seen, fired = os.close, [0], []
@@ -8067,6 +8081,11 @@ def _self_test_checks():
                         run_adopt_transaction(root, rid, compose_c or compose_full(files))
                     except BaseException as exc:    # noqa: BLE001  every outcome is inspected below
                         raised = exc
+            # An injection at a disclosed close window (the store's _open_working_dir_fd parent close among
+            # them; leak-freedom under interrupt is not claimed) leaves a descriptor open: reclaim each one
+            # this run left behind, so the sweep's runs never leave them to the modules tested after this one.
+            for fd in sorted(_fds_open() - held):
+                os.close(fd)
             return seen[0], fired, raised
 
         def class_named(exc, raised):
@@ -12187,6 +12206,13 @@ def _self_test_checks():
                       died == 137 and rdied == 137 and recovered == 0 and again == [] and journal_quiet(root)
                       and tree_state(root, journal=False) == pre and txn_state(root, txn_of) == "rolled-back")
 
+    if census:
+        left_open = sorted(descriptors() - entry_descriptors)
+        check("self-test-leaves-no-descriptor-open", not left_open,
+              observed="{} descriptor(s) left open, first {}".format(
+                  len(left_open), [(fd, os.readlink("/proc/self/fd/{}".format(fd))) for fd in left_open[:4]]))
+    else:
+        skipped.append(("self-test-leaves-no-descriptor-open", no_census))
     for name, why in skipped:
         print("  SKIPPED: {} ({})".format(name, why))
     if failures:
