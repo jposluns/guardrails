@@ -80,7 +80,16 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      authority), to a fixed point; the rosters bind from the product roots above the session cwd,
      every absolute spelling and every resolved target; and every resolved target is judged exactly
      as a file-tool target would be (store, frozen, view, the pack own files (R8) and the
-     registration (R8)). Past the derived-spelling, base or resolved-target budget the command
+     registration (R8)). Round 9: every directory a spelling resolves to also receives the
+     basename of every argument spelling as one more resolved target (cp X docs, cp -t docs X,
+     install X docs and mv X /abs/docs write docs/<basename of X>); a command led by a removing,
+     moving or re-permissioning word (CONTAINER_VERBS) or git rm, mv, clean, checkout or restore
+     denies when a resolved operand (the cwd too, for git) is a directory HOLDING a protected
+     path (a bound store tree, a frozen file, a view, a registration or the pack tree), and so
+     does any command whose directory-plus-basename target is such a directory (cp -r src/docs
+     .); a tilde-headed spelling is judged in BOTH readings, literal under the cwd (bash keeps a
+     quoted tilde literal) and expanded; and an absolute GIT_TRACE* value is one more inherited
+     spelling. Past the derived-spelling, base or resolved-target budget the command
      DENIES cannot-evaluate. A command referencing a protected token is denied unless the WHOLE
      command is a single plain invocation of the sanctioned writer (allowance A1 below), the only
      allowance. A git command under an inherited code-valued git variable (GIT_CODE_ENV, other than
@@ -109,7 +118,11 @@ WHAT IT DENIES (each rule names the sanctioned path in its decision reason):
      chain is absence (nothing to read), but a roster or evidence path whose deepest EXISTING
      ancestor is a dangling symlink or a non-directory, and a `.working` entry that exists without
      resolving to a directory, are CANNOT-EVALUATE and deny: an unresolved ancestor is never read
-     as an absent (empty) roster. Roster files are opened without blocking (O_NONBLOCK where the
+     as an absent (empty) roster. Root discovery keeps the probe's errors (round 9): a directory
+     on the way that refuses the search while the session's own user owns it (so the same command
+     could unlock it first) is CANNOT-EVALUATE, never a directory holding no store; another
+     user's unsearchable directory is absence, since nothing below it is reachable to this user.
+     Roster files are opened without blocking (O_NONBLOCK where the
      platform has it) after a regular-file check, re-checked on the open descriptor, and read through
      a bounded loop, so a FIFO or other trap input yields a prompt structured deny, never a stall and
      never an empty protection set. A payload unreadable at the envelope level exits 2 (blocking
@@ -158,7 +171,10 @@ assignment-bearing command is never the allowance.
      only) running THE repository's own opf/tools/opf.py with verb record or render. The launched
      script is identified by realpath EQUALITY against the writer this hook ships beside (resolved
      from the hook's own installed location), never by a filename: a same-named opf.py anywhere else
-     is not the writer. opf's own write guard, lease and journal govern what the writer may do. This
+     is not the writer. The script word resolves LITERALLY against the session cwd, as bash runs it
+     (round 9): a tilde can reach it only inside single quotes, which bash keeps literal, so a
+     tilde-headed script word is never the writer. opf's own write guard, lease and journal govern
+     what the writer may do. This
      allowance also holds under an R6 roster failure, so the in-session repair path stays open.
 
 RESIDUALS (spec 14.1 requires each disclosed; the pack's residual register (slice (d)) and the plan's
@@ -175,9 +191,15 @@ per-platform residual coverage carry the same list):
     PLAIN_DENIED_COMMANDS that runs a command named in its own options. The deny list and the plain
     semantic check exclude the inline forms only; the configuration and the prepared file are
     same-user preparation.
-  - A plain command whose operand CONTAINS the store rather than lying in it: the exact check judges
-    words that resolve INTO a protected path, so an operand naming a product root or an ancestor of
-    one (a recursive remove of the root, git clean from the root) reaches the store with no
+  - A plain command whose operand CONTAINS a protected path rather than lying on it, outside the
+    round-9 container rule: the exact check judges words that resolve INTO a protected path, the
+    directory-plus-basename joins and, for CONTAINER_VERBS and git rm, mv, clean, checkout and
+    restore, a directory operand holding a protected path of a BOUND root. So a program outside
+    those words acting on a directory's whole contents under a name no operand carries (an
+    archive extraction or a sync into a parent directory, cp -r src/. docs), a git work-tree
+    rewrite named by no path (git reset --hard, git stash, git switch, git merge or pull), and a
+    recursive remove of an ancestor of a product root that the session neither sits in nor
+    binds (no product root above the cwd or any operand) reach a protected file with no
     protected token.
   - A relative protected spelling past the word budget: a provably plain command binds the rosters
     above every RESOLVED target (round 8), so a relative spelling that climbs into a product from
@@ -235,7 +257,8 @@ per-platform residual coverage carry the same list):
     variable the Bash tool sets that the hook process does not inherit, a non-git program's own
     configuration variable (PAGER, EDITOR, a build tool's), and git's user or system configuration
     files themselves (an alias or hook path inside them) stay the same-user-preparation residual
-    named above.
+    named above. An absolute GIT_TRACE* value is judged as a spelling (round 9); a trace variable
+    naming a descriptor or socket writes no named file.
   - An R7 payload string is judged WHOLE: the option-glued and delimiter-embedded derivation of R5
     applies to Bash words only, so an unknown tool string such as -o/abs/TODO.md binds no roster by
     its glued spelling (its textual token scan still applies once a roster is bound).
@@ -264,7 +287,13 @@ per-platform residual coverage carry the same list):
     the same command names (ls docs STATUS.md where docs/STATUS.md is a view), any not-plain command
     that spells .working anywhere (grep .working from outside every product), a git command under a
     non-trivial inherited GIT_PAGER, GIT_EXTERNAL_DIFF or similar, and a plain command naming more
-    than MAX_BASES directories, all deny. R6 denies every write under a root whose roster
+    than MAX_BASES directories, all deny. Round 9 widens them again: a remove, move or
+    re-permission of ANY directory holding a protected path (mv notes.md docs where docs holds a
+    view, chmod -R u+w . from a product root), git restore --staged or git rm --cached over such a
+    directory, a directory operand beside a word whose basename names a protected file inside it,
+    a quoted tilde spelling whose literal OR expanded reading is protected, and every path below a
+    directory the session's own user made unsearchable, all deny. R6 denies every write under a
+    root whose roster
     carries any unreadable or malformed entry, R3 keeps denying a frozen path even after its
     retirement is recorded, and a protected token inside prose (a commit message) still trips a
     plain command.
@@ -300,6 +329,7 @@ if tuple(sys.version_info[:2]) < (3, 11):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
+import errno
 import json
 import os
 import re
@@ -473,6 +503,22 @@ GIT_CODE_ENV = ("GIT_EXTERNAL_DIFF", "GIT_PAGER", "GIT_EDITOR", "GIT_SEQUENCE_ED
                 "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_EXEC_PATH", "GIT_PROXY_COMMAND",
                 "GIT_TEMPLATE_DIR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
 GIT_ENV_NOOPS = frozenset(("", "true", "cat", "less", "more", ":", "0"))
+# The git trace variables (round 9): an ABSOLUTE value is a file git appends its trace to, creating
+# it, so each such value is judged as one more spelling like a GIT_PATH_ENV value; any other value
+# (1, true, a descriptor number, a socket address) writes no named file.
+GIT_TRACE_PREFIX = "GIT_TRACE"
+# The lstat errors that mean a `.working` probe found nothing (round 9): no such entry, a
+# non-directory or over-long component, a symlink loop on the way. A permission error is NOT
+# absence (_store_entry), and every other error is cannot-evaluate.
+ABSENT_ERRNOS = frozenset((errno.ENOENT, errno.ENOTDIR, errno.ENAMETOOLONG, errno.ELOOP))
+# The removing, moving and permission-changing command words (round 9): such a program applied to a
+# DIRECTORY operand acts on everything inside it, so a plain command led by one of these (or git rm,
+# mv, clean, checkout or restore) denies when a resolved operand is a directory that CONTAINS a
+# protected path: the store tree of a bound root, a frozen file, a declared view, the registration or
+# the pack own tree (_container_rule). Matched like the deny list, on the lowercased basename.
+CONTAINER_VERBS = frozenset(("rm", "rmdir", "unlink", "mv", "shred", "srm", "wipe", "trash",
+                             "trash-put", "chmod", "chown", "chgrp", "setfacl", "chattr"))
+GIT_CONTAINER_SUBCOMMANDS = frozenset(("rm", "mv", "clean", "checkout", "restore"))
 
 SANCTIONED = ("OPF content changes only through the sanctioned writer: run the opf CLI (opf record, "
               "opf render, and the other opf verbs), or make the change outside the store's scope")
@@ -516,15 +562,23 @@ def _components(path):
     return [c for c in norm.split(os.sep) if c not in ("", ".")]
 
 
-def _candidates(target, cwd):
+def _candidates(target, cwd, tilde="both"):
     """The absolute forms of `target` to judge: the lexically normalized path and the realpath of the
     ORIGINAL spelling. Resolving the original spelling first is load-bearing: in a spelling such as
     `link/../x`, the filesystem resolves the symlink BEFORE `..` climbs out of its destination, so a
     lexical collapse first (normpath dropping `link/..`) would judge a different file than the one the
     write reaches. normpath is applied only to the already-resolved result and to the lexical twin.
-    A tilde spelling expands FIRST (the launched tool expands it too, so the hook must judge the
-    expanded path, never a cwd-joined literal `~`)."""
-    target = os.path.expanduser(target)
+    A leading tilde has two readings and BOTH are judged (round 9, fail closed): expanded against HOME
+    (a tool or program that expands it) and LITERAL, a `~` directory under the cwd (bash keeps a
+    quoted tilde literal, and the plain classifier lets a tilde through only inside single quotes).
+    `tilde` "expand" or "literal" judges one reading alone; with neither reading resolvable (a
+    relative spelling and no absolute cwd) the result is None."""
+    if tilde == "both" and target.startswith("~"):
+        both = set(_candidates(target, cwd, "expand") or ())
+        both.update(_candidates(target, cwd, "literal") or ())
+        return sorted(both) or None
+    if tilde != "literal":
+        target = os.path.expanduser(target)
     if not os.path.isabs(target):
         if not isinstance(cwd, str) or not os.path.isabs(cwd):
             return None
@@ -574,25 +628,73 @@ def _store_rule(candidate):
             "change only through the sanctioned writer (spec 14.1). %s." % (WORKING, SANCTIONED))
 
 
+def _search_blocker(entry):
+    """For an entry whose lstat failed on a permission error: a reason when the directory refusing
+    the search is one the session's own user can unlock (it owns it, or it is the superuser), or
+    None when another user owns it (round 9). The blocker is the deepest ancestor of `entry` that
+    can itself be examined; every examination error is a reason (fail closed)."""
+    cur = os.path.dirname(entry)
+    while True:
+        try:
+            st = os.stat(cur)
+        except PermissionError:
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+            continue
+        except OSError as exc:
+            return "the directory %s on the path to %s cannot be examined (%r)" % (cur, entry, exc)
+        euid = os.geteuid() if hasattr(os, "geteuid") else None
+        if euid is not None and euid != 0 and st.st_uid != euid:
+            return None
+        return ("the directory %s is not searchable, but the session's own user can unlock it (it "
+                "owns it), even within the same command, so whether a %s store tree lies below it "
+                "cannot be read" % (cur, WORKING))
+    return "no directory on the path to %s can be examined" % (entry,)
+
+
+def _store_entry(entry):
+    """One `.working` probe for _roots_above with the errors KEPT (round 9: os.path.isdir and
+    os.path.lexists read a permission error as absence): "dir" for a plain directory, "absent" for a
+    genuinely absent entry (no such file, a non-directory or over-long component, a symlink loop on
+    the way) or one under another user's unsearchable directory, else a reason."""
+    try:
+        st = os.lstat(entry)
+    except OSError as exc:
+        if exc.errno in ABSENT_ERRNOS:
+            return "absent"
+        if isinstance(exc, PermissionError):
+            reason = _search_blocker(entry)
+            return "absent" if reason is None else reason
+        return "the store entry %s cannot be examined (%r)" % (entry, exc)
+    if stat.S_ISDIR(st.st_mode):
+        return "dir"
+    return ("the store entry %s exists but is not a plain directory (a symlinked, dangling or "
+            "non-directory %s tree is a layout the sanctioned writer refuses, and this hook will not "
+            "bind a store it cannot read as the writer would)" % (entry, WORKING))
+
+
 def _roots_above(path):
     """Every product root at or above `path` (a directory holding a `.working` entry, nearest
     first): (roots, None), or (None, reason) when a `.working` entry EXISTS somewhere above but is
     not a plain directory (a SYMLINK, even to a directory: the writer refuses a symlinked
     `.working` with O_NOFOLLOW, so this hook refuses to bind one as a store; a dangling link; or a
-    non-directory): a store tree that cannot be read as the writer would read it is
-    cannot-evaluate, never an absent root (R6)."""
+    non-directory), or when a directory on the way refuses the search and the session's own user
+    could unlock it (round 9: an unsearchable directory the same command can chmod first is never
+    read as holding no store; another user's unsearchable directory is absence, since nothing
+    below it is reachable to this user): a store tree that cannot be read as the writer would read
+    it is cannot-evaluate, never an absent root (R6)."""
     roots = []
     cur = os.path.normpath(path)
     while True:
         if os.path.basename(cur) != WORKING:
             entry = os.path.join(cur, WORKING)
-            if os.path.isdir(entry) and not os.path.islink(entry):
+            state = _store_entry(entry)
+            if state == "dir":
                 roots.append(cur)
-            elif os.path.lexists(entry):
-                return None, ("the store entry %s exists but is not a plain directory (a symlinked, "
-                              "dangling or non-directory %s tree is a layout the sanctioned writer "
-                              "refuses, and this hook will not bind a store it cannot read as the "
-                              "writer would)" % (entry, WORKING))
+            elif state != "absent":
+                return None, state
         parent = os.path.dirname(cur)
         if parent == cur:
             return roots, None
@@ -1078,7 +1180,12 @@ def _is_sanctioned_opf(tokens, cwd):
         rest = rest[1:]
     if len(rest) < 2 or rest[1] not in WRITER_VERBS:
         return False
-    script = os.path.expanduser(rest[0])
+    # The script word resolves LITERALLY, as bash runs it (round 9): a tilde reaches a plain word
+    # only inside single quotes, which bash keeps literal, so a tilde-headed word is never the
+    # writer (expanding it against HOME would bless a planted `~` directory under the cwd).
+    script = rest[0]
+    if script.startswith("~"):
+        return False
     if not os.path.isabs(script):
         if not isinstance(cwd, str) or not os.path.isabs(cwd):
             return False
@@ -1197,7 +1304,9 @@ def _derived_spellings(words):
 
 def _ambient_git_spellings():
     """The path values of the inherited git environment (GIT_PATH_ENV; a list-valued variable split
-    on the path separator): each is judged as one more spelling of the Bash command (R5, round 8)."""
+    on the path separator), and the absolute value of every GIT_TRACE* variable (round 9: git
+    appends its trace to that file): each is judged as one more spelling of the Bash command (R5,
+    round 8)."""
     out = []
     for name in GIT_PATH_ENV:
         value = os.environ.get(name)
@@ -1205,6 +1314,10 @@ def _ambient_git_spellings():
             continue
         parts = value.split(os.pathsep) if name == "GIT_ALTERNATE_OBJECT_DIRECTORIES" else [value]
         out.extend(part for part in parts if part)
+    for name in sorted(os.environ):
+        value = os.environ[name]
+        if name.startswith(GIT_TRACE_PREFIX) and value and os.path.isabs(value):
+            out.append(value)
     return out
 
 
@@ -1214,8 +1327,10 @@ def _resolved_targets(spellings, cwd, relative=True):
     cwd AND against every directory another spelling resolves to (a redirection of authority: git -C
     dir, --work-tree=dir, curl --output-dir dir, an inherited GIT_WORK_TREE), to a fixed point, so a
     relative operand is judged where the program may actually open it. Each candidate is the
-    lexical and the realpath spelling (_candidates). With `relative` false (past the word budget)
-    only absolute spellings resolve."""
+    lexical and the realpath spelling (_candidates), and a tilde-headed spelling is judged in BOTH
+    readings, expanded and literal, against every base (round 9: bash keeps a quoted tilde literal,
+    while a program may expand one in its own option value). With `relative` false (past the word
+    budget) only absolute and tilde-headed spellings resolve."""
     bases, queue, cands, seen = [], [cwd], [], set()
     absolutes_done = False
     while queue:
@@ -1228,10 +1343,10 @@ def _resolved_targets(spellings, cwd, relative=True):
                           "failing closed (R6)" % (MAX_BASES,))
         bases.append(base)
         for spelling in spellings:
-            if os.path.isabs(os.path.expanduser(spelling)):
+            if os.path.isabs(spelling):
                 if absolutes_done:
                     continue
-            elif not relative:
+            elif not relative and not spelling.startswith("~"):
                 continue
             for cand in _candidates(spelling, base) or ():
                 if cand in seen:
@@ -1246,6 +1361,71 @@ def _resolved_targets(spellings, cwd, relative=True):
                     queue.append(cand)
         absolutes_done = True
     return cands, None
+
+
+def _joined_targets(cands, spellings):
+    """The targets a word reaches INSIDE a directory another word names (R5, round 9): cp X docs,
+    cp -t docs X, install X docs, ln X docs and mv X /abs/docs each write docs/<basename of X>, so
+    every resolved candidate that is a directory receives the basename of every argument spelling as
+    one more resolved target (lexical and realpath): (targets, None), or (None, reason) past
+    MAX_JUDGED_TARGETS."""
+    names = []
+    for spelling in spellings:
+        name = os.path.basename(os.path.normpath(spelling)) if spelling else ""
+        if name and name not in (".", "..") and name not in names:
+            names.append(name)
+    out, seen = [], set(cands)
+    for directory in cands:
+        if not names or not os.path.isdir(directory):
+            continue
+        for name in names:
+            for cand in _candidates(os.path.join(directory, name), None, "literal") or ():
+                if cand in seen:
+                    continue
+                seen.add(cand)
+                if len(seen) > MAX_JUDGED_TARGETS:
+                    return None, ("the command reaches more than %d candidate targets inside the "
+                                  "directories it names, over the resolution budget, so it cannot "
+                                  "be fully examined; failing closed (R6)" % (MAX_JUDGED_TARGETS,))
+                out.append(cand)
+    return out, None
+
+
+def _git_subcommand_index(words):
+    """The index of a git command's subcommand word past its global options, or None."""
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in GIT_VALUE_GLOBALS else 1
+    return i if i < len(words) else None
+
+
+def _container_verb(words):
+    """True when a plain command acts on a directory operand's whole contents (round 9): a
+    CONTAINER_VERBS command word, or git with a GIT_CONTAINER_SUBCOMMANDS subcommand."""
+    names = _command_names(words[0])
+    if names & CONTAINER_VERBS:
+        return True
+    if "git" not in names:
+        return False
+    i = _git_subcommand_index(words)
+    return i is not None and words[i] in GIT_CONTAINER_SUBCOMMANDS
+
+
+def _container_rule(cand, protected):
+    """R5/R8 container check (round 9): a deny reason when `cand` is a directory holding one of the
+    `protected` absolute paths (a store tree, a frozen file, a declared view, a registration or a
+    pack own directory) at any depth, or None."""
+    if not os.path.isdir(cand):
+        return None
+    prefix = cand if cand.endswith(os.sep) else cand + os.sep
+    for path in sorted(protected):
+        if path.startswith(prefix):
+            return ("a word of this Bash command resolves to the directory %r, which holds the "
+                    "protected path %r, and the command removes, moves, re-permissions or "
+                    "rewrites a directory operand's whole contents (or writes into it under a "
+                    "protected name), so it is denied fail-closed (R5, R8). %s." % (cand, path,
+                                                                                   SANCTIONED))
+    return None
 
 
 def _bound_roots(text, cwd, extras=()):
@@ -1445,10 +1625,19 @@ def _plain_bash_rule(command, words, cwd):
     cands, reason = _resolved_targets(spellings, cwd, resolve_all)
     if reason is not None:
         return reason
+    joined, reason = _joined_targets(cands, words[1:] + derived)
+    if reason is not None:
+        return reason
+    container = _container_verb(words)
+    if container and "git" in _command_names(words[0]):
+        # git clean (and the other git container forms) act below the cwd with no path operand.
+        for cand in _candidates(cwd, None, "literal") or ():
+            if cand not in cands:
+                cands.append(cand)
     roots, reason = _bound_roots(command, cwd, spellings)
     if reason is not None:
         return reason + "; failing closed (R6)"
-    for cand in cands:
+    for cand in cands + joined:
         got, reason = _roots_above(cand)
         if reason is not None:
             return reason + "; failing closed (R6)"
@@ -1465,7 +1654,13 @@ def _plain_bash_rule(command, words, cwd):
                 "sanctioned writer (opf record or opf render): a lexical hook cannot prove any "
                 "other referencing command read-only, so it is denied fail-closed (R5). %s; read "
                 "protected files through the platform Read tool." % (kind, SANCTIONED))
-    for cand in cands:
+    protected = set(frozen[0]) | set(views[0]) | set(reg_idents) | set(_guarded_prefixes())
+    protected.update(os.path.join(root, WORKING) for root in roots)
+    for cand in (cands if container else []) + joined:
+        reason = _container_rule(cand, protected)
+        if reason is not None:
+            return reason
+    for cand in cands + joined:
         if _store_rule(cand) is not None:
             return ("a word of this Bash command resolves into the %s store tree and the "
                     "command is not a single plain invocation of the sanctioned writer, so it "

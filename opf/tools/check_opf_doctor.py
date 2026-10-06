@@ -1204,6 +1204,7 @@ def _claude_hook_self_test():
     cannot be launched)."""
     import importlib.util
     import json
+    import shutil
     import tempfile
 
     import _opf_store  # noqa: E402  the store-tree / machine-store name constants
@@ -2229,6 +2230,91 @@ def _claude_hook_self_test():
                     ("deny-list-case-fold", "PYTHON3 -c x")):
                 deny("bash-r8-discriminating-" + label + "-denied",
                      payload("Bash", dict(command=cmd), root), "product root")
+            # ROUND 9 (QA round 9): each vector below ALLOWED on the predecessor pin 7a7c8fde and
+            # denies now. (1) A product directory the session's own user owns but has made
+            # unsearchable hid its store from discovery (os.path.isdir read the permission error as
+            # absence), so a command that unlocks it and then writes was allowed; the store probe
+            # now keeps the error and fails closed. (2) A quoted tilde, which bash keeps literal,
+            # was expanded against HOME: the python3 writer launch blessed a planted `~` directory
+            # under the cwd, and a plain or coarse word through a `~` symlink was judged at HOME;
+            # A1 now resolves the script word literally and every other spelling is judged in both
+            # readings. (3) A directory operand reached a protected file inside it: the copy,
+            # install and move INTO a directory are judged at <directory>/<basename>, and a
+            # removing, moving or re-permissioning command (and git rm, mv, clean, checkout and
+            # restore) denies on a directory operand holding a protected path, the registration
+            # directory included. (4) An absolute GIT_TRACE* value is a file git writes.
+            r9_mode = os.stat(root).st_mode & 0o7777
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                os.chmod(root, 0)
+                try:
+                    deny("bash-r9-unsearchable-root-unlock-then-write-denied",
+                         payload("Bash", dict(command="chmod u+rwx " + root + "; printf x > "
+                                              + os.path.join(root, "TODO.md")), elsewhere),
+                         "not searchable")
+                    deny("write-r9-unsearchable-root-view-denied",
+                         payload("Write", dict(file_path=os.path.join(root, "TODO.md"),
+                                               content="x"), elsewhere), "not searchable")
+                finally:
+                    os.chmod(root, r9_mode)
+            allow("bash-r9-absent-directory-allowed",
+                  payload("Bash", dict(command="ls " + os.path.join(elsewhere, "missing", "x")),
+                          elsewhere))
+            repo_root = str(Path(__file__).resolve().parent.parent.parent)
+            planted = os.path.join(root, "~", "opf", "tools")
+            os.makedirs(planted)
+            with open(os.path.join(planted, "opf.py"), "w", encoding="utf-8") as fh:
+                fh.write("planted\n")
+            deny("bash-r9-a1-quoted-tilde-writer-denied",
+                 payload("Bash", dict(command="python3 " + chr(39) + "~/opf/tools/opf.py" + chr(39)
+                                      + " record task x"), root), "product root",
+                 env=dict(HOME=repo_root))
+            shutil.rmtree(os.path.join(root, "~"))
+            os.symlink("docs", os.path.join(root, "~"))
+            deny("bash-r9-plain-quoted-tilde-view-denied",
+                 payload("Bash", dict(command="cp /dev/null " + chr(39) + "~/STATUS.md" + chr(39)),
+                         root), "declared view", env=dict(HOME=elsewhere))
+            os.remove(os.path.join(root, "~"))
+            os.symlink(root, os.path.join(elsewhere, "~"))
+            deny("bash-r9-coarse-quoted-tilde-view-denied",
+                 payload("Bash", dict(command="printf x > " + chr(39) + "~/TODO.md" + chr(39)),
+                         elsewhere), "product root", env=dict(HOME=basestr))
+            os.remove(os.path.join(elsewhere, "~"))
+            stage = os.path.join(basestr, "stage")
+            os.makedirs(os.path.join(stage, "docs"))
+            for rel in ("STATUS.md", "notes.md", os.path.join("docs", "STATUS.md")):
+                with open(os.path.join(stage, rel), "w", encoding="utf-8") as fh:
+                    fh.write("staged\n")
+            staged = os.path.join(stage, "STATUS.md")
+            deny("bash-r9-cp-into-view-directory-denied",
+                 payload("Bash", dict(command="cp " + staged + " docs"), root), "declared view")
+            deny("bash-r9-cp-t-view-directory-denied",
+                 payload("Bash", dict(command="cp -t docs " + staged), root), "declared view")
+            deny("bash-r9-install-into-view-directory-denied",
+                 payload("Bash", dict(command="install " + staged + " docs/"), root),
+                 "declared view")
+            deny("bash-r9-mv-into-abs-view-directory-outside-denied",
+                 payload("Bash", dict(command="mv " + staged + " " + os.path.join(root, "docs")),
+                         elsewhere), "STATUS.md")
+            deny("bash-r9-cp-r-directory-over-views-denied",
+                 payload("Bash", dict(command="cp -r " + os.path.join(stage, "docs") + " ."),
+                         root), "holds the protected path")
+            deny("bash-r9-rm-r-view-directory-denied",
+                 payload("Bash", dict(command="rm -r docs"), root), "holds the protected path")
+            deny("bash-r9-git-rm-r-view-directory-denied",
+                 payload("Bash", dict(command="git rm -r docs"), root), "holds the protected path")
+            os.makedirs(os.path.join(root, ".claude"), exist_ok=True)
+            deny("bash-r9-rm-r-registration-directory-denied",
+                 payload("Bash", dict(command="rm -r .claude"), root), "holds the protected path")
+            allow("bash-r9-cp-free-name-into-directory-allowed",
+                  payload("Bash", dict(command="cp " + os.path.join(stage, "notes.md") + " docs"),
+                          root))
+            allow("bash-r9-ls-view-directory-allowed",
+                  payload("Bash", dict(command="ls docs"), root))
+            deny("bash-r9-ambient-git-trace-view-outside-denied",
+                 payload("Bash", dict(command="git status"), elsewhere), "declared view",
+                 env=dict(GIT_TRACE=os.path.join(root, "TODO.md")))
+            allow("bash-r9-ambient-git-trace-flag-allowed",
+                  payload("Bash", dict(command="git status"), elsewhere), env=dict(GIT_TRACE="1"))
             # claude n2: Skill and SlashCommand are no longer read-only-listed (their expansion
             # may run shell lines the platform does not route back through PreToolUse), so each
             # takes R7: a protected reference denies, a free one allows. Both FAIL on the pin.
@@ -2339,7 +2425,15 @@ def _claude_hook_self_test():
           "relative operand resolved against a directory the command names (git -C) or climbing "
           "into a product from outside, and an inherited GIT_WORK_TREE, GIT_DIR or "
           "GIT_EXTERNAL_DIFF each deny, a no-op GIT_EDITOR and GIT_PAGER allow, and one "
-          "discriminating vector pins each coarse, git and forbidden-character behaviour)")
+          "discriminating vector pins each coarse, git and forbidden-character behaviour. ROUND 9: "
+          "a product directory its own user made unsearchable fails closed (an unlock-then-write "
+          "command and a view Write both deny) while an absent directory stays absence, a quoted "
+          "tilde is never expanded for the writer launch (a planted ~/opf/tools/opf.py denies) and "
+          "every other tilde spelling is judged literal and expanded (plain and coarse), a copy, "
+          "install or move into a directory holding a view denies at <directory>/<basename>, a "
+          "recursive copy, remove or git rm over a directory holding a view, and a remove of the "
+          "registration directory, deny, while a free copy into the directory and ls of it allow, "
+          "and an absolute GIT_TRACE value denies while GIT_TRACE=1 allows)")
     return EXIT_OK
 
 
