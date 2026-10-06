@@ -112,7 +112,12 @@ THREAT MODEL
     This is an accidental-habit guard, not a security boundary. The actor is a well-meaning assistant that
     destroys or recreates a record without first looking at what it holds; nothing here resists a caller that
     sets out to destroy a file. So every internal error, every input the reading cannot follow, and every
-    malformed payload fails OPEN: no output, exit 0. The hook also stays silent for a verification worker
+    malformed payload fails OPEN: no output, exit 0.
+    The one exception is an interpreter older than Python 3.14: the guard at the top of this file reads no
+    input, writes one `error: record-remove-check.py requires Python 3.14 or newer` line to stderr and exits 2,
+    which PreToolUse treats as a deny, so every Bash call is denied until Python is upgraded or the hook's
+    entry is removed.
+    The hook also stays silent for a verification worker
     process (AIQT_HOOKS_WORKER set to "1"; or the legacy names, ORCH_WORKER set to "1" or ORCH_VERIFY_OWNER
     present at all, even empty), for a tool_name other than Bash, for an event other than PreToolUse, for a
     bad argv, and for a stdin that is absent, unreadable, over 16 MiB, incomplete after 2 seconds, not JSON,

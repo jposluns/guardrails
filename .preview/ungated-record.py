@@ -73,7 +73,12 @@ THREAT MODEL
     This is an accidental-habit guard, not a security boundary. The actor is a well-meaning assistant that
     joins a gate and its record with `;` and forgets the record then runs on failure; nothing here resists a
     caller that sets out to hide a record. So every internal error, every input the walk cannot follow, and
-    every malformed payload fails OPEN: no output, exit 0. The hook also stays silent for a verification worker
+    every malformed payload fails OPEN: no output, exit 0.
+    The one exception is an interpreter older than Python 3.14: the guard at the top of this file reads no
+    input, writes one `error: ungated-record.py requires Python 3.14 or newer` line to stderr and exits 2,
+    which PreToolUse treats as a deny, so every Bash call is denied until Python is upgraded or the hook's
+    entry is removed.
+    The hook also stays silent for a verification worker
     process (AIQT_HOOKS_WORKER set to "1"; or the legacy names, ORCH_WORKER set to "1" or ORCH_VERIFY_OWNER
     present at all, even empty), for a payload carrying agent_id (a subagent's call), for a tool_name other
     than Bash, for an event other than PreToolUse, for a bad argv, and for a stdin that is absent, unreadable,

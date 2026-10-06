@@ -46,8 +46,15 @@ import json
 import os
 import stat
 import time
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: pin.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
@@ -1326,6 +1333,7 @@ def self_test():
     """Adversarial synthetic-tree flow invariants (B10 root-cause fix: the r1 suite was too shallow and hid
     B1-B9). Each scenario asserts the FAIL/refuse path first, so the guard is proven to bite, then the clean
     path. Real subprocess crash-injection (the engine KILL hook) exercises the recovery command."""
+    import importlib.util
     import io
     import shutil
     import subprocess
@@ -1371,6 +1379,31 @@ def self_test():
                 "corruption-finding": "", "chain": chain}
 
     try:
+        # ---- TNOTOML: a 3.14 interpreter that cannot import tomllib is an incomplete install, not an old
+        # one; the module refuses at exit 2 with one error line naming tomllib (never a traceback, never the
+        # version refusal). It is loaded afresh from this file with tomllib blocked (None in sys.modules makes
+        # the import fail). ----
+        nt_err = io.StringIO()
+        nt_saved = sys.modules.get("tomllib"), list(sys.path)
+        sys.modules["tomllib"] = None
+        try:
+            nt_spec = importlib.util.spec_from_file_location("_pin_no_tomllib", os.path.abspath(__file__))
+            with redirect_stderr(nt_err):
+                nt_spec.loader.exec_module(importlib.util.module_from_spec(nt_spec))
+            nt_outcome = "loaded"
+        except SystemExit as exc:
+            nt_outcome = exc.code
+        except ModuleNotFoundError as exc:
+            nt_outcome = "escaped " + type(exc).__name__
+        finally:
+            sys.modules["tomllib"] = nt_saved[0]
+            sys.path[:] = nt_saved[1]
+        nt_lines = nt_err.getvalue().splitlines()
+        check("TNOTOML: a missing tomllib on a 3.14 interpreter is one exit-2 'cannot import' line, got "
+              "{} with {!r}".format(nt_outcome, nt_lines),
+              nt_outcome == 2 and len(nt_lines) == 1 and nt_lines[0].startswith("error: pin.py cannot import "
+              "tomllib, part of the Python standard library") and "requires Python" not in nt_lines[0])
+
         # ---- TBIG (F-TOML-BARE-VALUEERROR-CLASS): an integer literal past CPython's 4300-digit int-string
         # limit makes tomllib raise a BARE ValueError (not TOMLDecodeError); the contained TOML reader must
         # still refuse with PinError (exit 2), never let the ValueError escape (do_un_adopt catches only
