@@ -36,7 +36,9 @@ never importing or running the file, and reports:
                called on; called on a class, as in smtplib.SMTP.starttls(server), its first
                positional argument is self) without a context, each given as literal None, a
                name every binding of which in its scope is literal None (a None default
-               parameter never rebound, or ctx = None), or hidden by a spread counting as none,
+               parameter never rebound, ctx = None, or ctx, other = None, 1; a bare annotation
+               such as ctx: object, or a del, stores no value, so it is no binding), or hidden
+               by a spread counting as none,
                any ssl.get_server_certificate (it never checks the hostname, whatever ca_certs
                it is given), a logging.handlers.SMTPHandler whose secure= (sixth positional)
                is set or a spread hides, and any of these referenced without a call (an alias);
@@ -83,9 +85,13 @@ below). A judged callable referenced without a call (r = subprocess.run),
 a star import from a sink module and a literal importlib.import_module or __import__ of one are
 findings.
 
-Keywords are read as Python binds them: a literal ** dict is read by its keys, a duplicate key
-keeping its LAST value as Python does, and dict(key=value) only where the name dict can only be
-the builtin. A safe value (a yaml Loader, an SSLContext protocol, a verify_mode or cert_reqs)
+Keywords are read as Python binds them: a literal ** dict is read by its keys, and so is a ** or
+a dict(...) inside it at any depth, a later key overwriting an earlier one (a duplicate key
+keeps its LAST value) as Python does; dict(...) is read only where the name dict can only be the
+builtin. A spread the scan cannot read inside a literal dict may overwrite every key written
+before it, so those keys are unseen, except that a literal verify, verify_ssl, ssl,
+check_hostname, server_hostname, verify_mode, cert_reqs or allow_pickle written there is still
+judged. A safe value (a yaml Loader, an SSLContext protocol, a verify_mode or cert_reqs)
 is PROVEN only when every binding the name may hold names the safe value; a name that may also
 hold an assignment, a parameter or any other value the scan cannot name, an unbound name, and
 an expression prove nothing, so they are findings. A reviewed site is admitted only by an
@@ -122,15 +128,16 @@ than its own (a module that binds pickle as _p, reached as mod._p.loads); a sink
 module) obtained from such an object or from a call; a method run on a profiler, debugger or
 trace object (cProfile.Profile().run, bdb.Bdb.run); a shell launched through an argv list
 naming a shell (["sh", "-c", text]), an executable= override, or os.exec*, os.spawn* or
-pty.spawn of a shell; a verify= or ssl= value hidden in a ** spread that is not a literal dict
-(only the subprocess shell switch and the command, Loader, protocol, context and secure= of the
-judged sinks are denied when unseen); the context given to a standard-library client is not
-traced beyond its own scope (a name that may hold anything but literal None there passes, so
-ctx = None rebound under a condition, or a None passed in by a caller through a parameter
-without a None default, is not seen; a built context is judged only where it is built), a
-starttls or stls called on a class reached other than through an import binding or a class this
-file defines is read as bound (its first positional argument as the context), and a client
-configured from data (logging.config) is not seen; TLS verification disabled inside a
+pty.spawn of a shell; a verify= or ssl= value hidden in, or overwritten by, a ** spread that is
+not a literal dict (only the subprocess shell switch and the command, Loader, protocol, context
+and secure= of the judged sinks are denied when unseen); the context given to a
+standard-library client is not traced beyond its own scope (a name that may hold anything but
+literal None there passes, so ctx = None rebound under a condition, a None passed in by a
+caller through a parameter without a None default, or a None kept in an attribute (self.context
+= context, then context=self.context), is not seen; a built context is judged only where it is
+built), a starttls or stls called on a class reached other than through an import binding or a
+class this file defines is read as bound (its first positional argument as the context), and a
+client configured from data (logging.config) is not seen; TLS verification disabled inside a
 third-party library's own defaults, through a library option this scan does not name, or
 through environment variables (PYTHONHTTPSVERIFY, CURL_CA_BUNDLE, REQUESTS_CA_BUNDLE); a
 deserializer outside the named set; a star import from a module outside STAR_MODULES;
@@ -437,32 +444,66 @@ def _verify_ok(node):
 
 
 def _effective_keywords(call, builtin_dict):
-    """The call's keywords as (name, value) pairs in source order; a ** spread of a literal dict
-    with string keys, or of dict(key=value) when the name dict can only be the builtin, is read
-    as its keys; any other ** spread is one (None, value) pair."""
+    """The call's keywords as (name, value) pairs in source order, each ** spread read by
+    _spread_pairs."""
     out = []
     for kw in call.keywords:
-        value = kw.value
         if kw.arg is not None:
-            out.append((kw.arg, value))
-        elif isinstance(value, ast.Dict) and all(
-                isinstance(k, ast.Constant) and isinstance(k.value, str) for k in value.keys):
-            out.extend((k.value, v) for k, v in zip(value.keys, value.values))
-        elif isinstance(value, ast.Call) and isinstance(value.func, ast.Name) \
-                and value.func.id == "dict" and builtin_dict and not value.args \
-                and all(k.arg is not None for k in value.keywords):
-            out.extend((k.arg, k.value) for k in value.keywords)
+            out.append((kw.arg, kw.value))
         else:
-            out.append((None, value))
+            out.extend(_spread_pairs(kw.value, builtin_dict))
     return out
 
 
-def _kw(pairs, name):
+def _spread_items(value, builtin_dict):
+    """The (name, value) items a ** spread binds, in the order Python writes them: a literal
+    dict with string keys, and dict(...) when the name dict can only be the builtin, are read by
+    their keys, and a ** (or dict's mapping argument) inside either is read the same way, at any
+    depth; anything else, a computed key included, is one (None, value) item."""
+    if isinstance(value, ast.Dict):
+        for key, item in zip(value.keys, value.values):
+            if key is None:
+                yield from _spread_items(item, builtin_dict)
+            elif isinstance(key, ast.Constant) and isinstance(key.value, str):
+                yield key.value, item
+            else:
+                yield None, item
+    elif isinstance(value, ast.Call) and isinstance(value.func, ast.Name) \
+            and value.func.id == "dict" and builtin_dict and len(value.args) <= 1 \
+            and not any(isinstance(arg, ast.Starred) for arg in value.args):
+        for arg in value.args:
+            yield from _spread_items(arg, builtin_dict)
+        for kw in value.keywords:
+            if kw.arg is None:
+                yield from _spread_items(kw.value, builtin_dict)
+            else:
+                yield kw.arg, kw.value
+    else:
+        yield None, value
+
+
+def _spread_pairs(value, builtin_dict):
+    """A ** spread's items in Python's overwrite order (a later key overwrites an earlier one).
+    An unseen (None, value) item may overwrite every name written before it in the same spread,
+    so each such name is followed by (name, None): its value is then unseen."""
+    out, written = [], []
+    for name, item in _spread_items(value, builtin_dict):
+        out.append((name, item))
+        if name is None:
+            out.extend((earlier, None) for earlier in written)
+        elif name not in written:
+            written.append(name)
+    return out
+
+
+def _kw(pairs, name, written=False):
     """The value Python binds to the keyword: the LAST pair for it, as a literal dict keeps its
-    last duplicate key (a keyword given twice across a spread is a TypeError, never a call)."""
+    last duplicate key (a keyword given twice across a spread is a TypeError, never a call).
+    A value a later spread may overwrite is unseen (None); written asks instead for the last
+    value written for the name, so a literal a spread may leave in place is still judged."""
     found = None
     for key, value in pairs:
-        if key == name:
+        if key == name and (value is not None or not written):
             found = value
     return found
 
@@ -511,7 +552,7 @@ class _Scope:
 
 class _Binder(ast.NodeVisitor):
     """Pass one: every binding of every name, per scope. An import binds its dotted target; any
-    other binding (assignment, parameter, def, class, for, with, except, match, del) binds None."""
+    other binding (assignment, parameter, def, class, for, with, except, match) binds None."""
 
     def __init__(self):
         self.module = _Scope("module", None)
@@ -587,18 +628,46 @@ class _Binder(ast.NodeVisitor):
                 self.bind(item.asname or item.name, target)
 
     def visit_Name(self, node):
-        if not isinstance(node.ctx, ast.Load):
+        if isinstance(node.ctx, ast.Del):
+            self._declare(node.id)
+        elif not isinstance(node.ctx, ast.Load):
             self.bind(node.id, None, id(node) in self.none_targets)
 
+    def _declare(self, name):
+        """A store of no value (a bare annotation, a del) binds nothing, so a None stays
+        provable; in a function it still makes the name local, so no outer binding is read."""
+        scope = self.current
+        if scope.kind == "function" and name not in scope.globals | scope.nonlocals:
+            scope.bindings.setdefault(name, set())
+
+    def _none_target(self, target, value):
+        """Mark each name the store binds to literal None, an unpacked display included
+        (ctx, other = None, 1)."""
+        if isinstance(target, ast.Name):
+            if _is_none(value):
+                self.none_targets.add(id(target))
+        elif isinstance(target, (ast.Tuple, ast.List)) \
+                and isinstance(value, (ast.Tuple, ast.List)) \
+                and len(target.elts) == len(value.elts) \
+                and not any(isinstance(e, ast.Starred) for e in target.elts + value.elts):
+            for item, part in zip(target.elts, value.elts):
+                self._none_target(item, part)
+
     def visit_Assign(self, node):
-        if _is_none(node.value):
-            self.none_targets.update(id(t) for t in node.targets if isinstance(t, ast.Name))
+        for target in node.targets:
+            self._none_target(target, node.value)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node):
-        if node.value is not None and _is_none(node.value):
-            self.none_targets.add(id(node.target))
-        self.generic_visit(node)
+        if node.value is not None:
+            self._none_target(node.target, node.value)
+            self.generic_visit(node)
+            return
+        if isinstance(node.target, ast.Name):
+            self._declare(node.target.id)
+        else:
+            self.visit(node.target)
+        self.visit(node.annotation)
 
     def visit_NamedExpr(self, node):
         saved = self.current
@@ -898,28 +967,28 @@ class _Scanner(ast.NodeVisitor):
     def _judge_keywords(self, node, pairs):
         if self.on("tls-verify"):
             for key in ("verify", "verify_ssl"):
-                value = _kw(pairs, key)
+                value = _kw(pairs, key, True)
                 if value is not None and not _verify_ok(value):
                     self.add(node, "tls", "tls-verify",
                              key + "= is not a true-valued literal (verification off or unseen)")
-            value = _kw(pairs, "ssl")
+            value = _kw(pairs, "ssl", True)
             if isinstance(value, ast.Constant) and (value.value is False or value.value == 0):
                 self.add(node, "tls", "tls-verify", "ssl= is False or 0")
         if self.on("tls-hostname"):
-            value = _kw(pairs, "check_hostname")
+            value = _kw(pairs, "check_hostname", True)
             if value is not None and not _is_true(value):
                 self.add(node, "tls", "tls-hostname", "check_hostname= is not True")
-            value = _kw(pairs, "server_hostname")
+            value = _kw(pairs, "server_hostname", True)
             if isinstance(value, ast.Constant) and value.value is not None and not value.value:
                 self.add(node, "tls", "tls-hostname",
                          "server_hostname= is an empty literal (the hostname check is turned off)")
         if self.on("tls-verify-mode"):
             for key in ("verify_mode", "cert_reqs"):
-                value = _kw(pairs, key)
+                value = _kw(pairs, key, True)
                 if value is not None and not self.proves(value, {"ssl.CERT_REQUIRED"}):
                     self.add(node, "tls", "tls-verify-mode", key + "= is not ssl.CERT_REQUIRED")
         if self.on("dsz-numpy"):
-            value = _kw(pairs, "allow_pickle")
+            value = _kw(pairs, "allow_pickle", True)
             if value is not None and not _is_false(value):
                 self.add(node, "deserialize", "dsz-numpy", "allow_pickle= is not literal False")
 
@@ -1281,6 +1350,13 @@ POSITIVE_VECTORS = (
     ("import requests\nrequests.get(url, **{'verify': False})\n", ("tls-verify",)),
     ("import requests\nrequests.get(url, **dict(verify=False))\n", ("tls-verify",)),
     ("import requests\nrequests.get(url, **{'verify': True, 'verify': False})\n", ("tls-verify",)),
+    # A ** or dict(...) inside a literal ** dict is read the same way, in overwrite order.
+    ("import requests\nrequests.get(url, **{**{'verify': False}})\n", ("tls-verify",)),
+    ("import requests\nrequests.get(url, **{'verify': True, **{'verify': False}})\n",
+     ("tls-verify",)),
+    ("import requests\nrequests.get(url, **dict({'verify': False}))\n", ("tls-verify",)),
+    # A literal false verify that a later unreadable spread may overwrite is still judged.
+    ("import requests\nrequests.get(url, **{'verify': False, **opts})\n", ("tls-verify",)),
     ("session.verify = False\n", ("tls-verify",)),
     # requests reads any false value as verification off, so None and "" are not proof.
     ("import requests\nrequests.get(url, verify='')\n", ("tls-verify",)),
@@ -1337,6 +1413,23 @@ POSITIVE_VECTORS = (
      "    return smtplib.SMTP_SSL(host, context=context)\n", ("tls-context",)),
     ("import smtplib\nctx = None\nsmtplib.SMTP_SSL(host, context=ctx)\n", ("tls-context",)),
     ("import poplib\nctx: object = None\npoplib.POP3_SSL(host, context=ctx)\n", ("tls-context",)),
+    ("import smtplib\nctx, other = None, 1\nsmtplib.SMTP_SSL(host, context=ctx)\n",
+     ("tls-context",)),
+    # A bare annotation stores no value, so it never makes a None-only name rebound.
+    ("import smtplib\ndef connect(host, context=None):\n    context: object\n"
+     "    return smtplib.SMTP_SSL(host, context=context)\n", ("tls-context",)),
+    ("import smtplib\nctx: object\nctx = None\nsmtplib.SMTP_SSL(host, context=ctx)\n",
+     ("tls-context",)),
+    ("import smtplib\ndef connect(host, context=None):\n"
+     "    server = smtplib.SMTP_SSL(host, context=context)\n    del context\n    return server\n",
+     ("tls-context",)),
+    ("def outer(server):\n    def tls(ctx=None):\n        ctx: object\n"
+     "        server.starttls(context=ctx)\n", ("tls-context",)),
+    ("import smtplib\nctx = None\nclass Mail:\n    ctx: object\n"
+     "    server = smtplib.SMTP_SSL(host, context=ctx)\n", ("tls-context",)),
+    # A global declaration reads the module binding, not the enclosing function's.
+    ("import smtplib\nCTX = None\ndef outer():\n    CTX = make()\n    def inner():\n"
+     "        global CTX\n        return smtplib.SMTP_SSL(host, context=CTX)\n", ("tls-context",)),
     ("def tls(server, *, ctx=None):\n    server.starttls(context=ctx)\n", ("tls-context",)),
     ("import asyncio\nasyncio.open_connection(host, 443, ssl=True, server_hostname='')\n",
      ("tls-hostname",)),
@@ -1375,6 +1468,10 @@ POSITIVE_VECTORS = (
     ("import subprocess\nsubprocess.run(cmd, shell=1)\n", ("shell-subprocess",)),
     ("import subprocess\nsubprocess.run(cmd, **{'shell': False, 'shell': True})\n",
      ("shell-subprocess",)),
+    # A key an unreadable spread written after it may overwrite is unseen.
+    ("import subprocess\nsubprocess.run(cmd, **{'shell': False, **opts})\n",
+     ("shell-subprocess",)),
+    ("import yaml\nyaml.load(text, **{'Loader': yaml.SafeLoader, **opts})\n", ("dsz-yaml",)),
     ("import subprocess\ndef dict(**kw):\n    return {'shell': True}\n"
      "subprocess.run(cmd, **dict(shell=False))\n", ("shell-subprocess",)),
     ("import subprocess\nsubprocess.call(cmd, -1, None, None, None, None, None, True, True)\n",
@@ -1410,6 +1507,7 @@ POSITIVE_VECTORS = (
     ("spec.loader.exec_module(module)\n", ("code-loader",)),
     ("loader.load_module()\n", ("code-loader",)),
     ("run = spec.loader.exec_module\n", ("code-loader",)),
+    ("run = loader.load_module\n", ("code-loader",)),
     ("getattr(spec.loader, 'exec_module')(module)\n", ("code-loader",)),
     ("from logging.handlers import pickle\npickle.loads(data)\n", ("chain", "dsz-ref")),
     ("from pickle import *\nloads(b'')\n", ("star-import",)),
@@ -1504,6 +1602,17 @@ NEGATIVE_VECTORS = (
     "import asyncio\nasyncio.BaseEventLoop.subprocess_shell(loop, factory, 'ls -l')\n"
     "asyncio.open_connection(host, 443, ssl=True, server_hostname=None)\n"
     "asyncio.open_connection(host, 443, ssl=True, server_hostname=host)\n",
+    # A key written after a spread overwrites it; a literal spread inside one is read by its keys.
+    "import requests, subprocess, yaml\n"
+    "requests.get(url, **{'verify': False, **{'verify': True}})\n"
+    "requests.get(url, **{**opts, 'verify': True})\n"
+    "subprocess.run(cmd, **{**{'shell': False}})\n"
+    "subprocess.run(cmd, **{**opts, 'shell': False})\n"
+    "yaml.load(text, **{**opts, 'Loader': yaml.SafeLoader})\n",
+    "import smtplib\nctx, other = make(), None\nsmtplib.SMTP_SSL(host, context=ctx)\n",
+    # A bare annotation still makes the name local in a function: the module None is not read.
+    "import smtplib\nctx = None\ndef f():\n    ctx: object\n"
+    "    return smtplib.SMTP_SSL(host, context=ctx)\n",
     "import logging.handlers\nlogging.handlers.SMTPHandler(host, a, b, s)\n"
     "logging.handlers.SMTPHandler(host, a, b, s, creds, None)\n"
     "logging.handlers.SMTPHandler(host, a, b, s, secure=None)\n",
