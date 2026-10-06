@@ -674,7 +674,9 @@ def parity_child(spec):
     calls whatever hook is installed), writes the result only on a fault-free settle, and ends
     the child ITSELF with os._exit, so no interpreter finalization runs after the result. Any
     such event, any machinery replacement, a closed original stderr, an unsettled collection or
-    a flush failure writes the named fault line to fd 2 and exits 2 with no result. Exit 2 also
+    a flush failure writes the named fault line to fd 2 and exits 2 with no result; a result
+    write or flush that RAISES (after the result reached stdout) exits 2 with the contract's
+    one-line diagnostic, and the nonzero exit is refused (merge train 2 QA r7). Exit 2 also
     if a file or the contract module cannot be loaded, or if another exit handler was registered
     before the record handler (its os._exit would skip that one)."""
     sys.path.insert(0, str(ROOT / "opf" / "tools"))
@@ -1256,6 +1258,24 @@ def self_test_main():
                  "    _SeededNetOuter()\n"
                  "\n\n_seeded_atexit.register(_seeded_net_setup)\n",
                  "Exception ignored"),
+                # Merge train 2 QA r7 (codex MAJOR), the reproduction: a stdout wrapper whose
+                # flush raises once written. The child writes the genuine result and terminator,
+                # then the result callback's flush raises; the pinned contract's
+                # `finally: os._exit(code)` swallowed it and the leg accepted exit 0.
+                ("result-flush-fault", "\n\nimport sys as _seeded_sys\n"
+                 "\n\nclass _SeededOutput:\n"
+                 "    def __init__(self, stream):\n"
+                 "        self.stream, self.written = stream, False\n"
+                 "\n    def write(self, text):\n"
+                 "        result = self.stream.write(text)\n"
+                 "        self.written = True\n"
+                 "        return result\n"
+                 "\n    def flush(self):\n"
+                 "        self.stream.flush()\n"
+                 "        if self.written:\n"
+                 "            raise RuntimeError('result flush failed')\n"
+                 "\n\n_seeded_sys.stdout = _SeededOutput(_seeded_sys.stdout)\n",
+                 "the record handler raised RuntimeError in the record callback"),
         ):
             root = fresh("p-" + name)
             _patch(root / STOP_REL, "", "", append)
@@ -1291,7 +1311,8 @@ def self_test_main():
           "under the repeated collection, a seeded finalizer chain outlasting the bounded "
           "collection, a seeded resurrecting finalizer whose newly created cyclic cleanup work "
           "faults, the same with other tracked objects released alongside (the identity-set "
-          "settle rule, merge train 2 QA r6), and a seeded cleanup exit that cuts "
+          "settle rule, merge train 2 QA r6), a seeded stdout whose flush raises after the "
+          "result was written (QA r7), and a seeded cleanup exit that cuts "
           "off its shutdown-written result are cannot-evaluate (secfcl)")
     return 0
 

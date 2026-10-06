@@ -23035,8 +23035,11 @@ def _cmd_self_test_unit(label):
     try:
         sys.stdout.flush()
         sys.stderr.flush()
-    except Exception:
-        pass
+    except Exception as exc:
+        # A fault, never swallowed (merge train 2 QA r7: a flush that fails here and succeeds at
+        # the record handler's own flush would otherwise leave the unit's code standing).
+        contract.faults.append("the streams could not be flushed when the unit returned ({})".format(
+            type(exc).__name__))
     try:
         os.write(2, "{} {} {}\n".format(_UNIT_BOUNDARY, label, os.getpid()).encode("utf-8"))
     except OSError:

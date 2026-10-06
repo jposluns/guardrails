@@ -48,7 +48,13 @@ THE CONTRACT, in the order it runs:
    handler writes the caller's fault line (file descriptor 2) when there are faults, calls the
    caller's record callback with the decided code (the settled code, or fail_code when any fault
    was recorded), and ends the process ITSELF with os._exit(code), so no interpreter finalization
-   runs after the record.
+   runs after the record. The decided code is used ONLY when the callback RETURNED NORMALLY: an
+   exception the callback raises (a stdout flush that fails after the result was written), or
+   one raised anywhere in the handler before it, is caught, named in a one-line diagnostic on
+   file descriptor 2 (best effort, itself guarded), and the exit is fail_code, so a record the
+   callback wrote before it failed is never carried by a success exit (merge train 2 QA r7,
+   codex MAJOR: a `finally: os._exit(code)` swallowed the exception and exited with the success
+   code).
 
 DISCLOSED RESIDUALS -- the channels this contract CANNOT close, disclosed here ONCE (the two
 callers' docstrings point here instead of restating them):
@@ -193,7 +199,33 @@ class FailClosedChild:
         # this write, and the parent fails closed on the missing record (secfcl).
         if not self._settled:
             return   # never settled: no record, and the parent fails closed
-        code = self._settled[0]
+        stage = "before the record"
+        try:
+            code = self._decide(self._settled[0])
+            stage = "in the record callback"
+            self._record(code)
+        except BaseException as exc:
+            # Never a `finally: os._exit(code)`: that swallowed the exception and kept the
+            # success code (merge train 2 QA r7, codex MAJOR). A handler that did not return
+            # normally exits fail_code, whatever the callback wrote before it raised.
+            code = self.fail_code
+            self._handler_fault(stage, exc)
+        os._exit(code)
+
+    def _handler_fault(self, stage, exc):
+        """The one-line diagnostic for a record handler that raised: best effort and itself
+        guarded (the fail_code exit carries the failure whether or not this line is written)."""
+        try:
+            os.write(2, ("child-contract-fault: the record handler raised {} {}, so any record it "
+                         "wrote is void; exit {} (secfcl)\n".format(
+                             type(exc).__name__, stage, self.fail_code)).encode("utf-8", "replace"))
+        except BaseException:
+            pass
+
+    def _decide(self, code):
+        """Settle the collection, restore the reporting machinery and flush the streams; return
+        the code the record carries (fail_code, with the caller's fault line on file descriptor 2,
+        when any fault was recorded)."""
         replaced = self.restore_reporting()
         settled = False
         for _ in range(GC_PASS_BOUND):
@@ -219,11 +251,8 @@ class FailClosedChild:
             try:
                 os.write(2, self._fault_line(self.faults))
             except OSError:
-                pass
-        try:
-            self._record(code)
-        finally:
-            os._exit(code)
+                pass   # the fail_code exit still carries the fault
+        return code
 
 
 # --- self-test -----------------------------------------------------------------------------------
@@ -247,6 +276,8 @@ _CASE_HEAD = (
     "def record(code):\n"
     "    with open(sys.argv[1], \"w\", encoding=\"utf-8\") as handle:\n"
     "        handle.write(\"record {}\\n\".format(code))\n"
+    "    sys.stdout.write(\"record {}\\n\".format(code))\n"
+    "    sys.stdout.flush()\n"
     "\n"
     "\n"
     "def fault_line(faults):\n"
@@ -477,6 +508,29 @@ atexit.register(fault)
 atexit.register(hide)
 """
 
+# Merge train 2 QA r7 (codex MAJOR), the reproduction: loaded code wraps sys.stdout so a flush
+# raises once anything was written. The handler's own pre-record flush passes (nothing written
+# yet); the record callback writes its genuine record and then its flush raises. The pinned
+# `finally: os._exit(code)` swallowed that and exited 0 with an empty error stream.
+_SEED_RECORD_FLUSH = """
+class Output:
+    def __init__(self, stream):
+        self.stream, self.written = stream, False
+
+    def write(self, text):
+        result = self.stream.write(text)
+        self.written = True
+        return result
+
+    def flush(self):
+        self.stream.flush()
+        if self.written:
+            raise RuntimeError("result flush failed")
+
+
+sys.stdout = Output(sys.stdout)
+"""
+
 # (name, source before register(), source after arm_audit(), expected exit, expected record line
 # or None for provably no record, needles the error stream must carry, whether it must be empty).
 _CASES = (
@@ -511,6 +565,10 @@ _CASES = (
     ("deleted-hook-window-passes", "", _SEED_WINDOW, 0, "record 0", (), True),
     ("kept-hook-window-fault", "", _SEED_WINDOW_CONTROL, 2, "record 2",
      ("a cleanup fault reached sys.unraisablehook",), False),
+    ("record-callback-raises", "", _SEED_RECORD_FLUSH, 2, "record 0",
+     ("the record handler raised RuntimeError in the record callback", "exit 2"), False),
+    ("handler-raises-before-record", "", "atexit.register(setattr, gc, \"collect\", None)\n", 2,
+     None, ("the record handler raised TypeError before the record",), False),
 )
 
 
@@ -572,8 +630,10 @@ def self_test():
           "finalizer whose new work faults, one that also releases tracked objects while it "
           "creates that work (QA r6), its single-object swap variant, a finalizer chain "
           "outlasting the collection bound, and a closed stdout each fail closed by name with "
-          "the exit-2 record; and the deleted-unraisablehook window passes exactly as residual "
-          "(b) discloses while its kept-hook control is caught by the audit event)")
+          "the exit-2 record; a record callback that raises after writing its record (QA r7) "
+          "and a handler that raises before the record each exit 2 with a named diagnostic; "
+          "and the deleted-unraisablehook window passes exactly as residual (b) discloses "
+          "while its kept-hook control is caught by the audit event)")
     return 0
 
 
