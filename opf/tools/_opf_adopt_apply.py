@@ -3547,8 +3547,7 @@ def _finish_ops_self_test(check):
 
 
 def main():
-    args = sys.argv[1:]
-    if "--self-test" in args or "--selftest" in args:
+    if sys.argv[1:] == ["--self-test"]:
         return self_test()
     print("usage: _opf_adopt_apply.py --self-test (a library module; the adoption verb is `opf adopt`)",
           file=sys.stderr)

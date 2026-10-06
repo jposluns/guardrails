@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse hook (Write|Edit|MultiEdit|Bash): deny writing a FUTURE-dated observed-time literal into a store.
+"""PreToolUse hook (Write|Edit|MultiEdit|Bash): warn on writing a FUTURE-dated observed-time literal to a store.
 
 THREAT MODEL. An ACCIDENTAL-DRIFT discipline guard: it catches the model composing times instead of reading
 the clock and writing them into a store in its NORMAL record format. It is NOT an adversarial boundary: an
@@ -12,10 +12,10 @@ drifting up to 4h40m ahead, and persisting those invented times into its durable
 the clock, so one dated in the future is a composed value. A scheduled value (a deadline, a next run) is
 legitimately future and is allowed.
 
-Store roots. env AIQT_STORE_ROOT (a legacy spelling is accepted as a fallback, see _cfg): one or more
-absolute paths joined by os.pathsep; an empty or relative entry is ignored. There is NO default: when neither
-spelling is set, when AIQT_STORE_ROOT is set but empty (it takes precedence over the fallback), or when the
-value in effect names no absolute path, no store is configured and the hook is INERT (every call is
+Store roots. env AIQT_STORE_ROOT (no other spelling is read, see _cfg): one or more
+absolute paths joined by os.pathsep; an empty or relative entry is ignored. There is NO default: when it is
+unset, when it is set but empty, or when the
+value names no absolute path, no store is configured and the hook is INERT (every call is
 allowed). No store is derived from the project directory or the cwd. For Write/Edit/MultiEdit a relative
 file_path is resolved against the payload cwd.
 
@@ -266,8 +266,8 @@ or an unterminated quote starts no span, so the literals it would have covered a
 Literals and zones. YYYY-MM-DD[T or space]HH:MM(:SS(.fraction)?)? then an optional zone: Z (attached or after
 one space); a numeric offset +HH, +HHMM, or +HH:MM, or with - (attached or after one space); or, after one
 space, UTC, GMT, or a letter abbreviation of 2 to 6 capitals. This zone grammar and the scheduling keyword
-list are duplicated verbatim in stamp-truth-stop.py (python3 -I forbids a sibling import); a self-test
-asserts they are identical. Z, UTC, and GMT are UTC; an offset is applied as written; a letter abbreviation
+list are duplicated verbatim in a companion Stop hook (python3 -I forbids a sibling import); a repository
+gate asserts they are identical. Z, UTC, and GMT are UTC; an offset is applied as written; a letter abbreviation
 must be the process local zone's abbreviation for that wall time (both DST abbreviations are tried; the
 earlier instant is taken if both match); any other abbreviation is an unknown zone and that literal is
 SKIPPED, never guessed. A literal with NO zone is compared as local wall time AND as UTC, and counts as future
@@ -315,19 +315,20 @@ a table, EVERY row of that table is checked as changed, even rows identical to l
 Each distinct (header, delimiter) context is given an integer id once, shared by the old- and new-file scans,
 so a row's carry-over key never re-compares the header text (linear in rows, flat in header length).
 
-Contract: allow = no stdout, exit 0; deny = the PreToolUse hookSpecificOutput permissionDecision "deny" JSON
-on stdout, exit 0. Fail-OPEN (allow) on unparseable input or any internal error, including an argument,
+Contract: WARN ONLY. Silent = no stdout, exit 0; a finding = ONE JSON object {"systemMessage": <line>} on
+stdout, exit 0, where <line> is a single line of at most 100 characters (see _warn_line). The hook never
+denies, blocks, or asks: where this text says a write is "denied" or a "false deny", read "warned" or a
+"false warning". Fail-OPEN (allow) on unparseable input or any internal error, including an argument,
 stdin, or JSON error before the payload is evaluated: a DISCIPLINE guard, not a security boundary. The
 payload is read as BYTES and parsed by json.loads, so its decoding does not depend on the process locale. An
-error writing the deny (a closed or full stdout) also fails open (round 24): it is swallowed and the hook
+error writing the warning (a closed or full stdout) also fails open (round 24): it is swallowed and the hook
 exits 0; if the stream cannot even be pointed at /dev/null, the hook ends at once with os._exit(0), so no
-exit-time flush can fail it. Kill-switch: a subordinate worker process, detected as env AIQT_HOOKS_WORKER=1
-(legacy spellings are also accepted, see _is_worker), allows, writing one warning line to stderr (round 24;
-never stdout, and on exit 0 stderr reaches only the host's debug log, so the skip is logged, not shown).
+exit-time flush can fail it. There is no worker bypass: no environment variable skips the check, and the
+hook writes nothing to stderr.
 Subagent calls (a payload carrying agent_id or agent_type) are DELIBERATELY checked exactly like
 main-session calls, with no skip: a subagent applies store writes on the main session's behalf, and a helper
 can compose a timestamp that is then relayed into a record, so exempting it would open the very drift path
-this hook guards. Only the worker kill-switch above allows.
+this hook guards.
 
 RESIDUAL COVERAGE. Quoted text is trusted as quotation (a MISS,
 disclosed): a composed stamp placed inside a quote or code span in a record (a `>` line, an inline code
@@ -417,9 +418,8 @@ through a program or script with no write indicator in the command text (`python
 `awk -i inplace`, `rsync`, `ln`, an editor, a heredoc-fed interpreter), or a script that writes internally;
 a future literal inside a `$(date ...)` span in a quoted heredoc body or a
 comment (text the shell never runs); a literal built from parts; and a write via another tool
-(NotebookEdit). Only the configured store roots are covered: nothing is when neither AIQT_STORE_ROOT nor
-its legacy fallback spelling is set, or when AIQT_STORE_ROOT is set but empty (it then takes precedence over
-the fallback); and a store the configuration does not name, or reaches by a different spelling, is not
+(NotebookEdit). Only the configured store roots are covered: nothing is when AIQT_STORE_ROOT is unset
+or empty; and a store the configuration does not name, or reaches by a different spelling, is not
 covered. The
 date-substitution scan reads a heredoc body (of either delimiter kind) like command text, so an apostrophe there can hide a
 later `$(date ...)` span, which then fails toward denying. date_spans() is not case-aware: a case pattern
@@ -453,10 +453,7 @@ two is not caught (exotic; a disclosed miss), for example
 operand text. A wrong host clock is enforced faithfully.
 
 Self-test: python3 -I -S -B future-stamp-write.py --self-test
-Run beside its sibling hooks, the self-test also checks that the code shared verbatim with them is identical.
-Run alone (a single-hook install), those sibling-parity checks are SKIPPED, not passed, each naming the absent
-sibling; with env AIQT_HOOKS_REQUIRE_SIBLINGS=1 an absent sibling FAILS them instead (for a repository gate). A
-sibling that is present but unreadable fails them either way.
+It needs no sibling file: the code shared verbatim with a companion hook is compared by a repository gate.
 """
 
 import bisect
@@ -628,7 +625,7 @@ def sched_exempter(line):
     """A predicate pos -> True when a scheduling keyword ends at most SCHED_GAP_TOKENS word tokens before
     position `pos` of `line` (a word token holds a letter or digit; punctuation-only tokens such as `:` or `[`,
     and the token containing `pos`, are not counted). Linear: keyword ends and tokens are found once per line.
-    Duplicated verbatim in the sibling hook; the self-test asserts the two copies are identical."""
+    Duplicated verbatim in a companion hook; a repository gate asserts the two copies are identical."""
     ends = [k.end() for k in _SCHED_RE.finditer(line)]
     if not ends:
         return lambda pos: False
@@ -3166,67 +3163,36 @@ def _emit_line(text, *stream):
         return False
 
 
-def _deny(bad, now):
-    local = now.astimezone()
-    _emit_line(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                "Blocked: this write to a durable store carries observed-time literal(s) dated in the FUTURE: "
-                + ", ".join(repr(b) for b in bad[:MAX_REPORTED])
-                + (f" and {len(bad) - MAX_REPORTED} more" if len(bad) > MAX_REPORTED else "")
-                + f". The real clock now reads {now.strftime('%Y-%m-%dT%H:%M:%SZ')} "
-                f"({local.strftime('%Y-%m-%d %H:%M:%S')} {local.tzname()}). A record timestamp is read from the "
-                "clock, never composed: use $(date -u +%Y-%m-%dT%H:%M:%SZ) in a shell write, or run `date -u` and "
-                "copy its output. A genuinely scheduled value is allowed when a schedule word immediately precedes "
-                "it (due, deadline, expires, until, through, valid, next run, scheduled for, not before, eta, "
-                "planned, target date, by). A Bash command is checked lexically: a command whose write TARGETS a "
-                "store path (a `>` redirection target, a tee operand, a sed/perl -i file, a cp/mv/install "
-                "destination, dd of=, or a truncate, ed, or ex file; a relative path is resolved against the cwd "
-                "and any cd before it) is denied when a future literal outside a $(date ...) substitution is DATA "
-                "of that write (in its own command, here-document, here-string, or pipeline, or a compound whose "
-                "output it redirects); a comment, an unrelated read-only search, or a write elsewhere is allowed."
-            ),
-        }
-    }))
+WARN_MAX = 100  # the warning is one line of at most this many characters
+
+
+def _warn_line(bad, now):
+    """The one-line warning for the future literals `bad`, at most WARN_MAX characters: the first literal, the
+    count of the others, the UTC clock to the minute, and a pointer to `date -u`. When it is too long the pointer,
+    then the clock reading, then the count are dropped, in that order; the first literal is never dropped, only
+    cut to fit with a trailing `...`."""
+    head = "future-stamp-write: future stamp "
+    first = " ".join(str(bad[0]).split())
+    more = f" (+{len(bad) - 1} more)" if len(bad) > 1 else ""
+    clock = "; now " + now.strftime("%Y-%m-%dT%H:%MZ")
+    for parts in ((more, clock, "; run date -u"), (more, clock, ""), (more, "", ""), ("", "", "")):
+        line = head + first + "".join(parts)
+        if len(line) <= WARN_MAX:
+            return line
+    return head + first[:WARN_MAX - len(head) - 3] + "..."
+
+
+def _warn(bad, now):
+    """Emit the warning as a systemMessage and exit 0: a finding never denies or blocks the call."""
+    _emit_line(json.dumps({"systemMessage": _warn_line(bad, now)}))
     return 0
 
 
 def _cfg(name, env=None):
-    """AIQT_<name> primary; the legacy ORCH_<name> spelling is accepted as a fallback."""
+    """AIQT_<name>, or None when it is unset; no other spelling is read, and callers treat an empty value as
+    not configured."""
     env = os.environ if env is None else env
-    v = env.get("AIQT_" + name)
-    return v if v is not None else env.get("ORCH_" + name)
-
-
-def _is_worker(env=None):
-    """True in a subordinate worker process: AIQT_HOOKS_WORKER=1. Kept identical across the three hooks
-    (python3 -I forbids a sibling import)."""
-    env = os.environ if env is None else env
-    if env.get("AIQT_HOOKS_WORKER") == "1":
-        return True
-    return env.get("ORCH_WORKER") == "1" or "ORCH_VERIFY_OWNER" in env  # legacy spellings
-
-def _sibling_or_skip(name, env=None):
-    """Self-test helper, kept identical across the three hooks: the path of sibling hook `name` beside this file.
-    A genuinely absent sibling (os.lstat raises FileNotFoundError, nothing broader) SKIPS the calling test with a
-    message naming it, so a single-hook install self-tests clean; with env AIQT_HOOKS_REQUIRE_SIBLINGS=1 the
-    absence FAILS the test instead, so a repository gate never skips parity silently. Any other error (an
-    unreadable directory, say) propagates, and a sibling that exists but cannot be loaded fails when it is read,
-    so only a genuine absence ever skips."""
-    import unittest
-    env = os.environ if env is None else env
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
-    try:
-        os.lstat(path)
-    except FileNotFoundError:
-        if env.get("AIQT_HOOKS_REQUIRE_SIBLINGS") == "1":
-            raise AssertionError(f"sibling hook {name} is absent ({path}) and AIQT_HOOKS_REQUIRE_SIBLINGS=1 "
-                                 "requires it") from None
-        raise unittest.SkipTest(f"sibling hook {name} is absent (a standalone install); set "
-                                "AIQT_HOOKS_REQUIRE_SIBLINGS=1 to require it") from None
-    return path
+    return env.get("AIQT_" + name)
 
 
 def _wall_clock_asserts(source, exempt=()):
@@ -3490,11 +3456,6 @@ def main(argv):
     if self_test:
         return _self_test()
     try:
-        if _is_worker():
-            # round 24: the skip is no longer silent (stderr only, so worker output is never distorted)
-            _emit_line("future-stamp-write: skipped, worker marker present (AIQT_HOOKS_WORKER=1 or a legacy "
-                       "spelling)", sys.stderr)
-            return 0
         buf = getattr(sys.stdin, "buffer", None)  # bytes; a text stream (the self-test) has no buffer
         payload = json.loads(buf.read() if buf is not None else sys.stdin.read())
         if not isinstance(payload, dict):
@@ -3504,7 +3465,7 @@ def main(argv):
     except Exception:
         return 0  # fail-open
     if bad:
-        return _deny(bad, now)
+        return _warn(bad, now)
     return 0
 
 
@@ -3515,6 +3476,7 @@ def _self_test():
     import shutil
     import subprocess
     import tempfile
+    import types
     import unittest
 
     # round 26 (finding 6): timed runs execute in a child interpreter under a subprocess timeout, so a hang is
@@ -3542,7 +3504,7 @@ def _self_test():
         "import importlib.util as u, datetime, json, os, time\n"
         "os.environ['TZ'] = 'EST5EDT,M3.2.0,M11.1.0'\n"
         "time.tzset()\n"
-        "for k in ('ORCH_STORE_ROOT', 'CLAUDE_PROJECT_DIR'):\n"
+        "for k in ('CLAUDE_PROJECT_DIR',):\n"
         "    os.environ.pop(k, None)\n"
         "os.environ['AIQT_STORE_ROOT'] = %r\n"
         "s = u.spec_from_file_location('m', %r)\n"
@@ -3613,6 +3575,79 @@ def _self_test():
         timed child runs under the default policy only."""
         return {k: v for k, v in os.environ.items() if not k.startswith("MALLOC_") and k != "GLIBC_TUNABLES"}
 
+    # The FIFO guard for a child: an audit hook (the `open` event fires for os.open, the builtin open, io.open
+    # and io.FileIO alike) refuses every open without O_NONBLOCK of a path that names a FIFO, and records it in
+    # _blocking, so a blocking open fails the test at once, even where a fail-open handler swallows the refusal;
+    # the child's timeout stays a hang guard only. A path is resolved by os.stat, which follows symlinks, so an
+    # alias (a symlink, a hard link, a `//` or `..` spelling, a PathLike) names the same FIFO. The event does not
+    # carry os.open's dir_fd (the openat form), so a relative path is resolved from the working directory AND
+    # from every open directory descriptor: a descriptor-relative open of a FIFO is refused too (conservatively,
+    # a relative name that some other open directory resolves to a FIFO is refused as well: a false failure,
+    # never a false pass). The open descriptors are enumerated through /dev/fd; where that fails, a relative
+    # open cannot be evaluated, so it is refused and recorded (a cannot-evaluate fails the test; a guessed
+    # descriptor range missed a directory descriptor above it and let a blocking open through). Every FIFO is
+    # guarded, one the child creates after the guard is installed included. A metadata read that fails with
+    # anything but a missing name (ENOENT, or ENOTDIR for a path through a non-directory) or an unusable
+    # base descriptor (EBADF, or ENOTDIR for a descriptor that is not a directory) cannot be evaluated either:
+    # it is refused and recorded too (QA round 3: an injected EIO from os.stat read as "not a FIFO" and let
+    # a blocking open through); an embedded NUL (ValueError) is no FIFO, as the open itself refuses it.
+    # Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes). Not
+    # covered either, the stat-then-open race: the guard reads a path's metadata and the open resolves the
+    # path again afterwards, so a path retargeted between the two (a symlink switched from a regular file to
+    # a FIFO by another thread, or by an audit hook installed after this one) is opened unchecked. Nor a
+    # blocking wait on a descriptor opened with O_NONBLOCK (a select or read on a FIFO no writer opens):
+    # only the child's hang guard bounds that.
+    FIFO_GUARD = (
+        "import errno, os, stat, sys\n"
+        "_blocking = []\n"
+        "def _names_fifo(path):\n"
+        "    bases = [None]\n"
+        "    if not os.path.isabs(path):\n"
+        "        try:\n"
+        "            bases += [int(fd) for fd in os.listdir('/dev/fd')]\n"
+        "        except (OSError, ValueError) as e:\n"
+        "            _blocking.append(('cannot evaluate', path))\n"
+        "            raise AssertionError('the FIFO guard cannot evaluate %r: the open descriptors are not '\n"
+        "                                 'enumerable (%r)' % (path, e))\n"
+        "    for fd in bases:\n"
+        "        try:\n"
+        "            if stat.S_ISFIFO(os.stat(path, dir_fd=fd).st_mode):\n"
+        "                return True\n"
+        "        except ValueError:\n"
+        "            pass\n"
+        "        except Exception as e:\n"
+        "            if getattr(e, 'errno', None) in (errno.ENOENT, errno.ENOTDIR, errno.EBADF):\n"
+        "                continue\n"
+        "            _blocking.append(('cannot evaluate', path))\n"
+        "            raise AssertionError('the FIFO guard cannot evaluate %r: its metadata read failed '\n"
+        "                                 '(%r)' % (path, e))\n"
+        "    return False\n"
+        "def _fifo_guard(event, args):\n"
+        "    if event != 'open' or not isinstance(args[2], int) or args[2] & os.O_NONBLOCK:\n"
+        "        return\n"
+        "    path = os.fspath(args[0]) if isinstance(args[0], os.PathLike) else args[0]\n"
+        "    if isinstance(path, (str, bytes)) and _names_fifo(path):\n"
+        "        _blocking.append(args[0])\n"
+        "        raise AssertionError('a FIFO opened without O_NONBLOCK: %r' % (args,))\n"
+        "sys.addaudithook(_fifo_guard)\n")
+    # every opener and path spelling the guard covers, each tried once on the FIFO p in a child (the guard's own
+    # vector), with d an open descriptor of p's directory, and p + '.sym' and p + '.hard' a symlink and a hard
+    # link to p
+    FIFO_OPENERS = ("lambda p: os.open(p, os.O_RDONLY)", "lambda p: open(p, 'rb')",
+                    "lambda p: __import__('io').open(p, 'rb')", "lambda p: __import__('io').FileIO(p, 'r')",
+                    "lambda p: os.open(os.path.basename(p), os.O_RDONLY, dir_fd=d)",
+                    "lambda p: os.open(p + '.sym', os.O_RDONLY)", "lambda p: open(p + '.hard', 'rb')",
+                    "lambda p: os.open('/' + p, os.O_RDONLY)", "lambda p: open(os.path.relpath(p), 'rb')",
+                    "lambda p: os.open(__import__('pathlib').Path(p), os.O_RDONLY)")
+
+    # the ten r7 command shapes of bash_writes and the date_spans shape, each a maker of size k: shared by the
+    # operation-count check and the small-size CPU-scaling check
+    R7_CASES = [("bash_writes", make) for make in (
+        lambda k: "'" + "a" * (4 * k), lambda k: "x " * (2 * k), lambda k: "2>&1 " * k, lambda k: "\\" * (4 * k),
+        lambda k: "$'\\'" * k, lambda k: '"$(' * k, lambda k: '"$(x)"' * k, lambda k: '"`x`"' * k,
+        lambda k: "$((" * k + "))" * k, lambda k: "1>& 2 " * k)]
+    R7_CASES.append(("date_spans", lambda k: "$(" * (5 * k) + "`" * (k + 1) + "$(A=B" * (k // 2) + " 2099-01-01T00:00Z"))
+
     def run_timed(code, timeout):
         """Run `code` in a fresh isolated interpreter under child_env() (the ambient allocator policy
         neutralized), killed at `timeout` seconds (raising TimeoutExpired); return the JSON its last stdout
@@ -3623,11 +3658,48 @@ def _self_test():
             raise AssertionError(f"timed child failed ({r.returncode}): {r.stderr}")
         return json.loads(r.stdout.strip().splitlines()[-1])
 
+    def freeze_clocks(ns):
+        """Freeze every wall clock this module reads at the one instant `ns` (epoch nanoseconds) and return the
+        undo: the module's `time` and `datetime` names become views of those modules whose time.time, time_ns,
+        localtime() and gmtime() with no argument, and datetime.datetime.now, utcnow and today, return that
+        instant; every other name is the module's own. setUp freezes each test at a reading of the real clock,
+        so a fixture built from the clock and the code it evaluates (main's datetime.now) read the same
+        instant however much wall time passes between the two reads (QA round 3, in the sibling
+        stamp-truth-stop.py: a fixture age taken before the code's later clock reading flipped a verdict once
+        that reading moved). A timed child interpreter reads its own clocks and passes a fixed now."""
+        real_time, real_dt = globals()["time"], globals()["datetime"]
+        sec, frac = divmod(ns, 10 ** 9)
+        tview = types.ModuleType("time")
+        tview.__dict__.update(vars(real_time))
+        tview.time, tview.time_ns = (lambda: ns / 10 ** 9), (lambda: ns)
+        tview.localtime = lambda secs=None: real_time.localtime(sec if secs is None else secs)
+        tview.gmtime = lambda secs=None: real_time.gmtime(sec if secs is None else secs)
+
+        class FrozenDatetime(real_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_dt.datetime.fromtimestamp(sec, tz).replace(microsecond=frac // 1000)
+
+            @classmethod
+            def utcnow(cls):
+                return cls.now(real_dt.timezone.utc).replace(tzinfo=None)
+
+            @classmethod
+            def today(cls):
+                return cls.now()
+        dview = types.ModuleType("datetime")
+        dview.__dict__.update(vars(real_dt))
+        dview.datetime = FrozenDatetime
+        globals()["time"], globals()["datetime"] = tview, dview
+
+        def thaw():
+            globals()["time"], globals()["datetime"] = real_time, real_dt
+        return thaw
+
     class T(unittest.TestCase):
         def setUp(self):
             self._tz = os.environ.get("TZ")
-            self._saved = {k: os.environ.pop(k, None) for k in ("AIQT_STORE_ROOT", "ORCH_STORE_ROOT",
-                                                                 "CLAUDE_PROJECT_DIR")}
+            self._saved = {k: os.environ.pop(k, None) for k in ("AIQT_STORE_ROOT", "CLAUDE_PROJECT_DIR")}
             os.environ["AIQT_STORE_ROOT"] = STORE  # the fixture store root (there is no default)
             os.environ["TZ"] = "EST5EDT,M3.2.0,M11.1.0"  # pinned zone, no tzdata needed
             time.tzset()
@@ -3635,6 +3707,9 @@ def _self_test():
             self.tmp = tempfile.mkdtemp(prefix="clk.", dir=base)
             self.now = datetime.datetime(2026, 9, 23, 17, 45, 0, tzinfo=UTC)
             self.store = f"{PROJ}/private/state.md"
+            # every clock this module reads is frozen at one instant for the whole test (freeze_clocks)
+            self.clock_ns = time.time_ns()
+            self.addCleanup(freeze_clocks(self.clock_ns))
 
         def tearDown(self):
             shutil.rmtree(self.tmp, ignore_errors=True)
@@ -3691,7 +3766,7 @@ def _self_test():
             self.assertTrue(self.ev("Write", file_path=self.store, content="2026-09-23T23:00+02:00"))
 
         def test_spaced_numeric_zone(self):
-            # finding (codex r2): a space-separated numeric zone was dropped and the literal read as naive
+            # finding (r2): a space-separated numeric zone was dropped and the literal read as naive
             os.environ["TZ"] = "UTC0"
             time.tzset()
             self.assertEqual(self.ev("Write", file_path=self.store, content="[2026-09-23 22:45 +05]"), [])
@@ -3744,7 +3819,7 @@ def _self_test():
             self.assertTrue(self.ev("Write", file_path=fp, content="hb: 2099-01-01T00:00Z\nhb: 2099-01-01T00:00Z\n"))
 
         def test_edit_fragments_reconstructed_on_whole_lines(self):
-            # finding (codex r2): Edit checked the replacement fragment, not the changed file line
+            # finding (r2): Edit checked the replacement fragment, not the changed file line
             fp = self.store_file("deadline: 2099-01-01T00:00Z\nheartbeat: 2026-09-23T17:45Z\n"
                                  "next_run: 2099-03-01T00:00Z\n")
             self.assertEqual(self.ev("Edit", file_path=fp, old_string="deadline", new_string="heartbeat"),
@@ -3760,7 +3835,7 @@ def _self_test():
                                      replace_all=True), ["2099-02-02T00:00Z"])
 
         def test_edit_old_string_absent_on_whole_file_allowed(self):
-            # finding (gemini r3 M2): a non-applying edit fell back to naked fragments (false deny); on a file
+            # finding (r3 M2): a non-applying edit fell back to naked fragments (false deny); on a file
             # read whole the tool itself fails, so the call is allowed
             fp = self.store_file("a\n")
             self.assertEqual(self.ev("Edit", file_path=fp, old_string="zzz", new_string="hb 2099-01-01T00:00Z"), [])
@@ -3772,7 +3847,7 @@ def _self_test():
                                      new_string="hb 2099-01-01T00:00Z"), [])
 
         def test_edit_beyond_read_cap_checks_fragment(self):
-            # finding (codex r3 m): past the cap the hook cannot reconstruct; the fragment is checked on its own
+            # finding (r3 m): past the cap the hook cannot reconstruct; the fragment is checked on its own
             fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2) + "hb: 2026-09-23T17:45Z\n")
             self.assertEqual(read_existing(fp, EXISTING_MAX_BYTES)[1], False)
             self.assertTrue(self.ev("Edit", file_path=fp, old_string="hb: 2026-09-23T17:45Z",
@@ -3784,13 +3859,140 @@ def _self_test():
             self.assertEqual(read_existing(fp2, EXISTING_MAX_BYTES)[1], True)
 
         def test_fifo_existing_content_does_not_block(self):
+            # FIFO_GUARD fails a blocking open of the FIFO at once, whatever the opener; the timeout is the hang
+            # guard only
             fifo = os.path.join(self.tmp, "fifo")
             os.mkfifo(fifo)
-            code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
-                    "s.loader.exec_module(m);print(repr(m.read_existing(%r, 10)))" % (os.path.abspath(__file__), fifo))
+            code = FIFO_GUARD + (
+                "import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
+                "s.loader.exec_module(m);print(repr(m.read_existing(%r, 10)));print(repr(_blocking))"
+                % (os.path.abspath(__file__), fifo))
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
-                               timeout=HANG_TIMEOUT)  # the hang guard: a blocking FIFO open never returns
-            self.assertEqual(r.stdout.strip(), "('', False)")
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.splitlines(), ["('', False)", "[]"], r.stderr)
+
+        def test_fifo_guard_refuses_every_blocking_opener(self):
+            # the guard's vector: each opener in FIFO_OPENERS, without O_NONBLOCK, is refused and recorded at once
+            # (none blocks, so the hang guard is never reached); an O_NONBLOCK os.open passes and is not recorded.
+            # A reader and writer descriptor (keep) is held first, so no open can block even where the guard
+            # misses one: a missed opener returns, is counted short, and the test fails at once, never at the
+            # hang guard. A blocking open of a regular file through d stays allowed and unrecorded.
+            fifo = os.path.join(self.tmp, "gfifo")
+            os.mkfifo(fifo)
+            os.symlink(fifo, fifo + ".sym")
+            os.link(fifo, fifo + ".hard")
+            code = FIFO_GUARD + (
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "d = os.open(%r, os.O_RDONLY | os.O_DIRECTORY)\n"
+                "refused = 0\n"
+                "for opener in (%s,):\n"
+                "    try:\n"
+                "        got = opener(%r)\n"
+                "    except AssertionError:\n"
+                "        refused += 1\n"
+                "    else:\n"
+                "        os.close(got) if isinstance(got, int) else got.close()\n"
+                "os.close(os.open(%r, os.O_RDONLY | os.O_NONBLOCK))\n"
+                "os.close(os.open('plain', os.O_RDONLY | os.O_CREAT, 0o600, dir_fd=d))\n"
+                "print(refused, len(_blocking))\n") % (fifo, self.tmp, ", ".join(FIFO_OPENERS), fifo, fifo)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.split(), [str(len(FIFO_OPENERS))] * 2, r.stderr)
+
+        def test_fifo_guard_cannot_evaluate_without_descriptor_list(self):
+            # QA (codex MED): where /dev/fd could not be listed the guard tried descriptors 3 to 1023 only, so a
+            # blocking open relative to a directory descriptor above that range passed unrecorded. The listing
+            # now fails as a cannot-evaluate: the open is refused and recorded. The keeper descriptor means no
+            # open can block, so a missed refusal returns at once and the test fails on the printed counts
+            # (the directory descriptor is moved above 1023 where the hard limit allows)
+            fifo = os.path.join(self.tmp, "efifo")
+            os.mkfifo(fifo)
+            code = FIFO_GUARD + (
+                "import resource\n"
+                "soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
+                "high = 2048 if hard == resource.RLIM_INFINITY or hard > 2048 else hard - 1\n"
+                "resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, high + 1), hard))\n"
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "d = os.open(%r, os.O_RDONLY | os.O_DIRECTORY)\n"
+                "os.dup2(d, high)\n"
+                "os.close(d)\n"
+                "_listdir = os.listdir\n"
+                "def _no_fd_list(path='.'):\n"
+                "    if path == '/dev/fd':\n"
+                "        raise OSError('descriptor listing refused')\n"
+                "    return _listdir(path)\n"
+                "os.listdir = _no_fd_list\n"
+                "refused = 0\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY, dir_fd=high))\n"
+                "except AssertionError:\n"
+                "    refused += 1\n"
+                "print(refused, _blocking)\n") % (fifo, self.tmp, os.path.basename(fifo))
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.strip(), "1 [('cannot evaluate', 'efifo')]", r.stderr)
+
+        def test_fifo_guard_refuses_an_unexpected_metadata_error(self):
+            # QA round 3 (codex MED): every metadata error read as "not a FIFO", so an os.stat that failed with
+            # EIO let a blocking open of the FIFO through unrecorded. Only a missing name or an unusable base
+            # descriptor is now "not a FIFO"; any other failure is refused and recorded as a cannot-evaluate.
+            # The keeper descriptor means no open can block, so a missed refusal returns at once and the test
+            # fails on the printed counts; a missing path still opens to FileNotFoundError, unrecorded
+            fifo, absent = os.path.join(self.tmp, "ififo"), os.path.join(self.tmp, "absent")
+            os.mkfifo(fifo)
+            code = FIFO_GUARD + (
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "_stat = os.stat\n"
+                "def _failing_stat(path, *a, **k):\n"
+                "    if path == %r:\n"
+                "        raise OSError(errno.EIO, 'injected metadata I/O error')\n"
+                "    return _stat(path, *a, **k)\n"
+                "os.stat = _failing_stat\n"
+                "refused = missing = 0\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY))\n"
+                "except AssertionError:\n"
+                "    refused += 1\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY))\n"
+                "except FileNotFoundError:\n"
+                "    missing += 1\n"
+                "print(refused, missing, _blocking == [('cannot evaluate', %r)])\n") % (fifo, fifo, fifo, absent, fifo)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.split(), ["1", "1", "True"], r.stderr)
+
+        def test_fifo_guard_disclosures(self):
+            # QA round 3 (codex MINOR, claude MINOR): the stat-then-open race and a blocking wait after a
+            # non-blocking open are disclosed beside the ctypes residual
+            src = " ".join(inspect.getsource(_self_test).split())
+            for s in ("Not covered: an open outside the audited interpreter calls",
+                      "Not covered either, the stat-then-open race", "a symlink switched from a regular file to a FIFO",
+                      "Nor a blocking wait on a descriptor opened with O_NONBLOCK"):
+                self.assertIn(s, src)
+
+        def test_clocks_frozen_for_fixture_and_code(self):
+            # QA round 3 (codex MED, in the sibling stamp-truth-stop.py): a fixture built from the clock and the
+            # code it evaluates read the clock at different moments, so wall time elapsed between the two reads
+            # could move a verdict. Every clock this module reads is frozen (setUp): main() hands evaluate the
+            # instant setUp froze, whatever the wall time
+            real_evaluate, seen = evaluate, []
+
+            def recording_evaluate(*a, **k):
+                seen.append((a[1] - datetime.datetime(1970, 1, 1, tzinfo=UTC)) // datetime.timedelta(microseconds=1))
+                return real_evaluate(*a, **k)
+            payload = {"tool_name": "Write", "tool_input": {"file_path": os.path.join(self.tmp, "a.md"), "content": "x"}}
+            old_in, old_out = sys.stdin, sys.stdout
+            sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+            globals()["evaluate"] = recording_evaluate
+            try:
+                rc = main(["future-stamp-write.py"])
+                out = sys.stdout.getvalue()
+            finally:
+                globals()["evaluate"] = real_evaluate
+                sys.stdin, sys.stdout = old_in, old_out
+            self.assertEqual((rc, out), (0, ""))
+            self.assertEqual(seen, [self.clock_ns // 1000])
 
         def test_store_root_env_override(self):
             os.environ["AIQT_STORE_ROOT"] = self.tmp
@@ -3803,22 +4005,22 @@ def _self_test():
             self.assertEqual(store_roots(), [os.path.normpath(self.tmp), STORE])
             self.assertTrue(self.ev("Write", file_path=self.store, content="2099-01-01T00:00Z"))
 
-        def test_store_root_precedence_and_legacy_spelling(self):
+        def test_store_root_only_aiqt_spelling(self):
             other = tempfile.mkdtemp(dir=self.tmp)
             del os.environ["AIQT_STORE_ROOT"]
-            os.environ["ORCH_STORE_ROOT"] = other  # the legacy spelling is a fallback
-            self.assertEqual(store_roots(), [other])
-            self.assertTrue(self.ev("Write", file_path=os.path.join(other, "a.md"), content="2099-01-01T00:00Z"))
-            os.environ["AIQT_STORE_ROOT"] = STORE  # AIQT_ beats ORCH_
+            os.environ["OTHER_STORE_ROOT"] = other  # no other spelling is read: no store, so inert
+            self.assertEqual(store_roots(), [])
+            self.assertEqual(self.ev("Write", file_path=os.path.join(other, "a.md"), content="2099-01-01T00:00Z"), [])
+            os.environ["AIQT_STORE_ROOT"] = STORE
             self.assertEqual(store_roots(), [STORE])
             self.assertEqual(self.ev("Write", file_path=os.path.join(other, "a.md"), content="2099-01-01T00:00Z"), [])
             self.assertTrue(self.ev("Write", file_path=self.store, content="2099-01-01T00:00Z"))
-            os.environ["AIQT_STORE_ROOT"] = ""  # set but empty still beats ORCH_: no store, so inert
+            os.environ["AIQT_STORE_ROOT"] = ""  # set but empty: no store, so inert
             self.assertEqual(store_roots(), [])
             self.assertEqual(self.ev("Write", file_path=os.path.join(other, "a.md"), content="2099-01-01T00:00Z"), [])
-            self.assertEqual(_cfg("X", {"AIQT_X": "a", "ORCH_X": "o"}), "a")
-            self.assertEqual(_cfg("X", {"AIQT_X": "", "ORCH_X": "o"}), "")
-            self.assertEqual(_cfg("X", {"ORCH_X": "o"}), "o")
+            self.assertEqual(_cfg("X", {"AIQT_X": "a", "OTHER_X": "o"}), "a")
+            self.assertEqual(_cfg("X", {"AIQT_X": "", "OTHER_X": "o"}), "")
+            self.assertIsNone(_cfg("X", {"OTHER_X": "o"}))
             self.assertIsNone(_cfg("X", {}))
 
         def test_no_store_configured_is_inert(self):
@@ -3862,7 +4064,7 @@ def _self_test():
                 self.assertTrue(self.ev("Bash", command=cmd), cmd)
 
         def test_bash_parse_evasions_now_denied(self):
-            # findings (codex/gemini r2): comment heredoc, wrapper options, and $(echo ...) evaded parsing
+            # findings (r2): comment heredoc, wrapper options, and $(echo ...) evaded parsing
             for cmd in (f"# <<EOF\nprintf '%s\\n' 'hb: 2099-01-01T00:00Z' > {PROJ}/private/s.md",
                         f"printf '%s\\n' '<<EOF'\nprintf 'hb: 2099-01-01T00:00Z' > {PROJ}/private/s.md",
                         f"echo 2099-01-01T00:00Z | env -i tee {PROJ}/private/s.md",
@@ -3884,7 +4086,7 @@ def _self_test():
             self.assertEqual(self.ev("Bash", command=f"grep tee {PROJ}/private/s.md 2099-01-01T00:00Z"), [])
 
         def test_r7_read_only_store_inspection_allowed(self):
-            # peer finding (MEDIUM): a read-only command naming a store path was denied; the old
+            # finding (MEDIUM): a read-only command naming a store path was denied; the old
             # documented false positives for a read (grep, a quoted `>` argument) now pass
             for cmd in (f"rg -n '2099-01-01T00:00Z' {PROJ}/private/pending-decisions.md",
                         f"grep -c 2099-01-01T00:00Z {PROJ}/private/s.md",
@@ -3967,7 +4169,7 @@ def _self_test():
                              [])
 
         def test_bash_scan_is_linear(self):
-            # finding (codex r2): unmatched $( openers rescanned the suffix quadratically
+            # finding (r2): unmatched $( openers rescanned the suffix quadratically
             # round 31: at this size (1.35 MB) the analysis spends BASH_WORK_BUDGET and fails OPEN (allowed), still
             # within the timeout; a hundredth of it stays inside the budget and is still denied (unparseable).
             # The timeout is the hang guard only; linearity is the growth from n to GROWTH * n (up to that size)
@@ -3988,22 +4190,18 @@ def _self_test():
             small, large = run_timed(code, HANG_TIMEOUT)
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
-        def test_main_deny_shape_and_fail_open(self):
+        def test_main_warn_shape_and_fail_open(self):
             payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": self.store,
                                                                        "content": "2099-01-01T00:00:00Z"}})
-            for stdin_text, env, want_deny in ((payload, {}, True), ("not json", {}, False),
-                                               (payload, {"AIQT_HOOKS_WORKER": "1"}, False),
+            # no environment variable skips the check: a worker marker is evaluated like any session
+            for stdin_text, env, want_warn in ((payload, {}, True), ("not json", {}, False),
+                                               (payload, {"AIQT_HOOKS_WORKER": "1"}, True),
                                                (payload, {"AIQT_HOOKS_WORKER": "0"}, True),
-                                               (payload, {"AIQT_HOOKS_WORKER": ""}, True),
-                                               (payload, {"ORCH_WORKER": "1"}, False),
-                                               (payload, {"ORCH_VERIFY_OWNER": "x"}, False),
-                                               (payload, {"ORCH_VERIFY_OWNER": ""}, False)):
+                                               (payload, {"AIQT_HOOKS_WORKER": ""}, True)):
                 old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
                 sys.stdin, sys.stdout = io.StringIO(stdin_text), io.StringIO()
                 try:
                     os.environ.pop("AIQT_HOOKS_WORKER", None)
-                    os.environ.pop("ORCH_WORKER", None)
-                    os.environ.pop("ORCH_VERIFY_OWNER", None)
                     os.environ.update(env)
                     rc = main(["future-stamp-write.py"])
                     out = sys.stdout.getvalue()
@@ -4012,37 +4210,19 @@ def _self_test():
                     os.environ.clear()
                     os.environ.update(old_env)
                 self.assertEqual(rc, 0)
-                if want_deny:
-                    h = json.loads(out)["hookSpecificOutput"]
-                    self.assertEqual((h["hookEventName"], h["permissionDecision"]), ("PreToolUse", "deny"))
-                    self.assertIn("2099-01-01T00:00:00Z", h["permissionDecisionReason"])
+                if want_warn:
+                    obj = json.loads(out)
+                    self.assertEqual(list(obj), ["systemMessage"])
+                    self.assertIn("2099-01-01T00:00:00Z", obj["systemMessage"])
+                    self.assertLessEqual(len(obj["systemMessage"]), WARN_MAX)
+                    self.assertNotIn("\n", obj["systemMessage"])
                 else:
                     self.assertEqual(out, "")
 
-        def test_shared_grammar_identical_to_sibling(self):
-            sib = _sibling_or_skip("stamp-truth-stop.py")
-            spec = importlib.util.spec_from_file_location("sts_sibling", sib)
-            mod = importlib.util.module_from_spec(spec)
-            # the sibling is loaded with no bytecode written, so no __pycache__ is left beside the hooks
-            old_dwb, sys.dont_write_bytecode = sys.dont_write_bytecode, True
-            try:
-                spec.loader.exec_module(mod)
-            finally:
-                sys.dont_write_bytecode = old_dwb
-            self.assertEqual(mod.SCHED_KEYWORDS, SCHED_KEYWORDS)
-            self.assertEqual(mod.SCHED_GAP_TOKENS, SCHED_GAP_TOKENS)
-            self.assertEqual((mod.TIME_GRAMMAR, mod.ZONE_GRAMMAR), (TIME_GRAMMAR, ZONE_GRAMMAR))
-            self.assertEqual((mod._SCHED_RE.pattern, mod._SCHED_RE.flags), (_SCHED_RE.pattern, _SCHED_RE.flags))
-            self.assertEqual((mod._TOKEN_RE.pattern, mod._WORDCH_RE.pattern), (_TOKEN_RE.pattern, _WORDCH_RE.pattern))
-            self.assertEqual(inspect.getsource(mod.sched_exempter), inspect.getsource(sched_exempter))
-            # the configuration and kill-switch helpers are shared verbatim across the three hooks
-            for name in ("_cfg", "_is_worker", "_sibling_or_skip", "_wall_clock_asserts",
-                         "_wall_clock_alias_fixtures"):
-                self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
 
         # -- round 4 --
         def test_r4_date_span_respects_quoting(self):
-            # finding (codex r3 M2): a quoted paren inside $(date ...) extended the span over a later literal
+            # finding (r3 M2): a quoted paren inside $(date ...) extended the span over a later literal
             deny = (f"echo \"$(date '+(')\" \"hb: 2099-01-01T00:00Z\" > {PROJ}/private/s.md; echo ')'",
                     f"echo '$(date -d 2099-01-01T00:00Z)' > {PROJ}/private/s.md",
                     f"echo $'$(date \\' 2099-01-01T00:00Z' > {PROJ}/private/s.md",
@@ -4058,7 +4238,7 @@ def _self_test():
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
 
         def test_r4_env_prefix_date_span(self):
-            # finding (gemini r3 m1): `env TZ=UTC date` was not a date substitution
+            # finding (r3 m1): `env TZ=UTC date` was not a date substitution
             for cmd in (f"echo \"hb $(env TZ=UTC date -d 2099-01-01T00:00Z)\" > {PROJ}/private/s.md",
                         f"echo \"hb $(/usr/bin/env TZ=UTC date -d 2099-01-01T00:00Z)\" > {PROJ}/private/s.md"):
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
@@ -4095,7 +4275,7 @@ def _self_test():
                 self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (name, small, large))
 
         def test_r5_many_distinct_literals_linear_and_bounded(self):
-            # finding (codex r4, sibling pattern): the fragment path scanned the growing list per literal
+            # finding (r4, sibling pattern): the fragment path scanned the growing list per literal
             lits = [f"2099-{1 + i % 12:02d}-{1 + (i // 12) % 28:02d}T{(i // 336) % 24:02d}:{(i // 8064) % 60:02d}Z"
                     for i in range(40000)]
             fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2 + 1))  # over the cap: the fragment path
@@ -4125,19 +4305,20 @@ def _self_test():
             old_out = sys.stdout
             sys.stdout = io.StringIO()
             try:
-                _deny(w, self.now)
-                reason = json.loads(sys.stdout.getvalue())["hookSpecificOutput"]["permissionDecisionReason"]
+                _warn(w, self.now)
+                obj = json.loads(sys.stdout.getvalue())
             finally:
                 sys.stdout = old_out
-            self.assertIn(f" and {40000 - MAX_REPORTED} more", reason)
-            self.assertLess(len(reason), 2000)
+            self.assertEqual(list(obj), ["systemMessage"])
+            self.assertLessEqual(len(obj["systemMessage"]), WARN_MAX)
+            self.assertIn(w[0], obj["systemMessage"])
 
         # -- round 6: markdown-table header exemption --
         def tw(self, *lines):
             return self.ev("Write", file_path=self.store, content="\n".join(lines) + "\n")
 
         def test_r6_table_header_keyword_column_allowed(self):
-            # finding (codex r5 MAJOR): the scheduling keyword lived in the header cell, not on the row's line
+            # finding (r5 MAJOR): the scheduling keyword lived in the header cell, not on the row's line
             self.assertEqual(self.tw("| Item | Due | Owner |", "|---|---|---|", "| x | 2099-01-01T00:00Z | me |"), [])
             self.assertEqual(self.tw("| Item | Next run |", "| :--- | ---: |", "| x | 2099-01-01T00:00Z |",
                                      "| y | 2099-02-01T00:00Z |"), [])
@@ -4203,7 +4384,7 @@ def _self_test():
             small, large = run_timed(code, HANG_TIMEOUT)
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
-        # -- round 7 (codex round-6 findings) --
+        # -- round 7 (round-6 findings) --
         def test_r7_dq_substitution_write_seen(self):
             # finding 1 (HIGH): a write inside a double-quoted command substitution was hidden
             for cmd in (f"result=\"$(printf '%s\\n' 'heartbeat: 2099-01-01T00:00Z' | tee {PROJ}/private/s.md)\"",
@@ -4308,7 +4489,143 @@ def _self_test():
             small, large = run_timed(code, HANG_TIMEOUT)
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
-        # -- round 8 (codex round-7 findings) --
+        def test_r7_operation_counts_scale_linearly(self):
+            # Deterministic, no clock: every character the scanners read from the command, through indexing,
+            # iteration, a C-level str method (charged by the span it scans: a find to its hit or the end, a
+            # startswith by its prefix), or a module regex (match by its matched span, search to its hit or the
+            # end, finditer per match as consumed, findall, sub and split over the whole text) is charged to one
+            # counter. The count at GROWTH * n over the count at n stays under 3 * GROWTH (24: linear about
+            # GROWTH, quadratic about GROWTH squared) for the ten r7 shapes of bash_writes and for date_spans,
+            # and the verdict is unchanged by the proxies. Work on DERIVED structures (word buffers, token lists,
+            # the frame stack) is not charged here; the CPU growth checks above cover the Python-level part of it.
+            # Residual (disclosed): C-level work on a plain str copy of the command (str(cmd), then a find from
+            # many offsets) escapes the proxies and, at these sizes, the CPU ratio too; a failed match is charged
+            # one step, so regex backtracking is left to those CPU checks.
+            work = [0]
+
+            def wrap(value):
+                if type(value) is str:
+                    return Counted(value)
+                if type(value) in (list, tuple):
+                    return type(value)(wrap(v) for v in value)
+                return value
+
+            class Counted(str):
+                def __getitem__(self, key):
+                    value = str.__getitem__(self, key)
+                    work[0] += max(1, len(value))
+                    return Counted(value)
+
+                def __iter__(self):
+                    for i in range(len(self)):
+                        yield self[i]
+
+            def charged(name):
+                def method(self, *args):
+                    result = getattr(str, name)(self, *args)
+                    if name in ("startswith", "endswith"):
+                        cost = max(map(len, args[0])) if isinstance(args[0], tuple) else len(args[0])
+                    elif name in ("find", "index", "count", "rfind", "rindex"):
+                        lo, hi, _ = slice(*(tuple(args[1:3]) + (None, None))[:2]).indices(len(self))
+                        hit = name in ("find", "index") and result >= 0
+                        cost = result + len(args[0]) - lo if hit else hi - lo
+                    else:
+                        cost = len(self)
+                    work[0] += cost + 1
+                    return wrap(result)
+                return method
+
+            for name in ("count", "find", "rfind", "index", "rindex", "__contains__", "split", "rsplit",
+                         "partition", "rpartition", "replace", "splitlines", "strip", "lstrip", "rstrip",
+                         "startswith", "endswith", "lower", "upper", "expandtabs", "translate", "isspace",
+                         "isdigit", "isalnum", "isalpha"):
+                setattr(Counted, name, charged(name))
+
+            class CountedPattern:
+                def __init__(self, pattern):
+                    self.pattern = pattern
+
+                def __getattr__(self, name):
+                    return getattr(self.pattern, name)
+
+                def match(self, string, pos=0, endpos=sys.maxsize):
+                    m = self.pattern.match(string, pos, endpos)
+                    work[0] += (m.end() - pos if m else 0) + 1
+                    return m
+
+                def fullmatch(self, string, pos=0, endpos=sys.maxsize):
+                    m = self.pattern.fullmatch(string, pos, endpos)
+                    work[0] += (m.end() - pos if m else 0) + 1
+                    return m
+
+                def search(self, string, pos=0, endpos=sys.maxsize):
+                    m = self.pattern.search(string, pos, endpos)
+                    work[0] += max(0, (m.end() if m else min(endpos, len(string))) - pos) + 1
+                    return m
+
+                def finditer(self, string, pos=0, endpos=sys.maxsize):
+                    last = pos
+                    work[0] += 1
+                    for m in self.pattern.finditer(string, pos, endpos):
+                        work[0] += m.end() - last + 1
+                        last = m.end()
+                        yield m
+
+                def findall(self, string, pos=0, endpos=sys.maxsize):
+                    work[0] += max(0, min(endpos, len(string)) - pos) + 1
+                    return self.pattern.findall(string, pos, endpos)
+
+                def sub(self, repl, string, *args, **kwargs):
+                    work[0] += len(string) + 1
+                    return self.pattern.sub(repl, string, *args, **kwargs)
+
+                def subn(self, repl, string, *args, **kwargs):
+                    work[0] += len(string) + 1
+                    return self.pattern.subn(repl, string, *args, **kwargs)
+
+                def split(self, string, *args, **kwargs):
+                    work[0] += len(string) + 1
+                    return self.pattern.split(string, *args, **kwargs)
+
+            def counted(fn, text):
+                saved = {k: v for k, v in globals().items() if isinstance(v, re.Pattern)}
+                globals().update({k: CountedPattern(v) for k, v in saved.items()})
+                work[0] = 0
+                try:
+                    got = fn(Counted(text))
+                finally:
+                    globals().update(saved)
+                self.assertEqual(got, fn(text))  # the proxies change no verdict
+                return work[0]
+
+            n = 500
+            for index, (name, make) in enumerate(R7_CASES):
+                fn = globals()[name]
+                small, large = counted(fn, make(n)), counted(fn, make(GROWTH * n))
+                self.assertGreater(small, 0, index)
+                self.assertLess(large / small, 3 * GROWTH, (index, name, small, large))
+
+        def test_r7_derived_work_cpu_scaling(self):
+            # Work on derived structures (word buffers, token lists, the frame stack) is invisible to the counts
+            # above, so each R7_CASES case is timed on CPU (time.process_time, interleaved, best of 2, in a child
+            # under the hang ceiling) at n and at GROWTH * n: the ratio stays under 3 * GROWTH (24: linear about
+            # GROWTH, quadratic about GROWTH squared). The size is small, so a quadratic regression fails here on
+            # its ratio at once rather than only at the large-size checks' hang ceiling
+            n = 500
+            cases = [(name, make(n), make(GROWTH * n)) for name, make in R7_CASES]
+            path = os.path.join(self.tmp, "r7.json")  # the commands go by file: too long for an argument
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cases, f)
+            for index in range(len(cases)):  # one child per case, so each stays seconds of CPU under the ceiling
+                code = TIMED_PRELUDE + (
+                    "with open(%r, encoding='utf-8') as f:\n"
+                    "    name, small, large = json.load(f)[%d]\n"
+                    "fn = getattr(m, name)\n"
+                    "print(json.dumps(interleaved((0, 1), lambda k: fn((small, large)[k]), 2)))\n") % (path, index)
+                small, large = run_timed(code, HANG_TIMEOUT)
+                self.assertLess(large / max(small, 1e-3), 3 * GROWTH, (index, cases[index][0], small, large))
+
+        # -- round 8 (round-7 findings) --
         def test_r8_new_block_ends_table(self):
             # finding 1 (HIGH): a list item, heading, blockquote, or fence after a Due table inherited its context
             hdr = ("| Item | Due |", "|---|---|", "| a | 2026-09-01T00:00Z |")
@@ -4330,7 +4647,7 @@ def _self_test():
                                               "| b | 2099-01-02T00:00Z |"))), [])
 
         def test_r10_bare_row_under_leading_pipe_header(self):
-            # codex round-8 [H]: GFM leading pipes are optional per line, so a bare row continues a `| ... |` table
+            # round-8 [H]: GFM leading pipes are optional per line, so a bare row continues a `| ... |` table
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "release | 2099-01-01T00:00Z"), [])
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "| a | x |", "release | 2099-01-01T00:00Z |"), [])
             # the column is counted from the row's own leading pipe: a bare row's Item column is not exempt
@@ -4343,7 +4660,7 @@ def _self_test():
             self.assertNotIn("stricter than GFM", __doc__)
 
         def test_r11_pipe_free_row_continues_table(self):
-            # codex round-10 [H]: GFM example 202, a pipe-free body row continues the table (one cell, column 0)
+            # round-10 [H]: GFM example 202, a pipe-free body row continues the table (one cell, column 0)
             body = "| Item | Due |\n|---|---|\nTBD\nrelease | %s\n"
             self.assertEqual(self.tw(*(body % "2099-01-01T00:00Z").splitlines()), [])
             fp = os.path.join(self.tmp, "r11.md")
@@ -4383,7 +4700,7 @@ def _self_test():
             self.assertNotIn("so it is exempt only when header cell 0 carries a keyword", __doc__)
 
         def test_r12_pipe_free_heartbeat_under_due_header_denied(self):
-            # codex round-11 [H]: a pipe-free line under `| Due | Item |` inherited column 0's exemption, so
+            # round-11 [H]: a pipe-free line under `| Due | Item |` inherited column 0's exemption, so
             # a fabricated future heartbeat was allowed through Write, Edit, and MultiEdit
             fut = "2099-01-01T00:00Z"
             body = "| Due | Item |\n| --- | --- |\n| 2099-02-01T09:00Z | release |\nLast-heartbeat: %s\n"
@@ -4460,14 +4777,11 @@ def _self_test():
         def test_r4_threat_model_stated(self):
             self.assertIn("THREAT MODEL", __doc__.split("\n\n")[1])
 
-        # -- round 13 (peer adoption QA) --
+        # -- round 13 --
         def main_out(self, payload):
             old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
             sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
             try:
-                os.environ.pop("AIQT_HOOKS_WORKER", None)
-                os.environ.pop("ORCH_WORKER", None)  # a worker environment would skip the hook entirely
-                os.environ.pop("ORCH_VERIFY_OWNER", None)
                 self.assertEqual(main(["future-stamp-write.py"]), 0)
                 return sys.stdout.getvalue()
             finally:
@@ -4503,7 +4817,7 @@ def _self_test():
                 cmd = cmd.replace("S", store)
                 self.assertTrue(bash_writes(cmd), cmd)
                 self.assertEqual(self.ev("Bash", command=cmd), ["2099-01-01T00:00Z"], cmd)
-            self.assertIn("deny", self.main_out({"tool_name": "Bash", "tool_input": {
+            self.assertIn("systemMessage", self.main_out({"tool_name": "Bash", "tool_input": {
                 "command": f"echo 2099-01-01T00:00Z | tee -a {store}"}}))
             # redirection, in-place, and substitution detection are position-free, as before
             for cmd in ("rg tee 2099-01-01T00:00Z > S", "rg x | sed -n -i 2099-01-01T00:00Z S",
@@ -4538,21 +4852,6 @@ def _self_test():
                                                                                   "content": f"> {fut}\n"}}), "")
             self.assertIn("a composed stamp placed inside a quote", " ".join(__doc__.split()))
 
-        def test_r13_code_quote_helpers_identical_to_sibling(self):
-            sib = _sibling_or_skip("stamp-truth-stop.py")
-            spec = importlib.util.spec_from_file_location("sts_sibling13", sib)
-            mod = importlib.util.module_from_spec(spec)
-            # the sibling is loaded with no bytecode written, so no __pycache__ is left beside the hooks
-            old_dwb, sys.dont_write_bytecode = sys.dont_write_bytecode, True
-            try:
-                spec.loader.exec_module(mod)
-            finally:
-                sys.dont_write_bytecode = old_dwb
-            for name in ("_code_lines", "_code_spans", "_in_spans"):
-                self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
-            for name in ("_BTICK_RE", "_FENCE_RE"):
-                self.assertEqual((getattr(mod, name).pattern, getattr(mod, name).flags),
-                                 (globals()[name].pattern, globals()[name].flags), name)
 
         # -- round 14 --
         def r14(self, cmds, want):
@@ -4600,19 +4899,19 @@ def _self_test():
                     "[ a > b1 ]", "[[ a > c1 ]]", "[[ z < c2 ]]", "test a > b2")
             with open(os.path.join(self.tmp, "in"), "w") as f:
                 f.write("i\n")
-            subprocess.run(["bash", "-c", "; ".join(cmds)], cwd=self.tmp, capture_output=True, timeout=5)
+            subprocess.run(["bash", "-c", "; ".join(cmds)], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             made = set(os.listdir(self.tmp))
             self.assertTrue({"o1", "o2", "o3", "b1", "b2"} <= made, made)
             self.assertFalse({"c1", "c2"} & made, made)
 
-        def test_r14_helpers_clear_worker_env(self):
-            # item 4: main_out ran main() with ORCH_WORKER / ORCH_VERIFY_OWNER inherited, so main() skipped
+        def test_r14_worker_env_does_not_skip(self):
+            # item 4, now that no worker bypass exists: a worker marker in the environment does not skip main()
             payload = {"tool_name": "Write", "tool_input": {"file_path": self.store, "content": "2099-01-01T00:00Z"}}
-            for k, v in (("AIQT_HOOKS_WORKER", "1"), ("ORCH_VERIFY_OWNER", "x"), ("ORCH_WORKER", "1")):
+            for k, v in (("AIQT_HOOKS_WORKER", "1"),):
                 old = os.environ.get(k)
                 os.environ[k] = v
                 try:
-                    self.assertIn("deny", self.main_out(payload))
+                    self.assertIn("systemMessage", self.main_out(payload))
                     self.assertEqual(os.environ.get(k), v)  # the environment is restored afterwards
                 finally:
                     if old is None:
@@ -4658,14 +4957,14 @@ def _self_test():
                     "time -p -p [[ a > b1 ]]", "time -x [[ a > b2 ]]", "time -- -p [[ a > b3 ]]",
                     "function f { echo > b4; }; f", "g() { echo > b5; }; g", "function h { [[ a > c8 ]]; }; h")
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             made = set(os.listdir(self.tmp))
             self.assertTrue({"b1", "b2", "b3", "b4", "b5"} <= made, made)
             self.assertFalse({"c%d" % k for k in range(1, 9)} & made, made)
 
         # -- round 16 --
         def test_r16_arithmetic_is_not_redirection(self):
-            # codex round-15 finding (false deny): `>` inside `(( ... ))` and `$(( ... ))` read as a redirection
+            # round-15 finding (false deny): `>` inside `(( ... ))` and `$(( ... ))` read as a redirection
             self.r14(("count=$(grep -Fc 'F' S)\nif (( count > 0 )); then printf '%s\\n' \"$count\"; fi",
                       "count=$(grep -Fc 'F' S)\nprintf '%s\\n' \"$(( count > 0 ))\"",
                       "rg -c F S; (( x = 1 << 2 ))", "rg -c F S; echo $(( a >> 1 ))", "rg F S; (( a > b ))",
@@ -4693,12 +4992,12 @@ def _self_test():
                     "x=$((echo x) > b4)", "echo $(( `echo > b5` 1 > 0 ))")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5"})
 
         # -- round 17 --
         def test_r17_for_arith_header_restores_command_position(self):
-            # codex round-16 finding (MISS, a regression from r12/r15): after a `for ((...))` header the body
+            # round-16 finding (MISS, a regression from r12/r15): after a `for ((...))` header the body
             # lost command position, so `do tee` and `do sed -i` were missed; bash takes `do` with or without a
             # `;` or newline before it, and `{` in place of `do`
             self.r14(("for ((i=0;i<1;i++)) do tee S <<< 'Last-heartbeat: F'; done",
@@ -4719,7 +5018,7 @@ def _self_test():
             self.assertEqual(toks[:4], [("w", "for"), ("w", "$"), ("s",), ("w", "do")], toks)
 
         def test_r17_keyword_touching_arith_is_arithmetic(self):
-            # codex round-16 finding (false deny): the reserved word before `((` was not flushed at the `(`
+            # round-16 finding (false deny): the reserved word before `((` was not flushed at the `(`
             # metacharacter, so `if((` read as a subshell and its `>` as a redirection
             self.r14(("count=$(grep -Fc 'F' S); if(( count > 0 )); then echo found; fi",
                       "count=$(grep -Fc 'F' S); while(( count > 5 )); do break; done",
@@ -4744,7 +5043,7 @@ def _self_test():
                     "!(( 1 > c5 ))")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4"})
 
         # -- round 18 --
@@ -4783,7 +5082,7 @@ def _self_test():
                     "function q for ((i=0;i<1;i++)) do echo > b6; done; q")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5", "b6"})
 
         # -- round 19 --
@@ -4812,7 +5111,7 @@ def _self_test():
             self.assertEqual(_shell_tokens("echo $((1)) tee")[-1], [("w", "echo"), ("w", "$"), ("w", "tee")])
 
         def test_r19_conditional_operand_text_is_not_a_separator(self):
-            # codex round-18 finding (false deny, pre-existing): inside [[ ... ]] a regex operand's `(`, `)`, and
+            # round-18 finding (false deny, pre-existing): inside [[ ... ]] a regex operand's `(`, `)`, and
             # `|` were separators, so `cp` in `=~ operation=(cp|mv)` read as a command word
             self.r14(("record=$(grep -c 'F' S)\n[[ \"$record\" =~ operation=(cp|mv) ]]",
                       "record=$(grep -c 'F' S); function check [[ \"$record\" =~ operation=(cp|mv) ]]",
@@ -4839,12 +5138,12 @@ def _self_test():
                     "if (( 2 > c2 )) then :; fi", "[[ a && (b || c > c3) ]]")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5", "b6", "b7"})
 
         # -- round 20 --
         def test_r20_conditional_hash_is_operand_text(self):
-            # codex round-19 finding (false deny, present since round 17): inside [[ ... ]] the `#` of a regex
+            # round-19 finding (false deny, present since round 17): inside [[ ... ]] the `#` of a regex
             # operand such as `(#|$)` started a comment that swallowed the closing `]]`, so the command read as
             # an unterminated conditional (a write); a newline inside the conditional is no separator either
             self.r14(("record=$(grep 'F' S)\n[[ \"$record\" =~ ^[[:space:]]*(#|$) ]]",
@@ -4856,7 +5155,7 @@ def _self_test():
                       "[[ x =~ (#|$($(tee S <<< F))) ]]"), True)
 
         def test_r20_conditional_closes_only_at_a_closing_word(self):
-            # codex round-19 finding (miss): a `]]` glued to a regex word's `)` closed the conditional, so the
+            # round-19 finding (miss): a `]]` glued to a regex word's `)` closed the conditional, so the
             # real closing `]]` read as a command word and the `then` body after it lost command position
             self.r14(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
                       "if [[ 'x]]' =~ (x)]] ]]\nthen tee S <<< 'Last-heartbeat: F'; fi",
@@ -4884,12 +5183,12 @@ def _self_test():
                     "[[ x =~ (a>c1) ]]", "[[ x == x]] ]] && [[ y > c2 ]]")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b%d" % k for k in range(1, 10)})
 
         # -- round 21 --
         def test_r21_touching_conditional_opener_is_no_separator(self):
-            # codex round-20 finding (false deny, an r20 regression): in a compact `[[(`, flushing `[[` opened the
+            # round-20 finding (false deny, an r20 regression): in a compact `[[(`, flushing `[[` opened the
             # conditional only after its branch was passed, so the `(` became a separator (and, in a substitution,
             # a depth change that left the substitution unterminated)
             self.r14(("result=$( [[(-f S) ]] && grep -c 'F' S )", "result=$( [[(-f S) ]] &&\n grep -c 'F' S )",
@@ -4901,7 +5200,7 @@ def _self_test():
                               ("s",), ("w", "y")])
 
         def test_r21_glued_close_never_closes_before_a_later_close(self):
-            # codex round-20 finding (false deny): the removed alternate reading closed at the regex word `(x)]]`
+            # round-20 finding (false deny): the removed alternate reading closed at the regex word `(x)]]`
             # and invented a redirection out of the string comparison `>` after it; with the single rule a `]]`
             # glued to preceding text never closes while a word-initial `]]` follows
             self.r14(("record=$(grep 'F' S)\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
@@ -4931,12 +5230,12 @@ def _self_test():
                     "[[ ( a )]] && echo > b8; [[ x ]]")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b%d" % k for k in range(1, 9)})
 
         # -- round 22 --
         def test_r22_conditional_open_at_frame_end_is_unparseable(self):
-            # codex round-21 finding (miss, an r21 regression): a backtick frame closed while its conditional was
+            # round-21 finding (miss, an r21 regression): a backtick frame closed while its conditional was
             # open, so the round-21 fallback never ran and the write read as conditional operand text; the
             # fallback is removed, and a conditional open when its frame ends makes the command unparseable
             self.r14(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
@@ -4948,7 +5247,7 @@ def _self_test():
             self.assertEqual(list(inspect.signature(_shell_tokens).parameters), ["cmd"])  # no re-read machinery
 
         def test_r22_glued_group_close_is_disclosed_false_deny(self):
-            # codex round-21 finding (false deny from the fallback's loose closing, now removed): the rule leaves
+            # round-21 finding (false deny from the fallback's loose closing, now removed): the rule leaves
             # the first conditional's glued `)]]` unclosed, so the command is unparseable and denies only
             # because it names a store and holds a future literal (the disclosed exotic false deny); the same
             # holds for the former glued-close allows, pinned here so a future fix flips them deliberately
@@ -4964,9 +5263,6 @@ def _self_test():
                 old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
                 sys.stdin, sys.stdout = io.StringIO(payload), io.StringIO()
                 try:
-                    os.environ.pop("AIQT_HOOKS_WORKER", None)
-                    os.environ.pop("ORCH_WORKER", None)
-                    os.environ.pop("ORCH_VERIFY_OWNER", None)
                     rc = main(["future-stamp-write.py"])
                     out = sys.stdout.getvalue()
                 finally:
@@ -4978,7 +5274,7 @@ def _self_test():
         def test_r22_real_bash_agrees(self):
             # the syntax round 22 rests on, observed in real bash: a glued grouping `)]]` closes the conditional
             # inside a backtick or `$(...)` frame and at top level (so the backtick counterexample writes), and
-            # codex's three-line command writes nothing (the pinned deny above is a genuine false deny)
+            # three-line command writes nothing (the pinned deny above is a genuine false deny)
             if not shutil.which("bash"):
                 self.skipTest("bash absent")
             cmds = ("r=`[[ ( -n x )]] && echo > b1`", "r=$( [[ ( -n x )]] && echo > b2 )",
@@ -4986,12 +5282,12 @@ def _self_test():
                     "r=x\n[[ ( -n x )]] # it's fine\n[[ \"$r\" =~ (x)]] || \"$r\" > 'c1' ]]")
             before = set(os.listdir(self.tmp))
             for c in cmds:
-                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=HANG_TIMEOUT)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3"})
 
         # -- round 23 --
         def test_r23_word_initial_close_before_closing_backtick(self):
-            # codex round-22 finding (false deny, an r22 regression): a word-initial `]]` glued to the closing
+            # round-22 finding (false deny, an r22 regression): a word-initial `]]` glued to the closing
             # backtick of the backtick frame being scanned was not a close, so the conditional was still open at
             # the frame end and a read was unparseable; that backtick now closes it, as `)` does for `$(...)`
             self.r14(("record=`grep 'F' S && [[ -s S ]]`", "record=`grep 'F' S && [[ -s S ]] `",
@@ -5017,9 +5313,9 @@ def _self_test():
             if not shutil.which("bash"):
                 self.skipTest("bash absent")
             ok = subprocess.run(["bash", "-c", "r=`[[ -n x ]]` && r=`[[ -n x ]] ` && echo > b1"], cwd=self.tmp,
-                                capture_output=True, timeout=5)
+                                capture_output=True, timeout=HANG_TIMEOUT)
             bad = subprocess.run(["bash", "-c", "r=`[[ -n x ]]y` && echo > b2"], cwd=self.tmp, capture_output=True,
-                                 timeout=5)
+                                 timeout=HANG_TIMEOUT)
             self.assertEqual(ok.returncode, 0, ok.stderr)
             self.assertNotEqual(bad.returncode, 0)
             self.assertTrue(os.path.exists(os.path.join(self.tmp, "b1")))
@@ -5080,24 +5376,12 @@ def _self_test():
             self.assertEqual(self.ev("Edit", file_path=big, old_string=f"hb {F}", new_string=f"hb {F} (confirmed)"),
                              [F])
 
-        # -- generic port: the kill-switch spellings, bytes payload, a failed output rescue, fail-open before
-        # evaluation --
-        def test_aiqt_hooks_worker(self):
-            self.assertTrue(_is_worker({"AIQT_HOOKS_WORKER": "1"}))
-            for value in ("0", "", "true", "yes", " 1"):
-                self.assertFalse(_is_worker({"AIQT_HOOKS_WORKER": value}), value)
-            for env in ({"ORCH_WORKER": "1"}, {"ORCH_VERIFY_OWNER": ""}, {"ORCH_VERIFY_OWNER": "x"},
-                        {"AIQT_HOOKS_WORKER": "0", "ORCH_VERIFY_OWNER": ""}):
-                self.assertTrue(_is_worker(env), env)  # legacy spellings
-            self.assertFalse(_is_worker({"ORCH_WORKER": "0"}))
-            self.assertFalse(_is_worker({}))
+        # -- generic port: bytes payload, a failed output rescue, fail-open before evaluation --
 
         def run_stream(self, stream, argv=("future-stamp-write.py",)):
             old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
             sys.stdin, sys.stdout = stream, io.StringIO()
             try:
-                for k in ("AIQT_HOOKS_WORKER", "ORCH_WORKER", "ORCH_VERIFY_OWNER"):
-                    os.environ.pop(k, None)
                 rc = main(list(argv) if isinstance(argv, tuple) else argv)
                 return rc, sys.stdout.getvalue()
             finally:
@@ -5111,7 +5395,7 @@ def _self_test():
             raw = json.dumps({"tool_name": "Write", "tool_input": {"file_path": self.store, "content": content}},
                              ensure_ascii=False).encode("utf-8")
             rc, out = self.run_stream(io.TextIOWrapper(io.BytesIO(raw), encoding="ascii"))
-            self.assertEqual((rc, json.loads(out)["hookSpecificOutput"]["permissionDecision"]), (0, "deny"))
+            self.assertEqual((rc, list(json.loads(out))), (0, ["systemMessage"]))
             bad = io.TextIOWrapper(io.BytesIO(b"\xff\xfe{"), encoding="ascii")  # undecodable: fails open
             self.assertEqual(self.run_stream(bad), (0, ""))
 
@@ -5119,21 +5403,9 @@ def _self_test():
             code = ("import importlib.util as u, io;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print('before', flush=True);b=io.StringIO();b.close();"
                     "m._emit_line('x', b);print('after', flush=True)" % os.path.abspath(__file__))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=30)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=HANG_TIMEOUT)
             self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "before\n", ""))
 
-        def test_closed_stderr_line_never_reaches_stdout(self):
-            # the worker-skip line is for stderr only: with descriptor 2 closed (sys.stderr is None) it is dropped,
-            # never redirected to stdout, the hook's protocol channel; the open-stderr control shows it is emitted
-            env = {k: v for k, v in os.environ.items() if k not in ("ORCH_WORKER", "ORCH_VERIFY_OWNER")}
-            env["AIQT_HOOKS_WORKER"] = "1"
-            hook = [sys.executable, "-I", "-S", "-B", os.path.abspath(__file__)]
-            close2 = "import os, sys; os.close(2); os.execv(sys.argv[1], sys.argv[1:])"
-            for closed in (False, True):
-                argv = [sys.executable, "-I", "-S", "-B", "-c", close2] + hook if closed else hook
-                p = subprocess.run(argv, input="{}", capture_output=True, text=True, env=env, timeout=30)
-                self.assertEqual((p.returncode, p.stdout), (0, ""), (closed, p.stderr))
-                self.assertEqual("skipped, worker marker present" in p.stderr, not closed, (closed, p.stderr))
 
         def test_fail_open_before_evaluation(self):
             class Unreadable:
@@ -5147,34 +5419,18 @@ def _self_test():
             for argv in (None, 7):  # argv that cannot be inspected fails open: exit 0, silent, nothing evaluated
                 self.assertEqual(self.run_stream(io.StringIO(p), argv=argv), (0, ""), argv)
             rc, out = self.run_stream(io.StringIO(p), argv=[None, 3])  # inspectable: evaluated as a hook
-            self.assertEqual((rc, json.loads(out)["hookSpecificOutput"]["permissionDecision"]), (0, "deny"))
+            self.assertEqual((rc, list(json.loads(out))), (0, ["systemMessage"]))
 
-        def test_r24_worker_skip_warns_and_output_error_fails_open(self):
-            old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
-            had = os.environ.get("AIQT_HOOKS_WORKER")
-            sys.stdin, sys.stdout, sys.stderr = io.StringIO("{}"), io.StringIO(), io.StringIO()
-            try:
-                os.environ["AIQT_HOOKS_WORKER"] = "1"
-                rc = main(["future-stamp-write.py"])
-                out, err = sys.stdout.getvalue(), sys.stderr.getvalue()
-            finally:
-                sys.stdin, sys.stdout, sys.stderr = old_in, old_out, old_err
-                if had is None:
-                    os.environ.pop("AIQT_HOOKS_WORKER", None)
-                else:
-                    os.environ["AIQT_HOOKS_WORKER"] = had
-            self.assertEqual((rc, out), (0, ""))
-            self.assertEqual(err.count("\n"), 1)
-            self.assertIn("skipped, worker marker present", err)
+        def test_r24_output_error_fails_open(self):
+            # a failed stdout write (a full device) is swallowed: the hook still exits 0
             if not os.path.exists("/dev/full"):
                 self.skipTest("/dev/full absent")
-            env = {k: v for k, v in os.environ.items() if k not in ("AIQT_HOOKS_WORKER", "ORCH_WORKER",
-                                                                    "ORCH_VERIFY_OWNER", "ORCH_STORE_ROOT")}
+            env = dict(os.environ)
             env["AIQT_STORE_ROOT"] = STORE
             payload = {"tool_name": "Bash", "tool_input": {"command": f"echo 2099-01-01T00:00Z > {PROJ}/private/s.md"}}
             with open("/dev/full", "w") as full:
                 p = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__)], stdout=full,
-                                   stderr=subprocess.PIPE, text=True, env=env, timeout=30, input=json.dumps(payload))
+                                   stderr=subprocess.PIPE, text=True, env=env, timeout=HANG_TIMEOUT, input=json.dumps(payload))
             self.assertEqual(p.returncode, 0, p.stderr)
 
         def test_r24b_keywords_match_whole_words(self):
@@ -5194,7 +5450,7 @@ def _self_test():
             for s in ("compared as local wall time", "TARGETS a store path", "fails OPEN", "through", "valid"):
                 self.assertIn(s, doc)
 
-        # -- round 25 (claude-fable-5 expensive QA of round 24) --
+        # -- round 25 --
         def test_r25_item2_find_exec_false_positive_example_is_accurate(self):
             # finding 2 (LOW): the FALSE POSITIVES text named `find <store dir> ... -exec cp {} /elsewhere` as
             # denied, but it is allowed ({} is cp's source); the example now has {} as the TARGET, and each
@@ -5210,7 +5466,7 @@ def _self_test():
             # a {} target under a find over the store itself is a true store write, denied
             self.assertEqual(self.ev("Bash", command=f"find {S} -type f -exec tee {{}} \\; <<< {F}"), [F])
 
-        # -- round 26 (codex gpt-6-astra high QA of round 25) --
+        # -- round 26 --
         def test_r26_item2_option_arguments_are_not_targets(self):
             # finding 2 (MED): a command-specific option argument was read as a write target, so a read-only
             # store file named by sed -f or truncate -r denied a write elsewhere; fixed at class width for every
@@ -5258,7 +5514,7 @@ def _self_test():
                     f.write(text)
             before = {n: open(os.path.join(self.tmp, n)).read() for n in ("rules.sed", "ref", "prog.pl")}
             subprocess.run(["bash", "-c", "sed -i -f rules.sed -e 's/b/c/' X && truncate -r ref T && "
-                            "perl -pi -I . -e 's/x/y/' P && perl -i prog.pl P"], cwd=self.tmp, timeout=10, check=True)
+                            "perl -pi -I . -e 's/x/y/' P && perl -i prog.pl P"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True)
             self.assertEqual({n: open(os.path.join(self.tmp, n)).read() for n in before}, before)
             self.assertEqual((open(os.path.join(self.tmp, "X")).read(), os.path.getsize(os.path.join(self.tmp, "T")),
                               open(os.path.join(self.tmp, "P")).read()), ("c\n", 3, "y\n"))
@@ -5297,7 +5553,7 @@ def _self_test():
                 for lit in news:
                     self.assertEqual(lit in held, lit in old, (old, lit))
             self.assertEqual(max(len(lit) for lit in news), LITERAL_MAX_LEN)
-            code = TIMED_PRELUDE + (
+            code = FIFO_GUARD + TIMED_PRELUDE + (  # FIFO_GUARD: the Edit target's FIFO is never opened blocking
                 "fifo = %r\n"
                 "os.mkfifo(fifo)\n"
                 "os.environ['AIQT_STORE_ROOT'] = os.path.dirname(fifo)\n"
@@ -5309,18 +5565,36 @@ def _self_test():
                 "    got = m.evaluate({'tool_name': 'Edit', 'tool_input': {'file_path': fifo, 'old_string': old,"
                 " 'new_string': new}}, now)\n"
                 "    assert len(got) == n, len(got)\n"
-                "print(json.dumps(ratio(4000, run)))\n") % os.path.join(self.tmp, "fifo")
+                "res = ratio(4000, run)\n"
+                "assert not _blocking, _blocking\n"
+                "print(json.dumps(res))\n") % os.path.join(self.tmp, "fifo")
             small, large = run_timed(code, HANG_TIMEOUT)
             # N to GROWTH * N (up to the former 32,000): about 1 when linear, about GROWTH when quadratic
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_r26_item6_hang_guard_interrupts(self):
             # finding 6 (LOW): the growth test's ceiling was asserted only after every run returned, so it could
-            # not interrupt a hang; timed runs now go through run_timed, which kills the child at its timeout
-            t0 = time.monotonic()
-            with self.assertRaises(subprocess.TimeoutExpired):
-                run_timed("import time\ntime.sleep(60)\n", 1)
-            self.assertLess(time.monotonic() - t0, 30.0)
+            # not interrupt a hang; timed runs now go through run_timed, which kills the child at its timeout.
+            # The verdict is the TimeoutExpired and the timeout run_timed hands on, never an elapsed time. The child
+            # is held on an explicit signal that never comes (a read of its own pipe, whose write end it keeps
+            # open), so it cannot end of its own accord however late the parent resumes: without the timeout the
+            # run never returns. (QA: a child that slept a finite minute ended on its own when the parent resumed
+            # after it, and the test then failed on its output, not on the timeout.) The child also bounds itself
+            # at 10 * HANG_TIMEOUT (SIGALRM), so a run_timed that lost its timeout fails the test (the child dies,
+            # no TimeoutExpired) instead of hanging the suite (QA round 3, claude MINOR)
+            seen, real_run = [], subprocess.run
+
+            def recording_run(*args, **kwargs):
+                seen.append(kwargs.get("timeout"))
+                return real_run(*args, **kwargs)
+            subprocess.run = recording_run
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    run_timed("import os, signal\nsignal.alarm(%d)\nr, w = os.pipe()\nos.read(r, 1)\n"
+                              % (10 * HANG_TIMEOUT), 1)
+            finally:
+                subprocess.run = real_run
+            self.assertEqual(seen, [1])
             for test in (T.test_r4_scan_is_linear, T.test_r26_item5_unreadable_edit_literal_index_is_linear):
                 src = inspect.getsource(test)
                 self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
@@ -5341,16 +5615,16 @@ def _self_test():
             os.mkdir(os.path.join(self.tmp, "store"))
             with open(os.path.join(self.tmp, "src"), "w") as f:
                 f.write("s\n")
-            subprocess.run(["cp", "src", "store/s.md", "--suf", ".bak"], cwd=self.tmp, timeout=10, check=True)
+            subprocess.run(["cp", "src", "store/s.md", "--suf", ".bak"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True)
             self.assertTrue(os.path.exists(os.path.join(self.tmp, "store", "s.md")))  # the write is real
 
-        # -- round 27 (codex gpt-6-astra high and claude QA of round 26) --
+        # -- round 27 --
         def real_env(self):
             # the real tools run with POSIXLY_CORRECT removed, as the model assumes (test hermeticity)
             return {k: v for k, v in os.environ.items() if k != "POSIXLY_CORRECT"}
 
         def test_r27_perl_stops_parsing_options_at_first_operand(self):
-            # finding (codex MED, a round-26 regression): the option parser consumed `-I S` after perl's first
+            # finding (MED, a round-26 regression): the option parser consumed `-I S` after perl's first
             # operand, but perl parses no option there, so S was a file perl edited in place and the store write
             # was allowed (round 25 denied it)
             S, F, X = f"{PROJ}/private", "2099-01-01T00:00Z", "/dev/shm/X"
@@ -5378,17 +5652,17 @@ def _self_test():
             for name in ("X", "S"):
                 with open(os.path.join(self.tmp, name), "w") as f:
                     f.write("old\n")
-            r = subprocess.run(["perl", "-pi", "-e", f"s/old/{F}/", "X", "-I", "S"], cwd=self.tmp, timeout=10,
+            r = subprocess.run(["perl", "-pi", "-e", f"s/old/{F}/", "X", "-I", "S"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                                capture_output=True, text=True, env=self.real_env())
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("-I", r.stderr)  # perl tried to open a FILE named -I
             self.assertEqual([open(os.path.join(self.tmp, n)).read() for n in ("X", "S")], [F + "\n"] * 2)
-            r = subprocess.run(["sed", "s/old/new/", "S", "-n"], cwd=self.tmp, timeout=10, capture_output=True,
+            r = subprocess.run(["sed", "s/old/new/", "S", "-n"], cwd=self.tmp, timeout=HANG_TIMEOUT, capture_output=True,
                                text=True, env=self.real_env())
             self.assertEqual((r.returncode, r.stdout), (0, ""))  # -n after the operand is still an option
             with open(os.path.join(self.tmp, "T"), "w") as f:
                 f.write("abc")
-            subprocess.run(["truncate", "T", "-s", "0"], cwd=self.tmp, timeout=10, check=True, env=self.real_env())
+            subprocess.run(["truncate", "T", "-s", "0"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True, env=self.real_env())
             self.assertEqual(os.path.getsize(os.path.join(self.tmp, "T")), 0)
 
         def test_r27_script_text_naming_store_is_unknown_target(self):
@@ -5433,24 +5707,24 @@ def _self_test():
             cap = os.path.join(self.tmp, "store", "cap.md")
             with open(os.path.join(self.tmp, "in"), "w") as f:
                 f.write("ts: old\n")
-            subprocess.run(["sed", "-i", f"s/ts: .*/ts: {F}/w {cap}", "in"], cwd=self.tmp, timeout=10, check=True,
+            subprocess.run(["sed", "-i", f"s/ts: .*/ts: {F}/w {cap}", "in"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True,
                            env=self.real_env())
             self.assertEqual(open(cap).read(), f"ts: {F}\n")
             os.unlink(cap)
-            subprocess.run(["sed", "-n", "-e", f"w {cap}", "in"], cwd=self.tmp, timeout=10, check=True,
+            subprocess.run(["sed", "-n", "-e", f"w {cap}", "in"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True,
                            env=self.real_env())
             self.assertEqual(open(cap).read(), f"ts: {F}\n")
             if not shutil.which("ex"):
                 self.skipTest("ex absent")
             exw = os.path.join(self.tmp, "store", "ex.md")
-            subprocess.run(["ex", "-s", "-c", f"w! {exw}", "-c", "q", "in"], cwd=self.tmp, timeout=10,
+            subprocess.run(["ex", "-s", "-c", f"w! {exw}", "-c", "q", "in"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            env=self.real_env())
             self.assertEqual(open(exw).read(), f"ts: {F}\n")
 
-        # -- round 28 (codex gpt-6-astra high QA of round 27) --
+        # -- round 28 --
         def test_r28_read_only_sed_mentioning_store_is_no_write(self):
-            # finding (codex MED, a round-27 regression): `sed -n '\|S F|p' audit.log` only prints matching lines,
+            # finding (MED, a round-27 regression): `sed -n '\|S F|p' audit.log` only prints matching lines,
             # but its program MENTIONS a store path, so round 27 made its target unknown and denied it (round 26
             # allowed it); a sed with no in-place option whose program parses as unable to write is now no write
             S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
@@ -5505,18 +5779,18 @@ def _self_test():
             os.mkdir(store)
             with open(os.path.join(self.tmp, "audit.log"), "w") as f:
                 f.write(f"read {store}/s.md {F}\nother\n")
-            r = subprocess.run(["sed", "-n", f"\\|{store}/s.md {F}|p", "audit.log"], cwd=self.tmp, timeout=10,
+            r = subprocess.run(["sed", "-n", f"\\|{store}/s.md {F}|p", "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                                capture_output=True, text=True, env=self.real_env())
             self.assertEqual((r.returncode, r.stdout, os.listdir(store)), (0, f"read {store}/s.md {F}\n", []))
-            r = subprocess.run(["sed", "-n", f"1{{w {store}/early}}", "audit.log"], cwd=self.tmp, timeout=10,
+            r = subprocess.run(["sed", "-n", f"1{{w {store}/early}}", "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                                capture_output=True, text=True, env=self.real_env())
             self.assertNotEqual(r.returncode, 0)  # the script fails (unmatched `{`) ...
             self.assertEqual(os.listdir(store), ["early}"])  # ... after its `w` file was created
-            subprocess.run(["sed", "-n", f"s/other/{F}/ w {store}/flag", "audit.log"], cwd=self.tmp, timeout=10,
+            subprocess.run(["sed", "-n", f"s/other/{F}/ w {store}/flag", "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                            check=True, env=self.real_env())
             self.assertEqual(open(os.path.join(store, "flag")).read(), f"{F}\n")
 
-        # -- round 29 (claude QA of round 28) --
+        # -- round 29 --
         def test_r29_long_option_abbreviations_resolved(self):
             # finding (claude LOW): GNU long-option ABBREVIATIONS were not modelled, so `sed --expr='s/x/F/w S' log`
             # and `sed --in 's/x/F/' S` were allowed while real GNU sed 4.9 wrote the store; a long option is now
@@ -5576,31 +5850,31 @@ def _self_test():
             os.mkdir(store)
             with open(os.path.join(self.tmp, "audit.log"), "w") as f:
                 f.write("x\n")
-            subprocess.run(["sed", f"--expr=s/x/{F}/w {store}/s.md", "audit.log"], cwd=self.tmp, timeout=10,
+            subprocess.run(["sed", f"--expr=s/x/{F}/w {store}/s.md", "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                            check=True, capture_output=True, env=self.real_env())
             self.assertEqual(open(os.path.join(store, "s.md")).read(), f"{F}\n")
             with open(os.path.join(store, "state.md"), "w") as f:
                 f.write("x\n")
-            subprocess.run(["sed", "--in", f"s/x/{F}/", f"{store}/state.md"], cwd=self.tmp, timeout=10, check=True,
+            subprocess.run(["sed", "--in", f"s/x/{F}/", f"{store}/state.md"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True,
                            env=self.real_env())
             self.assertEqual(open(os.path.join(store, "state.md")).read(), f"{F}\n")
-            r = subprocess.run(["sed", "--f", "-n", "p", "audit.log"], cwd=self.tmp, timeout=10, capture_output=True,
+            r = subprocess.run(["sed", "--f", "-n", "p", "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT, capture_output=True,
                                text=True, env=self.real_env())
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("ambiguous", r.stderr)
             if shutil.which("cp"):
-                subprocess.run(["cp", "--targ", store, "audit.log"], cwd=self.tmp, timeout=10, check=True,
+                subprocess.run(["cp", "--targ", store, "audit.log"], cwd=self.tmp, timeout=HANG_TIMEOUT, check=True,
                                env=self.real_env())
                 self.assertTrue(os.path.exists(os.path.join(store, "audit.log")))
             if shutil.which("perl"):
-                r = subprocess.run(["perl", "--in", "-e", "1"], cwd=self.tmp, timeout=10, capture_output=True,
+                r = subprocess.run(["perl", "--in", "-e", "1"], cwd=self.tmp, timeout=HANG_TIMEOUT, capture_output=True,
                                    text=True, env=self.real_env())
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn("Unrecognized switch", r.stderr)
 
-        # -- round 30 (codex gpt-6-astra high and claude-fable-5 QA of round 29) --
+        # -- round 30 --
         def test_r30_perl_help_and_version_exit_writing_nothing(self):
-            # finding (codex MED, a round-29 regression): perl's option table was empty, so `perl --version` (a
+            # finding (MED, a round-29 regression): perl's option table was empty, so `perl --version` (a
             # read-only diagnostic) made the target UNKNOWN and a later read-only store search in the same command
             # was denied; perl accepts exactly --help and --version and exits at once on either
             S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
@@ -5634,16 +5908,16 @@ def _self_test():
                                  (["-pi", "-e", "s/a/b/", "x", "--version"], True)):
                 with open(x, "w") as f:
                     f.write("a\n")
-                r = subprocess.run(["perl"] + args, cwd=self.tmp, timeout=10, capture_output=True,
+                r = subprocess.run(["perl"] + args, cwd=self.tmp, timeout=HANG_TIMEOUT, capture_output=True,
                                    stdin=subprocess.DEVNULL, env=self.real_env())
                 self.assertEqual((r.returncode, open(x).read()), (0, "b\n" if edited else "a\n"), args)
             for bad in ("--vers", "--version=1"):
-                r = subprocess.run(["perl", bad], cwd=self.tmp, timeout=10, capture_output=True, text=True,
+                r = subprocess.run(["perl", bad], cwd=self.tmp, timeout=HANG_TIMEOUT, capture_output=True, text=True,
                                    stdin=subprocess.DEVNULL, env=self.real_env())
                 self.assertIn("Unrecognized switch", r.stderr, bad)
 
         def test_r30_every_operand_written_under_exchange_or_directory(self):
-            # finding (codex MED, pre-existing): `mv -T --exchange S T` swaps S and T, so it WRITES S (the first
+            # finding (MED, pre-existing): `mv -T --exchange S T` swaps S and T, so it WRITES S (the first
             # operand), but only the destination was a target; under mv's --exchange, and install's -d or
             # --directory, every operand (and every -t directory) is now a target
             S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
@@ -5675,12 +5949,12 @@ def _self_test():
             with open(os.path.join(self.tmp, "t"), "w") as f:
                 f.write(f"heartbeat: {F}\n")
             r = subprocess.run(["mv", "-T", "--exchange", os.path.join(store, "s.md"), "t"], cwd=self.tmp,
-                               timeout=10, capture_output=True, text=True, env=self.real_env())
+                               timeout=HANG_TIMEOUT, capture_output=True, text=True, env=self.real_env())
             if r.returncode != 0 and "exchange" in r.stderr:
                 self.skipTest("this mv has no --exchange")
             self.assertEqual((r.returncode, open(os.path.join(store, "s.md")).read()), (0, f"heartbeat: {F}\n"))
             if shutil.which("install"):
-                subprocess.run(["install", "-d", os.path.join(store, "d1"), "d2"], cwd=self.tmp, timeout=10,
+                subprocess.run(["install", "-d", os.path.join(store, "d1"), "d2"], cwd=self.tmp, timeout=HANG_TIMEOUT,
                                check=True, env=self.real_env())
                 self.assertTrue(os.path.isdir(os.path.join(store, "d1")))
 
@@ -5716,7 +5990,7 @@ def _self_test():
             # the real tool, observed: uutils install consumes the separate word (GNU install would not)
             if not shutil.which("install"):
                 self.skipTest("install absent")
-            v = subprocess.run(["install", "--version"], capture_output=True, text=True, timeout=10,
+            v = subprocess.run(["install", "--version"], capture_output=True, text=True, timeout=HANG_TIMEOUT,
                                env=self.real_env())
             if "uutils" not in v.stdout:
                 self.skipTest("install is not uutils")
@@ -5725,10 +5999,10 @@ def _self_test():
             with open(os.path.join(self.tmp, "src"), "w") as f:
                 f.write(f"heartbeat: {F}\n")
             subprocess.run(["install", "src", os.path.join(store, "s.md"), "--context", "foo"], cwd=self.tmp,
-                           timeout=10, check=True, capture_output=True, env=self.real_env())
+                           timeout=HANG_TIMEOUT, check=True, capture_output=True, env=self.real_env())
             self.assertEqual(open(os.path.join(store, "s.md")).read(), f"heartbeat: {F}\n")
             r = subprocess.run(["install", "src", "--context", os.path.join(store, "t.md")], cwd=self.tmp,
-                               timeout=10, capture_output=True, text=True, env=self.real_env())
+                               timeout=HANG_TIMEOUT, capture_output=True, text=True, env=self.real_env())
             self.assertNotEqual(r.returncode, 0)  # the store path was consumed as the context: no destination
             self.assertIn("missing destination", r.stderr)
 
@@ -5756,7 +6030,7 @@ def _self_test():
                         f.write("A\n")
                     os.mkdir(os.path.join(d, "D"))
                     word = values.get(opt, "Wn")
-                    r = subprocess.run([tool, "a", "D", opt, word], cwd=d, timeout=10, capture_output=True,
+                    r = subprocess.run([tool, "a", "D", opt, word], cwd=d, timeout=HANG_TIMEOUT, capture_output=True,
                                        text=True, stdin=subprocess.DEVNULL, env=self.real_env())
                     consumed = r.returncode == 0 and os.path.lexists(os.path.join(d, "D", "a"))
                     if not consumed:
@@ -5772,10 +6046,10 @@ def _self_test():
                 self.skipTest("cp, mv, and install absent")
             self.assertGreater(checked, 40)
 
-        # -- round 31 (codex gpt-6-astra high and claude-fable-5 QA of round 30) --
+        # -- round 31 --
         def bash_run(self, cmd, cwd):
             """Run `cmd` in real bash in `cwd` (inside self.tmp), with no inherited environment beyond PATH."""
-            return subprocess.run(["bash", "-c", cmd], cwd=cwd, capture_output=True, text=True, timeout=10,
+            return subprocess.run(["bash", "-c", cmd], cwd=cwd, capture_output=True, text=True, timeout=HANG_TIMEOUT,
                                   stdin=subprocess.DEVNULL, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                                                                  "HOME": self.tmp, "LC_ALL": "C"})
 
@@ -5788,7 +6062,7 @@ def _self_test():
             return store
 
         def test_r31_work_budget_bounds_the_bash_analysis(self):
-            # finding (codex HIGH): a 65,536-byte command of `: > x;` repeats before a future store write took about
+            # finding (HIGH): a 65,536-byte command of `: > x;` repeats before a future store write took about
             # 75 ms of analysis; the analysis now runs under a work budget and fails OPEN when it is spent, with the
             # per-token work cut (store roots read once, regex fast path, lazy per-literal decisions)
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
@@ -5824,7 +6098,7 @@ def _self_test():
                 self.assertIn(s, doc)
 
         def test_r31_relative_targets_resolve_against_cwd_and_cd(self):
-            # finding (codex MED): a relative Bash destination bypassed store detection: `printf ... > store/state.md`
+            # finding (MED): a relative Bash destination bypassed store detection: `printf ... > store/state.md`
             # with the cwd holding store/, and `cd <store> && printf ... > state.md`, wrote the future heartbeat
             store = self.r31_store()
             F = "2099-01-01T00:00Z"
@@ -5868,7 +6142,7 @@ def _self_test():
                     self.assertIn(F, f.read(), cmd)
 
         def test_r31_literal_shell_c_strings_are_inspected(self):
-            # finding (codex MED): `bash -c "printf ... > <store file>"` was allowed although real bash wrote the
+            # finding (MED): `bash -c "printf ... > <store file>"` was allowed although real bash wrote the
             # future heartbeat; a statically known -c string is now analysed recursively with the same cwd
             store = self.r31_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
@@ -5903,7 +6177,7 @@ def _self_test():
                     self.assertIn(F, f.read(), cmd)
 
         def test_r31_literal_counts_only_for_the_write_it_feeds(self):
-            # finding (codex MED): an unrelated literal tainted every store write in the command: a search for the
+            # finding (MED): an unrelated literal tainted every store write in the command: a search for the
             # literal, then an audit append, and a literal only in a comment, were denied although bash appended
             # only `checked`; a literal now counts only as DATA of a store write
             store = self.r31_store()
@@ -5945,7 +6219,7 @@ def _self_test():
                     self.assertEqual(F in f.read(), want, cmd)
 
         def test_r31_unexecuted_conditional_write_is_judged_as_written(self):
-            # by design (maintainer ruling on codex's MED): a write in a branch that never runs is judged as
+            # by design: a write in a branch that never runs is judged as
             # written, and the docstring says so
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
             for cmd in (f"if false; then printf '%s\\n' 'heartbeat: {F}' > {S}; fi",
@@ -6027,7 +6301,7 @@ def _self_test():
                       "AND the command holds a future-dated literal"):
                 self.assertNotIn(s, doc)
 
-        # -- round 32 (codex gpt-6-astra high and claude QA of round 31; the bounded final round) --
+        # -- round 32 (the bounded final round) --
         def r32_check_bash(self, cases, store, cwd=None):
             """Real bash agrees with each (command, wants-denied) case: it writes F into the store exactly when the
             hook denies."""
@@ -6045,7 +6319,7 @@ def _self_test():
                     self.assertEqual("2099-01-01T00:00Z" in f.read(), want, cmd)
 
         def test_r32_item2_directory_work_is_budgeted(self):
-            # finding (codex HIGH): directory-set expansion, path resolution, and set union were not charged to the
+            # finding (HIGH): directory-set expansion, path resolution, and set union were not charged to the
             # work budget, so 64 KiB of `(cd <dir>);` over 400 directories took about 200 ms in-process. They are
             # now charged BEFORE they are done, and a set above MAX_CWDS spends the budget (fail open)
             store = self.r31_store()
@@ -6069,7 +6343,7 @@ def _self_test():
             self.assertTrue(_analyze(few, frozenset((self.tmp,)), _StoreCtx(), b).store)
             self.assertGreater(BASH_WORK_BUDGET - b.left, 50 * cost * cap)
             self.assertEqual(self.ev("Bash", cwd=self.tmp, command=few), [F])  # still judged
-            # the codex construct: 400 directories, 800 `(cd .);`, a future store write, padded to 65,536 bytes:
+            # the construct: 400 directories, 800 `(cd .);`, a future store write, padded to 65,536 bytes:
             # analysed in-process well under the latency bound, or the budget is spent (best of 5 in a child). The
             # bound is a PEER check: at most PEER_LIMIT times an ordinary 64 KiB command judged in full on the same
             # host (round 31's uncharged directory work took about 200 ms), not a wall-clock ceiling
@@ -6093,7 +6367,7 @@ def _self_test():
             self.assertEqual((globals().get("CWD_COST"), globals().get("MAX_CWDS")), (6, 32))
 
         def test_r32_item3_subshell_scopes_directory_state(self):
-            # finding (codex MED, a round-31 regression): a subshell's cd leaked into the parent, so
+            # finding (MED, a round-31 regression): a subshell's cd leaked into the parent, so
             # `(cd <store> && ls >/dev/null); printf ... > state.md` was denied although bash wrote only the cwd's
             # state.md; `( ... )` now scopes the directory set, and `{ ... }` does not, as in bash
             store = self.r31_store()
@@ -6110,7 +6384,7 @@ def _self_test():
             self.r32_check_bash([(c, False) for c in allowed] + [(c, True) for c in denied], store)
 
         def test_r32_item4_shell_c_output_reaching_the_store_counts(self):
-            # finding (codex MED MISS): a literal shell -c string whose OUTPUT is redirected or piped into a store
+            # finding (MED MISS): a literal shell -c string whose OUTPUT is redirected or piped into a store
             # target was allowed; a literal in the string is now also data of the wrapper, as for echo
             store = self.r31_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
@@ -6128,7 +6402,7 @@ def _self_test():
             self.r32_check_bash([(c, True) for c in denied] + [(c, False) for c in allowed], store)
 
         def test_r32_item5_staging_through_shell_c(self):
-            # finding (codex MED): a file staged by the outer command and copied by a literal shell -c string
+            # finding (MED): a file staged by the outer command and copied by a literal shell -c string
             # (`printf ... > stage; bash -c 'cp stage <store file>'`) was allowed; the string's store write now
             # exposes the words it names, and its own writes, to the enclosing staging walk
             store = self.r31_store()
@@ -6191,7 +6465,7 @@ def _self_test():
                                  (T.test_r5_many_distinct_literals_linear_and_bounded, "ratio(5000, run, 3)"),
                                  (T.test_r6_table_scan_is_linear, "ratio(6250, run, 3)"),
                                  (T.test_r32_item2_directory_work_is_budgeted, "versus(run, ordinary("),
-                                 (T.test_r33_wrapper_check_is_constant_per_wrapper, "versus(run_codex, ordinary(")):
+                                 (T.test_r33_wrapper_check_is_constant_per_wrapper, "versus(run_adv, ordinary(")):
                 src = inspect.getsource(test)
                 self.assertIn(needle, src)
                 self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
@@ -6199,7 +6473,7 @@ def _self_test():
             # a wall-clock bound in any test is rejected by test_no_wall_clock_verdict (an AST scan)
 
         def test_interleaved_refuses_sub_floor_samples(self):
-            # QA round 2 (codex 3): at the multiplier cap interleaved() returned sub-floor samples, voiding
+            # QA round 2 (3): at the multiplier cap interleaved() returned sub-floor samples, voiding
             # the every-sample floor; it now fails closed. The child's CPU clock is replaced by a counter
             # that barely advances, so the cap is reached the same way on any host
             code = TIMED_PRELUDE + (
@@ -6216,7 +6490,7 @@ def _self_test():
             self.assertIn("cannot measure above the floor", str(ctx.exception))
 
         def test_timed_child_ignores_ambient_allocator_policy(self):
-            # QA round 4 (codex MAJOR, in the sibling stamp-truth-stop.py): a timed child inherited the
+            # QA round 4 (MAJOR, in the sibling stamp-truth-stop.py): a timed child inherited the
             # parent's environment, so an ambient MALLOC_* variable or GLIBC_TUNABLES entry pinned glibc's
             # thresholds and false-REDed healthy code under load (2.0 to 3.1x); every timed child now
             # launches with child_env(). Deterministic: the probe reports the child's environment, no
@@ -6259,7 +6533,7 @@ def _self_test():
                 self.assertIn(s, doc)
 
         def test_r33_wrapper_check_is_constant_per_wrapper(self):
-            # finding (codex HIGH, a round-32 regression): each shell -c wrapper rescanned its whole pipeline and
+            # finding (HIGH, a round-32 regression): each shell -c wrapper rescanned its whole pipeline and
             # rebuilt its separator text, work of wrappers x pipeline length the budget never saw: 64 KiB of 450
             # piped `sh -c` wrappers and 1,050 `:` took about 107 ms in-process (round 31: 14.5 ms) with 1,794
             # budget steps left. Each pipeline's aggregates are now computed once, charged before the pass
@@ -6278,18 +6552,18 @@ def _self_test():
                     if c.startswith(F, i):
                         an.counts(i)
                 return left - b.left
-            codex = build(450, 1050).ljust(65536)
-            self.assertEqual(len(codex), 65536)
+            adv = build(450, 1050).ljust(65536)
+            self.assertEqual(len(adv), 65536)
             with self.assertRaises(_Exhausted):  # deterministic: the budget, not the host's speed, bounds it
-                spend(codex)
-            self.assertEqual(self.ev("Bash", cwd=self.tmp, command=codex), [])  # fail open
+                spend(adv)
+            self.assertEqual(self.ev("Bash", cwd=self.tmp, command=adv), [])  # fail open
             # inside the budget it is still judged (the conservative direction: each wrapper's output is piped into
             # a command outside READ_COMMANDS), and the per-literal phase pays for the pipeline walk up front
             for w in (120, 300):
                 c = build(w, 3 * w)
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=c), [F])
                 self.assertGreaterEqual(spend(c), 4 * 4 * w)
-            # in a child under the hang ceiling: the codex construction in-process against an ordinary 64 KiB
+            # in a child under the hang ceiling: the construction in-process against an ordinary 64 KiB
             # command judged in full (a PEER check, about 1.2 on the development host; round 32 took about 107 ms),
             # and the growth from 37 to GROWTH * 37 wrappers (interleaved, best of 5; round 32's per-wrapper
             # rescan grew it by about 3.2 times per doubling)
@@ -6299,21 +6573,107 @@ def _self_test():
                 "tail = '; echo checked > ' + D + '/store/state.md'\n"
                 "def build(w, n):\n"
                 "    return ' |\\n'.join([\"sh -c 'echo 2099-01-01T00:00Z'\"] * w + [':'] * n) + tail\n"
-                "codex = build(450, 1050).ljust(65536)\n"
+                "adv = build(450, 1050).ljust(65536)\n"
                 "def run(w):\n"
                 "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': build(w, 3 * w)}, 'cwd': D}, now)\n"
-                "def run_codex():\n"
-                "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': codex}, 'cwd': D}, now)\n"
-                "print(json.dumps(versus(run_codex, ordinary(D, os.path.join(D, 'store'))) + ratio(37, run)))\n"
+                "def run_adv():\n"
+                "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': adv}, 'cwd': D}, now)\n"
+                "print(json.dumps(versus(run_adv, ordinary(D, os.path.join(D, 'store'))) + ratio(37, run)))\n"
                 ) % self.tmp
-            t_codex, ref_t, small, large = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(t_codex / max(ref_t, 1e-3), PEER_LIMIT, (t_codex, ref_t))
+            t_adv, ref_t, small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(t_adv / max(ref_t, 1e-3), PEER_LIMIT, (t_adv, ref_t))
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
             doc = " ".join(__doc__.split())
             self.assertIn("Round 33: the shell -c WRAPPER check is charged too", doc)
 
+        def test_no_short_timeout_or_clock_in_parent(self):
+            # the leftover-timing probe, wider than the assertion scan below: in the parent's own code (a child's
+            # source is a string literal, not scanned) every timeout keyword is HANG_TIMEOUT (run_timed
+            # passes its own argument on), so no verdict rests on a few seconds of host time, and the parent
+            # neither sleeps nor reads an elapsed-time clock (time.sleep, monotonic, perf_counter, process_time,
+            # thread_time, clock_gettime, each _ns variant too), under the time module or an alias of it, nor
+            # imports from time (an unaliased name would escape); a wall-clock timestamp (time.time, time_ns)
+            # that only dates a fixture stays allowed
+            import ast
+
+            def leftover(source):
+                tree = ast.parse(source)
+                mods = {"time"} | {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
+                                   for a in n.names if a.name == "time"}
+                found = [("timeout", k.value.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                         for k in n.keywords if k.arg == "timeout" and not (
+                             isinstance(k.value, ast.Name) and k.value.id in ("HANG_TIMEOUT", "timeout"))]
+                found += [("time." + n.func.attr, n.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                          and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                          and n.func.value.id in mods and n.func.attr.replace("_ns", "") in (
+                              "sleep", "monotonic", "perf_counter", "process_time", "thread_time",
+                              "clock_gettime")]
+                found += [("from time import", n.lineno) for n in ast.walk(tree)
+                          if isinstance(n, ast.ImportFrom) and n.module == "time"]
+                names = numbers(tree)
+                found += [(what, n.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                          for what in [positional_deadline(n, names)] if what]
+                return sorted(found, key=lambda item: item[1])
+
+            def numeric(v, names):  # a number literal, a name bound to one, or arithmetic over them
+                if isinstance(v, ast.UnaryOp):
+                    return numeric(v.operand, names)
+                if isinstance(v, ast.BinOp):
+                    return numeric(v.left, names) and numeric(v.right, names)
+                return (isinstance(v, ast.Constant) and type(v.value) in (int, float)) or (
+                    isinstance(v, ast.Name) and v.id in names)
+
+            def numbers(tree):
+                return {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign) and numeric(n.value, ())
+                        for t in n.targets if isinstance(t, ast.Name)}
+
+            def positional_deadline(call, names):
+                # a deadline passed by position, which the keyword scan above cannot see (QA: `paused.wait(10)`,
+                # `a.join(10)`, `holder.wait(10)` decided verdicts in the sibling stamp-truth-stop.py): the
+                # timeout slot of a wait, wait_for, result, exception or communicate (Event, Condition, Popen,
+                # Future) holding anything but HANG_TIMEOUT; a join given a number (a str or path join is never
+                # given one); a Lock acquire or Queue get whose first argument is a bool (their (block, timeout)
+                # form; a dict get takes a key); the timeout of select.select; and a timer (threading.Timer,
+                # signal.alarm, signal.setitimer)
+                f = call.func
+                name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+                if name in ("Timer", "alarm", "setitimer"):
+                    return name
+                slot = {"wait": 0, "wait_for": 1, "result": 0, "exception": 0, "communicate": 1, "join": 0,
+                        "acquire": 1, "get": 1, "select": 3}.get(name)
+                if slot is None or len(call.args) <= slot or not isinstance(f, ast.Attribute):
+                    return None
+                arg = call.args[slot]
+                if isinstance(arg, ast.Name) and arg.id in ("HANG_TIMEOUT", "timeout"):
+                    return None
+                if name == "join" and (not numeric(arg, names) or isinstance(f.value, ast.Constant)):
+                    return None
+                if name in ("acquire", "get") and not (isinstance(call.args[0], ast.Constant)
+                                                       and type(call.args[0].value) is bool):
+                    return None
+                return "positional " + name
+
+            self.assertEqual(leftover(inspect.getsource(_self_test)), [])
+            bad = ("def f():\n    subprocess.run(c, timeout=5)\n    p.wait(timeout=2.5)\n    t = time.monotonic()\n"
+                   "    time.sleep(1)\n    import time as tm\n    tm.perf_counter_ns()\n"
+                   "    from time import process_time\n    time.tzset()\n    run(c, timeout=HANG_TIMEOUT)\n"
+                   "    t = time.time_ns()\n    time.clock_gettime(1)\n"
+                   "    s = 'time.sleep(60)'\n"
+                   "    paused.wait(10)\n    a.join(10)\n    holder.wait(2.5)\n    cv.wait_for(ok, 5)\n"
+                   "    q.get(True, 5)\n    lk.acquire(True, 1)\n    p.communicate(b'', 3)\n    n = 7\n"
+                   "    t.join(n)\n    ', '.join(parts)\n    os.path.join(a, b)\n    d.get('k', 0)\n    '-'.join(n * 2)\n"
+                   "    s.join([x] * n)\n"
+                   "    ev.wait()\n    ev.wait(HANG_TIMEOUT)\n    p.wait(timeout=HANG_TIMEOUT)\n"
+                   "    threading.Timer(1, f)\n    signal.alarm(3)\n    select.select(r, [], [], 0.5)\n")
+            self.assertEqual([what for what, _line in leftover(bad)],
+                             ["timeout", "timeout", "time.monotonic", "time.sleep", "time.perf_counter_ns",
+                              "from time import", "time.clock_gettime", "positional wait", "positional join",
+                              "positional wait", "positional wait_for", "positional get", "positional acquire",
+                              "positional communicate", "positional join", "Timer", "alarm",
+                              "positional select"])
+
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
-        HANG_GUARD_TESTS = ("test_r26_item6_hang_guard_interrupts",)
+        HANG_GUARD_TESTS = ()
 
         def test_no_wall_clock_verdict(self):
             """Residual (disclosed): the scan covers direct calls, imported aliases, and assigned aliases within a
@@ -6357,72 +6717,9 @@ def _self_test():
             self.assertEqual([name for name, _line in _wall_clock_asserts(bad)], want)
             self.assertEqual(_wall_clock_asserts(good), [])
 
-        # -- sibling parity on a single-hook install --
-        PARITY_TESTS = ("test_shared_grammar_identical_to_sibling",
-                        "test_r13_code_quote_helpers_identical_to_sibling")
-        PARITY_SIBLINGS = ("stamp-truth-stop.py",)
 
-        def _parity_in_copy(self, siblings, value, dangling=False):
-            """Copy this file (and `siblings`, found beside it) into a fresh directory, run ONLY the copy's
-            sibling-parity tests in a child interpreter with AIQT_HOOKS_REQUIRE_SIBLINGS set to `value` (None:
-            unset, whatever the caller has), and return ([rc, run, skipped, failures, errors], child stderr).
-            With `dangling`, each sibling is a symlink to a missing target: it EXISTS but cannot be read."""
-            base = "/dev/shm" if os.path.isdir("/dev/shm") else None
-            d = tempfile.mkdtemp(prefix="sib.", dir=base)
-            try:
-                me = os.path.join(d, os.path.basename(os.path.abspath(__file__)))
-                shutil.copyfile(os.path.abspath(__file__), me)
-                for sib in siblings:
-                    shutil.copyfile(_sibling_or_skip(sib), os.path.join(d, sib))
-                if dangling:
-                    for sib in self.PARITY_SIBLINGS:
-                        os.symlink(os.path.join(d, "no-such-target"), os.path.join(d, sib))
-                env = {k: v for k, v in os.environ.items() if k != "AIQT_HOOKS_REQUIRE_SIBLINGS"}
-                if value is not None:
-                    env["AIQT_HOOKS_REQUIRE_SIBLINGS"] = value
-                code = ("import importlib.util as u, json, unittest\n"
-                        "s = u.spec_from_file_location('m', %r)\n"
-                        "m = u.module_from_spec(s)\n"
-                        "s.loader.exec_module(m)\n"
-                        "names = %r\n"
-                        "unittest.TestLoader.loadTestsFromTestCase = lambda self, tc: unittest.TestSuite("
-                        "tc(n) for n in names)\n"
-                        "box, run = [], unittest.TextTestRunner.run\n"
-                        "unittest.TextTestRunner.run = lambda self, t: box.append(run(self, t)) or box[-1]\n"
-                        "rc = m._self_test()\n"
-                        "r = box[0]\n"
-                        "print(json.dumps([rc, r.testsRun, len(r.skipped), len(r.failures), len(r.errors)]))\n"
-                        ) % (me, self.PARITY_TESTS)
-                p = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code], env=env, capture_output=True,
-                                   text=True, timeout=120)
-                self.assertTrue(p.stdout.strip(), p.stderr)
-                return json.loads(p.stdout.strip().splitlines()[-1]), p.stderr
-            finally:
-                shutil.rmtree(d, ignore_errors=True)
 
-        def test_sibling_parity_skips_alone_and_fails_when_required(self):
-            # a single-hook install: each sibling-parity test is SKIPPED (not passed) with a message naming the
-            # absent sibling, unless AIQT_HOOKS_REQUIRE_SIBLINGS=1, when the same absence FAILS it
-            n = len(self.PARITY_TESTS)
-            for value in (None, "0", ""):
-                got, err = self._parity_in_copy((), value)
-                self.assertEqual(got, [0, n, n, 0, 0], (value, err))
-                for sib in self.PARITY_SIBLINGS:
-                    self.assertIn(f"sibling hook {sib} is absent (a standalone install)", err)
-            got, err = self._parity_in_copy((), "1")
-            self.assertEqual(got, [1, n, 0, n, 0], err)
-            self.assertIn("AIQT_HOOKS_REQUIRE_SIBLINGS=1 requires it", err)
-            # a sibling that EXISTS but cannot be read fails (never skips), with or without the variable
-            for value in (None, "1"):
-                got, err = self._parity_in_copy((), value, dangling=True)
-                self.assertEqual((got[0], got[1], got[2], got[3] + got[4]), (1, n, 0, n), (value, err))
 
-        def test_sibling_parity_runs_and_passes_with_siblings_present(self):
-            # with every sibling beside the copy the parity tests RUN and pass, whatever the variable says
-            n = len(self.PARITY_TESTS)
-            for value in (None, "1"):
-                got, err = self._parity_in_copy(self.PARITY_SIBLINGS, value)
-                self.assertEqual(got, [0, n, 0, 0, 0], (value, err))
 
     try:
         result = unittest.TextTestRunner(verbosity=2).run(unittest.TestLoader().loadTestsFromTestCase(T))

@@ -19,7 +19,8 @@ Z, UTC, and GMT are UTC; an offset is applied as written; a letter abbreviation 
 process local zone's abbreviation at that wall time (both DST readings are tried; if both match, the earlier
 instant is taken). A time with no zone, or with an abbreviation that is not the local zone, is not a claim
 in prose (it is ignored). The zone grammar and the scheduling keyword list are duplicated verbatim in
-future-stamp-write.py (python3 -I forbids a sibling import); a self-test asserts they are identical.
+future-stamp-write.py (python3 -I forbids a sibling import); the repository gate tools/check_hook_scripts.py
+asserts they are identical.
 
 EXEMPT TEXT. Lines inside a matched fenced code block (``` or ~~~, closed by a fence of the same character
 at least as long; an UNCLOSED fence is not code, so its lines are checked), blockquote lines (starting `>`
@@ -193,8 +194,8 @@ on exit 0 reaches only the host's debug log, so stderr is diagnostic logging, no
 Elapsed resolution (same as clock-inject.py). Lease file = env AIQT_LEASE_FILE when set to a non-empty value
 (a legacy spelling is accepted as a fallback, see _cfg); otherwise there is NO lease, elapsed is unknown, and
 the footer is not checked. No lease is derived from the project directory or the cwd. Start (the lease code
-is shared verbatim with clock-inject.py; a self-test
-in each asserts the copies are identical): a lease FIELD line is `Name: value`, `**Name:** value`, or either
+is shared verbatim with clock-inject.py; the repository gate
+tools/check_hook_scripts.py asserts the copies are identical): a lease FIELD line is `Name: value`, `**Name:** value`, or either
 after a `-` or `*` list bullet, with optional surrounding whitespace. ONLY the FIRST Active-session field is
 read. (a) A value <label>-YYYYMMDDTHHMMSSZ, where <label> is 1 to 32 characters of [A-Za-z0-9] (for example
 `sess-` or `S88-`), gives that time (an impossible time is unknown, no fallback). (b) `none` (any case) or an
@@ -348,10 +349,8 @@ the user only through systemMessage, so its visibility depends on the host honou
 diagnostic line is logging only (on exit 0 the host sends stderr to its debug log, not to the user).
 
 Self-test: python3 -I -S -B stamp-truth-stop.py --self-test
-Run beside its sibling hooks, the self-test also checks that the code shared verbatim with them is identical.
-Run alone (a single-hook install), those sibling-parity checks are SKIPPED, not passed, each naming the absent
-sibling; with env AIQT_HOOKS_REQUIRE_SIBLINGS=1 an absent sibling FAILS them instead (for a repository gate). A
-sibling that is present but unreadable fails them either way.
+It needs no sibling file: the code shared verbatim with the pack's clock-inject.py and future-stamp-write.py is
+compared by the repository gate tools/check_hook_scripts.py, not by this self-test.
 """
 
 import bisect
@@ -401,7 +400,8 @@ _EPOCH = datetime.datetime(1970, 1, 1)
 _EPOCH_UTC = _EPOCH.replace(tzinfo=UTC)
 _ONE_US = datetime.timedelta(microseconds=1)
 
-# Duplicated verbatim in future-stamp-write.py; the self-test asserts the two copies are identical.
+# Duplicated verbatim in future-stamp-write.py; the repository gate tools/check_hook_scripts.py asserts the two
+# copies are identical.
 SCHED_KEYWORDS = ("due", "deadline", "expir", "until", "next", "scheduled", "not before", "not-before", "eta",
                   "planned", "target date", "target:", "by ", "through", "valid")
 SCHED_GAP_TOKENS = 3
@@ -438,32 +438,13 @@ def _cfg(name, env=None):
 
 
 def _is_worker(env=None):
-    """True in a subordinate worker process: AIQT_HOOKS_WORKER=1. Kept identical across the three hooks
-    (python3 -I forbids a sibling import)."""
+    """True in a subordinate worker process: AIQT_HOOKS_WORKER=1. Only this preview hook keeps it; the pack's
+    clock-inject.py and future-stamp-write.py have no worker bypass."""
     env = os.environ if env is None else env
     if env.get("AIQT_HOOKS_WORKER") == "1":
         return True
     return env.get("ORCH_WORKER") == "1" or "ORCH_VERIFY_OWNER" in env  # legacy spellings
 
-def _sibling_or_skip(name, env=None):
-    """Self-test helper, kept identical across the three hooks: the path of sibling hook `name` beside this file.
-    A genuinely absent sibling (os.lstat raises FileNotFoundError, nothing broader) SKIPS the calling test with a
-    message naming it, so a single-hook install self-tests clean; with env AIQT_HOOKS_REQUIRE_SIBLINGS=1 the
-    absence FAILS the test instead, so a repository gate never skips parity silently. Any other error (an
-    unreadable directory, say) propagates, and a sibling that exists but cannot be loaded fails when it is read,
-    so only a genuine absence ever skips."""
-    import unittest
-    env = os.environ if env is None else env
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
-    try:
-        os.lstat(path)
-    except FileNotFoundError:
-        if env.get("AIQT_HOOKS_REQUIRE_SIBLINGS") == "1":
-            raise AssertionError(f"sibling hook {name} is absent ({path}) and AIQT_HOOKS_REQUIRE_SIBLINGS=1 "
-                                 "requires it") from None
-        raise unittest.SkipTest(f"sibling hook {name} is absent (a standalone install); set "
-                                "AIQT_HOOKS_REQUIRE_SIBLINGS=1 to require it") from None
-    return path
 
 
 def _wall_clock_asserts(source, exempt=()):
@@ -927,7 +908,7 @@ def sched_exempter(line):
     """A predicate pos -> True when a scheduling keyword ends at most SCHED_GAP_TOKENS word tokens before
     position `pos` of `line` (a word token holds a letter or digit; punctuation-only tokens such as `:` or `[`,
     and the token containing `pos`, are not counted). Linear: keyword ends and tokens are found once per line.
-    Duplicated verbatim in the sibling hook; the self-test asserts the two copies are identical."""
+    Duplicated verbatim in a companion hook; a repository gate asserts the two copies are identical."""
     ends = [k.end() for k in _SCHED_RE.finditer(line)]
     if not ends:
         return lambda pos: False
@@ -2067,6 +2048,7 @@ def _self_test():
     import shutil
     import subprocess
     import tempfile
+    import types
     import threading
     import unittest
 
@@ -2101,11 +2083,139 @@ def _self_test():
     CHILD_HEAD = ("import importlib.util as u,datetime,os,time;os.environ['TZ']='EST5EDT,M3.2.0,M11.1.0';time.tzset();"
                   "s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);s.loader.exec_module(m);"
                   "UTC=datetime.timezone.utc\n" % os.path.abspath(__file__))
+    # A child that evaluates a Stop freezes the loaded module's time.time and time_ns at one reading (as
+    # freeze_clocks does in this process), so a prune it runs reads one instant; its fixtures pass a fixed now.
+    CHILD_FREEZE = ("_ns = time.time_ns()\nm.time = type(time)('time')\nm.time.__dict__.update(vars(time))\n"
+                    "m.time.time_ns, m.time.time = (lambda: _ns), (lambda: _ns / 10 ** 9)\n")
 
-    def in_subprocess(expr, timeout):
-        """Run `expr` (with module m loaded) in a fresh interpreter; return stdout, raising on timeout."""
-        return subprocess.run([sys.executable, "-I", "-B", "-c", CHILD_HEAD + "print(%s)" % expr],
+    # The FIFO guard for a child: an audit hook (the `open` event fires for os.open, the builtin open, io.open
+    # and io.FileIO alike) refuses every open without O_NONBLOCK of a path that names a FIFO, and records it in
+    # _blocking, so a blocking open fails the test at once, even where a fail-open handler swallows the refusal;
+    # the child's timeout stays a hang guard only. A path is resolved by os.stat, which follows symlinks, so an
+    # alias (a symlink, a hard link, a `//` or `..` spelling, a PathLike) names the same FIFO. The event does not
+    # carry os.open's dir_fd (the openat form), so a relative path is resolved from the working directory AND
+    # from every open directory descriptor: a descriptor-relative open of a FIFO is refused too (conservatively,
+    # a relative name that some other open directory resolves to a FIFO is refused as well: a false failure,
+    # never a false pass). The open descriptors are enumerated through /dev/fd; where that fails, a relative
+    # open cannot be evaluated, so it is refused and recorded (a cannot-evaluate fails the test; a guessed
+    # descriptor range missed a directory descriptor above it and let a blocking open through). Every FIFO is
+    # guarded, one the child creates after the guard is installed included. A metadata read that fails with
+    # anything but a missing name (ENOENT, or ENOTDIR for a path through a non-directory) or an unusable
+    # base descriptor (EBADF, or ENOTDIR for a descriptor that is not a directory) cannot be evaluated either:
+    # it is refused and recorded too (QA round 3: an injected EIO from os.stat read as "not a FIFO" and let
+    # a blocking open through); an embedded NUL (ValueError) is no FIFO, as the open itself refuses it.
+    # Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes). Not
+    # covered either, the stat-then-open race: the guard reads a path's metadata and the open resolves the
+    # path again afterwards, so a path retargeted between the two (a symlink switched from a regular file to
+    # a FIFO by another thread, or by an audit hook installed after this one) is opened unchecked. Nor a
+    # blocking wait on a descriptor opened with O_NONBLOCK (a select or read on a FIFO no writer opens):
+    # only the child's hang guard bounds that.
+    FIFO_GUARD = (
+        "import errno, os, stat, sys\n"
+        "_blocking = []\n"
+        "def _names_fifo(path):\n"
+        "    bases = [None]\n"
+        "    if not os.path.isabs(path):\n"
+        "        try:\n"
+        "            bases += [int(fd) for fd in os.listdir('/dev/fd')]\n"
+        "        except (OSError, ValueError) as e:\n"
+        "            _blocking.append(('cannot evaluate', path))\n"
+        "            raise AssertionError('the FIFO guard cannot evaluate %r: the open descriptors are not '\n"
+        "                                 'enumerable (%r)' % (path, e))\n"
+        "    for fd in bases:\n"
+        "        try:\n"
+        "            if stat.S_ISFIFO(os.stat(path, dir_fd=fd).st_mode):\n"
+        "                return True\n"
+        "        except ValueError:\n"
+        "            pass\n"
+        "        except Exception as e:\n"
+        "            if getattr(e, 'errno', None) in (errno.ENOENT, errno.ENOTDIR, errno.EBADF):\n"
+        "                continue\n"
+        "            _blocking.append(('cannot evaluate', path))\n"
+        "            raise AssertionError('the FIFO guard cannot evaluate %r: its metadata read failed '\n"
+        "                                 '(%r)' % (path, e))\n"
+        "    return False\n"
+        "def _fifo_guard(event, args):\n"
+        "    if event != 'open' or not isinstance(args[2], int) or args[2] & os.O_NONBLOCK:\n"
+        "        return\n"
+        "    path = os.fspath(args[0]) if isinstance(args[0], os.PathLike) else args[0]\n"
+        "    if isinstance(path, (str, bytes)) and _names_fifo(path):\n"
+        "        _blocking.append(args[0])\n"
+        "        raise AssertionError('a FIFO opened without O_NONBLOCK: %r' % (args,))\n"
+        "sys.addaudithook(_fifo_guard)\n")
+    # every opener and path spelling the guard covers, each tried once on the FIFO p in a child (the guard's own
+    # vector), with d an open descriptor of p's directory, and p + '.sym' and p + '.hard' a symlink and a hard
+    # link to p
+    FIFO_OPENERS = ("lambda p: os.open(p, os.O_RDONLY)", "lambda p: open(p, 'rb')",
+                    "lambda p: __import__('io').open(p, 'rb')", "lambda p: __import__('io').FileIO(p, 'r')",
+                    "lambda p: os.open(os.path.basename(p), os.O_RDONLY, dir_fd=d)",
+                    "lambda p: os.open(p + '.sym', os.O_RDONLY)", "lambda p: open(p + '.hard', 'rb')",
+                    "lambda p: os.open('/' + p, os.O_RDONLY)", "lambda p: open(os.path.relpath(p), 'rb')",
+                    "lambda p: os.open(__import__('pathlib').Path(p), os.O_RDONLY)")
+
+    def in_subprocess(expr, timeout, guarded=False):
+        """Run `expr` (with module m loaded) in a fresh interpreter; return stdout, raising on timeout. When
+        `guarded`, FIFO_GUARD runs first and the output gains a last line, the repr of the refused opens."""
+        guard, tail = (FIFO_GUARD, "\nprint(repr(_blocking))") if guarded else ("", "")
+        return subprocess.run([sys.executable, "-I", "-B", "-c",
+                               guard + CHILD_HEAD + CHILD_FREEZE + "print(%s)" % expr + tail],
                               capture_output=True, text=True, timeout=timeout).stdout.strip()
+
+    class Park:
+        """A started thread parks at a chosen point (park()) until the test releases it. Every wait is on a signal
+        that every path sets (a 10 s bound once decided verdicts under load, and a thread delayed past it changed
+        the result): the thread signals when it parks AND when its target ends, so reached() returns at once,
+        true only for a park; release(), called in the test's finally, sets resume and joins the released
+        thread, which runs to its end. HANG_TIMEOUT bounds each wait as a hang guard only, and an expired guard
+        is a FAILURE, never a pass: a park whose resume never comes (a lock regression that blocks the main
+        thread on the lock the parked thread holds) stops waiting, is recorded, and raises, so the parked
+        thread ends and frees what it holds. A failure of the started thread (its target raised, or its park
+        expired) is recorded and release() raises it, so a test cannot pass on a thread that died (QA: an
+        exception after the save left the result unset and the test still passed). The main thread never parks
+        (it would wait on itself), so park() refuses there."""
+
+        def __init__(self):
+            self.parked, self.signal, self.resume = threading.Event(), threading.Event(), threading.Event()
+            self.failures = []
+
+        def start(self, name, target):
+            for e in (self.parked, self.signal, self.resume):
+                e.clear()
+            self.failures = []
+
+            def run():
+                try:
+                    target()
+                except BaseException as e:  # recorded for release(), which raises it in the test's thread
+                    if not any(e is f for f in self.failures):  # an expired park recorded itself already
+                        self.failures.append(e)
+                finally:
+                    self.signal.set()  # ended: reached() returns now, false unless it parked first
+            t = threading.Thread(name=name, target=run)
+            t.start()
+            return t
+
+        def park(self):
+            if threading.current_thread() is threading.main_thread():
+                raise AssertionError("only a started thread parks")
+            self.parked.set()
+            self.signal.set()
+            if not self.resume.wait(HANG_TIMEOUT):  # the hang guard: never resumed
+                self.failures.append(AssertionError("hang guard: the parked thread was never released"))
+                raise self.failures[-1]
+
+        def reached(self):
+            self.signal.wait(HANG_TIMEOUT)  # the hang guard: expired, the thread has not parked, so false
+            return self.parked.is_set()
+
+        def release(self, thread):
+            self.resume.set()
+            thread.join(HANG_TIMEOUT)  # the hang guard
+            if thread.is_alive():
+                raise AssertionError("hang guard: the released thread %s did not end" % thread.name)
+            if self.failures:
+                raise AssertionError("the started thread %s failed: %r" % (thread.name, self.failures)) \
+                    from self.failures[0]
 
     # A timing verdict compares the same code with itself on the same host, never with a wall-clock figure (a
     # 2.0 s ceiling in a sibling hook's self-test failed at 2.53 s on a slower CI runner). A GROWTH check times,
@@ -2247,6 +2357,46 @@ def _self_test():
 
     MIN = datetime.timedelta(minutes=1)
 
+    def freeze_clocks(ns):
+        """Freeze every wall clock this module reads at the one instant `ns` (epoch nanoseconds) and return the
+        undo: the module's `time` and `datetime` names become views of those modules whose time.time, time_ns,
+        localtime() and gmtime() with no argument, and datetime.datetime.now, utcnow and today, return that
+        instant; every other name is the module's own. setUp freezes each test at a reading of the real clock,
+        so a fixture built from the clock and the code it evaluates (main's datetime.now, prune_state's
+        time.time_ns) read the same instant, and an age a fixture sets up is exact however much wall time
+        passes between the two reads (QA round 3: a transcript start taken 2h05 before the fixture's reading,
+        and an mtime PRUNE_AGE_NS plus an hour before it, each flipped a verdict once the code's later reading
+        moved). A file the test creates keeps its real mtime, at or after the instant, so it never ages. A
+        child interpreter reads its own clocks (see CHILD_FREEZE)."""
+        real_time, real_dt = globals()["time"], globals()["datetime"]
+        sec, frac = divmod(ns, 10 ** 9)
+        tview = types.ModuleType("time")
+        tview.__dict__.update(vars(real_time))
+        tview.time, tview.time_ns = (lambda: ns / 10 ** 9), (lambda: ns)
+        tview.localtime = lambda secs=None: real_time.localtime(sec if secs is None else secs)
+        tview.gmtime = lambda secs=None: real_time.gmtime(sec if secs is None else secs)
+
+        class FrozenDatetime(real_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_dt.datetime.fromtimestamp(sec, tz).replace(microsecond=frac // 1000)
+
+            @classmethod
+            def utcnow(cls):
+                return cls.now(real_dt.timezone.utc).replace(tzinfo=None)
+
+            @classmethod
+            def today(cls):
+                return cls.now()
+        dview = types.ModuleType("datetime")
+        dview.__dict__.update(vars(real_dt))
+        dview.datetime = FrozenDatetime
+        globals()["time"], globals()["datetime"] = tview, dview
+
+        def thaw():
+            globals()["time"], globals()["datetime"] = real_time, real_dt
+        return thaw
+
     class T(unittest.TestCase):
         def setUp(self):
             # Pin the zone (test hermeticity): a POSIX TZ string needs no tzdata on the host.
@@ -2263,6 +2413,9 @@ def _self_test():
             self.tr = os.path.join(self.tmp, "t.jsonl")
             self.now = datetime.datetime(2026, 9, 23, 17, 45, 0, tzinfo=UTC)
             self.start = datetime.datetime(2026, 9, 23, 14, 18, 0, tzinfo=UTC)  # elapsed 03:27
+            # every clock this module reads is frozen at one instant for the whole test (freeze_clocks)
+            self.clock_ns = time.time_ns()
+            self.addCleanup(freeze_clocks(self.clock_ns))
 
         def tearDown(self):
             shutil.rmtree(self.tmp, ignore_errors=True)
@@ -2274,7 +2427,7 @@ def _self_test():
 
         def write(self, entries, mode="w"):
             if mode == "w":  # a fresh transcript path: a real transcript is append-only
-                self.tr = os.path.join(self.tmp, f"t{time.monotonic_ns()}.jsonl")
+                self.tr = os.path.join(self.tmp, f"t{os.urandom(8).hex()}.jsonl")
             with open(self.tr, mode) as f:
                 for e in entries:
                     f.write((e if isinstance(e, str) else json.dumps(e)) + "\n")
@@ -3071,12 +3224,145 @@ def _self_test():
             self.assertIsNone(lease_file())  # a set-but-empty AIQT_ value still beats ORCH_: no lease
 
         def test_fifo_transcript_and_lease_do_not_block(self):
+            # the second evaluation is a stop_hook_active Stop, which also reads the transcript through
+            # block_cycles (QA: no FIFO test reached that open, so its O_NONBLOCK could be dropped unnoticed)
             fifo = os.path.join(self.tmp, "fifo")
             os.mkfifo(fifo)
             out = in_subprocess("(m.lease_start(%r), m.evaluate({'transcript_path':%r,'last_assistant_message':"
-                                "'[2099-01-01T00:00Z] x'}, datetime.datetime.now(UTC), None, %r) is not None)"
-                                % (fifo, fifo, self.sdir), timeout=HANG_TIMEOUT)  # the hang guard
-            self.assertEqual(out, "(None, True)")
+                                "'[2099-01-01T00:00Z] x'}, datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC), None, %r) is not None, "
+                                "m.evaluate({'transcript_path':%r,'stop_hook_active':True,'last_assistant_message':"
+                                "'[2099-01-01T00:00Z] x'}, datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC), None, %r) is not None)"
+                                % (fifo, fifo, self.sdir, fifo, self.sdir), timeout=HANG_TIMEOUT,
+                                guarded=True)  # the hang guard
+            self.assertEqual(out.splitlines(), ["(None, True, True)", "[]"])  # FIFO_GUARD refused no open
+
+        def test_fifo_guard_refuses_every_blocking_opener(self):
+            # the guard's vector: each opener in FIFO_OPENERS, without O_NONBLOCK, is refused and recorded at once
+            # (none blocks, so the hang guard is never reached); an O_NONBLOCK os.open passes and is not recorded.
+            # A reader and writer descriptor (keep) is held first, so no open can block even where the guard
+            # misses one: a missed opener returns, is counted short, and the test fails at once, never at the
+            # hang guard. A blocking open of a regular file through d stays allowed and unrecorded.
+            fifo = os.path.join(self.tmp, "gfifo")
+            os.mkfifo(fifo)
+            os.symlink(fifo, fifo + ".sym")
+            os.link(fifo, fifo + ".hard")
+            code = FIFO_GUARD + (
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "d = os.open(%r, os.O_RDONLY | os.O_DIRECTORY)\n"
+                "refused = 0\n"
+                "for opener in (%s,):\n"
+                "    try:\n"
+                "        got = opener(%r)\n"
+                "    except AssertionError:\n"
+                "        refused += 1\n"
+                "    else:\n"
+                "        os.close(got) if isinstance(got, int) else got.close()\n"
+                "os.close(os.open(%r, os.O_RDONLY | os.O_NONBLOCK))\n"
+                "os.close(os.open('plain', os.O_RDONLY | os.O_CREAT, 0o600, dir_fd=d))\n"
+                "print(refused, len(_blocking))\n") % (fifo, self.tmp, ", ".join(FIFO_OPENERS), fifo, fifo)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.split(), [str(len(FIFO_OPENERS))] * 2, r.stderr)
+
+        def test_fifo_guard_cannot_evaluate_without_descriptor_list(self):
+            # QA (codex MED): where /dev/fd could not be listed the guard tried descriptors 3 to 1023 only, so a
+            # blocking open relative to a directory descriptor above that range passed unrecorded. The listing
+            # now fails as a cannot-evaluate: the open is refused and recorded. The keeper descriptor means no
+            # open can block, so a missed refusal returns at once and the test fails on the printed counts
+            # (the directory descriptor is moved above 1023 where the hard limit allows)
+            fifo = os.path.join(self.tmp, "efifo")
+            os.mkfifo(fifo)
+            code = FIFO_GUARD + (
+                "import resource\n"
+                "soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
+                "high = 2048 if hard == resource.RLIM_INFINITY or hard > 2048 else hard - 1\n"
+                "resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, high + 1), hard))\n"
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "d = os.open(%r, os.O_RDONLY | os.O_DIRECTORY)\n"
+                "os.dup2(d, high)\n"
+                "os.close(d)\n"
+                "_listdir = os.listdir\n"
+                "def _no_fd_list(path='.'):\n"
+                "    if path == '/dev/fd':\n"
+                "        raise OSError('descriptor listing refused')\n"
+                "    return _listdir(path)\n"
+                "os.listdir = _no_fd_list\n"
+                "refused = 0\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY, dir_fd=high))\n"
+                "except AssertionError:\n"
+                "    refused += 1\n"
+                "print(refused, _blocking)\n") % (fifo, self.tmp, os.path.basename(fifo))
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.strip(), "1 [('cannot evaluate', 'efifo')]", r.stderr)
+
+        def test_fifo_guard_refuses_an_unexpected_metadata_error(self):
+            # QA round 3 (codex MED): every metadata error read as "not a FIFO", so an os.stat that failed with
+            # EIO let a blocking open of the FIFO through unrecorded. Only a missing name or an unusable base
+            # descriptor is now "not a FIFO"; any other failure is refused and recorded as a cannot-evaluate.
+            # The keeper descriptor means no open can block, so a missed refusal returns at once and the test
+            # fails on the printed counts; a missing path still opens to FileNotFoundError, unrecorded
+            fifo, absent = os.path.join(self.tmp, "ififo"), os.path.join(self.tmp, "absent")
+            os.mkfifo(fifo)
+            code = FIFO_GUARD + (
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "_stat = os.stat\n"
+                "def _failing_stat(path, *a, **k):\n"
+                "    if path == %r:\n"
+                "        raise OSError(errno.EIO, 'injected metadata I/O error')\n"
+                "    return _stat(path, *a, **k)\n"
+                "os.stat = _failing_stat\n"
+                "refused = missing = 0\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY))\n"
+                "except AssertionError:\n"
+                "    refused += 1\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY))\n"
+                "except FileNotFoundError:\n"
+                "    missing += 1\n"
+                "print(refused, missing, _blocking == [('cannot evaluate', %r)])\n") % (fifo, fifo, fifo, absent, fifo)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.split(), ["1", "1", "True"], r.stderr)
+
+        def test_fifo_guard_disclosures(self):
+            # QA round 3 (codex MINOR, claude MINOR): the stat-then-open race and a blocking wait after a
+            # non-blocking open are disclosed beside the ctypes residual
+            src = " ".join(inspect.getsource(_self_test).split())
+            for s in ("Not covered: an open outside the audited interpreter calls",
+                      "Not covered either, the stat-then-open race", "a symlink switched from a regular file to a FIFO",
+                      "Nor a blocking wait on a descriptor opened with O_NONBLOCK"):
+                self.assertIn(s, src)
+
+        def test_clocks_frozen_for_fixture_and_code(self):
+            # QA round 3 (codex MED): a fixture built from the clock and the code it evaluates read the clock at
+            # different moments, so wall time elapsed between the two reads moved the verdict (test_r13's
+            # transcript start, test_r30's and test_r31's PRUNE_AGE_NS mtimes). With every clock this module
+            # reads frozen (setUp), an age a fixture sets up is exact: at the PRUNE_AGE_NS boundary a subdirectory
+            # exactly that old is removed and one a nanosecond younger is kept by a prune that reads the clock
+            # itself, and main() hands evaluate the instant setUp froze
+            os.makedirs(self.sdir, 0o700)
+            os.chmod(self.sdir, 0o700)
+            edge = time.time_ns() - PRUNE_AGE_NS
+            for name, ns in (("edge", edge), ("younger", edge + 1)):
+                d = os.path.join(self.sdir, _sha(name) + ".d")
+                os.mkdir(d, 0o700)
+                os.utime(d, ns=(ns, ns))
+            self.assertEqual(prune_state(self.sdir), 1)
+            self.assertEqual([n for n in os.listdir(self.sdir) if _is_state_subdir(n)], [_sha("younger") + ".d"])
+            real_evaluate, seen = evaluate, []
+
+            def recording_evaluate(*a, **k):
+                seen.append(to_us(a[1]))  # main's now
+                return real_evaluate(*a, **k)
+            globals()["evaluate"] = recording_evaluate
+            try:
+                self.assertEqual(run_main(json.dumps({"last_assistant_message": "Done."})), (0, ""))
+            finally:
+                globals()["evaluate"] = real_evaluate
+            self.assertEqual(seen, [self.clock_ns // 1000])
 
         def test_inactive_lease_never_reads_history(self):
             lease = os.path.join(self.tmp, "lease.md")
@@ -3427,20 +3713,35 @@ def _self_test():
             for bad in (None, "", os.path.join(self.tmp, "absent.jsonl"), self.tmp, 42):
                 self.assertIsNone(transcript_start(bad), bad)
             # end to end through main(): the id-only lease plus the payload transcript gives the footer a start
-            # main() reads the real clock, so the transcript start is taken relative to it
+            # main() reads the frozen clock (setUp), the instant the transcript start is taken 2h05 before, so the
+            # true elapsed is exactly 02:05 however long the run takes (QA round 3: a later clock reading in main()
+            # moved the true elapsed, and 6h55 later made the 9h claim true, so nothing was blocked)
             self.write([self.user("go", datetime.datetime.now(UTC) - datetime.timedelta(hours=2, minutes=5))])
             p = json.dumps({"transcript_path": self.tr, "last_assistant_message": "done (session: 9h 0m)"})
-            rc, out = run_main(p, {"AIQT_LEASE_FILE": self.lease(ids)})
+            real_evaluate, seen = evaluate, []
+
+            def recording_evaluate(*a, **k):
+                seen.append(a[1:3])  # main's (now, start)
+                return real_evaluate(*a, **k)
+            globals()["evaluate"] = recording_evaluate
+            try:
+                rc, out = run_main(p, {"AIQT_LEASE_FILE": self.lease(ids)})
+            finally:
+                globals()["evaluate"] = real_evaluate
             r = json.loads(out)["reason"]
             self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `(session: 9h 0m)`"), r)
-            self.assertIn(", true 02:0", r)
+            start = transcript_start(self.tr)
+            self.assertIsNotNone(start)
+            self.assertEqual([got for _now, got in seen], [start])  # the transcript fallback gave the start
+            self.assertIn(", true 02:05;", r)
 
         def test_r13_fifo_transcript_does_not_block(self):
             fifo = os.path.join(self.tmp, "tfifo")
             os.mkfifo(fifo)
             lease = self.lease("**Active-session:** sess-2026-09-23-opus55-r1\n")
             self.assertEqual(in_subprocess("(m.transcript_start(%r), m.lease_start(%r, %r))" % (fifo, lease, fifo),
-                                           timeout=HANG_TIMEOUT), "(None, None)")  # the hang guard
+                                           timeout=HANG_TIMEOUT, guarded=True).splitlines(),
+                             ["(None, None)", "[]"])  # the hang guard; FIFO_GUARD refused no open
 
         def test_r13_inactive_lease_stays_unknown(self):
             self.write([self.user("go", self.start)])
@@ -3500,52 +3801,7 @@ def _self_test():
                 12500)
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
-        def test_r13_shared_lease_code_identical_to_clock_inject(self):
-            sib = _sibling_or_skip("clock-inject.py")
-            spec = importlib.util.spec_from_file_location("ci_sibling", sib)
-            mod = importlib.util.module_from_spec(spec)
-            # the sibling is loaded with no bytecode written, so no __pycache__ is left beside the hooks
-            old_dwb, sys.dont_write_bytecode = sys.dont_write_bytecode, True
-            try:
-                spec.loader.exec_module(mod)
-            finally:
-                sys.dont_write_bytecode = old_dwb
-            for name in ("read_regular", "lease_file", "_utc_field", "transcript_start", "lease_start", "_is_worker",
-                     "_cfg", "_sibling_or_skip", "_wall_clock_asserts", "_wall_clock_alias_fixtures"):
-                self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
-            for name in ("_SESS_RE", "_LEASE_FIELD_RE", "_START_VALUE_RE", "_HEADING_RE"):
-                self.assertEqual((getattr(mod, name).pattern, getattr(mod, name).flags),
-                                 (globals()[name].pattern, globals()[name].flags), name)
-            self.assertEqual((mod.LEASE_MAX_BYTES, mod.TRANSCRIPT_PREFIX_BYTES),
-                             (LEASE_MAX_BYTES, TRANSCRIPT_PREFIX_BYTES))
 
-        def test_shared_grammar_identical_to_sibling(self):
-            sib = _sibling_or_skip("future-stamp-write.py")
-            spec = importlib.util.spec_from_file_location("fsw_sibling", sib)
-            mod = importlib.util.module_from_spec(spec)
-            # the sibling is loaded with no bytecode written, so no __pycache__ is left beside the hooks
-            old_dwb, sys.dont_write_bytecode = sys.dont_write_bytecode, True
-            try:
-                spec.loader.exec_module(mod)
-            finally:
-                sys.dont_write_bytecode = old_dwb
-            self.assertEqual(mod.SCHED_KEYWORDS, SCHED_KEYWORDS)
-            self.assertEqual(mod.SCHED_GAP_TOKENS, SCHED_GAP_TOKENS)
-            self.assertEqual((mod.TIME_GRAMMAR, mod.ZONE_GRAMMAR), (TIME_GRAMMAR, ZONE_GRAMMAR))
-            self.assertEqual((mod._SCHED_RE.pattern, mod._SCHED_RE.flags), (_SCHED_RE.pattern, _SCHED_RE.flags))
-            self.assertEqual(mod.SCHED_STEMS, SCHED_STEMS)
-            self.assertEqual((mod._TOKEN_RE.pattern, mod._WORDCH_RE.pattern), (_TOKEN_RE.pattern, _WORDCH_RE.pattern))
-            self.assertEqual(inspect.getsource(mod.sched_exempter), inspect.getsource(sched_exempter))
-            # round 13: the code and quote exemption helpers are shared verbatim too
-            for name in ("_code_lines", "_code_spans", "_in_spans"):
-                self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
-            for name in ("_BTICK_RE", "_FENCE_RE"):
-                self.assertEqual((getattr(mod, name).pattern, getattr(mod, name).flags),
-                                 (globals()[name].pattern, globals()[name].flags), name)
-            # the configuration and kill-switch helpers are shared verbatim across the three hooks
-            for name in ("_cfg", "_is_worker", "_sibling_or_skip", "_wall_clock_asserts",
-                         "_wall_clock_alias_fixtures"):
-                self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
 
 
         # -- round 24 (field validation of round 12) --
@@ -3644,7 +3900,7 @@ def _self_test():
             env["AIQT_LEASE_FILE"] = os.path.join(self.tmp, "no-lease.md")  # never the host's real lease
             with open("/dev/full", "w") as full:
                 p = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__)], stdout=full,
-                                   stderr=subprocess.PIPE, text=True, env=env, timeout=30,
+                                   stderr=subprocess.PIPE, text=True, env=env, timeout=HANG_TIMEOUT,
                                    input=json.dumps({"last_assistant_message": "[2099-01-01T00:00Z] x"}))
             self.assertEqual(p.returncode, 0, p.stderr)
 
@@ -3662,7 +3918,7 @@ def _self_test():
             code = ("import importlib.util as u, io;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print('before', flush=True);b=io.StringIO();b.close();"
                     "m._emit_line('x', b);print('after', flush=True)" % os.path.abspath(__file__))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=30)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=HANG_TIMEOUT)
             self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "before\n", ""))
 
         def test_closed_stderr_line_never_reaches_stdout(self):
@@ -3674,7 +3930,7 @@ def _self_test():
             close2 = "import os, sys; os.close(2); os.execv(sys.argv[1], sys.argv[1:])"
             for closed in (False, True):
                 argv = [sys.executable, "-I", "-S", "-B", "-c", close2] + hook if closed else hook
-                p = subprocess.run(argv, input="{}", capture_output=True, text=True, env=env, timeout=30)
+                p = subprocess.run(argv, input="{}", capture_output=True, text=True, env=env, timeout=HANG_TIMEOUT)
                 self.assertEqual((p.returncode, p.stdout), (0, ""), (closed, p.stderr))
                 self.assertEqual("skipped, worker marker present" in p.stderr, not closed, (closed, p.stderr))
 
@@ -3995,6 +4251,37 @@ def _self_test():
             self.assertEqual(worst, BLOCK_CAP)  # the bound is reached, so the runs exercise it
 
         # -- round 28 (codex gpt-6-astra high QA of round 27) --
+        def test_park_failures_fail_the_test(self):
+            # QA (codex MED): an exception in a started thread went unnoticed, so a test passed on an absent
+            # result; QA (claude MED): a park never resumed waited forever, so a lock regression hung the suite.
+            # release() now raises a recorded failure of the started thread, and an expired park guard is
+            # recorded and raised. The expiry is injected (a resume event whose wait reports the guard expired),
+            # so no verdict here waits on a clock
+            park = Park()
+            a = park.start("A", lambda: [][0])
+            self.assertFalse(park.reached())  # it ended without parking
+            with self.assertRaises(AssertionError) as cm:
+                park.release(a)
+            self.assertIsInstance(cm.exception.__cause__, IndexError)
+
+            class Expired(threading.Event):
+                def wait(self, timeout=None):
+                    return False  # the hang guard expired
+
+            park, after = Park(), []
+            park.resume = Expired()
+            a = park.start("A", lambda: (park.park(), after.append("resumed")))
+            self.assertTrue(park.reached())
+            with self.assertRaises(AssertionError) as cm:
+                park.release(a)
+            self.assertEqual(after, [])  # the expired park raised: the thread did not run on as if released
+            self.assertIn("never released", str(cm.exception))
+            park, ran = Park(), []  # a clean park and release raise nothing
+            a = park.start("A", lambda: (park.park(), ran.append(1)))
+            self.assertTrue(park.reached())
+            park.release(a)
+            self.assertEqual(ran, [1])
+
         def test_r28_concurrent_stops_cannot_rearm_counter(self):
             # finding (codex MED): the bound assumed serialized Stops; two concurrent evaluations for one transcript
             # (a clean Stop A loads 1 and pauses before saving; a violating Stop B loads 1, saves 2, and blocks; A
@@ -4003,12 +4290,11 @@ def _self_test():
             bad = "[2026-09-23T20:00Z] heartbeat"
             self.write([self.user("go"), self.asst(bad)])
             self.assertTrue(self.ev(last_assistant_message=bad).startswith(BLOCK_PREFIX))  # counter 1
-            real_save, paused, resume = save_state, threading.Event(), threading.Event()
+            real_save, park = save_state, Park()
 
             def parking_save(*a, **k):  # A parks after loading the counter, before saving it
                 if threading.current_thread().name == "A":
-                    paused.set()
-                    resume.wait(10)
+                    park.park()
                 return real_save(*a, **k)
 
             def counter():
@@ -4020,27 +4306,23 @@ def _self_test():
             globals()["save_state"] = parking_save
             try:
                 for _ in range(8):
-                    paused.clear()
-                    resume.clear()
                     out = {"notes": []}
 
                     def run_a(out=out):
                         out["r"] = evaluate({"transcript_path": self.tr, "stop_hook_active": True,
                                              "last_assistant_message": "Done."}, self.now, self.start, self.sdir,
                                             out["notes"])
-                    a = threading.Thread(name="A", target=run_a)
-                    a.start()
+                    a = park.start("A", run_a)
                     try:
-                        self.assertTrue(paused.wait(10))  # A has loaded the counter (and holds the lock)
+                        self.assertTrue(park.reached())  # A has loaded the counter (and holds the lock)
                         notes = []
                         r = evaluate({"transcript_path": self.tr, "stop_hook_active": True,
                                       "last_assistant_message": bad}, self.now, self.start, self.sdir, notes)
                         b_kinds.append("block" if r else notes[0] if notes else "pass")
                     finally:
-                        resume.set()
-                        a.join(10)
+                        park.release(a)
                     self.assertFalse(a.is_alive())
-                    self.assertEqual((out.get("r"), out["notes"]), (None, []))  # A's clean pass, unaffected
+                    self.assertEqual((out["r"], out["notes"]), (None, []))  # A's clean pass, unaffected
                     counters.append(counter())
             finally:
                 globals()["save_state"] = real_save
@@ -4085,7 +4367,7 @@ def _self_test():
                     self.assertEqual(f.read(), before)  # no state change, the counter included
             finally:
                 holder.stdin.close()
-                holder.wait(10)
+                holder.wait(timeout=HANG_TIMEOUT)  # it exits at its stdin's end: the hang guard only
                 holder.stdout.close()
             self.assertTrue(self.ev(last_assistant_message=bad).startswith(BLOCK_PREFIX))  # the lock is released
 
@@ -4213,12 +4495,11 @@ def _self_test():
             bad = "[2026-09-23T20:00Z] heartbeat"
             self.write([self.user("go"), self.asst(bad)])
             self.assertTrue(self.ev(last_assistant_message=bad).startswith(BLOCK_PREFIX))  # counter 1
-            real_save, paused, resume = save_state, threading.Event(), threading.Event()
+            real_save, park = save_state, Park()
 
             def parking_save(*a, **k):
                 if threading.current_thread().name == "A":
-                    paused.set()
-                    resume.wait(10)
+                    park.park()
                 return real_save(*a, **k)
 
             def counter():
@@ -4234,18 +4515,15 @@ def _self_test():
             globals()["save_state"] = parking_save
             try:
                 for i in range(n):
-                    paused.clear()
-                    resume.clear()
                     out = {"notes": []}
 
                     def run_a(out=out):
                         out["r"] = evaluate({"transcript_path": self.tr, "stop_hook_active": True,
                                              "last_assistant_message": "Done."}, self.now, self.start, self.sdir,
                                             out["notes"])
-                    a = threading.Thread(name="A", target=run_a)
-                    a.start()
+                    a = park.start("A", run_a)
                     try:
-                        self.assertTrue(paused.wait(10), (mode, i))  # A is past its final re-read
+                        self.assertTrue(park.reached(), (mode, i))  # A is past its final re-read
                         if mode == "unlink-lock":
                             for x in os.listdir(self.sdir):
                                 if x.endswith(".lock"):
@@ -4267,10 +4545,9 @@ def _self_test():
                         b_kinds.append(kind(r, notes))
                         active_blocks += bool(r)
                     finally:
-                        resume.set()
-                        a.join(10)
+                        park.release(a)
                     self.assertFalse(a.is_alive())
-                    self.assertEqual((out.get("r"), out["notes"]), (None, []), (mode, i))  # A's clean pass
+                    self.assertEqual((out["r"], out["notes"]), (None, []), (mode, i))  # A's clean pass
                     counters.append(counter())
             finally:
                 globals()["save_state"] = real_save
@@ -4324,24 +4601,23 @@ def _self_test():
             bad = "[2026-09-23T20:00Z] heartbeat"
             self.write([self.user("go"), self.asst(bad)])
             self.assertTrue(self.ev(last_assistant_message=bad).startswith(BLOCK_PREFIX))
-            real_save, paused, resume, got = save_state, threading.Event(), threading.Event(), {}
+            real_save, park, got = save_state, Park(), {}
 
             def parking_save(*a, **k):
-                paused.set()
-                resume.wait(10)
+                park.park()
                 got["saved"] = real_save(*a, **k)
                 return got["saved"]
             globals()["save_state"] = parking_save
-            a = threading.Thread(target=lambda: got.setdefault("r", evaluate(
-                {"transcript_path": self.tr, "stop_hook_active": True, "last_assistant_message": bad},
-                self.now, self.start, self.sdir, got.setdefault("notes", []))))
+            a = None
             try:
-                a.start()
-                self.assertTrue(paused.wait(10))
+                a = park.start("A", lambda: got.setdefault("r", evaluate(
+                    {"transcript_path": self.tr, "stop_hook_active": True, "last_assistant_message": bad},
+                    self.now, self.start, self.sdir, got.setdefault("notes", []))))
+                self.assertTrue(park.reached())
                 shutil.rmtree(self.sdir)
             finally:
-                resume.set()
-                a.join(10)
+                if a is not None:
+                    park.release(a)
                 globals()["save_state"] = real_save
             self.assertIs(got["saved"], False)
             self.assertIsNone(got["r"])  # its block could not be recorded, so it failed open
@@ -4417,21 +4693,19 @@ def _self_test():
             tr1 = self.tr
             self.write([self.user("go"), self.asst(bad)])
             tr2 = self.tr
-            real_save, paused, resume = save_state, threading.Event(), threading.Event()
+            real_save, park = save_state, Park()
 
             def parking_save(*a, **k):  # A (transcript 1) parks inside its evaluation, holding its lock
                 if threading.current_thread().name == "A":
-                    paused.set()
-                    resume.wait(10)
+                    park.park()
                 return real_save(*a, **k)
             globals()["save_state"] = parking_save
-            out = {"notes": []}
-            a = threading.Thread(name="A", target=lambda: out.setdefault("r", evaluate(
-                {"transcript_path": tr1, "last_assistant_message": bad}, self.now, self.start, self.sdir,
-                out["notes"])))
+            out, a = {"notes": []}, None
             try:
-                a.start()
-                self.assertTrue(paused.wait(10))
+                a = park.start("A", lambda: out.setdefault("r", evaluate(
+                    {"transcript_path": tr1, "last_assistant_message": bad}, self.now, self.start, self.sdir,
+                    out["notes"])))
+                self.assertTrue(park.reached())
                 # a Stop of ANOTHER transcript is evaluated (it blocks), never skipped as busy
                 notes = []
                 r = evaluate({"transcript_path": tr2, "last_assistant_message": bad}, self.now, self.start,
@@ -4444,8 +4718,8 @@ def _self_test():
                                            self.start, self.sdir, notes))
                 self.assertIn("holds the state lock", notes[0])
             finally:
-                resume.set()
-                a.join(10)
+                if a is not None:
+                    park.release(a)
                 globals()["save_state"] = real_save
             self.assertFalse(a.is_alive())
             self.assertTrue(out["r"].startswith(BLOCK_PREFIX))
@@ -4472,7 +4746,7 @@ def _self_test():
                             self.assertTrue(r and r.startswith(BLOCK_PREFIX), (held, tp, r, notes))
                 finally:
                     holder.stdin.close()
-                    holder.wait(10)
+                    holder.wait(timeout=HANG_TIMEOUT)  # it exits at its stdin's end: the hang guard only
                     holder.stdout.close()
 
         def test_r30_prune_state_policy(self):
@@ -4480,6 +4754,8 @@ def _self_test():
             # removes (at most PRUNE_BATCH of) the subdirectories unwritten for PRUNE_AGE_NS, never one an
             # evaluation holds locked, never a name without the subdirectory shape, never through a symlink
             bad = "[2026-09-23T20:00Z] heartbeat"
+            # the clock is frozen (setUp): prune_state reads the instant old_s is taken from, so old_s is exactly
+            # an hour past PRUNE_AGE_NS however long the test runs (QA round 3)
             old_s = (time.time_ns() - PRUNE_AGE_NS) / 1e9 - 3600
             trs = {}
             for name in ("old", "locked", "recent"):
@@ -4560,6 +4836,8 @@ def _self_test():
             # so it lies beyond the first PRUNE_SCAN entries whichever way the filesystem orders creation
             os.makedirs(self.sdir, 0o700)
             os.chmod(self.sdir, 0o700)
+            # the clock is frozen (setUp): prune_state reads the instant old_s is taken from, so old_s is exactly
+            # an hour past PRUNE_AGE_NS however long the test runs (QA round 3)
             old_s = (time.time_ns() - PRUNE_AGE_NS) / 1e9 - 3600
             recent = [_sha(f"recent{i}") + ".d" for i in range(2 * PRUNE_SCAN)]
             stale = _sha("stale") + ".d"
@@ -4904,11 +5182,12 @@ def _self_test():
             # a Stop that pruned past a whole window hung. The cursor is now written only through an exclusively
             # created regular temporary renamed over it. Run in a SUBPROCESS with a hard deadline, so a regression
             # fails the test instead of hanging the suite. A FIFO at the state file, and a directory at the
-            # cursor, are exercised too; no temporary file is ever left behind.
+            # cursor, are exercised too; no temporary file is ever left behind. FIFO_GUARD fails a blocking open
+            # of either FIFO at once, the descriptor-relative opens the production code makes included.
             child = (
                 "import datetime, hashlib, importlib.util, json, os, stat, sys, time\n"
                 "spec = importlib.util.spec_from_file_location('sts32', sys.argv[1])\n"
-                "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+                "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n" + CHILD_FREEZE +
                 "tmp = sys.argv[2]; sdir = os.path.join(tmp, 'state'); os.mkdir(sdir, 0o700)\n"
                 "m.PRUNE_SCAN = 8  # a prune that cannot cover every name, so it writes the cursor\n"
                 "for i in range(m.PRUNE_SCAN + 1):\n"
@@ -4917,7 +5196,7 @@ def _self_test():
                 "tr = os.path.join(tmp, 't.jsonl')\n"
                 "with open(tr, 'w') as f:\n"
                 "    f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'go'}}) + '\\n')\n"
-                "now = datetime.datetime.now(datetime.timezone.utc)\n"
+                "now = datetime.datetime(2026, 9, 23, 17, 45, tzinfo=datetime.timezone.utc)\n"
                 "r = m.evaluate({'transcript_path': tr, 'last_assistant_message': 'Done.'}, now, now, sdir, [])\n"
                 "assert r is None, r\n"
                 "assert stat.S_ISREG(os.lstat(cur).st_mode), 'the cursor was not replaced by a regular file'\n"
@@ -4938,15 +5217,102 @@ def _self_test():
                 "assert stat.S_ISREG(os.lstat(st).st_mode)\n"
                 "left = [n for d in (sdir, sub) for n in os.listdir(d) if n.endswith('.tmp')]\n"
                 "assert not left, left\n"
+                "assert not _blocking, _blocking  # FIFO_GUARD refused no open\n"
                 "print('R32-OK')\n")
-            p = subprocess.run([sys.executable, "-I", "-B", "-c", child, os.path.abspath(__file__), self.tmp],
-                               capture_output=True, text=True, timeout=30)
+            p = subprocess.run([sys.executable, "-I", "-B", "-c", FIFO_GUARD + child, os.path.abspath(__file__),
+                                self.tmp],
+                               capture_output=True, text=True, timeout=HANG_TIMEOUT)
             self.assertEqual((p.returncode, p.stdout.strip()), (0, "R32-OK"), p.stderr[-2000:])
             src = " ".join(inspect.getsource(_write_prune_cursor).split())
             self.assertIn("os.O_EXCL", src)
             self.assertIn("os.replace(tmp, PRUNE_CURSOR", src)
             self.assertNotIn("O_TRUNC", src)
             self.assertIn("never by opening the existing entry", " ".join(__doc__.split()))
+
+        def test_no_short_timeout_or_clock_in_parent(self):
+            # the leftover-timing probe, wider than the assertion scan below: in the parent's own code (a child's
+            # source is a string literal, not scanned) every timeout keyword is HANG_TIMEOUT (in_subprocess
+            # passes its own argument on), so no verdict rests on a few seconds of host time, and the parent
+            # neither sleeps nor reads an elapsed-time clock (time.sleep, monotonic, perf_counter, process_time,
+            # thread_time, clock_gettime, each _ns variant too), under the time module or an alias of it, nor
+            # imports from time (an unaliased name would escape); a wall-clock timestamp (time.time, time_ns)
+            # that only dates a fixture stays allowed
+            import ast
+
+            def leftover(source):
+                tree = ast.parse(source)
+                mods = {"time"} | {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
+                                   for a in n.names if a.name == "time"}
+                found = [("timeout", k.value.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                         for k in n.keywords if k.arg == "timeout" and not (
+                             isinstance(k.value, ast.Name) and k.value.id in ("HANG_TIMEOUT", "timeout"))]
+                found += [("time." + n.func.attr, n.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                          and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                          and n.func.value.id in mods and n.func.attr.replace("_ns", "") in (
+                              "sleep", "monotonic", "perf_counter", "process_time", "thread_time",
+                              "clock_gettime")]
+                found += [("from time import", n.lineno) for n in ast.walk(tree)
+                          if isinstance(n, ast.ImportFrom) and n.module == "time"]
+                names = numbers(tree)
+                found += [(what, n.lineno) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                          for what in [positional_deadline(n, names)] if what]
+                return sorted(found, key=lambda item: item[1])
+
+            def numeric(v, names):  # a number literal, a name bound to one, or arithmetic over them
+                if isinstance(v, ast.UnaryOp):
+                    return numeric(v.operand, names)
+                if isinstance(v, ast.BinOp):
+                    return numeric(v.left, names) and numeric(v.right, names)
+                return (isinstance(v, ast.Constant) and type(v.value) in (int, float)) or (
+                    isinstance(v, ast.Name) and v.id in names)
+
+            def numbers(tree):
+                return {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign) and numeric(n.value, ())
+                        for t in n.targets if isinstance(t, ast.Name)}
+
+            def positional_deadline(call, names):
+                # a deadline passed by position, which the keyword scan above cannot see (QA: `paused.wait(10)`,
+                # `a.join(10)`, `holder.wait(10)` decided verdicts): the timeout slot of a wait, wait_for, result,
+                # exception or communicate (Event, Condition, Popen, Future) holding anything but HANG_TIMEOUT; a
+                # join given a number (a str or path join is never given one); a Lock acquire or Queue get whose
+                # first argument is a bool (their (block, timeout) form; a dict get takes a key); the timeout of
+                # select.select; and a timer (threading.Timer, signal.alarm, signal.setitimer)
+                f = call.func
+                name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+                if name in ("Timer", "alarm", "setitimer"):
+                    return name
+                slot = {"wait": 0, "wait_for": 1, "result": 0, "exception": 0, "communicate": 1, "join": 0,
+                        "acquire": 1, "get": 1, "select": 3}.get(name)
+                if slot is None or len(call.args) <= slot or not isinstance(f, ast.Attribute):
+                    return None
+                arg = call.args[slot]
+                if isinstance(arg, ast.Name) and arg.id in ("HANG_TIMEOUT", "timeout"):
+                    return None
+                if name == "join" and (not numeric(arg, names) or isinstance(f.value, ast.Constant)):
+                    return None
+                if name in ("acquire", "get") and not (isinstance(call.args[0], ast.Constant)
+                                                       and type(call.args[0].value) is bool):
+                    return None
+                return "positional " + name
+
+            self.assertEqual(leftover(inspect.getsource(_self_test)), [])
+            bad = ("def f():\n    subprocess.run(c, timeout=5)\n    p.wait(timeout=2.5)\n    t = time.monotonic()\n"
+                   "    time.sleep(1)\n    import time as tm\n    tm.perf_counter_ns()\n"
+                   "    from time import process_time\n    time.tzset()\n    run(c, timeout=HANG_TIMEOUT)\n"
+                   "    t = time.time_ns()\n    time.clock_gettime(1)\n"
+                   "    s = 'time.sleep(60)'\n"
+                   "    paused.wait(10)\n    a.join(10)\n    holder.wait(2.5)\n    cv.wait_for(ok, 5)\n"
+                   "    q.get(True, 5)\n    lk.acquire(True, 1)\n    p.communicate(b'', 3)\n    n = 7\n"
+                   "    t.join(n)\n    ', '.join(parts)\n    os.path.join(a, b)\n    d.get('k', 0)\n    '-'.join(n * 2)\n"
+                   "    s.join([x] * n)\n"
+                   "    ev.wait()\n    ev.wait(HANG_TIMEOUT)\n    p.wait(timeout=HANG_TIMEOUT)\n"
+                   "    threading.Timer(1, f)\n    signal.alarm(3)\n    select.select(r, [], [], 0.5)\n")
+            self.assertEqual([what for what, _line in leftover(bad)],
+                             ["timeout", "timeout", "time.monotonic", "time.sleep", "time.perf_counter_ns",
+                              "from time import", "time.clock_gettime", "positional wait", "positional join",
+                              "positional wait", "positional wait_for", "positional get", "positional acquire",
+                              "positional communicate", "positional join", "Timer", "alarm",
+                              "positional select"])
 
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
         HANG_GUARD_TESTS = ()
@@ -4993,72 +5359,9 @@ def _self_test():
             self.assertEqual([name for name, _line in _wall_clock_asserts(bad)], want)
             self.assertEqual(_wall_clock_asserts(good), [])
 
-        # -- sibling parity on a single-hook install --
-        PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_clock_inject",
-                        "test_shared_grammar_identical_to_sibling")
-        PARITY_SIBLINGS = ("clock-inject.py", "future-stamp-write.py")
 
-        def _parity_in_copy(self, siblings, value, dangling=False):
-            """Copy this file (and `siblings`, found beside it) into a fresh directory, run ONLY the copy's
-            sibling-parity tests in a child interpreter with AIQT_HOOKS_REQUIRE_SIBLINGS set to `value` (None:
-            unset, whatever the caller has), and return ([rc, run, skipped, failures, errors], child stderr).
-            With `dangling`, each sibling is a symlink to a missing target: it EXISTS but cannot be read."""
-            base = "/dev/shm" if os.path.isdir("/dev/shm") else None
-            d = tempfile.mkdtemp(prefix="sib.", dir=base)
-            try:
-                me = os.path.join(d, os.path.basename(os.path.abspath(__file__)))
-                shutil.copyfile(os.path.abspath(__file__), me)
-                for sib in siblings:
-                    shutil.copyfile(_sibling_or_skip(sib), os.path.join(d, sib))
-                if dangling:
-                    for sib in self.PARITY_SIBLINGS:
-                        os.symlink(os.path.join(d, "no-such-target"), os.path.join(d, sib))
-                env = {k: v for k, v in os.environ.items() if k != "AIQT_HOOKS_REQUIRE_SIBLINGS"}
-                if value is not None:
-                    env["AIQT_HOOKS_REQUIRE_SIBLINGS"] = value
-                code = ("import importlib.util as u, json, unittest\n"
-                        "s = u.spec_from_file_location('m', %r)\n"
-                        "m = u.module_from_spec(s)\n"
-                        "s.loader.exec_module(m)\n"
-                        "names = %r\n"
-                        "unittest.TestLoader.loadTestsFromTestCase = lambda self, tc: unittest.TestSuite("
-                        "tc(n) for n in names)\n"
-                        "box, run = [], unittest.TextTestRunner.run\n"
-                        "unittest.TextTestRunner.run = lambda self, t: box.append(run(self, t)) or box[-1]\n"
-                        "rc = m._self_test()\n"
-                        "r = box[0]\n"
-                        "print(json.dumps([rc, r.testsRun, len(r.skipped), len(r.failures), len(r.errors)]))\n"
-                        ) % (me, self.PARITY_TESTS)
-                p = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code], env=env, capture_output=True,
-                                   text=True, timeout=120)
-                self.assertTrue(p.stdout.strip(), p.stderr)
-                return json.loads(p.stdout.strip().splitlines()[-1]), p.stderr
-            finally:
-                shutil.rmtree(d, ignore_errors=True)
 
-        def test_sibling_parity_skips_alone_and_fails_when_required(self):
-            # a single-hook install: each sibling-parity test is SKIPPED (not passed) with a message naming the
-            # absent sibling, unless AIQT_HOOKS_REQUIRE_SIBLINGS=1, when the same absence FAILS it
-            n = len(self.PARITY_TESTS)
-            for value in (None, "0", ""):
-                got, err = self._parity_in_copy((), value)
-                self.assertEqual(got, [0, n, n, 0, 0], (value, err))
-                for sib in self.PARITY_SIBLINGS:
-                    self.assertIn(f"sibling hook {sib} is absent (a standalone install)", err)
-            got, err = self._parity_in_copy((), "1")
-            self.assertEqual(got, [1, n, 0, n, 0], err)
-            self.assertIn("AIQT_HOOKS_REQUIRE_SIBLINGS=1 requires it", err)
-            # a sibling that EXISTS but cannot be read fails (never skips), with or without the variable
-            for value in (None, "1"):
-                got, err = self._parity_in_copy((), value, dangling=True)
-                self.assertEqual((got[0], got[1], got[2], got[3] + got[4]), (1, n, 0, n), (value, err))
 
-        def test_sibling_parity_runs_and_passes_with_siblings_present(self):
-            # with every sibling beside the copy the parity tests RUN and pass, whatever the variable says
-            n = len(self.PARITY_TESTS)
-            for value in (None, "1"):
-                got, err = self._parity_in_copy(self.PARITY_SIBLINGS, value)
-                self.assertEqual(got, [0, n, 0, 0, 0], (value, err))
 
     result = unittest.TextTestRunner(verbosity=2).run(unittest.TestLoader().loadTestsFromTestCase(T))
     return 0 if result.wasSuccessful() else 1
