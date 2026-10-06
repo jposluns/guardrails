@@ -238,6 +238,12 @@ run_gate "ci-parity"          python3 -I -B tools/check_ci_parity.py
 run_gate "git-option-table-selftest" python3 -I -B tools/check_git_option_table.py --self-test
 run_gate "git-option-table" python3 -I -B tools/check_git_option_table.py
 
+# Dangerous-API AST lint (plan item 6): unsafe deserialization, disabled TLS verification, and
+# shell or code execution sinks in the repo's own Python, with a reviewed in-gate allowlist; an
+# unreadable or unparseable file is cannot-evaluate.
+run_gate "dangerous-api-selftest" python3 -I -B tools/check_dangerous_api.py --self-test
+run_gate "dangerous-api" python3 -I -B tools/check_dangerous_api.py
+
 # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit that
 # proves the harness end to end, and the internal-name leak gate. Their self-tests are gating (a broken
 # harness is a real failure); the internal-name scan is gating too.
