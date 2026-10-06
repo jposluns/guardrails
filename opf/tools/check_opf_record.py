@@ -557,14 +557,16 @@ def assert_no_auto_maintenance(env, base):
 _BACKSTOP = re.compile(r"(?:cannot evaluate|harness error|refused): unexpected error[^\n]*")
 _flip_watch = []
 
-# The exact line the record CLI's backstop prints for an exception object; a declared backstop is accepted
-# only as this line for a recorded injection (_bound_injection).
-_BACKSTOP_LINE = "cannot evaluate: unexpected error ({!r}); failing closed to exit 2"
-
 # While _discriminate runs a flip it also pushes a list here, and each injection site a declared backstop
 # may come from records (label, exception object) in the innermost list as it raises (_injected), or as a
 # reverted guard's crash passes its one expected point (_crash_point).
 _flip_injections = []
+
+# While _discriminate runs a flip it also pushes a list here, and the captured stderr of each in-process
+# CLI run (_EmissionStderr) records in the innermost list, as a record CLI backstop (record.cli or
+# opf._cmd_record) writes a backstop line, (that line, the exception object the backstop printed): the
+# emission identity a declared backstop is bound by (_bound_injection).
+_flip_emissions = []
 
 
 def _note_backstops(text):
@@ -595,9 +597,32 @@ def _crash_point(label, owner, name, expected):
     return patch.object(owner, name, observing)
 
 
+class _EmissionStderr(io.StringIO):
+    """A CLI run's captured stderr. Each backstop line written to it is recorded in the innermost
+    _flip_emissions list with the exception object the writing record CLI backstop holds: `exc` in the
+    nearest calling frame that is record.cli or opf._cmd_record. That name is bound only inside the
+    backstop's except clause, whose one call is the print that formats it (directly, or through a test's
+    record-module print replacement, as T64's), so it is the object that print emitted; a line written
+    with no such frame, or while that frame holds no `exc`, records None, which binds no injection."""
+
+    def write(self, text):
+        written = super().write(text)
+        if _flip_emissions:
+            codes = (record.cli.__code__, opf._cmd_record.__code__)
+            frame = sys._getframe(1)
+            try:
+                while frame is not None and frame.f_code not in codes:
+                    frame = frame.f_back
+                printed = None if frame is None else frame.f_locals.get("exc")
+                _flip_emissions[-1].extend((line, printed) for line in _BACKSTOP.findall(text))
+            finally:
+                del frame
+        return written
+
+
 def cli(env, argv):
     """Run `opf <argv>` in-process under the scrubbed environment: (rc, stdout, stderr)."""
-    out, err = io.StringIO(), io.StringIO()
+    out, err = io.StringIO(), _EmissionStderr()
     with patch.dict(os.environ, env.vars, clear=True), contextlib.redirect_stdout(out), \
             contextlib.redirect_stderr(err):
         rc = opf.main(list(argv))
@@ -6319,21 +6344,20 @@ def flip_t81_holder():
 # --- T82: the discriminator binds each flip to an assertion, never a backstop or harness fault ---------
 
 
-def _caught_at_backstop(exc):
-    """True when exc itself last propagated into a record CLI backstop's frame (its traceback's outermost
-    entry), so the line that backstop printed was made from this object."""
-    tb = exc.__traceback__
-    return tb is not None and tb.tb_frame.f_code in (record.cli.__code__, opf._cmd_record.__code__)
-
-
-def _bound_injection(line, injections, allowed):
-    """Consume and return the recorded injection that caused backstop `line`: one whose label the flip
-    declares, whose exact backstop line (type and message) is `line`, and which itself reached the
-    backstop. None when no recorded injection is the cause; each injection accounts for one line only."""
-    for index, (label, exc) in enumerate(injections):
-        if label in allowed and line == _BACKSTOP_LINE.format(exc) and _caught_at_backstop(exc):
-            del injections[index]
-            return exc
+def _bound_injection(line, emissions, injections, allowed):
+    """Consume and return the recorded injection that backstop `line` printed: a record CLI backstop
+    emitted `line` (_EmissionStderr) from an exception object that IS a recorded injection whose label the
+    flip declares. A line no backstop emission recorded (another verb's, a child's), or one printed from
+    any other object, a twin of the injection with its type and message included, has none: None. Each
+    emission and each injection accounts for one line only."""
+    for e_index, (emitted, printed) in enumerate(emissions):
+        if emitted != line:
+            continue
+        for i_index, (label, exc) in enumerate(injections):
+            if label in allowed and printed is exc:
+                del emissions[e_index]
+                del injections[i_index]
+                return exc
     return None
 
 
@@ -6341,20 +6365,22 @@ def _discriminate(name, test, flip):
     """The flip must turn the test red through an assertion, and the unflipped test must stay green
     around it. The flipped run is bound to that outcome: a backstop line (_BACKSTOP) printed by any CLI
     run inside it (a crash the CLI turned into an ordinary exit 2, which an assertion then reads as red)
-    fails the discrimination unless a recorded injection the flip declares (_INTENDED_BACKSTOPS) is its
-    cause (_bound_injection), and any exception other than an assertion (the flip's own construction
-    included, a SystemExit too; an interrupt propagates) fails it by name; neither counts as a caught
-    defect. A crash production code swallows prints no backstop line and is outside this check."""
+    fails the discrimination unless the record CLI backstop printed it from the very object of a
+    recorded injection the flip declares (_INTENDED_BACKSTOPS, _bound_injection), and any exception other
+    than an assertion (the flip's own construction included, a SystemExit too; an interrupt propagates)
+    fails it by name; neither counts as a caught defect. A crash production code swallows prints no
+    backstop line and is outside this check."""
     test()
-    faults, injections = [], []
+    faults, injections, emissions = [], [], []
     _flip_watch.append(faults)
     _flip_injections.append(injections)
+    _flip_emissions.append(emissions)
     try:
         with flip():
             test()
     except AssertionError:
         allowed = _INTENDED_BACKSTOPS.get(flip, ())
-        stray = [line for line in faults if _bound_injection(line, injections, allowed) is None]
+        stray = [line for line in faults if _bound_injection(line, emissions, injections, allowed) is None]
         if stray:
             raise AssertionError("{} went red through the unexpected-error backstop (exit 2, cannot "
                                  "evaluate), not an assertion: {}".format(name, stray[0])) from None
@@ -6368,7 +6394,8 @@ def _discriminate(name, test, flip):
     finally:
         _flip_watch.pop()
         _flip_injections.pop()
-        del injections[:]   # the recorded exceptions' tracebacks hold the flipped run's frames
+        _flip_emissions.pop()
+        del injections[:], emissions[:]   # the recorded exceptions' tracebacks hold the flipped run's frames
     test()
 
 
@@ -6521,6 +6548,19 @@ def _t83_twin_crash(*_args):
     raise NameError("t82 broken flip fixture")
 
 
+def _t83_print_twin(*_args, **_kwargs):
+    raise NameError("t82 broken flip fixture")
+
+
+@contextlib.contextmanager
+def _t83_print_twin_flip():
+    """The declared crash, whose diagnostic print in record.cli's backstop raises a twin of it (same type
+    and message, a distinct object) that opf._cmd_record's backstop then prints: the declared line, printed
+    from an object no injection recorded."""
+    with _t82_declared_flip(), patch.object(record, "print", _t83_print_twin, create=True):
+        yield
+
+
 def _t83_resolver_crash(*_args):
     raise NameError("t83 crash in the store resolver")
 
@@ -6548,11 +6588,12 @@ def _t83_declared_as(probe, model):
 
 
 def t83_backstop_bound_to_injection(fx):
-    """A declared backstop is accepted only when the recorded injection the flip declares caused it: an
-    unrelated EIO under flip_t77's declarations, a RuntimeError carrying the declared NameError's text,
-    and a twin of the recorded NameError raised in its place each fail the discrimination as a backstop;
-    so does a crash the record CLI reports as an unexpected-error refusal, and a SystemExit(0) from the
-    flipped run fails it as a harness exception, never escaping."""
+    """A declared backstop is accepted only when the backstop printed it from the recorded injection the
+    flip declares: an unrelated EIO under flip_t77's declarations, a RuntimeError carrying the declared
+    NameError's text, a twin of the recorded NameError raised in its place, and a twin raised by the
+    backstop's own print of the recorded NameError (which the outer backstop then prints) each fail the
+    discrimination as a backstop; so does a crash the record CLI reports as an unexpected-error refusal,
+    and a SystemExit(0) from the flipped run fails it as a harness exception, never escaping."""
     me = sys.modules[__name__]
 
     def create():
@@ -6564,6 +6605,8 @@ def t83_backstop_bound_to_injection(fx):
              lambda: patch.object(me, "_t82_declared_crash", _t83_mimic_crash), backstop),
             ("twin-object", create, _t82_declared_flip,
              lambda: patch.object(me, "_t82_declared_crash", _t83_twin_crash), backstop),
+            ("print-twin", create, _t83_print_twin_flip,
+             lambda: _t83_declared_as(_t83_print_twin_flip, _t82_declared_flip), backstop),
             ("resolver-refusal", create, _t83_resolver_flip, contextlib.nullcontext, backstop),
             ("system-exit", create, _t83_exit_flip, contextlib.nullcontext, harness))
     for label, test, flip, setup, needle in legs:
@@ -6587,8 +6630,8 @@ def flip_t83():
 
 # The flips whose intended red is reached through a CLI backstop, each with the labels of the injections
 # that may cause it. A backstop line is accepted only when a recorded injection of a declared label is its
-# cause: the line is exactly that exception object's backstop line, and that object itself reached the
-# backstop (_bound_injection); any other backstop or exception in the flipped run fails the
+# cause: a record CLI backstop emitted that line printing that very exception object (_EmissionStderr,
+# _bound_injection); any other backstop or exception in the flipped run fails the
 # discrimination. Each label is recorded by one test's injection site alone, so a declaration binds the
 # test, the flip and the injection together. Most label the synthetic failure their test injects, which
 # the reverted handling lets reach the backstop; the T18 flips drop an option guard and record the crash
