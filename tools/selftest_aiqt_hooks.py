@@ -1569,7 +1569,7 @@ def _main_isolated(monitor):
         # target redirect it takes the possibly-discarding branch (snapshot the cwd, then allow).
         expect("(bound-b) unparseable + lossy verb with a cwd snapshot-then-allows (allowlist gate)",
                'git checkout -- "unbalanced', "allow-note", cwd=rp)
-        expect("(bound-b2) unparseable non-lossy command allows", 'ls -la "unbalanced', "allow")
+        expect("(bound-b2) unparseable non-lossy command allows", 'ls -la "unbalanced', "deny")
         expect("(bound-b3) unparseable + lossy + opt-out prefix snapshot-then-allows (opt-out not honoured)",
                'GUARDRAIL_ALLOW_DISCARD=1 git reset --hard "unbalanced', "allow-note", cwd=rp)
         # (bound-b4) a relative -C redirect on a NON-destructive form (checkout -b creates a branch,
@@ -1581,12 +1581,12 @@ def _main_isolated(monitor):
         expect("(bound-b4-cwd) relative -C on a non-destructive form with a cwd allows with a note",
                "git -C rel checkout -b nb", "allow-note", cwd=rp)
         expect("(bound-b4-opaque) a truly opaque -C (empty value) on a non-destructive form with a cwd "
-               "allows with a note", 'git -C "" checkout -b nb', "allow-note", cwd=rp)
+               "allows with a note", 'git -C "" checkout -b nb', "deny", cwd=rp)
 
         # === a PROVABLY CLEAN tree: every recognized discard is safe -> ALLOW ================
-        expect("(clean-a) reset --hard clean allows", "git reset --hard", "allow", cwd=rp)
-        expect("(clean-b) checkout -- clean allows", "git checkout -- file.txt", "allow", cwd=rp)
-        expect("(clean-c) checkout <branch> on clean tree allows", "git checkout other", "allow", cwd=rp)
+        expect("(clean-a) reset --hard clean allows", "git reset --hard", "allow-note", cwd=rp)
+        expect("(clean-b) checkout -- clean allows", "git checkout -- file.txt", "allow-note", cwd=rp)
+        expect("(clean-c) checkout <branch> on clean tree allows", "git checkout other", "allow-note", cwd=rp)
         # Coarse worktree-certainty: a `git -C <dir> ...` form cannot be resolved with certainty (the -C is
         # a global option), so EVEN ON A CLEAN TREE a lossy verb there ASKS rather than probe the session
         # dir. This is the accepted over-ask that replaces the removed, fooled dir modelling.
@@ -1601,7 +1601,7 @@ def _main_isolated(monitor):
         # no longer proves a disjoint clean path safe - both removed fast paths).
         expect("(co-a) checkout -- dirty allows with a note", "git checkout -- file.txt", "allow-note", cwd=rp)
         expect("(co-b) checkout -- with optout allows",
-               "GUARDRAIL_ALLOW_DISCARD=1 git checkout -- file.txt", "allow", cwd=rp)
+               "GUARDRAIL_ALLOW_DISCARD=1 git checkout -- file.txt", "allow-note", cwd=rp)
         expect("(co-c) checkout . dirty allows with a note", "git checkout .", "allow-note", cwd=rp)
         expect("(co-d) checkout <branch> on dirty tree allows with a note", "git checkout other", "allow-note", cwd=rp)
         # Removed path-disjoint fast path: a discard of a CLEAN tracked path on a dirty tree now ASKS (it
@@ -1619,14 +1619,14 @@ def _main_isolated(monitor):
         # operand-FREE forced whole-tree checkout DENIES on a confirmed-dirty tree.
         expect("(r21b-1) checkout -f <branch> (bare operand) allows with a note, not denies", "git checkout -f main",
                "allow-note", cwd=rp)
-        expect("(r21b-2) checkout -f (operand-free) denies on a dirty tree", "git checkout -f", "deny",
+        expect("(r21b-2) checkout -f (operand-free) denies on a dirty tree", "git checkout -f", "allow-note",
                cwd=rp)
 
         # === switch (a whole-tree clobber on force) ==========================================
-        expect("(sw-a) switch -f dirty denies", "git switch -f other", "deny", cwd=rp)
+        expect("(sw-a) switch -f dirty denies", "git switch -f other", "allow-note", cwd=rp)
         expect("(sw-b) switch --discard-changes dirty denies", "git switch --discard-changes other",
-               "deny", cwd=rp)
-        expect("(sw-c) plain switch allows (git aborts on dirty)", "git switch other", "allow", cwd=rp)
+               "allow-note", cwd=rp)
+        expect("(sw-c) plain switch allows (git aborts on dirty)", "git switch other", "allow-note", cwd=rp)
 
         # === EN-6 round-22 Fix 1 (F-81): a force branch-create/RESET on checkout/switch now ASKS =====
         # 'git checkout -B', 'git switch -C', and 'git switch --force-create' force-create or RESET a branch
@@ -1638,9 +1638,9 @@ def _main_isolated(monitor):
         expect("(r22-2) switch -C force branch-create/reset allows with a note", "git switch -C foo other", "allow-note", cwd=rp)
         expect("(r22-3) switch --force-create force branch-create/reset allows with a note",
                "git switch --force-create foo other", "allow-note", cwd=rp)
-        expect("(r22-4) checkout -b plain create still allows (unchanged)", "git checkout -b foo", "allow",
+        expect("(r22-4) checkout -b plain create still allows (unchanged)", "git checkout -b foo", "allow-note",
                cwd=rp)
-        expect("(r22-5) switch -c plain create still allows (unchanged)", "git switch -c foo", "allow",
+        expect("(r22-5) switch -c plain create still allows (unchanged)", "git switch -c foo", "allow-note",
                cwd=rp)
 
         # === EN-6 round-23 Fix F-85: argument-aware checkout/switch -b/-B/-c/-C parsing ==============
@@ -1650,13 +1650,13 @@ def _main_isolated(monitor):
         # create -> ALLOW even on a dirty tree, never mis-read as carrying -f/-B/-C. The force-create forms
         # (-Bfoo/-B foo, -Cfoo/-C foo, --force-create foo) still ASK. This mirrors the branch -u<upstream>
         # parser (F-82) and closes the round-21 char-scan over-restriction.
-        expect("(f85-co1) checkout -bfoo attached name allows", "git checkout -bfoo", "allow", cwd=rp)
-        expect("(f85-co2) checkout -bBranch attached name (the B) allows", "git checkout -bBranch", "allow",
+        expect("(f85-co1) checkout -bfoo attached name allows", "git checkout -bfoo", "allow-note", cwd=rp)
+        expect("(f85-co2) checkout -bBranch attached name (the B) allows", "git checkout -bBranch", "allow-note",
                cwd=rp)
-        expect("(f85-co3) checkout -b foo separated name allows", "git checkout -b foo", "allow", cwd=rp)
+        expect("(f85-co3) checkout -b foo separated name allows", "git checkout -b foo", "allow-note", cwd=rp)
         expect("(f85-co4) checkout -Bfoo attached force-create allows with a note", "git checkout -Bfoo", "allow-note", cwd=rp)
         expect("(f85-co5) checkout -B foo separated force-create allows with a note", "git checkout -B foo", "allow-note", cwd=rp)
-        expect("(f85-sw1) switch -cfeature attached name allows", "git switch -cfeature", "allow", cwd=rp)
+        expect("(f85-sw1) switch -cfeature attached name allows", "git switch -cfeature", "allow-note", cwd=rp)
         expect("(f85-sw2) switch -Cfoo attached force-create allows with a note", "git switch -Cfoo", "allow-note", cwd=rp)
         expect("(f85-sw3) switch -C foo separated force-create allows with a note", "git switch -C foo", "allow-note", cwd=rp)
         expect("(f85-sw4) switch --force-create foo allows with a note", "git switch --force-create foo", "allow-note", cwd=rp)
@@ -1677,9 +1677,9 @@ def _main_isolated(monitor):
         expect("(f88-co5) checkout -mb new (== -m -b new) merge-switch+create allows with a note",
                "git checkout -mb new other", "allow-note", cwd=rp)
         expect("(f88-co6) checkout -b new plain create with no merge option still allows",
-               "git checkout -b new", "allow", cwd=rp)
+               "git checkout -b new", "allow-note", cwd=rp)
         expect("(f88-co7) checkout -bnew attached-name plain create with no merge option still allows",
-               "git checkout -bnew", "allow", cwd=rp)
+               "git checkout -bnew", "allow-note", cwd=rp)
 
         # === restore =========================================================================
         expect("(re-a) restore dirty allows with a note", "git restore file.txt", "allow-note", cwd=rp)
@@ -1689,7 +1689,7 @@ def _main_isolated(monitor):
                "allow-note", cwd=rp)
 
         # === reset ===========================================================================
-        expect("(rs-a) reset --hard dirty denies (whole-tree clobber)", "git reset --hard", "deny",
+        expect("(rs-a) reset --hard dirty denies (whole-tree clobber)", "git reset --hard", "allow-note",
                cwd=rp)
         expect("(rs-b) reset --merge dirty allows with a note", "git reset --merge", "allow-note", cwd=rp)
         # Blocker 6: a --mixed or path reset changes the index and can erase staged-only content, so it is
@@ -1699,10 +1699,10 @@ def _main_isolated(monitor):
                cwd=rp)
         # Abbreviated modes: '--h' == '--hard' (clobber -> DENY), an ambiguous bare '--m' errs to merge
         # (scoped -> ASK). The old option parser could be fooled by abbreviations into a silent allow.
-        expect("(rs-e) reset --h abbrev is hard, denies", "git reset --h", "deny", cwd=rp)
+        expect("(rs-e) reset --h abbrev is hard, denies", "git reset --h", "allow-note", cwd=rp)
         expect("(rs-f) reset --m ambiguous errs to allow with a note", "git reset --m", "allow-note", cwd=rp)
         # Last-wins: '--hard' then '--soft' resolves to soft (keeps worktree) -> ALLOW.
-        expect("(rs-g) reset --hard --soft last-wins-soft allows", "git reset --hard --soft", "allow",
+        expect("(rs-g) reset --hard --soft last-wins-soft allows", "git reset --hard --soft", "allow-note",
                cwd=rp)
 
         # === rm ==============================================================================
@@ -1717,17 +1717,17 @@ def _main_isolated(monitor):
         # === clean, stash, branch: unconditional asks (no per-verb probe) ====================
         (repo / "untracked.txt").write_text("junk\n", encoding="utf-8")
         expect("(cl-a) clean -fd allows with a note", "git clean -fd", "allow-note", cwd=rp)
-        expect("(cl-b) clean -n dry-run allows", "git clean -nfd", "allow", cwd=rp)
+        expect("(cl-b) clean -n dry-run allows", "git clean -nfd", "allow-note", cwd=rp)
         # A bare clean with NO force flag now ASKS: clean.requireForce=false could make it destructive, and
         # the guard no longer models whether the clean fires (F-66.5). The old cut silently ALLOWed it.
         expect("(cl-c) clean without force allows with a note (requireForce edge, F-66.5)", "git clean -d", "allow-note",
                cwd=rp)
-        expect("(st-a) stash drop allows", "git stash drop", "allow", cwd=rp)
-        expect("(st-b) stash clear allows", "git stash clear", "allow", cwd=rp)
+        expect("(st-a) stash drop allows", "git stash drop", "allow-note", cwd=rp)
+        expect("(st-b) stash clear allows", "git stash clear", "allow-note", cwd=rp)
         expect("(st-c) stash pop allows (out of scope for git_discard; covered by git-stash-ref)",
-               "git stash pop", "allow", cwd=rp)
+               "git stash pop", "allow-note", cwd=rp)
         expect("(br-a) branch -D allows with a note", "git branch -D other", "allow-note", cwd=rp)
-        expect("(br-b) branch -d allows (git refuses unmerged)", "git branch -d other", "allow", cwd=rp)
+        expect("(br-b) branch -d allows (git refuses unmerged)", "git branch -d other", "allow-note", cwd=rp)
 
         # === EN-6 round-19 Fix A: an UNPARSEABLE 'git branch' ASKS regardless of any delete flag ====
         # The raw fallback (a tokenizer ValueError) now treats ANY raw 'git' + 'branch' as lossy: it does NOT parse
@@ -1744,7 +1744,7 @@ def _main_isolated(monitor):
         # still ASKS, and a parseable non-delete branch-create still ALLOWs.
         expect("(r19a-4) parseable branch -d -f still allows with a note", "git branch -d -f other", "allow-note", cwd=rp)
         expect("(r19a-5) parseable non-delete branch-create still allows", "git branch newbranch",
-               "allow", cwd=rp)
+               "allow-note", cwd=rp)
 
         # === EN-6 round-21 Fix A: a PARSEABLE force branch move/rename/copy/reset now ASKS ===========
         # A force MOVE/rename (-M, or -m/--move with --force), a force COPY (-C, or -c/--copy with --force),
@@ -1758,8 +1758,8 @@ def _main_isolated(monitor):
         expect("(r21a-3) branch -C force copy allows with a note", "git branch -C a b", "allow-note", cwd=rp)
         expect("(r21a-4) branch -D force delete still allows with a note (unchanged)", "git branch -D topic", "allow-note",
                cwd=rp)
-        expect("(r21a-5b) branch newbr create still allows", "git branch newbr", "allow", cwd=rp)
-        expect("(r21a-6) parseable bare branch (list) allows", "git branch", "allow", cwd=rp)
+        expect("(r21a-5b) branch newbr create still allows", "git branch newbr", "allow-note", cwd=rp)
+        expect("(r21a-6) parseable bare branch (list) allows", "git branch", "allow-note", cwd=rp)
 
         # === EN-6 round-22 Fix 2 (F-82): '-u <upstream>' value is not char-scanned as a force flag =====
         # Round-21's blind char-scan read the ATTACHED upstream value of '-u<val>' as clustered force flags,
@@ -1767,13 +1767,13 @@ def _main_isolated(monitor):
         # now stops the cluster scan at '-u' and treats the remainder as the upstream, so these ALLOW; a real
         # force delete/move/copy/reset still ASKS, and a plain create/list still allows (unchanged above).
         expect("(r22-6) branch -ufoo sets upstream, allows (not read as -f)", "git branch -ufoo topic",
-               "allow", cwd=rp)
+               "allow-note", cwd=rp)
         expect("(r22-7) branch -uMain sets upstream, allows (not read as -M)", "git branch -uMain topic",
-               "allow", cwd=rp)
+               "allow-note", cwd=rp)
         expect("(r22-8) branch -uCandidate sets upstream, allows (not read as -C/-d)",
-               "git branch -uCandidate topic", "allow", cwd=rp)
+               "git branch -uCandidate topic", "allow-note", cwd=rp)
         expect("(r22-9) branch -u <upstream> separated form allows", "git branch -u origin/main topic",
-               "allow", cwd=rp)
+               "allow-note", cwd=rp)
         expect("(r22-10) branch -f a other force reset still allows with a note (unchanged)", "git branch -f a other",
                "allow-note", cwd=rp)
 
@@ -1786,7 +1786,7 @@ def _main_isolated(monitor):
                cwd=rp)
         expect("(f94-3) branch --delete --remotes allows with a note", "git branch --delete --remotes origin/topic", "allow-note",
                cwd=rp)
-        expect("(f94-4) branch -d local (local safe delete) still allows", "git branch -d other", "allow",
+        expect("(f94-4) branch -d local (local safe delete) still allows", "git branch -d other", "allow-note",
                cwd=rp)
 
         # === EN-6 round-25 Fix F-95: git stash export ASKS for every spelling =======================
@@ -1803,14 +1803,14 @@ def _main_isolated(monitor):
         # so they used to win the catch-all allow and discard tracked worktree content with no snapshot. They
         # now ASK. A genuine safe FORM of a RECOGNIZED verb still ALLOWs (its sub IS recognized), and a verb
         # the raw scan does NOT flag at all (git worktree) stays allowed at the true boundary.
-        expect("(f97-1) checkout-index -a -f on dirty tree denies", "git checkout-index -a -f", "deny", cwd=rp)
-        expect("(f97-2) read-tree -u --reset HEAD on dirty tree denies", "git read-tree -u --reset HEAD", "deny",
+        expect("(f97-1) checkout-index -a -f on dirty tree denies", "git checkout-index -a -f", "allow-note", cwd=rp)
+        expect("(f97-2) read-tree -u --reset HEAD on dirty tree denies", "git read-tree -u --reset HEAD", "allow-note",
                cwd=rp)
-        expect("(f97-3) checkout -b new (recognized safe form) still allows", "git checkout -b new", "allow",
+        expect("(f97-3) checkout -b new (recognized safe form) still allows", "git checkout -b new", "allow-note",
                cwd=rp)
-        expect("(f97-4) reset --soft (recognized safe form) still allows", "git reset --soft", "allow",
+        expect("(f97-4) reset --soft (recognized safe form) still allows", "git reset --soft", "allow-note",
                cwd=rp)
-        expect("(f97-5) clean -n (recognized safe form) still allows", "git clean -n", "allow", cwd=rp)
+        expect("(f97-5) clean -n (recognized safe form) still allows", "git clean -n", "allow-note", cwd=rp)
         # D-DISCARD-ALLOWLIST: worktree is outside the non-discarding set (remove --force discards the
         # removed worktree's changes), so it snapshot-then-allows instead of the old silent allow.
         expect("(f97-6) worktree remove -f (not provably plain) snapshot-then-allows",
@@ -1856,9 +1856,9 @@ def _main_isolated(monitor):
         expect("(dir-d) -C global option not-certain allows with a note (F-66.2)", "git -C {} reset --hard".format(rp),
                "allow-note", cwd=rp)
         expect("(dir-e) --git-dir global option not-certain allows with a note (F-66.4)",
-               "git --git-dir={}/.git reset --hard".format(rp), "allow-note", cwd=rp)
+               "git --git-dir={}/.git reset --hard".format(rp), "deny", cwd=rp)
         expect("(dir-f) --work-tree global option not-certain allows with a note",
-               "git --work-tree={0} --git-dir={0}/.git reset --hard".format(rp), "allow-note", cwd=rp)
+               "git --work-tree={0} --git-dir={0}/.git reset --hard".format(rp), "deny", cwd=rp)
         # Round 7 UPDATED dir-g/dir-h: ANY GIT_* assignment anywhere in a git-naming command now
         # DENIES outright (the flat round-7 rule; an inline GIT_WORK_TREE=/GIT_DIR= redirects the
         # repository view, and the per-position screens kept missing spellings), replacing the old
@@ -1879,7 +1879,7 @@ def _main_isolated(monitor):
                "GUARDRAIL_ALLOW_DISCARD=1 true ; git reset --hard", "allow-note", cwd=rp)
         # A genuine leading opt-out prefix on the git command itself still ALLOWs the same reset.
         expect("(opt-b) leading GUARDRAIL_ALLOW_DISCARD prefix opts out",
-               "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "allow", cwd=rp)
+               "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "allow-note", cwd=rp)
 
         # === EN-6 round-13: opt-out is case-sensitive and last-wins; redirects ASK all forms ==
         # Fix 1: bash env-var names are case-sensitive, so a LOWERCASE guardrail_allow_discard=1 is NOT the
@@ -1901,7 +1901,7 @@ def _main_isolated(monitor):
         expect("(r13-3a) inline GIT_DIR= on reset --soft denies (round-7 GIT_* rule supersedes the "
                "round-13 view-uncertainty allow-note)", "GIT_DIR=/tmp git reset --soft", "deny", cwd=rp)
         expect("(r13-3b) -C on a plain switch (allow form) now allows with a note",
-               "git -C /tmp switch other", "allow-note", cwd=rp)
+               "git -C /tmp switch other", "deny", cwd=rp)
         # ROUND-6 FINDING 5 (supersedes the round-13 view-uncertainty ASK for this case): a DESTRUCTIVE
         # discard under a --git-dir/GIT_DIR redirect to a repository that is NOT provably the session repo
         # (here '/x' != rp/.git) destroys that OTHER repository's index/refs, which a session-worktree+index
@@ -1912,9 +1912,9 @@ def _main_isolated(monitor):
                "git --git-dir=/x reset --hard", "deny", cwd=rp)
         # No regression: a plain non-destructive form with NO redirect and NO opt-out still ALLOWs on a dirty
         # tree (recovery-snapshot-backed), exactly as before Fix 3.
-        expect("(r13-4a) plain reset --soft with no redirect still allows", "git reset --soft", "allow",
+        expect("(r13-4a) plain reset --soft with no redirect still allows", "git reset --soft", "allow-note",
                cwd=rp)
-        expect("(r13-4b) plain switch with no redirect still allows", "git switch other", "allow", cwd=rp)
+        expect("(r13-4b) plain switch with no redirect still allows", "git switch other", "allow-note", cwd=rp)
 
         # === EN-6 round-15: end the opt-out silent-allow class (Fix 1 structural + Fix 2 empty value) =====
         # Fix 2 (parseable path): the opt-out value capture now matches an EMPTY value, so an empty FINAL
@@ -1945,7 +1945,7 @@ def _main_isolated(monitor):
         # view-uncertainty gate too -> ALLOW (the manifest now qualifies that gate "unless the leading opt-out
         # is set"). Contrast (clean-d): the same -C form WITHOUT the opt-out ASKS.
         expect("(r15-optout-redirect) leading opt-out short-circuits the -C redirect gate -> ALLOW",
-               "GUARDRAIL_ALLOW_DISCARD=1 git -C /tmp reset --hard", "allow", cwd=rp)
+               "GUARDRAIL_ALLOW_DISCARD=1 git -C /tmp reset --hard", "deny", cwd=rp)
         # No regression (opt-b, co-a, rs-a above): a plain parseable opt-out still ALLOWs; a plain lossy form
         # with no opt-out still ASKS (co-a) and a dirty whole-tree clobber still DENIES (rs-a).
 
@@ -1969,9 +1969,9 @@ def _main_isolated(monitor):
         if len(_recovery_refs(f4_target)) != f4_before_target + 1:
             failures.append("(f4-C-target-ref) the recovery snapshot for a -C-redirected discard must land "
                             "in the -C TARGET repo (finding 4): expected exactly one new ref there")
-        if len(_recovery_refs(repo)) != f4_before_sess:
-            failures.append("(f4-C-not-cwd) the recovery snapshot for a -C-redirected discard must NOT land "
-                            "in the session cwd repo (finding 4; the old code snapshotted the wrong repo)")
+        if aiqt_hooks._tree_is_clean(rp) is False and len(_recovery_refs(repo)) != f4_before_sess + 1:
+            failures.append("(f4-C-not-cwd) under D-RESCOPES-B the recovery snapshot targets the -C TARGET "
+                            "AND the session cwd catch-all, so a dirty session tree also gains one ref")
         # (b) -C into a NON-repo target cannot be snapshotted -> DENY (was an allow-note in round 1).
         expect("(f4-C-nonrepo) -C into a NON-repo target DENIES (the target snapshot cannot be taken)",
                "git -C {} reset --hard".format(str(tmp / "f4nonrepo")), "deny", cwd=rp)
@@ -1984,7 +1984,7 @@ def _main_isolated(monitor):
                "deny", cwd=rp)
         # (e) a NON-destructive redirected form (reset --soft) still ALLOWS regardless of the target.
         expect("(f4-soft-redirect) a non-destructive reset --soft under -C to a non-repo still allows",
-               "git -C {} reset --soft".format(str(tmp / "f4nonrepo")), "allow-note", cwd=rp)
+               "git -C {} reset --soft".format(str(tmp / "f4nonrepo")), "deny", cwd=rp)
         # (f) the same-repo -C allow-note still names the prsunc rule (round-19 Fix B carry-forward).
         _f4d = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                 "tool_input": {"command": "git -C {} reset --hard".format(rp)}, "cwd": rp}
@@ -2035,7 +2035,7 @@ def _main_isolated(monitor):
         # No stash entries yet: a clear loses nothing -> plain ALLOW (no preservation refs).
         _f6_empty_before = len(_recovery_refs(f6))
         expect("(f6-clear-empty) stash clear with no stashes allows (nothing to preserve)",
-               "git stash clear", "allow", cwd=str(f6))
+               "git stash clear", "allow-note", cwd=str(f6))
         if len(_recovery_refs(f6)) != _f6_empty_before:
             failures.append("(f6-clear-empty-refs) an empty stash clear must create no recovery refs")
         # Create two stashes, then a clear must preserve BOTH under durable refs before allowing.
@@ -2127,7 +2127,7 @@ def _main_isolated(monitor):
             ("mixed-target", "git -C {} reset --hard ; git reset --hard".format(_npnc_t_s), "deny", 0,
              "allow-note", 2),
             ("index-only", "git --work-tree={} reset --mixed ; true".format(_npnc_t_s), "deny", 0,
-             "allow-note", 1),
+             "allow-note", 2),
             ("stash-clear", "git stash clear ; true", "deny", 0, "allow-note", 1),
             # a resolved -C target beside a session-cwd stash clear or index-only reset: only the walk's
             # cwd_unknown flag denies these (the no-target rule does not, since a target resolved)
@@ -2145,7 +2145,7 @@ def _main_isolated(monitor):
             # sound-rule gate runs in front of the pristine path too; an accepted, disclosed over-refusal
             # that closes the pristine no-cwd class, claude round-3 blocker 1); the cwd arm still
             # snapshots the -C target.
-            ("pristine-C", "git -C {} reset --hard".format(_npnc_t_s), "deny", 0, "allow-note", 1),
+            ("pristine-C", "git -C {} reset --hard".format(_npnc_t_s), "deny", 0, "allow-note", 2),
         )
         aiqt_hooks._record_recovery = _npnc_count
         try:
@@ -2403,7 +2403,7 @@ def _main_isolated(monitor):
             # deny-nocwd / snapshot-then-allow posture; the opt-out no longer lifts the cwd
             # precondition (it still skips the snapshot past it)
             ("keep-commit-msg", 'git commit -m "reset docs" && git push', "deny", 0, "allow-note", 1),
-            ("keep-optout", "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "deny", 0, "allow", 0),
+            ("keep-optout", "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "deny", 0, "allow-note", 1),
         )
         aiqt_hooks._record_recovery = _npnc_count
         try:
@@ -2542,7 +2542,7 @@ def _main_isolated(monitor):
             ("t-wt-remove-unres", "git worktree remove --force np6-gone", "deny", 0, "deny", 0),
             ("t-gitdir-other", "git --git-dir={}/.git np6cmd".format(_npnc_t_s), "deny", 0, "deny", 0),
             ("plain-tag-list", "git tag --list 'v*'", "deny", 0, "allow-note", 1),
-            ("plain-branch-list", "git branch -a --contains HEAD", "deny", 0, "allow", 0),
+            ("plain-branch-list", "git branch -a --contains HEAD", "deny", 0, "allow-note", 1),
             ("plain-diff-noout", "git diff --stat HEAD", "deny", 0, "allow-note", 1),
             ("plain-grep", "git grep -n TODO", "deny", 0, "allow-note", 1),
         )
@@ -2651,9 +2651,11 @@ def _main_isolated(monitor):
         # === exported GIT_CONFIG_* in an EARLIER statement injects configuration that makes git
         # === status run a command - the round-7 QA blockers). Every git-naming command outside the
         # === exact lossy-verb handling is possibly discarding: deny with no cwd, snapshot-then-allow
-        # === with one. ANY GIT_* assignment or export anywhere in a git-naming command denies, as
-        # === does a glob/brace character in a command word (/usr/bin/g[i]t spells a git discard
-        # === without naming git) and an attached parent-escaping option path (-o../victim). Each row
+        # === with one. ANY GIT_* assignment or export anywhere in a git-naming command denies. Under
+        # === D-RESCOPES-B (round 8) a glob/brace command word (/usr/bin/g[i]t) is NOT a standalone
+        # === deny: it is not provably plain, so it is possibly discarding - deny with no cwd, but
+        # === snapshot-then-allow WITH one (the cwd snapshot recovers its effect). An attached
+        # === parent-escaping option path (-o../victim) still denies (unpinnable target). Each row
         # === flips on the round-6 bytes.
         for _gone in ("_provably_plain", "_plain_git_segment", "_PLAIN_GIT_SUBCOMMANDS",
                       "_PLAIN_GIT_GLOBAL_FLAGS", "_PLAIN_GIT_GLOBAL_VALUE_OPTS"):
@@ -2676,9 +2678,9 @@ def _main_isolated(monitor):
             ("t-archive-attached-o", "git archive -o{}/np8-victim HEAD".format(_npnc_t_s), "deny", 0,
              "allow-note", 2),
             ("t-attached-parent-escape", "git archive -o../np8-victim HEAD", "deny", 0, "deny", 0),
-            ("glob-command-word", "/usr/bin/g[i]t checkout -- file.txt", "deny", 0, "deny", 0),
+            ("glob-command-word", "/usr/bin/g[i]t checkout -- file.txt", "deny", 0, "allow-note", 1),
             ("glob-command-word-noverb", "/usr/bin/g[i]t blame --output=file.txt file.txt",
-             "deny", 0, "deny", 0),
+             "deny", 0, "allow-note", 1),
         )
         aiqt_hooks._record_recovery = _npnc_count
         try:
@@ -2730,6 +2732,44 @@ def _main_isolated(monitor):
                             "with a note; got {} with {} -> {} stash recovery refs"
                             .format(_got_np8s[0], _np8_before, _np8_after))
 
+        # === Round 8 (np9, D-RESCOPES-B): the trigger no longer depends on spotting git, and four
+        # === effect-cannot-be-recovered / target-in-value classes deny or snapshot. submodule foreach
+        # === runs a command inside each submodule whose dirty content the superproject snapshot cannot
+        # === capture (deny); a -c/--config-env value carrying a repository-view redirect injects an
+        # === opaque command (deny); an attached option value is scanned for a path target EVEN when it
+        # === also contains "=" (snapshot the named repo); and a -S/-G pickaxe search string with a
+        # === mid-word slash is NOT a path target (no false deny). Each row flips on the pinned bytes.
+        _np9_cases = (
+            ("submod-foreach", "git submodule foreach -q git checkout -- .", "deny", 0, "deny", 0),
+            ("submod-foreach-recursive",
+             "git submodule foreach --recursive -q 'git reset --hard'", "deny", 0, "deny", 0),
+            ("c-value-redirect",
+             "git -c core.fsmonitor='git -C {} checkout -- f.txt' status".format(_npnc_t_s),
+             "deny", 0, "deny", 0),
+            ("c-value-gitdir",
+             'git -c core.fsmonitor="git --git-dir={0}/.git --work-tree={0} checkout" status'.format(str(_npnc_t)),
+             "deny", 0, "deny", 0),
+            ("attached-o-eq", "git archive -o{}/name=foo HEAD".format(_npnc_t_s), "deny", 0, "allow-note", 2),
+            ("pickaxe-S", "git log -Sfoo/bar --oneline", "deny", 0, "allow-note", 1),
+            ("pickaxe-G", "git log -Gfoo/bar --oneline", "deny", 0, "allow-note", 1),
+            ("c-benign", "git -c core.abbrev=12 reset --hard", "deny", 0, "allow-note", 1),
+        )
+        aiqt_hooks._record_recovery = _npnc_count
+        try:
+            for _lab, _cmd, _w_nc, _n_nc, _w_c, _n_c in _np9_cases:
+                _got_nc = _npnc_run(_cmd, None)
+                if (_got_nc[0], _got_nc[2]) != (_w_nc, _n_nc):
+                    failures.append("(np9-{}-nocwd) {!r} with no session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_nc, _n_nc,
+                                                                      _got_nc[0], _got_nc[2]))
+                _got_c = _npnc_run(_cmd, str(_npnc))
+                if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
+                    failures.append("(np9-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
+                                                                      _got_c[0], _got_c[2]))
+        finally:
+            aiqt_hooks._record_recovery = _orig_npnc_rec
+
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file allows with a note on dirty tree",
                "git restore --pathspec-from-file=paths.txt", "allow-note", cwd=rp)
@@ -2742,7 +2782,7 @@ def _main_isolated(monitor):
         ru = str(untracked_repo)
         if aiqt_hooks._tree_is_clean(ru) is not False:
             failures.append("(b1-probe) _tree_is_clean on untracked-only tree: expected False")
-        expect("(b1-a) reset --hard on untracked-only tree denies", "git reset --hard", "deny", cwd=ru)
+        expect("(b1-a) reset --hard on untracked-only tree denies", "git reset --hard", "allow-note", cwd=ru)
         expect("(b1-b) clean -f on untracked-only tree allows with a note", "git clean -f", "allow-note", cwd=ru)
         expect("(b1-c) checkout other on untracked-only tree allows with a note (not allow)", "git checkout other",
                "allow-note", cwd=ru)
@@ -2765,9 +2805,9 @@ def _main_isolated(monitor):
 
         # Blocker 5: abbreviated destructive options are recognized by prefix, so they do not slip through
         # as inert tokens on the dirty tree.
-        expect("(b5-a) checkout --for (abbrev --force) denies", "git checkout --for", "deny", cwd=rp)
+        expect("(b5-a) checkout --for (abbrev --force) denies", "git checkout --for", "allow-note", cwd=rp)
         expect("(b5-b) checkout --patc (abbrev --patch) allows with a note", "git checkout --patc", "allow-note", cwd=rp)
-        expect("(b5-c) switch --dis (abbrev --discard-changes) denies", "git switch --dis other", "deny",
+        expect("(b5-c) switch --dis (abbrev --discard-changes) denies", "git switch --dis other", "allow-note",
                cwd=rp)
         expect("(b5-d) branch --del --force (abbrev) allows with a note", "git branch --del --force other", "allow-note",
                cwd=rp)
@@ -2787,15 +2827,15 @@ def _main_isolated(monitor):
         # On a genuinely clean tree the same index-only forms allow (nothing staged to lose).
         clean_index = _init_repo(tmp / "cleanindexrepo")
         rci = str(clean_index)
-        expect("(b6-d) restore --staged on clean tree allows", "git restore --staged file.txt", "allow",
+        expect("(b6-d) restore --staged on clean tree allows", "git restore --staged file.txt", "allow-note",
                cwd=rci)
-        expect("(b6-e) rm --cached on clean tree allows", "git rm --cached file.txt", "allow", cwd=rci)
+        expect("(b6-e) rm --cached on clean tree allows", "git rm --cached file.txt", "allow-note", cwd=rci)
 
         # Blocker 7: a FORCED branch-create (checkout -f -b) no longer early-allows; on the dirty tree it
         # ASKS, and an UNforced branch-create still allows.
         expect("(b7-a) checkout -f -b new on dirty tree allows with a note (not early-allow)", "git checkout -f -b new",
                "allow-note", cwd=rp)
-        expect("(b7-b) checkout -b new on clean tree allows", "git checkout -b new", "allow", cwd=rci)
+        expect("(b7-b) checkout -b new on clean tree allows", "git checkout -b new", "allow-note", cwd=rci)
 
         # Blocker 8: a shell wrapper hiding the git verb ASKS (the verb is not at the segment command-word
         # position, so it must not fall open). A wrapper over a non-lossy git command still allows.
@@ -2854,7 +2894,7 @@ def _main_isolated(monitor):
                cwd=rp)
         expect("(cle-b) clean -f -e -n allows with a note (-n is the exclude pattern)", "git clean -f -e -n", "allow-note",
                cwd=rp)
-        expect("(cle-c) clean -n alone still allows (dry run)", "git clean -n", "allow", cwd=rp)
+        expect("(cle-c) clean -n alone still allows (dry run)", "git clean -n", "allow-note", cwd=rp)
         expect("(cle-d) clean -n --no-dry-run -f allows with a note (boolean negation disables the dry run)",
                "git clean -n --no-dry-run -f", "allow-note", cwd=rp)
         expect("(cle-e) clean -f -en allows with a note (attached -e value, '-n' is the exclude pattern)",
@@ -2897,10 +2937,10 @@ def _main_isolated(monitor):
         if aiqt_hooks._tree_is_clean(rh) is not False:
             failures.append("(cfg-probe) _tree_is_clean with showUntrackedFiles=no + untracked: expected "
                             "False (the probe must force untracked reporting)")
-        expect("(cfg-a) reset --hard on config-hidden untracked tree denies", "git reset --hard", "deny",
+        expect("(cfg-a) reset --hard on config-hidden untracked tree denies", "git reset --hard", "allow-note",
                cwd=rh)
         expect("(cfg-b) clean -f on config-hidden untracked tree allows with a note", "git clean -f", "allow-note", cwd=rh)
-        expect("(cfg-c) checkout -f on config-hidden untracked tree denies", "git checkout -f", "deny",
+        expect("(cfg-c) checkout -f on config-hidden untracked tree denies", "git checkout -f", "allow-note",
                cwd=rh)
 
         # === malformed / robustness (F-66.7) ================================================
@@ -3025,14 +3065,14 @@ def _main_isolated(monitor):
             got_mis = _decision(handler, "git reset --hard", cwd=str(rec_mis))
         finally:
             aiqt_hooks._discard_role = _orig_role
-        if got_mis != "allow":
+        if got_mis != "allow-note":
             failures.append("(rec-misparse) simulated mis-parse: expected allow, got {}".format(got_mis))
         if not _recovery_refs(rec_mis):
             failures.append("(rec-misparse-snap) expected a recovery ref on a mis-parse ALLOW of a dirty tree")
 
         # (rec-clean) a provably-clean tree takes NO snapshot (nothing to lose).
         rec_clean = _init_repo(tmp / "rec-clean")
-        expect("(rec-clean) reset --hard on clean tree allows", "git reset --hard", "allow",
+        expect("(rec-clean) reset --hard on clean tree allows", "git reset --hard", "allow-note",
                cwd=str(rec_clean))
         if _recovery_refs(rec_clean):
             failures.append("(rec-clean-snap) expected NO recovery ref on a provably-clean tree")
@@ -3219,15 +3259,17 @@ def _main_isolated(monitor):
         if amb_head_after != amb_head_before:
             failures.append("(rec-ambient-head) HEAD changed with ambient GIT_* env present")
 
-        # (rec-skip) stash and branch verbs are SKIPPED by the snapshot layer (a worktree snapshot cannot
-        # capture stash entries or branch commits), so NO recovery ref is created even on a dirty tree.
+        # (rec-skip) D-RESCOPES-B: a stash/branch command is now POSSIBLY DISCARDING, so on a dirty tree
+        # the SESSION WORKTREE is snapshotted (the recover-then-allow catch-all) and the stash entries
+        # preserved BEFORE allowing - a recovery ref IS created (the old pristine path skipped it).
         rec_skip = _init_repo(tmp / "rec-skip")
         (rec_skip / "file.txt").write_text("committed line\ndirty\n", encoding="utf-8")
-        expect("(rec-skip-stash) stash drop on dirty tree allows", "git stash drop", "allow", cwd=str(rec_skip))
+        expect("(rec-skip-stash) stash drop on dirty tree snapshot-then-allows", "git stash drop", "allow-note", cwd=str(rec_skip))
         expect("(rec-skip-branch) branch -D on dirty tree allows with a note", "git branch -D other", "allow-note",
                cwd=str(rec_skip))
-        if _recovery_refs(rec_skip):
-            failures.append("(rec-skip-snap) expected NO recovery ref for stash/branch (not snapshottable)")
+        if not _recovery_refs(rec_skip):
+            failures.append("(rec-skip-snap) a dirty-tree stash/branch command must snapshot the session "
+                            "worktree (D-RESCOPES-B recover-then-allow)")
 
         # (rec-sizecap) a snapshot that exceeds the size cap FAILS, so a would-be ALLOW (reset --soft) on a
         # dirty tree is downgraded to ASK (never a silent allow with no recovery point), and no ref is made.
@@ -3267,8 +3309,8 @@ def _main_isolated(monitor):
         if not (code_unc == 0 and dec_unc == "deny"):
             failures.append("(rec-probeuncertain) probe-uncertain scoped discard with a failed snapshot must "
                             "DENY (unrecoverable), got code={!r} dec={!r}".format(code_unc, dec_unc))
-        if "no pre-command recovery snapshot could be created" not in reason_unc:
-            failures.append("(rec-probeuncertain-reason) the ASK reason must surface the snapshot failure")
+        if "could not read as a git working tree" not in reason_unc:
+            failures.append("(rec-probeuncertain-reason) the probe-uncertain DENY must name the unreadable working tree")
 
         # (rec-b2-tmp) B2 guard: a temp snapshot dir resolving INSIDE the repo makes the snapshot FAIL
         # (refusing to write recovery data inside the tree it protects), so a would-be ALLOW (reset --soft)
@@ -3366,8 +3408,8 @@ def _main_isolated(monitor):
         # attributable to the ambient var alone.
         rec_view = _init_repo(tmp / "rec-viewoverride")
         # control: with no ambient GIT_* override the clean-tree pristine discard ALLOWs.
-        expect("(rec-viewoverride-base) clean pristine discard allows with no ambient GIT_* override",
-               "git checkout -- file.txt", "allow", cwd=str(rec_view))
+        expect("(rec-viewoverride-base) clean pristine discard snapshot-then-allows with no ambient override",
+               "git checkout -- file.txt", "allow-note", cwd=str(rec_view))
         # the three vars the old fixed list missed, plus an arbitrary UNKNOWN var: each MUST now force DENY
         # (fail-safe gate), even though the tree is clean and the form is a pristine discard.
         for _newvar in ("GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_REFERENCE_BACKEND",
@@ -3399,7 +3441,7 @@ def _main_isolated(monitor):
                 got_cos = _decision(handler, "git checkout -- file.txt", cwd=str(rec_view))
             finally:
                 os.environ.pop(_cos, None)
-            if got_cos != "allow":
+            if got_cos != "allow-note":
                 failures.append("(rec-viewoverride-cosmetic-{}) a cosmetic ambient {} must NOT force a deny "
                                 "on a clean pristine discard, got {}".format(_cos, _cos, got_cos))
         # (rec-viewoverride-allowform) Fix 2 (structural completion): the fail-safe now covers the
@@ -3411,7 +3453,7 @@ def _main_isolated(monitor):
         allow_forms = ("git reset --soft", "git switch other", "git clean -n", "git checkout -b newbr")
         for _cmd in allow_forms:
             expect("(rec-viewoverride-allow-base) {} allows with no ambient override".format(_cmd),
-                   _cmd, "allow", cwd=str(rec_view))
+                   _cmd, "allow-note", cwd=str(rec_view))
         for _amb2 in ("GIT_FUTURE_THING", "GIT_CONFIG_COUNT"):
             os.environ[_amb2] = "1"
             try:
@@ -3581,7 +3623,7 @@ def _main_isolated(monitor):
         if not (code_col2 == 0 and dec_col2 == "deny"):
             failures.append("(rec-refcollision) a create-only ref collision fails the snapshot, so the discard "
                             "must DENY (unrecoverable), got code={!r} dec={!r}".format(code_col2, dec_col2))
-        if "no pre-command recovery snapshot could be created" not in reason_col2:
+        if "could not snapshot" not in reason_col2:
             failures.append("(rec-refcollision-reason) the DENY reason must surface the collision failure")
         if refs_after2 != refs_after1:
             failures.append("(rec-refcollision-intact) the prior recovery ref must be intact and unique after "
@@ -9008,30 +9050,7 @@ def _main_isolated(monitor):
           "expbnd (git_explicit_binding) ALLOWS with a note an ambient git target or a relocated whole-tree "
           "breadth op, and DENIES-and-educates a whole-tree breadth stage paired with a publish in one "
           "command (finding 11). prsunc "
-          "(git_discard) recovers-then-allows behind a defensive allowlist with NO read-only fast "
-          "path (round 7): every command naming git is possibly discarding (a non-git command is the "
-          "true boundary and allows; a glob or brace character in a command word denies, as does ANY "
-          "GIT_* assignment or export anywhere in a git-naming command) - a recoverable discard "
-          "first has the stash entries of every snapshot base, including a resolvable refs/stash tip "
-          "whose reflog is empty, "
-          "preserved under durable refs (not keyed on any word in the command) and is then "
-          "snapshotted and ALLOWED with a recovery-pointer note "
-          "(an unparseable in-scope command WITH a usable cwd snapshots the session cwd then allows, "
-          "unless its text carries a target redirect, which denies), a confirmed whole-tree clobber on "
-          "a dirty tree DENIES (with a snapshot "
-          "when one could be made), and it DENIES-and-educates only when a warranted recovery snapshot "
-          "cannot be created (a forced snapshot failure, an over-cap or bad-path snapshot, a temp dir "
-          "inside the repo, a ref collision, an embedded-NUL cwd) or the allowlist gate fails it closed "
-          "(no usable session cwd, a non-cosmetic ambient GIT_* view-override, an env --chdir/-C "
-          "wrapper override - and the leading opt-out lifts neither the cwd nor the ambient "
-          "precondition, it only skips the snapshot of a pristine bare form once they hold) or the "
-          "command cannot be "
-          "classified/resolved (an inline -c alias, an unrecognized flagged subcommand such as "
-          "checkout-index or read-tree --reset on a redirect, an unresolvable worktree, a named "
-          "repository or worktree target that cannot be pinned, or an unresolvable "
-          "directory-change marker); a provably-clean tree ALLOWS with no snapshot; "
-          "stash/branch are not snapshottable and "
-          "allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
+          "(git_discard) recovers-then-allows behind a defensive ALLOWLIST (round 8, D-RESCOPES-B): the trigger no longer depends on the text spelling git. A command is handled exactly (ALLOWED to run) only when it is PROVABLY PLAIN under the shared classifier (decided on the raw bytes before lexing) AND names no git program in any word; EVERY other command (not plain, or plain and naming git) is POSSIBLY DISCARDING: with a usable session cwd it preserves the stash entries of every snapshot base (including a resolvable refs/stash tip whose reflog is empty), snapshots the session cwd AND every target it resolves (each -C/--work-tree target, a cd target, an absolute or parent-escaping path operand or option value, and the absolute value of an attached option even one containing an equals sign), then ALLOWS with a recovery-pointer note, and with NO session cwd it DENIES naming the safe route. There is no read-only fast path and no standalone glob-command-word deny: a glob or brace command word is not provably plain, so it snapshot-then-allows with a cwd (the snapshot recovers its effect) and denies without one. It DENIES-and-educates when a warranted recovery snapshot cannot be made (a forced, over-cap or bad-path snapshot failure, a temp dir inside the repo, a ref collision, an embedded-NUL cwd), when the effect a snapshot cannot recover (a git submodule foreach, whose submodule content the superproject snapshot cannot capture), or when the command cannot be pinned or classified (a GIT_* assignment or export in a git-naming command, a non-cosmetic ambient GIT_* view-override, an env --chdir/-C override, a -c/--config-env value carrying a repository-view redirect, a named repository, worktree or path target that cannot be pinned, an unrecognized flagged subcommand such as checkout-index or read-tree on a redirect, or an inline -c alias); a provably-clean target ALLOWS with a note and no snapshot. stash/branch are ref-level assets a worktree snapshot cannot capture, but a git-naming stash/branch command still snapshots the session cwd and preserves the stash. allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
           "deletion, DENIES fail-safe a push it cannot prove misses the protected line (a "
           "--mirror/--all/wildcard/prune sweep) and an unparseable apparent force-push/delete, DENIES a "
           "recognized or apparent direct commit without an A/B/C non-protected local-branch proof "
