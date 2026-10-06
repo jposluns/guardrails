@@ -49,10 +49,14 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     planner records, by the planner's own row rule (_opf_adopt_plan.entry_row_problem, which _inventory
     calls on every row it walks: a canonical path by _opf_adopt_plan._path, a kind in its vocabulary,
     exactly that kind's fields, a file row's size a byte count and its digest well formed, kind="excluded"
-    exactly under a recorded exclusion by _opf_adopt_plan._under), and a duplicate-path row is ambiguous;
-    either is CANNOT-EVALUATE naming the row, never a pass; every exclusion, candidate and empty-directory
-    path must pass _opf_adopt_plan._path too; the recorded source roots must be as the planner records
-    them (_opf_adopt_plan._roots); and the redundant candidates and empty_directories lists are RE-DERIVED
+    exactly under a recorded exclusion by _opf_adopt_plan._under), and the WHOLE observation must be one
+    the planner builds, by the planner's own observation rule (_opf_adopt_plan.observation_problem, which
+    _inventory calls on the observation it built: source and target roots as _roots records them, sorted
+    exclusions with no root beneath one, a scope holding every root it walks, one sorted row per path, a row
+    for every scope path, every declared source available, every other row a child of a directory row,
+    nothing beneath a file, excluded or absent row but an absent scope path, and the walk's bounds); either
+    is CANNOT-EVALUATE naming the problem, never a pass; every exclusion, candidate and empty-directory
+    path must pass _opf_adopt_plan._path too; and the redundant candidates and empty_directories lists are RE-DERIVED
     from the entries by the planner's own derivations (_opf_adopt_plan.candidate_files and
     empty_directories): each recorded path must be one the derivation yields over every root, and under the
     candidate roots the inventory itself fixes (the source roots and .working) the recorded list must EQUAL
@@ -352,7 +356,7 @@ def _check_discovery(ev, rep):
         rep.finding("the planning inventory {!r} is not the one the approved plan binds ({!r})".format(
             claimed, ev.plan["inventory_digest"]))
     obs = doc.get("observation")
-    lists = ("exclusions", "entries", "candidates", "empty_directories", "sources")
+    lists = ("exclusions", "entries", "candidates", "empty_directories", "sources", "targets", "scope")
     if not (isinstance(obs, dict) and all(isinstance(obs.get(k), list) for k in lists)):
         raise Unevaluable("the planning inventory's observation lacks {}".format(", ".join(lists)))
     try:
@@ -367,19 +371,15 @@ def _check_discovery(ev, rep):
         if problem is not None:
             raise Unevaluable("planning inventory entry [{}]: {}; the planner never records such a row "
                               "(a malformed or contradictory record, never skipped)".format(i, problem))
-        if row["path"] in entries:
-            raise Unevaluable("planning inventory entry {!r} is duplicated: the accounting is "
-                              "ambiguous".format(row["path"]))
         entries[row["path"]] = row
+    # The rows' relationships, the source roots' availability included, are the planner's own observation
+    # rule, the one _inventory holds the observation it builds to (a duplicate path is ambiguous there).
+    problem = planner.observation_problem(obs)
+    if problem is not None:
+        raise Unevaluable("the planning inventory's observation is not one the planner builds: {}; a "
+                          "contradictory or ambiguous record is never graded".format(problem))
     rows = list(entries.values())
-    try:
-        roots = planner._roots(obs["sources"])
-    except (planner.PlanError, TypeError, ValueError) as exc:
-        raise Unevaluable("the planning inventory's source roots are not roots the planner records ({})".format(
-            exc))
-    if roots != obs["sources"]:
-        raise Unevaluable("the planning inventory's source roots are not recorded sorted, as the planner "
-                          "records them")
+    roots = list(obs["sources"])
     # The planner's candidate roots are the source roots, .working and the deliverable destinations; the
     # last come from the store manifest, which the inventory does not record, so the re-derivation is exact
     # under the first two only (a disclosed residual).
@@ -797,8 +797,12 @@ _EXTRA_ENTRIES = ()
 # Extra empty_directories paths, and (path, changes) edits to existing entry rows, sealed and bound alike.
 _EXTRA_EMPTY = ()
 _ENTRY_EDITS = ()
-# The planner's recorded source roots for the fixture (sorted, non-overlapping, as _opf_adopt_plan._roots).
+# A function a vector applies to the whole observation (its lists edited in place) before the fixture seals it.
+_OBSERVATION_EDIT = None
+# The planner's recorded source and target roots for the fixture (sorted, non-overlapping, as
+# _opf_adopt_plan._roots); the recorded scope is every one of them plus the detection roots.
 _SOURCE_ROOTS = ["adopter", "legacy", "notes"]
+_TARGET_ROOTS = []
 _CI_PATH = ".github/workflows/opf.yml"
 _RENDERED = b"rendered todo view\n"
 _MOVE_DEST = ".working/archive/moved/adopter/MOVE.md"
@@ -881,20 +885,38 @@ def _fixture(root):
             dict(op="repoint-consumer", path=_CONSUMER, old_digest=_digest(_CONSUMER_OLD),
                  new_digest=_digest(_CONSUMER_NEW)),
             init, render, schema.enforcement_install_op(bindings["enforcement"])]
-    entries = [dict(path=p, kind="file", size=len(_LIVE[p]), digest=_digest(_LIVE[p])) for p in sorted(_LIVE)]
-    # The consumer lies under a recorded exclusion, so the planner records it excluded and never reads it.
-    entries.append(dict(path=_CONSUMER, kind="excluded"))
-    entries += [dict(row) for row in _EXTRA_ENTRIES]
+    # The entries as _inventory records them: each live file, the machine store a recorded exclusion the walk
+    # of .working meets (recorded excluded, never read), every directory enumerated on the way to them, and
+    # every other scope path outside the exclusions absent. The consumer's exclusion lies under no walked
+    # directory, so the planner records nothing there. A vector's extra rows are recorded as given.
+    exclusions = [dict(path=".working/toml", reason="machine-store"),
+                  dict(path="consumer", reason="adopter-owned consumers, repointed by the plan")]
+    scope = sorted(set(_SOURCE_ROOTS) | set(_TARGET_ROOTS) | set(planner.DETECTION_ROOTS))
+    walked = [dict(path=p, kind="file", size=len(_LIVE[p]), digest=_digest(_LIVE[p])) for p in sorted(_LIVE)]
+    walked.append(dict(path=".working/toml", kind="excluded"))
+    entries = walked + [dict(row) for row in _EXTRA_ENTRIES]
+    recorded = set(row["path"] for row in entries)
+    for row in walked:
+        parts = row["path"].split("/")
+        for depth in range(1, len(parts)):
+            parent = "/".join(parts[:depth])
+            if parent not in recorded and any(planner._under(parent, s) for s in scope):
+                entries.append(dict(path=parent, kind="directory"))
+                recorded.add(parent)
+    entries += [dict(path=p, kind="absent") for p in scope
+                if p not in recorded and not any(planner._under(p, x["path"]) for x in exclusions)]
     for path, changes in _ENTRY_EDITS:
         for row in entries:
             if row["path"] == path:
                 row.update(changes)
     entries.sort(key=lambda row: row["path"])
-    inventory = _sealed(dict(format=PLANNING_INVENTORY_FORMAT, decisions=[], observation=dict(
-        exclusions=[dict(path=".working/toml", reason="machine-store"),
-                    dict(path="consumer", reason="adopter-owned consumers, repointed by the plan")],
-        entries=entries, candidates=sorted(_LIVE), empty_directories=sorted(_EXTRA_EMPTY),
-        sources=list(_SOURCE_ROOTS))), "inventory_digest")
+    observation = dict(exclusions=exclusions, entries=entries, candidates=sorted(_LIVE),
+                       empty_directories=sorted(_EXTRA_EMPTY), sources=list(_SOURCE_ROOTS),
+                       targets=list(_TARGET_ROOTS), scope=scope)
+    if _OBSERVATION_EDIT is not None:
+        _OBSERVATION_EDIT(observation)
+    inventory = _sealed(dict(format=PLANNING_INVENTORY_FORMAT, decisions=[], observation=observation),
+                        "inventory_digest")
     plan = dict(format=schema.PLAN_FORMAT, schema=schema.SCHEMA_VERSION, product="aiqt",
                 inventory_digest=inventory["inventory_digest"], run_id=_RUN, revision=bindings["revision"],
                 store=dict(store_root=".", machine_rel=".working/toml", adoption="first-adoption"),
@@ -940,6 +962,12 @@ def _case(mutate=None):
         return evaluate(root, _RUN, **kwargs)
 
 
+def _case_inventory():
+    """The fixture's planning inventory bytes, the tree discarded."""
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+        return _fixture(root)
+
+
 def _reference_case(template=None, recipe=None, symlinked=()):
     """The round-10 reproductions: the pack's reference CI floor replaced in a scratch pack root, `template`
     or `recipe` bytes standing in for the shipped file, installed live and recorded by the plan (as an edit
@@ -976,9 +1004,13 @@ def _says(results, name, text):
     return any(text in f for f in results[name].findings)
 
 
-def _reseal_inventory(inv, **changes):
+def _reseal_inventory(inv, sort_entries=True, **changes):
+    """The planning inventory with `changes` made to its observation, resealed; changed entries are recorded
+    in path order, as the planner records them, unless `sort_entries` is False."""
     import tomllib
     doc = tomllib.loads(inv.decode("utf-8"))
+    if sort_entries and "entries" in changes:
+        changes = dict(changes, entries=sorted(changes["entries"], key=lambda row: str(row.get("path"))))
     doc["observation"].update(changes)
     return _emit(_sealed(doc, "inventory_digest"))
 
@@ -1217,10 +1249,10 @@ def self_test():
         check("check-1-manifest-drift-red", _only(drifted, _red(AUTHORITY))
               and _says(drifted, AUTHORITY, "planned destination '.working/toml/manifest.toml'"))
         # Check 2: the seal and binding legs, whole-tree accounting, ambiguous or malformed entries.
-        excluded = _case(lambda r, i: dict(planning_inventory=_strayed(
-            i, entries=[dict(path=".working/toml/x.toml", kind="excluded")])))
+        excluded = _case(_flip_2)
         check("check-2-excluded-entry-accounted", _says(excluded, DISCOVERY, "'legacy/stray.md' has neither")
-              and not _says(excluded, DISCOVERY, "x.toml' has neither"))
+              and any(row == dict(path=".working/toml", kind="excluded") for row in _entries(_case_inventory()))
+              and not _says(excluded, DISCOVERY, "'.working/toml' has neither"))
         rekeyed = _case(lambda r, i: dict(planning_inventory=_reseal_inventory(
             i, exclusions=[dict(path=".working/toml", reason="machine"), dict(path="consumer", reason="other")])))
         check("check-2-unbound-inventory-red", rekeyed[DISCOVERY].status == INVALID
@@ -1236,14 +1268,15 @@ def self_test():
                                                  DISCOVERY, "does not seal its own bytes"))
         uninv = _case(lambda r, i: dict(planning_inventory=_reseal_inventory(
             i, entries=[row for row in _entries(i) if row["path"] != "legacy/RULES.md"],
-            candidates=[p for p in sorted(_LIVE) if p != "legacy/RULES.md"])))
+            candidates=[p for p in sorted(_LIVE) if p != "legacy/RULES.md"], empty_directories=["legacy"])))
         check("check-2-source-not-inventoried-red",
               _says(uninv, DISCOVERY, "'legacy/RULES.md' is not an inventoried file"))
-        stray_entry = dict(path="elsewhere/unaccounted.md", kind="file", size=2, digest="sha256:" + "b" * 64)
+        stray_entry = dict(path=".claude/unaccounted.md", kind="file", size=2, digest="sha256:" + "b" * 64)
         anywhere = _case(lambda r, i: dict(planning_inventory=_reseal_inventory(
-            i, entries=_entries(i) + [stray_entry])))
+            i, entries=[row for row in _entries(i) if row["path"] != ".claude"]
+            + [dict(path=".claude", kind="directory"), stray_entry])))
         check("check-2-inventoried-file-outside-working-red", _only(anywhere, _red(DISCOVERY))
-              and _says(anywhere, DISCOVERY, "'elsewhere/unaccounted.md' has neither"))
+              and _says(anywhere, DISCOVERY, "'.claude/unaccounted.md' has neither"))
         dup_entry = dict(path="legacy/RULES.md", kind="file", size=1, digest="sha256:" + "a" * 64)
         check("closed-duplicate-entry", _only(_case(lambda r, i: dict(planning_inventory=_reseal_inventory(
             i, entries=_entries(i) + [dup_entry]))), _red(DISCOVERY, CANNOT_EVALUATE)))
@@ -1262,17 +1295,17 @@ def self_test():
                 return _case()
 
         foreign = dict(path="foreign.md", kind="file", size=1, digest=_digest(b"x"))
-        control = _with_entries(foreign)
+        control = _with_entries(dict(foreign, path="CLAUDE.md"))
         check("check-2-unexcluded-file-control-red", _only(control, _red(DISCOVERY))
-              and _says(control, DISCOVERY, "'foreign.md' has neither"))
+              and _says(control, DISCOVERY, "'CLAUDE.md' has neither"))
         orphan = _with_entries(dict(path="foreign.md", kind="excluded"))
         check("check-2-excluded-without-exclusion-cannot", _only(orphan, _red(DISCOVERY, CANNOT_EVALUATE))
               and _says(orphan, DISCOVERY, "'foreign.md' is recorded excluded but lies under no recorded"))
         escaping = _with_entries(dict(foreign, path="consumer/../foreign.md"))
         check("check-2-noncanonical-entry-cannot", _only(escaping, _red(DISCOVERY, CANNOT_EVALUATE))
               and _says(escaping, DISCOVERY, "entry path 'consumer/../foreign.md'"))
-        check("check-2-excluded-under-exclusion-valid", _only(_with_entries(dict(
-            path=".working/toml/x.toml", kind="excluded")), {}))
+        check("check-2-excluded-under-exclusion-valid", _only(_with_entries(), {})
+              and dict(path=".working/toml", kind="excluded") in _entries(_case_inventory()))
         # Round 13: each producer invariant is re-checked by calling the producer's own function. Check 1:
         # a receipt whose release anchor flags are not both True is refused by adoption_record, and check 1
         # now says so through the same receipt_binding_refusals; the genuine receipt passes both.
@@ -1329,7 +1362,7 @@ def self_test():
                  "is not the byte count"),
                 ("size-string", "legacy/RULES.md", dict(size="10"), "is not the byte count"),
                 ("extra-field", "legacy/RULES.md", dict(note="x"), "records fields"),
-                ("excluded-with-digest", _CONSUMER, dict(digest=_digest(b"x")), "records fields")):
+                ("excluded-with-digest", ".working/toml", dict(digest=_digest(b"x")), "records fields")):
             got = _edited(path, **changes)
             check("check-2-r13-entry-" + label + "-cannot", _only(got, _red(DISCOVERY, CANNOT_EVALUATE))
                   and _says(got, DISCOVERY, text))
@@ -1338,6 +1371,121 @@ def self_test():
               and _says(under, DISCOVERY, "lies under a recorded exclusion"))
         with mock.patch.object(planner, "entry_row_problem", lambda row, exclusions: None):
             check("check-2-r13-row-rule-load-bearing", _only(_edited("legacy/RULES.md", size=-1), {}))
+        # Round 14: the whole observation is held to the planner's own observation rule (observation_problem,
+        # which _inventory calls on what it builds). Each vector is sealed and bound by the fixture, so only
+        # check 2 grades it: CANNOT-EVALUATE naming the problem; its flip drops the named invariants from
+        # OBSERVATION_INVARIANTS and the same inventory grades VALID, so each invariant is load-bearing.
+        def _observed(sources=None, targets=(), extra=(), edit=None, bounds=()):
+            patches = [mock.patch.object(here, "_SOURCE_ROOTS", sources or _SOURCE_ROOTS),
+                       mock.patch.object(here, "_TARGET_ROOTS", list(targets)),
+                       mock.patch.object(here, "_EXTRA_ENTRIES", tuple(extra)),
+                       mock.patch.object(here, "_OBSERVATION_EDIT", edit)]
+            patches += [mock.patch.object(planner, name, value) for name, value in bounds]
+            for patch in patches:
+                patch.start()
+            try:
+                return _case()
+            finally:
+                for patch in reversed(patches):
+                    patch.stop()
+
+        def _without(names, **vector):
+            kept = tuple(item for item in planner.OBSERVATION_INVARIANTS if item[0] not in names)
+            with mock.patch.object(planner, "OBSERVATION_INVARIANTS", kept):
+                return _observed(**vector)
+
+        def _drop_path(path):
+            def edit(obs):
+                obs["entries"][:] = [row for row in obs["entries"] if row["path"] != path]
+            return edit
+
+        def _scope_without(path):
+            def edit(obs):
+                obs["scope"].remove(path)
+                _drop_path(path)(obs)
+            return edit
+
+        def _duplicate(path):
+            def edit(obs):
+                obs["entries"][:] = sorted(obs["entries"] + [row for row in obs["entries"] if row["path"] == path],
+                                           key=lambda row: row["path"])
+            return edit
+
+        baseline_entries = _entries(_case_inventory())
+        scope_size = len(sorted(set(_SOURCE_ROOTS) | set(planner.DETECTION_ROOTS)))
+        imports_file = dict(path=".working/imports/x.md", kind="file", size=1, digest=_digest(b"x"))
+        for label, vector, text, drop in (
+                ("repro-missing-source-root", dict(sources=sorted(_SOURCE_ROOTS + ["missing"])),
+                 "declared source is unavailable: 'missing'", ("available",)),
+                ("repro-absent-root-with-child", dict(extra=[dict(path="legacy", kind="absent")]),
+                 "declared source is unavailable: 'legacy'", ("available", "walked", "ancestors")),
+                ("roots-targets-unsorted", dict(targets=[".gemini", ".claude"]),
+                 "the target roots are not recorded sorted", ("roots",)),
+                ("exclusions-unsorted", dict(edit=lambda obs: obs["exclusions"].reverse()),
+                 "exclusions are not recorded sorted", ("exclusions",)),
+                ("exclusions-root-beneath", dict(targets=["consumer/x"]),
+                 "source is in an excluded subtree: 'consumer/x'", ("exclusions",)),
+                ("scope-omits-detection-root", dict(edit=_scope_without("CLAUDE.md")),
+                 "the scope omits ['CLAUDE.md']", ("scope",)),
+                ("scope-unsorted", dict(edit=lambda obs: obs["scope"].reverse()),
+                 "the scope is not recorded sorted", ("scope",)),
+                ("entries-duplicated", dict(edit=_duplicate("CLAUDE.md")),
+                 "entry 'CLAUDE.md' is duplicated", ("unique",)),
+                ("entries-unsorted", dict(edit=lambda obs: obs["entries"].reverse()),
+                 "the entries are not recorded sorted", ("sorted",)),
+                ("scope-path-unrecorded", dict(edit=_drop_path("CLAUDE.md")),
+                 "scope path 'CLAUDE.md' lies under no exclusion yet has no entry", ("recorded",)),
+                ("parent-unrecorded", dict(extra=[imports_file]),
+                 "its parent '.working/imports' is recorded nowhere", ("walked",)),
+                ("top-level-unwalked", dict(extra=[dict(path="foreign.md", kind="absent")]),
+                 "entry 'foreign.md' (absent) is no scope path", ("walked", "bounds")),
+                ("excluded-beneath-exclusion", dict(extra=[dict(path=".working/toml/x.toml", kind="excluded")]),
+                 "its parent '.working/toml' is recorded excluded", ("walked", "ancestors")),
+                ("beneath-absent", dict(targets=[".github"], extra=[dict(path=".github", kind="absent"), dict(
+                    path=".github/workflows", kind="directory")]),
+                 "lies under '.github', recorded absent", ("ancestors",)),
+                ("beneath-file", dict(targets=[".working/imports/x"], extra=[dict(
+                    imports_file, path=".working/imports"), dict(path=".working/imports/x", kind="absent")]),
+                 "lies under '.working/imports', recorded file", ("ancestors",)),
+                ("bounds-entries", dict(bounds=[("MAX_ENTRIES", len(baseline_entries) - scope_size - 1)]),
+                 "exceed the planner's entry bound", ("bounds",)),
+                ("bounds-path-bytes", dict(bounds=[("MAX_PATH_BYTES", 0)]),
+                 "walked path bytes exceed", ("bounds",)),
+                ("bounds-depth", dict(bounds=[("MAX_DEPTH", 0)]),
+                 "deeper than the planner's depth bound", ("bounds",))):
+            got = _observed(**vector)
+            check("check-2-r14-" + label + "-cannot", _only(got, _red(DISCOVERY, CANNOT_EVALUATE))
+                  and _says(got, DISCOVERY, text))
+            check("check-2-r14-" + label + "-load-bearing", _only(_without(drop, **vector), {}))
+        # Under the excluded row the walk rule speaks first; the ancestor rule alone still refuses it.
+        check("check-2-r14-excluded-beneath-exclusion-ancestor-rule", _says(_without(("walked",), extra=[dict(
+            path=".working/toml/x.toml", kind="excluded")]), DISCOVERY, "lies under '.working/toml', recorded excluded"))
+        # Beside the walk rule, the bounds rule alone refuses a row under no scope path.
+        check("check-2-r14-top-level-unwalked-bounds-rule", _says(_without(("walked",), extra=[dict(
+            path="foreign.md", kind="absent")]), DISCOVERY, "'foreign.md' lies under no scope path"))
+        # The controls: legacy recorded a directory with its child, and an absent scope path beneath an
+        # absent one (as the planner records a nested root whose parent is missing), both grade VALID.
+        check("check-2-r14-directory-control-valid", _only(_observed(extra=[dict(path="legacy", kind="directory")]), {})
+              and dict(path="legacy", kind="directory") in baseline_entries)
+        check("check-2-r14-absent-beneath-absent-control-valid", _only(_observed(
+            targets=[".github"], extra=[dict(path=".github", kind="absent")]), {}))
+        # Without the shared rule at all, both review reproductions grade VALID (the round-13 hole).
+        with mock.patch.object(planner, "observation_problem", lambda obs: None):
+            check("check-2-r14-repros-load-bearing", _only(_observed(sources=sorted(_SOURCE_ROOTS + ["missing"])), {})
+                  and _only(_observed(extra=[dict(path="legacy", kind="absent")]), {}))
+        # The producer refuses the missing root with the same words, and the observation it builds for a
+        # tree with legacy/RULES.md passes the shared rule, recording legacy a directory beside its child.
+        import tomllib
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-complete-") as root:
+            refused = planner.investigate(root, sources=["missing"])
+            _put(root, "legacy/RULES.md", _LIVE["legacy/RULES.md"])
+            built = planner.investigate(root, sources=["legacy"])
+        built_obs = tomllib.loads(built.observation.decode("utf-8")) if built.observation else {}
+        check("check-2-r14-producer-refuses-missing-root", refused.status == CANNOT_EVALUATE
+              and refused.findings == ("declared source is unavailable: 'missing'",))
+        check("check-2-r14-producer-observation-passes", built.status == VALID
+              and planner.observation_problem(built_obs) is None
+              and dict(path="legacy", kind="directory") in built_obs.get("entries", []))
         # Check 4: the formerly occupied destination, the doctor contract, store identity, CI and views.
         occ = _case(_occupied)
         check("check-4-old-occupant-red", _only(occ, _red(OPERATIONAL)))
@@ -1653,9 +1801,10 @@ def self_test():
                     return report.findings
 
                 check("check-2-empty-directory-accounted", _discovery(entries=_entries(inv) + [dict(
-                    path="empty/dir", kind="directory")], empty_directories=["empty/dir"]) == [
-                    "inventory entry 'empty/dir' has neither a disposition nor a recorded exclusion"])
+                    path="legacy/empty", kind="directory")], empty_directories=["legacy/empty"]) == [
+                    "inventory entry 'legacy/empty' has neither a disposition nor a recorded exclusion"])
                 check("check-2-control-area-exempt", _discovery(entries=_entries(inv) + [dict(
+                    path=".working/imports", kind="directory"), dict(
                     path=".working/imports/x.md", kind="file", size=1, digest=_digest(b"x"))]) == [])
                 check("check-2-alien-kind-cannot", _discovery(entries=_entries(inv) + [dict(
                     path="legacy/odd.md", kind="symlink")]) is None)
@@ -1697,8 +1846,7 @@ def self_test():
                          "duplicate-free"),
                         ("empty-directory-without-entry", dict(empty_directories=["legacy/hollow"]),
                          "empty_directories name ['legacy/hollow']"),
-                        ("empty-directory-with-descendant", dict(entries=_entries(inv) + [dict(
-                            path="legacy", kind="directory")], empty_directories=["legacy"]),
+                        ("empty-directory-with-descendant", dict(empty_directories=["legacy"]),
                          "empty_directories name ['legacy']"),
                         ("empty-directory-omitted-under-root", dict(entries=_entries(inv) + [hollow_dir]),
                          "empty_directories omit ['legacy/hollow']"),

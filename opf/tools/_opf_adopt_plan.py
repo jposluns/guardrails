@@ -205,6 +205,167 @@ def _require_entry(row, exclusions):
         raise PlanError(problem)
 
 
+def _obs_roots(obs):
+    for key, label in (("sources", "source"), ("targets", "target")):
+        try:
+            roots = _roots(obs[key])
+        except (PlanError, TypeError, ValueError) as exc:
+            return "the {} roots are not roots the planner records ({})".format(label, exc)
+        if roots != obs[key]:
+            return "the {} roots are not recorded sorted, as the planner records them".format(label)
+    return None
+
+
+def _obs_exclusions(obs):
+    rows = obs["exclusions"]
+    for row in rows:
+        if not (isinstance(row, dict) and sorted(map(str, row)) == ["path", "reason"]
+                and isinstance(row["path"], str) and isinstance(row["reason"], str)):
+            return "exclusion {!r} is not a path and reason row".format(row)
+        try:
+            _path(row["path"])
+        except (PlanError, TypeError, ValueError) as exc:
+            return "exclusion path {!r} is not a path the planner records ({})".format(row["path"], exc)
+    keys = [(row["path"], row["reason"]) for row in rows]
+    if keys != sorted(keys):
+        return "the exclusions are not recorded sorted by path and reason, as the planner records them"
+    for path in obs["sources"] + obs["targets"]:
+        if any(_under(path, row["path"]) for row in rows):
+            return "source is in an excluded subtree: {!r}".format(path)
+    return None
+
+
+def _obs_scope(obs):
+    scope = obs["scope"]
+    if type(scope) is not list:
+        return "the scope is not a list of paths"
+    for path in scope:
+        try:
+            _path(path)
+        except (PlanError, TypeError, ValueError) as exc:
+            return "scope path {!r} is not a path the planner records ({})".format(path, exc)
+    if scope != sorted(set(scope)):
+        return "the scope is not recorded sorted and duplicate-free, as the planner records it"
+    omitted = sorted((set(obs["sources"]) | set(obs["targets"]) | set(DETECTION_ROOTS)) - set(scope))
+    if omitted:
+        return "the scope omits {}, which the planner always walks (every source, target and detection " \
+               "root)".format(omitted)
+    return None
+
+
+def _obs_unique(obs):
+    seen = set()
+    for row in obs["entries"]:
+        if row["path"] in seen:
+            return "entry {!r} is duplicated: the accounting is ambiguous".format(row["path"])
+        seen.add(row["path"])
+    return None
+
+
+def _obs_sorted(obs):
+    paths = [row["path"] for row in obs["entries"]]
+    if paths != sorted(paths):
+        return "the entries are not recorded sorted by path, as the planner records them"
+    return None
+
+
+def _obs_recorded(obs):
+    paths = set(row["path"] for row in obs["entries"])
+    for path in obs["scope"]:
+        if path not in paths and not any(_under(path, row["path"]) for row in obs["exclusions"]):
+            return ("scope path {!r} lies under no exclusion yet has no entry; the planner records every "
+                    "scope path it walks".format(path))
+    return None
+
+
+def _obs_available(obs):
+    kinds = dict((row["path"], row["kind"]) for row in obs["entries"])
+    for path in obs["sources"]:
+        if kinds.get(path) in (None, "absent", "excluded"):
+            return "declared source is unavailable: {!r}".format(path)
+    return None
+
+
+def _obs_walked(obs):
+    kinds = dict((row["path"], row["kind"]) for row in obs["entries"])
+    scope = set(obs["scope"])
+    for row in obs["entries"]:
+        if row["path"] in scope and row["kind"] != "excluded":
+            continue
+        parent = row["path"].rpartition("/")[0]
+        if kinds.get(parent) != "directory":
+            return ("entry {!r} ({}) is no scope path the planner walks from, and its parent {!r} is "
+                    "recorded {}, not as a directory it enumerated".format(
+                        row["path"], row["kind"], parent, kinds.get(parent, "nowhere")))
+    return None
+
+
+def _obs_ancestors(obs):
+    kinds = dict((row["path"], row["kind"]) for row in obs["entries"])
+    scope = set(obs["scope"])
+    for row in obs["entries"]:
+        parts = row["path"].split("/")
+        for depth in range(1, len(parts)):
+            ancestor = "/".join(parts[:depth])
+            kind = kinds.get(ancestor)
+            if kind in ("file", "excluded") or (
+                    kind == "absent" and not (row["kind"] == "absent" and row["path"] in scope)):
+                return ("entry {!r} ({}) lies under {!r}, recorded {}; beneath an absent entry the planner "
+                        "records only an absent scope path, and nothing beneath a file or an exclusion".format(
+                            row["path"], row["kind"], ancestor, kind))
+    return None
+
+
+def _obs_bounds(obs):
+    scope = set(obs["scope"])
+    entries = obs["entries"]
+    if len(entries) > MAX_ENTRIES + len(scope):
+        return "the entries exceed the planner's entry bound ({} > {} + {} scope paths)".format(
+            len(entries), MAX_ENTRIES, len(scope))
+    walked = sum(len(row["path"].encode("utf-8")) for row in entries if row["path"] not in scope)
+    if walked > MAX_PATH_BYTES:
+        return "the entries' walked path bytes exceed the planner's bound ({} > {})".format(walked, MAX_PATH_BYTES)
+    for row in entries:
+        parts = row["path"].split("/")
+        walked_from = [depth for depth in range(1, len(parts) + 1) if "/".join(parts[:depth]) in scope]
+        if not walked_from:
+            return "entry {!r} lies under no scope path the planner walks".format(row["path"])
+        if len(parts) - max(walked_from) > MAX_DEPTH:
+            return "entry {!r} lies deeper than the planner's depth bound ({}) below every scope path".format(
+                row["path"], MAX_DEPTH)
+    return None
+
+
+# Every cross-entry invariant _inventory guarantees of the observation it builds, in check order (the
+# completion evaluator's self-test names each one and drops it by name to show its vector load-bearing).
+OBSERVATION_INVARIANTS = (
+    ("roots", _obs_roots),            # sources, targets: as _roots records them (sorted, non-overlapping)
+    ("exclusions", _obs_exclusions),  # path and reason rows, sorted; no source or target beneath one
+    ("scope", _obs_scope),            # sorted, duplicate-free, holding every source, target, detection root
+    ("unique", _obs_unique),          # one row per path
+    ("sorted", _obs_sorted),          # rows in path order
+    ("recorded", _obs_recorded),      # every scope path outside the exclusions has a row
+    ("available", _obs_available),    # every source is recorded a file or a directory
+    ("walked", _obs_walked),          # a non-scope or excluded row is a child of a directory row
+    ("ancestors", _obs_ancestors),    # nothing beneath a file/excluded row; only absent scope beneath absent
+    ("bounds", _obs_bounds),          # entry count, walked path bytes and depth within the walk's bounds
+)
+
+
+def observation_problem(obs):
+    """Why `obs` (its sources, targets, scope, exclusions and entries) is not an observation _inventory
+    builds, or None when it is one. _inventory calls it on the observation it built (its first problem is
+    the PlanError it refuses with, so a declared source it finds unavailable refuses as before) and the
+    completion evaluator on the sealed planning inventory, so both hold one rule over the WHOLE observation,
+    where entry_row_problem holds each row alone: each of OBSERVATION_INVARIANTS, in order. Each row must
+    already pass entry_row_problem."""
+    for _name, invariant in OBSERVATION_INVARIANTS:
+        problem = invariant(obs)
+        if problem is not None:
+            return problem
+    return None
+
+
 def candidate_files(rows, roots):
     """The observation's candidates, derived from its entry rows (_inventory and the completion evaluator
     both call this): every file row under a candidate root (`roots`; None for every root) outside the store
@@ -445,9 +606,11 @@ def _inventory(root, sources, targets):
                 visit(parent, name, path, 0)
             finally:
                 store._journal._close_fd_propagating(parent)
-        for path in sources:
-            if entries.get(path, {}).get("kind") in (None, "absent", "excluded"):
-                raise PlanError("declared source is unavailable: {!r}".format(path))
+        observed = dict(sources=sources, targets=targets, scope=requested, exclusions=exclusions,
+                        entries=sorted(entries.values(), key=lambda row: row["path"]))
+        problem = observation_problem(observed)
+        if problem is not None:
+            raise PlanError(problem)
         if resolution.status != store.RESOLVED:
             # With no resolved store, content at a reserved name (for example counters and
             # records, or import runs, left without a manifest) is still prior ancestry.
@@ -478,7 +641,7 @@ def _inventory(root, sources, targets):
             "sources": sources,
             "targets": targets,
             "exclusions": exclusions,
-            "entries": sorted(entries.values(), key=lambda row: row["path"]),
+            "entries": observed["entries"],
             "candidates": sorted(candidates),
             "empty_directories": sorted(empty),
             "resolution": {
