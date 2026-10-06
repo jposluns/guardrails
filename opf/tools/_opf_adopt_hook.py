@@ -9,10 +9,15 @@ registration file as structured JSON, computes the merged model inserting exactl
 `plugin_entry`, re-emits deterministically, and returns (old_bytes, new_bytes, new_digest) with NO
 filesystem write, journal transaction, subprocess, or network use. The op wiring (verify old_digest
 against live bytes, require the produced bytes to hash to the plan's approval-bound new_digest,
-publish through the journal `write` primitive, reversal restoring the prior bytes) is the next slice.
+publish through the journal `write` primitive, reversal restoring the prior bytes) is the enable-hook
+handler of _opf_adopt_apply (PR3 slice 2).
 
-v1 registration family: the Claude Code `settings.json`-family shape ONLY (the canonical operand in
-_opf_adopt is `.claude/settings.json`). Any other format or shape refuses fail-closed; further
+v1 registration family: the Claude Code `settings.json`-family shape ONLY, and ONLY at the closed
+registration-path allowlist REGISTRATION_PATHS (exactly `.claude/settings.json`, the canonical operand
+in _opf_adopt): PATH IDENTITY selects the platform, never content shape, so an unrelated JSON file or
+another platform's settings file whose content happens to fit the recognized keyset still refuses, and
+the adopter's personal `.claude/settings.local.json` overlay is refused explicitly (see the allowlist
+comment). Any other format or shape refuses fail-closed; further
 platform adapters land with the enforcement pack only after their denial semantics are verified
 against official platform documentation at build time (the enforcement pack's build-time
 denial-verification rule: a platform whose semantics cannot be so verified gets no enable-hook write
@@ -25,8 +30,12 @@ whatever the registration file registers executes with the adopter's FULL USER A
 platform's next load, and the file usually already carries the adopter's own security controls.
   1. Malicious or wrong registration content (privilege escalation). A plan row must never register
      arbitrary command text. `plugin_entry` is a token naming a member of the digest-verified
-     installed pack (the plant-governance trust gate); the merge inserts exactly that pinned token
-     and nothing else; the exact post-merge bytes are pinned by the plan's `new_digest`, which the
+     installed pack (the plant-governance trust gate); until that trust gate lands, the op-row
+     grammar (`_opf_adopt._is_hook_entry`) holds the token to ONE shell word of portable filename
+     characters, so a plan row cannot carry arguments or shell syntax (that one word can still name
+     any program on the adopter's PATH or any repository file, which only the trust gate's
+     installed-pack check closes); the merge inserts exactly that pinned token and nothing else;
+     the exact post-merge bytes are pinned by the plan's `new_digest`, which the
      single approval binds transitively through `plan_digest`, so the adopter's one informed yes
      covers the precise executable registration byte-exact. The approval presentation must quote
      what will execute and when (on the platform's next load, not at apply).
@@ -147,6 +156,24 @@ HOOK_TYPES = ("command",)
 # would silently exempt tools and is a PR6 (enforcement-pack) decision, not this library's.
 ENTRY_EVENT = "PreToolUse"
 ENTRY_MATCHER = "*"
+
+# The closed v1 registration-path allowlist: the ONE adopter file of the supported family that may
+# take an enable-hook write. The platform is identified by PATH IDENTITY, decided before any read:
+# recognizing settings-shaped JSON content never admits a write, because an unrelated JSON file, or
+# another platform's settings file, can carry the same recognized keyset. `.claude/settings.local.json`
+# is refused EXPLICITLY: it is the adopter's personal, normally git-ignored overlay (it may carry env
+# secrets), never the shared project registration the one approval binds. Further platform adapters
+# widen this tuple only with the enforcement pack, after their deny semantics are verified against
+# official platform documentation at build time (above: an unverifiable platform gets no enable-hook
+# write at all).
+REGISTRATION_PATHS = (".claude/settings.json",)
+
+
+def supported_registration_path(path):
+    """Whether `path` is EXACTLY a supported v1 registration target, compared byte-for-byte with no
+    normalization (a differently cased, composed, re-rooted or trailing-slashed spelling refuses
+    fail-closed)."""
+    return isinstance(path, str) and path in REGISTRATION_PATHS
 
 # The closed v1 RECOGNIZED top-level keyset: `hooks` is the structured surface this library merges
 # into; the rest are recognized-opaque (preserved through the model, never interpreted). The set is
@@ -800,7 +827,7 @@ def _entry_occurrences(model, plugin_entry):
 
 def merge_registration(old_bytes, plugin_entry):
     """Compute the merged registration for `old_bytes` + `plugin_entry`, purely. No filesystem write:
-    the caller (the enable-hook op wiring, next slice) publishes new_bytes through the journal only
+    the caller (the enable-hook handler of _opf_adopt_apply) publishes new_bytes through the journal only
     after the plan's approval-bound new_digest matches. THE ENTRY GATE comes first (fix 5: one
     gate per public function, never per-dunder hardening): old_bytes must be EXACTLY bytes and
     plugin_entry EXACTLY str, both by type identity, and anything else (a bytearray, a bytes or
@@ -993,7 +1020,7 @@ def self_test():
     old = _emit(canonical_registration())
 
     # 0: vocabulary and seam consistency. The insertion pins are inside their own closed sets, and the
-    # op row this library serves still declares exactly the inputs the wiring slice will bind.
+    # op row this library serves still declares exactly the inputs the apply engine's wiring binds.
     check("entry-event-in-vocab", ENTRY_EVENT in HOOK_EVENTS)
     check("events-unique", len(set(HOOK_EVENTS)) == len(HOOK_EVENTS))
     check("top-keys-unique-and-recognize-hooks",
@@ -1004,6 +1031,18 @@ def self_test():
     check("op-seam-journal-write", op.journal == ("write",))
     check("op-seam-canonical-operand",
           schema.canonical_op("enable-hook")["registration_path"] == ".claude/settings.json")
+    # QA round 1 blocker: the closed registration-path allowlist. PATH identity, never content
+    # shape, selects the platform: the canonical op row names a supported target, and the adopter's
+    # personal settings.local.json, another platform's settings file, an unrelated JSON file, a
+    # case variant, a re-rooted spelling and a non-string each refuse.
+    check("registration-path-allowlist-pinned", REGISTRATION_PATHS == (".claude/settings.json",))
+    check("registration-path-canonical-op-supported",
+          supported_registration_path(schema.canonical_op("enable-hook")["registration_path"]))
+    for bad in (".claude/settings.local.json", ".gemini/settings.json", ".cursor/hooks.json",
+                ".codex/config.json", "config/application.json", ".Claude/settings.json",
+                "claude/settings.json", "x/.claude/settings.json", ".claude/settings.json/", "",
+                None):
+        check("registration-path-refused-{!r}".format(bad), not supported_registration_path(bad))
 
     # 1: the successful merge, computed under the refusing purity harness (the docstring above and
     # the module-level comment state its exact boundary; a denial is BOTH recorded and raised, so a
@@ -2511,7 +2550,7 @@ def main():
     if "--self-test" in args or "--selftest" in args:
         return self_test()
     print("usage: _opf_adopt_hook.py --self-test (a pure library module; the enable-hook op wiring "
-          "is a later slice)", file=sys.stderr)
+          "is _opf_adopt_apply's)", file=sys.stderr)
     return 2
 
 
