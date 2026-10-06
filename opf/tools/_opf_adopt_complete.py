@@ -45,10 +45,16 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     empty directory and inventoried file entry, wherever it lies, has a plan disposition or lies under a
     recorded exclusion (the store control area counts as one, spec 14.2); a duplicate-path, non-table,
     alien-kind or non-string-path entry row is ambiguous or malformed accounting input, refused as
-    CANNOT-EVALUATE, never a pass; every plan source is an observed file whose digest equals its plan
-    digest.
+    CANNOT-EVALUATE, never a pass; every entry, exclusion, candidate and empty-directory path must pass the
+    planner's own path validator (_opf_adopt_plan._path), so containment is tested on canonical paths
+    only and a traversing or non-canonical path is CANNOT-EVALUATE naming it; an entry recorded
+    kind="excluded" must lie under a recorded exclusion by the planner's own matching rule
+    (_opf_adopt_plan._under), else it is a contradictory record, CANNOT-EVALUATE, never skipped; every plan
+    source is an observed file whose digest equals its plan digest.
   3 preservation-restore: the run's evidence bundle verifies from disk (_opf_adopt_apply.verify_bundle, the
-    homes-1 evidence digest verification: every inventory and every payload it lists); every
+    homes-1 evidence digest verification: every inventory and every payload it lists), and the bundle
+    inventory this check re-reads must again pass the apply shell's own inventory validator
+    (_opf_adopt_apply.validate_inventory), else CANNOT-EVALUATE; every
     archive-preserved source (retire, migrate and occupying, spec 14.2) sits at its run archive path,
     digest-matched and claimed by the bundle inventory, and the restore exercise reproduces each preserved
     file's bytes in scratch. A non-occupying move source is preserved at its move destination only by the
@@ -121,6 +127,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_adopt as schema          # noqa: E402
 import _opf_adopt_apply as apply     # noqa: E402
+import _opf_adopt_plan as planner    # noqa: E402
 import _opf_store as store           # noqa: E402
 from _opf_emit import EmitError, emit_checked  # noqa: E402
 
@@ -167,10 +174,6 @@ class _Evaluation:
 
 def _digest(data):
     return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
-def _under(path, prefix):
-    return path == prefix or path.startswith(prefix + "/")
 
 
 def _read(ev, relpath):
@@ -302,11 +305,26 @@ def _receipt_binding(ev, rep, receipt, approval):
 
 # --- check 2: discovery accounting --------------------------------------------------------------------
 
+def _inventory_path(value, label):
+    """`value` held to the planning inventory producer's own path validator (_opf_adopt_plan._path: a
+    contained, canonical file or directory path with no `.` or `..` component and no .git component), or
+    Unevaluable naming it: a path the planner never records is malformed accounting input, never a pass."""
+    try:
+        return planner._path(value)
+    except (planner.PlanError, TypeError, ValueError) as exc:
+        raise Unevaluable("planning inventory {} path {!r} is not a path the planner records ({})".format(
+            label, value, exc))
+
+
 def _check_discovery(ev, rep):
     """Spec 14.1 check 2: 'Discovery accounting: every inventory entry has a disposition or recorded
     exclusion.' Every inventoried file, wherever it lies, and every candidate and empty directory needs a
     plan disposition or a recorded exclusion; an ambiguous (duplicate-path) or malformed entry row is
-    CANNOT-EVALUATE, never a pass."""
+    CANNOT-EVALUATE, never a pass. Every path is first held to the planner's own validator
+    (_inventory_path), so the containment test below only ever sees canonical contained paths, and an
+    entry recorded excluded must lie under a recorded exclusion by the planner's own matching rule
+    (_opf_adopt_plan._under: the producer records kind="excluded" exactly for such a path), so a
+    contradictory excluded entry is CANNOT-EVALUATE, never skipped."""
     if ev.planning_inventory is None:
         raise Unevaluable("the planning inventory was not supplied; discovery accounting needs its entries")
     doc = _canonical(ev.planning_inventory, "the planning inventory")
@@ -329,7 +347,7 @@ def _check_discovery(ev, rep):
     if not (isinstance(obs, dict) and all(isinstance(obs.get(k), list) for k in lists)):
         raise Unevaluable("the planning inventory's observation lacks {}".format(", ".join(lists)))
     try:
-        excluded = [row["path"] for row in obs["exclusions"]]
+        excluded = [_inventory_path(row["path"], "exclusion") for row in obs["exclusions"]]
     except (TypeError, KeyError) as exc:
         raise Unevaluable("the planning inventory's exclusions are malformed ({!r})".format(exc))
     entries = {}
@@ -339,6 +357,10 @@ def _check_discovery(ev, rep):
                 and row.get("kind") in ENTRY_KINDS):
             raise Unevaluable("planning inventory entry [{}] is malformed (a table with a non-empty string "
                               "path and a kind in {} is required)".format(i, "/".join(ENTRY_KINDS)))
+        _inventory_path(row["path"], "entry")
+        if row["kind"] == "excluded" and not any(planner._under(row["path"], e) for e in excluded):
+            raise Unevaluable("planning inventory entry {!r} is recorded excluded but lies under no recorded "
+                              "exclusion: a contradictory record, never skipped".format(row["path"]))
         if row["kind"] == "file" and not schema._is_digest(row.get("digest")):
             raise Unevaluable("planning inventory file entry {!r} carries no well-formed digest".format(
                 row["path"]))
@@ -346,13 +368,12 @@ def _check_discovery(ev, rep):
             raise Unevaluable("planning inventory entry {!r} is duplicated: the accounting is "
                               "ambiguous".format(row["path"]))
         entries[row["path"]] = row
-    needing = set(obs["candidates"]) | set(obs["empty_directories"])
+    needing = {_inventory_path(p, "candidate") for p in obs["candidates"]}
+    needing |= {_inventory_path(p, "empty directory") for p in obs["empty_directories"]}
     needing |= {p for p, row in entries.items() if row["kind"] == "file"}
-    if not all(isinstance(p, str) for p in list(needing) + excluded):
-        raise Unevaluable("the planning inventory names a non-string path")
     disposed = {row["path"] for row in _sources(ev)}
     for path in sorted(needing):
-        if path in disposed or schema._in_control_area(path) or any(_under(path, e) for e in excluded):
+        if path in disposed or schema._in_control_area(path) or any(planner._under(path, e) for e in excluded):
             continue
         rep.finding("inventory entry {!r} has neither a disposition nor a recorded exclusion".format(path))
     for source in _sources(ev):
@@ -398,7 +419,12 @@ def _check_preservation(ev, rep):
     listed = set()
     inventory = _read(ev, apply.inventory_rel(ev.run_id))
     if inventory is not None:
-        rows = _canonical(inventory, "the bundle inventory").get("file")
+        doc = _canonical(inventory, "the bundle inventory")
+        # The re-read inventory is held to the apply shell's own validator, as verify_bundle's read was.
+        checked = apply.validate_inventory(doc, ev.run_id)
+        if checked.status == CANNOT_EVALUATE:
+            raise Unevaluable("the bundle inventory: " + "; ".join(checked.findings))
+        rows = doc.get("file")
         if not (isinstance(rows, list) and all(isinstance(r, dict) and isinstance(r.get("path"), str)
                                                 for r in rows)):
             raise Unevaluable("the bundle inventory carries no well-formed file rows")
@@ -731,6 +757,9 @@ _RUN = "adopt-20260917T120000Z-0123456789abcdef"
 # other bytes, which the fixture's plan then records, so the change is digest-bound (a post-apply tree).
 _CI_BYTES = None
 _CI_RECIPE_BYTES = None
+# Extra planning inventory entry rows a vector adds to the fixture; the fixture seals and binds them (its plan,
+# approval, receipt and bundle inventory), so no seal or binding failure can stand in for the check graded.
+_EXTRA_ENTRIES = ()
 _CI_PATH = ".github/workflows/opf.yml"
 _RENDERED = b"rendered todo view\n"
 _MOVE_DEST = ".working/archive/moved/adopter/MOVE.md"
@@ -815,6 +844,7 @@ def _fixture(root):
             init, render, schema.enforcement_install_op(bindings["enforcement"])]
     entries = [dict(path=p, kind="file", size=len(_LIVE[p]), digest=_digest(_LIVE[p])) for p in sorted(_LIVE)]
     entries.append(dict(path=_CONSUMER, kind="file", size=len(_CONSUMER_OLD), digest=_digest(_CONSUMER_OLD)))
+    entries += [dict(row) for row in _EXTRA_ENTRIES]
     entries.sort(key=lambda row: row["path"])
     inventory = _sealed(dict(format=PLANNING_INVENTORY_FORMAT, decisions=[], observation=dict(
         exclusions=[dict(path=".working/toml", reason="machine-store"),
@@ -1166,6 +1196,27 @@ def self_test():
         check("closed-undigested-file-entry", _only(_case(lambda r, i: dict(
             planning_inventory=_reseal_inventory(i, entries=_entries(i) + [dict(
                 path="legacy/undigested.md", kind="file")]))), _red(DISCOVERY, CANNOT_EVALUATE)))
+
+        # Round 12: entries the planner never records, each sealed and bound by the fixture itself
+        # (_EXTRA_ENTRIES), so every other check stays VALID: an excluded entry under no recorded exclusion
+        # is a contradictory record and a non-canonical path escaping a recorded exclusion is malformed; both
+        # are CANNOT-EVALUATE naming the entry, while the same file entry at a canonical path stays INVALID.
+        def _with_entries(*rows):
+            with mock.patch.object(here, "_EXTRA_ENTRIES", rows):
+                return _case()
+
+        foreign = dict(path="foreign.md", kind="file", size=1, digest=_digest(b"x"))
+        control = _with_entries(foreign)
+        check("check-2-unexcluded-file-control-red", _only(control, _red(DISCOVERY))
+              and _says(control, DISCOVERY, "'foreign.md' has neither"))
+        orphan = _with_entries(dict(path="foreign.md", kind="excluded"))
+        check("check-2-excluded-without-exclusion-cannot", _only(orphan, _red(DISCOVERY, CANNOT_EVALUATE))
+              and _says(orphan, DISCOVERY, "'foreign.md' is recorded excluded but lies under no recorded"))
+        escaping = _with_entries(dict(foreign, path="consumer/../foreign.md"))
+        check("check-2-noncanonical-entry-cannot", _only(escaping, _red(DISCOVERY, CANNOT_EVALUATE))
+              and _says(escaping, DISCOVERY, "entry path 'consumer/../foreign.md'"))
+        check("check-2-excluded-under-exclusion-valid", _only(_with_entries(dict(
+            path=".working/toml/x.toml", kind="excluded")), {}))
         # Check 4: the formerly occupied destination, the doctor contract, store identity, CI and views.
         occ = _case(_occupied)
         check("check-4-old-occupant-red", _only(occ, _red(OPERATIONAL)))
@@ -1490,6 +1541,15 @@ def self_test():
                               for row in _entries(inv)]
                 check("check-2-source-digest-bound", _discovery(entries=redigested) == [
                     "plan source 'legacy/RULES.md' is not an inventoried file with its plan digest"])
+                # Every other path check 2 tests containment on is held to the planner's validator too.
+                recorded = tomllib.loads(inv.decode("utf-8"))["observation"]["exclusions"]
+                check("check-2-noncanonical-exclusion-cannot", _discovery(
+                    exclusions=recorded + [dict(path="consumer/..", reason="x")]) is None)
+                check("check-2-noncanonical-candidate-cannot", _discovery(
+                    candidates=sorted(_LIVE) + ["consumer/../stray.md"]) is None)
+                check("check-2-git-candidate-cannot", _discovery(candidates=sorted(_LIVE) + [".git/config"]) is None)
+                check("check-2-noncanonical-empty-directory-cannot", _discovery(
+                    empty_directories=["empty//dir"]) is None)
                 # Check 1's destination sweep over every op kind it owns (the fixture plants none of these).
                 extra = [dict(op="create-file", path="docs/NEW.md", content_digest="sha256:" + "1" * 64),
                          dict(op="plant-governance", path="CLAUDE.md", content_digest="sha256:" + "2" * 64),
@@ -1504,6 +1564,20 @@ def self_test():
                       and wanted.get(".working/toml/manifest.toml") == "sha256:" + "4" * 64
                       and _CI_PATH not in wanted and _CI_RECIPE_REL not in wanted
                       and ".working/TODO.md" not in wanted)
+                # Check 3 re-reads the bundle inventory after verify_bundle: that read is held to the apply
+                # shell's own inventory validator too (here verify_bundle is stubbed VALID, so only it grades).
+                ev.plan = plan
+                bundled = _toml_file(root, apply.inventory_rel(_RUN))
+                bundled["file"].append(apply.inventory_row("../escape.md", b"x"))
+                _put(root, apply.inventory_rel(_RUN), _emit(bundled))
+                direct = _Report()
+                with mock.patch.object(apply, "verify_bundle", lambda *a: schema._ok()):
+                    try:
+                        _check_preservation(ev, direct)
+                    except Unevaluable as exc:
+                        direct.cannot.append(str(exc))
+                check("check-3-bundle-inventory-validated", direct.result().status == CANNOT_EVALUATE
+                      and any("the bundle inventory:" in f for f in direct.result().findings))
             finally:
                 store._close_fd_exc_safe(ev.root_fd)
         # Dispatch wiring: each roster name runs exactly its own check function. (These replace the former
