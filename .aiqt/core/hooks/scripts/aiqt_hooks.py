@@ -9719,6 +9719,18 @@ def _orch_backtick_end(text, j, n):
     return -1
 
 
+# A `${NAME}`, `${1}`, `${#NAME}`, or `${NAME[0]}`/`${NAME[@]}` parameter expansion: the brace forms whose end the
+# structural walk reads exactly (no operator text inside that could hold a quote or a paren), so they do not
+# mark a span inexact.
+_ORCH_SIMPLE_BRACE_RE = re.compile(r"\$\{#?(?:[A-Za-z_][A-Za-z0-9_]*(?:\[(?:[0-9]+|[@*])\])?|[0-9]+)\}")
+
+
+def _orch_nested_cmdsub(command, j):
+    """True when a `$(` that is not `$((` starts at `j`: a nested command substitution whose own end
+    _orch_cmdsub_end finds by recursion (its quoting starts afresh inside, also within double quotes)."""
+    return command.startswith("$(", j) and command[j + 2:j + 3] != "("
+
+
 def _orch_cmdsub_end(command, j, n):
     """Walk a `$(` command substitution whose content starts at `j` to its closing `)`. Returns
     (end, heredoc_seen, exact). `end` is the index just past the closing paren, or -1 when the walk cannot
@@ -9734,7 +9746,11 @@ def _orch_cmdsub_end(command, j, n):
     closes: the end found may then not be bash's. The walk models only quotes, backslash escapes, word-start `#` comments (after
     whitespace or a `;&|()<>` metacharacter, a closing paren included), parens,
     backtick spans (skipped whole), here-strings, and here-documents with a simple delimiter
-    (_orch_simple_heredoc_delim) met before any untracked construct. The content is NOT judged here."""
+    (_orch_simple_heredoc_delim) met before any untracked construct. A nested `$(` that is not `$((`,
+    quoted or not, is walked to its own end by recursion (QA round 10), and a simple `${NAME}` form is
+    skipped whole (_ORCH_SIMPLE_BRACE_RE), so neither marks the span inexact by itself; a nested span
+    that is not exact, or one opened while a here-document awaits its body, makes this one inexact too.
+    The content is NOT judged here."""
     in_single = in_double = escaped = False
     depth = 0
     pending = []  # (delim, strip_tabs, quoted) for here-documents opened inside the span; bodies skipped as data
@@ -9753,6 +9769,19 @@ def _orch_cmdsub_end(command, j, n):
             word_start = False
             j += 1
             continue
+        if c == "$":
+            if _orch_nested_cmdsub(command, j):
+                sub_end, sub_seen, sub_exact = _orch_cmdsub_end(command, j + 2, n)
+                heredoc_seen = heredoc_seen or sub_seen
+                if sub_end == -1:
+                    return -1, heredoc_seen, exact
+                exact = exact and sub_exact and not pending
+                j, word_start = sub_end, False
+                continue
+            brace = _ORCH_SIMPLE_BRACE_RE.match(command, j)
+            if brace is not None:
+                j, word_start = brace.end(), False
+                continue
         if in_double:
             if _orch_untracked_at(command, j, True):
                 exact = False
@@ -9979,6 +10008,31 @@ def _orch_scan_heredoc_bodies(command, i, n, pending, bash_word_starts):
     return i, None
 
 
+def _orch_dq_arithmetic(inner):
+    """True when the text `inner` of a closed double-quoted `$(...)` span is ONE parenthesised group, so the
+    span is a `$((...))` arithmetic expansion closed by `))`. bash reads any other `$((` as a command
+    substitution whose first word is a subshell (`$((job) & wait)`), which is code."""
+    if inner[:1] != "(":
+        return False
+    return _orch_cmdsub_end(inner, 1, len(inner))[0] == len(inner)
+
+
+def _orch_dq_backtick_text(content):
+    """The code text bash runs for a backtick substitution inside double quotes whose raw text between the
+    backticks is `content`: a backslash before `\\`, a backtick, `$`, or `"` is removed (one pass, left to
+    right); any other backslash stays."""
+    out, i, n = [], 0, len(content)
+    while i < n:
+        c = content[i]
+        if c == "\\" and content[i + 1:i + 2] in ("\\", "`", "$", '"'):
+            out.append(content[i + 1])
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _orch_foreground_scan(command, bash_word_starts):
     """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
     unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or
@@ -10017,8 +10071,9 @@ def _orch_foreground_scan(command, bash_word_starts):
     denies), then the outer scan resumes after the closing paren, still inside the double quotes, so the
     body's quotes never shift the outer quote state; when the walk cannot close it, or reads a span
     holding a here-document (or a `<<` it cannot read) only inexactly, the scan returns
-    "unclosed-substitution" at once (fail closed). A double-quoted `$(...)` with no here-document inside is
-    scanned character by character as on main (residual (1)). bash_word_starts selects where a `#` opens a comment: False keeps the historical rule (after
+    "unclosed-substitution" at once (fail closed). QA round 10 extends this to EVERY double-quoted `$(...)`
+    (a `$((...))` closed by `))` stays arithmetic, read as on main) and to every double-quoted backtick span
+    (its text after bash's backslash removal there, _orch_dq_backtick_text): residual (1) is closed here. bash_word_starts selects where a `#` opens a comment: False keeps the historical rule (after
     any str.isspace() character), True uses bash's rule (_ORCH_BASH_WORD_BREAKS). The guard runs BOTH and
     denies when either reports, so the bash rule can only ADD denies."""
     in_single = in_double = escaped = False
@@ -10046,28 +10101,43 @@ def _orch_foreground_scan(command, bash_word_starts):
                 if command[i:i + 2] == "$(":
                     end, heredoc_seen, exact = _orch_cmdsub_end(command, i + 2, n)
                     inner = command[i + 2:(end - 1 if end != -1 else n)]
-                    if inner[:1] == "(" and ("$(" in inner or "`" in inner):
-                        # A double-quoted $((...)) holding a substitution: its text is scanned as code,
-                        # as unquoted arithmetic is, so a detach in the nested substitution denies.
-                        kind = _orch_foreground_scan(inner, bash_word_starts)
-                        if kind is not None:
-                            return kind
-                    if end == -1 or (heredoc_seen and not exact):
-                        # The walk cannot close this double-quoted substitution, or cannot read exactly
-                        # one that holds a here-document, so where it ends and what follows it are unseen:
-                        # fail closed with a reason naming it, never continue a character scan that could
-                        # stay inside the balanced outer quotes and allow.
-                        return "unclosed-substitution"
-                    if heredoc_seen:
-                        # Never skipped: the span's INNER text is scanned by this same scan (its bodies are
-                        # data, everything else is code), then the outer scan resumes after the closing
-                        # paren, still inside the double quotes, so body quotes never shift the outer state.
+                    if end != -1 and _orch_dq_arithmetic(inner):
+                        # A double-quoted $((...)) arithmetic expansion closed by `))`: read as on main
+                        # (character by character inside the quotes), except that text holding a
+                        # substitution is scanned as code, as unquoted arithmetic is.
+                        if "$(" in inner or "`" in inner:
+                            kind = _orch_foreground_scan(inner, bash_word_starts)
+                            if kind is not None:
+                                return kind
+                    else:
+                        # QA round 10 (residual (1) closed): EVERY double-quoted $(...) command
+                        # substitution is code to bash, so when the walk reads it exactly its INNER text is
+                        # scanned by this same scan (here-document bodies are data, everything else is
+                        # code, so a bare `&` in it denies), then the outer scan resumes after the closing
+                        # paren, still inside the double quotes. A span the walk cannot close or cannot read
+                        # exactly fails closed at once with a reason naming it, never a character scan
+                        # inside the outer quotes that could hide its `&`.
+                        if end == -1 or not exact:
+                            return "unclosed-substitution"
                         kind = _orch_foreground_scan(inner, bash_word_starts)
                         if kind is not None:
                             return kind
                         i = end
                         continue
-                    # no here-document inside: scanned character by character inside the quotes, as on main
+                elif ch == "`":
+                    # QA round 10: a backtick substitution inside double quotes is code too. It ends at the
+                    # first unescaped backtick (bash's rule), and its text, after bash's backslash removal
+                    # there (_orch_dq_backtick_text), is scanned by this same scan; one that never closes
+                    # fails closed as an unclosed substitution.
+                    end = _orch_backtick_end(command, i + 1, n)
+                    if end == -1:
+                        return "unclosed-substitution"
+                    kind = _orch_foreground_scan(_orch_dq_backtick_text(command[i + 1:end - 1]),
+                                                 bash_word_starts)
+                    if kind is not None:
+                        return kind
+                    i = end
+                    continue
             if ch == "\\":
                 escaped = True
             elif ch == '"':
@@ -10304,13 +10374,11 @@ def _orch_foreground_detach(command):
     KNOWN FALSE-ALLOW RESIDUAL (confirmed against real bash, disclosed in the manifest, which lists the
     same cases): the scan reads only the outer quoting level, and its quote and comment tracking can
     diverge from bash's in further ways than those listed here, so this list is NOT complete. Known cases
-    include a real detach that is NOT seen (1) when its `&` sits inside a command substitution or backtick
-    wrapped in double quotes (echo "$(job &)"; a `$(...)` span with no here-document inside, and any
-    backtick span, is read as double-quoted text as on main, so its content is never judged as code; a
-    `$(...)` span holding a here-document is NOT in this residual: its inner text is scanned as code with
-    the bodies as data, or it denies as unclosed; nor is one inside a closed substitution span of an
-    unquoted here-document body, which denies unread whenever its content holds a quote or a nested
-    substitution opener); (2) inside a string that
+    include a real detach that is NOT seen (1) CLOSED in QA round 10: a `&` inside a command
+    substitution or backtick wrapped in double quotes (echo "$(job &)") is now scanned as code when the
+    walk reads the span exactly and DENIES as an unclosed substitution otherwise (a disclosed
+    over-refusal for a safe span holding a construct the walk does not track, such as ${x:-y}, a backtick,
+    $((...)), or `[`); (2) inside a string that
     eval or quote removal re-reads as code (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3)
     after an ANSI-C $'...' quote with an escaped quote that leaves the scan balanced but misaligned; (4)
     inside a string that ARITHMETIC re-reads as code: a variable whose value is an array subscript
@@ -10324,9 +10392,8 @@ def _orch_foreground_detach(command):
     here-document the scan cannot read as data (a delimiter word that is not simple, or one after an
     untracked construct) DENIES as cannot-evaluate when a later line exists ("heredoc-unread" in the outer
     command, "unclosed-substitution" inside a double-quoted `$(...)`), and an unquoted-delimiter body
-    holding a backslash is scanned as code and always denies. NOT closed: a here-document inside a
-    BACKTICK span inside double quotes (residual (1): the outer scan reads that span as double-quoted
-    text, as on main, so its body quotes can still shift the outer state). What remains beyond that is
+    holding a backslash is scanned as code and always denies; a here-document inside a backtick span inside
+    double quotes is now read the same way (QA round 10). What remains beyond that is
     the divergence class itself, not enumerated here: any other construct where bash reads a quote
     character as data but this scan reads it as a quote (the ANSI-C misalignment (3) is the known concrete
     case); and (6) COMMENT SHIFT: after a `#` that follows a blank inside an
@@ -10355,8 +10422,11 @@ _ORCH_HEREDOC_OVERREFUSALS = (
     "and a $ before a space, a line end, or other text), which denies unread, so a safe ${HOME} denies "
     "(a quoted delimiter avoids it); (e) a $(...) inside double quotes that holds a here-document "
     "together with such a construct, a 'case' word, a here-document still awaiting its body when the "
-    "span closes, or a here-document of class (a) or (b); and (f) a here-document whose terminator line "
-    "never arrives")
+    "span closes, or a here-document of class (a) or (b); (f) a here-document whose terminator line "
+    "never arrives; and (g) any $(...) inside double quotes that the scan cannot read exactly (one holding "
+    "${...} with operator text such as ${x:-y}, a backtick, $((...)), [, ((, a 'case' word, or an "
+    "unclosed quote), or a double-quoted backtick that never closes, which denies unread, so a safe "
+    "$(echo ${x:-y}) inside double quotes denies")
 
 
 # ROUND-2 FINDING 9: sinks that TRUNCATE their input, so a producer piped into one loses both its full
@@ -10634,10 +10704,10 @@ def orch_truncation_guard(data):
         if detach_kind == "unclosed-substitution":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command opens a $(...) command "
-                "substitution inside double quotes that this guard's structural reader cannot close (an "
+                "substitution (or a backtick) inside double quotes that this guard's structural reader cannot close (an "
                 "unterminated quote, comment, backtick, or here-document inside it, or an "
                 "unquoted-delimiter here-document body holding a backslash, whose end it does not "
-                "predict) or cannot read exactly while it holds a here-document (over-refusal class (e): "
+                "predict) or cannot read exactly (over-refusal classes (e) and (g): "
                 + _ORCH_HEREDOC_OVERREFUSALS + "), so the scan cannot see where the substitution ends or "
                 "what follows it; it is denied rather than allowed unread "
                 "(check-fails-closed-on-unreadable). Quote the "

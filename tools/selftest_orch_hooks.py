@@ -1193,7 +1193,10 @@ def _main_isolated(report_path=None):
                  "echo \"$(echo ${x}; cat <<'EOF'\n\"\"\nEOF\nprintf DETACHED >&2 &\nwait\n)\""),
                 ("trunc/scan-r6-dq-cmdsub-partial-delim-shift-kind",
                  "echo \"$(cat <<E'OF'\n\"\"\nEOF\nprintf DETACHED >&2 &\nwait\n)\"")):
-            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), "unclosed-substitution")
+            # QA round 10: a simple ${x} is now read exactly, so the first span's here-document body is data
+            # and its real '&' is seen as a detach (still a deny).
+            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd),
+                  "detach" if "${x}" in cmd else "unclosed-substitution")
         shift_res = bg("echo \"${x:-}\"; cat <<'EOF'\n'\nEOF\nprintf DETACHED >&2 &\ncat <<'EOF'\n'\nEOF\nwait",
                        rib=False)
         check("trunc/fg-r6-paramexp-heredoc-shift-denies",
@@ -1349,6 +1352,52 @@ def _main_isolated(report_path=None):
                 ("trunc/scan-r9-quoted-body-funsub-none", "cat <<'EOF'\n${ " + r9_job + "; }\nEOF", None),
                 ("trunc/scan-r9-dq-quoted-body-funsub-none", "cat <<\"EOF\"\n${HOME} $[1]\nEOF", None)):
             check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), want)
+        # QA round 10 MAJOR: residual (1) composed with this change. A $(...) or backtick inside double
+        # quotes was read as quoted text (as on main), so once the body's literal '&' no longer denied, the
+        # substitution's real '&' allowed (bash 5.3.9 printed A & B then CHILDPID=<pid>; DENIED on main only
+        # for the body '&'). Every double-quoted substitution read exactly is now scanned as code; one not
+        # read exactly denies as an unclosed substitution. Each detach vector below was ALLOWED at acb7f01b.
+        r10_job = "printf CHILD; true & echo PID=$!; wait"
+        r10_repro = "cat <<'EOF'\nA & B\nEOF\necho \"$(" + r10_job + ")\""
+        for name, cmd, want in (
+                ("trunc/scan-r10-repro-detach-kind", r10_repro, "detach"),
+                ("trunc/scan-r10-dq-cmdsub-detach-kind", "echo \"$(" + r10_job + ")\"", "detach"),
+                ("trunc/scan-r10-dq-backtick-detach-kind", "echo \"`" + r10_job + "`\"", "detach"),
+                ("trunc/scan-r10-dq-backtick-body-detach-kind",
+                 "cat <<'EOF'\nA & B\nEOF\necho \"`" + r10_job + "`\"", "detach"),
+                ("trunc/scan-r10-dq-nested-unquoted-detach-kind", "echo \"$(echo $(" + r10_job + "))\"", "detach"),
+                ("trunc/scan-r10-dq-nested-dq-detach-kind", "echo \"$(echo \"$(" + r10_job + ")\")\"", "detach"),
+                # bash reads $((job) & ...) as a command substitution whose first word is a subshell.
+                ("trunc/scan-r10-dq-arith-fallback-detach-kind", "echo \"$((true) & wait)\"", "detach"),
+                # A parameter expansion whose text holds a ')' cannot be read exactly: unclosed, never allowed.
+                ("trunc/scan-r10-dq-brace-paren-unclosed-kind", "echo \"$(echo ${x%)} & wait)\"",
+                 "unclosed-substitution"),
+                ("trunc/scan-r10-dq-backtick-unclosed-kind", "echo \"`true & wait\"", "unclosed-substitution"),
+                # Safe forms that stay allowed: nested and simple-brace spans read exactly, arithmetic
+                # closed by '))' read as on main, and bash's backslash removal in a double-quoted backtick.
+                ("trunc/scan-r10-dq-safe-cmdsub-none", "echo \"$(date +%s)\"", None),
+                ("trunc/scan-r10-dq-safe-nested-none", "cd \"$(dirname \"$(pwd)\")\"", None),
+                ("trunc/scan-r10-dq-safe-brace-none", "echo \"$(basename \"${PWD}\")\"", None),
+                ("trunc/scan-r10-dq-safe-arith-none", "echo \"$((3 & 1)) $(( (1+2) * 3 ))\"", None),
+                ("trunc/scan-r10-dq-safe-backtick-none", "echo \"`date`\"", None),
+                ("trunc/scan-r10-dq-safe-backtick-escaped-quote-none", "echo \"`echo \\\"a & b\\\"`\"", None),
+                ("trunc/scan-r10-dq-safe-and-redirect-none", "x=\"$(true && cmd 2>&1)\"", None),
+                # The disclosed over-refusals this adds (class (g)): safe, ALLOWED at acb7f01b.
+                ("trunc/scan-r10-dq-brace-op-overrefusal-kind", "echo \"$(echo ${x:-y})\"",
+                 "unclosed-substitution"),
+                ("trunc/scan-r10-dq-backtick-in-span-overrefusal-kind", "echo \"$(echo `date`)\"",
+                 "unclosed-substitution"),
+                ("trunc/scan-r10-dq-arith-in-span-overrefusal-kind", "echo \"$(echo $((1+2)))\"",
+                 "unclosed-substitution"),
+                ("trunc/scan-r10-dq-bracket-overrefusal-kind", "echo \"$([ -n \"$x\" ] && echo y)\"",
+                 "unclosed-substitution")):
+            check(name, aiqt_hooks._orch_foreground_detach_kind(cmd), want)
+        check("trunc/fg-r10-repro-denies", _verdict(bg(r10_repro, rib=False)), "deny")
+        check("trunc/fg-r10-commit-form-allows",
+              _verdict(bg("git commit -m \"$(cat <<'EOF'\nFix A & B, the user's file\nEOF\n)\"", rib=False)),
+              "allow")
+        check("trunc/dq-backtick-text-unescape",
+              aiqt_hooks._orch_dq_backtick_text("a \\\\\\` \\$ \\\" \\x"), "a \\` $ \" \\x")
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a
