@@ -8318,7 +8318,7 @@ def _orch_git_toplevel_has_registry(cwd):
         os.close(fd)
 
 
-def _orch_registry(root, nofollow=False):
+def _orch_registry(root, nofollow=False, files=_ORCH_REGISTRY_FILES):
     """Load the orchestration registry: ('absent', None) only when a registry file is genuinely NOT PRESENT
     (a clean lstat FileNotFoundError; the suite is inert by design), ('ok', dict) on a schema-valid
     registry, ('bad', detail) otherwise. A present-but-unreadable registry is a cannot-evaluate returned as
@@ -8328,8 +8328,9 @@ def _orch_registry(root, nofollow=False):
     descriptor, so a FIFO or device registry is bad at once rather than blocking the hook; with nofollow a
     symlinked registry is bad too (the review dispatch pin reads it that way). The
     machine-local .aiqt/orchestration.local.json takes WHOLE-FILE precedence over the committed
-    .aiqt/orchestration.json; there is no merge, so precedence is never ambiguous."""
-    for rel in _ORCH_REGISTRY_FILES:
+    .aiqt/orchestration.json; there is no merge, so precedence is never ambiguous. files narrows the read
+    to the named registry files (the review dispatch pin reads each file on its own)."""
+    for rel in files:
         path = os.path.join(root, *rel.split("/"))
         try:
             os.lstat(path)
@@ -11013,28 +11014,43 @@ def _rdp_decide(data):
     return value
 
 
-def _rdp_main_worktree(root):
-    """For a linked worktree at root: (the main worktree's top level, None), or (None, detail) when root is
-    a linked worktree whose main worktree cannot be located (a separate git directory whose common
-    directory is not a main worktree's .git and names no core.worktree). (None, None) when root is not a
-    linked worktree. Raises OSError when git cannot say."""
-    p = _review_git(root, "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir")
-    if p is None or p.returncode != 0:
-        raise OSError("git cannot read the common git directory of {}".format(root))
-    lines = p.stdout.decode("utf-8", "surrogateescape").split("\n")
-    if len(lines) < 3:
-        raise OSError("git printed no common git directory for {}".format(root))
-    if os.path.realpath(lines[0]) == os.path.realpath(lines[1]):
-        return (None, None)
-    if os.path.basename(lines[0]) == ".git":
-        return (os.path.dirname(lines[0]), None)
-    q = _review_git(root, "config", "--file", os.path.join(lines[0], "config"), "--get", "core.worktree")
+def _rdp_common_main(common):
+    """For a linked worktree whose common git directory is common (an absolute path): (the main worktree's
+    top level, None); (None, None) when common is a bare repository (core.bare true and no core.worktree),
+    which has no main worktree and so no registry the search could miss; (None, detail) when the main
+    worktree cannot be located (a separate git directory whose configuration names no core.worktree, or a
+    configuration git cannot read)."""
+    if os.path.basename(common) == ".git":
+        return (os.path.dirname(common), None)
+    config = os.path.join(common, "config")
+    q = _review_git(common, "config", "--file", config, "--get", "core.worktree")
     if q is not None and q.returncode == 0:
         top = q.stdout.decode("utf-8", "surrogateescape").rstrip("\n")
         if top:
-            return (os.path.normpath(os.path.join(lines[0], top)), None)
+            return (os.path.normpath(os.path.join(common, top)), None)
+    q = _review_git(common, "config", "--file", config, "--bool", "--get", "core.bare")
+    if q is not None and q.returncode == 0 and q.stdout.strip() == b"true":
+        return (None, None)
     return (None, "the session is a linked worktree of the git directory {}, whose main worktree cannot be "
-            "located".format(lines[0]))
+            "located".format(common))
+
+
+def _rdp_main_worktree(root):
+    """For a linked worktree at root: (the main worktree's top level, None), or (None, detail) when root is
+    a linked worktree whose main worktree cannot be located (_rdp_common_main). (None, None) when root is
+    not a linked worktree, or is one of a bare repository. Raises OSError when git cannot say. The paths
+    are asked for without --path-format (git before 2.31 does not know it and echoes it back as if it were
+    a path) and resolved against root, the directory the probe runs in."""
+    p = _review_git(root, "rev-parse", "--git-common-dir", "--git-dir")
+    if p is None or p.returncode != 0:
+        raise OSError("git cannot read the common git directory of {}".format(root))
+    lines = p.stdout.decode("utf-8", "surrogateescape").split("\n")
+    if len(lines) < 3 or not all(line and not line.startswith("-") for line in lines[:2]):
+        raise OSError("git printed no common git directory for {}".format(root))
+    common = os.path.normpath(os.path.join(root, lines[0]))
+    if os.path.realpath(common) == os.path.realpath(os.path.join(root, lines[1])):
+        return (None, None)
+    return _rdp_common_main(common)
 
 
 def _rdp_read_small(path):
@@ -11058,31 +11074,47 @@ def _rdp_read_small(path):
 
 
 def _rdp_gitfile_main(cwd):
-    """Where git cannot be run (a broken shared configuration, say): the main worktree's top level of the
-    linked worktree holding cwd, read from the raw files git itself reads (the worktree's .git file names
-    its git directory, whose commondir file names the common directory, the main worktree's .git). None
-    when cwd is not inside a linked worktree whose common directory is a .git directory."""
+    """Where git cannot be run or answer (a broken shared configuration, a failed or timed-out probe): the
+    main worktree of the linked worktree holding cwd, read from the raw files git itself reads (the
+    worktree's .git file names its git directory, whose commondir file names the common directory).
+    (top, None) for a linked worktree whose main worktree is located; (None, None) when cwd is not in a
+    linked worktree (the nearest .git is a directory, or a .git file whose git directory has no commondir,
+    as a submodule's has not, or there is no .git at all) or is in one of a bare repository; (None, detail)
+    when the raw files cannot say (an unreadable .git or commondir file, or a common directory whose main
+    worktree cannot be located), which the caller withholds as a cannot-evaluate. A git directory that is
+    gone but whose path is a main worktree's .git/worktrees/NAME still names that main worktree."""
     path = os.path.realpath(cwd)
     while True:
+        dotgit = os.path.join(path, ".git")
         try:
-            st = os.lstat(os.path.join(path, ".git"))
-        except OSError:
+            st = os.lstat(dotgit)
+        except (FileNotFoundError, NotADirectoryError):
             st = None
+        except OSError as exc:
+            return (None, "the git metadata {} cannot be examined ({})".format(dotgit, exc))
         if st is not None:
-            if not stat.S_ISREG(st.st_mode):
-                return None
-            text = _rdp_read_small(os.path.join(path, ".git"))
-            if text is None or not text.startswith("gitdir: "):
-                return None
-            gitdir = os.path.join(path, text[len("gitdir: "):].strip())
+            if stat.S_ISDIR(st.st_mode):
+                return (None, None)
+            text = _rdp_read_small(dotgit) if stat.S_ISREG(st.st_mode) else None
+            if text is None or not text.startswith("gitdir: ") or not text[len("gitdir: "):].strip():
+                return (None, "the git file {} cannot be read as a gitdir pointer".format(dotgit))
+            gitdir = os.path.normpath(os.path.join(path, text[len("gitdir: "):].strip()))
+            holder = os.path.dirname(gitdir)
+            named = os.path.dirname(holder) if os.path.basename(holder) == "worktrees" and \
+                os.path.basename(os.path.dirname(holder)) == ".git" else None
+            try:
+                os.lstat(os.path.join(gitdir, "commondir"))
+            except (FileNotFoundError, NotADirectoryError):
+                return (os.path.dirname(named), None) if named else (None, None)
+            except OSError as exc:
+                return (None, "the git directory {} cannot be examined ({})".format(gitdir, exc))
             common = _rdp_read_small(os.path.join(gitdir, "commondir"))
             if common is None or not common.strip():
-                return None
-            common = os.path.normpath(os.path.join(gitdir, common.strip()))
-            return os.path.dirname(common) if os.path.basename(common) == ".git" else None
+                return (None, "the commondir file of {} cannot be read".format(gitdir))
+            return _rdp_common_main(os.path.normpath(os.path.join(gitdir, common.strip())))
         parent = os.path.dirname(path)
         if parent == path:
-            return None
+            return (None, None)
         path = parent
 
 
@@ -11108,14 +11140,16 @@ def _rdp_decide_within(data):
             main_top, why = _rdp_main_worktree(root)
         except OSError as exc:
             # A failed or timed-out probe: the raw .git and commondir files still name the main worktree
-            # of a linked worktree; only where they do not is the scope unknown.
-            main_top = _rdp_gitfile_main(root)
-            why = None if main_top is not None else str(exc)
+            # of a linked worktree, or show root is not one; only where they cannot say is the scope unknown.
+            main_top, why = _rdp_gitfile_main(root)
+            why = "{}, and {}".format(exc, why) if why else None
         if main_top is not None:
             own.append(main_top)
         withheld = why
-    else:
-        main_top = _rdp_gitfile_main(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None
+    elif isinstance(cwd, str) and os.path.isabs(cwd):
+        # git cannot resolve the session repository: a linked worktree whose main worktree the raw files
+        # cannot locate is a scope that cannot be known, withheld as a failed probe is.
+        main_top, withheld = _rdp_gitfile_main(cwd)
         if main_top is not None:
             own.append(main_top)
     for reg_dir in own:
@@ -11144,13 +11178,21 @@ def _rdp_decide_within(data):
 
 
 def _rdp_scope(reg_dir):
-    """The binding of the registry at reg_dir as _rdp_binding gives it: (None, None) when there is no
-    registry or it declares no binding, so the search goes on; ("bad", detail) for a registry that cannot
-    be read or parsed; ("ok", cfg) for a well-formed binding."""
-    status, reg = _orch_registry(reg_dir, nofollow=True)
-    if status == "absent":
-        return (None, None)
-    return _rdp_binding(reg) if status == "ok" else ("bad", reg)
+    """The binding of the registries at reg_dir as _rdp_binding gives it: (None, None) when there is no
+    registry or none declares a binding, so the search goes on; ("bad", detail) for a registry that cannot
+    be read or parsed; ("ok", cfg) for a well-formed binding. Each registry file is read on its own, the
+    local one first, so a local registry WITHOUT a binding cannot hide the committed one's binding, as its
+    whole-file precedence would for the other orchestration hooks."""
+    for rel in _ORCH_REGISTRY_FILES:
+        status, reg = _orch_registry(reg_dir, nofollow=True, files=(rel,))
+        if status == "absent":
+            continue
+        if status != "ok":
+            return ("bad", reg)
+        binding, cfg = _rdp_binding(reg)
+        if binding is not None:
+            return (binding, cfg)
+    return (None, None)
 
 
 def _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign):
@@ -11166,6 +11208,30 @@ def _rdp_bound(data, tool_input, binding, cfg, root, reg_dir, foreign):
         return ("unverifiable", "the check ran past its {} second budget, so its result is not "
                 "used".format(_RDP_BUDGET))
     return result
+
+
+# The commands a plain call may run on a registry file or the .aiqt directory, because they only read
+# (no option of theirs writes a file); a bare command word, compared without regard to case.
+_RDP_REGISTRY_READERS = frozenset(("cat", "head", "tail", "wc", "ls", "stat", "grep", "jq", "cmp", "diff"))
+
+
+def _rdp_names_registry(words):
+    """The first word of a plain command that names an orchestration registry file (its file name anywhere
+    in the word, without regard to case) or the .aiqt directory holding it (the last component of the
+    word, or of its value after an =, once normalized); None when no word does, or the command only reads
+    (_RDP_REGISTRY_READERS). A Bash call that writes, moves or removes the registry would switch the hook
+    off for every later call."""
+    if words[0].casefold() in _RDP_REGISTRY_READERS:
+        return None
+    names = tuple(rel.rsplit("/", 1)[-1].casefold() for rel in _ORCH_REGISTRY_FILES)
+    for word in words[1:]:
+        folded = word.casefold()
+        if any(name in folded for name in names):
+            return word
+        for value in (folded, folded.split("=", 1)[-1]):
+            if value and os.path.basename(os.path.normpath(value)) == ".aiqt":
+                return word
+    return None
 
 
 def _rdp_not_plain(cfg, names, why):
@@ -11197,6 +11263,12 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False):
     words, why = _rdp_plain_words(command)
     if words is None:
         return _rdp_not_plain(cfg, _rdp_mentions(command, commands), why)
+    touched = _rdp_names_registry(words)
+    if touched is not None:
+        return ("deny", "the command names the orchestration registry ({}) that binds review dispatch in "
+                "this session; a Bash call that may write, move or remove it would switch this check off, so "
+                "only a read ({}) may name it, and an operator changes the registry outside the "
+                "session".format(touched, ", ".join(sorted(_RDP_REGISTRY_READERS))))
     word = _rdp_basename(words[0])
     if word.casefold() not in {name.casefold() for name in commands}:
         # The one dispatch's own arguments may mention a declared name (in a brief path, say); a plain
@@ -11272,8 +11344,9 @@ def review_dispatch_pin(data):
     immutable, authoritative revision whose changed set is the declared review set and whose declared
     paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
     dispatch runs. Inert without a review_dispatch binding; in a session a binding scopes, a Bash call that
-    is not one provably plain command is withheld, and a malformed registry or binding withholds every
-    Bash call.
+    is not one provably plain command is withheld, a plain one naming the registry is refused unless it only
+    reads, and a malformed registry or binding, or a linked worktree whose main worktree cannot be located,
+    withholds every Bash call.
     A refusal denies and names its reason; a cannot-evaluate denies with an UNVERIFIABLE: prefix; a
     declared non-revision target, or a branch label that does not resolve to the pin, is allowed with a
     note. A crash reaches main's PreToolUse fail-closed exit 2.

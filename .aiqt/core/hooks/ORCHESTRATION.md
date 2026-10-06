@@ -248,12 +248,21 @@ duplicate label, an unreadable brief, a failed or timed-out git probe, an exhaus
 an authority that fails or prints anything other than one commit id. A linked worktree is scoped
 by its main worktree's registry, found through git or, when git cannot run (a broken shared
 configuration), through the raw `.git` and `commondir` files. A linked worktree whose main worktree
-cannot be located (a git directory separated from the main worktree) withholds every Bash call. When
-git cannot say where the main worktree is (a failed or timed-out probe), the raw `.git` and
-`commondir` files are read instead. A registry without a binding never ends the search: the session
+cannot be located (a git directory separated from the main worktree) withholds every Bash call,
+whether or not git can run. When git cannot say where the main worktree is (a failed or timed-out
+probe), the raw `.git` and `commondir` files are read instead. A linked worktree of a bare repository
+(`core.bare` true) has no main worktree and is not withheld, and a failed probe where `.git` is a
+directory is no linked worktree, so a session with no registry anywhere is not withheld. Setting
+`core.bare` to true in a separated git directory's configuration would end that withholding. A registry without a binding never ends the search: the session
 repository's registry, its main worktree's, and every registry on the cwd's ancestors are read,
 nearest first, and the first binding decides, so a registry of `{"version": 1}` checked out, written
-or nested below an orchestrated tree cannot hide its binding. When git cannot resolve the session
+or nested below an orchestrated tree cannot hide its binding. This hook reads each registry file on
+its own, so a local `.aiqt/orchestration.local.json` without a binding cannot hide a binding in the
+committed `.aiqt/orchestration.json`. In a bound session, a plain command that names a registry file
+or the `.aiqt` directory is refused unless its command word only reads (`cat`, `head`, `tail`, `wc`,
+`ls`, `stat`, `grep`, `jq`, `cmp`, `diff`). A command that changes the registry without naming it (a
+whole-tree checkout, reset, stash or clean, the removal of a parent directory, a script) is not seen
+and switches the hook off. When git cannot resolve the session
 repository (a broken configuration, a refused ownership check, a deleted cwd), or resolves one with
 no binding, the hook looks for the registry on the cwd's ancestors, so a `core.worktree` setting that
 moves the top level cannot turn the check off. If git cannot resolve the repository, or resolves one

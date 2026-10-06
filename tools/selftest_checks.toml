@@ -567,6 +567,14 @@ expected-check-ids = [
   "rdp/core-worktree-cannot-unscope",
   "rdp/linked-worktree-broken-config-scoped",
   "rdp/linked-worktree-separate-gitdir-withheld",
+  "rdp/linked-worktree-separate-gitdir-broken-config-withheld",
+  "rdp/each-ambient-git-variable-withholds",
+  "rdp/bare-repository-linked-worktree-unbound-allows",
+  "rdp/unbound-repository-failed-probe-or-old-git-allows",
+  "rdp/plain-registry-write-denies",
+  "rdp/plain-registry-read-allows",
+  "rdp/registry-disarm-dispatch-still-denies",
+  "rdp/bindingless-local-registry-cannot-hide-committed-binding",
 ]
 
 [[suite]]

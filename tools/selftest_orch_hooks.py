@@ -702,6 +702,27 @@ def _rdp_cases(tmp):
             else:
                 os.environ[k] = v
     check("rdp/hostile-git-env-scrubbed-and-dispatch-withheld", hostile_kind, ("unverifiable", True))
+    # Each ambient variable on its own withholds the dispatch, named in the reason.
+    ambient_names = (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_QUARANTINE_PATH", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
+        "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE")
+    ambient_brief = f.good()
+    ambient_got = []
+    for name in ambient_names:
+        saved = os.environ.get(name)
+        os.environ[name] = str(bare / "elsewhere")
+        try:
+            result = f.dispatch(ambient_brief)
+        finally:
+            if saved is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = saved
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
+        ambient_got.append((name, _rdp_kind(result), "sets " + name + "," in reason))
+    check("rdp/each-ambient-git-variable-withholds", ambient_got,
+          [(name, "unverifiable", True) for name in ambient_names])
     check("rdp/grafts-and-replace-probe-real-parents", [
         (p.returncode, p.stdout.decode().strip()) if p is not None else None
         for p in (graft_parent, replace_parent)], [(0, gf.seed), (0, rp.seed)])
@@ -1048,6 +1069,14 @@ def _rdp_cases(tmp):
     check("rdp/linked-worktree-separate-gitdir-withheld", [
         _from(base / "linkedsep-beside", ls_branch, background=True), _from(base / "linkedsep-beside", ls_branch),
         _rdp_kind(ls_.dispatch(ls_branch))], ["unverifiable", "unverifiable", "deny"])
+    # The same separated git directory with a broken shared configuration: git cannot resolve the linked
+    # worktree, and the raw .git and commondir files name a common directory that is no main worktree's
+    # .git, so the scope still cannot be known and every call stays withheld.
+    with open(str(base / "linkedsep-meta" / "config"), "a", encoding="utf-8") as fh:
+        fh.write("\n[invalid\n")
+    check("rdp/linked-worktree-separate-gitdir-broken-config-withheld", [
+        _from(base / "linkedsep-beside", "/nonexistent", background=bg) for bg in (False, True)],
+        ["unverifiable", "unverifiable"])
     # A registry WITHOUT a binding never ends the search for one: not one a linked worktree checks out from
     # a commit (the binding kept in the main worktree's untracked local registry), not one written beside
     # or inside a linked worktree, not one in a repository nested inside the orchestrated tree.
@@ -1159,6 +1188,72 @@ def _rdp_cases(tmp):
     finally:
         aiqt_hooks._rdp_decide, sys.stdin = saved_decide, saved_stdin
     check("rdp/handler-crash-fails-closed", rc, 2)
+    _rdp_scope_cases(base, bare)
+
+
+def _rdp_ls(cwd, background):
+    """The review dispatch verdict on a plain `ls` from cwd."""
+    return _rdp_kind(aiqt_hooks.review_dispatch_pin(dict(
+        hook_event_name="PreToolUse", cwd=str(cwd), session_id="s1", tool_name="Bash",
+        tool_input=dict(command="ls", run_in_background=background))))
+
+
+def _rdp_scope_cases(base, plain):
+    """Scope vectors: a session with no registry anywhere is never withheld (a linked worktree of a bare
+    repository, a failed common-directory probe, a git that echoes --path-format back), and a bound
+    session cannot switch the hook off through a plain command that writes or removes its registry."""
+    src = base / "baresrc"
+    _rdp_git(base, "init", "-q", "-b", "main", str(src))
+    (src / "x.txt").write_text("x\n", encoding="utf-8")
+    _rdp_git(src, "add", "x.txt")
+    _rdp_git(src, "commit", "-q", "-m", "x")
+    _rdp_git(base, "clone", "-q", "--bare", str(src), str(base / "bareproj.git"))
+    _rdp_git(base / "bareproj.git", "worktree", "add", "-q", str(base / "bareproj-wt"), "main")
+    check("rdp/bare-repository-linked-worktree-unbound-allows",
+          [_rdp_ls(base / "bareproj-wt", bg) for bg in (False, True)], ["allow", "allow"])
+    real_main, real_git = aiqt_hooks._rdp_main_worktree, aiqt_hooks._review_git
+
+    def _probe_fails(root):
+        raise OSError("git cannot read the common git directory of {}".format(root))
+
+    def _old_git(repo, *args, stdin=None):
+        # git before 2.31 echoes an option rev-parse does not know as if it were a path.
+        if args[:1] == ("rev-parse",) and "--path-format=absolute" in args:
+            p = real_git(repo, *[a for a in args if a != "--path-format=absolute"], stdin=stdin)
+            if p is not None:
+                p.stdout = b"--path-format=absolute\n" + p.stdout
+            return p
+        return real_git(repo, *args, stdin=stdin)
+    got = []
+    try:
+        aiqt_hooks._rdp_main_worktree = _probe_fails
+        got += [_rdp_ls(plain, bg) for bg in (False, True)]
+        aiqt_hooks._rdp_main_worktree = real_main
+        aiqt_hooks._review_git = _old_git
+        got += [_rdp_ls(plain, bg) for bg in (False, True)]
+    finally:
+        aiqt_hooks._rdp_main_worktree, aiqt_hooks._review_git = real_main, real_git
+    check("rdp/unbound-repository-failed-probe-or-old-git-allows", got, ["allow"] * 4)
+    # A plain command that writes, moves or removes the registry binding this session is refused; a read
+    # of it, and a command naming other .aiqt paths, is not.
+    rg = RdpFixture(base, "regdisarm")
+    rg_bad = rg.brief(["Review-target: revision", "Reviewed-revision: HEAD"], "bad.txt")
+    unbound = rg.briefs / "unbound.json"
+    unbound.write_text(json.dumps(dict(version=1)), encoding="utf-8")
+    local = rg.root / ".aiqt" / "orchestration.local.json"
+    check("rdp/plain-registry-write-denies", [_rdp_kind(rg.run(c)) for c in (
+        "cp " + str(unbound) + " .aiqt/orchestration.local.json", "git rm -q .aiqt/orchestration.json",
+        "rm -rf .aiqt", "mv .aiqt/ elsewhere", "rm " + str(rg.root / ".AIQT" / "Orchestration.Local.JSON"),
+        "ln -sf " + str(unbound) + " .aiqt/orchestration.local.json", "git checkout HEAD -- .aiqt/.",
+        "cp " + str(unbound) + " --target-directory=.aiqt")], ["deny"] * 8)
+    check("rdp/plain-registry-read-allows", [_rdp_kind(rg.run(c)) for c in (
+        "cat .aiqt/orchestration.local.json", "ls .aiqt", "git diff .aiqt/core/x.toml")], ["allow"] * 3)
+    check("rdp/registry-disarm-dispatch-still-denies", _rdp_kind(rg.dispatch(rg_bad)), "deny")
+    # The binding in the committed registry, a bindingless local one beside it: the binding still scopes.
+    reg = dict(version=1, state_dir=str(rg.briefs / "state"), review_dispatch=rg.binding)
+    (rg.root / ".aiqt" / "orchestration.json").write_text(json.dumps(reg), encoding="utf-8")
+    local.write_text(json.dumps(dict(version=1, state_dir=str(rg.briefs / "state"))), encoding="utf-8")
+    check("rdp/bindingless-local-registry-cannot-hide-committed-binding", _rdp_kind(rg.dispatch(rg_bad)), "deny")
 
 
 def main(report_path=None):
