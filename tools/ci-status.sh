@@ -64,23 +64,24 @@ DEADLINE=$(( NOW + ${CI_STATUS_TIMEOUT:-900} ))
 # A run for this commit is created after the commit is pushed, so after the commit object exists; its
 # created_at (GitHub's clock) can precede the committer date only when the committer's clock ran ahead.
 # LOWER_BOUND is therefore min(committer date, now) minus SCAN_MARGIN_SECONDS. The clamp to now
-# neutralises a committer date in the future; it can only lower the bound, so through the clamp a wrong
-# clock on the machine running this check never narrows the scan. WHAT THE 24-HOUR MARGIN COVERS: a committer clock ahead of GitHub's by at most 24
-# hours, whatever the cause. A clock behind is always covered, since it only lowers the bound. A wrong
-# time zone setting on a clock showing the right local time shifts the committer date by the
-# difference of two UTC offsets, which span UTC-12 to UTC+14, so up to 26 hours either way: an error of
-# up to 24 hours ahead is covered, one of 24 to 26 hours ahead is NOT. ORDERING JITTER: the stop rule
-# ends the scan at a page whose runs were ALL created before LOWER_BOUND, so a run of this commit is
-# missed only if the listing places it after a full page of 100 runs each created before LOWER_BOUND;
-# with an accurate committer clock each of those runs was created at least 24 hours before it (at least
-# 24 hours minus the clock error when the clock is ahead). Jitter on that scale is NOT covered.
-# RESIDUAL (disclosed, not closed): a committer clock ahead by more than 24 hours (including the 24 to
-# 26 hour wrong time zone case), still ahead when the commit was made, can place this commit's runs below
-# LOWER_BOUND; they are then visible only to the head_sha query, which is exactly the parent script's
-# coverage. ASSUMPTION: the listing is ordered newest first by creation, so a new run enters at the head
-# (observed GitHub behaviour, not a documented contract). Cost scales with the runs created since
-# LOWER_BOUND: one request for the head_sha query plus one per page, typically one or two pages for a
-# recent commit; a scan that has not reached the bound within SCAN_MAX_PAGES pages (5,000 runs) is an
+# neutralises a committer date in the future; it can only lower the bound, so the clamp never raises the
+# bound above the committer-date bound; its effect depends on the checking machine's clock, which, if
+# ahead, can leave a future committer date unclamped. WHAT THE 24-HOUR MARGIN COVERS: a committer clock
+# ahead of GitHub's by at most 24 hours, whatever the cause. A clock behind is always covered, since it
+# only lowers the bound. A wrong time zone setting on a clock showing the right local time shifts the
+# committer date by the difference of two UTC offsets, which span UTC-12 to UTC+14, so up to 26 hours
+# either way: an error of up to 24 hours ahead is covered, one of 24 to 26 hours ahead is NOT. ORDERING
+# JITTER: the stop rule ends the scan at a page whose runs were ALL created before LOWER_BOUND, so a run
+# of this commit is missed only if the listing places it after a full page of 100 runs each created
+# before LOWER_BOUND; with an accurate committer clock each of those runs was created at least 24 hours
+# before it (at least 24 hours minus the clock error when the clock is ahead). Jitter on that scale is
+# NOT covered. RESIDUAL (disclosed, not closed): a committer clock ahead by more than 24 hours (including
+# the 24 to 26 hour wrong time zone case), still ahead when the commit was made, can place this commit's
+# runs below LOWER_BOUND; they are then visible only to the head_sha query, which is exactly the parent
+# script's coverage. ASSUMPTION: the listing is ordered newest first by creation, so a new run enters at
+# the head (observed GitHub behaviour, not a documented contract). Cost scales with the runs created
+# since LOWER_BOUND: one request for the head_sha query plus one per page, typically one or two pages for
+# a recent commit; a scan that has not reached the bound within SCAN_MAX_PAGES pages (5,000 runs) is an
 # API error, never a verdict.
 SCAN_MARGIN_SECONDS=86400
 SCAN_MAX_PAGES=50

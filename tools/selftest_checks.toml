@@ -512,6 +512,7 @@ expected-check-ids = [
   "ci/scan-created-at-calendar-valid",
   "ci/filtered-only-failure-reported",
   "ci/jq-step-direct-cases",
+  "ci/finalise-harness-error-keeps-failures",
 ]
 [[suite]]
 id = "git-fixture-env-selftest"

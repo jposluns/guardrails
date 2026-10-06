@@ -11,7 +11,10 @@ and complete captured output, never a success token.
   selftest_ci_status.py --execution-report ABS_PATH  also write the executed check IDs as JSON
 
 Exit 2 is a harness/setup error, including bad arguments, a failed report write, an unreadable,
-malformed, or suite-missing expectation manifest, or a ci-status.sh whose jq program cannot be extracted.
+malformed, or suite-missing expectation manifest, a ci-status.sh whose jq program cannot be extracted,
+or a duplicate check id. Exit 1 takes precedence over exit 2: a run with a harness error in which any
+assertion failed exits 1, after printing every collected failure. Bad arguments are refused before any
+check runs, so they always exit 2.
 """
 import sys
 
@@ -22,6 +25,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
         % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
     raise SystemExit(2)
 
+import contextlib
+import io
 import json
 import os
 import stat
@@ -162,12 +167,20 @@ except (IndexError, OSError, ValueError) as exc:
 
 def check(name, got, want):
     if name in _EXECUTED_SET:
-        print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
-        sys.exit(2)
-    _EXECUTED_SET.add(name)
-    EXECUTED.append(name)
+        _duplicate_check_id(name)
+    else:
+        _EXECUTED_SET.add(name)
+        EXECUTED.append(name)
     if got != want:
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
+
+
+def _duplicate_check_id(name):
+    # Recorded, not raised: the run still reaches main()'s finalisation, which prints every collected
+    # failure. check() still evaluates the duplicate's own assertion.
+    message = "{}: duplicate check id".format(name)
+    HARNESS_ERRORS.append(message)
+    print("SELF-TEST HARNESS ERROR: " + message, file=sys.stderr)
 
 
 def harness_error(check_id, detail):
@@ -779,33 +792,88 @@ def main(report_path=None):
             check("ci/jq-step-direct-cases", step_result,
                   ((0, "stop"), (0, "more"), (0, "stop"), True, True, True, True, True))
 
-    if not _write_report(report_path):
-        return 2
-    if HARNESS_ERRORS:
-        # Assertion failures seen in the same run are still printed, and they make the run a FAIL
-        # (exit 1), not a cannot-evaluate: a harness error never hides a behaviour failure.
-        if FAILURES:
-            print("SELF-TEST FAIL:")
-            for failure in FAILURES:
-                print("  - " + failure)
-        print("SELF-TEST HARNESS ERROR: {} check(s) not evaluated; see the labelled errors above "
-              "(cannot evaluate)".format(len(HARNESS_ERRORS)), file=sys.stderr)
-        return 1 if FAILURES else 2
-    expected = _expected_check_ids()
-    if expected is None:
-        return 2
-    for check_id in sorted(expected - _EXECUTED_SET):
-        FAILURES.append("execution-set/missing: {}".format(check_id))
-    for check_id in sorted(_EXECUTED_SET - expected):
-        FAILURES.append("execution-set/extra: {}".format(check_id))
+    # Round 6: every harness-error exit of the finalisation must print the failures collected before it
+    # and exit 1 when there are any. Each case seeds state, runs _finalise() in-process, and restores.
+    check("ci/finalise-harness-error-keeps-failures", _finalisation_cases(),
+          [(1, True), (2, False), (1, True), (1, True), (1, True), (2, False)])
+    return _finalise(report_path)
+
+
+def _print_failures():
     if FAILURES:
         print("SELF-TEST FAIL:")
         for failure in FAILURES:
             print("  - " + failure)
+
+
+def _harness_error_exit():
+    # Every harness-error exit after the checks have run returns through here, so a harness error
+    # never hides a behaviour failure: the collected failures are printed, and any one of them makes
+    # the run a FAIL (exit 1) rather than a cannot-evaluate (exit 2).
+    _print_failures()
+    if FAILURES:
+        print("SELF-TEST HARNESS ERROR: see the labelled errors above; the assertion failures make this "
+              "run a FAIL", file=sys.stderr)
+        return 1
+    print("SELF-TEST HARNESS ERROR: see the labelled errors above (cannot evaluate)", file=sys.stderr)
+    return 2
+
+
+def _finalise(report_path):
+    report_written = _write_report(report_path)
+    if HARNESS_ERRORS:
+        return _harness_error_exit()
+    expected = _expected_check_ids()
+    if expected is not None:
+        for check_id in sorted(expected - _EXECUTED_SET):
+            FAILURES.append("execution-set/missing: {}".format(check_id))
+        for check_id in sorted(_EXECUTED_SET - expected):
+            FAILURES.append("execution-set/extra: {}".format(check_id))
+    if not report_written or expected is None:
+        return _harness_error_exit()
+    if FAILURES:
+        _print_failures()
         return 1
     print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
           "tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
+
+
+def _finalisation_cases():
+    """Run _finalise() on seeded state per case; return (exit code, seeded failure printed) for each."""
+    global CHECKS_MANIFEST
+    saved = (list(FAILURES), list(HARNESS_ERRORS), list(EXECUTED), set(_EXECUTED_SET), CHECKS_MANIFEST)
+    seeded = "seeded/assertion: got 1, want 2"
+    results = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="ci-status-finalise-") as raw:
+            missing = Path(raw) / "absent"
+            # (seed a failure?, harness error to inject); otherwise the report path is None and the
+            # manifest is the real one, so only the injected error can make the exit a harness error.
+            for fail, inject in ((True, "recorded"), (False, "recorded"), (True, "duplicate"),
+                                 (True, "report"), (True, "manifest"), (False, "manifest")):
+                FAILURES[:] = [seeded] if fail else []
+                HARNESS_ERRORS[:] = []
+                EXECUTED[:] = []
+                _EXECUTED_SET.clear()
+                CHECKS_MANIFEST = missing / "selftest_checks.toml" if inject == "manifest" else saved[4]
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        if inject == "recorded":
+                            harness_error("seeded/not-evaluated", "seeded harness error")
+                        elif inject == "duplicate":
+                            _duplicate_check_id("seeded/duplicate")
+                        code = _finalise(str(missing / "report.json") if inject == "report" else None)
+                    except SystemExit as exc:  # an exit that bypasses finalisation is a failure here
+                        code = ("SystemExit", exc.code)
+                results.append((code, seeded in out.getvalue()))
+    finally:
+        FAILURES[:], HARNESS_ERRORS[:], EXECUTED[:] = saved[0], saved[1], saved[2]
+        _EXECUTED_SET.clear()
+        _EXECUTED_SET.update(saved[3])
+        CHECKS_MANIFEST = saved[4]
+    return results
 
 
 def _parse_argv(argv):
