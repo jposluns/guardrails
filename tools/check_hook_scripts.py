@@ -62,7 +62,11 @@ reviewed edit here. Six legs:
       is the shared fail-closed child contract, opf/tools/_child_contract.py, implemented once
       for this child and the OPF unit child); a fault the loaded code reports into a replaced
       or silenced reporting machinery is seen by an audit hook and makes the child exit 2, and
-      reporting machinery left replaced is put back and refused the same way. The parent accepts
+      reporting machinery left replaced is put back and refused the same way, also when the
+      fault, the replacement or a thread start happens inside the result write itself (the
+      contract re-checks after its record callback returns; merge train 2 QA r8, codex MAJOR:
+      a stdout wrapper's flush that raised an unraisable fault under a hook it put back left
+      the exit 0). The parent accepts
       a verdict only with the zero exit, the complete result ending in its terminator line, and
       NOTHING on the child's error stream: the loaded files write nothing to stderr at load time,
       so any bytes there -- an uncaught-exception traceback, a frameless `Exception ignored` line
@@ -103,8 +107,10 @@ DISCLOSED RESIDUALS (what this gate does not catch):
     ONCE in opf/tools/_child_contract.py (its DISCLOSED RESIDUALS section): a thread's uncaught
     exception raising no audit event; the window while loaded code has DELETED sys.unraisablehook
     with sys.stderr replaced, both restored before the result (merge train 2 QA r5, codex MEDIUM,
-    reproduced); an object still reachable at the result, never finalized (os._exit); and the
-    address-reuse edge of the identity-set settle comparison (merge train 2 QA r6).
+    reproduced), in the result write as in cleanup; an object still reachable at the result,
+    never finalized (os._exit), and a thread cleanup code started before the result handler ran,
+    still running at the result; and the address-reuse edge of the identity-set settle
+    comparison (merge train 2 QA r6).
   - The scripts run under this gate's interpreter (sys.executable), not the host's `python3` lookup.
     Not exercised: a python3 too old to accept -I (before 3.4), which exits 2 with a usage error before
     the launcher runs; a python3 that cannot be found or started (the outcome is the host's); and a
@@ -676,7 +682,11 @@ def parity_child(spec):
     such event, any machinery replacement, a closed original stderr, an unsettled collection or
     a flush failure writes the named fault line to fd 2 and exits 2 with no result; a result
     write or flush that RAISES (after the result reached stdout) exits 2 with the contract's
-    one-line diagnostic, and the nonzero exit is refused (merge train 2 QA r7). Exit 2 also
+    one-line diagnostic, and the nonzero exit is refused (merge train 2 QA r7); a result write
+    that RETURNS but faulted without raising (an unraisable fault the audit hook saw, the
+    machinery left replaced, a thread started, a flush failure on the re-check) also exits 2,
+    with the contract's diagnostic, because the contract re-runs its checks after the record
+    callback and a new fault voids the result (merge train 2 QA r8). Exit 2 also
     if a file or the contract module cannot be loaded, or if another exit handler was registered
     before the record handler (its os._exit would skip that one)."""
     sys.path.insert(0, str(ROOT / "opf" / "tools"))
@@ -1276,6 +1286,43 @@ def self_test_main():
                  "            raise RuntimeError('result flush failed')\n"
                  "\n\n_seeded_sys.stdout = _SeededOutput(_seeded_sys.stdout)\n",
                  "the record handler raised RuntimeError in the record callback"),
+                # Merge train 2 QA r8 (codex MAJOR), the reproduction: the wrapper's flush,
+                # once written, absorbs an unraisable fault (a finalizer raising during the
+                # flush) under a hook it installs and puts back, so the callback returns
+                # normally; the pinned contract kept its decided exit 0 over a complete result.
+                ("result-flush-unraisable", "\n\nimport sys as _seeded_sys\n"
+                 "\n\nclass _SeededRaiser:\n"
+                 "    def __del__(self):\n"
+                 "        raise RuntimeError('fault during result flush')\n"
+                 "\n\nclass _SeededAbsorbingOutput:\n"
+                 "    def __init__(self, stream):\n"
+                 "        self.stream, self.written, self.log = stream, False, []\n"
+                 "\n    def write(self, text):\n"
+                 "        result = self.stream.write(text)\n"
+                 "        self.written = True\n"
+                 "        return result\n"
+                 "\n    def flush(self):\n"
+                 "        self.stream.flush()\n"
+                 "        if self.written:\n"
+                 "            saved = _seeded_sys.unraisablehook\n"
+                 "            _seeded_sys.unraisablehook = self.log.append\n"
+                 "            _SeededRaiser()\n"
+                 "            _seeded_sys.unraisablehook = saved\n"
+                 "\n\n_seeded_sys.stdout = _SeededAbsorbingOutput(_seeded_sys.stdout)\n",
+                 "a fault was observed during the record callback"),
+                # QA r8, the error-stream channel: a result write that writes to stderr is no
+                # fault the child sees (it exits 0 with its result); the leg refuses the bytes.
+                ("result-write-stderr", "\n\nimport sys as _seeded_sys\n"
+                 "\n\nclass _SeededNoisyOutput:\n"
+                 "    def __init__(self, stream):\n"
+                 "        self.stream = stream\n"
+                 "\n    def write(self, text):\n"
+                 "        _seeded_sys.stderr.write('result write noise\\n')\n"
+                 "        return self.stream.write(text)\n"
+                 "\n    def flush(self):\n"
+                 "        self.stream.flush()\n"
+                 "\n\n_seeded_sys.stdout = _SeededNoisyOutput(_seeded_sys.stdout)\n",
+                 "fault on the comparison child's error stream"),
         ):
             root = fresh("p-" + name)
             _patch(root / STOP_REL, "", "", append)
@@ -1312,7 +1359,9 @@ def self_test_main():
           "collection, a seeded resurrecting finalizer whose newly created cyclic cleanup work "
           "faults, the same with other tracked objects released alongside (the identity-set "
           "settle rule, merge train 2 QA r6), a seeded stdout whose flush raises after the "
-          "result was written (QA r7), and a seeded cleanup exit that cuts "
+          "result was written (QA r7), a seeded stdout whose flush absorbs an unraisable fault "
+          "under a hook it puts back and one whose write writes to stderr (QA r8), and a "
+          "seeded cleanup exit that cuts "
           "off its shutdown-written result are cannot-evaluate (secfcl)")
     return 0
 

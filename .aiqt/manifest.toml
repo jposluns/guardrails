@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "90d15397d40bcbd1b01aa5134c646dd49dab4d72f67699b12f10bfe79ddf1296"
+tree-sha256 = "23172fa51b29075589e7de870a732fa75189012da6b3ca835bceec6b1a539d60"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2566,8 +2566,8 @@ sha256 = "d2247bf246136735bef911aa3129a9e2895c0bc2297a0480b9d1daf2d8fdbd99"
 
 [[sources]]
 path = "opf/tools/_child_contract.py"
-bytes = 28181
-sha256 = "e4e543d1f560d04d8bc3891e1517d24a3c1a4f42fc7ac7645cb446df061a4148"
+bytes = 38693
+sha256 = "977867e42da25f5ea9e084611bdb53f1a208f34530c2259b0b3a3c214482f6af"
 
 [[sources]]
 path = "opf/tools/_commonmark_headings.py"
@@ -3261,8 +3261,8 @@ sha256 = "b013edeeefca5054b5351bab57530a8874d6bc2aaacdc7dd598110e80f5e78eb"
 
 [[sources]]
 path = "tools/check_hook_scripts.py"
-bytes = 75712
-sha256 = "2366653221a730809d2a9d4f4791785b522cc97a1feb998bb599eeca9c857848"
+bytes = 79099
+sha256 = "53f46d1971df9488bb5fc01f45aa34d59cd89b347733ebe1aed71a13012f394c"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"

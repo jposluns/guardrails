@@ -55,6 +55,33 @@ THE CONTRACT, in the order it runs:
    callback wrote before it failed is never carried by a success exit (merge train 2 QA r7,
    codex MAJOR: a `finally: os._exit(code)` swallowed the exception and exited with the success
    code).
+5. THE DECISION RE-CHECKED AFTER THE RECORD. A callback that RETURNS normally can still fault
+   without raising: the record it writes runs whatever the loaded or tested code installed (a
+   wrapped stdout, say), and that code can raise an unraisable exception (a finalizer that raises
+   during a flush) and report it through a hook it installs only for the moment (merge train 2 QA
+   r8, codex MAJOR, reproduced: the decided code was never reconsidered, and the parity child
+   exited 0 with a complete result). So after the callback returns the handler runs _decide's
+   checks AGAIN -- collection settled, reporting machinery restored, streams flushed, the
+   audit-recorded faults -- and any fault NEW since the callback started voids the record: a
+   one-line diagnostic on file descriptor 2 and the exit is fail_code. Each channel a callback
+   can fault through without raising, and how it is handled:
+     - an unraisable exception (a finalizer, an ignored exception in a flush): the audit hook sees
+       the `sys.unraisablehook` event whatever hook is installed, so it is a new fault; only the
+       DELETED-hook window of residual (b) hides it, in the callback as in cleanup;
+     - a THREAD it starts: the interpreter joined its threads BEFORE the exit handlers ran, and
+       the os._exit would end a thread started after that unobserved, so the audit hook counts
+       every `_thread.start_joinable_thread` and `_thread.start_new_thread` event, and a thread
+       started anywhere inside the record handler (by the callback or by a finalizer the
+       collection runs) is a fault by name, whether it faults or not;
+     - a WRITE TO THE ERROR STREAM: not seen by the child; both parents refuse it (the parity
+       parent requires an empty error stream, the OPF unit runner one holding nothing but its
+       boundary line and declared rows);
+     - a REPLACED or SILENCED hook or stream: one left replaced at the re-check is found,
+       restored and refused by name; one replaced and put back inside the callback hides no
+       unraisable or excepthook fault (the audit event fires whatever hook is installed), and
+       residual (a) (a thread's fault under a threading.excepthook replaced and put back) still
+       applies to a thread started BEFORE the handler, while one started inside it is refused by
+       the thread rule above.
 
 DISCLOSED RESIDUALS -- the channels this contract CANNOT close, disclosed here ONCE (the two
 callers' docstrings point here instead of restating them):
@@ -70,7 +97,9 @@ callers' docstrings point here instead of restating them):
       it: the same fault with the hook present, even silenced, is caught by the audit event, so
       DELETED is the precise wording).
   (c) an object still REACHABLE at the record is never finalized (the os._exit ends the child), so
-      its finalizer neither runs nor faults.
+      its finalizer neither runs nor faults. Likewise a thread that cleanup code started BEFORE the
+      record handler ran (an earlier exit handler's), still running at the record, is ended by
+      the os._exit unobserved; only a thread started inside the record handler is refused.
   (d) the identity comparison is by id(): a finalizer that frees tracked objects and creates
       replacements that receive the SAME addresses within one pass, the counts equal, reads as a
       pass that changed nothing (CPython reuses freed addresses; not reproduced -- the probing
@@ -93,6 +122,10 @@ GC_PASS_BOUND = 10
 # The audit events CPython raises BEFORE it hands an exception to the reporting machinery
 # (Python/errors.c: `sys.unraisablehook`; Python/pythonrun.c: `sys.excepthook`).
 FAULT_EVENTS = frozenset(("sys.unraisablehook", "sys.excepthook"))
+# The audit events CPython raises when it starts a thread (Modules/_threadmodule.c). A thread
+# started inside the record handler runs after the interpreter's thread join and is ended by the
+# os._exit unobserved, so the handler counts these and refuses one started inside it (QA r8).
+THREAD_EVENTS = frozenset(("_thread.start_joinable_thread", "_thread.start_new_thread"))
 # The reporting machinery a cleanup fault is reported through: the error stream and the three
 # hooks CPython hands an uncaught or unraisable exception.
 REPORTING = (("sys", "stderr"), ("sys", "excepthook"), ("sys", "unraisablehook"),
@@ -147,6 +180,7 @@ class FailClosedChild:
         self._record = record
         self._fault_line = fault_line
         self._settled = []
+        self._threads_started = []
         self._snapshot = reporting_snapshot()
 
     def register(self):
@@ -169,6 +203,8 @@ class FailClosedChild:
         def audit(event, _args):
             if event in FAULT_EVENTS:
                 self.faults.append("a cleanup fault reached {}".format(event))
+            elif event in THREAD_EVENTS:
+                self._threads_started.append(event)
         try:
             sys.addaudithook(audit)
         except Exception as exc:
@@ -201,9 +237,18 @@ class FailClosedChild:
             return   # never settled: no record, and the parent fails closed
         stage = "before the record"
         try:
-            code = self._decide(self._settled[0])
+            code = self._decide(self._settled[0], len(self._threads_started))
+            seen, threads = len(self.faults), len(self._threads_started)
             stage = "in the record callback"
             self._record(code)
+            # The callback returned normally, but it may have faulted without raising (module
+            # docstring, contract step 5): the same checks again, and a fault new since the
+            # callback started voids the record (merge train 2 QA r8, codex MAJOR).
+            stage = "after the record callback"
+            self._check(threads)
+            if len(self.faults) > seen:
+                code = self.fail_code
+                self._callback_fault(self.faults[seen:])
         except BaseException as exc:
             # Never a `finally: os._exit(code)`: that swallowed the exception and kept the
             # success code (merge train 2 QA r7, codex MAJOR). A handler that did not return
@@ -211,6 +256,17 @@ class FailClosedChild:
             code = self.fail_code
             self._handler_fault(stage, exc)
         os._exit(code)
+
+    def _callback_fault(self, faults):
+        """The one-line diagnostic for a fault observed during a record callback that returned
+        normally: best effort and itself guarded (the fail_code exit carries the failure whether
+        or not this line is written)."""
+        try:
+            os.write(2, ("child-contract-fault: a fault was observed during the record callback "
+                         "({}), so any record it wrote is void; exit {} (secfcl)\n".format(
+                             "; ".join(faults)[:1000], self.fail_code)).encode("utf-8", "replace"))
+        except BaseException:
+            pass
 
     def _handler_fault(self, stage, exc):
         """The one-line diagnostic for a record handler that raised: best effort and itself
@@ -222,10 +278,23 @@ class FailClosedChild:
         except BaseException:
             pass
 
-    def _decide(self, code):
-        """Settle the collection, restore the reporting machinery and flush the streams; return
-        the code the record carries (fail_code, with the caller's fault line on file descriptor 2,
-        when any fault was recorded)."""
+    def _decide(self, code, threads):
+        """Run the checks (_check) and return the code the record carries (fail_code, with the
+        caller's fault line on file descriptor 2, when any fault was recorded)."""
+        self._check(threads)
+        if self.faults:
+            code = self.fail_code
+            try:
+                os.write(2, self._fault_line(self.faults))
+            except OSError:
+                pass   # the fail_code exit still carries the fault
+        return code
+
+    def _check(self, threads):
+        """Settle the collection, restore the reporting machinery and flush the streams, adding
+        a fault for each check that fails, and one for any thread started since the audit hook
+        had counted `threads` thread starts. Run before the record and again after the record
+        callback returns (QA r8)."""
         replaced = self.restore_reporting()
         settled = False
         for _ in range(GC_PASS_BOUND):
@@ -246,13 +315,11 @@ class FailClosedChild:
             sys.stderr.flush()
         except Exception as exc:
             self.faults.append("the streams could not be flushed ({})".format(type(exc).__name__))
-        if self.faults:
-            code = self.fail_code
-            try:
-                os.write(2, self._fault_line(self.faults))
-            except OSError:
-                pass   # the fail_code exit still carries the fault
-        return code
+        started = len(self._threads_started) - threads
+        if started:
+            self.faults.append(
+                "{} thread start(s) inside the record handler, after the interpreter joined its "
+                "threads, so the work and any fault of such a thread cannot be seen".format(started))
 
 
 # --- self-test -----------------------------------------------------------------------------------
@@ -531,6 +598,156 @@ class Output:
 sys.stdout = Output(sys.stdout)
 """
 
+# Merge train 2 QA r8 (codex MAJOR), the reproduction: the wrapped stdout's flush, once anything
+# was written, installs an unraisable hook that absorbs the report, drops an object whose
+# finalizer raises, and puts the hook back. The callback returns normally; the pinned handler
+# never reconsidered its decided code and exited 0 with an empty error stream. The audit event
+# fired, so the re-check after the callback sees the new fault.
+_SEED_RECORD_UNRAISABLE = """
+class Raiser:
+    def __del__(self):
+        raise RuntimeError("fault during result flush")
+
+
+class Output:
+    def __init__(self, stream):
+        self.stream, self.written, self.log = stream, False, []
+
+    def write(self, text):
+        result = self.stream.write(text)
+        self.written = True
+        return result
+
+    def flush(self):
+        self.stream.flush()
+        if self.written:
+            saved = sys.unraisablehook
+            sys.unraisablehook = lambda unraisable: self.log.append(unraisable.exc_value)
+            Raiser()
+            sys.unraisablehook = saved
+
+
+sys.stdout = Output(sys.stdout)
+"""
+
+# QA r8, the thread channel: the record's write starts a thread, which the os._exit would end
+# unobserved (the interpreter joined its threads before the exit handlers ran).
+_SEED_RECORD_THREAD = """
+import threading
+
+
+class Output:
+    def __init__(self, stream):
+        self.stream, self.started = stream, False
+
+    def write(self, text):
+        if not self.started:
+            self.started = True
+            threading.Thread(target=lambda: None).start()
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+
+
+sys.stdout = Output(sys.stdout)
+"""
+
+# QA r8, the same thread rule before the record: a finalizer the settling collection runs starts
+# a thread (automatic collection disabled, so the object is still pending at the record).
+_SEED_FINALIZER_THREAD = """
+import threading
+
+
+class Starter:
+    def __init__(self):
+        self.cycle = self
+        self.thread = threading.Thread
+
+    def __del__(self):
+        self.thread(target=lambda: None).start()
+
+
+def setup():
+    gc.collect()
+    gc.disable()
+    Starter()
+
+
+atexit.register(setup)
+"""
+
+# QA r8, the replaced-hook channel: the record's write leaves threading.excepthook replaced.
+_SEED_RECORD_HOOK_LEFT = """
+import threading
+
+
+class Output:
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, text):
+        threading.excepthook = print
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+
+
+sys.stdout = Output(sys.stdout)
+"""
+
+# QA r8, residual (b) inside the callback, measured: the flush DELETES the hook and replaces the
+# stream around the unraisable fault, restoring both, so no audit event fires and the child
+# passes (the reproduction above, with the hook present, is caught).
+_SEED_RECORD_WINDOW = """
+class Raiser:
+    def __del__(self):
+        raise RuntimeError("fault during result flush")
+
+
+class Output:
+    def __init__(self, stream):
+        self.stream, self.written = stream, False
+
+    def write(self, text):
+        result = self.stream.write(text)
+        self.written = True
+        return result
+
+    def flush(self):
+        self.stream.flush()
+        if self.written:
+            saved = (sys.stderr, sys.unraisablehook)
+            sys.stderr = io.StringIO()
+            del sys.unraisablehook
+            Raiser()
+            sys.stderr, sys.unraisablehook = saved
+
+
+sys.stdout = Output(sys.stdout)
+"""
+
+# QA r8, the error-stream channel, measured: a write to stderr from the record's write is not a
+# fault the child sees (it exits 0); the bytes stay on its error stream, which both parents
+# refuse on a passing exit.
+_SEED_RECORD_STDERR = """
+class Output:
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, text):
+        sys.stderr.write("callback wrote to stderr\\n")
+        sys.stderr.flush()
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+
+
+sys.stdout = Output(sys.stdout)
+"""
+
 # (name, source before register(), source after arm_audit(), expected exit, expected record line
 # or None for provably no record, needles the error stream must carry, whether it must be empty).
 _CASES = (
@@ -569,6 +786,21 @@ _CASES = (
      ("the record handler raised RuntimeError in the record callback", "exit 2"), False),
     ("handler-raises-before-record", "", "atexit.register(setattr, gc, \"collect\", None)\n", 2,
      None, ("the record handler raised TypeError before the record",), False),
+    ("record-callback-unraisable", "", _SEED_RECORD_UNRAISABLE, 2, "record 0",
+     ("a fault was observed during the record callback",
+      "a cleanup fault reached sys.unraisablehook", "exit 2"), False),
+    ("record-callback-starts-thread", "", _SEED_RECORD_THREAD, 2, "record 0",
+     ("a fault was observed during the record callback",
+      "1 thread start(s) inside the record handler"), False),
+    ("finalizer-starts-thread", "", _SEED_FINALIZER_THREAD, 2, "record 2",
+     ("child-contract-fault", "1 thread start(s) inside the record handler"), False),
+    ("record-callback-leaves-hook-replaced", "", _SEED_RECORD_HOOK_LEFT, 2, "record 0",
+     ("a fault was observed during the record callback",
+      "replaced the reporting machinery (threading.excepthook)"), False),
+    ("record-callback-deleted-hook-window-passes", "", _SEED_RECORD_WINDOW, 0, "record 0", (),
+     True),
+    ("record-callback-stderr-write-left-to-parent", "", _SEED_RECORD_STDERR, 0, "record 0",
+     ("callback wrote to stderr",), False),
 )
 
 
@@ -632,8 +864,13 @@ def self_test():
           "outlasting the collection bound, and a closed stdout each fail closed by name with "
           "the exit-2 record; a record callback that raises after writing its record (QA r7) "
           "and a handler that raises before the record each exit 2 with a named diagnostic; "
-          "and the deleted-unraisablehook window passes exactly as residual (b) discloses "
-          "while its kept-hook control is caught by the audit event)")
+          "a record callback that returns normally after an unraisable fault under a hook it "
+          "puts back (QA r8), one that starts a thread, one that leaves threading.excepthook "
+          "replaced, and a finalizer that starts a thread in the settling collection each exit "
+          "2 by name; the deleted-unraisablehook window passes exactly as residual (b) "
+          "discloses, in cleanup and in the record callback, while its kept-hook controls are "
+          "caught by the audit event; and a callback's stderr write exits 0 with the bytes on "
+          "the error stream, which the parents refuse)")
     return 0
 
 
