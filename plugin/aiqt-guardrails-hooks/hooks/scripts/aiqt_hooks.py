@@ -8263,7 +8263,8 @@ def _orch_walk_recheck(cwd, chain):
     the walk AND the recheck can hide a registry: a registry relocated within the chain so it is never
     where either pass probes, or a sibling directory swapped in under a textual chain path during the
     recheck so it reports the same dev/ino the redirected walk recorded, leaves every probe a clean
-    not-present with the chains agreeing, and the call is allowed. (2) Any change AFTER the recheck
+    not-present with the chains agreeing, and the call is allowed (denied under registry-required
+    mode). (2) Any change AFTER the recheck
     returns, including a registry that appears only then, is out of view (the inherent pre-execution
     TOCTOU bound). Both are outside this guard's threat model: it stops ACCIDENTAL truncation in an
     orchestrated tree, and a party able to rename this host's ancestor directories concurrently with the
@@ -9860,14 +9861,14 @@ def _orch_registry_required():
     AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value ("", "0", "false", "no", "off",
     case-insensitive in ASCII letters only; unset is off). The value is compared EXACTLY as set, with
     nothing stripped, so an off word with any added character (a space, tab, newline, or no-break space
-    around it) is not an off value and reads as ON. Under it, an ABSENT orchestration registry DENIES
-    in-scope Bash calls instead of leaving orch_truncation_guard inert; the default (variable unset) is
-    unchanged. An environment variable, not a pack config key, because every pack config surface
-    (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
+    around it) is not an off value and reads as ON. Under it, an ABSENT orchestration registry DENIES every
+    Bash call that passes the pre-scope checks instead of leaving orch_truncation_guard inert; the default
+    (variable unset) is unchanged. An environment variable, not a pack config key, because every pack config
+    surface (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
     located by the same cwd-anchored lookup whose EMPTY result this mode exists to fail closed on, so a
     file-based key can never speak exactly when it is needed; the hook execution environment is the one
-    channel independent of that lookup. A garbled or padded value reads as ON, the deny-safe direction
-    for an explicitly configured strict mode."""
+    channel independent of that lookup. A garbled or padded value reads as ON, the deny-safe direction for
+    an explicitly configured strict mode."""
     value = os.environ.get(_ORCH_REQUIRE_REGISTRY_ENV)
     if value is None:
         return False
@@ -9903,8 +9904,8 @@ def orch_truncation_guard(data):
     toplevel's registry too (_orch_git_toplevel_has_registry: core.worktree can point the work tree off
     the ancestor chain; a git discovery failure alone - no git binary, a dubious-ownership refusal, a
     broken config, a bare repository - still never denies), so with NO registry entry on that chain and
-    none at a git-resolved toplevel the guard is inert and allows every Bash call that passes the
-    pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
+    none at a git-resolved toplevel the guard is, by default, inert and allows every Bash call that
+    passes the pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
     unreadable, or invalid keeps it active. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
     off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing

@@ -1233,6 +1233,21 @@ def _main_isolated(report_path=None):
         check("trunc/git-core-worktree-registry-plain-allows",
               _verdict(aiqt_hooks.orch_truncation_guard(dict(
                   nocwd, cwd=str(gw / "A"), tool_input=dict(command="ls -la")))), "allow")
+        # Registry-required mode on the union leg: the registry is reachable ONLY through the git toplevel
+        # (core.worktree), so it is PRESENT and a plain call stays an allow. Red when the registry-required
+        # deny is moved above the git-union test (an absent CHAIN registry alone must not deny).
+        _rrg = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+        _rrg_old = os.environ.get(_rrg)
+        try:
+            os.environ[_rrg] = "1"
+            check("trunc/registry-required-git-core-worktree-plain-allows",
+                  _verdict(aiqt_hooks.orch_truncation_guard(dict(
+                      nocwd, cwd=str(gw / "A"), tool_input=dict(command="ls -la")))), "allow")
+        finally:
+            if _rrg_old is None:
+                os.environ.pop(_rrg, None)
+            else:
+                os.environ[_rrg] = _rrg_old
         sepg = tmp / "gw-sep"
         sepg.mkdir()
         subprocess.run(["git", "init", "-q", "--separate-git-dir", str(sepg / "meta.git"),
@@ -2373,7 +2388,7 @@ def _main_isolated(report_path=None):
           "scan misreads in mid-string, such as an ANSI-C escaped quote or a quote in a here-document body, "
           "can still shift it into a disclosed silent allow, and a safe here-document body '&' is a "
           "disclosed over-refusal), reads a '#' comment by bash's word-start rule as well, denies every "
-          "in-scope call when the opt-in registry-required mode is set and no registry is found, and fails "
+          "Bash call that passes the pre-scope checks when the opt-in registry-required mode is set and no registry is found, and fails "
           "closed on a missing or unreadable tool_name, an unreadable cwd or one whose registry walk cannot "
           "be carried out (scope is the ancestor walk with its concurrent-move recheck, unioned with "
           "a git-resolved toplevel; a git failure alone never denies), a malformed tool_input, "
