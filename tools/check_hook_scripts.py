@@ -66,7 +66,10 @@ reviewed edit here. Six legs:
       fault, the replacement or a thread start happens inside the result write itself (the
       contract re-checks after its record callback returns; merge train 2 QA r8, codex MAJOR:
       a stdout wrapper's flush that raised an unraisable fault under a hook it put back left
-      the exit 0). The parent accepts
+      the exit 0), and the re-check's own flushes run BEFORE its checks, the terminator line
+      written after them by os.write on a saved descriptor (merge train 2 QA r9, codex MAJOR: a
+      wrapper's second flush, in the re-check, replaced a hook or dropped faulting cyclic
+      garbage after the checks covering them, and the exit stayed 0). The parent accepts
       a verdict only with the zero exit, the complete result ending in its terminator line, and
       NOTHING on the child's error stream: the loaded files write nothing to stderr at load time,
       so any bytes there -- an uncaught-exception traceback, a frameless `Exception ignored` line
@@ -109,7 +112,8 @@ DISCLOSED RESIDUALS (what this gate does not catch):
     with sys.stderr replaced, both restored before the result (merge train 2 QA r5, codex MEDIUM,
     reproduced), in the result write as in cleanup; an object still reachable at the result,
     never finalized (os._exit), and a thread cleanup code started before the result handler ran,
-    still running at the result; and the address-reuse edge of the identity-set settle
+    still running at the result, ended by the os._exit unobserved (it also runs concurrently with
+    the handler, outside its ordering); and the address-reuse edge of the identity-set settle
     comparison (merge train 2 QA r6).
   - The scripts run under this gate's interpreter (sys.executable), not the host's `python3` lookup.
     Not exercised: a python3 too old to accept -I (before 3.4), which exits 2 with a usage error before
@@ -686,7 +690,13 @@ def parity_child(spec):
     that RETURNS but faulted without raising (an unraisable fault the audit hook saw, the
     machinery left replaced, a thread started, a flush failure on the re-check) also exits 2,
     with the contract's diagnostic, because the contract re-runs its checks after the record
-    callback and a new fault voids the result (merge train 2 QA r8). Exit 2 also
+    callback and a new fault voids the result (merge train 2 QA r8). That re-check is the
+    FINAL check, and nothing loaded code can reach runs after it (contract step 6, merge train 2
+    QA r9, codex MAJOR: its own stdout flush, which runs a loaded wrapper, used to come after its
+    machinery check and collection): the result line is written and flushed through sys.stdout
+    before it, and the PARITY_COMPLETE terminator only after it, by os.write on the stdout
+    descriptor the contract saved at register(), so a fault the final check finds leaves the
+    result without its terminator and the exit 2. Exit 2 also
     if a file or the contract module cannot be loaded, or if another exit handler was registered
     before the record handler (its os._exit would skip that one)."""
     sys.path.insert(0, str(ROOT / "opf" / "tools"))
@@ -702,9 +712,14 @@ def parity_child(spec):
     outcome = []
 
     def record(code):
+        # The result line goes through sys.stdout BEFORE the contract's final check; the
+        # terminator is the seal, written by os.write on the descriptor saved at register() only
+        # AFTER that check passes (contract step 6, merge train 2 QA r9).
         if code == 0:
-            sys.stdout.write(json.dumps(outcome[0]) + "\n" + PARITY_COMPLETE + "\n")
+            sys.stdout.write(json.dumps(outcome[0]) + "\n")
             sys.stdout.flush()
+            return [(contract.saved_stdout, (PARITY_COMPLETE + "\n").encode("ascii"))]
+        return ()
 
     def fault_line(faults):
         return ("parity child: a fault in loaded code's cleanup or its reporting "
@@ -1323,6 +1338,52 @@ def self_test_main():
                  "        self.stream.flush()\n"
                  "\n\n_seeded_sys.stdout = _SeededNoisyOutput(_seeded_sys.stdout)\n",
                  "fault on the comparison child's error stream"),
+                # Merge train 2 QA r9 (codex MAJOR), the reproductions: the wrapper's SECOND
+                # flush once written (the contract re-check's own) replaces
+                # threading.excepthook, or disables automatic collection and drops a cyclic
+                # object whose finalizer raises; the pinned re-check flushed after its checks,
+                # and the leg accepted exit 0 with a complete result.
+                ("final-flush-replaces-hook", "\n\nimport sys as _seeded_sys\n"
+                 "import threading as _seeded_threading\n"
+                 "\n\nclass _SeededCountingOutput:\n"
+                 "    def __init__(self, stream):\n"
+                 "        self.stream, self.written, self.flushes = stream, False, 0\n"
+                 "\n    def write(self, text):\n"
+                 "        self.written = True\n"
+                 "        return self.stream.write(text)\n"
+                 "\n    def flush(self):\n"
+                 "        self.stream.flush()\n"
+                 "        if self.written:\n"
+                 "            self.flushes += 1\n"
+                 "            if self.flushes == 2:\n"
+                 "                _seeded_threading.excepthook = lambda args: None\n"
+                 "\n\n_seeded_sys.stdout = _SeededCountingOutput(_seeded_sys.stdout)\n",
+                 "a fault was observed during the record callback"),
+                ("final-flush-drops-cyclic-fault", "\n\nimport gc as _seeded_gc\n"
+                 "import sys as _seeded_sys\n"
+                 "\n\nclass _SeededCyclicRaiser:\n"
+                 "    def __init__(self):\n"
+                 "        self.cycle = self\n"
+                 "\n    def __del__(self):\n"
+                 "        raise RuntimeError('cyclic cleanup dropped by the final flush')\n"
+                 "\n\nclass _SeededDroppingOutput:\n"
+                 "    def __init__(self, stream):\n"
+                 "        self.stream, self.written, self.flushes = stream, False, 0\n"
+                 "\n    def write(self, text):\n"
+                 "        self.written = True\n"
+                 "        return self.stream.write(text)\n"
+                 "\n    def flush(self):\n"
+                 "        self.stream.flush()\n"
+                 "        if self.written:\n"
+                 "            self.flushes += 1\n"
+                 "            if self.flushes == 2:\n"
+                 "                _seeded_gc.disable()\n"
+                 "                _SeededCyclicRaiser()\n"
+                 "\n\n_seeded_sys.stdout = _SeededDroppingOutput(_seeded_sys.stdout)\n",
+                 # The bounded diagnostic shows the stream's head: the finalizer's unraisable
+                 # report, raised by the final check's collection (the contract's diagnostic
+                 # follows).
+                 "Exception ignored"),
         ):
             root = fresh("p-" + name)
             _patch(root / STOP_REL, "", "", append)
@@ -1360,7 +1421,9 @@ def self_test_main():
           "faults, the same with other tracked objects released alongside (the identity-set "
           "settle rule, merge train 2 QA r6), a seeded stdout whose flush raises after the "
           "result was written (QA r7), a seeded stdout whose flush absorbs an unraisable fault "
-          "under a hook it puts back and one whose write writes to stderr (QA r8), and a "
+          "under a hook it puts back and one whose write writes to stderr (QA r8), a seeded "
+          "stdout whose second flush (the final check's own) replaces threading.excepthook or "
+          "drops a cyclic raising finalizer (QA r9), and a "
           "seeded cleanup exit that cuts "
           "off its shutdown-written result are cannot-evaluate (secfcl)")
     return 0

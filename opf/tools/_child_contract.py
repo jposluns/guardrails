@@ -18,7 +18,9 @@ THE CONTRACT, in the order it runs:
 1. RECORD FROM AN EXIT HANDLER REGISTERED FIRST. register() registers the record handler and
    requires it to be the only one (another exit handler already registered would be skipped by the
    handler's own os._exit, so register() unregisters and returns False and the caller refuses by
-   name). Exit handlers run last-registered-first, so being first puts the record AFTER every
+   name). register() also duplicates file descriptors 1 and 2 and saves them (saved_stdout,
+   saved_stderr), before the loaded or tested code runs, for the writes that come after the final
+   check (step 6). Exit handlers run last-registered-first, so being first puts the record AFTER every
    cleanup handler the loaded or tested code registers, and code that ends the process from its
    cleanup -- an os._exit, a fault that kills the process, a signal -- prevents the record, and the
    parent fails closed on the missing record (merge train 2 QA r2, codex MAJOR).
@@ -48,7 +50,10 @@ THE CONTRACT, in the order it runs:
    handler writes the caller's fault line (file descriptor 2) when there are faults, calls the
    caller's record callback with the decided code (the settled code, or fail_code when any fault
    was recorded), and ends the process ITSELF with os._exit(code), so no interpreter finalization
-   runs after the record. The decided code is used ONLY when the callback RETURNED NORMALLY: an
+   runs after the record. The callback writes through the Python-level streams only what may come
+   BEFORE the final check, and RETURNS the SEAL: the (descriptor, bytes) pairs that must come
+   after it (a result's completeness terminator, written to saved_stdout), which the handler writes
+   with os.write only when the record stands (step 6). The decided code is used ONLY when the callback RETURNED NORMALLY: an
    exception the callback raises (a stdout flush that fails after the result was written), or
    one raised anywhere in the handler before it, is caught, named in a one-line diagnostic on
    file descriptor 2 (best effort, itself guarded), and the exit is fail_code, so a record the
@@ -76,12 +81,28 @@ THE CONTRACT, in the order it runs:
      - a WRITE TO THE ERROR STREAM: not seen by the child; both parents refuse it (the parity
        parent requires an empty error stream, the OPF unit runner one holding nothing but its
        boundary line and declared rows);
-     - a REPLACED or SILENCED hook or stream: one left replaced at the re-check is found,
-       restored and refused by name; one replaced and put back inside the callback hides no
-       unraisable or excepthook fault (the audit event fires whatever hook is installed), and
-       residual (a) (a thread's fault under a threading.excepthook replaced and put back) still
-       applies to a thread started BEFORE the handler, while one started inside it is refused by
-       the thread rule above.
+     - a REPLACED or SILENCED hook or stream: one left replaced when the re-check's flushes and
+       collection passes have run (including one replaced BY those flushes or passes, step 6) is
+       found, restored and refused by name; one replaced and put back inside the callback or
+       inside the re-check's flushes hides no unraisable or excepthook fault (the audit event
+       fires whatever hook is installed), and residual (a) (a thread's fault under a
+       threading.excepthook replaced and put back) still applies to a thread started BEFORE the
+       handler, while one started inside it is refused by the thread rule above.
+6. NOTHING THE CHECKED CODE CAN REACH RUNS AFTER THE LAST CHECK (the ordering invariant; merge
+   train 2 QA r9, codex MAJOR, reproduced: the re-check restored the machinery and settled the
+   collection BEFORE its own sys.stdout and sys.stderr flushes, so a stdout wrapper whose SECOND
+   flush replaced a hook, or dropped cyclic garbage whose finalizer raises, did so after the checks
+   that cover it, and the parity child exited 0 with a complete result). Each check (_check) runs
+   FIRST every operation that can execute code the loaded or tested module controls: the
+   Python-level flushes of sys.stdout and sys.stderr (a wrapper's write or flush), then the
+   collection passes (finalizers, gc callbacks, audit hooks on gc.get_objects), each pass judged
+   by its own after-comparison; and only THEN the checks that cover them: the machinery restored
+   and compared, the thread starts counted. After the FINAL check the handler runs only what that
+   code cannot reach: os.write on saved_stdout and saved_stderr (the seal, or a diagnostic) and
+   os._exit; no Python-level stream write or flush, no collection, no callback. The handler blocks
+   every blockable signal in its thread when it starts, so a signal handler the loaded code
+   installed does not run after the final check (one already pending runs at the next check's
+   entry, before the checks; residual (c) bounds this for other threads).
 
 DISCLOSED RESIDUALS -- the channels this contract CANNOT close, disclosed here ONCE (the two
 callers' docstrings point here instead of restating them):
@@ -99,7 +120,10 @@ callers' docstrings point here instead of restating them):
   (c) an object still REACHABLE at the record is never finalized (the os._exit ends the child), so
       its finalizer neither runs nor faults. Likewise a thread that cleanup code started BEFORE the
       record handler ran (an earlier exit handler's), still running at the record, is ended by
-      the os._exit unobserved; only a thread started inside the record handler is refused.
+      the os._exit unobserved; only a thread started inside the record handler is refused. Such a
+      thread also runs CONCURRENTLY with the handler, so step 6's ordering does not bind it: it can
+      act after the final check (and a signal delivered to it runs its Python handler in the
+      handler's thread at any point); the self-test measures the plain case (it passes).
   (d) the identity comparison is by id(): a finalizer that frees tracked objects and creates
       replacements that receive the SAME addresses within one pass, the counts equal, reads as a
       pass that changed nothing (CPython reuses freed addresses; not reproduced -- the probing
@@ -114,6 +138,7 @@ explicit opf/tools path insert.
 """
 import gc
 import os
+import signal
 import sys
 
 # How many collection passes the record handler may make before one settles (changes nothing). A
@@ -172,10 +197,13 @@ class FailClosedChild:
     terminator -- it may write nothing for a failing code when the failure is carried by the exit
     alone); `fault_line(faults)` returns the caller's named fault bytes for file descriptor 2;
     `fail_code` is the caller's cannot-evaluate exit. The reporting snapshot is taken HERE, at
-    construction, before the loaded or tested code runs."""
+    construction, before the loaded or tested code runs. `record` may RETURN the seal, a sequence
+    of (descriptor, bytes) pairs written with os.write after the final check when the record
+    stands (contract step 6); the descriptor is saved_stdout or one the caller saved as early."""
 
     def __init__(self, record, fault_line, fail_code=2):
         self.faults = []
+        self.saved_stdout = self.saved_stderr = None
         self.fail_code = fail_code
         self._record = record
         self._fault_line = fault_line
@@ -193,6 +221,15 @@ class FailClosedChild:
         if getattr(atexit, "_ncallbacks", lambda: 1)() != 1:
             atexit.unregister(self._record_at_exit)
             return False
+        # The descriptors the writes after the final check use (contract step 6), duplicated before
+        # the loaded or tested code runs; they stay open until the handler's os._exit. One that
+        # cannot be saved is a fault (the record then carries fail_code and no seal is written).
+        try:
+            self.saved_stdout = os.dup(1)
+            self.saved_stderr = os.dup(2)
+        except OSError as exc:
+            self.faults.append("the output descriptors could not be saved ({})".format(
+                type(exc).__name__))
         return True
 
     def arm_audit(self):
@@ -237,18 +274,29 @@ class FailClosedChild:
             return   # never settled: no record, and the parent fails closed
         stage = "before the record"
         try:
+            if hasattr(signal, "pthread_sigmask"):
+                # A signal handler the loaded code installed must not run after the final check
+                # (contract step 6): blocked here, a signal stays pending until the os._exit.
+                signal.pthread_sigmask(signal.SIG_BLOCK, signal.valid_signals())
             code = self._decide(self._settled[0], len(self._threads_started))
             seen, threads = len(self.faults), len(self._threads_started)
             stage = "in the record callback"
-            self._record(code)
+            seal = [(fd, bytes(data)) for fd, data in (self._record(code) or ())]
             # The callback returned normally, but it may have faulted without raising (module
-            # docstring, contract step 5): the same checks again, and a fault new since the
-            # callback started voids the record (merge train 2 QA r8, codex MAJOR).
+            # docstring, contract step 5): the same checks again, the FINAL check, and a fault new
+            # since the callback started voids the record (merge train 2 QA r8, codex MAJOR).
             stage = "after the record callback"
             self._check(threads)
+            # From here on only os.write on the saved descriptors and the os._exit (contract
+            # step 6, merge train 2 QA r9): no flush, no collection, no callback.
             if len(self.faults) > seen:
                 code = self.fail_code
                 self._callback_fault(self.faults[seen:])
+            else:
+                stage = "sealing the record"
+                for fd, data in seal:
+                    while data:
+                        data = data[os.write(fd, data):]
         except BaseException as exc:
             # Never a `finally: os._exit(code)`: that swallowed the exception and kept the
             # success code (merge train 2 QA r7, codex MAJOR). A handler that did not return
@@ -262,7 +310,7 @@ class FailClosedChild:
         normally: best effort and itself guarded (the fail_code exit carries the failure whether
         or not this line is written)."""
         try:
-            os.write(2, ("child-contract-fault: a fault was observed during the record callback "
+            os.write(self._error_fd(), ("child-contract-fault: a fault was observed during the record callback "
                          "({}), so any record it wrote is void; exit {} (secfcl)\n".format(
                              "; ".join(faults)[:1000], self.fail_code)).encode("utf-8", "replace"))
         except BaseException:
@@ -272,11 +320,16 @@ class FailClosedChild:
         """The one-line diagnostic for a record handler that raised: best effort and itself
         guarded (the fail_code exit carries the failure whether or not this line is written)."""
         try:
-            os.write(2, ("child-contract-fault: the record handler raised {} {}, so any record it "
+            os.write(self._error_fd(), ("child-contract-fault: the record handler raised {} {}, so any record it "
                          "wrote is void; exit {} (secfcl)\n".format(
                              type(exc).__name__, stage, self.fail_code)).encode("utf-8", "replace"))
         except BaseException:
             pass
+
+    def _error_fd(self):
+        """The descriptor for this handler's own diagnostics: saved_stderr, or 2 when it could not
+        be saved (that is already a fault)."""
+        return 2 if self.saved_stderr is None else self.saved_stderr
 
     def _decide(self, code, threads):
         """Run the checks (_check) and return the code the record carries (fail_code, with the
@@ -285,17 +338,27 @@ class FailClosedChild:
         if self.faults:
             code = self.fail_code
             try:
-                os.write(2, self._fault_line(self.faults))
+                os.write(self._error_fd(), self._fault_line(self.faults))
             except OSError:
                 pass   # the fail_code exit still carries the fault
         return code
 
     def _check(self, threads):
-        """Settle the collection, restore the reporting machinery and flush the streams, adding
+        """Flush the streams, settle the collection and restore the reporting machinery, adding
         a fault for each check that fails, and one for any thread started since the audit hook
         had counted `threads` thread starts. Run before the record and again after the record
-        callback returns (QA r8)."""
+        callback returns (QA r8). The ORDER is contract step 6: the flushes (a wrapper the loaded
+        code installed runs in them) and then the collection passes (finalizers, gc callbacks)
+        come FIRST, each pass judged by its own after-comparison, and the machinery comparison and
+        the thread count come LAST, so nothing runs after them that could invalidate either (QA
+        r9: the flushes used to come after the machinery check and the collection)."""
         replaced = self.restore_reporting()
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception as exc:
+            self.faults.append("the streams could not be flushed ({})".format(type(exc).__name__))
+        replaced += self.restore_reporting()
         settled = False
         for _ in range(GC_PASS_BOUND):
             if collection_pass_changed_nothing():
@@ -310,11 +373,6 @@ class FailClosedChild:
         if replaced:
             self.faults.append("cleanup code replaced the reporting machinery ({})".format(
                 ", ".join(sorted(set(replaced)))))
-        try:
-            sys.stdout.flush()
-            sys.stderr.flush()
-        except Exception as exc:
-            self.faults.append("the streams could not be flushed ({})".format(type(exc).__name__))
         started = len(self._threads_started) - threads
         if started:
             self.faults.append(
@@ -345,6 +403,7 @@ _CASE_HEAD = (
     "        handle.write(\"record {}\\n\".format(code))\n"
     "    sys.stdout.write(\"record {}\\n\".format(code))\n"
     "    sys.stdout.flush()\n"
+    "    return [(contract.saved_stdout, \"seal {}\\n\".format(code).encode(\"ascii\"))]\n"
     "\n"
     "\n"
     "def fault_line(faults):\n"
@@ -748,6 +807,121 @@ class Output:
 sys.stdout = Output(sys.stdout)
 """
 
+# Merge train 2 QA r9 (codex MAJOR), the reproductions: the wrapped stdout counts the flushes made
+# once anything was written, and its SECOND (the re-check's own flush, after the callback's) either
+# replaces threading.excepthook or drops cyclic garbage whose finalizer raises, with automatic
+# collection disabled. The pinned re-check flushed AFTER its machinery check and its collection, so
+# both exited 0 with a complete record; the flushes now come first (contract step 6).
+_SEED_FINAL_FLUSH_HOOK = """
+import threading
+
+
+class Output:
+    def __init__(self, stream):
+        self.stream, self.written, self.flushes = stream, False, 0
+
+    def write(self, text):
+        self.written = True
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+        if self.written:
+            self.flushes += 1
+            if self.flushes == 2:
+                threading.excepthook = lambda args: None
+
+
+sys.stdout = Output(sys.stdout)
+"""
+
+_SEED_FINAL_FLUSH_GARBAGE = """
+class Raiser:
+    def __init__(self):
+        self.cycle = self
+
+    def __del__(self):
+        raise RuntimeError("cyclic cleanup dropped by the final flush")
+
+
+class Output:
+    def __init__(self, stream):
+        self.stream, self.written, self.flushes = stream, False, 0
+
+    def write(self, text):
+        self.written = True
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+        if self.written:
+            self.flushes += 1
+            if self.flushes == 2:
+                gc.disable()
+                Raiser()
+
+
+sys.stdout = Output(sys.stdout)
+"""
+
+# QA r9, residual (c) measured: an earlier exit handler starts a daemon thread, waits until it
+# runs and returns while the thread still waits on an event nobody sets. The thread started
+# before the record handler, so it is not refused; the os._exit ends it unobserved and the child
+# exits 0 with its record and seal, exactly as the residual discloses.
+_SEED_EARLIER_HANDLER_THREAD = """
+import threading
+
+
+def start_waiter():
+    started, never = threading.Event(), threading.Event()
+
+    def wait():
+        started.set()
+        never.wait()
+
+    threading.Thread(target=wait, daemon=True).start()
+    started.wait()
+
+
+atexit.register(start_waiter)
+"""
+
+# QA r9, the signal channel of contract step 6: the re-check's flush sends the child a signal
+# whose Python handler, installed by the loaded code, would replace a hook and write to stderr.
+# The record handler blocked every blockable signal when it started, so the handler never runs:
+# exit 0, record and seal, empty error stream.
+_SEED_FINAL_FLUSH_SIGNAL = """
+import signal
+import threading
+
+
+def on_signal(signum, frame):
+    threading.excepthook = print
+    os.write(2, b"signal handler ran\\n")
+
+
+signal.signal(signal.SIGUSR1, on_signal)
+
+
+class Output:
+    def __init__(self, stream):
+        self.stream, self.written, self.flushes = stream, False, 0
+
+    def write(self, text):
+        self.written = True
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+        if self.written:
+            self.flushes += 1
+            if self.flushes == 2:
+                os.kill(os.getpid(), signal.SIGUSR1)
+
+
+sys.stdout = Output(sys.stdout)
+"""
+
 # (name, source before register(), source after arm_audit(), expected exit, expected record line
 # or None for provably no record, needles the error stream must carry, whether it must be empty).
 _CASES = (
@@ -801,11 +975,21 @@ _CASES = (
      True),
     ("record-callback-stderr-write-left-to-parent", "", _SEED_RECORD_STDERR, 0, "record 0",
      ("callback wrote to stderr",), False),
+    ("final-flush-replaces-hook", "", _SEED_FINAL_FLUSH_HOOK, 2, "record 0",
+     ("a fault was observed during the record callback",
+      "replaced the reporting machinery (threading.excepthook)", "exit 2"), False),
+    ("final-flush-drops-cyclic-fault", "", _SEED_FINAL_FLUSH_GARBAGE, 2, "record 0",
+     ("a fault was observed during the record callback",
+      "a cleanup fault reached sys.unraisablehook", "exit 2"), False),
+    ("final-flush-signal-blocked", "", _SEED_FINAL_FLUSH_SIGNAL, 0, "record 0", (), True),
+    ("earlier-handler-thread-residual-passes", "", _SEED_EARLIER_HANDLER_THREAD, 0, "record 0",
+     (), True),
 )
 
 
 def _run_case(pre, body):
-    """Run one seeded child; returns (exit code, the record line or None, stderr text). The child
+    """Run one seeded child; returns (exit code, the record line or None, stderr text, stdout
+    text). The child
     is a real `python3 -I -B -c` interpreter wired exactly as the callers wire the contract."""
     import subprocess
     import tempfile
@@ -820,20 +1004,25 @@ def _run_case(pre, body):
         if os.path.exists(result):
             with open(result, "r", encoding="utf-8") as handle:
                 record = handle.read().strip()
-    return proc.returncode, record, proc.stderr.decode("utf-8", "replace")
+    return (proc.returncode, record, proc.stderr.decode("utf-8", "replace"),
+            proc.stdout.decode("utf-8", "replace"))
 
 
 def self_test():
     """Every channel of the contract through real children (_CASES), plus the disclosure floor:
-    the module docstring must keep naming each channel the contract cannot close."""
+    the module docstring must keep naming each channel the contract cannot close and the ordering
+    invariant. The seal (written by os.write after the final check, contract step 6) must END the
+    stdout of every passing child with a record, and no failing or record-less child may carry a
+    passing seal."""
     failures = []
     for needle in ("DELETED sys.unraisablehook", "threading.excepthook", "SAME addresses",
-                   "never finalized"):
+                   "never finalized", "NOTHING THE CHECKED CODE CAN REACH RUNS AFTER THE LAST CHECK",
+                   "CONCURRENTLY"):
         if needle not in (__doc__ or ""):
             failures.append("the module docstring no longer discloses {!r}".format(needle))
     for name, pre, body, want_code, want_record, needles, want_quiet in _CASES:
         try:
-            code, record, err = _run_case(pre, body)
+            code, record, err, out = _run_case(pre, body)
         except Exception as exc:
             failures.append("{}: the child could not be driven ({})".format(
                 name, type(exc).__name__))
@@ -846,6 +1035,12 @@ def self_test():
         missing = [needle for needle in needles if needle not in err]
         if missing:
             failures.append("{}: stderr lacks {!r} (tail {!r})".format(name, missing, err[-240:]))
+        if want_code == 0 and want_record == "record 0" and not out.endswith("seal 0\n"):
+            failures.append("{}: stdout does not end with the seal (tail {!r})".format(
+                name, out[-240:]))
+        if (want_code != 0 or want_record is None) and "seal 0" in out:
+            failures.append("{}: a passing seal on a failing or record-less child ({!r})".format(
+                name, out[-240:]))
         if want_quiet and err.strip():
             failures.append("{}: expected an empty error stream, got {!r}".format(
                 name, err[-240:]))
@@ -869,8 +1064,12 @@ def self_test():
           "replaced, and a finalizer that starts a thread in the settling collection each exit "
           "2 by name; the deleted-unraisablehook window passes exactly as residual (b) "
           "discloses, in cleanup and in the record callback, while its kept-hook controls are "
-          "caught by the audit event; and a callback's stderr write exits 0 with the bytes on "
-          "the error stream, which the parents refuse)")
+          "caught by the audit event; a callback's stderr write exits 0 with the bytes on "
+          "the error stream, which the parents refuse; the re-check's own second flush that "
+          "replaces threading.excepthook or drops a cyclic raising finalizer (QA r9) exits 2 by "
+          "name, a signal it sends finds its handler blocked, an earlier exit handler's waiting "
+          "thread passes exactly as residual (c) discloses, and every passing child's stdout "
+          "ends with the seal written after the final check)")
     return 0
 
 
