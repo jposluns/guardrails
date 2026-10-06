@@ -5472,6 +5472,11 @@ def _possibly_discarding(command, cwd):
 # (PLAIN-CLASSIFIER-SPEC). Over-rejecting is the SAFE direction: a rejected command is possibly
 # discarding (snapshot-then-allow with a cwd, deny without), never a silent allow.
 _PLAIN_FORBIDDEN = frozenset("$;&|<>(){}[]*?!#~" + "`" + chr(92))
+# Rule 3 (REVISED): single-quoted content may NOT hold a dollar, a backtick, a square bracket or a
+# backslash. Single quoting protects only the first shell parse: the bash builtins printf -v and
+# test -v evaluate a quoted array subscript again, so printf -v 'a[$(cmd)]' x runs cmd (the round-10
+# codex blocker). Other punctuation inside single quotes stays allowed.
+_PLAIN_SQ_FORBIDDEN = frozenset("$[]" + "`" + chr(92))
 _PLAIN_CMDWORD_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-")
 # Rule 4 (REVISED): the command word of a PLAIN command is on this ALLOWLIST and nothing else. A deny
@@ -5496,9 +5501,12 @@ def _command_is_plain(command):
     0x20-0x7E (no tab, newline, carriage return, NUL, or non-ASCII byte); (2) none of these appear
     OUTSIDE a single-quoted span: dollar, backtick, backslash, and the characters
     semicolon ampersand pipe less greater parens braces brackets star question bang hash tilde; and
-    no equals precedes the first word (no leading assignment); (3) a single-quoted span is literal
-    (its content is exempt from rule 2); a double-quoted span is admitted only when its content holds
-    no rule-2 character (so no expansion is possible); an unterminated quote is NOT plain; (4) words
+    no equals precedes the first word (no leading assignment); (3) a single-quoted span is admitted
+    only when its content holds no dollar, backtick, square bracket or backslash (REVISED: the bash
+    builtins printf -v and test -v evaluate a quoted array subscript again, so 'a[$(cmd)]' runs cmd);
+    its other punctuation is exempt from rule 2; a double-quoted span is admitted only when its
+    content holds no rule-2 character (so no expansion is possible); an unterminated quote is NOT
+    plain; (4) words
     are separated by spaces only and the first word (the command) is an unquoted bare name/path from
     [A-Za-z0-9_./-] whose basename is on the _PLAIN_COMMAND_WORDS allowlist, given either as a bare
     name or as an absolute path whose directory is exactly one of _PLAIN_COMMAND_DIRS. Anything else
@@ -5522,6 +5530,9 @@ def _command_is_plain(command):
             j = command.find("'", i + 1)
             if j < 0:
                 return False  # unterminated single quote
+            for d in command[i + 1:j]:
+                if d in _PLAIN_SQ_FORBIDDEN:
+                    return False  # rule 3: a builtin may evaluate this single-quoted text again
             i = j + 1
             continue
         if c == '"':
@@ -5574,8 +5585,13 @@ def _plain_command_runs_program(command):
     program named by --compress-program, feeding it the data being sorted on its standard input
     (observed with GNU sort: sort -S 4K --compress-program=bash file executed the lines of file); getopt
     accepts any unambiguous prefix of the long option, so every sort argument starting with --c is
-    treated as that option (a --check is over-refused, the safe direction). The command is plain, so
-    quotes are literal and removing them yields every shell word's leading characters."""
+    treated as that option (a --check is over-refused, the safe direction). The bash printf builtin
+    with -v assigns the named variable, and an assignment to RANDOM, SRANDOM, OPTIND or HISTCMD is
+    evaluated as arithmetic, which expands a variable named in the value recursively: with an ambient
+    X holding a[$(cmd)], printf -v OPTIND X runs cmd (observed on bash 5.3.9), so every printf
+    carrying a word that starts with -v (the attached -vNAME too) is treated as able to run a program
+    (an over-refusal for a harmless printf -v, the safe direction). The command is plain, so quotes
+    are literal and removing them yields every shell word's leading characters."""
     words = command.replace("'", "").replace('"', "").split()
     if not words:
         return False
@@ -5584,6 +5600,8 @@ def _plain_command_runs_program(command):
         return True
     if name == "sort":
         return any(w.startswith("--c") for w in words[1:])
+    if name == "printf":
+        return any(w.startswith("-v") for w in words[1:])
     return False
 
 
@@ -5610,7 +5628,8 @@ def git_discard(data):
     name, bare or in exactly /usr/bin, /bin, /usr/local/bin or /usr/sbin, so an interpreter at any
     version or path is not plain); it names no git program in any word (_command_names_git); and this
     hook's own semantic check finds no way for it to run another program (_plain_command_runs_program:
-    an opf command, or a sort carrying a --c option prefix such as --compress-program). EVERY other
+    an opf command, a sort carrying a --c option prefix such as --compress-program, or a printf
+    carrying a -v option). EVERY other
     command is POSSIBLY DISCARDING (_possibly_discarding), whatever verbs it names: there is no
     read-only fast path, no pristine bare-git handling, no lossy-verb keyword trigger, no whole-tree
     clobber deny, and no GUARDRAIL_ALLOW_DISCARD opt-out (those helpers are no longer reached from
@@ -5663,7 +5682,7 @@ def git_discard(data):
     # can prove it is neither a discard nor able to hide one - ONLY when it is PROVABLY PLAIN under the
     # shared classifier (_command_is_plain, PLAIN-CLASSIFIER-SPEC, decided on the raw bytes before any
     # lexing), names no git program in any word (_command_names_git), AND cannot run another program
-    # (_plain_command_runs_program: opf, or sort with a --c option). EVERY other command - not plain,
+    # (_plain_command_runs_program: opf, sort with a --c option, or printf with -v). EVERY other command - not plain,
     # OR plain and naming git or able to run a program - is POSSIBLY DISCARDING: with a usable session cwd it is
     # snapshot-backed then allowed; without one it is denied. _possibly_discarding carries the
     # git-specific denies (a GIT_* assignment/export, a git submodule foreach, a -c/--config-env value

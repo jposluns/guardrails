@@ -2801,7 +2801,13 @@ def _main_isolated(monitor):
             ("/bin/cat f", True), ("/usr/local/bin/git status", True), ("/usr/sbin/ls", True),
             ("/usr/bin/./ls", False), ("/usr//bin/ls", False), ("//usr/bin/ls", False),
             ("usr/bin/ls", False), ("/usr/bin/", False), ("/usr/bin/perl -e x", False),
-            ("LS -la", False), ("make all", False))
+            ("LS -la", False), ("make all", False),
+            # round 10: rule 3 (REVISED) bars a dollar, backtick, square bracket or backslash inside a
+            # single-quoted span (the two new shared rows first); other quoted punctuation stays plain
+            ("printf -v 'a[$(x)]' y", False), ("test -v 'a[$(x)]'", False),
+            ("echo 'a$b'", False), ("echo 'a`b'", False), ("grep 'a[b' f", False),
+            ("grep 'a]' f", False), ("echo 'a\\b'", False), ("echo 'a; b | c & d'", True),
+            ("echo 'x' 'y'", True))
         for _pv_cmd, _pv_want in _np10_plain_vectors:
             _pv_got = aiqt_hooks._command_is_plain(_pv_cmd)
             if _pv_got is not _pv_want:
@@ -2838,6 +2844,49 @@ def _main_isolated(monitor):
                 _got_c = _npnc_run(_cmd, str(_npnc))
                 if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
                     failures.append("(np10-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
+                                                                      _got_c[0], _got_c[2]))
+        finally:
+            aiqt_hooks._record_recovery = _orig_npnc_rec
+
+        # === Round 10 (np11): the round-10 codex blocker. Single quoting protects only the first shell
+        # === parse: the bash builtins printf -v and test -v evaluate a quoted array subscript again,
+        # === so printf -v 'a[$(g""it reset --hard)]' x reset a dirty worktree with no snapshot (bash
+        # === 5.3.9). Rule 3 (REVISED) now bars a dollar, backtick, square bracket or backslash inside a
+        # === single-quoted span, so both reproductions are possibly discarding: deny with no session
+        # === cwd, snapshot-then-allow with a dirty one. The sweep found one more route by an allowlisted
+        # === program: printf -v RANDOM, SRANDOM, OPTIND or HISTCMD evaluates its value as arithmetic,
+        # === which expands an ambient variable holding a[$(cmd)] and runs cmd, so this hook's semantic
+        # === check treats every printf carrying a -v option as able to run a program. On the round-9
+        # === bytes every possibly-discarding row below was a silent allow with no snapshot.
+        _np11_cases = (
+            ("codex-printf", "printf -v 'a[$(g\"\"it reset --hard >/dev/null)]' x", "deny", 0,
+             "allow-note", 1),
+            ("codex-test", "test -v 'a[$(g\"\"it reset --hard >/dev/null)]'", "deny", 0,
+             "allow-note", 1),
+            ("spec-printf", "printf -v 'a[$(x)]' y", "deny", 0, "allow-note", 1),
+            ("spec-test", "test -v 'a[$(x)]'", "deny", 0, "allow-note", 1),
+            ("sq-backtick", "test -v 'a[`x`]'", "deny", 0, "allow-note", 1),
+            ("printf-v-arith", "printf -v OPTIND X", "deny", 0, "allow-note", 1),
+            ("printf-v-attached", "printf -vRANDOM X", "deny", 0, "allow-note", 1),
+            ("printf-v-quoted", "printf '-v' HISTCMD X", "deny", 0, "allow-note", 1),
+            # the disclosed over-refusal of rule 3: a quoted bracket expression is not plain
+            ("grep-bracket", "grep '[a-z]' notes.txt", "deny", 0, "allow-note", 1),
+            ("printf-plain", "printf '%s' x", "allow", 0, "allow", 0),
+            ("test-v-name", "test -v X", "allow", 0, "allow", 0),
+            ("echo-quoted-punct", "echo 'a; b | c'", "allow", 0, "allow", 0),
+        )
+        aiqt_hooks._record_recovery = _npnc_count
+        try:
+            for _lab, _cmd, _w_nc, _n_nc, _w_c, _n_c in _np11_cases:
+                _got_nc = _npnc_run(_cmd, None)
+                if (_got_nc[0], _got_nc[2]) != (_w_nc, _n_nc):
+                    failures.append("(np11-{}-nocwd) {!r} with no session cwd: expected {} with {} "
+                                    "snapshot(s), got {} with {}".format(_lab, _cmd, _w_nc, _n_nc,
+                                                                      _got_nc[0], _got_nc[2]))
+                _got_c = _npnc_run(_cmd, str(_npnc))
+                if (_got_c[0], _got_c[2]) != (_w_c, _n_c):
+                    failures.append("(np11-{}-cwd) {!r} with a dirty session cwd: expected {} with {} "
                                     "snapshot(s), got {} with {}".format(_lab, _cmd, _w_c, _n_c,
                                                                       _got_c[0], _got_c[2]))
         finally:
