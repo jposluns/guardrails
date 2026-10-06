@@ -62,7 +62,8 @@ every non-daemon thread is joined, every later atexit callback has run, and a bo
 collection; a refusing child ends with os._exit(2), while the reporting path returns, so the process
 ends with the interpreter's own exit status; the report carries format_version 2, finalized
 true, and the exit_code that must equal the child's real exit status. A fault the child survived (an
-atexit callback, a destructor, a thread) therefore reaches the error stream and refuses the verdict; a
+atexit callback, a destructor, a thread) therefore refuses the verdict when it reaches the error
+stream, which a destructor fault at late interpreter teardown can fail to do (disclosed below); a
 thread that ends in a failure SystemExit, which writes nothing to stderr, a thread started through
 _thread directly at any moment from process start (whose SystemExit _thread ignores silently), an
 import of an interpreter-creating module (_interpreters, _xxsubinterpreters, _testcapi,
@@ -70,8 +71,11 @@ _testinternalcapi: every in-process hook is per-interpreter, so code in another 
 unobservable and the machinery's import is itself the fault), a thread started or an atexit callback
 registered after the exit-time thread join (neither is ever joined or run), and a status recorded
 through exit_with that the interpreter's own exit did not confirm (its exit was caught before the
-process left by another path, or an earlier exit_with outlived it), each
-make the child write no report and exit 2; a run that arms the finalizer without the bootstrap's
+process left by another path, or an earlier exit_with outlived it), each,
+when it occurs before the finalizer runs, make the child write no report and exit 2 (one that occurs
+at interpreter teardown, after the report is written, refuses nothing; and the finalizer detects a
+late atexit registration by comparing callback counts, so an atexit.unregister made after the join
+can mask one; both disclosed below); a run that arms the finalizer without the bootstrap's
 hooks (a launch that bypassed this gate) exits 2 the same way; and an in-band (format 1) report is
 refused. The finalizer's reporting path defers to the interpreter's own exit status rather than
 overriding it, so the exit_code reconcile above is against the status the child REALLY exited with:
@@ -79,9 +83,10 @@ a confirmation forged by a C callable reading the caught exception's code with n
 the stack (for example a weakref callback) cannot make a failure exit pass, because either the real
 exit status contradicts the report (refused here) or the process really exited with the recorded
 status (nothing was hidden). The
-child-side teardown residual (a daemon thread is killed, post-report teardown destructor effects, an
-execution context created below the audited Python surface by a C extension) is disclosed in that
-module. A report that is missing, truncated, malformed,
+child-side teardown residual (a daemon thread is killed, post-report teardown destructor effects and
+faults, a late atexit registration masked by an atexit.unregister under the finalizer's count
+comparison, an execution context created below the audited Python surface by a C extension) is
+disclosed in that module. A report that is missing, truncated, malformed,
 wrong-suite, non-regular, or carrying a duplicate or wrong-typed entry is CANNOT-EVALUATE, never a
 pass, whatever the child's exit code; completeness is never inferred from output volume or from the
 absence of a reported problem.
@@ -131,8 +136,13 @@ reconcile still proves the executed set independently. Repo-root confirmation is
 proxy anchored to this gate's own file, not a full git-identity check; and the static scan and the
 launch read the runner's source at two moments, so a concurrent same-user writer between them is
 outside this repo's sole-orchestrator threat model (the runtime layer still reconciles what
-actually ran). The fail-closed child contract's one permitted residual is loaded code replacing the
-reporting machinery: code running inside the child can write a complete finalized-shape report itself
+actually ran). The fail-closed child contract has two permitted residuals. First, a destructor fault
+at late interpreter teardown can pass silently: CPython drops sys.stderr before it frees some
+objects, so the faulting destructor of an object held by the codec search registry
+(codecs.register), or of a cycle anchored on a sys attribute, runs and raises after the report is
+written with an empty error stream, and this gate passes the run; no in-process fix is known (a
+direct launch is equally silent), and the self-test pins both placements as a residual witness.
+Second, loaded code replacing the reporting machinery: code running inside the child can write a complete finalized-shape report itself
 (for example, then os._exit(0), whether or not it armed the finalizer), or replace sys.stderr,
 sys.unraisablehook, threading.excepthook, threading._shutdown, threading.Thread._bootstrap
 or the private per-thread run machinery it calls (a threading.Thread subclass overriding
@@ -705,14 +715,38 @@ TEARDOWN_FAULT = ("class _LateFault:\n"
                   "    def __del__(self, op=open, dn=os.devnull, err=RuntimeError):\n"
                   "        with op(dn, 'w') as f:\n            f.write('ok')\n"
                   "        raise err('ST_TEARDOWN_FAULT')\n_late = _LateFault()\n")
-# The opcodes that read (or write) a name through the module globals or the builtins at call time.
+# The DISCLOSED late-teardown residual: a faulting destructor that CPython runs after it has dropped
+# sys.stderr, so its fault is reported nowhere. It records that it ran in a marker file beside the
+# runner before raising; the two placements are an object held by the codec search registry and a
+# cycle anchored on a sys attribute (TEARDOWN_FAULT, held by a module global, is the refused control).
+RESIDUAL_LATE_FAULT = ("class _LateMarked:\n"
+                       "    def __init__(self, path):\n        self.path = path\n"
+                       "    def __del__(self, op=open, err=RuntimeError):\n"
+                       "        with op(self.path, 'w') as f:\n            f.write('ran')\n"
+                       "        raise err('ST_RESIDUAL_LATE_FAULT')\n"
+                       "_marker = os.path.join(here, 'late.marker')\n")
+RESIDUAL_CODEC_REGISTRY = ("class _Search:\n    def __init__(self, held):\n        self.held = held\n"
+                           "    def __call__(self, name):\n        return None\n"
+                           "import codecs\ncodecs.register(_Search(_LateMarked(_marker)))\n")
+RESIDUAL_SYS_CYCLE = ("_cycle = _LateMarked(_marker)\n_cycle.me = _cycle\n"
+                      "sys._st_residual = [_cycle]\ndel _cycle\n")
+# Not residual: a faulting cycle anchored on a module global or a class attribute. It was silent
+# while the finalizer kept the exit exception, whose traceback held the runner's module globals past
+# module teardown; it must be refused.
+TEARDOWN_CYCLE_GLOBAL = "_cycle = _LateMarked(_marker)\n_cycle.me = _cycle\n"
+TEARDOWN_CYCLE_CLASS = ("class _Holder:\n    pass\n_Holder.held = _LateMarked(_marker)\n"
+                        "_Holder.held.me = _Holder.held\n")
+# The opcodes that read (or write) a name through the module globals or the builtins at call time,
+# and the import opcodes (an import at teardown fails once sys.meta_path is cleared).
 _GLOBAL_NAME_OPS = frozenset(("LOAD_GLOBAL", "LOAD_NAME", "LOAD_FROM_DICT_OR_GLOBALS",
-                              "STORE_GLOBAL", "DELETE_GLOBAL", "STORE_NAME", "DELETE_NAME"))
+                              "STORE_GLOBAL", "DELETE_GLOBAL", "STORE_NAME", "DELETE_NAME",
+                              "IMPORT_NAME", "IMPORT_FROM"))
 
 
 def _global_name_reads(function):
     """The names a function's code (nested code objects included) reads or writes through the
-    module globals or the builtins at call time, as sorted (code name, opcode, name) triples."""
+    module globals or the builtins, or imports, at call time, as sorted (code name, opcode, name)
+    triples."""
     found, stack = set(), [function.__code__]
     while stack:
         code = stack.pop()
@@ -1415,6 +1449,46 @@ def self_test():
                 ("shutdown-wrapper", probe._wrap_shutdown(int)),
                 ("harness-error", probe._harness_error), ("finalize", probe._finalize)):
             expect("st/teardown-bound-{}".format(label), _global_name_reads(function), [])
+        # 25f (round 7): the static witness names an import at call time (IMPORT_NAME, and
+        # IMPORT_FROM for a from-import), which fails at teardown once sys.meta_path is cleared
+
+        def _imports_name(event, args):
+            import json
+            return json
+
+        def _imports_from(event, args):
+            from os import path
+            return path
+        expect("st/teardown-bound-import-name-named", _global_name_reads(_imports_name),
+               [("_imports_name", "IMPORT_NAME", "json")])
+        expect("st/teardown-bound-import-from-named", _global_name_reads(_imports_from),
+               [("_imports_from", "IMPORT_FROM", "path"), ("_imports_from", "IMPORT_NAME", "os")])
+        # 25g (round 7), a RESIDUAL WITNESS, not a guarantee: a faulting destructor that CPython runs
+        # at late teardown, after it has dropped sys.stderr, raises with an empty error stream, so
+        # the gate PASSES the run while the marker shows the destructor ran; both disclosed
+        # placements (the codec search registry, a cycle anchored on a sys attribute) are pinned, so
+        # if the interpreter ever reports such a fault this leg fails and the disclosure must change
+        for label, placement in (("codec-registry", RESIDUAL_CODEC_REGISTRY),
+                                 ("sys-attribute-cycle", RESIDUAL_SYS_CYCLE)):
+            root = build(_manifest_text(), _report_body(
+                GOOD_IDS, 0, before_exit=RESIDUAL_LATE_FAULT + placement))
+            code, _out, err = run(root)
+            marker = root / "tools" / "late.marker"
+            ran = marker.read_text(encoding="utf-8") if marker.exists() else None
+            expect("st/residual-witness-late-teardown-{}-passes".format(label), (code, err, ran),
+                   (0, "", "ran"))
+        # 25h (round 7): a faulting cycle anchored on a module global or a class attribute is freed
+        # while sys.stderr exists, because the finalizer drops the exit exception (whose traceback
+        # held the runner's globals) after writing the report; each is refused, its destructor ran
+        for label, placement in (("module-global", TEARDOWN_CYCLE_GLOBAL),
+                                 ("class-attribute", TEARDOWN_CYCLE_CLASS)):
+            root = build(_manifest_text(), _report_body(
+                GOOD_IDS, 0, before_exit=RESIDUAL_LATE_FAULT + placement))
+            code, _out, err = run(root)
+            marker = root / "tools" / "late.marker"
+            ran = marker.read_text(encoding="utf-8") if marker.exists() else None
+            expect("st/teardown-cycle-{}-refused".format(label),
+                   (code, "ST_RESIDUAL_LATE_FAULT" in err, ran), (2, True, "ran"))
 
         # 26: the declared stderr allowance is byte-exact over the WHOLE stream: the declared bytes
         # pass, and a repetition, a line-separator variant (CRLF, vertical tab, file separator), a
@@ -1507,7 +1581,11 @@ def self_test():
           "twin passes, keeps the runner's module as __main__ for its exit handlers, and passes a "
           "clean destructor run at interpreter teardown (a file open or a captured sys.audit) while "
           "refusing its faulting twin, every hook and the finalizer reading no module global or "
-          "builtin at call time")
+          "builtin and importing nothing at call time (an import named by the static witness), and "
+          "witnesses the disclosed late-teardown residual (a faulting destructor held by the codec "
+          "search registry, or in a cycle anchored on a sys attribute, passes while its marker "
+          "shows it ran) while refusing a faulting cycle anchored on a module global or a class "
+          "attribute")
     return 0
 
 

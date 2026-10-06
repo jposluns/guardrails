@@ -67,20 +67,31 @@ a run whose late code was clean (for example a destructor that opens a file or a
 Every hook and the finalizer (_audit, _genuine_bootstrap, _thread_hook, _clean_status,
 _SuiteExit.code, the _shutdown wrapper, _harness_error, _finalize) therefore binds, when it is
 defined, every object it reads, builtins included, as a keyword-only default (the _shutdown wrapper
-reads its factory's through its closure), and looks up no global or builtin name at call time; a
-faulting late destructor still reaches stderr through sys.unraisablehook and is still refused.
+reads its factory's through its closure), and looks up no global or builtin name and imports
+nothing at call time (an import at teardown fails once sys.meta_path is cleared). A faulting late
+destructor reaches stderr through sys.unraisablehook, and is refused, only while sys.stderr still
+exists: CPython drops sys.stderr (and sys.__stderr__) before it frees some objects, so the destructor
+of an object held by the codec search registry, or of a cycle anchored on a sys attribute, runs and
+raises at late teardown with nothing written to stderr, and the run passes (DISCLOSED RESIDUAL).
 
 At exit the interpreter joins every non-daemon thread (a thread fault reaches stderr through
 threading.excepthook, and the wrapper above records it), runs every atexit callback registered after
 arm (a callback fault reaches stderr as an ignored exception), and only then runs the finalizer, which
 records as a fault an atexit callback registered after the exit-time join (one registered while the
-exit callbacks run is never run, so its fault could never surface), runs a bounded garbage collection
+exit callbacks run is never run, so its fault could never surface; the test compares the callback
+COUNT with the one taken at the join, because atexit exposes only the count, atexit._ncallbacks,
+never the registered callables, and a wrapped atexit.register is no sound identity record, since a
+fresh import of atexit returns the unwrapped one; so an atexit.unregister made after the join masks
+an equal number of later registrations, disclosed below), runs a bounded garbage collection
 (at most GC_PASSES passes, stopping once a pass frees nothing; a destructor fault in garbage those
 passes free reaches stderr through sys.unraisablehook, while a chain
 whose destructors keep creating new cyclic garbage beyond the bound is never collected, as at plain
 interpreter shutdown, where such a chain is equally silent), flushes stdout and stderr, and writes the
 report with exclusive creation (a report already present, for example one written in band, is
-refused). Every REFUSING path ends the process immediately with os._exit(2) and writes NO report:
+refused), and then drops its references to the exit exception (whose traceback would otherwise
+keep the runner's frame and module globals alive past module teardown, so that a faulting cycle
+anchored on a module global or class attribute was freed only after sys.stderr is dropped, and
+passed silently). Every REFUSING path ends the process immediately with os._exit(2) and writes NO report:
 when exit_with never recorded a status (an uncaught exception, a sys.exit that bypassed it), when
 the recorded status is not the one the process exited with, when a thread, import, or registration
 fault was recorded, when the exit-time thread join was never observed, or when anything inside the
@@ -88,20 +99,30 @@ finalizer fails. The REPORTING path instead RETURNS after writing the report, so
 with the interpreter's OWN exit status, the one carried by the exception that really ended the
 process; the gate refuses a report whose exit_code differs from the child's real exit status, so a
 forged confirmation changes nothing unless the process also really exits with the recorded status,
-in which case no failure was hidden.
+in which case no failure was hidden. Those refusals cover what happens BEFORE the finalizer runs: a
+fault the hooks record after it (a teardown destructor's import of an interpreter-creating module or
+atexit registration) refuses nothing, disclosed below.
 The report is {"format_version": 2, "suite": ..., "check_ids": [...], "exit_code": <the recorded
 status>, "finalized": true}.
 
 DISCLOSED RESIDUAL: a daemon thread still running at exit is killed, and its pending fault or
-message can be lost; interpreter teardown after the report is written still runs destructors, whose
-faults reach stderr through sys.unraisablehook and refuse the verdict, while a silent effect of
-such late code (rewriting the report, calling os._exit itself) is the same tier as loaded code
-replacing the reporting machinery; and an execution context created below the audited Python
-surface (a C extension or ctypes creating an interpreter or an OS thread directly) is that same
-tier. Loaded code replacing the reporting machinery (including
+message can be lost. Interpreter teardown after the report is written still runs destructors, and a
+destructor fault reaches stderr through sys.unraisablehook, refusing the verdict, only while
+sys.stderr still exists: CPython drops sys.stderr before it frees some objects, so a faulting
+destructor of an object held by the codec search registry (codecs.register), or of a cycle anchored
+on a sys attribute, runs and raises at late teardown with an empty error stream, and the run passes.
+No in-process fix is known (the report is already written, and a direct launch is equally silent);
+the gate's self-test pins both placements as a residual witness, so a change in this behaviour
+fails it. A fault the observation hooks record after the finalizer has run (a teardown destructor's
+import of an interpreter-creating module or atexit registration) refuses nothing, and the
+finalizer's count comparison lets an atexit.unregister made after the exit-time join mask a later
+registration (above). A silent effect of such late code (rewriting the report, calling os._exit
+itself) is the same tier as loaded code replacing the reporting machinery; and an execution context
+created below the audited Python surface (a C extension or ctypes creating an interpreter or an OS
+thread directly) is that same tier. Loaded code replacing the reporting machinery (including
 this module's state, threading._shutdown, threading.Thread._bootstrap, or the private per-thread
 run machinery _bootstrap calls, such as a threading.Thread subclass overriding _bootstrap_inner or a
-replaced _invoke_excepthook) is the gate's one in-process residual, disclosed there.
+replaced _invoke_excepthook) is the gate's loaded-code residual, disclosed there.
 """
 import atexit
 import gc
@@ -319,6 +340,10 @@ def _finalize(report_path, suite_id, executed, *, _STATE=_STATE, _collect=gc.col
                       handle)
                 handle.write("\n")
             status = None   # defer to the interpreter's own exit status
+            # drop the exit exception: its traceback holds the runner's frame and so its module
+            # globals, which would otherwise outlive module teardown as cyclic garbage freed only
+            # after sys.stderr is dropped, silencing a destructor fault in a cycle they anchor
+            _STATE["raised"] = _STATE["confirmed"] = None
     except BaseException as exc:
         status = HARNESS_ERROR
         # the fixed message first: the report path and the exception are the suite's objects, and
