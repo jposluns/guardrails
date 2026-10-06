@@ -1132,8 +1132,8 @@ def _watchdog_isolation_self_test():
 _DEADLINE_EXECUTION_BOUND = 5.0
 # The deadline fixture's requested run_bounded timeout, and the allowance it
 # grants after the guardian's declared drain deadline for receipt delivery and
-# parent scheduling (its cleanup check). Named so the regression runner can
-# derive each leg's process bound from them.
+# parent scheduling (its cleanup check). Named so the regression runner's
+# floor pins them and the leg ledger charges each fixture call by them.
 _DEADLINE_CASE_TIMEOUT = 0.25
 _DEADLINE_RECEIPT_ALLOWANCE = 1.0
 # Interpreter start, `import opf` and _bootstrap for one fixture process: the
@@ -1183,263 +1183,147 @@ def _watchdog_bound_faults(bounds, budgets):
     return faults
 
 
-# The bounded waits a watchdog leg makes in series, read from the leg's OWN
-# source: the single source the leg runs and the regression floor derives the
-# leg's budget from (never a hand-copied number). Each fixture-process call
-# (run_bounded, run_status_owned, a completion launch()) is allowed the
-# deadline case's per-call budget at its own timeout: execution up to the
-# larger of that timeout and the tolerated execution bound, the guardian's
-# cleanup grace, then the receipt allowance. Each join/wait/select timeout,
-# each `time.monotonic() + N` deadline and each sleep counts its seconds. A
-# thunk, subject or thread target handed to a call runs inside that call's own
-# bound (or concurrently, under the join that bounds it), so it is not counted
-# again; a local helper counts at every call or reference; a loop over a
-# literal sequence multiplies its body; a branch on the leg's own arguments
-# counts only the branch taken, any other branch its larger arm. A wait whose
-# timeout the walk cannot evaluate is reported, so the floor fails closed.
-# Only the leg's own sleeps count: a helper's sleep runs in a forked subject or
-# a thread (the subjects that sleep until killed), bounded by the call or join
-# that owns it, and a polling sleep is bounded by its monotonic deadline.
-_WATCHDOG_FIXTURE_CALLS = ("run_bounded", "run_status_owned", "_run_fixture_process")
-_WATCHDOG_INNER_KEYWORDS = ("subject", "target", "thunk")
-_WATCHDOG_NESTED_LEGS = ("_watchdog_deadline_case", "_watchdog_completion_case",
-                         "_watchdog_safety_case", "_watchdog_overlap_case")
+# Runtime accounting of a watchdog leg's bounded waits. Static source analysis
+# cannot soundly bound these legs (data-dependent `while` loops, helpers
+# resolved at run time, callees outside the leg's own source), so the budget
+# is DECLARED per leg and every bounded wait the leg makes in its own process
+# charges its full timeout (never its elapsed time) to that budget while it
+# runs: each fixture-process call (run_bounded, _run_fixture_process, which
+# run_status_owned and the completion launch() use) at the deadline case's
+# per-call allowance for its timeout, each Thread.join, Event.wait,
+# select.select and sleep timeout, and each polling deadline the leg opens
+# through _watchdog_deadline. A sub-tick sleep is a polling step inside a
+# charged deadline, so it is not charged again. Waits made while a charged
+# fixture call runs belong to that call's allowance and are not charged twice.
+# A leg whose charged waits exceed its declared budget, or that makes a wait
+# whose timeout is not a finite number, FAILS as a test failure; the runner's
+# kill bound stays budget + launch margin. A wait with no timeout (a blocking
+# waitpid on a child the leg has killed) is not charged.
+_WATCHDOG_POLL_TICK = 0.1
+# How long a completion leg holds a sleep-until-killed fixture open: ten of
+# its 30 s polling deadlines. A fixture's deadline is not itself a wait; the
+# fixture's own waits (bounded by what remains of it) charge themselves.
+_WATCHDOG_FIXTURE_HOLD = 300
+_WATCHDOG_LEDGERS = []
+_WATCHDOG_ORIGINALS = []
 
 
-def _watchdog_leg_waits(case, *args):
-    """[(line, what, seconds)] for every bounded wait leg `case(*args)` makes in
-    series, and [(line, what)] for every wait whose timeout cannot be evaluated."""
-    import ast
-    import inspect
-    import math
+def _watchdog_charge(seconds, what):
+    """Charge one bounded wait to the running leg's ledger (a no-op outside a leg,
+    inside a charged fixture call, or in a forked child of the leg)."""
+    if not _WATCHDOG_LEDGERS:
+        return
+    ledger = _WATCHDOG_LEDGERS[-1]
+    if ledger["pid"] != os.getpid() or ledger["depth"]:
+        return
+    if not _watchdog_finite_seconds(seconds) and seconds != 0:
+        ledger["uncountable"].append(what)
+        return
+    ledger["charged"] += seconds
+    ledger["waits"].append((what, seconds))
+
+
+def _watchdog_deadline(seconds):
+    """A polling deadline `seconds` from now, charged to the running leg."""
+    import time
+    _watchdog_charge(seconds, "deadline(%r)" % (seconds,))
+    return time.monotonic() + seconds
+
+
+def _watchdog_install_charges():
+    """Route the leg process's bounded-wait primitives through _watchdog_charge."""
+    import functools
+    import select
+    import threading
+    import time
     import _opf_emit
-    tree = ast.parse(inspect.getsource(case)).body[0]
-    first = case.__code__.co_firstlineno - 1
-    bindings = dict(zip([a.arg for a in tree.args.args], args))
-    run_default = inspect.signature(_opf_emit.run_bounded).parameters["timeout_s"].default
-    namespace = sys.modules[case.__module__].__dict__
-    helpers, assigned = dict(), dict()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node is not tree:
-            helpers.setdefault(node.name, node)
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    assigned.setdefault(target.id, []).append(node.value)
-    waits, unresolved = [], []
 
-    def plain(value):
-        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    def charged(owner, name, timeout_of, allowance=lambda seconds: seconds):
+        real = getattr(owner, name)
 
-    def known(node):
-        """The truth of a test on the leg's own arguments, or None when undecidable."""
-        if isinstance(node, ast.BoolOp):
-            values = [known(v) for v in node.values]
-            decisive = isinstance(node.op, ast.Or)
-            if decisive in values:
-                return decisive
-            return None if None in values else not decisive
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            value = known(node.operand)
-            return None if value is None else not value
-        if (isinstance(node, ast.Compare) and len(node.ops) == 1
-                and isinstance(node.left, ast.Name) and node.left.id in bindings):
+        @functools.wraps(real)
+        def wrapper(*args, **kwargs):
+            timeout = timeout_of(args, kwargs)
+            if timeout is not None:
+                try:
+                    seconds = float(timeout)
+                except (TypeError, ValueError, OverflowError):
+                    seconds = float("nan")
+                if name in ("run_bounded", "_run_fixture_process"):
+                    # refused before fork (a non-finite or non-positive timeout)
+                    seconds = (allowance(seconds) if _watchdog_finite_seconds(seconds)
+                               else 0)
+                elif name == "sleep" and 0 <= seconds < _WATCHDOG_POLL_TICK:
+                    seconds = 0
+                _watchdog_charge(seconds, "%s(%r)" % (name, timeout))
+            ledger = _WATCHDOG_LEDGERS[-1] if _WATCHDOG_LEDGERS else None
+            nested = name in ("run_bounded", "_run_fixture_process") and ledger is not None
+            if nested:
+                ledger["depth"] += 1
             try:
-                other = ast.literal_eval(node.comparators[0])
-            except ValueError:
-                return None
-            value, op = bindings[node.left.id], node.ops[0]
-            if isinstance(op, (ast.Eq, ast.NotEq)):
-                return (value == other) == isinstance(op, ast.Eq)
-            if isinstance(op, (ast.In, ast.NotIn)):
-                return (value in other) == isinstance(op, ast.In)
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "startswith" and isinstance(node.func.value, ast.Name)
-                and node.func.value.id in bindings and len(node.args) == 1
-                and isinstance(node.args[0], ast.Constant)):
-            return bindings[node.func.value.id].startswith(node.args[0].value)
-        return None
+                return real(*args, **kwargs)
+            finally:
+                if nested:
+                    ledger["depth"] -= 1
+        _WATCHDOG_ORIGINALS.append((owner, name, real))
+        setattr(owner, name, wrapper)
 
-    def number(node, depth=0):
-        """The seconds an expression evaluates to, or None."""
-        if depth > 8:
-            return None
-        if isinstance(node, ast.Constant):
-            return plain(node.value)
-        if isinstance(node, ast.Name):
-            if node.id in assigned:
-                values = [number(v, depth + 1) for v in assigned[node.id]]
-                return None if None in values else max(values)
-            return plain(namespace.get(node.id))
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            module = _opf_emit if node.value.id in ("emit", "_opf_emit") else None
-            return plain(getattr(module, node.attr, None)) if module else None
-        if isinstance(node, ast.IfExp):
-            taken = known(node.test)
-            if taken is not None:
-                return number(node.body if taken else node.orelse, depth + 1)
-            values = [number(node.body, depth + 1), number(node.orelse, depth + 1)]
-            return None if None in values else max(values)
-        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub,
-                                                                ast.Mult, ast.Pow)):
-            left, right = number(node.left, depth + 1), number(node.right, depth + 1)
-            if left is None or right is None:
-                return None
-            if isinstance(node.op, ast.Add):
-                return left + right
-            if isinstance(node.op, ast.Sub):
-                return left - right
-            return left * right if isinstance(node.op, ast.Mult) else left ** right
-        return None
+    def argument(index, key, default=None):
+        return lambda args, kwargs: kwargs.get(key, args[index] if len(args) > index else default)
 
-    def name_of(func):
-        return func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+    import inspect
 
-    def keyword(call, name):
-        return next((item.value for item in call.keywords if item.arg == name), None)
-
-    def fixture_allowance(seconds):
+    def default(function, name):
         try:
-            seconds = float(seconds)
-        except OverflowError:
-            return 0  # refused before fork (SETUP-ERROR:BadTimeout), never waited for
-        if not math.isfinite(seconds) or seconds <= 0:
-            return 0
-        return _deadline_case_budget(seconds)
+            return inspect.signature(function).parameters[name].default
+        except (TypeError, ValueError, KeyError):
+            return None  # an unknown default is not a finite timeout: the leg fails
 
-    def forked_child(test):
-        return (isinstance(test, ast.Compare) and len(test.ops) == 1
-                and isinstance(test.ops[0], ast.Eq) and isinstance(test.left, ast.Name)
-                and isinstance(test.comparators[0], ast.Constant)
-                and test.comparators[0].value == 0
-                and any(isinstance(v, ast.Call) and name_of(v.func) == "fork"
-                        for v in assigned.get(test.left.id, ())))
-
-    def record(node, what, seconds, scale):
-        waits.append((first + node.lineno, what, seconds * scale))
-
-    def isolated(nodes, scale, stack):
-        before = len(waits), len(unresolved)
-        for node in nodes:
-            visit(node, scale, stack)
-        taken = waits[before[0]:], unresolved[before[1]:]
-        del waits[before[0]:], unresolved[before[1]:]
-        return taken
-
-    def visit(node, scale, stack):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            return  # counted where it is called or referenced
-        if isinstance(node, ast.If) and forked_child(node.test):
-            for item in node.orelse:  # the forked child's code runs until the leg kills it
-                visit(item, scale, stack)
-            return
-        if isinstance(node, ast.If):
-            taken = known(node.test)
-            if taken is not None:
-                for item in node.body if taken else node.orelse:
-                    visit(item, scale, stack)
-                return
-            visit(node.test, scale, stack)
-            arms = [isolated(node.body, scale, stack), isolated(node.orelse, scale, stack)]
-            larger = max(arms, key=lambda pair: sum(w[2] for w in pair[0]))
-            waits.extend(larger[0])
-            unresolved.extend(arms[0][1] + arms[1][1])
-            return
-        if isinstance(node, ast.For):
-            visit(node.iter, scale, stack)
-            times = None
-            if isinstance(node.iter, (ast.Tuple, ast.List, ast.Set)):
-                times = len(node.iter.elts)
-            elif (isinstance(node.iter, ast.Call) and name_of(node.iter.func) == "range"
-                  and len(node.iter.args) == 1):
-                times = number(node.iter.args[0])
-            inner = isolated(node.body, scale * (times or 1), stack)
-            waits.extend(inner[0])
-            unresolved.extend(inner[1])
-            if times is None and inner[0]:
-                unresolved.append((first + node.lineno, "waits in a loop over a non-literal sequence"))
-            for item in node.orelse:
-                visit(item, scale, stack)
-            return
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-            helper = helpers.get(node.id)
-            if helper is not None and helper not in stack:
-                for item in helper.body:
-                    visit(item, scale, stack + (helper,))
-            return
-        if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
-                and isinstance(node.left, ast.Call) and name_of(node.left.func) == "monotonic"):
-            seconds = number(node.right)
-            if seconds is None:
-                unresolved.append((first + node.lineno, "monotonic() deadline"))
-            elif seconds > 0:
-                record(node, "monotonic() + %s" % seconds, seconds, scale)
-            return
-        if isinstance(node, ast.Call):
-            visit_call(node, scale, stack)
-            return
-        for child in ast.iter_child_nodes(node):
-            visit(child, scale, stack)
-
-    def visit_call(node, scale, stack):
-        called = name_of(node.func)
-        if isinstance(node.func, ast.Attribute):
-            visit(node.func.value, scale, stack)
-        if called in _WATCHDOG_FIXTURE_CALLS or (called == "launch" and "launch" in helpers):
-            if called == "launch":
-                value = keyword(node, "timeout") or ast.Name("_COMPLETION_LAUNCH_TIMEOUT", ast.Load())
-            elif called == "run_bounded":
-                value = keyword(node, "timeout_s") or (
-                    node.args[1] if len(node.args) > 1 else ast.Constant(run_default))
-            else:
-                value = keyword(node, "timeout")
-            seconds = None if value is None else number(value)
-            if seconds is None:
-                unresolved.append((first + node.lineno, called + " timeout"))
-            else:
-                record(node, "%s(timeout=%s)" % (called, seconds), fixture_allowance(seconds), scale)
-            return  # its thunk or code runs inside this call's own bound
-        if called in _WATCHDOG_NESTED_LEGS:
-            try:
-                nested = [ast.literal_eval(item) for item in node.args]
-            except ValueError:
-                unresolved.append((first + node.lineno, called + " with a non-literal mode"))
-                return
-            inner, missing = _watchdog_leg_waits(namespace[called], *nested)
-            record(node, "%s(%s)" % (called, ", ".join(map(repr, nested))),
-                   sum(w[2] for w in inner), scale)
-            unresolved.extend(missing)
-            return
-        timed = None
-        if called in ("join", "wait") and (node.args or keyword(node, "timeout")):
-            timed = node.args[0] if node.args else keyword(node, "timeout")
-        elif called == "select" and len(node.args) == 4:
-            timed = node.args[3]
-        elif called == "sleep" and len(node.args) == 1 and not stack:
-            timed = node.args[0]  # a helper's sleep runs in a forked subject or thread
-        if timed is not None:
-            seconds = number(timed)
-            if seconds is not None:
-                record(node, "%s(%s)" % (called, seconds), seconds, scale)
-            elif called != "join":  # str.join over a sequence is not a wait
-                unresolved.append((first + node.lineno, called + " timeout"))
-        for item in node.args:
-            visit(item, scale, stack)
-        for item in node.keywords:
-            if item.arg not in _WATCHDOG_INNER_KEYWORDS:
-                visit(item.value, scale, stack)
-
-    for node in tree.body:
-        visit(node, 1, ())
-    return waits, unresolved
+    run_default = default(_opf_emit.run_bounded, "timeout_s")
+    fixture_default = default(_opf_emit._run_fixture_process, "timeout")
+    charged(_opf_emit, "run_bounded", argument(1, "timeout_s", run_default),
+            _deadline_case_budget)
+    charged(_opf_emit, "_run_fixture_process",
+            lambda args, kwargs: kwargs.get("timeout", fixture_default), _deadline_case_budget)
+    charged(threading.Thread, "join", argument(1, "timeout"))
+    charged(threading.Event, "wait", argument(1, "timeout"))
+    charged(select, "select", argument(3, "timeout"))
+    charged(time, "sleep", argument(0, "secs"))
 
 
-def _watchdog_leg_budget(case, *args, extra=0):
-    """A leg's budget: the sum of its own sequential waits plus any declared
-    patched-path extra, or None (refused by the floor) when a wait could not be
-    evaluated."""
-    waits, unresolved = _watchdog_leg_waits(case, *args)
-    return None if unresolved else sum(w[2] for w in waits) + extra
+def _watchdog_leg_entry(budget, case, *args):
+    """Run one watchdog leg against its declared budget: its charged bounded waits
+    must stay within the budget, or the leg fails (never a silent pass)."""
+    if not _watchdog_finite_seconds(budget):
+        print("opf watchdog leg: FAIL (declared budget %r is not a finite positive number)"
+              % (budget,))
+        return EXIT_FINDING
+    ledger = dict(pid=os.getpid(), depth=0, charged=0, waits=[], uncountable=[])
+    if not _WATCHDOG_LEDGERS:
+        _watchdog_install_charges()
+    _WATCHDOG_LEDGERS.append(ledger)
+    try:
+        rc = case(*args)
+    finally:
+        _WATCHDOG_LEDGERS.remove(ledger)
+        if not _WATCHDOG_LEDGERS:
+            while _WATCHDOG_ORIGINALS:
+                owner, name, real = _WATCHDOG_ORIGINALS.pop()
+                setattr(owner, name, real)
+    if os.getpid() != ledger["pid"]:
+        return rc
+    print("opf watchdog leg: charged %ss of a %ss declared budget in %d waits" % (
+        round(ledger["charged"], 3), budget, len(ledger["waits"])))
+    if ledger["uncountable"]:
+        print("opf watchdog leg: FAIL (waits with no finite timeout: %s)"
+              % ", ".join(ledger["uncountable"]))
+        return EXIT_FINDING
+    if ledger["charged"] > budget:
+        print("opf watchdog leg: FAIL (charged waits %ss exceed the declared budget %ss: %s)" % (
+            round(ledger["charged"], 3), budget,
+            ", ".join("%s=%s" % wait for wait in ledger["waits"])))
+        return EXIT_FINDING
+    return rc
 
 
 def _watchdog_deadline_case(mode):
@@ -2250,7 +2134,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -2277,7 +2161,7 @@ def _watchdog_completion_case(mode):
                     patch.object(emit, "_fixture_ack_subject", stop_guardian):
                 worker.start()
                 try:
-                    bound = time.monotonic() + 30
+                    bound = _watchdog_deadline(30)
                     while not guardian_file.exists():
                         assert time.monotonic() < bound, "guardian never reached its stop point"
                         time.sleep(0.005)
@@ -2702,18 +2586,18 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
             def launch_wedged(hook):
                 guardian_file.unlink(missing_ok=True)
-                child = emit._FixtureProcess(time.monotonic() + 3600,
+                child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                              subject=lambda: time.sleep(3600))
                 with patch.object(emit, "_fixture_send_subject", hook):
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not guardian_file.exists():
                     assert time.monotonic() < bound, "the guardian never reached its stop point"
                     time.sleep(0.005)
@@ -2797,7 +2681,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -2805,11 +2689,11 @@ def _watchdog_completion_case(mode):
             def launch_wedged():
                 guardian_file.unlink(missing_ok=True)
                 marker.unlink(missing_ok=True)
-                child = emit._FixtureProcess(time.monotonic() + 3600,
+                child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                              subject=subject_body)
                 with patch.object(emit, "_fixture_ack_subject", wedge_ack):
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not guardian_file.exists():
                     assert time.monotonic() < bound, "the guardian never stopped"
                     time.sleep(0.005)
@@ -2843,7 +2727,7 @@ def _watchdog_completion_case(mode):
             with patch.object(emit, "_fixture_pdeathsig", lambda: None), \
                     patch.object(emit, "_fixture_await_ack", lambda fd: None):
                 child, subject = launch_wedged()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not marker.exists():
                     assert time.monotonic() < bound, "the flip subject never ran"
                     time.sleep(0.005)
@@ -2880,7 +2764,7 @@ def _watchdog_completion_case(mode):
                 scratch = Path(directory, "waiting.tmp")
                 scratch.write_text(str(os.getpid()), encoding="ascii")
                 scratch.rename(waiting)  # atomic: never a partial PID
-                bound = clock.monotonic() + 120
+                bound = _watchdog_deadline(120)
                 while not release.exists():
                     if clock.monotonic() >= bound:
                         os._exit(96)  # the gate never opened: fail loudly
@@ -2901,7 +2785,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -2911,11 +2795,11 @@ def _watchdog_completion_case(mode):
                 waiting.unlink(missing_ok=True)
                 release.unlink(missing_ok=True)
                 marker.unlink(missing_ok=True)
-                child = emit._FixtureProcess(time.monotonic() + 3600,
+                child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                              subject=subject_body)
                 with patch.object(emit, "_fixture_pdeathsig", lambda: hold(arm)):
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not waiting.exists():
                     assert time.monotonic() < bound, "the subject never reached its gate"
                     time.sleep(0.005)
@@ -2968,7 +2852,7 @@ def _watchdog_completion_case(mode):
                 os.kill(child.pid, signal.SIGKILL)
                 await_state(child.pid, ("Z",), "the killed guardian did not exit")
                 release.write_text("go", encoding="ascii")
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not marker.exists():
                     assert time.monotonic() < bound, "the flip orphan never ran"
                     time.sleep(0.005)
@@ -3024,7 +2908,7 @@ def _watchdog_completion_case(mode):
             return pids
 
         def await_child(owner, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while True:
                 assert time.monotonic() < bound, note
                 listed = children_of(owner)
@@ -3046,14 +2930,15 @@ def _watchdog_completion_case(mode):
                         lambda subject, fd, **license: None))
                     stack.enter_context(patch.object(
                         emit, "_fixture_pdeathsig", lambda: None))
-                child = emit._FixtureProcess(time.monotonic() + 3600, subject=subject_tree)
+                child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
+                                             subject=subject_tree)
                 pid = child.start()
                 subject = await_child(pid, "the guardian subject never appeared")
                 descendant = await_child(subject, "the subject descendant never appeared")
                 # A stopped guardian models a cleanup that cannot make progress: it
                 # can never exit, so an unbounded close() would block until resumed.
                 os.kill(pid, signal.SIGSTOP)
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(pid) != "T":
                     assert time.monotonic() < bound, "the guardian did not stop"
                     time.sleep(0.005)
@@ -3141,7 +3026,7 @@ def _watchdog_completion_case(mode):
         # (the outer guardian, under the regression runner) and lingers as a
         # zombie until that ancestor's drain: Z is dead, not surviving.
         dead = (None, "Z")
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while state(subject) not in dead or state(descendant) not in dead:
             assert time.monotonic() < bound, (state(subject), state(descendant))
             time.sleep(0.005)
@@ -3151,7 +3036,7 @@ def _watchdog_completion_case(mode):
         assert state(subject) not in dead, "flip: the subject died without its kill step"
         assert "could not confirm subject exit" in failures[0], failures
         os.killpg(subject, signal.SIGKILL)  # clean up the deliberately-leaked tree
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while state(subject) not in dead or state(descendant) not in dead:
             assert time.monotonic() < bound, "the flip cleanup did not complete"
             time.sleep(0.005)
@@ -3201,7 +3086,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -3209,11 +3094,11 @@ def _watchdog_completion_case(mode):
             def exercise(flip):
                 wedged.unlink(missing_ok=True)
                 grandchild_file.unlink(missing_ok=True)
-                child = emit._FixtureProcess(time.monotonic() + 3600,
+                child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                              subject=subject_body)
                 with patch.object(emit, "_fixture_drain", reap_then_wedge):
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not (wedged.exists() and grandchild_file.exists()):
                     assert time.monotonic() < bound, "the drain wedge was not reached"
                     time.sleep(0.005)
@@ -3278,7 +3163,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -3288,10 +3173,10 @@ def _watchdog_completion_case(mode):
                 # guardian and collect it through poll(), never through close().
                 descendant_file.unlink(missing_ok=True)
                 with patch.object(emit, "_fixture_pdeathsig", lambda: None):
-                    child = emit._FixtureProcess(time.monotonic() + 3600,
+                    child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                                  subject=subject_body)
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not descendant_file.exists():
                     assert time.monotonic() < bound, "the subject tree never appeared"
                     time.sleep(0.005)
@@ -3300,7 +3185,7 @@ def _watchdog_completion_case(mode):
                                    "children").read_text(encoding="ascii").split()[0])
                 os.kill(child.pid, signal.SIGKILL)
                 polled = []
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while True:
                     try:
                         status = child.poll()
@@ -3450,13 +3335,13 @@ def _watchdog_completion_case(mode):
             return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
         def await_state(target, wanted, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while state(target) not in wanted:
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
         def await_subject(child):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while True:
                 listed = Path("/proc", str(child.pid), "task", str(child.pid),
                               "children").read_text(encoding="ascii").split()
@@ -3497,7 +3382,7 @@ def _watchdog_completion_case(mode):
                     child.close()
                 except emit.ChildStatusUnavailable as exc:
                     refusals.append(str(exc))
-                bound = time.monotonic() + 10
+                bound = _watchdog_deadline(10)
                 while time.monotonic() < bound:
                     pass
                 raise AssertionError("the pending interrupt was never delivered")
@@ -3600,7 +3485,7 @@ def _watchdog_completion_case(mode):
         # Leg 4: SIGINT pending from inside the collection's bounded reap wait
         # -> the reap loop keeps running, collection and validation complete,
         # the interrupt lands after.
-        child = emit._FixtureProcess(time.monotonic() + 3600,
+        child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                      subject=lambda: time.sleep(3600))
         child.start()
         gpid = child.pid
@@ -3669,7 +3554,7 @@ def _watchdog_completion_case(mode):
                 if not fired:
                     fired.append(True)
                     os.kill(os.getpid(), signal.SIGINT)  # process-directed
-                    spin = time.monotonic() + 2.0
+                    spin = _watchdog_deadline(2.0)
                     while time.monotonic() < spin:
                         pass
                     survived.append(True)
@@ -3817,7 +3702,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -3838,10 +3723,10 @@ def _watchdog_completion_case(mode):
                                                      lambda pid: None))
                     stack.enter_context(patch.object(emit, "_fixture_ack_subject",
                                                      wedge_ack))
-                    child = emit._FixtureProcess(time.monotonic() + 3600,
+                    child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                                  subject=lambda: time.sleep(3600))
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not wedged.exists():
                     assert time.monotonic() < bound, \
                         "the guardian never reached its stop point"
@@ -3909,7 +3794,7 @@ def _watchdog_completion_case(mode):
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
             def await_state(target, wanted, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while state(target) not in wanted:
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -3924,10 +3809,10 @@ def _watchdog_completion_case(mode):
                         patch.object(emit, "_fixture_pdeathsig", lambda: None))
                     for target, name, value in patches:
                         stack.enter_context(patch.object(target, name, value))
-                    child = emit._FixtureProcess(time.monotonic() + 3600,
+                    child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                                  subject=subject_body)
                     child.start()
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not descendant_file.exists():
                     assert time.monotonic() < bound, "the subject tree never appeared"
                     time.sleep(0.005)
@@ -3939,7 +3824,7 @@ def _watchdog_completion_case(mode):
 
             def poll_failure(child):
                 refusals = []
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not refusals:
                     assert time.monotonic() < bound, "poll never collected"
                     try:
@@ -3974,7 +3859,7 @@ def _watchdog_completion_case(mode):
 
             refusals, delivered = [], []
             with patch.object(emit._FixtureProcess, "_read_report", read_hook):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 try:
                     while not refusals:
                         assert time.monotonic() < bound, "poll never collected"
@@ -3982,7 +3867,7 @@ def _watchdog_completion_case(mode):
                             assert child.poll() is None
                         except emit.ChildStatusUnavailable as exc:
                             refusals.append(str(exc))
-                            spin = time.monotonic() + 10
+                            spin = _watchdog_deadline(10)
                             while time.monotonic() < spin:
                                 pass
                             raise AssertionError(
@@ -4029,7 +3914,7 @@ def _watchdog_completion_case(mode):
             def poll_cancelled(child):
                 with patch.object(emit._FixtureProcess, "_read_report",
                                   side_effect=Cancelled()):
-                    bound = time.monotonic() + 30
+                    bound = _watchdog_deadline(30)
                     while True:
                         assert time.monotonic() < bound, "poll never collected"
                         try:
@@ -4237,7 +4122,7 @@ def _watchdog_completion_case(mode):
             return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
         def await_state(target, wanted, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while state(target) not in wanted:
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
@@ -4271,7 +4156,7 @@ def _watchdog_completion_case(mode):
                 scratch.rename(descendant_file)  # atomic: never a partial PID
                 time.sleep(3600)
                 os._exit(0)
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while not descendant_file.exists():
                 assert time.monotonic() < bound, "the leg-1 tree never appeared"
                 time.sleep(0.005)
@@ -4341,7 +4226,7 @@ def _watchdog_completion_case(mode):
                 scratch.write_text(str(pid), encoding="ascii")
                 scratch.rename(descendant_file)  # atomic: never a partial PID
                 os._exit(0)                    # dies UNREAPED: a zombie leader
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while not descendant_file.exists():
                 assert time.monotonic() < bound, "the zombie-leg tree never appeared"
                 time.sleep(0.005)
@@ -4374,7 +4259,7 @@ def _watchdog_completion_case(mode):
             os.setsid()
             time.sleep(3600)
             os._exit(0)
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             try:
                 if os.getpgid(decoy) == decoy:
@@ -4431,7 +4316,7 @@ def _watchdog_completion_case(mode):
                     scratch = Path(directory, "leader.tmp")
                     scratch.write_text(str(leader), encoding="ascii")
                     scratch.rename(leader_file)
-                    bound = time.monotonic() + 30
+                    bound = _watchdog_deadline(30)
                     while not opened.exists():  # the caller holds the pidfd now
                         if time.monotonic() >= bound:
                             os._exit(125)
@@ -4447,7 +4332,7 @@ def _watchdog_completion_case(mode):
                     os._exit(125)
 
             def await_file(path, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not path.exists():
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -4579,7 +4464,7 @@ def _watchdog_completion_case(mode):
                     os._exit(125)
 
             def await_file(path, note):
-                bound = time.monotonic() + 30
+                bound = _watchdog_deadline(30)
                 while not path.exists():
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
@@ -4634,7 +4519,7 @@ def _watchdog_completion_case(mode):
             os.setsid()
             time.sleep(3600)
             os._exit(0)
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             try:
                 if os.getpgid(sentinel) == sentinel:
@@ -4698,13 +4583,13 @@ def _watchdog_completion_case(mode):
             return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
         def await_state(target, wanted, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while state(target) not in wanted:
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
         def await_file(path, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while not path.exists():
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
@@ -4731,7 +4616,7 @@ def _watchdog_completion_case(mode):
                         grandchild = os.fork()
                         if grandchild == 0:
                             if forker:
-                                bound = time.monotonic() + 30
+                                bound = _watchdog_deadline(30)
                                 while not cue.exists():
                                     if time.monotonic() >= bound:
                                         os._exit(125)
@@ -4878,7 +4763,7 @@ def _watchdog_completion_case(mode):
                     scratch = Path(directory, "cue.tmp")
                     scratch.write_text("go", encoding="ascii")
                     scratch.rename(cue)
-                    bound = time.monotonic() + 30
+                    bound = _watchdog_deadline(30)
                     while not forked_file.exists():
                         assert time.monotonic() < bound, (
                             "the raced fork never appeared")
@@ -4914,7 +4799,7 @@ def _watchdog_completion_case(mode):
             os.setsid()
             time.sleep(3600)
             os._exit(0)
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             try:
                 if os.getpgid(survivor) == survivor:
@@ -4976,19 +4861,19 @@ def _watchdog_completion_case(mode):
             return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
         def await_state(target, wanted, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while state(target) not in wanted:
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
         def await_file(path, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while not path.exists():
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
         def await_pgid(target, note):
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while os.getpgid(target) != target:
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
@@ -5071,7 +4956,7 @@ def _watchdog_completion_case(mode):
                     and fake._subject_skipped is None), (
                 "the interrupted accounting was not recorded",
                 fake._subject_kill, fake._subject_skipped)
-            bound = time.monotonic() + 30
+            bound = _watchdog_deadline(30)
             while True:
                 waited, raw = os.waitpid(guardian, os.WNOHANG)
                 if waited == guardian:
@@ -5216,7 +5101,7 @@ def _watchdog_completion_case(mode):
                     "the recorded subject kill never ran (round 24: the "
                     "freeze fault skipped the held-pidfd SIGKILL)")
         os.waitpid(subject, 0)
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             waited, raw = os.waitpid(guardian, os.WNOHANG)
             if waited == guardian:
@@ -5260,7 +5145,7 @@ def _watchdog_completion_case(mode):
         assert fake._subject_kill is None and fake._subject_skipped is None, (
             "a cleanup that never ran was recorded",
             fake._subject_kill, fake._subject_skipped)
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             waited, raw = os.waitpid(guardian, os.WNOHANG)
             if waited == guardian:
@@ -5417,7 +5302,7 @@ def _watchdog_completion_case(mode):
             fake._subject_kill, fake._subject_skipped)
         # The direct held-pidfd backstop ran unpatched for SIGKILL: collect
         # the killed guardian.
-        bound = time.monotonic() + 30
+        bound = _watchdog_deadline(30)
         while True:
             waited, raw = os.waitpid(guardian, os.WNOHANG)
             if waited == guardian:
@@ -11386,8 +11271,14 @@ def _watchdog_overlap_case(mode):
 
 def _watchdog_regression_self_test():
     """R10: startup/collection/exit bounds and the registered runner under hostile inherited state."""
+    import ast
+    import contextlib
+    import inspect
+    import io
     import signal
     import subprocess
+    import threading
+    import time
     import _opf_emit
     from _opf_emit import run_status_owned
     if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
@@ -11439,110 +11330,162 @@ def _watchdog_regression_self_test():
     # process bound is its own budget plus the launch margin, never a flat
     # constant below what the leg is sanctioned to wait for. The old flat 10 s
     # deadline bound sat below one deadline case's own budget (execution
-    # bound + cleanup grace + receipt allowance = 11 s), so a slow but
-    # in-budget leg under host load was killed and reported as a hang.
+    # bound + cleanup grace + receipt allowance = 11 s), so a leg slow but
+    # inside that budget could be killed and reported as a hang (an arithmetic
+    # consequence of those two numbers; no run reproduced such a kill).
     deadline_budget = _deadline_case_budget()
-    # Sequential launch() calls per completion mode, each up to its launch
-    # timeout, plus any other in-budget waits the passing path performs.
-    completion_launches = dict([("nonce", 2), ("fixture-id", 2), ("status", 2),
-                                ("early-exit", 3), ("premature-exit", 5),
-                                ("empty-children", 3), ("guardian-error", 3), ("reaper", 2),
-                                ("audit-ignore", 1), ("cleanup-budget", 1),
-                                ("cleanup-cancel", 1)])
-    completion_extra = dict([
-        ("reaper", 2 * 5),  # one bounded competing-reaper join per launch
-        # The late mutant (timeout above the execution bound), the expired
-        # cleanup-deadline mutant (whose refusal escalates through close()'s
-        # doubled grace) and the swallowed-send transient census.
-        ("deadline-flips", _deadline_case_budget(_DEADLINE_EXECUTION_BOUND + 1)
-         + deadline_budget + 2 * _opf_emit._FIXTURE_CLEANUP_GRACE + deadline_budget)])
-    # The committed budgets stay a floor (a bound only ever rises): the
-    # remaining completion modes' prior default, and every family's prior rule.
-    completion_default = 40 - _WATCHDOG_LAUNCH_MARGIN
-    prior = dict((mode, deadline_budget) for mode in deadline_modes)
-    prior.update(("overlap-" + mode, 30) for mode in overlap_modes)
-    prior.update((mode, deadline_budget) for mode in safety_modes)
-    prior.update((label + "-" + disposition, 2 * nested_launches[label] * 5)
-                 for label in launcher_labels for disposition in launcher_dispositions)
-    prior.update(("completion-" + mode,
-                  max(completion_default,
-                      completion_launches.get(mode, 0) * _COMPLETION_LAUNCH_TIMEOUT
-                      + completion_extra.get(mode, 0)))
-                 for mode in completion_modes)
-    # Every leg's budget derives from its OWN sequential waits, read from the
-    # leg's source (_watchdog_leg_waits): the same code the leg runs. Patched
-    # paths the walk cannot see add their own extra: a launcher case runs its
-    # nested runner twice with every launch patched to one 5 s exit-37 launch.
-    families = [(mode, _watchdog_deadline_case, (mode,), 0) for mode in deadline_modes]
-    families.extend(("overlap-" + mode, _watchdog_overlap_case, (mode,), 0)
-                    for mode in overlap_modes)
-    families.extend((mode, _watchdog_safety_case, (mode,), 0) for mode in safety_modes)
-    families.extend((label + "-" + disposition, _watchdog_launcher_case, (label, disposition),
-                     2 * nested_launches[label] * 5)
-                    for label in launcher_labels for disposition in launcher_dispositions)
-    families.extend(("completion-" + mode, _watchdog_completion_case, (mode,),
-                     completion_extra.get(mode, 0) if mode == "deadline-flips" else 0)
-                    for mode in completion_modes)
-    budgets = dict()
-    for label, case, case_args, extra in families:
-        derived = _watchdog_leg_budget(case, *case_args, extra=extra)
-        budgets[label] = None if derived is None else max(derived, prior[label])
-    budgets["blocked-isolation"] = 31 * 180  # the isolation matrix's full budget
+    # Every leg's budget is DECLARED here and checked on every run: the leg
+    # runs under _watchdog_leg_entry, which charges each bounded wait it makes
+    # at its full timeout and fails the leg when the charges exceed this
+    # budget. Each number is the larger of the leg's prior budget and the
+    # charges its passing path made (two ledger runs, 2026-10-06, equal to
+    # within 2 ms); close-cancel alone drops, its one-hour fixture deadline
+    # replaced by the fixture hold.
+    budgets = dict((mode, deadline_budget) for mode in deadline_modes)
+    budgets.update(("overlap-" + mode, 80) for mode in overlap_modes)
+    budgets.update((mode, deadline_budget) for mode in safety_modes)
+    budgets.update((("lost-cleanup", 16), ("fork-error", 36), ("poll-error", 36)))
+    # A launcher case runs its nested runner twice with every launch patched
+    # to one exit-37 _run_fixture_process(timeout=5), each charged its allowance.
+    budgets.update((label + "-" + disposition,
+                    2 * nested_launches[label] * _deadline_case_budget(5))
+                   for label in launcher_labels for disposition in launcher_dispositions)
+    budgets.update(("completion-" + mode, seconds) for mode, seconds in (
+        ("audit-ignore", 16), ("reaper", 42), ("nonce", 32), ("fixture-id", 32),
+        ("status", 32), ("early-exit", 48), ("cleanup-reaped", 15), ("cleanup-cancel", 16),
+        ("premature-exit", 80), ("nested-timeout", 11), ("nested-cancel", 11),
+        ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
+        ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
+        ("subject-setup", 22), ("overdue-success", 90.01), ("launch-ownership", 60),
+        ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
+        ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
+        ("subject-receipt", 784), ("subject-ack", 814), ("subject-orphan", 1658),
+        ("pdeathsig", 32), ("escalation-subject", 884), ("escalate-reaped", 784),
+        ("poll-collected", 1266), ("close-cancel", 1014), ("escalate-degraded", 784),
+        ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
+        ("census-exception", 780), ("receipt-high-fd", 10)))
+    # The isolation matrix: 31 timer cases, each one 180 s fixture call.
+    budgets["blocked-isolation"] = 31 * _deadline_case_budget(180)
+    entries = [(mode, "_watchdog_deadline_case", (mode,)) for mode in deadline_modes]
+    entries.extend(("overlap-" + mode, "_watchdog_overlap_case", (mode,))
+                   for mode in overlap_modes)
+    entries.extend((mode, "_watchdog_safety_case", (mode,)) for mode in safety_modes)
+    entries.extend((label + "-" + disposition, "_watchdog_launcher_case", (label, disposition))
+                   for label in launcher_labels for disposition in launcher_dispositions)
+    entries.extend(("completion-" + mode, "_watchdog_completion_case", (mode,))
+                   for mode in completion_modes)
 
     def bound(label):
-        return budgets[label] + _WATCHDOG_LAUNCH_MARGIN
+        # Validated before any arithmetic: a missing, None, NaN or otherwise
+        # unusable budget reaches the floor's refusal below, never a TypeError.
+        budget = budgets.get(label)
+        return budget + _WATCHDOG_LAUNCH_MARGIN if _watchdog_finite_seconds(budget) else None
 
-    cases = [(mode, prefix + "return opf._watchdog_deadline_case(" + repr(mode) + ")",
-              bound(mode))
-             for mode in deadline_modes]
-    cases.extend(("overlap-" + mode,
-                  prefix + "return opf._watchdog_overlap_case(" + repr(mode) + ")",
-                  bound("overlap-" + mode))
-                 for mode in overlap_modes)
-    cases.extend((mode, prefix + "return opf._watchdog_safety_case(" + repr(mode) + ")",
-                  bound(mode))
-                 for mode in safety_modes)
-    cases.extend((label + "-" + disposition,
-                  prefix + "return opf._watchdog_launcher_case("
-                  + repr(label) + ", " + repr(disposition) + ")",
-                  bound(label + "-" + disposition))
-                 for label in launcher_labels
-                 for disposition in launcher_dispositions)
-    cases.extend(("completion-" + mode,
-                  prefix + "return opf._watchdog_completion_case(" + repr(mode) + ")",
-                  bound("completion-" + mode))
-                 for mode in completion_modes)
+    def entry(label, case, args):
+        return (prefix + "return opf._watchdog_leg_entry(" + repr(budgets.get(label))
+                + ", opf." + case + "".join(", " + repr(arg) for arg in args) + ")")
+
+    cases = [(label, entry(label, case, args), bound(label)) for label, case, args in entries]
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
     cases.append(("blocked-isolation", prefix
                   + "import signal; signal.signal(signal.SIGALRM, signal.SIG_IGN); "
                   + "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}); "
                   + "rc = opf._bootstrap(); "
-                  + "return rc if rc else dict(opf._self_tests())['opf-watchdog-isolation']()",
+                  + "return rc if rc else opf._watchdog_leg_entry("
+                  + repr(budgets.get("blocked-isolation"))
+                  + ", dict(opf._self_tests())['opf-watchdog-isolation'])",
                   bound("blocked-isolation")))
     # The rule holds for every leg, and it is discriminating: the pre-fix flat
     # bounds (deadline 10 s, safety 15 s, completion 40 s) must be refused,
-    # naming the deadline legs and the completion modes they under-cover.
+    # naming the deadline and safety legs and the completion modes they under-cover.
     live = dict((label, timeout) for label, _code, timeout in cases)
     flat = dict(live)
     flat.update((mode, 10) for mode in deadline_modes)
     flat.update((mode, 15) for mode in safety_modes)
     flat.update(("completion-" + mode, 40) for mode in completion_modes)
     refused = " ".join(_watchdog_bound_faults(flat, budgets))
-    flip_missed = [label for label in deadline_modes + ("completion-premature-exit",
-                                                        "completion-deadline-flips",
-                                                        "completion-nested-keep")
+    flip_missed = [label for label in deadline_modes + safety_modes
+                   + ("completion-premature-exit", "completion-deadline-flips",
+                      "completion-nested-keep")
                    if label + ": bound" not in refused]
-    # The scheduling-delay reproduction: nested-keep's three sequential
-    # run_bounded(timeout_s=30) calls each delayed 14 s, inside its own
-    # allowance (42 s in all), fit the derived bound and overrun the old 40 s.
-    keep = [w for w in _watchdog_leg_waits(_watchdog_completion_case, "nested-keep")[0]
-            if w[1].startswith("run_bounded")]
-    delayed = 14 * len(keep)
-    if not (len(keep) == 3 and all(14 < w[2] for w in keep)
-            and delayed <= live["completion-nested-keep"] - _WATCHDOG_LAUNCH_MARGIN
-            and delayed > 40):
-        flip_missed.append("completion-nested-keep (scheduling-delay reproduction)")
+    # The per-call allowance, the launch margin and the leg roster are inputs
+    # the floor itself trusts, so each is pinned: the allowance is execution
+    # up to max(timeout, execution bound) + cleanup grace + receipt allowance;
+    # the margin covers interpreter start, import and bootstrap; a bound one
+    # step under budget + margin is refused; and every mode a case function
+    # branches on is a launched leg.
+    for timeout_s in (_DEADLINE_CASE_TIMEOUT, _DEADLINE_EXECUTION_BOUND + 1, 30):
+        if _deadline_case_budget(timeout_s) < (max(timeout_s, _DEADLINE_EXECUTION_BOUND)
+                                               + _opf_emit._FIXTURE_CLEANUP_GRACE
+                                               + _DEADLINE_RECEIPT_ALLOWANCE):
+            flip_missed.append("per-call allowance at timeout %s" % timeout_s)
+    if _WATCHDOG_LAUNCH_MARGIN < 30:
+        flip_missed.append("launch margin %r below 30 s" % (_WATCHDOG_LAUNCH_MARGIN,))
+    if not _watchdog_bound_faults(dict(probe=10 + _WATCHDOG_LAUNCH_MARGIN - 0.5), dict(probe=10)):
+        flip_missed.append("bound below budget + margin")
+    for prefix_label, case in (("", _watchdog_deadline_case), ("", _watchdog_safety_case),
+                               ("overlap-", _watchdog_overlap_case),
+                               ("completion-", _watchdog_completion_case)):
+        branched = set()
+        for node in ast.walk(ast.parse(inspect.getsource(case))):
+            if (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
+                    and node.left.id == "mode"):
+                for item in node.comparators:
+                    for const in ast.walk(item):
+                        if isinstance(const, ast.Constant) and isinstance(const.value, str):
+                            branched.add(prefix_label + const.value)
+        flip_missed.extend("unlaunched mode %s" % label for label in sorted(branched - set(live)))
+    # A leg with no declared budget, or an unusable one, is refused by the floor
+    # on the runner's own tables (never a TypeError while bounds are built).
+    for label, budget in ((next(iter(budgets)), None), ("completion-reaper", float("nan"))):
+        probe_budgets = dict(budgets)
+        if budget is None:
+            del probe_budgets[label]
+        else:
+            probe_budgets[label] = budget
+        probe_bounds = dict(live)
+        probe_bounds[label] = (probe_budgets[label] + _WATCHDOG_LAUNCH_MARGIN
+                               if _watchdog_finite_seconds(probe_budgets.get(label))
+                               else live[label])
+        faults = " ".join(_watchdog_bound_faults(probe_bounds, probe_budgets))
+        if (label + (": no declared budget" if budget is None else ": budget")) not in faults:
+            flip_missed.append("unusable budget %r for %s" % (budget, label))
+    # The runtime ledger: a leg whose charged waits exceed its declared budget,
+    # whose wait has no finite timeout, or whose budget is unusable fails; a leg
+    # inside its budget keeps its own result; a wait inside a charged fixture
+    # call is not charged twice, and a polling tick is not charged.
+    def probe(*charges):
+        def leg():
+            for seconds in charges:
+                _watchdog_charge(seconds, "probe")
+            return EXIT_OK
+        return leg
+    installed = (list(_WATCHDOG_LEDGERS), list(_WATCHDOG_ORIGINALS))
+    with contextlib.redirect_stdout(io.StringIO()):
+        ledger_vectors = [
+            (_watchdog_leg_entry(10, probe(4, 6)), EXIT_OK),
+            (_watchdog_leg_entry(10, probe(4, 6.5)), EXIT_FINDING),
+            (_watchdog_leg_entry(10, probe(float("inf"))), EXIT_FINDING),
+            (_watchdog_leg_entry(10, probe(float("nan"))), EXIT_FINDING),
+            (_watchdog_leg_entry(None, probe()), EXIT_FINDING),
+            (_watchdog_leg_entry(float("nan"), probe()), EXIT_FINDING),
+            (_watchdog_leg_entry(1, lambda: _watchdog_deadline(2) and EXIT_OK), EXIT_FINDING),
+            (_watchdog_leg_entry(_WATCHDOG_POLL_TICK / 100,
+                                 lambda: time.sleep(_WATCHDOG_POLL_TICK / 20) or EXIT_OK),
+             EXIT_OK),
+            (_watchdog_leg_entry(1, lambda: threading.Event().wait(1.5) or EXIT_OK),
+             EXIT_FINDING),
+            (_watchdog_leg_entry(_deadline_case_budget(0.5) - 0.5, lambda: _opf_emit.run_bounded(
+                lambda: "ok", timeout_s=0.5) == "ok" and EXIT_OK), EXIT_FINDING),
+            (_watchdog_leg_entry(_deadline_case_budget(0.5), lambda: _opf_emit.run_bounded(
+                lambda: time.sleep(4) or "ok", timeout_s=0.5) == "TIMEOUT" and EXIT_OK),
+             EXIT_OK),
+        ]
+    flip_missed.extend("runtime ledger vector %d" % index
+                       for index, (got, want) in enumerate(ledger_vectors) if got != want)
+    if (list(_WATCHDOG_LEDGERS), list(_WATCHDOG_ORIGINALS)) != installed:
+        flip_missed.append("runtime ledger left installed")
     # The floor fails closed on a non-finite, non-positive or non-numeric
     # bound or budget (a NaN compares False with every threshold).
     for bad in (float("nan"), float("inf"), -1, 0, True, "60", None):
@@ -11552,7 +11495,7 @@ def _watchdog_regression_self_test():
     floor = _watchdog_bound_faults(live, budgets)
     if floor or flip_missed:
         print("opf watchdog regressions: FAIL (process bound below a leg's own budget: %s; "
-              "flat pre-fix bounds not refused for: %s)" % (
+              "floor vectors not refused: %s)" % (
                   "; ".join(floor) or "none", ", ".join(flip_missed) or "none"))
         return EXIT_FINDING
     failed = False
