@@ -177,22 +177,31 @@ its no-follow walk's hand-off close), and EVERY handler in the transaction's rea
 exception's class as a signal applies ONE record-and-report rule first, _journal._fd_release_fault: a marked
 exception is raised as itself (or, in the two lock-state reads, recorded and named beside the outcome),
 never read as absent, unreadable, cannot-evaluate, cannot-inspect, does-not-verify or not reached. Those
-handlers: _journal's _lstat_contained, release_lock and _poststate_verifies; the store's
-_read_store_bytes_contained (both reads), _open_working_dir_fd and _resolve_at (so the resolver, its
-discovery and the probe, _default_store_present_without_manifest, never fold one into a posture or a
-False); and here _open_product_root, _read_live, ApplyOps._mkdirs, journal_state,
+handlers: _journal's _lstat_contained, _read_contained (its parent walk), release_lock and
+_poststate_verifies; the store's _read_store_bytes_contained (both reads), _open_working_dir_fd, every
+StoreError handler of resolve_store, resolve_store_fd, _resolve_at and load_manifest (so the resolver, its
+discovery and the probe, _default_store_present_without_manifest, both of its handlers, never fold one
+into a posture or a False); and here _open_product_root, _read_live, ApplyOps._mkdirs, journal_state,
 _committed_base_or_refuse, _absent_journal_dirs, the sweep (_remove_journal_dirs, both _open_parent
 handlers), _interrupted_lock_state, _failed_lock_state and run_adopt_transaction's journal reads, lock
-acquire and transaction handler. run_transaction rolls back on any Exception a close raised (a KeyError
+acquire and transaction handler (a close exception after the COMPLETE frame is durable leaves the commit
+standing, named beside it as AdoptCommittedLockError; an interrupt there still propagates as itself, the
+transaction named NOT confirmed committed). run_transaction rolls back on any Exception a close raised (a KeyError
 from _poststate_verifies' close among them), never only on a JournalError. A lock clause names each
 exception with its notes (_journal._msg_said), and a transaction whose state cannot be classified names
 why. A self-test vector injects a raise after a real close at EVERY close event of seven runs (commit,
-refusal, body interrupt, body fault, failed acquire, lock stays, failed transaction with rollback), so a
-handler added later that drops one fails the suite. Not named (disclosed): a close OSError that yields
+refusal, body interrupt, body fault, failed acquire, lock stays, failed transaction with rollback), EVERY
+probe class at every event, the classes read from the code (each exception class named at a raise,
+except or isinstance site of every module on a close event's stack, plus an ordinary fault and an
+interrupt no site names), so a handler added later that drops one, or a class added later, fails the
+suite. Not named (disclosed): a close OSError that yields
 to an exception already in flight (#378), as before; and a close OSError on a quiet teardown close
 (_journal._close_fd_quietly: the lock identity's and the first listing's held descriptors, the
 cleanup loops of _open_parent, _open_dir_contained and ensure_journal_dirs, and _committed_base_or_refuse's
-journal descriptor), whose descriptor close(2) released anyway.
+journal descriptor), whose descriptor close(2) released anyway; and a close OSError on _journal._pid_start's
+/proc stat FILE OBJECT (a file-object close, outside every os.close probe), which reads as an unknown start
+time, so release_lock treats the run's own lock as not provably its own and the commit reports the lock
+STAYING, fail-closed, without naming that close error.
 Residual (disclosed, not chased): when a SECOND ORDINARY fault (an Exception) arrives during a cleanup
 that is already failing, which of the two propagates and which is named beside it (in a note, or as the
 other's context) is not specified, for instance a _journal close exception with an error in flight
@@ -1000,7 +1009,8 @@ def _default_store_present_without_manifest(product_root):
     try:
         try:
             held.append(_open_product_root(product_root))
-        except AdoptApplyError:
+        except AdoptApplyError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never read as False
             return False
         try:
             status, _machine, _detail = store.discover_machine_store(held[0], Path(product_root))
@@ -2021,6 +2031,14 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
                     raise AdoptApplyError("the adoption transaction was refused and rolled back to the "
                                           "prestate ({}): the product tree is as it was, and the journal "
                                           "keeps this transaction's terminal record".format(_journal._msg_said(exc)))
+                if state == "complete" and _journal._fd_release_raised(exc):
+                    # a close after the COMPLETE frame was made durable (publish's frames-log or directory
+                    # close): the transaction COMMITTED, so that result stands, the lock released as on any
+                    # commit, and the close's exception, every fault recorded on it kept, is named beside it
+                    # (AdoptCommittedLockError), never a FAILED refusal for a change that landed
+                    closeout.append(exc)
+                    done = True
+                    return txn
                 retain = True
                 lock_state = "retained"
                 raise AdoptApplyError("the adoption transaction {} FAILED and is {} ({}); the journal lock "
@@ -5348,16 +5366,22 @@ def _self_test_checks():
               and raised_p is fired_p[0] and verdict_p is None and not leaked,
               observed="control={!r} verdict={!r} raised={!r} injected={!r} leaked={!r}".format(
                   control_p, verdict_p, raised_p, fired_p, leaked))
-        # 6a'''b3o (round 18, the close-exception CLASS): a raise after a REAL close at EVERY close event of
-        # seven runs (commit, refusal, body interrupt, body fault, failed acquire, lock stays, failed
-        # transaction with rollback), one injection per run, its class rotating by event number over a
-        # JournalError, an OSError EIO, a KeyError, an ordinary fault and an interrupt: the injected
-        # exception is named in the outcome (raised itself, or in the message, notes, cause or context chain
-        # of what was raised) on every run, except the disclosed unnamed close OSErrors (a quiet teardown
-        # close, or one yielding to an exception in flight). Red against any handler in the run's reach
-        # that reads a close exception as a clean signal (absent, unreadable, cannot-evaluate, not reached).
-        class_makers = (_journal.JournalError, lambda said: OSError(errno.EIO, said), KeyError,
-                        _InjectedCloseFault, _InjectedCloseInterrupt)
+        # 6a'''b3o (rounds 18 and 19, the close-exception CLASS): a raise after a REAL close at EVERY close
+        # event of seven runs (commit, refusal, body interrupt, body fault, failed acquire, lock stays,
+        # failed transaction with rollback), one injection per run, EVERY probe class at EVERY event. The
+        # classes are read from the code, never a hand list (close_site_classes): every exception class
+        # named at a raise, except or isinstance site of every module whose code is on the stack at any
+        # close event of those runs (StoreError and FileNotFoundError among them), plus an ordinary fault and
+        # an interrupt no site names. The injected exception is named in the outcome (raised itself, or in
+        # the message, notes, cause or context chain of what was raised) on every run, except the disclosed
+        # unnamed close OSErrors (a quiet teardown close, or one yielding to an exception in flight). Red
+        # against any handler in the run's reach that reads a close exception as a clean signal (absent,
+        # unreadable, cannot-evaluate, not reached). The probe runs make fsync a no-op (no close event
+        # depends on it, re-proved below by equal event counts) so the full set fits a self-test run.
+        import ast
+        import builtins
+        import inspect
+        import warnings
         real_acquire_c, real_apply_c = _journal.acquire_lock, _journal.apply_ops
 
         def class_failed_acquire(journal_root, session_id):
@@ -5382,10 +5406,12 @@ def _self_test_checks():
                            ("rollback", None, (("apply_ops", class_apply_then_fail),)))
         quiet_code = _journal._close_fd_quietly.__code__
 
-        def class_run(scenario, plan):
+        def class_run(scenario, plan, sites=None):
             """One run of `scenario` with os.close replaced by the real close, then a raise of plan[n]() at
-            close event n (counted from 1, or only beneath a frame running `plan["under"]` when given):
-            (events counted, [(exception, disclosed-unnamed)], what the run raised)."""
+            close event n (counted from 1, or only beneath a frame running `plan["under"]` when given; with
+            plan["fast"], fsync a no-op): (events counted, [(exception, disclosed-unnamed)], what the run
+            raised). `sites`, a set, collects the module of every frame on the stack at each close event, from
+            the close up to run_adopt_transaction (the close-site path, never the harness above it)."""
             name, compose_c, patches = scenario
             under = plan.get("under")
             with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -5401,6 +5427,11 @@ def _self_test_checks():
                         if frame is None:
                             return
                     seen[0] += 1
+                    if sites is not None:
+                        frame = sys._getframe(1)
+                        while frame is not None:
+                            sites.add(frame.f_globals.get("__name__"))
+                            frame = None if frame.f_code is run_adopt_transaction.__code__ else frame.f_back
                     if seen[0] in plan:
                         exc = plan[seen[0]]()
                         fired.append((exc, sys._getframe(1).f_code is quiet_code or sys.exc_info()[1] is not None))
@@ -5410,6 +5441,8 @@ def _self_test_checks():
                     for attr, value in patches:
                         stack.enter_context(mock.patch.object(_journal, attr, value))
                     stack.enter_context(mock.patch.object(os, "close", close_then_raise))
+                    if plan.get("fast"):
+                        stack.enter_context(mock.patch.object(os, "fsync", lambda fd: None))
                     try:
                         run_adopt_transaction(root, rid, compose_c or compose_full(files))
                     except BaseException as exc:    # noqa: BLE001  every outcome is inspected below
@@ -5418,18 +5451,170 @@ def _self_test_checks():
 
         def class_named(exc, raised):
             return raised is exc or (raised is not None and str(exc.args[-1]) in rendering(raised))
-        class_bad, class_runs = [], 0
+
+        def close_site_classes(module_names):
+            """Every exception class named at a raise, an except or an isinstance site of each module in
+            `module_names` that lives beside this one (its self-test functions excluded), resolved in that
+            module's namespace: the classes a close-site path can raise or a handler on it can read."""
+            found = set()
+            here = os.path.dirname(os.path.abspath(__file__))
+            for module_name in sorted(n for n in module_names if n in sys.modules):
+                module = sys.modules[module_name]
+                if os.path.dirname(os.path.abspath(getattr(module, "__file__", None) or "/")) != here:
+                    continue
+                todo = [ast.parse(inspect.getsource(module))]
+                while todo:
+                    node = todo.pop()
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and "self_test" in node.name:
+                        continue
+                    named = []
+                    if isinstance(node, ast.ExceptHandler) and node.type is not None:
+                        named = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
+                    elif isinstance(node, ast.Raise) and node.exc is not None:
+                        named = [node.exc.func if isinstance(node.exc, ast.Call) else node.exc]
+                    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and len(node.args) == 2 \
+                            and node.func.id in ("isinstance", "issubclass"):
+                        named = node.args[1].elts if isinstance(node.args[1], ast.Tuple) else [node.args[1]]
+                    for expr in named:
+                        chain = []
+                        while isinstance(expr, ast.Attribute):
+                            chain.append(expr.attr)
+                            expr = expr.value
+                        if isinstance(expr, ast.Name):
+                            obj = vars(module).get(expr.id, getattr(builtins, expr.id, None))
+                            for attr in reversed(chain):
+                                obj = getattr(obj, attr, None)
+                            if isinstance(obj, type) and issubclass(obj, BaseException):
+                                found.add(obj)
+                    todo.extend(ast.iter_child_nodes(node))
+            return found
+
+        def class_maker(cls, said):
+            """An instance of `cls` whose last argument carries `said`, or None when no form constructs one."""
+            forms = (((errno.EIO, said),) if issubclass(cls, OSError) else ()) \
+                + ((("utf-8", b"", 0, 1, said),) if issubclass(cls, UnicodeDecodeError) else ()) \
+                + ((said,), (said, "", 0), (said, said))
+            for args in forms:
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error")
+                        made = cls(*args)
+                except Exception:   # noqa: BLE001  the next constructor form is tried
+                    continue
+                if made.args and said in str(made.args[-1]):
+                    return made
+            return None
+        class_sites, class_counts = set(), []
         for scenario in class_scenarios:
-            total = class_run(scenario, dict())[0]
+            class_counts.append((class_run(scenario, dict(), class_sites)[0],
+                                 class_run(scenario, dict(fast=True))[0]))
+        class_set = sorted(close_site_classes(class_sites) | {_InjectedCloseFault, _InjectedCloseInterrupt},
+                           key=lambda cls: (cls.__module__, cls.__qualname__))
+        class_unmade = [cls.__qualname__ for cls in class_set if class_maker(cls, "probe") is None]
+        class_bad, class_runs = [], 0
+        for scenario, (total, _fast_total) in zip(class_scenarios, class_counts):
             for at in range(1, total + 1):
-                said = "CLASS-CLOSE-%s-%d" % (scenario[0], at)
-                _n, fired, raised = class_run(scenario, dict(((at, lambda: class_makers[at % 5](said)),)))
-                class_runs += 1
-                if fired and not (isinstance(fired[0][0], OSError) and fired[0][1]) \
-                        and not class_named(fired[0][0], raised):
-                    class_bad.append((scenario[0], at, repr(fired[0][0]), repr(raised)[:300]))
-        check("close-class-every-close-event-named-or-raised", class_runs > 500 and not class_bad,
-              observed="runs={} unnamed (scenario, event, injected, raised)={!r}".format(class_runs, class_bad[:8]))
+                for cls in class_set:
+                    said = "CLASS-CLOSE-%s-%d-%s" % (scenario[0], at, cls.__qualname__)
+                    if class_maker(cls, said) is None:
+                        continue
+                    _n, fired, raised = class_run(scenario, dict(((at, lambda: class_maker(cls, said)),
+                                                                  ("fast", True))))
+                    class_runs += 1
+                    if fired and not (isinstance(fired[0][0], OSError) and fired[0][1]) \
+                            and not class_named(fired[0][0], raised):
+                        class_bad.append((scenario[0], at, repr(fired[0][0]), repr(raised)[:300]))
+        class_names = {cls.__qualname__ for cls in class_set}
+        check("close-class-every-close-event-named-or-raised",
+              all(total == fast_total for total, fast_total in class_counts) and not class_unmade
+              and {"StoreError", "FileNotFoundError", "JournalError", "OSError", "KeyError"} <= class_names
+              and class_runs == sum(total for total, _fast in class_counts) * len(class_set) and not class_bad,
+              observed="counts={} classes={} unmade={} runs={} unnamed (scenario, class): events={!r}; first "
+              "(scenario, event, injected, raised)={!r}".format(
+                  class_counts, sorted(class_names), class_unmade, class_runs,
+                  sorted({(sc, inj.split("(")[0]): [ev for sc2, ev, inj2, _r in class_bad
+                                                    if sc2 == sc and inj2.split("(")[0] == inj.split("(")[0]]
+                          for sc, _ev, inj, _r in class_bad}.items()), class_bad[:8]))
+        # round 19: a close after the COMPLETE frame is durable (publish's frames-log close, then its
+        # transaction-directory close) that raises any probe class but an interrupt leaves the commit
+        # standing: AdoptCommittedLockError naming COMMITTED and the injected exception, the transaction
+        # complete and the lock released (red against the handler refusing it as FAILED with the lock kept)
+        publish_code = _journal.publish.__code__
+        complete_bad, complete_runs = [], 0
+        for nth in (1, 2):
+            for cls in (cls for cls in class_set if issubclass(cls, Exception)):
+                said = "COMPLETE-CLOSE-%d-%s" % (nth, cls.__qualname__)
+                real_close_q, seen_q, fired_q, outcome_q = os.close, [0], [], None
+
+                def close_q(fd):
+                    real_close_q(fd)
+                    frame = sys._getframe(1)
+                    while frame is not None and not (frame.f_code is publish_code
+                                                     and frame.f_locals.get("ftype") == _journal.F_COMPLETE):
+                        frame = frame.f_back
+                    if frame is not None:
+                        seen_q[0] += 1
+                        if seen_q[0] == nth:
+                            fired_q.append(class_maker(cls, said))
+                            raise fired_q[0]
+                with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                    root, files = fixture(temp)
+                    with mock.patch.object(os, "close", close_q), mock.patch.object(os, "fsync", lambda fd: None):
+                        try:
+                            outcome_q = run_adopt_transaction(root, rid, compose_full(files))
+                        except BaseException as exc:    # noqa: BLE001  inspected below
+                            outcome_q = exc
+                    state_q, free_q = txn_state(root, rid), lock_free(root)
+                complete_runs += 1
+                if not (fired_q and type(outcome_q) is AdoptCommittedLockError and "COMMITTED" in str(outcome_q)
+                        and said in rendering(outcome_q) and state_q == "complete" and free_q):
+                    complete_bad.append((nth, cls.__qualname__, repr(outcome_q)[:240], state_q, free_q))
+        check("complete-publish-close-commit-stands-and-names-it", complete_runs > 20 and not complete_bad,
+              observed="runs={} bad (close, class, outcome, state, lock free)={!r}".format(
+                  complete_runs, complete_bad[:6]))
+        # round 19: a StoreError a close beneath _resolve_at's discovery raises (marked as it left the close
+        # helper) is raised as itself, never read as a cannot-evaluate posture that _store_posture_or_refuse
+        # then admits (red against _resolve_at's handler returning CANNOT-EVALUATE on it): at
+        # _lstat_contained's close; and an ordinary fault at _read_contained's file close, then a StoreError
+        # at its parent close, the StoreError raised with the first recorded on it
+        resolve_code, classify_code = store._resolve_at.__code__, store._classify_working_names.__code__
+        lstat_code, read_code = _journal._lstat_contained.__code__, _journal._read_contained.__code__
+
+        def resolve_close_run(where, makers):
+            """One run with an empty composer, os.close making the real close, then raising the next of
+            `makers` at each close made directly by `where` beneath _resolve_at and _classify_working_names:
+            (the exceptions raised there, what the run raised or returned)."""
+            real_close_r, fired_r, outcome_r = os.close, [], None
+
+            def close_r(fd):
+                real_close_r(fd)
+                frame, codes, direct = sys._getframe(1), set(), None
+                while frame is not None:
+                    codes.add(frame.f_code)
+                    if direct is None and frame.f_code not in (_journal._close_fd_propagating.__code__,
+                                                               _journal._close_fd_yielding.__code__):
+                        direct = frame.f_code
+                    frame = frame.f_back
+                if direct is where and resolve_code in codes and classify_code in codes \
+                        and len(fired_r) < len(makers):
+                    fired_r.append(makers[len(fired_r)]())
+                    raise fired_r[-1]
+            with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+                root, files = fixture(temp)
+                with mock.patch.object(os, "close", close_r):
+                    try:
+                        outcome_r = run_adopt_transaction(root, rid, lambda ops: None)
+                    except BaseException as exc:    # noqa: BLE001  inspected below
+                        outcome_r = exc
+            return fired_r, outcome_r
+        fired_r, outcome_r = resolve_close_run(lstat_code, (lambda: store.StoreError("STORE-CLOSE-SENTINEL"),))
+        check("resolve-at-close-store-error-raised-as-itself", len(fired_r) == 1 and outcome_r is fired_r[0],
+              observed="injected={!r} outcome={!r}".format(fired_r, outcome_r))
+        fired_r, outcome_r = resolve_close_run(read_code, (lambda: RuntimeError("INNER-CLOSE-SENTINEL"),
+                                                           lambda: store.StoreError("OUTER-CLOSE-SENTINEL")))
+        check("resolve-at-read-close-fault-then-store-error-both-named",
+              len(fired_r) == 2 and outcome_r is fired_r[1] and "INNER-CLOSE-SENTINEL" in rendering(outcome_r),
+              observed="injected={!r} outcome={!r}".format(fired_r, outcome_r))
         # the sweep (_remove_journal_dirs): an ordinary fault at one of its closes, then a JournalError at
         # the next (the second raised with the first recorded on it), at every consecutive pair: both are
         # named beside the refusal (red against the sweep keeping only the JournalError's message)

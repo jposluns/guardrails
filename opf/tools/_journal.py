@@ -466,6 +466,7 @@ def _read_contained(root_fd, relpath, require_single_link=False):
     try:
         pfd, name = _open_parent(root_fd, relpath)
     except OSError as exc:                                 # includes FileNotFoundError
+        _fd_release_fault(exc)                                 # a close's exception: raised as itself, never rewrapped
         raise JournalError("cannot read contained file {!r} ({})".format(relpath, exc))
     try:
         # O_NONBLOCK so opening a non-regular final component (e.g. a FIFO swapped in for the regular file

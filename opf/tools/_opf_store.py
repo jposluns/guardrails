@@ -1075,6 +1075,7 @@ def resolve_store(product_root, accept_tokens=None):
             # override already settled (MAJOR 1).
             committed = _read_pointer_target(product_root_fd, POINTER_REL) if local is None else None
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc))
     finally:
         inflight = _journal._in_flight_in(sys._getframe())
@@ -1093,6 +1094,7 @@ def resolve_store(product_root, accept_tokens=None):
         try:
             store_root = _target_store_root(target, product_root)
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
                               product_root=product_root)
         res = _resolve_at(store_root, source, target, pointer=True, accept_tokens=accept_tokens)
@@ -1139,6 +1141,10 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
             status, machine_dir, detail = discover_machine_store(
                 store_root_fd, store_root, accept_tokens=accept_tokens)
         except StoreError as exc:
+            # a close's exception (marked as it left the close helper) is raised as itself, every fault
+            # recorded on it kept, never this cannot-evaluate posture (_store_posture_or_refuse admits a
+            # cannot-evaluate default location once fresh discovery succeeds, so it would vanish there)
+            _journal._fd_release_fault(exc)
             return Resolution(CANNOT_EVALUATE, str(exc), store_root=store_root, target=target,
                               pointer_source=source)
     finally:
@@ -1198,6 +1204,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
         # The local override wins WHOLESALE (spec 4.3), exactly as in resolve_store (MAJOR 1).
         committed = _read_pointer_target(product_root_fd, POINTER_REL) if local is None else None
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, str(exc), product_root=product_root), None
     pointer = local is not None or committed is not None
     target = local if local is not None else committed
@@ -1207,6 +1214,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
         try:
             store_root = _target_store_root(target, product_root)
         except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
                               product_root=product_root), None
         if store_root != product_root:
@@ -1219,6 +1227,7 @@ def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
         status, machine_dir, detail, manifest_raw = discover_machine_store_fd(
             product_root_fd, accept_tokens=accept_tokens)
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return Resolution(CANNOT_EVALUATE, str(exc), store_root=product_root, target=target,
                           pointer_source=source, product_root=product_root), None
     if status == "one":
@@ -1998,6 +2007,7 @@ def load_manifest(resolution, supported_profiles=None):
     try:
         data = _read_toml_contained(store_root_fd, manifest_rel)
     except StoreError as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         return ManifestValidation(CANNOT_EVALUATE, [str(exc)])
     finally:
         inflight = _journal._in_flight_in(sys._getframe())
