@@ -3,22 +3,39 @@
 # The SINGLE SOURCE for the Python floor of the pack's executable tooling (PYTHON-FLOOR): the oldest
 # Python minor version every shipped entrypoint supports. Hand-authored SOURCE; tools/check_python_floor.py
 # reads it and checks that every other statement of the floor (the CI and template interpreter pins, each
-# entrypoint's refusal guard and, once switched on, the declarations) agrees with it.
+# entrypoint's refusal guard and the declarations) agrees with it.
 #
 # python-floor        "MAJOR.MINOR". The gate asserts it names the decided floor, so a change here is a
 #                     reviewed change to that gate too, never a silent edit.
 # guarded-surfaces    the repo-relative entrypoints that carry the canonical refusal guard, sorted and
 #                     unique. Each is checked statically (the guard leads the file) and dynamically (run
 #                     in a child with a patched sys.version_info below the floor, it refuses with the exact
-#                     message and exit code). It starts EMPTY and grows unit by unit.
-# completeness-check  false until every shipped entrypoint is listed above; true then makes an unlisted
+#                     message and exit code). It grows unit by unit; the core-hook, preview-hook and
+#                     adopter-tool entrypoints are listed, and one shipped entrypoint,
+#                     tools/check_entry_guard.py, is not listed yet. The core hook and its plugin copy
+#                     carry the guard's hook form (HOOK_SURFACES in the gate): a fail-open event's mode
+#                     warns on exit 0 instead of refusing.
+# nonblocking-surfaces the guarded-surfaces entries whose guard exits 1 instead of 2, sorted, unique and each
+#                     also listed above: a hook whose event reads exit 2 as a block (a Stop hook's exit 2
+#                     blocks the stop, and the guard runs before the hook's own block cap). Never a
+#                     HOOK_SURFACES entry (cannot-evaluate): its hook form denies with exit 2, fixed.
+# completeness-check  false (the check is OFF) until every shipped entrypoint is listed above, which
+#                     needs tools/check_entry_guard.py guarded and listed; true then makes an unlisted
 #                     shipped entrypoint a finding.
-# documentation-check false until the declarations land; true then requires each declaration file to state
-#                     the floor.
+# documentation-check true since the declarations landed: each declaration file must state the floor and
+#                     name no older version. The gate holds it at its decided value, so setting it to
+#                     false is a finding, never a silent pass.
 
 format-version = 1
 python-floor = "3.14"
 guarded-surfaces = [
+    ".aiqt/core/hooks/scripts/aiqt_hooks.py",
+    ".preview/clock-inject.py",
+    ".preview/future-stamp-write.py",
+    ".preview/record-remove-check.py",
+    ".preview/stamp-truth-stop.py",
+    ".preview/unbounded-wait.py",
+    ".preview/ungated-record.py",
     "opf/tools/_journal.py",
     "opf/tools/_opf_absorb.py",
     "opf/tools/_opf_adopt.py",
@@ -58,6 +75,96 @@ guarded-surfaces = [
     "opf/tools/opf.py",
     "opf/tools/selftest_commonmark_conformance.py",
     "opf/tools/selftest_commonmark_headings.py",
+    "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py",
+    "tools/_qa_adapter.py",
+    "tools/aei_backlog_md.py",
+    "tools/aiqt_corpus.py",
+    "tools/audit_reference.py",
+    "tools/check_applies.py",
+    "tools/check_artifact_checksums.py",
+    "tools/check_branch_root.py",
+    "tools/check_byte_canon.py",
+    "tools/check_ci_parity.py",
+    "tools/check_clauses.py",
+    "tools/check_crosswalk.py",
+    "tools/check_derived_command_parameters.py",
+    "tools/check_footer.py",
+    "tools/check_gensrc_failclose.py",
+    "tools/check_git_option_table.py",
+    "tools/check_hooks_preview.py",
+    "tools/check_install_page.py",
+    "tools/check_instruction_budget.py",
+    "tools/check_internal_names.py",
+    "tools/check_leaks.py",
+    "tools/check_license_qualification.py",
+    "tools/check_links.py",
+    "tools/check_manifest.py",
+    "tools/check_mappings.py",
+    "tools/check_mistakes_register.py",
+    "tools/check_msg_leaks.py",
+    "tools/check_newtab.py",
+    "tools/check_no_dashes.py",
+    "tools/check_opf_standalone_closure.py",
+    "tools/check_overclaim.py",
+    "tools/check_portability.py",
+    "tools/check_python_floor.py",
+    "tools/check_python_launcher_isolation.py",
+    "tools/check_record_drift.py",
+    "tools/check_record_sections.py",
+    "tools/check_reference_facts.py",
+    "tools/check_release_build.py",
+    "tools/check_release_cut.py",
+    "tools/check_release_delta.py",
+    "tools/check_rule_placement.py",
+    "tools/check_secrets.py",
+    "tools/check_selftest_execution.py",
+    "tools/check_site.py",
+    "tools/check_site_versions.py",
+    "tools/check_sized_instructions.py",
+    "tools/check_standards_currency.py",
+    "tools/check_standards_urls_live.py",
+    "tools/check_version_monotonicity.py",
+    "tools/check_versions.py",
+    "tools/conformance.py",
+    "tools/doctor.py",
+    "tools/gen_adapters.py",
+    "tools/gen_agents.py",
+    "tools/gen_changelog.py",
+    "tools/gen_claude.py",
+    "tools/gen_crosswalk.py",
+    "tools/gen_cursor.py",
+    "tools/gen_disclosure.py",
+    "tools/gen_enforceability.py",
+    "tools/gen_enforcement_register.py",
+    "tools/gen_gensrc.py",
+    "tools/gen_hooks.py",
+    "tools/gen_install.py",
+    "tools/gen_manifest.py",
+    "tools/gen_mappings.py",
+    "tools/gen_notice.py",
+    "tools/gen_reference_facts.py",
+    "tools/gen_renderers.py",
+    "tools/gen_roadmap.py",
+    "tools/gen_rules.py",
+    "tools/gen_secret_patterns.py",
+    "tools/gen_site.py",
+    "tools/gen_skill.py",
+    "tools/gen_worker_pack.py",
+    "tools/import_cwe.py",
+    "tools/migrate.py",
+    "tools/orch_doctor.py",
+    "tools/orch_preflight.py",
+    "tools/orch_register.py",
+    "tools/pin.py",
+    "tools/selftest_aiqt_corpus.py",
+    "tools/selftest_aiqt_hooks.py",
+    "tools/selftest_ci_status.py",
+    "tools/selftest_git_fixture_env.py",
+    "tools/selftest_opf_render.py",
+    "tools/selftest_orch_hooks.py",
+]
+nonblocking-surfaces = [
+    ".preview/stamp-truth-stop.py",
 ]
 completeness-check = false
-documentation-check = false
+documentation-check = true

@@ -3,9 +3,15 @@
 # directory, sha256 of its exact bytes, rows in ascending path order). The digest binds the version and
 # every member row. Maintainers must update the row, version and digest when a member changes.
 # The gate checks byte and digest agreement; it does not enforce the version-bump obligation.
-# The pack has no members yet: its documents land in later slices, and nothing consumes the pack until
-# the adoption stage driver binds a plan's prompt_pack version and digest to it.
+# Member documents are consumed by deployment (an adopter or deployer copies a member beside its digest
+# into the assistant harness, for example flow/SKILL.md into a skills directory), by a deployer that
+# renders a member with a per-project overlay into a per-account command (the member doubles as the
+# render template; its overlay slots and the drift check are specified inside the member) and, once
+# the adoption stage driver lands, by a plan's prompt_pack {version, digest} binding.
 format = "opf.prompt-pack/v1"
-version = "0.1.0"
-digest = "sha256:94f6cf45b1c5febb9dc3c7904d5e5512f22a812bea92ea6c1dd777e5503027ea"
-members = []
+version = "0.3.0"
+digest = "sha256:05d733b6d2e8180e7152cf0b3fb93e424284fe2338753589c306751a008b6847"
+
+[[members]]
+path = "flow/SKILL.md"
+sha256 = "87ef3ca951e0f60e1f9ea8a397e594b86e0fdcf5f61de2749453d016bb274492"

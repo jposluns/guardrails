@@ -7,7 +7,8 @@
   migrate.py status   --root DIR                          report journal / transaction state
   migrate.py --self-test                                  the MANDATORY crash-injection gate (9.3)
 
-Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition.
+Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition. An
+interpreter older than Python 3.14 is refused at exit 2 before anything runs.
 
 The engine consumes two interfaces owed by the adopter-experience spec and refuses without their evidence
 (fail-closed, never a silent proceed): QUIESCENCE of the effective tree (a `quiescence.ok` marker the
@@ -24,23 +25,27 @@ Staged-unit contract (the off-path tree a verified, green step-2/3 build produce
                                 with op one of write|create|remove|mkdir|rmdir
   <staged>/payload/<path>       the exact new bytes for every write and create op
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: migrate.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import json
 import os
 import stat
 import subprocess
-import sys
 import time
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: migrate.py requires Python 3.11+ (tomllib).")
 
 JOURNAL_REL = ".aiqt/migration/journal"
 CROSSWALK_REL = ".aiqt/migration/crosswalk.toml"
@@ -790,23 +795,34 @@ def self_test():
 
     failures = []
     checked = 0
-    # F-TOML-BARE-VALUEERROR-CLASS: a 1200-deep nested array makes tomllib raise RecursionError (a
-    # RuntimeError, not a ValueError); load_crosswalk must still refuse with RefuseError. The recursion
-    # limit is pinned to the CPython default 1000 (test-hermeticity) and restored in finally.
+    # F-TOML-BARE-VALUEERROR-CLASS: a parser overflow makes tomllib raise RecursionError (a RuntimeError, not
+    # a ValueError); load_crosswalk must still refuse with RefuseError carrying the overflow.
+    # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise valid
+    # input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+    # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an unrelated
+    # refusal) under another.
     deep_root = tmp / "deep-crosswalk"
     (deep_root / CROSSWALK_REL).parent.mkdir(parents=True)
-    (deep_root / CROSSWALK_REL).write_text("deep = " + "[" * 1200 + "]" * 1200 + "\n", encoding="utf-8")
-    prev_reclimit = sys.getrecursionlimit()
-    sys.setrecursionlimit(1000)
+    (deep_root / CROSSWALK_REL).write_text("deep = 1  # injected-overflow\n", encoding="utf-8")
+    real_loads, real_load = tomllib.loads, tomllib.load
+
+    def overflowing_loads(text, **kwargs):
+        if "injected-overflow" in text:
+            raise RecursionError("injected parser overflow")
+        return real_loads(text, **kwargs)
+
+    tomllib.loads = overflowing_loads
+    tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
     try:
         load_crosswalk(deep_root)
-        failures.append("a deeply nested TOML crosswalk must be refused")
-    except RefuseError:
-        pass
+        failures.append("a TOML crosswalk parser overflow must be refused")
+    except RefuseError as exc:
+        if "injected parser overflow" not in str(exc):
+            failures.append("a crosswalk parser overflow was refused without its finding ({})".format(exc))
     except RecursionError:
-        failures.append("a deeply nested TOML crosswalk let a bare RecursionError escape load_crosswalk")
+        failures.append("a TOML crosswalk parser overflow let a bare RecursionError escape load_crosswalk")
     finally:
-        sys.setrecursionlimit(prev_reclimit)
+        tomllib.loads, tomllib.load = real_loads, real_load
     checked += 1
     try:
         # Per-case pre/post baselines, derived from a real clean cutover (never hand-written).

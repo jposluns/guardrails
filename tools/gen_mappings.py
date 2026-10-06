@@ -16,11 +16,19 @@ en/em dash fails closed here rather than as a red site-integrity gate later.
   gen_mappings.py           regenerate site/mappings.html and the two exports under site/downloads/
   gen_mappings.py --check   exit 1 if any of the three is out of date; exit 2 on malformed input
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: gen_mappings.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import csv
 import html
 import io
 import json
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

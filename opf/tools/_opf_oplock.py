@@ -4720,31 +4720,41 @@ def _t_c6_diffinode(d, env):
 
 
 def _t_toml_class_read_control(d, env):
-    """T-toml-class (F-TOML-BARE-VALUEERROR-CLASS): a control record carrying a 1200-deep nested
-    array makes tomllib raise RecursionError (a RuntimeError, not a ValueError), and one carrying
-    an over-long integer literal a bare ValueError; _read_control_record must refuse both with
-    OpLockError, never let either escape. The recursion and digit limits are pinned to the
-    CPython defaults (test-hermeticity) and restored in finally."""
+    """T-toml-class (F-TOML-BARE-VALUEERROR-CLASS): a control record whose parse overflows (tomllib
+    raises RecursionError, a RuntimeError, not a ValueError), and one carrying an over-long integer
+    literal (a bare ValueError); _read_control_record must refuse both with OpLockError, never let
+    either escape. The overflow is INJECTED (tomllib.loads raises RecursionError on a marked, otherwise
+    valid record) rather than provoked by a deeply nested body: the depth at which tomllib overflows
+    is an interpreter limit, so a fixed body overflows under one recursion limit and parses under
+    another. The digit limit is pinned to the CPython default (test-hermeticity) and restored."""
     dirp = os.path.join(d, "ctl-toml-class")
     os.mkdir(dirp)
     dfd = os.open(dirp, os.O_RDONLY | os.O_DIRECTORY)
-    prev_rec, prev_dig = sys.getrecursionlimit(), sys.get_int_max_str_digits()
-    sys.setrecursionlimit(1000)
+    prev_dig = sys.get_int_max_str_digits()
     sys.set_int_max_str_digits(4300)
+    real_loads, real_load = tomllib.loads, tomllib.load
+
+    def overflowing_loads(text, **kwargs):
+        if "injected-overflow" in text:
+            raise RecursionError("injected parser overflow")
+        return real_loads(text, **kwargs)
+
+    tomllib.loads = overflowing_loads
+    tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
     try:
-        for name, body in (("deep.toml", "deep = " + "[" * 1200 + "]" * 1200 + "\n"),
-                           ("bigint.toml", "big = " + "9" * 4400 + "\n")):
+        for name, body, needle in (("deep.toml", "deep = 1  # injected-overflow\n", "injected parser overflow"),
+                                   ("bigint.toml", "big = " + "9" * 4400 + "\n", "")):
             with open(os.path.join(dirp, name), "w", encoding="utf-8") as fh:
                 fh.write(body)
             try:
                 _read_control_record(dfd, name, name)
             except OpLockError as exc:
-                assert "not decodable UTF-8 TOML" in str(exc), str(exc)
+                assert "not decodable UTF-8 TOML" in str(exc) and needle in str(exc), str(exc)
                 continue
             raise AssertionError("{} was not refused".format(name))
     finally:
+        tomllib.loads, tomllib.load = real_loads, real_load
         sys.set_int_max_str_digits(prev_dig)
-        sys.setrecursionlimit(prev_rec)
         os.close(dfd)
 
 

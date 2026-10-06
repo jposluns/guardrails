@@ -25,17 +25,28 @@ read error, or PARTIAL migration state (partial state is malformed, never dorman
   check_crosswalk.py [--root DIR]   run the legs against an install (NA when not adopted)
   check_crosswalk.py --self-test    synthetic-tree honesty invariants
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: check_crosswalk.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import os
 import re
 import stat
-import sys
 from pathlib import Path
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: check_crosswalk.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: check_crosswalk.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
@@ -858,23 +869,33 @@ def self_test():
         return 2
     failures = []
     n = 0
-    # F-TOML-BARE-VALUEERROR-CLASS: a 1200-deep nested array makes tomllib raise RecursionError (a
-    # RuntimeError, not a ValueError); _load_toml must still refuse with GateError (exit 2). The recursion
-    # limit is pinned to the CPython default 1000 (test-hermeticity) and restored in finally.
+    # F-TOML-BARE-VALUEERROR-CLASS: a parser overflow makes tomllib raise RecursionError (a RuntimeError,
+    # not a ValueError); _load_toml must still refuse with GateError (exit 2) carrying the overflow.
+    # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise valid
+    # input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+    # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an unrelated
+    # refusal) under another.
     deep = tmp / "deep-nesting.toml"
-    deep.write_text("deep = " + "[" * 1200 + "]" * 1200 + "\n", encoding="utf-8")
-    prev_reclimit = sys.getrecursionlimit()
-    sys.setrecursionlimit(1000)
+    deep.write_text("deep = 1  # injected-overflow\n", encoding="utf-8")
+    real_loads, real_load = tomllib.loads, tomllib.load
+
+    def overflowing_loads(text, **kwargs):
+        if "injected-overflow" in text:
+            raise RecursionError("injected parser overflow")
+        return real_loads(text, **kwargs)
+
+    tomllib.loads = overflowing_loads
+    tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
     try:
         _load_toml(deep)
-        failures.append("a deeply nested TOML array must be refused (exit 2)")
-    except GateError:
-        pass
+        failures.append("a TOML parser overflow must be refused (exit 2)")
+    except GateError as exc:
+        if "injected parser overflow" not in str(exc):
+            failures.append("a TOML parser overflow was refused without its finding ({})".format(exc))
     except RecursionError:
-        failures.append("a deeply nested TOML array let a bare RecursionError escape _load_toml (exit 2 "
-                        "expected)")
+        failures.append("a TOML parser overflow let a bare RecursionError escape _load_toml (exit 2 expected)")
     finally:
-        sys.setrecursionlimit(prev_reclimit)
+        tomllib.loads, tomllib.load = real_loads, real_load
     try:
         # Clean one-to-one, fold, split all PASS.
         for label, kw in (("one-to-one", {}), ("fold", {"fold": True}), ("split", {"split": True})):

@@ -33,12 +33,20 @@ lifted from the archived preimage. There is therefore no section 8.6 residual to
 Exit convention (matches the repo's gates): 0 clean; 1 drift (--check) or a refused adopter precondition;
 2 malformed input, a read error, or an archive immutability violation.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: gen_crosswalk.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import itertools
 import os
 import re
 import stat
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -46,8 +54,11 @@ from _gen_common import repo_root, reconcile  # noqa: E402
 
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: gen_crosswalk.py requires Python 3.11+ (tomllib).")
+except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships tomllib
+    sys.stderr.write(
+        "error: gen_crosswalk.py cannot import tomllib, part of the Python standard library; "
+        "this installation is incomplete. Nothing was run (cannot evaluate).\n")
+    raise SystemExit(2)
 
 SCHEMA_REL = ".aiqt/core/migration/crosswalk-schema.toml"
 
@@ -826,27 +837,40 @@ def self_test():
         # makes tomllib raise a BARE ValueError (not TOMLDecodeError); the successor-inventory loader must
         # still refuse with AdoptError (exit 2), never let the ValueError escape. The digit limit is pinned to
         # the default 4300 (test-hermeticity) and restored in finally.
-        # A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must be refused the same
-        # way; the recursion limit is pinned to the CPython default 1000 for the same reason.
+        # A parser overflow (tomllib raises RecursionError, not a ValueError) must be refused the same way,
+        # with the overflow in the refusal.
+        # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise
+        # valid input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+        # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an
+        # unrelated refusal) under another.
         prev_digits = sys.get_int_max_str_digits()
-        prev_reclimit = sys.getrecursionlimit()
         sys.set_int_max_str_digits(4300)
-        sys.setrecursionlimit(1000)
+        real_loads, real_load = tomllib.loads, tomllib.load
+
+        def overflowing_loads(text, **kwargs):
+            if "injected-overflow" in text:
+                raise RecursionError("injected parser overflow")
+            return real_loads(text, **kwargs)
+
+        tomllib.loads = overflowing_loads
+        tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
         try:
-            for big_label, big_value in (("an over-long integer literal", "9" * 4400),
-                                         ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+            for big_label, big_value, big_needle in (("an over-long integer literal", "9" * 4400, ""),
+                                                     ("a parser overflow", "1  # injected-overflow",
+                                                      "injected parser overflow")):
                 big_inv = tmp / "bigint-inventory.toml"
                 big_inv.write_text("over-long = " + big_value + "\n", encoding="utf-8")
                 try:
                     _load_successor_inventory(big_inv)
                     failures.append("{} in the successor inventory must be refused (exit 2)".format(big_label))
-                except AdoptError:
-                    pass
+                except AdoptError as exc:
+                    if big_needle not in str(exc):
+                        failures.append("{} was refused without its finding ({})".format(big_label, exc))
                 except (ValueError, RecursionError) as exc:
                     failures.append("{} let a bare {} escape the successor-inventory loader (exit 2 "
                                     "expected)".format(big_label, type(exc).__name__))
         finally:
-            sys.setrecursionlimit(prev_reclimit)
+            tomllib.loads, tomllib.load = real_loads, real_load
             sys.set_int_max_str_digits(prev_digits)
 
         # (fix #7) unique-per-call temp + no-overwrite publish: a fresh archive leaves NO leftover temp in

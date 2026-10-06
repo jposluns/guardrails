@@ -164,12 +164,20 @@ Self-test: python3 -I -S -B record-remove-check.py --self-test
     /usr/bin/bash or /bin/bash) on throwaway fixture trees only, and is skipped when no such bash exists.
 """
 
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: record-remove-check.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import json
 import os
 import re
 import select
 import stat
-import sys
 import time
 
 HOOK_ID = "record-remove-check"

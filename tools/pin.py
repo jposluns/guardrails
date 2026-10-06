@@ -29,25 +29,30 @@ reverse swap (10.3/10.6), with NO 9.3 journal and NO lock. The corrupt-state car
 DEFERRED at this release (they refuse fail-closed); a migration cutover journal is DETECTED (it blocks a pin)
 but is reconciled by the deferred migration tool, never here.
 
-Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition.
+Exit convention: 0 clean/NA, 1 finding, 2 malformed input, a read error, or a refused precondition. An
+interpreter older than Python 3.14 is refused at exit 2 before anything runs.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: pin.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import hashlib
 import json
 import os
 import stat
-import sys
 import time
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402  the 9.3 engine: contained fd-bound helpers (open/read/lstat/apply/is_terminal)
 import _optlevel  # noqa: E402  level-0 source parse for the docstring check, shared with opf/tools
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: pin.py requires Python 3.11+ (tomllib).")
 
 EXIT_OK = 0
 EXIT_FINDING = 1
@@ -1370,23 +1375,34 @@ def self_test():
         # limit makes tomllib raise a BARE ValueError (not TOMLDecodeError); the contained TOML reader must
         # still refuse with PinError (exit 2), never let the ValueError escape (do_un_adopt catches only
         # PinError/OSError). The digit limit is pinned to the default 4300 (test-hermeticity). ----
-        # A 1200-deep nested array (RecursionError, not a ValueError) is refused the same way, both by the
-        # contained reader and by do_pin's staged release.toml reader (_read_release); the recursion limit
-        # is pinned to the CPython default 1000 for the same reason. ----
+        # A parser overflow (RecursionError, not a ValueError) is refused the same way, both by the contained
+        # reader and by do_pin's staged release.toml reader (_read_release), with the overflow in the refusal.
+        # The overflow is INJECTED (tomllib.loads and tomllib.load raise RecursionError on a marked, otherwise
+        # valid input) rather than provoked by a deeply nested body: the depth at which tomllib overflows is an
+        # interpreter limit, so a fixed body overflows under one recursion limit and parses (or trips an
+        # unrelated refusal) under another.
         for bi_label, bi_value in (("an over-long integer literal", "9" * 4400),
-                                   ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+                                   ("a parser overflow", "1  # injected-overflow")):
             bi = Path(tempfile.mkdtemp(prefix="bigint-", dir=str(tmp))) / "root"
             (bi / PIN_REL).parent.mkdir(parents=True)
             (bi / PIN_REL).write_text("over-long = " + bi_value + "\n", encoding="utf-8")
             (bi / "release.toml").write_text("over-long = " + bi_value + "\n", encoding="utf-8")
             bi_fd = _open_root_fd(bi)
+            bi_overflow = "injected-overflow" in bi_value
             prev_digits = sys.get_int_max_str_digits()
-            prev_reclimit = sys.getrecursionlimit()
             sys.set_int_max_str_digits(4300)
-            sys.setrecursionlimit(1000)
+            real_loads, real_load = tomllib.loads, tomllib.load
+
+            def overflowing_loads(text, **kwargs):
+                if "injected-overflow" in text:
+                    raise RecursionError("injected parser overflow")
+                return real_loads(text, **kwargs)
+
+            tomllib.loads = overflowing_loads
+            tomllib.load = lambda fp, **kwargs: overflowing_loads(fp.read().decode("utf-8"), **kwargs)
             try:
                 bi_readers = [("pin record", lambda: read_pin(bi_fd))]
-                if bi_value.startswith("["):
+                if bi_overflow:
                     # _read_release leaves the ValueError family to do_pin's handler by design, so only the
                     # RecursionError member is asserted at that locus.
                     bi_readers.append(("staged release.toml", lambda: _read_release(bi)))
@@ -1394,14 +1410,15 @@ def self_test():
                     try:
                         bi_call()
                         bi_outcome = "parsed"
-                    except PinError:
-                        bi_outcome = "refused"
+                    except PinError as exc:
+                        bi_outcome = ("refused" if not bi_overflow or "injected parser overflow" in str(exc)
+                                      else "refused without the finding")
                     except (ValueError, RecursionError):
                         bi_outcome = "escaped"
                     check("TBIG: {} in the {} is a PinError, never an escaped ValueError or "
                           "RecursionError".format(bi_label, bi_reader), bi_outcome == "refused")
             finally:
-                sys.setrecursionlimit(prev_reclimit)
+                tomllib.loads, tomllib.load = real_loads, real_load
                 sys.set_int_max_str_digits(prev_digits)
                 os.close(bi_fd)
 

@@ -13,10 +13,18 @@ helpers run against a throwaway repository. Nothing outside the tempdirs is
 read or written. Exit convention matches the repo's selftests: 0 pass, 1 a
 real assertion failure, 2 an error (a fixture or harness problem).
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: selftest_aiqt_corpus.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import datetime
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
