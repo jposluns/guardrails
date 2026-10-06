@@ -11,7 +11,9 @@ canonical guard: a mode in FLOOR_FAIL_OPEN_MODES (a Stop, SessionStart, Teammate
 UserPromptSubmit or PostToolUse handler, kept equal to aiqt_hooks.py's own literal) warns on exit 0,
 and every other argv (each PreToolUse handler) refuses with exit 2, which blocks the call. At or
 above the floor it runs aiqt_hooks.py beside it in this same process as __main__, with the same
-argv, so the hook behaves as when launched directly.
+argv, so the hook behaves as when launched directly. RESIDUAL: an interpreter that predates -I (Python 2,
+or Python 3 before 3.4) rejects that option before it reads this file and exits 2 on every event, so it
+blocks each UserPromptSubmit and Stop as well as each PreToolUse call.
 
 SOURCE tree copy: tools/gen_hooks.py copies this file byte-identical into the plugin surface beside
 the dispatcher; edit the source, never the generated copy.

@@ -105,6 +105,15 @@ Legs, in order:
                  run (no flag, the first patched version) with each FLOOR_FAIL_OPEN_MODES mode, which
                  must exit 0 with the exact warning on stdout and the refusal on stderr, and with
                  DENY_PROBE_MODE, a mode outside the literal, which must refuse with exit 2.
+  launcher       over exactly the launchers the tree declares: a LAUNCHERS entry is declared when
+                 guarded-surfaces lists it, when it is present, or when its registration file
+                 (REGISTRATIONS: the plugin hooks.json, and the `exec python3` lines of the preview
+                 README) is present and names a registration; an undeclared entry adds nothing. A
+                 declared launcher must be present and listed, compile under the OLD_GRAMMAR (Python
+                 3.4, the first to accept -I) with none of the newer tokens or nodes that grammar does
+                 not itself refuse, and carry the FLOOR_FAIL_OPEN_MODES literal of the hook it runs,
+                 which must be present; its registration file must be present and name at least one
+                 registration, each naming the launcher.
   completeness   OFF until the source sets completeness-check = true (the unit that guards the last
                  shipped entrypoint switches it on); until then an unlisted entrypoint is not a
                  finding. The core-hook, preview-hook and adopter-tool units are listed, but
@@ -135,7 +144,18 @@ DISCLOSED RESIDUAL. The dynamic leg patches sys.version_info inside a child of T
 proxy for a real older interpreter, faithful only for a guard that reads sys.version_info, which is why
 the guard leg pins the one canonical form. Each file is compiled whole before its guard runs, so an
 interpreter too old to parse a later statement stops with a SyntaxError instead of the refusal; the
-dynamic leg sees a compile failure only on the interpreter running it. The completeness scan walks the
+dynamic leg sees a compile failure only on the interpreter running it. For the hooks this is closed
+by the launcher leg: each registration runs a launcher held to the OLD_GRAMMAR, which refuses below
+the floor before the hook file is compiled. Every other guarded entrypoint keeps the residual (a
+SyntaxError exits 1, which a CI step still reads as a failure). The launcher cannot close one case:
+an interpreter that predates -I (Python 2, or Python 3 before 3.4) rejects that option before it
+reads any file and exits 2 on every event, so it blocks every UserPromptSubmit and Stop as well as
+every PreToolUse call (a fail-closed outcome, not a silent pass). The OLD_GRAMMAR check is a static
+proxy (ast.parse with feature_version, plus token and node scans), not a run on a real Python 3.4.
+The launcher leg reads the preview README's registrations only from its `exec python3` lines: a
+registration worded another way, in a tree whose preview launcher is neither present nor listed, is
+not seen. It checks that each registration names the launcher, not that its mode names the right
+hook. The completeness scan walks the
 working tree, not the git index: an untracked stray entrypoint is counted, and a directory named in
 SKIPPED_DIR_NAMES is not walked. The pins leg is a conservative line model, not a YAML parser: it reads
 a workflow or action file only through the enumerated grammar, so a YAML form outside it (an escaped,
@@ -1217,32 +1237,47 @@ def registered_scripts(registry, text):
 
 
 def launcher_findings(root, surfaces):
-    """Each registration names its launcher; each launcher is a guarded surface, compiles under the
-    OLD_GRAMMAR and carries its hook's FLOOR_FAIL_OPEN_MODES literal."""
-    findings, required = [], set()
-    for registry, launcher in REGISTRATIONS:
-        if not os.path.lexists(root / registry):
-            continue
-        required.add(launcher)
-        named = registered_scripts(registry, _read_text(root / registry))
-        if not named:
-            findings.append("{}: names no hook registration to check".format(registry))
-        findings.extend("{}: registers {}, not the launcher {} (a hook compiled whole on an old "
-                        "interpreter fails open)".format(where, name, Path(launcher).name)
-                        for where, name in named if name != Path(launcher).name)
+    """The launcher leg, over exactly the launchers the tree under check declares. A LAUNCHERS entry is
+    declared when guarded-surfaces lists it, when it is present in the tree, or when its registration
+    file (REGISTRATIONS) is present and names at least one hook registration; an entry with none of the
+    three adds nothing, so a tree that registers no hook is not held to these launchers. A declared
+    launcher must be present and listed in guarded-surfaces, compile under the OLD_GRAMMAR, and carry
+    the FLOOR_FAIL_OPEN_MODES literal of the hook it runs (LAUNCHERS), which must be present; its
+    registration file, where REGISTRATIONS names one, must be present and name at least one
+    registration, and every registration in it must name the launcher."""
+    findings = []
     for launcher, target in sorted(LAUNCHERS.items()):
+        named, registries = [], [registry for registry, name in REGISTRATIONS if name == launcher]
+        present = {registry: os.path.lexists(root / registry) for registry in registries}
+        for registry in registries:
+            if present[registry]:
+                named.append((registry, registered_scripts(registry, _read_text(root / registry))))
+        if not (launcher in surfaces or os.path.lexists(root / launcher)
+                or any(scripts for _, scripts in named)):
+            continue
+        findings.extend("{}: the registration file of the declared launcher {} is missing".format(
+            registry, launcher) for registry in registries if not present[registry])
+        for registry, scripts in named:
+            if not scripts:
+                findings.append("{}: names no hook registration to check".format(registry))
+            findings.extend("{}: registers {}, not the launcher {} (a hook compiled whole on an old "
+                            "interpreter fails open)".format(where, name, Path(launcher).name)
+                            for where, name in scripts if name != Path(launcher).name)
         if not os.path.lexists(root / launcher):
-            if launcher in required:
-                findings.append("{}: a registered launcher is missing".format(launcher))
+            findings.append("{}: a registered launcher is missing".format(launcher))
             continue
         if launcher not in surfaces:
             findings.append("{}: a launcher missing from guarded-surfaces in {}".format(launcher, SOURCE_REL))
         findings.extend(old_syntax_findings(launcher, _read_text(root / launcher)))
-        if target is not None and os.path.lexists(root / target):
-            want, got = hook_modes(_parse(root, target)), hook_modes(_parse(root, launcher))
-            if want != got:
-                findings.append("{}: {} {!r} differs from {} in {}".format(launcher, MODES_NAME, got, want,
-                                                                            target))
+        if target is None:
+            continue
+        if not os.path.lexists(root / target):
+            findings.append("{}: the hook {} it runs is missing".format(launcher, target))
+            continue
+        want, got = hook_modes(_parse(root, target)), hook_modes(_parse(root, launcher))
+        if want != got:
+            findings.append("{}: {} {!r} differs from {} in {}".format(launcher, MODES_NAME, got, want,
+                                                                        target))
     return findings
 
 
@@ -1349,7 +1384,7 @@ def evaluate(root):
         return 2, ["CANNOT EVALUATE: {}".format(exc)]
     if findings:
         return 1, ["FAIL: " + finding for finding in findings]
-    return 0, ["PASS: python floor {}.{} ({}): source, pins, guard and dynamic legs over {} "
+    return 0, ["PASS: python floor {}.{} ({}): source, pins, guard, dynamic and launcher legs over {} "
                "guarded surface(s); completeness check {}, documentation and claims checks {}".format(
                    floor[0], floor[1], SOURCE_REL, len(source["surfaces"]),
                    "ON" if source["completeness"] else "OFF (completeness-check = false)",
@@ -1749,7 +1784,7 @@ def _self_test_cases(base):
            "as '3.10'".format(WORKFLOWS_REL)])
 
     check("guard/canonical-passes", evaluate(_fixture(base, source=listed, files=demo)), (0, [
-        "PASS: python floor 3.14 ({}): source, pins, guard and dynamic legs over 1 guarded "
+        "PASS: python floor 3.14 ({}): source, pins, guard, dynamic and launcher legs over 1 guarded "
         "surface(s); completeness check OFF (completeness-check = false), documentation and claims "
         "checks ON".format(SOURCE_REL)]))
     guard_marker = "canonical floor guard"
@@ -2008,9 +2043,66 @@ def _self_test_cases(base):
         refusal_observed(ROOT / rel, old, (), [mode])[0] for rel, mode in sorted(LAUNCHERS.items())
         for mode in (("absolute_paths",) if LAUNCHERS[rel] else ("future_stamp_write", "ungated_record"))],
         [2, 2, 2, 2])
-    check("launcher/newer-syntax-findings", [len(old_syntax_findings("x.py", text)) for text in (
+    # Each newer construct is a finding (an f-string passes the OLD_GRAMMAR parse itself and is caught
+    # only by the token and node scans); the plain literal is not.
+    check("launcher/newer-syntax-findings", [bool(old_syntax_findings("x.py", text)) for text in (
         "x = f'{1}'\n", "x = 1_000\n", "if (x := 1):\n    pass\n", "x: int = 1\n", "x = 1000\n")],
-        [1, 2, 2, 1, 0])
+        [True, True, True, True, False])
+    # The leg's scope is what the tree under check declares. A tree with no registration file and no
+    # launcher adds nothing (fixture/clean-tree-passes, whose .preview/README.md names no registration);
+    # a declared launcher whose registration file, launcher or hook is missing is a finding.
+    core, (plugin_json, plugin_launcher), (readme, preview) = (
+        sorted(LAUNCHERS)[0], REGISTRATIONS[0], REGISTRATIONS[1])
+    plugin_hook = LAUNCHERS[plugin_launcher]
+    modes = ("orch_stop_guard",)
+    launched = json.dumps(dict(hooks=dict(PreToolUse=[dict(hooks=[dict(
+        args=["-I", "/p/hooks/scripts/" + Path(plugin_launcher).name, "absolute_paths"])])])))
+    conformant = {plugin_json: launched,
+                  plugin_launcher: _entry(guard_text(Path(plugin_launcher).name, floor, modes), after=""),
+                  plugin_hook: _entry(guard_text(Path(plugin_hook).name, floor, modes), after="")}
+    launcher_listed = _source_text(surfaces=[plugin_launcher])
+
+    def leg(files, source=launcher_listed):
+        root = _fixture(base, source=source, files=files)
+        return sorted(launcher_findings(root, load_source(root)["surfaces"]))
+
+    check("launcher/conformant-passes", evaluate(_fixture(base, source=launcher_listed,
+                                                          files=conformant))[0], 0)
+    check("launcher/undeclared-readme-adds-nothing", leg({readme: "Requires Python 3.14 or newer.\n" * 2},
+                                                         source=_source_text()), [])
+    check("launcher/registration-file-missing-finding", leg(
+        {rel: text for rel, text in conformant.items() if rel != plugin_json}),
+        ["{}: the registration file of the declared launcher {} is missing".format(plugin_json,
+                                                                                 plugin_launcher)])
+    check("launcher/registered-launcher-missing-finding", leg(
+        {plugin_json: launched}, source=_source_text()),
+        ["{}: a registered launcher is missing".format(plugin_launcher)])
+    check("launcher/hook-missing-finding", leg(
+        {rel: text for rel, text in conformant.items() if rel != plugin_hook}),
+        ["{}: the hook {} it runs is missing".format(plugin_launcher, plugin_hook)])
+    check("launcher/unlisted-launcher-finding", leg(conformant, source=_source_text()),
+          ["{}: a launcher missing from guarded-surfaces in {}".format(plugin_launcher, SOURCE_REL)])
+    check("launcher/modes-differ-finding", leg(dict(conformant, **{plugin_hook: _entry(
+        guard_text(Path(plugin_hook).name, floor, ("diff_wall_stop",)), after="")})),
+        ["{}: {} {!r} differs from {} in {}".format(plugin_launcher, MODES_NAME, modes,
+                                                    ("diff_wall_stop",), plugin_hook)])
+    check("launcher/empty-registration-finding", leg(dict(conformant, **{plugin_json: json.dumps(
+        dict(hooks={}))})), ["{}: names no hook registration to check".format(plugin_json)])
+    check("launcher/readme-declared-by-launcher", [line.split(": ", 1)[1] for line in leg(
+        {preview: _entry(guard_text(Path(preview).name, floor, modes), after="")},
+        source=_source_text(surfaces=[preview]))], ["names no hook registration to check"])
+    check("launcher/readme-direct-registration-finding", leg(
+        {readme: "Requires Python 3.14 or newer.\n" * 2 + "exec python3 -I \"/p/stamp-truth-stop.py\"\n"},
+        source=_source_text()), [
+            "{}:3: registers stamp-truth-stop.py, not the launcher {} (a hook compiled whole on an old "
+            "interpreter fails open)".format(readme, Path(preview).name),
+            "{}: a registered launcher is missing".format(preview)])
+    # The core source launcher has no registration file of its own (the plugin copy is the one
+    # registered), so declared and conformant it needs none.
+    check("launcher/unregistered-launcher-passes", leg(
+        {core: _entry(guard_text(Path(core).name, floor, modes), after=""),
+         LAUNCHERS[core]: _entry(guard_text(Path(LAUNCHERS[core]).name, floor, modes), after="")},
+        source=_source_text(surfaces=[core])), [])
     _red_on_revert(base, good)
     _rule_reverts(base)
 

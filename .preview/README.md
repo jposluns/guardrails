@@ -2,10 +2,11 @@
 
 This directory is a preview channel for AIQT Guardrails hooks that are not yet part of the pack's plugin.
 Each hook is one self-contained Python file that you can download, check, test, and switch on in Claude
-Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
+Code by hand; every hook runs through one shared launcher file, `preview-launch.py`, downloaded beside it. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
 
-Six hooks are published here, each listed with its checksum and link in the integrity table below.
+Six hooks and their launcher are published here, each listed with its checksum and link in the
+integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
 
 One document linked from this page is not a hook: [the OPF implementation prompt](../opf/spec/OPF-IMPLEMENTATION-PROMPT.md)
@@ -100,7 +101,8 @@ SHA256SUMS, and the files agree.
 
 These steps are for an AI coding assistant to carry out, one hook at a time. Replace `<file>` and
 `<checksum>` with the values from that hook's row in the integrity table. Stop at the first step that
-fails and report it; do not work around a failed check.
+fails and report it; do not work around a failed check. Before the first hook, carry out steps 1 to 3
+for `preview-launch.py` too, into the same directory: every hook entry runs it.
 
 1. Create the hooks directory and download the hook from the main branch:
 
@@ -149,12 +151,13 @@ fails and report it; do not work around a failed check.
      loads it; `-S` skips site packages, which these hooks do not use; `-B` writes no bytecode cache.
    - The `[ -d ... ]` tests are a launch guard: if any standard stream is a directory, Python would fail
      before the hook's own code could fail open, so the guard skips the hook instead.
-   - For `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`, use this guard in place
-     of their docstrings' `REGISTRATION` line, which tests only stdin. This guard has a stricter launch
+   - For `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`, use this launch line in
+     place of their docstrings' `REGISTRATION` line, which tests only stdin and runs the hook file
+     directly. This guard has a stricter launch
      condition: it also skips directory stdout or stderr. When none of the streams is a directory, it
      runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks do not define
      a `REGISTRATION` constant; use this same guard for them.
-   - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
+   - Use the absolute path to the downloaded `preview-launch.py`. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
      on the `PATH` that Claude Code runs hook commands with. The hooks require Python 3.14 or newer;
      check that `python3` with `python3 --version` before step 3. Every entry runs `preview-launch.py`,
@@ -162,13 +165,18 @@ fails and report it; do not work around a failed check.
      written as an underscore (`stamp_truth_stop` runs `stamp-truth-stop.py`). Several hooks use syntax
      an older interpreter cannot compile, and such a hook run directly would stop with a syntax
      error and exit 1, which lets a `PreToolUse` call go ahead unchecked; the launcher compiles on
-     every interpreter that accepts `-I`. On an older interpreter it reads no input and writes one
+     every interpreter that accepts `-I`. On an interpreter older than 3.14 that accepts `-I`, it
+     reads no input and writes one
      `error: preview-launch.py requires Python 3.14 or newer` line to standard error. Claude Code
      reads the exit by event: for the four `PreToolUse` hooks the exit is 2 and every matching tool
      call is denied; for `clock_inject` (`PostToolUse`, `PostToolUseFailure`, where the tool has
      already run) and `stamp_truth_stop` (`Stop`, where a block would hold every stop with no block
      cap) the launcher deliberately does not block: it exits 0 with a `systemMessage` warning that
-     the check could not run, so nothing is blocked and every stop goes ahead unchecked. If you see that line, upgrade Python or remove the hook's entry.
+     the check could not run, so nothing is blocked and every stop goes ahead unchecked. If you see
+     that line, upgrade Python or remove the hook's entry. One case the launcher cannot cover: an
+     interpreter so old that it does not accept `-I` rejects that option before it reads any file and
+     exits 2 for every hook, so it also blocks every stop. The `python3 --version` check above rules it
+     out.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
