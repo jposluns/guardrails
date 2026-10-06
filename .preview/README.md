@@ -75,7 +75,7 @@ files are served from this repository's main branch; for a raw download, use
 | `clock-inject.py` | `ef761a106e8154f071fc37c71943303a5cf193ae26ca855eab5b41ddb7acd930` | [clock-inject.py](clock-inject.py) |
 | `future-stamp-write.py` | `0b8590b8e21d3967446d55fa71fd7a334248e447202441b1426d272cbede969c` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `c17a75839784e07387408b2018df2ad9dcdb14b913dff146d42a7dc15768a79d` | [record-remove-check.py](record-remove-check.py) |
-| `stamp-truth-stop.py` | `2082902a85d93a098df43a8adfe6b8a3dd0e4917e66d75bb8cc2e0e481f9dd04` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `6d050fb0945d6f668e1e2879aa3b3aea0570f4b0e54ccca2a27ef52474920996` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `482e0a12281f18ed57c9e8bc600140179f28bb01dc165c4ab97a2fda3d05bafc` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `04feef36fb75333390fbab1982005721c404c24f00b0f2720a38dd746595fed8` | [ungated-record.py](ungated-record.py) |
 
@@ -165,13 +165,14 @@ fails and report it; do not work around a failed check.
      `PostToolUseFailure`) the exit is 2 and the tool has already run, so the line only reaches the
      assistant and nothing is blocked; for the four `PreToolUse` hooks the exit is 2 and every matching
      tool call is denied; for `stamp-truth-stop.py` (`Stop`) the exit is 1, a non-blocking error, so
-     every stop goes ahead unchecked (exit 2 would block every stop with no block cap, since the hook
-     stops before its loop guard runs). An interpreter that cannot start the hook fails before its guard
-     runs, with Python's own error instead of that line: an interpreter that predates the `-I` option
-     rejects it and exits 2, and one that predates f-strings cannot compile the three clock hooks, which
-     use them, and exits 1. Exit 1 is a non-blocking error on every event, so a `PreToolUse` hook then
-     allows every tool call unchecked; exit 2 on `Stop` blocks every stop with no block cap. If you see
-     any of these errors, upgrade Python or remove the hook's entry.
+     every stop goes ahead unchecked (exit 2 would block the stop, and the hook's own block cap would
+     never run, since the hook stops before its loop guard runs). An interpreter that cannot start the
+     hook fails before its guard runs, with Python's own error instead of that line: an interpreter that
+     predates the `-I` option rejects it and exits 2, and one that accepts `-I` but predates f-strings
+     cannot compile the three clock hooks, which use them, and exits 1. Exit 1 is a non-blocking error
+     on every event, so a `PreToolUse` hook then allows every tool call unchecked; exit 2 on `Stop`
+     blocks the stop, and the hook's own block cap never runs. If you see any of these errors, upgrade
+     Python or remove the hook's entry.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
