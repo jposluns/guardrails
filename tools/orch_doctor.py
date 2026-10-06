@@ -44,7 +44,9 @@ _STRICT_SCOPE_FINDINGS = dict((
 
 def _guard_scope_lines(root):
     """What the truncation guard decides for a Bash call whose cwd is the repository root: a list of
-    report lines, and whether registry-required mode would deny that call at the scope check."""
+    report lines, and whether the guard denies that call at the scope check in the CURRENT mode (a cwd
+    the walk cannot carry out denies in every mode; an absent or unconfirmable registry denies only when
+    registry-required mode is on)."""
     scope, found = aiqt_hooks._orch_truncation_scope(root)
     env = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
     if scope == "fail":
@@ -56,6 +58,12 @@ def _guard_scope_lines(root):
     if scope == "none":
         return (["truncation guard: inert for a Bash call from the repository root (no registry on its "
                  "ancestor chain or at its git toplevel; set %s to make it deny instead)" % env], False)
+    if scope in _STRICT_SCOPE_FINDINGS:
+        # Default mode reads a discovery fault as present (the deny-safe direction): the guard is active
+        # without a confirmed registry, which is reported as the fault it is, not as a registry found.
+        return (["truncation guard: ACTIVE for a Bash call from the repository root because its registry "
+                 "discovery hit a fault it reads as present, not because a registry was confirmed: %s "
+                 "(with %s set it denies instead)" % (_STRICT_SCOPE_FINDINGS[scope], env)], False)
     return (["truncation guard: ACTIVE for a Bash call from the repository root (a registry entry was "
              "found on its ancestor chain, which can lie above this repository, or at its git "
              "toplevel)"], False)
@@ -85,15 +93,17 @@ def main():
         # registry-required mode: the loader follows it, the guard's no-follow probe does not confirm it).
         findings.extend(guard_lines)
     if "--resume-audit" in sys.argv[1:]:
-        probe = aiqt_hooks._orch_resume_probes(reg, root)
+        # The findings gathered above (an unreadable registry, the truncation guard's deny) hold the
+        # barrier as the resume probes do: the audit is clean only when neither found anything.
+        audit = findings + aiqt_hooks._orch_resume_probes(reg, root)
         sd = aiqt_hooks._orch_state_dir_for_root(root)
         os.makedirs(sd, exist_ok=True)
         with open(os.path.join(sd, "resume-barrier.json"), "w", encoding="utf-8") as fh:
-            json.dump({"active": bool(probe), "findings": probe,
+            json.dump({"active": bool(audit), "findings": audit,
                        "ts": aiqt_hooks._orch_now().isoformat(), "warned": False}, fh)
-        if probe:
-            print("resume audit: {} finding(s); the barrier stays armed:".format(len(probe)))
-            for f in probe:
+        if audit:
+            print("resume audit: {} finding(s); the barrier stays armed:".format(len(audit)))
+            for f in audit:
                 print("  " + f)
             return 1
         print("resume audit clean: the barrier is cleared")

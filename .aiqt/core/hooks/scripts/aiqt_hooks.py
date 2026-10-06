@@ -8370,9 +8370,9 @@ def _orch_git_toplevel_has_registry(cwd):
     to the ancestor walk, because core.worktree (set in a repository config or a gitfile's gitdir target)
     can point the work tree OFF the cwd's physical ancestor chain: from inside such a repository's
     metadata directory the old scoping read the external work tree's registry and denied, and the walk
-    alone never visits it (the round-4 finding). THREE-VALUED like the probe (round 5): returns True (IN
-    SCOPE) when git resolves a toplevel and the same no-follow registry probe the walk uses
-    (_orch_dirfd_has_registry, so the self-test ceiling masks this leg identically) confirms a registry
+    alone never visits it (the round-4 finding). FOUR-VALUED (round 6; the registry probe it reuses is
+    three-valued): returns True (IN SCOPE) when git resolves a toplevel and the same no-follow registry
+    probe the walk uses (_orch_dirfd_has_registry, so the self-test ceiling masks this leg identically) confirms a registry
     there; returns _ORCH_REG_CANNOT_EVALUATE (truthy, so IN SCOPE by default, deny-safe; denied in
     registry-required mode) when that probe neither rules a registry out nor confirms one, and
     _ORCH_REG_TOPLEVEL_UNOPENABLE (truthy and denied in that mode the same way, with its own reason) when
@@ -10420,8 +10420,9 @@ def orch_untracked_wait_loop(data):
     resolves no toplevel or that toplevel has no registry, even where the truncation guard's ancestor walk
     finds one above or beside it. It never reads AIQT_ORCH_REQUIRE_REGISTRY, so registry-required mode does
     not change it: it stays inert wherever _orch_registry reports no registry at the git toplevel, in either
-    mode. The truncation guard in that mode denies only where its own scope (the ancestor walk unioned with
-    the git toplevel, _orch_truncation_scope) finds no registry or cannot confirm one; where that walk finds
+    mode. The truncation guard in that mode denies every call only where its own scope (the ancestor walk
+    unioned with the git toplevel, _orch_truncation_scope) finds no registry or cannot confirm one, or where
+    its pre-scope checks or its walk fail (those deny in every mode); where that walk finds
     a registry ABOVE a nested repository whose toplevel has none, the guard stays active (a plain call
     allows, a bare-& detach denies) while this component stays inert. NOT lease-gated: a
     bounded worker building a fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash

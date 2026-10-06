@@ -24,12 +24,16 @@ Where a registry is looked up (two scopes):
   a toplevel for the cwd, that toplevel (which `core.worktree` can place off the ancestor chain).
   Before either lookup, in every session, it denies a `tool_name` that is missing, not a non-empty
   string, or carries a control character, and for a Bash call a `cwd` that is missing, not a
-  non-empty string, or a directory it cannot walk. A malformed `tool_input` is checked only after
-  the lookup, so with no registry in scope (default mode) such a call is allowed.
-- On the walk the NEAREST directory whose `.aiqt` entry is not cleanly absent decides, and the walk
-  stops there: a stray `.aiqt` file (or any other entry it cannot evaluate) in a subdirectory
-  shadows a confirmed registry above it, so registry-required mode denies a Bash call from below
-  that subdirectory. The git toplevel is consulted only when nothing on the chain is present.
+  non-empty string, contains a NUL, is not an existing path, is not a directory, or is a directory
+  it cannot walk. A malformed `tool_input` is checked only after the lookup, so with no registry in
+  scope (default mode) such a call is allowed.
+- On the walk the NEAREST directory whose registry probe is not a clean not-present decides, and
+  the walk stops there. A clean not-present is no `.aiqt` entry at all, or a real `.aiqt` directory
+  holding neither registry name; so the walk passes a `.aiqt` directory without a registry name
+  (the usual layout of an adopted repository) and continues upward. A stray `.aiqt` file (or any
+  other entry it cannot evaluate) in a subdirectory shadows a confirmed registry above it, so
+  registry-required mode denies a Bash call from below that subdirectory. The git toplevel is
+  consulted only when every directory on the chain probes as a clean not-present.
   Inside `.aiqt` the first present registry name decides (`orchestration.local.json`, then
   `orchestration.json`): an `orchestration.local.json` that is a symlink or a directory is not
   confirmed even beside a regular `orchestration.json`.
@@ -41,14 +45,16 @@ What an absent registry means (two modes, truncation guard only):
   scope the truncation guard is inert and allows every Bash call that passes those pre-scope
   checks. A `.aiqt` entry it cannot evaluate (a regular file, a symlink, or an unreadable directory
   named `.aiqt`; a registry name that is not a regular file or cannot be examined) counts as
-  present, so the guard stays active there.
+  present, so the guard stays active there, and a git toplevel that cannot be opened as a directory
+  (consulted only when the whole chain probes as a clean not-present) keeps it active the same way.
 - REGISTRY-REQUIRED (`AIQT_ORCH_REQUIRE_REGISTRY` set to any other value, including a padded or
   garbled one): with no registry in its scope the truncation guard DENIES every Bash call that
   passes the pre-scope checks, and an entry it cannot evaluate also DENIES (a discovery fault is
   not a registry), as does a git toplevel that cannot be opened as a directory (with its own
   reason). A registry reachable only through the git toplevel reads as absent when git fails. A
-  registry file that is a symlink DENIES in this mode, although the registry loader the other
-  components use follows it and accepts it. Discovery checks presence and file type only: a
+  symlink at the first present registry name DENIES in this mode, although the registry loader the
+  other components use follows it and accepts it; a symlinked `orchestration.json` beside a regular
+  `orchestration.local.json` is never examined. Discovery checks presence and file type only: a
   regular registry file that is unreadable, invalid JSON, or empty satisfies this mode (the other
   components then read it as bad). No other component reads the variable, so every other component
   stays inert on an absent registry in both modes.

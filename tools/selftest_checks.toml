@@ -278,6 +278,8 @@ expected-check-ids = [
   "trunc/registry-required-union-unopenable-toplevel-plain-denies",
   "doctor/default-registry-above-root-not-inert",
   "doctor/registry-required-symlinked-registry-reports-deny",
+  "doctor/resume-audit-carries-strict-scope-deny",
+  "doctor/default-toplevel-unopenable-reports-fault-not-registry",
   "trunc/walk-recheck-realpath-fault-denies",
   "trunc/walk-recheck-open-fault-denies",
   "trunc/walk-recheck-fstat-fault-denies",

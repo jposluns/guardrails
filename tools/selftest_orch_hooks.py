@@ -1659,21 +1659,55 @@ def _main_isolated(report_path=None):
         (tmp / "doc-above" / ".aiqt" / "orchestration.json").write_text(json.dumps(dict(version=1)),
                                                                         encoding="utf-8")
         (tmp / "doc-above" / "nested").mkdir()
+        # ROUND 7: a registry the loader accepts through a symlinked orchestration.json, with a WORKING
+        # enumerator, a readable mode line, and a writable state directory, so the guard's strict deny is
+        # the ONLY possible finding: unset mode reports "all usable" (exit 0) and a clean resume audit, and
+        # strict mode must count the deny (exit 1, one finding) and carry it into the resume barrier. A
+        # doctor that only prints the deny line, or drops it on --resume-audit, is red here.
+        _doc_fx = Fixture(tmp, "doc-strict-link")
+        _doc_fx.mode.write_text("Operating-mode: attended\n", encoding="utf-8")
+        _doc_local = _doc_fx.root / ".aiqt" / "orchestration.local.json"
+        _doc_real = _doc_fx.root / "registry-real.json"
+        _doc_real.write_text(_doc_local.read_text(encoding="utf-8"), encoding="utf-8")
+        _doc_local.unlink()
+        os.symlink(str(_doc_real), str(_doc_fx.root / ".aiqt" / "orchestration.json"))
+        _doc_barrier = _doc_fx.state / "resume-barrier.json"
 
-        def _doc_run(root, env):
+        def _doc_run(root, env, *flags):
             if env is None:
                 os.environ.pop(_doc_env, None)
             else:
                 os.environ[_doc_env] = env
             _doc.repo_root = lambda: Path(root)
             out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                code = _doc.main()
+            saved_argv = sys.argv
+            sys.argv = [saved_argv[0]] + list(flags)
+            try:
+                with contextlib.redirect_stdout(out):
+                    code = _doc.main()
+            finally:
+                sys.argv = saved_argv
             return code, out.getvalue()
+
+        def _doc_barrier_read():
+            with open(_doc_barrier, "r", encoding="utf-8") as fh:
+                bar = json.load(fh)
+            return (bar.get("active"), [f for f in bar.get("findings") or [] if "is DENIED" in f] != [])
+        _doc_top = _doc.aiqt_hooks._recovery_toplevel
         try:
             _da_code, _da_out = _doc_run(tmp / "doc-above" / "nested", None)
-            _ds_code, _ds_out = _doc_run(craft / "nonreg-link", "1")
+            _du_code, _du_out = _doc_run(_doc_fx.root, None)
+            _ds_code, _ds_out = _doc_run(_doc_fx.root, "1")
+            _dru_code, _dru_out = _doc_run(_doc_fx.root, None, "--resume-audit")
+            _dru_bar = _doc_barrier_read()
+            _drs_code, _drs_out = _doc_run(_doc_fx.root, "1", "--resume-audit")
+            _drs_bar = _doc_barrier_read()
+            # Default mode, a git toplevel the union leg cannot open (fcb above): the guard is ACTIVE on a
+            # discovery fault, which the doctor must report as that fault, not as a registry found.
+            _doc.aiqt_hooks._recovery_toplevel = lambda _cwd: str(fcb / "top-file")
+            _dt_code, _dt_out = _doc_run(fcb_cwd, None)
         finally:
+            _doc.aiqt_hooks._recovery_toplevel = _doc_top
             _doc.repo_root = _doc_root
             if _doc_old is None:
                 os.environ.pop(_doc_env, None)
@@ -1683,9 +1717,19 @@ def _main_isolated(report_path=None):
               (_da_code, "the suite is inert here" in _da_out, "truncation guard: ACTIVE" in _da_out),
               (2, False, True))
         check("doctor/registry-required-symlinked-registry-reports-deny",
-              (_ds_code, "is DENIED" in _ds_out and "symlinked registry file" in _ds_out,
-               "all usable" in _ds_out),
-              (1, True, False))
+              (_du_code, "all usable" in _du_out,
+               _ds_code, "DOCTOR: 1 finding(s):\n  truncation guard (" in _ds_out,
+               "is DENIED" in _ds_out and "symlinked registry file" in _ds_out, "all usable" in _ds_out),
+              (0, True, 1, True, True, False))
+        check("doctor/resume-audit-carries-strict-scope-deny",
+              (_dru_code, "resume audit clean" in _dru_out, _dru_bar,
+               _drs_code, "resume audit clean" in _drs_out,
+               "1 finding(s); the barrier stays armed:\n  truncation guard (" in _drs_out, _drs_bar),
+              (0, True, (False, False), 1, False, True, (True, True)))
+        check("doctor/default-toplevel-unopenable-reports-fault-not-registry",
+              (_dt_code, "truncation guard: ACTIVE" in _dt_out, "a registry entry was found" in _dt_out,
+               "git toplevel cannot be opened as a directory" in _dt_out),
+              (2, True, False, True))
         saved_recheck_fc = aiqt_hooks._orch_walk_recheck
         saved_realpath = aiqt_hooks.os.path.realpath
         saved_open_fc = aiqt_hooks.os.open
