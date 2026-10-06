@@ -1421,6 +1421,7 @@ def _rdp_scope_cases(base, plain):
                 "git push --repo=evil::x", "git log --help", "git diff --ext-diff --",
                 "git log --show-signature --", "git log --grep -- --ext-diff", "git log -n -- --show-signature",
                 "git commit -m -- -S", "git commit --mess -- --gpg-sign", "git diff --cached --ext-diff",
+                "git grep -e -e -e -- -O", "git commit --mess -m -m -- -S", "git blame -n -L -- --ext-diff",
                 "git stash show -- --ext-diff", "git clone -- evil::x d")
     pr_got = []
     for c in programs:
@@ -1432,7 +1433,9 @@ def _rdp_scope_cases(base, plain):
     # Options are read with their operands: a search operand glued to -S or -G, or the next word of
     # --grep, --author or -S, is no patch request (git log -Sconfig reads, its c no -c), and words after
     # -- are paths, also after an option taking no value or with its value glued (--stat, --cached, -1,
-    # --format=oneline, -n5); an option that shares a letter or prefix with a program-running one runs none.
+    # --format=oneline, -n5), or after a word that is itself an option's value, separated as attached
+    # (git grep -e -e -- -O as git grep -e-e -- -O); an option that shares a letter or prefix with a
+    # program-running one runs none.
     operands = ("git log -Sconfig -- .aiqt", "git log -S config -- .aiqt", "git log -Gcmp -- .aiqt",
                 "git log --grep -c -- .aiqt", "git log --author -p -- .aiqt", "git log -n 3 -- .aiqt",
                 "git log -- .aiqt -p", "git grep -e -O -- .aiqt", "git grep -eOops -- .aiqt",
@@ -1444,7 +1447,9 @@ def _rdp_scope_cases(base, plain):
                 "git log -- --show-signature", "git log HEAD -- --show-signature", "git grep a -- -O",
                 "git diff --stat -- --ext-diff", "git diff --cached -- --ext-diff", "git log -1 -- --show-signature",
                 "git log --format=oneline -- --show-signature", "git log -n5 -- --show-signature",
-                "git commit -a -- -S")
+                "git commit -a -- -S", "git grep -e -e -- -O", "git grep -e-e -- -O",
+                "git log --grep --author -- --show-signature", "git log --grep=--author -- --show-signature",
+                "git log -S -n -- --ext-diff", "git log -S-n -- --ext-diff")
     check("rdp/plain-git-option-operands-parsed", [_rdp_kind(go.run(c)) for c in operands],
           ["allow"] * len(operands))
     patches = ("git log -Sx -p -- .aiqt", "git log -pSconfig -- .aiqt", "git log -cS x -- .aiqt",

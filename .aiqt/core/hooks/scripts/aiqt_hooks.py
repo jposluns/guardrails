@@ -11633,10 +11633,11 @@ _RDP_GIT_NOT_PROGRAM_OPTIONS = frozenset(("--text", "--filter", "--to", "--cc"))
 # path or revision for each of them (no unknown-option error), and git diff, log -p and show run no
 # diff.external for -- --ext-diff while they do for --ext-diff. log, show, diff, rev-list and shortlog end
 # at the first -- whatever comes before it (git log --grep -- x lacks a --grep value); the others end at a
-# -- not taken as an option's value. The -- is read as ending them unless the word before it may take it
-# as a value (_rdp_git_takes_dashdash), and a TRANSPORT::ADDRESS after it is still judged. Any other subcommand (stash, whose show passes its words to
-# a diff, config, remote, worktree, cat-file, mv, cherry-pick, revert, merge-base and the rest) judges a
-# word after -- as before, which only refuses.
+# -- not taken as an option's value. The -- is read as ending them when the one scan over the words reaches
+# it surely free: not taken by the word before it as a value (_rdp_git_takes_next, _rdp_git_takes_dashdash),
+# unless that word was itself surely an option's value; a TRANSPORT::ADDRESS after it is still judged. Any
+# other subcommand (stash, whose show passes its words to a diff, config, remote, worktree, cat-file, mv,
+# cherry-pick, revert, merge-base and the rest) judges a word after -- as before, which only refuses.
 _RDP_GIT_DASHDASH_ENDS = frozenset(("status", "log", "diff", "show", "rev-list", "shortlog", "ls-files",
                                     "blame", "grep", "add", "rm", "commit", "checkout", "restore", "reset"))
 # The subcommands that run a command given as their words: bisect run, submodule foreach (also through
@@ -11810,6 +11811,22 @@ def _rdp_git_takes_dashdash(sub, word):
     return False
 
 
+def _rdp_git_takes_next(sub, word):
+    """Whether the option word surely takes the next word as its value when given to the git subcommand
+    sub, by the tables the scan reads operands with: a long option of _RDP_GIT_NEXT_LONG written whole, or
+    a word of short options whose first value-taking letter (_RDP_GIT_PROGRAM_LETTERS) takes the next word
+    and ends it (git grep -e, git log -S); the rest of a word after any other value-taking letter is its
+    value (-eOops, -n5)."""
+    if word in _RDP_GIT_NEXT_LONG.get(sub, frozenset()):
+        return True
+    _letters, valued, nexts = _RDP_GIT_PROGRAM_LETTERS.get(sub, ("", "", ""))
+    if len(word) > 1 and word.startswith("-") and not word.startswith("--"):
+        for k, ch in enumerate(word[1:], 1):
+            if ch in valued:
+                return ch in nexts and k == len(word) - 1
+    return False
+
+
 def _rdp_git_program_under(sub, before, after):
     """The first word that runs a program when the git subcommand sub is called with the words after,
     after the global options before; None when none does (_rdp_git_runs_program)."""
@@ -11820,10 +11837,11 @@ def _rdp_git_program_under(sub, before, after):
     if run is None or (run and run in after):
         return sub if run is None else run
     owned = _RDP_GIT_SUB_PROGRAM_OPTIONS.get(sub, ())
-    letters, valued, nexts = _RDP_GIT_PROGRAM_LETTERS.get(sub, ("", "", ""))
-    longs = _RDP_GIT_NEXT_LONG.get(sub, frozenset())
-    skip = form = ended = False
-    for k, word in enumerate(after):
+    letters, valued, _nexts = _RDP_GIT_PROGRAM_LETTERS.get(sub, ("", "", ""))
+    # held: the word may be an option's value; data: it surely is one (the word before it, itself surely
+    # free, surely takes it). A -- ends the options only when reached neither.
+    skip = form = ended = held = data = False
+    for word in after:
         if form and ("%G" in word or "%(signature" in word):
             return word
         name = word.split("=", 1)[0]
@@ -11831,11 +11849,16 @@ def _rdp_git_program_under(sub, before, after):
             return word
         if ended:
             continue
-        if word == "--" and not skip and sub in _RDP_GIT_DASHDASH_ENDS and (
-                k == 0 or not _rdp_git_takes_dashdash(sub, after[k - 1])):
+        if word == "--" and not skip and not held and sub in _RDP_GIT_DASHDASH_ENDS:
             # The end of the options (_RDP_GIT_DASHDASH_ENDS): every word after it is a path.
             ended = True
             continue
+        # The next word: free after a value; surely a value after a surely free word that surely takes one;
+        # possibly one after any word that may take one (an abbreviation, an option whose value is
+        # optional, an option of a word that may itself be a value).
+        takes = _rdp_git_takes_next(sub, word)
+        held, data = (False, False) if data else (
+            takes or _rdp_git_takes_dashdash(sub, word), takes and not held)
         if skip:
             # An option's operand is data, a format-looking one included (git log --grep --format=%G
             # searches for --format=%G); a URL operand was judged above, since git still reaches it.
@@ -11850,13 +11873,12 @@ def _rdp_git_program_under(sub, before, after):
         if name.startswith("--") and name not in _RDP_GIT_NOT_PROGRAM_OPTIONS and word != "--exec-path" and (
                 _rdp_long_option(name, _RDP_GIT_PROGRAM_OPTIONS + owned)):
             return word
-        skip = word in longs
+        skip = takes
         if len(word) > 1 and word.startswith("-") and not word.startswith("--"):
-            for k, ch in enumerate(word[1:], 1):
+            for ch in word[1:]:
                 if ch in letters:
                     return word
                 if ch in valued:
-                    skip = ch in nexts and k == len(word) - 1
                     break
     return None
 
@@ -11896,9 +11918,10 @@ def _rdp_git_runs_program(words):
     read with their operands first: a word taken as the value of an option before it (attached, or the
     next word after one of _RDP_GIT_PROGRAM_LETTERS or _RDP_GIT_NEXT_LONG) is no option, so git log --grep
     --ext-diff searches for --ext-diff. Every other word is judged up to a -- ending the options of a
-    subcommand of _RDP_GIT_DASHDASH_ENDS (unless the word before it may take it as a value,
-    _rdp_git_takes_dashdash), after which a word is a path (git diff --cached -- --ext-diff); for any other subcommand, a word after -- is judged too. Behind a global
-    option this hook does not know, every word that may be the subcommand is tried."""
+    subcommand of _RDP_GIT_DASHDASH_ENDS, one the scan reaches surely free (the word before it may not
+    take it as a value, or is surely a value itself: git grep -e -e -- -O), after which a word is a path
+    (git diff --cached -- --ext-diff); for any other subcommand, a word after -- is judged too. Behind a
+    global option this hook does not know, every word that may be the subcommand is tried."""
     if _rdp_basename(words[0]).casefold() != "git":
         return None
     at, _configured = _rdp_git_subcommand(words)
