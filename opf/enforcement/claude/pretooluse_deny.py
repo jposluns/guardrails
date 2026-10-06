@@ -361,9 +361,9 @@ per-platform residual coverage carry the same list):
     membership (git format-patch -1 HEAD --stdout --no-stdout and git format-patch -1 HEAD
     --subject-prefix --stdout write the patch file; git pack-objects --stdout --no-stdout pack
     writes the pack): in a bound product a subcommand that constructs a file name (format-patch,
-    bugreport, diagnose, pack-objects, index-pack, bundle, clone, mailsplit) denies whatever its
-    options, and any other output-writing subcommand (diff, log, show, archive and the rest of
-    GIT_OUTPUT_WRITERS) denies when an output option word appears at all, wherever its value
+    bugreport, diagnose, unpack-file, pack-objects, index-pack, bundle, clone, mailsplit) denies
+    whatever its options, and any other output-writing subcommand (diff, log, show, archive and
+    the rest of GIT_OUTPUT_WRITERS) denies when an output option word appears at all, wherever its value
     points; a lone -- does not end that scan. This is a disclosed over-refusal: git format-patch
     --stdout, git pack-objects --stdout, git bundle create - HEAD, git bundle verify, git
     format-patch -o /elsewhere, git log --output=/elsewhere/x and git log -- --output=x are
@@ -688,8 +688,27 @@ GIT_HELP_PRINT_OPTIONS = frozenset((
     "-a", "--all", "-g", "--guides", "-c", "--config", "-v", "--verbose", "--no-verbose",
     "--external-commands", "--no-external-commands", "--aliases", "--no-aliases",
     "--user-interfaces", "--developer-interfaces"))
-GIT_CODE_OPTIONS = ("--exec", "--upload-pack", "--receive-pack", "--extcmd", "--tool",
-                    "--open-files-in-pager", "-O")
+# The command-naming git options, scoped by subcommand (round 18; each scope read from the git 2.53
+# -h output of every builtin and run against a scratch helper script): the option names a program
+# git runs only under the subcommands listed, so -O on diff, diff-files, diff-index, diff-tree,
+# diff-pairs, log, show and range-diff (an ordering file git reads) is not one. --exec runs a
+# program for archive (with --remote), push, send-pack and rebase, and for ls-remote and fetch-pack
+# (hidden in -h, run by git 2.53); --upload-pack for clone, fetch, fetch-pack, ls-remote and pull;
+# --receive-pack for push and send-pack; --extcmd and --tool for difftool and mergetool (also
+# GIT_CODE_SUBCOMMANDS); --open-files-in-pager and its short form -O only for grep. A word matches
+# when it begins with the option (a glued =value or -O value included) or, for a long option, when
+# its name before any = is an abbreviation git accepts (git fetch --upload-p=cmd and git grep
+# --open=cmd run cmd); a grep short-option cluster carrying O anywhere (git grep -iOcmd) matches
+# too (fail closed). An alias standing for one of these subcommands is the disclosed configuration
+# residual.
+GIT_CODE_OPTIONS = dict((
+    ("--exec", frozenset(("archive", "push", "send-pack", "rebase", "ls-remote", "fetch-pack"))),
+    ("--upload-pack", frozenset(("clone", "fetch", "fetch-pack", "ls-remote", "pull"))),
+    ("--receive-pack", frozenset(("push", "send-pack"))),
+    ("--extcmd", frozenset(("difftool",))),
+    ("--tool", frozenset(("difftool", "mergetool"))),
+    ("--open-files-in-pager", frozenset(("grep",))),
+    ("-O", frozenset(("grep",)))))
 # The AMBIENT git environment (R5, round 8): the hook reads the environment the session launched it
 # with, which the Bash tool's git inherits. A path-valued variable redirects where git reads and writes
 # (the repository, the work tree, the index, the object store, a configuration file), so each value is
@@ -730,7 +749,8 @@ PARENTS_OPTION = "--parents"
 # The git subcommands that write a file whose name they CONSTRUCT or an option names (round 16; each
 # checked against its git 2.53 -h output): format-patch (NNNN-subject.patch, the cover letter),
 # bugreport and diagnose (a suffixed report name) write into the cwd unless an output directory is
-# named; pack-objects (<base-name>-<hash>.pack, .idx, .rev) and index-pack (<pack>.idx, .rev, .keep)
+# named; unpack-file (round 18) writes a random .merge_file_XXXXXX into the work-tree top (the cwd
+# or above it) and takes no output option; pack-objects (<base-name>-<hash>.pack, .idx, .rev) and index-pack (<pack>.idx, .rev, .keep)
 # write beside a named base or pack; bundle create writes its first operand; clone creates a
 # directory named after the repository, or its operand; mailsplit writes numbered files into its -o
 # directory. Round 17: these GIT_GENERATED_WRITERS deny in a bound product whatever their options
@@ -747,7 +767,7 @@ PARENTS_OPTION = "--parents"
 # writes only inside the repository's own git directory (fetch, hash-object -w, notes, fsck,
 # update-server-info, maintenance), or it reads the file it names (-F, --file, -O, --contents,
 # --pathspec-from-file, --import-marks, --ignore-revs-file).
-GIT_CWD_WRITERS = frozenset(("format-patch", "bugreport", "diagnose"))
+GIT_CWD_WRITERS = frozenset(("format-patch", "bugreport", "diagnose", "unpack-file"))
 GIT_BASE_WRITERS = frozenset(("pack-objects", "index-pack"))
 GIT_SHORT_O_OUTPUT = frozenset(("archive", "bugreport", "diagnose", "format-patch", "index-pack",
                                 "mailsplit"))
@@ -1387,7 +1407,7 @@ def _git_runs_code(words):
     if sub in GIT_CODE_SUBCOMMANDS and not _git_submodule_read(sub, rest):
         return "the git subcommand %r runs or configures a command" % (sub,)
     for word in rest:
-        if word.startswith(GIT_CODE_OPTIONS):
+        if _git_code_option(sub, word):
             return "the git option %r names a command to run" % (word,)
         short = word.startswith("-") and not word.startswith("--")
         if sub == "rebase" and short and "x" in word[1:]:
@@ -1395,6 +1415,25 @@ def _git_runs_code(words):
         if sub == "clone" and short and "u" in word[1:]:
             return "git clone -u runs a command"
     return None
+
+
+def _git_code_option(sub, word):
+    """True when the argument word `word` of git subcommand `sub` is a command-naming option in
+    that subcommand's scope (GIT_CODE_OPTIONS, round 18): it begins with the option, it is an
+    abbreviation of a long option (its name before any = is at least one letter past the dashes),
+    or it is a short-option cluster carrying the letter of a short option."""
+    name = word.partition("=")[0]
+    for option, scope in GIT_CODE_OPTIONS.items():
+        if sub not in scope:
+            continue
+        if word.startswith(option):
+            return True
+        if option.startswith("--"):
+            if len(name) > 2 and option.startswith(name):
+                return True
+        elif word.startswith("-") and not word.startswith("--") and option[1:] in word[1:]:
+            return True
+    return False
 
 
 def _git_help_viewer(rest):

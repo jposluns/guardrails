@@ -2710,6 +2710,48 @@ def _claude_hook_self_test():
                 allow("bash-r16-git-" + label + "-allowed", payload("Bash", dict(command=cmd), root))
             allow("bash-r16-git-format-patch-outside-allowed",
                   payload("Bash", dict(command="git format-patch -1 HEAD"), elsewhere))
+            # ROUND 18 (QA round 16): git unpack-file writes a random .merge_file_XXXXXX into the
+            # work-tree top (git 2.53, observed in a scratch repository) and takes no output
+            # option, so it joins the constructing subcommands; and the command-naming git options
+            # are scoped by subcommand, so -O (an ordering file git diff, log and show read) allows
+            # while git grep -O, its glued and clustered forms and an abbreviated long option git
+            # accepts (git grep --open=cmd, git fetch --upload-p=cmd, both observed to run cmd)
+            # deny. On the pin 6812a358 the unpack-file, grep --open, grep -iOcmd and fetch
+            # --upload-p vectors ALLOWED and the three ordering-file vectors DENIED.
+            deny("bash-r18-git-unpack-file-denied",
+                 payload("Bash", dict(command="git unpack-file "
+                                      "6e86b48192b510d49b3484bc5f9079bd1c33c4ea"), root),
+                 "constructs")
+            allow("bash-r18-git-unpack-file-h-allowed",
+                  payload("Bash", dict(command="git unpack-file -h"), root))
+            for label, cmd in (("grep-O-separate", "git grep -O cmd x"),
+                               ("grep-O-glued", "git grep -Ocmd x"),
+                               ("grep-O-cluster", "git grep -iOcmd x"),
+                               ("grep-open-abbreviated", "git grep --open=cmd x"),
+                               ("fetch-upload-pack-abbreviated", "git fetch --upload-p=cmd r"),
+                               ("clone-upload-pack-abbreviated", "git clone --upl=cmd r"),
+                               ("ls-remote-hidden-exec", "git ls-remote --exec=cmd r"),
+                               ("push-receive-pack", "git push --receive-pack=cmd r")):
+                deny("bash-r18-git-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "product root")
+            for label, cmd in (("diff-O-orderfile", "git diff -O order.txt"),
+                               ("log-O-orderfile-glued", "git log -Oorder.txt --oneline"),
+                               ("show-O-orderfile", "git show -O order.txt HEAD"),
+                               ("grep-or", "git grep -e a --or -e b")):
+                allow("bash-r18-git-" + label + "-allowed", payload("Bash", dict(command=cmd), root))
+            # The grep-scoped -O pinned by a mutant: a scratch copy of the hook (in its own pack
+            # layout, so its pack own tree holds no product) with only that scope entry removed
+            # ALLOWS git grep -O cmd x, so the vector above holds it.
+            o_entry = '    ("-O", frozenset(("grep",)))))'
+            hook_text = hook.read_text(encoding="utf-8")
+            expect("bash-r18-grep-O-mutant-site-count", hook_text.count(o_entry), 1)
+            mutant_dir = os.path.join(basestr, "mutant-grep-O", "opf", "enforcement", "claude")
+            os.makedirs(mutant_dir)
+            mutant_hook = os.path.join(mutant_dir, "pretooluse_deny.py")
+            with open(mutant_hook, "w", encoding="utf-8") as fh:
+                fh.write(hook_text.replace(",\n" + o_entry, "))"))
+            allow("bash-r18-grep-O-mutant-allows",
+                  payload("Bash", dict(command="git grep -O cmd x"), root), via=mutant_hook)
             # ROUND 14: a synthetic pack repository (a .git entry, the hook copied to its
             # opf/enforcement/claude/ and an opf/tools/ directory, bound to no product), so the
             # unbound repository-top vectors run on every checkout. A not-plain command reads its
