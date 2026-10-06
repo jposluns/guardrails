@@ -2048,6 +2048,7 @@ def _self_test():
     import shutil
     import subprocess
     import tempfile
+    import types
     import threading
     import unittest
 
@@ -2082,6 +2083,10 @@ def _self_test():
     CHILD_HEAD = ("import importlib.util as u,datetime,os,time;os.environ['TZ']='EST5EDT,M3.2.0,M11.1.0';time.tzset();"
                   "s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);s.loader.exec_module(m);"
                   "UTC=datetime.timezone.utc\n" % os.path.abspath(__file__))
+    # A child that evaluates a Stop freezes the loaded module's time.time and time_ns at one reading (as
+    # freeze_clocks does in this process), so a prune it runs reads one instant; its fixtures pass a fixed now.
+    CHILD_FREEZE = ("_ns = time.time_ns()\nm.time = type(time)('time')\nm.time.__dict__.update(vars(time))\n"
+                    "m.time.time_ns, m.time.time = (lambda: _ns), (lambda: _ns / 10 ** 9)\n")
 
     # The FIFO guard for a child: an audit hook (the `open` event fires for os.open, the builtin open, io.open
     # and io.FileIO alike) refuses every open without O_NONBLOCK of a path that names a FIFO, and records it in
@@ -2094,10 +2099,19 @@ def _self_test():
     # never a false pass). The open descriptors are enumerated through /dev/fd; where that fails, a relative
     # open cannot be evaluated, so it is refused and recorded (a cannot-evaluate fails the test; a guessed
     # descriptor range missed a directory descriptor above it and let a blocking open through). Every FIFO is
-    # guarded, one the child creates after the guard is installed included.
-    # Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes).
+    # guarded, one the child creates after the guard is installed included. A metadata read that fails with
+    # anything but a missing name (ENOENT, or ENOTDIR for a path through a non-directory) or an unusable
+    # base descriptor (EBADF, or ENOTDIR for a descriptor that is not a directory) cannot be evaluated either:
+    # it is refused and recorded too (QA round 3: an injected EIO from os.stat read as "not a FIFO" and let
+    # a blocking open through); an embedded NUL (ValueError) is no FIFO, as the open itself refuses it.
+    # Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes). Not
+    # covered either, the stat-then-open race: the guard reads a path's metadata and the open resolves the
+    # path again afterwards, so a path retargeted between the two (a symlink switched from a regular file to
+    # a FIFO by another thread, or by an audit hook installed after this one) is opened unchecked. Nor a
+    # blocking wait on a descriptor opened with O_NONBLOCK (a select or read on a FIFO no writer opens):
+    # only the child's hang guard bounds that.
     FIFO_GUARD = (
-        "import os, stat, sys\n"
+        "import errno, os, stat, sys\n"
         "_blocking = []\n"
         "def _names_fifo(path):\n"
         "    bases = [None]\n"
@@ -2112,8 +2126,14 @@ def _self_test():
         "        try:\n"
         "            if stat.S_ISFIFO(os.stat(path, dir_fd=fd).st_mode):\n"
         "                return True\n"
-        "        except (OSError, ValueError, TypeError):\n"
+        "        except ValueError:\n"
         "            pass\n"
+        "        except Exception as e:\n"
+        "            if getattr(e, 'errno', None) in (errno.ENOENT, errno.ENOTDIR, errno.EBADF):\n"
+        "                continue\n"
+        "            _blocking.append(('cannot evaluate', path))\n"
+        "            raise AssertionError('the FIFO guard cannot evaluate %r: its metadata read failed '\n"
+        "                                 '(%r)' % (path, e))\n"
         "    return False\n"
         "def _fifo_guard(event, args):\n"
         "    if event != 'open' or not isinstance(args[2], int) or args[2] & os.O_NONBLOCK:\n"
@@ -2137,7 +2157,8 @@ def _self_test():
         """Run `expr` (with module m loaded) in a fresh interpreter; return stdout, raising on timeout. When
         `guarded`, FIFO_GUARD runs first and the output gains a last line, the repr of the refused opens."""
         guard, tail = (FIFO_GUARD, "\nprint(repr(_blocking))") if guarded else ("", "")
-        return subprocess.run([sys.executable, "-I", "-B", "-c", guard + CHILD_HEAD + "print(%s)" % expr + tail],
+        return subprocess.run([sys.executable, "-I", "-B", "-c",
+                               guard + CHILD_HEAD + CHILD_FREEZE + "print(%s)" % expr + tail],
                               capture_output=True, text=True, timeout=timeout).stdout.strip()
 
     class Park:
@@ -2336,6 +2357,46 @@ def _self_test():
 
     MIN = datetime.timedelta(minutes=1)
 
+    def freeze_clocks(ns):
+        """Freeze every wall clock this module reads at the one instant `ns` (epoch nanoseconds) and return the
+        undo: the module's `time` and `datetime` names become views of those modules whose time.time, time_ns,
+        localtime() and gmtime() with no argument, and datetime.datetime.now, utcnow and today, return that
+        instant; every other name is the module's own. setUp freezes each test at a reading of the real clock,
+        so a fixture built from the clock and the code it evaluates (main's datetime.now, prune_state's
+        time.time_ns) read the same instant, and an age a fixture sets up is exact however much wall time
+        passes between the two reads (QA round 3: a transcript start taken 2h05 before the fixture's reading,
+        and an mtime PRUNE_AGE_NS plus an hour before it, each flipped a verdict once the code's later reading
+        moved). A file the test creates keeps its real mtime, at or after the instant, so it never ages. A
+        child interpreter reads its own clocks (see CHILD_FREEZE)."""
+        real_time, real_dt = globals()["time"], globals()["datetime"]
+        sec, frac = divmod(ns, 10 ** 9)
+        tview = types.ModuleType("time")
+        tview.__dict__.update(vars(real_time))
+        tview.time, tview.time_ns = (lambda: ns / 10 ** 9), (lambda: ns)
+        tview.localtime = lambda secs=None: real_time.localtime(sec if secs is None else secs)
+        tview.gmtime = lambda secs=None: real_time.gmtime(sec if secs is None else secs)
+
+        class FrozenDatetime(real_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_dt.datetime.fromtimestamp(sec, tz).replace(microsecond=frac // 1000)
+
+            @classmethod
+            def utcnow(cls):
+                return cls.now(real_dt.timezone.utc).replace(tzinfo=None)
+
+            @classmethod
+            def today(cls):
+                return cls.now()
+        dview = types.ModuleType("datetime")
+        dview.__dict__.update(vars(real_dt))
+        dview.datetime = FrozenDatetime
+        globals()["time"], globals()["datetime"] = tview, dview
+
+        def thaw():
+            globals()["time"], globals()["datetime"] = real_time, real_dt
+        return thaw
+
     class T(unittest.TestCase):
         def setUp(self):
             # Pin the zone (test hermeticity): a POSIX TZ string needs no tzdata on the host.
@@ -2352,6 +2413,9 @@ def _self_test():
             self.tr = os.path.join(self.tmp, "t.jsonl")
             self.now = datetime.datetime(2026, 9, 23, 17, 45, 0, tzinfo=UTC)
             self.start = datetime.datetime(2026, 9, 23, 14, 18, 0, tzinfo=UTC)  # elapsed 03:27
+            # every clock this module reads is frozen at one instant for the whole test (freeze_clocks)
+            self.clock_ns = time.time_ns()
+            self.addCleanup(freeze_clocks(self.clock_ns))
 
         def tearDown(self):
             shutil.rmtree(self.tmp, ignore_errors=True)
@@ -3165,9 +3229,9 @@ def _self_test():
             fifo = os.path.join(self.tmp, "fifo")
             os.mkfifo(fifo)
             out = in_subprocess("(m.lease_start(%r), m.evaluate({'transcript_path':%r,'last_assistant_message':"
-                                "'[2099-01-01T00:00Z] x'}, datetime.datetime.now(UTC), None, %r) is not None, "
+                                "'[2099-01-01T00:00Z] x'}, datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC), None, %r) is not None, "
                                 "m.evaluate({'transcript_path':%r,'stop_hook_active':True,'last_assistant_message':"
-                                "'[2099-01-01T00:00Z] x'}, datetime.datetime.now(UTC), None, %r) is not None)"
+                                "'[2099-01-01T00:00Z] x'}, datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC), None, %r) is not None)"
                                 % (fifo, fifo, self.sdir, fifo, self.sdir), timeout=HANG_TIMEOUT,
                                 guarded=True)  # the hang guard
             self.assertEqual(out.splitlines(), ["(None, True, True)", "[]"])  # FIFO_GUARD refused no open
@@ -3232,6 +3296,73 @@ def _self_test():
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
                                timeout=HANG_TIMEOUT)  # the hang guard
             self.assertEqual(r.stdout.strip(), "1 [('cannot evaluate', 'efifo')]", r.stderr)
+
+        def test_fifo_guard_refuses_an_unexpected_metadata_error(self):
+            # QA round 3 (codex MED): every metadata error read as "not a FIFO", so an os.stat that failed with
+            # EIO let a blocking open of the FIFO through unrecorded. Only a missing name or an unusable base
+            # descriptor is now "not a FIFO"; any other failure is refused and recorded as a cannot-evaluate.
+            # The keeper descriptor means no open can block, so a missed refusal returns at once and the test
+            # fails on the printed counts; a missing path still opens to FileNotFoundError, unrecorded
+            fifo, absent = os.path.join(self.tmp, "ififo"), os.path.join(self.tmp, "absent")
+            os.mkfifo(fifo)
+            code = FIFO_GUARD + (
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "_stat = os.stat\n"
+                "def _failing_stat(path, *a, **k):\n"
+                "    if path == %r:\n"
+                "        raise OSError(errno.EIO, 'injected metadata I/O error')\n"
+                "    return _stat(path, *a, **k)\n"
+                "os.stat = _failing_stat\n"
+                "refused = missing = 0\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY))\n"
+                "except AssertionError:\n"
+                "    refused += 1\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY))\n"
+                "except FileNotFoundError:\n"
+                "    missing += 1\n"
+                "print(refused, missing, _blocking == [('cannot evaluate', %r)])\n") % (fifo, fifo, fifo, absent, fifo)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.split(), ["1", "1", "True"], r.stderr)
+
+        def test_fifo_guard_disclosures(self):
+            # QA round 3 (codex MINOR, claude MINOR): the stat-then-open race and a blocking wait after a
+            # non-blocking open are disclosed beside the ctypes residual
+            src = " ".join(inspect.getsource(_self_test).split())
+            for s in ("Not covered: an open outside the audited interpreter calls",
+                      "Not covered either, the stat-then-open race", "a symlink switched from a regular file to a FIFO",
+                      "Nor a blocking wait on a descriptor opened with O_NONBLOCK"):
+                self.assertIn(s, src)
+
+        def test_clocks_frozen_for_fixture_and_code(self):
+            # QA round 3 (codex MED): a fixture built from the clock and the code it evaluates read the clock at
+            # different moments, so wall time elapsed between the two reads moved the verdict (test_r13's
+            # transcript start, test_r30's and test_r31's PRUNE_AGE_NS mtimes). With every clock this module
+            # reads frozen (setUp), an age a fixture sets up is exact: at the PRUNE_AGE_NS boundary a subdirectory
+            # exactly that old is removed and one a nanosecond younger is kept by a prune that reads the clock
+            # itself, and main() hands evaluate the instant setUp froze
+            os.makedirs(self.sdir, 0o700)
+            os.chmod(self.sdir, 0o700)
+            edge = time.time_ns() - PRUNE_AGE_NS
+            for name, ns in (("edge", edge), ("younger", edge + 1)):
+                d = os.path.join(self.sdir, _sha(name) + ".d")
+                os.mkdir(d, 0o700)
+                os.utime(d, ns=(ns, ns))
+            self.assertEqual(prune_state(self.sdir), 1)
+            self.assertEqual([n for n in os.listdir(self.sdir) if _is_state_subdir(n)], [_sha("younger") + ".d"])
+            real_evaluate, seen = evaluate, []
+
+            def recording_evaluate(*a, **k):
+                seen.append(to_us(a[1]))  # main's now
+                return real_evaluate(*a, **k)
+            globals()["evaluate"] = recording_evaluate
+            try:
+                self.assertEqual(run_main(json.dumps({"last_assistant_message": "Done."})), (0, ""))
+            finally:
+                globals()["evaluate"] = real_evaluate
+            self.assertEqual(seen, [self.clock_ns // 1000])
 
         def test_inactive_lease_never_reads_history(self):
             lease = os.path.join(self.tmp, "lease.md")
@@ -3582,9 +3713,9 @@ def _self_test():
             for bad in (None, "", os.path.join(self.tmp, "absent.jsonl"), self.tmp, 42):
                 self.assertIsNone(transcript_start(bad), bad)
             # end to end through main(): the id-only lease plus the payload transcript gives the footer a start
-            # main() reads the real clock, so the transcript start is taken relative to it; the expected true
-            # elapsed comes from the clock reading main() itself handed to evaluate (recorded there), never from a
-            # window the run must finish within
+            # main() reads the frozen clock (setUp), the instant the transcript start is taken 2h05 before, so the
+            # true elapsed is exactly 02:05 however long the run takes (QA round 3: a later clock reading in main()
+            # moved the true elapsed, and 6h55 later made the 9h claim true, so nothing was blocked)
             self.write([self.user("go", datetime.datetime.now(UTC) - datetime.timedelta(hours=2, minutes=5))])
             p = json.dumps({"transcript_path": self.tr, "last_assistant_message": "done (session: 9h 0m)"})
             real_evaluate, seen = evaluate, []
@@ -3602,7 +3733,7 @@ def _self_test():
             start = transcript_start(self.tr)
             self.assertIsNotNone(start)
             self.assertEqual([got for _now, got in seen], [start])  # the transcript fallback gave the start
-            self.assertIn(", true %s;" % fmt_elapsed_us(to_us(seen[0][0]) - to_us(start)), r)
+            self.assertIn(", true 02:05;", r)
 
         def test_r13_fifo_transcript_does_not_block(self):
             fifo = os.path.join(self.tmp, "tfifo")
@@ -4623,6 +4754,8 @@ def _self_test():
             # removes (at most PRUNE_BATCH of) the subdirectories unwritten for PRUNE_AGE_NS, never one an
             # evaluation holds locked, never a name without the subdirectory shape, never through a symlink
             bad = "[2026-09-23T20:00Z] heartbeat"
+            # the clock is frozen (setUp): prune_state reads the instant old_s is taken from, so old_s is exactly
+            # an hour past PRUNE_AGE_NS however long the test runs (QA round 3)
             old_s = (time.time_ns() - PRUNE_AGE_NS) / 1e9 - 3600
             trs = {}
             for name in ("old", "locked", "recent"):
@@ -4703,6 +4836,8 @@ def _self_test():
             # so it lies beyond the first PRUNE_SCAN entries whichever way the filesystem orders creation
             os.makedirs(self.sdir, 0o700)
             os.chmod(self.sdir, 0o700)
+            # the clock is frozen (setUp): prune_state reads the instant old_s is taken from, so old_s is exactly
+            # an hour past PRUNE_AGE_NS however long the test runs (QA round 3)
             old_s = (time.time_ns() - PRUNE_AGE_NS) / 1e9 - 3600
             recent = [_sha(f"recent{i}") + ".d" for i in range(2 * PRUNE_SCAN)]
             stale = _sha("stale") + ".d"
@@ -5052,7 +5187,7 @@ def _self_test():
             child = (
                 "import datetime, hashlib, importlib.util, json, os, stat, sys, time\n"
                 "spec = importlib.util.spec_from_file_location('sts32', sys.argv[1])\n"
-                "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+                "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n" + CHILD_FREEZE +
                 "tmp = sys.argv[2]; sdir = os.path.join(tmp, 'state'); os.mkdir(sdir, 0o700)\n"
                 "m.PRUNE_SCAN = 8  # a prune that cannot cover every name, so it writes the cursor\n"
                 "for i in range(m.PRUNE_SCAN + 1):\n"
@@ -5061,7 +5196,7 @@ def _self_test():
                 "tr = os.path.join(tmp, 't.jsonl')\n"
                 "with open(tr, 'w') as f:\n"
                 "    f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'go'}}) + '\\n')\n"
-                "now = datetime.datetime.now(datetime.timezone.utc)\n"
+                "now = datetime.datetime(2026, 9, 23, 17, 45, tzinfo=datetime.timezone.utc)\n"
                 "r = m.evaluate({'transcript_path': tr, 'last_assistant_message': 'Done.'}, now, now, sdir, [])\n"
                 "assert r is None, r\n"
                 "assert stat.S_ISREG(os.lstat(cur).st_mode), 'the cursor was not replaced by a regular file'\n"

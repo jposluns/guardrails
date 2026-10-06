@@ -3476,6 +3476,7 @@ def _self_test():
     import shutil
     import subprocess
     import tempfile
+    import types
     import unittest
 
     # round 26 (finding 6): timed runs execute in a child interpreter under a subprocess timeout, so a hang is
@@ -3585,10 +3586,19 @@ def _self_test():
     # never a false pass). The open descriptors are enumerated through /dev/fd; where that fails, a relative
     # open cannot be evaluated, so it is refused and recorded (a cannot-evaluate fails the test; a guessed
     # descriptor range missed a directory descriptor above it and let a blocking open through). Every FIFO is
-    # guarded, one the child creates after the guard is installed included.
-    # Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes).
+    # guarded, one the child creates after the guard is installed included. A metadata read that fails with
+    # anything but a missing name (ENOENT, or ENOTDIR for a path through a non-directory) or an unusable
+    # base descriptor (EBADF, or ENOTDIR for a descriptor that is not a directory) cannot be evaluated either:
+    # it is refused and recorded too (QA round 3: an injected EIO from os.stat read as "not a FIFO" and let
+    # a blocking open through); an embedded NUL (ValueError) is no FIFO, as the open itself refuses it.
+    # Not covered: an open outside the audited interpreter calls (a raw libc open through ctypes). Not
+    # covered either, the stat-then-open race: the guard reads a path's metadata and the open resolves the
+    # path again afterwards, so a path retargeted between the two (a symlink switched from a regular file to
+    # a FIFO by another thread, or by an audit hook installed after this one) is opened unchecked. Nor a
+    # blocking wait on a descriptor opened with O_NONBLOCK (a select or read on a FIFO no writer opens):
+    # only the child's hang guard bounds that.
     FIFO_GUARD = (
-        "import os, stat, sys\n"
+        "import errno, os, stat, sys\n"
         "_blocking = []\n"
         "def _names_fifo(path):\n"
         "    bases = [None]\n"
@@ -3603,8 +3613,14 @@ def _self_test():
         "        try:\n"
         "            if stat.S_ISFIFO(os.stat(path, dir_fd=fd).st_mode):\n"
         "                return True\n"
-        "        except (OSError, ValueError, TypeError):\n"
+        "        except ValueError:\n"
         "            pass\n"
+        "        except Exception as e:\n"
+        "            if getattr(e, 'errno', None) in (errno.ENOENT, errno.ENOTDIR, errno.EBADF):\n"
+        "                continue\n"
+        "            _blocking.append(('cannot evaluate', path))\n"
+        "            raise AssertionError('the FIFO guard cannot evaluate %r: its metadata read failed '\n"
+        "                                 '(%r)' % (path, e))\n"
         "    return False\n"
         "def _fifo_guard(event, args):\n"
         "    if event != 'open' or not isinstance(args[2], int) or args[2] & os.O_NONBLOCK:\n"
@@ -3642,6 +3658,44 @@ def _self_test():
             raise AssertionError(f"timed child failed ({r.returncode}): {r.stderr}")
         return json.loads(r.stdout.strip().splitlines()[-1])
 
+    def freeze_clocks(ns):
+        """Freeze every wall clock this module reads at the one instant `ns` (epoch nanoseconds) and return the
+        undo: the module's `time` and `datetime` names become views of those modules whose time.time, time_ns,
+        localtime() and gmtime() with no argument, and datetime.datetime.now, utcnow and today, return that
+        instant; every other name is the module's own. setUp freezes each test at a reading of the real clock,
+        so a fixture built from the clock and the code it evaluates (main's datetime.now) read the same
+        instant however much wall time passes between the two reads (QA round 3, in the sibling
+        stamp-truth-stop.py: a fixture age taken before the code's later clock reading flipped a verdict once
+        that reading moved). A timed child interpreter reads its own clocks and passes a fixed now."""
+        real_time, real_dt = globals()["time"], globals()["datetime"]
+        sec, frac = divmod(ns, 10 ** 9)
+        tview = types.ModuleType("time")
+        tview.__dict__.update(vars(real_time))
+        tview.time, tview.time_ns = (lambda: ns / 10 ** 9), (lambda: ns)
+        tview.localtime = lambda secs=None: real_time.localtime(sec if secs is None else secs)
+        tview.gmtime = lambda secs=None: real_time.gmtime(sec if secs is None else secs)
+
+        class FrozenDatetime(real_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_dt.datetime.fromtimestamp(sec, tz).replace(microsecond=frac // 1000)
+
+            @classmethod
+            def utcnow(cls):
+                return cls.now(real_dt.timezone.utc).replace(tzinfo=None)
+
+            @classmethod
+            def today(cls):
+                return cls.now()
+        dview = types.ModuleType("datetime")
+        dview.__dict__.update(vars(real_dt))
+        dview.datetime = FrozenDatetime
+        globals()["time"], globals()["datetime"] = tview, dview
+
+        def thaw():
+            globals()["time"], globals()["datetime"] = real_time, real_dt
+        return thaw
+
     class T(unittest.TestCase):
         def setUp(self):
             self._tz = os.environ.get("TZ")
@@ -3653,6 +3707,9 @@ def _self_test():
             self.tmp = tempfile.mkdtemp(prefix="clk.", dir=base)
             self.now = datetime.datetime(2026, 9, 23, 17, 45, 0, tzinfo=UTC)
             self.store = f"{PROJ}/private/state.md"
+            # every clock this module reads is frozen at one instant for the whole test (freeze_clocks)
+            self.clock_ns = time.time_ns()
+            self.addCleanup(freeze_clocks(self.clock_ns))
 
         def tearDown(self):
             shutil.rmtree(self.tmp, ignore_errors=True)
@@ -3874,6 +3931,68 @@ def _self_test():
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
                                timeout=HANG_TIMEOUT)  # the hang guard
             self.assertEqual(r.stdout.strip(), "1 [('cannot evaluate', 'efifo')]", r.stderr)
+
+        def test_fifo_guard_refuses_an_unexpected_metadata_error(self):
+            # QA round 3 (codex MED): every metadata error read as "not a FIFO", so an os.stat that failed with
+            # EIO let a blocking open of the FIFO through unrecorded. Only a missing name or an unusable base
+            # descriptor is now "not a FIFO"; any other failure is refused and recorded as a cannot-evaluate.
+            # The keeper descriptor means no open can block, so a missed refusal returns at once and the test
+            # fails on the printed counts; a missing path still opens to FileNotFoundError, unrecorded
+            fifo, absent = os.path.join(self.tmp, "ififo"), os.path.join(self.tmp, "absent")
+            os.mkfifo(fifo)
+            code = FIFO_GUARD + (
+                "keep = os.open(%r, os.O_RDWR | os.O_NONBLOCK)\n"
+                "_stat = os.stat\n"
+                "def _failing_stat(path, *a, **k):\n"
+                "    if path == %r:\n"
+                "        raise OSError(errno.EIO, 'injected metadata I/O error')\n"
+                "    return _stat(path, *a, **k)\n"
+                "os.stat = _failing_stat\n"
+                "refused = missing = 0\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY))\n"
+                "except AssertionError:\n"
+                "    refused += 1\n"
+                "try:\n"
+                "    os.close(os.open(%r, os.O_RDONLY))\n"
+                "except FileNotFoundError:\n"
+                "    missing += 1\n"
+                "print(refused, missing, _blocking == [('cannot evaluate', %r)])\n") % (fifo, fifo, fifo, absent, fifo)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard
+            self.assertEqual(r.stdout.split(), ["1", "1", "True"], r.stderr)
+
+        def test_fifo_guard_disclosures(self):
+            # QA round 3 (codex MINOR, claude MINOR): the stat-then-open race and a blocking wait after a
+            # non-blocking open are disclosed beside the ctypes residual
+            src = " ".join(inspect.getsource(_self_test).split())
+            for s in ("Not covered: an open outside the audited interpreter calls",
+                      "Not covered either, the stat-then-open race", "a symlink switched from a regular file to a FIFO",
+                      "Nor a blocking wait on a descriptor opened with O_NONBLOCK"):
+                self.assertIn(s, src)
+
+        def test_clocks_frozen_for_fixture_and_code(self):
+            # QA round 3 (codex MED, in the sibling stamp-truth-stop.py): a fixture built from the clock and the
+            # code it evaluates read the clock at different moments, so wall time elapsed between the two reads
+            # could move a verdict. Every clock this module reads is frozen (setUp): main() hands evaluate the
+            # instant setUp froze, whatever the wall time
+            real_evaluate, seen = evaluate, []
+
+            def recording_evaluate(*a, **k):
+                seen.append((a[1] - datetime.datetime(1970, 1, 1, tzinfo=UTC)) // datetime.timedelta(microseconds=1))
+                return real_evaluate(*a, **k)
+            payload = {"tool_name": "Write", "tool_input": {"file_path": os.path.join(self.tmp, "a.md"), "content": "x"}}
+            old_in, old_out = sys.stdin, sys.stdout
+            sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+            globals()["evaluate"] = recording_evaluate
+            try:
+                rc = main(["future-stamp-write.py"])
+                out = sys.stdout.getvalue()
+            finally:
+                globals()["evaluate"] = real_evaluate
+                sys.stdin, sys.stdout = old_in, old_out
+            self.assertEqual((rc, out), (0, ""))
+            self.assertEqual(seen, [self.clock_ns // 1000])
 
         def test_store_root_env_override(self):
             os.environ["AIQT_STORE_ROOT"] = self.tmp
@@ -5460,7 +5579,9 @@ def _self_test():
             # is held on an explicit signal that never comes (a read of its own pipe, whose write end it keeps
             # open), so it cannot end of its own accord however late the parent resumes: without the timeout the
             # run never returns. (QA: a child that slept a finite minute ended on its own when the parent resumed
-            # after it, and the test then failed on its output, not on the timeout.)
+            # after it, and the test then failed on its output, not on the timeout.) The child also bounds itself
+            # at 10 * HANG_TIMEOUT (SIGALRM), so a run_timed that lost its timeout fails the test (the child dies,
+            # no TimeoutExpired) instead of hanging the suite (QA round 3, claude MINOR)
             seen, real_run = [], subprocess.run
 
             def recording_run(*args, **kwargs):
@@ -5469,7 +5590,8 @@ def _self_test():
             subprocess.run = recording_run
             try:
                 with self.assertRaises(subprocess.TimeoutExpired):
-                    run_timed("import os\nr, w = os.pipe()\nos.read(r, 1)\n", 1)
+                    run_timed("import os, signal\nsignal.alarm(%d)\nr, w = os.pipe()\nos.read(r, 1)\n"
+                              % (10 * HANG_TIMEOUT), 1)
             finally:
                 subprocess.run = real_run
             self.assertEqual(seen, [1])
