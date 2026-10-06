@@ -2821,6 +2821,125 @@ def _claude_hook_self_test():
                       payload("Bash", dict(command=cmd), pack_docs), via=pack_hook)
             allow("bash-r14-c-override-checkout-unbound-allowed",
                   payload("Bash", dict(command="git -c core.abbrev=7 checkout -- ."), elsewhere))
+            # ROUND 19 (QA round 17): a git subcommand that is an internal helper (a name carrying
+            # "--") or is not a public git 2.53 command runs code the hook cannot read, so it is
+            # never plain: it denies in a bound product and takes the unbound repository-top check
+            # in the synthetic pack repository. The helper list is literal (every "--" name git
+            # 2.53 ships in its exec path, plus the retired bisect--helper and rebase--helper),
+            # joined by every "--" name the installed git lists. On the pin 2b5a2c31 every bound
+            # helper vector, the unlisted vector and every pack-repository vector ALLOWED.
+            helpers = set(("checkout--worker", "credential-cache--daemon", "difftool--helper",
+                           "fsmonitor--daemon", "mergetool--lib", "sh-i18n--envsubst",
+                           "submodule--helper", "upload-archive--writer", "web--browse",
+                           "bisect--helper", "rebase--helper"))
+            git_bin = shutil.which("git")
+            if git_bin:
+                listed = subprocess.run([git_bin, "--list-cmds=main"], stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, env=_scrubbed_env(),
+                                        timeout=_GIT_TIMEOUT_S)
+                helpers.update(n for n in listed.stdout.decode("utf-8", "replace").split()
+                               if "--" in n)
+            for name in sorted(helpers):
+                cmd = "git " + name + " foreach x"
+                deny("bash-r19-git-" + name + "-denied", payload("Bash", dict(command=cmd), root),
+                     "product root")
+                deny("bash-r19-pack-repo-" + name + "-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
+            for label, cmd in (("unlisted", "git frobnicate x"),
+                               ("for-each-repo", "git for-each-repo --config=a.b reset --hard"),
+                               ("remote-ext", "git remote-ext r x")):
+                deny("bash-r19-git-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "product root")
+            for label, cmd in (("unlisted", "git -c a.b=c frobnicate x"),
+                               ("dashed-helper", "/usr/lib/git-core/git-submodule--helper foreach x"),
+                               ("helper-semicolon-true", "git -C . submodule--helper foreach x; true")):
+                deny("bash-r19-pack-repo-" + label + "-denied",
+                     payload("Bash", dict(command=cmd), pack_docs), "holds the protected path",
+                     via=pack_hook)
+            for label, cmd in (("c-override-log", "git -c a.b=c log; true"),
+                               ("dir-override-status", "git -C . status | grep -n x")):
+                allow("bash-r19-pack-repo-" + label + "-allowed",
+                      payload("Bash", dict(command=cmd), pack_docs), via=pack_hook)
+            # The witness: in a scratch product whose TODO.md is a declared view, git
+            # submodule--helper foreach 'git -C .. reset --hard' (QA round 17, git 2.53) rewrites
+            # the protected parent TODO.md when run, and the hook denies it.
+            wroot = os.path.join(basestr, "witness")
+            wsub = os.path.join(basestr, "witness-sub")
+            wmachine = os.path.join(wroot, _opf_store.WORKING_DIRNAME,
+                                    _opf_store.DEFAULT_MACHINE_SUBDIR)
+            os.makedirs(wmachine)
+            os.makedirs(wsub)
+            with open(os.path.join(wmachine, "manifest.toml"), "w", encoding="utf-8") as fh:
+                fh.write(manifest_text)
+            with open(os.path.join(wroot, "TODO.md"), "w", encoding="utf-8") as fh:
+                fh.write("committed\n")
+            with open(os.path.join(wsub, "s.txt"), "w", encoding="utf-8") as fh:
+                fh.write("s\n")
+            wenv = _scrubbed_env()
+            wenv["HOME"] = basestr
+
+            expect("bash-r19-witness-git-present", bool(git_bin), True)
+
+            def wgit(cwd, *args):
+                if not git_bin:
+                    return 127
+                return subprocess.run(
+                    ["git", "-C", cwd, "-c", "user.email=opf@example.invalid",
+                     "-c", "user.name=OPF Self Test", "-c", "commit.gpgsign=false",
+                     "-c", "init.defaultBranch=main", "-c", "protocol.file.allow=always",
+                     "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+                    + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=wenv,
+                    timeout=_GIT_TIMEOUT_S).returncode
+            setup = [wgit(wsub, "init", "-q"), wgit(wsub, "add", "s.txt"),
+                     wgit(wsub, "commit", "-q", "-m", "s"), wgit(wroot, "init", "-q"),
+                     wgit(wroot, "add", "TODO.md"), wgit(wroot, "submodule", "add", "-q", wsub, "sub"),
+                     wgit(wroot, "commit", "-q", "-m", "c")]
+            expect("bash-r19-witness-setup", setup, [0] * 7)
+            with open(os.path.join(wroot, "TODO.md"), "w", encoding="utf-8") as fh:
+                fh.write("protected live bytes\n")
+            witness = "git submodule--helper foreach 'git -C .. reset --hard'"
+            deny("bash-r19-witness-helper-foreach-denied",
+                 payload("Bash", dict(command=witness), wroot), "product root")
+            expect("bash-r19-witness-helper-foreach-rewrites",
+                   (wgit(wroot, "submodule--helper", "foreach", "git -C .. reset --hard"),
+                    Path(wroot, "TODO.md").read_text(encoding="utf-8")), (0, "committed\n"))
+            # ROUND 19 (QA round 17): grep's option VALUES and the words after a lone -- are not
+            # option clusters, so a pattern carrying O allows while a real -O cluster denies. On the
+            # pin 2b5a2c31 the -eFOO, -e -O, -ieO and -- -O vectors DENIED.
+            for label, cmd in (("grep-e-attached", "git grep -eFOO notes.txt"),
+                               ("grep-e-separate", "git grep -e FOO notes.txt"),
+                               ("grep-e-dash-O", "git grep -e -O notes.txt"),
+                               ("grep-ie-attached-O", "git grep -ieO notes.txt"),
+                               ("grep-dashdash-O", "git grep -- -O"),
+                               ("grep-context-then-e", "git grep -C3 -eO notes.txt")):
+                allow("bash-r19-git-" + label + "-allowed", payload("Bash", dict(command=cmd), root))
+            for label, cmd in (("grep-iO", "git grep -iO x"),
+                               ("grep-iOcmd", "git grep -iOcmd x"),
+                               ("grep-e-then-O", "git grep -e x -O cmd notes.txt"),
+                               ("grep-and-iO", "git grep -e x --and -iO -e y")):
+                deny("bash-r19-git-" + label + "-denied", payload("Bash", dict(command=cmd), root),
+                     "product root")
+            # Each grep value or -- step pinned by a mutant (a scratch copy of the hook in its own
+            # pack layout with that step alone removed denies its vector above).
+            for label, site, flip, cmd in (
+                    ("separate-value", "skip = at == len(word) - 1", "skip = False",
+                     "git grep -e -O notes.txt"),
+                    ("attached-value", "if word[at] in GIT_GREP_VALUED_SHORT:", "if False:",
+                     "git grep -eFOO notes.txt"),
+                    ("dashdash", 'break\n        if not word.startswith("-") or word == "-":\n'
+                     '            continue\n        if word.startswith("--"):\n            found',
+                     'pass\n        if not word.startswith("-") or word == "-":\n'
+                     '            continue\n        if word.startswith("--"):\n            found',
+                     "git grep -- -O")):
+                expect("bash-r19-grep-" + label + "-mutant-site-count", hook_text.count(site), 1)
+                mdir = os.path.join(basestr, "mutant-grep-" + label, "opf", "enforcement", "claude")
+                os.makedirs(mdir)
+                mhook = os.path.join(mdir, "pretooluse_deny.py")
+                with open(mhook, "w", encoding="utf-8") as fh:
+                    fh.write(hook_text.replace(site, flip))
+                deny("bash-r19-grep-" + label + "-mutant-denies",
+                     payload("Bash", dict(command=cmd), root), "product root", via=mhook)
             notes = os.path.join(root, "notes.txt")
             deny("multiedit-r11-nested-path-field-denied",
                  payload("MultiEdit", dict(file_path=notes, edits=[dict(

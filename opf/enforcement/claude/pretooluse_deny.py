@@ -674,7 +674,56 @@ GIT_DRY_RUN_GRAMMAR = dict(
     clean=("dfqxXn", ("--dry-run", "--force", "--quiet")))
 GIT_CODE_SUBCOMMANDS = frozenset(("config", "filter-branch", "bisect", "submodule", "difftool",
                                   "mergetool", "daemon", "instaweb", "send-email", "credential",
-                                  "svn", "p4", "cvsimport", "archimport", "web--browse"))
+                                  "svn", "p4", "cvsimport", "archimport", "web--browse",
+                                  "for-each-repo", "remote-ext"))
+# The public git commands (round 19, PD-427-GIT-SCOPE): every name git 2.53 lists with
+# git --list-cmds=main that carries no "--", frozen here so the verdict never depends on the
+# installed build or on PATH. A subcommand word that is an INTERNAL helper (a name carrying "--":
+# submodule--helper, whose foreach runs the command its words name, checkout--worker,
+# credential-cache--daemon, difftool--helper, fsmonitor--daemon, mergetool--lib,
+# sh-i18n--envsubst, upload-archive--writer, web--browse and the retired bisect--helper and
+# rebase--helper) or a name outside this set (an alias, a git-<name> program found on PATH, a
+# command another git build ships) runs code the hook cannot read, so it is never plain
+# (_git_unlisted) and a not-plain command carrying one takes the unbound repository-top check
+# (_git_worktree_words). Round 19 also adds for-each-repo (runs the git command its words name
+# in every configured repository) and remote-ext (runs the command its address names) to
+# GIT_CODE_SUBCOMMANDS.
+GIT_PUBLIC_SUBCOMMANDS = frozenset((
+    "add", "am", "annotate", "apply", "archive", "backfill", "bisect", "blame", "branch",
+    "bugreport", "bundle", "cat-file", "check-attr", "check-ignore", "check-mailmap",
+    "check-ref-format", "checkout", "checkout-index", "cherry", "cherry-pick", "clean", "clone",
+    "column", "commit", "commit-graph", "commit-tree", "config", "count-objects", "credential",
+    "credential-cache", "credential-store", "daemon", "describe", "diagnose", "diff", "diff-files",
+    "diff-index", "diff-pairs", "diff-tree", "difftool", "fast-export", "fast-import", "fetch",
+    "fetch-pack", "filter-branch", "fmt-merge-msg", "for-each-ref", "for-each-repo",
+    "format-patch", "fsck", "fsck-objects", "gc", "get-tar-commit-id", "grep", "hash-object",
+    "help", "hook", "http-backend", "http-fetch", "http-push", "imap-send", "index-pack", "init",
+    "init-db", "instaweb", "interpret-trailers", "last-modified", "log", "ls-files", "ls-remote",
+    "ls-tree", "mailinfo", "mailsplit", "maintenance", "merge", "merge-base", "merge-file",
+    "merge-index", "merge-octopus", "merge-one-file", "merge-ours", "merge-recursive",
+    "merge-recursive-ours", "merge-recursive-theirs", "merge-resolve", "merge-subtree",
+    "merge-tree", "mergetool", "mktag", "mktree", "multi-pack-index", "mv", "name-rev", "notes",
+    "pack-objects", "pack-redundant", "pack-refs", "patch-id", "pickaxe", "prune", "prune-packed",
+    "pull", "push", "quiltimport", "range-diff", "read-tree", "rebase", "receive-pack", "reflog",
+    "refs", "remote", "remote-ext", "remote-fd", "remote-ftp", "remote-ftps", "remote-http",
+    "remote-https", "repack", "replace", "replay", "repo", "request-pull", "rerere", "reset",
+    "restore", "rev-list", "rev-parse", "revert", "rm", "send-pack", "shell", "shortlog", "show",
+    "show-branch", "show-index", "show-ref", "sparse-checkout", "stage", "stash", "status",
+    "stripspace", "submodule", "subtree", "switch", "symbolic-ref", "tag", "unpack-file",
+    "unpack-objects", "update-index", "update-ref", "update-server-info", "upload-archive",
+    "upload-pack", "var", "verify-commit", "verify-pack", "verify-tag", "version", "whatchanged",
+    "worktree", "write-tree"))
+# The git global options that take their value as the NEXT word (git 2.53 git.c), skipped when the
+# not-plain read looks for the subcommand word after a git word (_git_worktree_words).
+GIT_SEPARATE_VALUE_GLOBALS = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                                        "--super-prefix", "--attr-source"))
+# The valued options of git grep (round 19, read from the git 2.53 git grep -h output): a short
+# letter here takes the rest of its cluster or, when it ends the cluster, the next word as its
+# value (git grep -eFOO and git grep -e -O name a pattern, never an option), and a long option
+# here spelled exactly, with no =, takes the next word. A lone -- ends grep's options.
+GIT_GREP_VALUED_SHORT = "efABCm"
+GIT_GREP_VALUED_LONG = frozenset(("--max-depth", "--context", "--before-context",
+                                  "--after-context", "--threads", "--max-count"))
 # The git help forms that only print (round 15, PD-427-GIT-SCOPE): git help whose every option word
 # is exactly one of these (a lone -- ends the options; every other word is a page or command name)
 # lists commands, guides, interfaces or configuration names, or shows a named page in the
@@ -698,9 +747,11 @@ GIT_HELP_PRINT_OPTIONS = frozenset((
 # GIT_CODE_SUBCOMMANDS); --open-files-in-pager and its short form -O only for grep. A word matches
 # when it begins with the option (a glued =value or -O value included) or, for a long option, when
 # its name before any = is an abbreviation git accepts (git fetch --upload-p=cmd and git grep
-# --open=cmd run cmd); a grep short-option cluster carrying O anywhere (git grep -iOcmd) matches
-# too (fail closed). An alias standing for one of these subcommands is the disclosed configuration
-# residual.
+# --open=cmd run cmd); a grep short-option cluster carrying O (git grep -iOcmd) matches too. Round
+# 19: only grep's OPTION words are read (_git_option_words): the value of a valued grep option
+# (GIT_GREP_VALUED_SHORT, GIT_GREP_VALUED_LONG) and every word after a lone -- are not options,
+# so git grep -eFOO and git grep -- -O allow while git grep -iO and -iOcmd deny. An alias is
+# outside GIT_PUBLIC_SUBCOMMANDS and so never plain.
 GIT_CODE_OPTIONS = dict((
     ("--exec", frozenset(("archive", "push", "send-pack", "rebase", "ls-remote", "fetch-pack"))),
     ("--upload-pack", frozenset(("clone", "fetch", "fetch-pack", "ls-remote", "pull"))),
@@ -1406,7 +1457,10 @@ def _git_runs_code(words):
             return "git help %r may launch a manual viewer" % (option,)
     if sub in GIT_CODE_SUBCOMMANDS and not _git_submodule_read(sub, rest):
         return "the git subcommand %r runs or configures a command" % (sub,)
-    for word in rest:
+    if _git_unlisted(sub):
+        return ("the git subcommand %r is an internal helper or is not a public git 2.53 command, "
+                "so it may run a command" % (sub,))
+    for word in _git_option_words(sub, rest):
         if _git_code_option(sub, word):
             return "the git option %r names a command to run" % (word,)
         short = word.startswith("-") and not word.startswith("--")
@@ -1415,6 +1469,47 @@ def _git_runs_code(words):
         if sub == "clone" and short and "u" in word[1:]:
             return "git clone -u runs a command"
     return None
+
+
+def _git_unlisted(sub):
+    """True when the git subcommand word `sub` is an internal helper (a name carrying "--") or is
+    outside GIT_PUBLIC_SUBCOMMANDS (round 19): git may run code for it that the hook cannot read."""
+    return "--" in sub or sub not in GIT_PUBLIC_SUBCOMMANDS
+
+
+def _git_option_words(sub, rest):
+    """The option words among `rest`, the words after git subcommand `sub`, that the command-naming
+    scan reads (round 19). For grep: words up to a lone --, without the value of a valued option
+    (GIT_GREP_VALUED_SHORT, GIT_GREP_VALUED_LONG) and without operands; a short cluster is cut
+    before its valued letter, whose rest is the value (-ieO keeps -i), and after an O, whose rest
+    is the pager. Every other subcommand: every word (fail closed)."""
+    if sub != "grep":
+        return list(rest)
+    found, skip = [], False
+    for word in rest:
+        if skip:
+            skip = False
+            continue
+        if word == "--":
+            break
+        if not word.startswith("-") or word == "-":
+            continue
+        if word.startswith("--"):
+            found.append(word)
+            skip = word in GIT_GREP_VALUED_LONG
+            continue
+        for at in range(1, len(word)):
+            if word[at] == "O":
+                found.append(word[:at + 1])
+                break
+            if word[at] in GIT_GREP_VALUED_SHORT:
+                if at > 1:
+                    found.append(word[:at])
+                skip = at == len(word) - 1
+                break
+        else:
+            found.append(word)
+    return found
 
 
 def _git_code_option(sub, word):
@@ -2017,16 +2112,30 @@ def _git_worktree_words(words):
     command's words would be read as the subcommand's own arguments (git rm -rf .; echo -n read as
     a dry run of git rm); the dry-run grammar (_git_dry_run) and the submodule read forms
     (_git_submodule_read) exempt only a plain single git invocation (_git_worktree_sub), whose own
-    argument list the plain classifier proved."""
-    found, seen_git = [], False
+    argument list the plain classifier proved. Round 19: an internal helper word (a name carrying
+    "--", bare or as a git-<name> basename) counts wherever it stands after a git word, and so does
+    the word in subcommand position after a git word (past its option words and the value of a
+    GIT_SEPARATE_VALUE_GLOBALS option) when it is not a public git 2.53 command (_git_unlisted):
+    git submodule--helper foreach and an alias run code the hook cannot read. A word after git
+    that is data (echo git notes.txt) counts too: the over-refusal is disclosed."""
+    found, seen_git, head, skip = [], False, False, False
     for word in words:
         base = os.path.basename(word)
         if base == "git":
-            seen_git = True
+            seen_git, head, skip = True, True, False
             continue
-        if base.startswith("git-") and base[4:] in GIT_WORKTREE_SUBCOMMANDS:
+        at_head = False
+        if skip:
+            skip = False
+        elif head and word.startswith("-"):
+            skip = word in GIT_SEPARATE_VALUE_GLOBALS
+        elif head:
+            at_head, head = True, False
+        if base.startswith("git-") and (base[4:] in GIT_WORKTREE_SUBCOMMANDS or "--" in base[4:]):
             sub = base[4:]
-        elif seen_git and word in GIT_WORKTREE_SUBCOMMANDS:
+        elif seen_git and (word in GIT_WORKTREE_SUBCOMMANDS
+                           or (not word.startswith("-") and "--" in word)
+                           or (at_head and _git_unlisted(word))):
             sub = word
         else:
             continue
