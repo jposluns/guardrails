@@ -17,7 +17,8 @@
 #                     warns on exit 0 instead of refusing.
 # nonblocking-surfaces the guarded-surfaces entries whose guard exits 1 instead of 2, sorted, unique and each
 #                     also listed above: a hook whose event reads exit 2 as a block (a Stop hook's exit 2
-#                     blocks the stop, and the guard runs before the hook's own block cap).
+#                     blocks the stop, and the guard runs before the hook's own block cap). Never a
+#                     HOOK_SURFACES entry (cannot-evaluate): its hook form denies with exit 2, fixed.
 # completeness-check  false (the check is OFF) until every shipped entrypoint is listed above, which
 #                     needs tools/check_entry_guard.py guarded and listed; true then makes an unlisted
 #                     shipped entrypoint a finding.

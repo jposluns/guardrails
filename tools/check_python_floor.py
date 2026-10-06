@@ -92,8 +92,10 @@ Legs, in order:
                  hook form instead, HOOK_GUARD_TEMPLATE: a FLOOR_FAIL_OPEN_MODES tuple literal of
                  sorted, unique mode names between `import sys` and the version test, and under the
                  floor a mode in that literal warns (a systemMessage on stdout, exit 0) while any other
-                 argv refuses exactly as the canonical guard does. The hook's own self-test holds the
-                 literal equal to its fail-open handlers.
+                 argv (a PreToolUse handler, an unknown mode, no mode) refuses with the canonical
+                 refusal and exit 2, fixed: exit 1 does not block a PreToolUse call, so a HOOK_SURFACES
+                 entry listed in nonblocking-surfaces is cannot-evaluate at the source leg. The hook's
+                 own self-test holds the literal equal to its fail-open handlers.
   dynamic        each guarded-surfaces entrypoint, run in a child (-I -B plus each of no flag, -O and
                  -OO) from a fresh empty working directory with sys.version_info patched to each of two
                  versions below the floor, exits with its refusal exit (as for the guard leg) with
@@ -102,7 +104,7 @@ Legs, in order:
                  release and at the real interpreter version, continues. A HOOK_SURFACES entry is also
                  run (no flag, the first patched version) with each FLOOR_FAIL_OPEN_MODES mode, which
                  must exit 0 with the exact warning on stdout and the refusal on stderr, and with
-                 DENY_PROBE_MODE, a mode outside the literal, which must refuse with its refusal exit.
+                 DENY_PROBE_MODE, a mode outside the literal, which must refuse with exit 2.
   completeness   OFF until the source sets completeness-check = true (the unit that guards the last
                  shipped entrypoint switches it on); until then an unlisted entrypoint is not a
                  finding. The core-hook, preview-hook and adopter-tool units are listed, but
@@ -332,8 +334,9 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
 # The hook form, for HOOK_SURFACES only: the hook's events differ in the direction an error must fail, so
 # a mode named in the FLOOR_FAIL_OPEN_MODES literal (a Stop-type, SessionStart, TeammateIdle,
 # UserPromptSubmit or PostToolUse handler) warns on exit 0, never blocking, and every other argv (a
-# PreToolUse handler, an unknown mode, no mode) fails closed with the canonical refusal and its refusal
-# exit (2; 1 for a nonblocking-surfaces entry, as for the canonical guard).
+# PreToolUse handler, an unknown mode, no mode) fails closed with the canonical refusal and exit 2. That
+# exit is fixed, never {code}: Claude Code reads exit 1 as a non-blocking error and lets a PreToolUse call
+# proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces.
 HOOK_GUARD_TEMPLATE = '''import sys
 
 FLOOR_FAIL_OPEN_MODES = {modes}
@@ -350,7 +353,7 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
             "AIQT guardrail: the %s check could not run (%s); surfacing a warning rather than blocking "
             "(non-blocking by design on this event)." % (sys.argv[1], _floor_refusal.strip())))) + "\\n")
         raise SystemExit(0)
-    raise SystemExit({code})
+    raise SystemExit(2)
 '''
 HOOK_SURFACES = (".aiqt/core/hooks/scripts/aiqt_hooks.py",
                  "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py")
@@ -422,6 +425,11 @@ def load_source(root):
     if nonblocking != sorted(set(nonblocking)) or not set(nonblocking) <= set(surfaces):
         raise CannotEvaluate("{}: nonblocking-surfaces must be sorted, unique and each listed in "
                              "guarded-surfaces".format(SOURCE_REL))
+    hooks = sorted(set(nonblocking) & set(HOOK_SURFACES))
+    if hooks:
+        raise CannotEvaluate("{}: nonblocking-surfaces lists the hook surface(s) {}, whose hook form "
+                             "refuses a PreToolUse, unknown or missing mode with exit 2, fixed (exit 1 "
+                             "does not block a PreToolUse call)".format(SOURCE_REL, ", ".join(hooks)))
     for item in surfaces:
         if not SURFACE_RE.fullmatch(item) or any(part in (".", "..") for part in item.split("/")):
             raise CannotEvaluate("{}: guarded-surfaces entry {!r} is not a repo-relative .py path"
@@ -935,15 +943,19 @@ def _dump(node):
 
 
 def guard_text(name, floor, modes=None, code=REFUSAL_EXIT):
-    """The canonical guard, or with modes (a tuple of mode names) its hook form; code is its refusal
-    exit."""
+    """The canonical guard with code as its refusal exit, or with modes (a tuple of mode names) its hook
+    form, whose deny exit is fixed at 2 (code is ignored there)."""
     if modes is None:
         return GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1], code=code)
-    return HOOK_GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1], code=code,
+    return HOOK_GUARD_TEMPLATE.format(name=name, major=floor[0], minor=floor[1],
                                       modes=repr(tuple(modes)))
 
 
 def refusal_exit(rel, nonblocking):
+    """The exit the guard and dynamic legs require of rel's refusal: 2, or 1 for a nonblocking-surfaces
+    entry; a HOOK_SURFACES entry is always 2 (load_source refuses one listed as nonblocking)."""
+    if rel in HOOK_SURFACES:
+        return REFUSAL_EXIT
     return NONBLOCKING_EXIT if rel in nonblocking else REFUSAL_EXIT
 
 
@@ -1112,12 +1124,12 @@ def dynamic_findings(root, surfaces, floor, nonblocking=()):
                     "stderr and an untouched working directory".format(rel, *version, mode, *got))
         if modes is not None:
             got = refusal_observed(root / rel, version, (), [DENY_PROBE_MODE])
-            if got != (code, "", refusal, []):
+            if got != (REFUSAL_EXIT, "", refusal, []):
                 findings.append(
                     "{} at patched {}.{}.{} with the mode {}, outside {}: got exit {}, stdout {!r}, "
                     "stderr {!r}, working-dir entries {!r}; want exit {}, empty stdout, the exact refusal "
                     "and an untouched working directory".format(
-                        rel, *version, DENY_PROBE_MODE, MODES_NAME, *got, code))
+                        rel, *version, DENY_PROBE_MODE, MODES_NAME, *got, REFUSAL_EXIT))
         if prefix is None:
             findings.append("{}: no canonical guard statement to run at the floor boundary".format(rel))
             continue
@@ -1776,6 +1788,33 @@ def _self_test_cases(base):
     hook_prefix = guard_prefix(ast.parse(hook[hook_rel]), "aiqt_hooks.py", floor, demo_modes)
     check("dynamic/hook-boundary-continues-at-floor", boundary_observed(hook_prefix, floor + (0,), ()),
           (0, CONTINUED + "\n", ""))
+    # The hook form's deny path (a PreToolUse, unknown or missing mode) exits 2, fixed: exit 1 does not
+    # block a PreToolUse call. A hook surface listed in nonblocking-surfaces is cannot-evaluate, the guard
+    # carrying exit 1 there (the fail-open the listing would otherwise demand) included; called directly
+    # with such a listing, the guard and dynamic legs still require exit 2.
+    hook_exit_1 = _entry(hook_good.replace("    raise SystemExit(2)\n", "    raise SystemExit(1)\n"),
+                         before='"""Fixture hook."""\n')
+    check("guard/hook-form-deny-exit-fixed-at-2",
+          (guard_text("aiqt_hooks.py", floor, demo_modes, code=NONBLOCKING_EXIT) == hook_good,
+           hook_good.endswith("    raise SystemExit(2)\n"), hook_exit_1 != hook[hook_rel]),
+          (True, True, True))
+    got = []
+    for rel, text in ((hook_rel, hook_exit_1), (hook_rel, hook[hook_rel]), (HOOK_SURFACES[1], hook_exit_1)):
+        code, lines = evaluate(_fixture(base, source=_source_text(surfaces=[rel], nonblocking=[rel]),
+                                        files=dict([(rel, text)])))
+        got.append((code, _has(lines, "nonblocking-surfaces lists the hook surface(s) " + rel)))
+    check("source/nonblocking-hook-surface-cannot-evaluate", got, [(2, True)] * 3)
+    code, lines = evaluate(_fixture(base, source=hook_listed, files=dict([(hook_rel, hook_exit_1)])))
+    direct = guard_findings(_fixture(base, files=dict([(hook_rel, hook_exit_1)])), [hook_rel], floor,
+                            frozenset([hook_rel]))
+    check("guard/hook-deny-exit-1-finding",
+          (code, _has(lines, "canonical floor guard in its hook form"),
+           _has(direct, "canonical floor guard in its hook form")), (1, True, True))
+    denied = dynamic_findings(_fixture(base, files=dict([(hook_rel, hook_exit_1)])), [hook_rel], floor,
+                              frozenset([hook_rel]))
+    check("dynamic/hook-deny-exit-1-finding",
+          [_has(denied, "with the mode {}, outside {}: got exit 1".format(DENY_PROBE_MODE, MODES_NAME)),
+           _has(denied, "under no flag: got exit 1"), _has(denied, "fail-open mode")], [True, True, False])
 
     unguarded = {"tools/demo.py": _entry("import sys\n")}
     check("completeness/off-ignores-unguarded", evaluate(_fixture(base, files=unguarded))[0], 0)
