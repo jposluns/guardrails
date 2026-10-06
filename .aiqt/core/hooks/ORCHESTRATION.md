@@ -260,26 +260,26 @@ or nested below an orchestrated tree cannot hide its binding. This hook reads ea
 its own, so a local `.aiqt/orchestration.local.json` without a binding cannot hide a binding in the
 committed `.aiqt/orchestration.json`. In a bound session, a plain command that names a registry file
 or the `.aiqt` directory is refused unless its command word only reads (`cat`, `head`, `tail`, `wc`,
-`ls`, `stat`, `grep`, `jq`, `cmp`, `diff`). A git command whose allowlisted subcommand can write or
-remove work-tree files or the index (`add`, `rm`, `mv`, `stash`, `switch`, `checkout`, `restore`,
-`reset`, `merge`, `rebase`, `cherry-pick`, `revert`, `worktree`, `clone`) is judged by the registry
-files' git state, read at hook time, for each registry file that exists or is tracked (an absent,
-untracked file cannot be overwritten in place). It is refused while a registry file exists untracked
-and not ignored, so keep `.aiqt/orchestration.local.json` untracked and listed in `.gitignore` or
-`.git/info/exclude`; the committed `.aiqt/orchestration.json` may stay tracked. Otherwise only the forms
-that can reach a registry file are refused: `add --force` and `stash --all` while one is ignored,
-`worktree move` and `remove`, `add` and `rm` whose pathspec matches a tracked registry file or a
-directory above it (with no pathspec the whole tree is meant, and `--pathspec-from-file` is refused), `mv`
-whose pathspec matches any registry file or a directory above it, and a subcommand that writes a commit's
-tree into the work tree (`stash`, `switch`, `checkout`, `restore`, `reset`, `merge`, `rebase`,
-`cherry-pick`, `revert`) while a registry file differs from `HEAD` in the index or the work tree, or while
-a commit reachable from a ref, a reflog or `FETCH_HEAD` differs from `HEAD` at a registry path or holds a
-file, a symlink or a gitlink where a directory above one is (git writes such a tree over an ignored
-registry, or in place of its directory). A tracked registry left unchanged is so open to an ordinary
-`git add`, `commit`, and a checkout of a branch holding the same registry blob. `git am` and `git apply`
-are off the allowlist. A dangling commit named by its id is not searched. A
-command other than git that changes the registry without naming it (the removal of a parent
-directory, a script) is not seen and switches the hook off. When git cannot resolve the session
+`ls`, `stat`, `grep`, `jq`, `cmp`, `diff`). A command that changes the registry without naming it (a git
+command that writes or removes work-tree files, a checkout from a subtree, the removal of a parent
+directory, a script) is not predicted. Instead, when the hook first sees a registry of the session
+repository, or of its main worktree, bind review dispatch, it records the binding (its digest, the binding
+and the registry paths) in hook-owned state outside the work tree:
+`GIT_COMMON_DIR/aiqt/review-dispatch-binding/KEY.json`, KEY the sha256 of the registry directory's real
+path, written without following a symbolic link, mode 0600 in directories of mode 0700. No allowlisted git
+subcommand writes there, and a plain command naming a `.git` component is refused in a bound session. While
+a record exists, a registry that is missing, unreadable, without a binding, or binding differently from the
+record withholds every dispatch as UNVERIFIABLE, naming the change and the record, and other plain commands
+are still judged under the recorded binding. An operator either restores the recorded binding or, outside
+the session, removes the record (`rm "$(git rev-parse --git-common-dir)/aiqt/review-dispatch-binding/KEY.json"`,
+the full path given in the refusal), and the next check records the binding then in force. A record that
+cannot be read withholds every Bash call, and a binding that cannot be recorded withholds every dispatch.
+Not caught: a process that removes both the registry and the record (an operator, a non-Bash tool, or a
+plain command naming the record through a separated git directory not named `.git`), and a registry
+changed before the hook first saw it bind, since a repository where no check ran while it was bound has no
+record; where git cannot resolve the session repository, no record is read. Ordinary git commands (`add`,
+`commit`, `checkout`, `restore`, `reset`) are allowed whatever the registry's git state; `git clean`,
+`git am` and `git apply` are off the allowlist. When git cannot resolve the session
 repository (a broken configuration, a refused ownership check, a deleted cwd), or resolves one with
 no binding, the hook looks for the registry on the cwd's ancestors, so a `core.worktree` setting that
 moves the top level cannot turn the check off. If git cannot resolve the repository, or resolves one
