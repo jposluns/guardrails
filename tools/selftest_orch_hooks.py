@@ -891,6 +891,23 @@ def _main_isolated(report_path=None):
             check("trunc/registry-required-off-value-inert", _verdict(aiqt_hooks.orch_truncation_guard(
                 ti.payload("PreToolUse", "Bash",
                            {"command": "long_job &", "run_in_background": False}))), "allow")
+            # The off values are matched EXACTLY, nothing stripped (ASCII case-insensitive): at the pre-fix
+            # pin the value was stripped first, so a tab, a newline, or an off word wrapped in spaces or
+            # no-break spaces read as OFF and the guard allowed without a registry. Each now reads as ON.
+            _padded = ("\t", "\n", " ", "\u00a0off\u00a0", " off", "off\n", "\u00a0")
+            _padded_on = []
+            for _v in _padded:
+                os.environ[_rr] = _v
+                _padded_on.append(aiqt_hooks._orch_registry_required())
+            check("trunc/registry-required-padded-off-reads-on", _padded_on, [True] * len(_padded))
+            os.environ[_rr] = "\u00a0off\u00a0"
+            check("trunc/registry-required-padded-off-denies", _verdict(aiqt_hooks.orch_truncation_guard(
+                ti.payload("PreToolUse", "Bash", {"command": ":", "run_in_background": False}))), "deny")
+            _exact_off = []
+            for _v in ("", "0", "false", "no", "off", "OFF", "False", "No"):
+                os.environ[_rr] = _v
+                _exact_off.append(aiqt_hooks._orch_registry_required())
+            check("trunc/registry-required-exact-off-values-off", _exact_off, [False] * 8)
         finally:
             if _rr_old is None:
                 os.environ.pop(_rr, None)
@@ -990,6 +1007,33 @@ def _main_isolated(report_path=None):
               _verdict(bg("cat <<EOF\nEO\\\nF", rib=False)), "allow")
         check("trunc/scan-quoted-delim-no-bsnl-join",
               aiqt_hooks._orch_foreground_detach_kind("cat <<'END'\nEN\\\nD\nsleep 100 &"), "unterminated")
+        # ANSI-C delimiter escapes (QA round 1, finding 3): bash decodes $'...' in a delimiter word, so
+        # <<$'E\x4fF' ends at the line EOF. At the pre-fix pin any backslash in the ANSI-C word made the
+        # parser give up, the body was scanned as code, and the safe body `A & B` was DENIED. The escapes
+        # decoded exactly (single-character, octal, \xHH, \uHHHH, \cX, an escaped quote) now resolve.
+        check("trunc/parse-ansic-delim-decodes",
+              aiqt_hooks._parse_heredoc_delim("$'E\\x4fF'", 0, 9), (True, "EOF", False, 9))
+        check("trunc/fg-ansic-delim-hex-safe-allows",
+              _verdict(bg("cat <<$'E\\x4fF'\nA & B\nEOF", rib=False)), "allow")
+        check("trunc/scan-ansic-delim-hex-kind",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<$'E\\x4fF'\nA & B\nEOF"), None)
+        check("trunc/scan-ansic-delim-octal-unicode-kind",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<$'\\105\\u004f\\cfF'\nA & B\nEO\x06F"), None)
+        check("trunc/scan-ansic-delim-escaped-quote-kind",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<$'E\\'F'\nit's A & B\nE'F"), None)
+        # The decoded delimiter still ends the body exactly where bash ends it, so a detach after it is
+        # CODE and denies; an escape with no exact decoding (here a NUL) keeps the fail-closed path (the
+        # `<<` is not read as a here-document and the lines after it are scanned as code).
+        check("trunc/scan-ansic-delim-decoded-then-detach",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<$'E\\x4fF'\nA\nEOF\nsleep 100 &"), "detach")
+        check("trunc/scan-ansic-delim-nul-fails-closed",
+              aiqt_hooks._orch_foreground_detach_kind("cat <<$'E\\0F'\nA & B\nE"), "detach")
+        # bash rewrites the byte 0x01 inside a QUOTED delimiter internally, so <<'E<0x01>F' ends at the line
+        # E<0x01><0x01>F, not E<0x01>F. At the pre-fix pin the scanner waited for E<0x01>F and read the
+        # detach between them as body (a silent allow); such a delimiter now fails closed.
+        check("trunc/scan-quoted-delim-ctlesc-fails-closed",
+              aiqt_hooks._orch_foreground_detach_kind(
+                  "cat <<'E\x01F'\nE\x01\x01F\nsleep 100 &\nE\x01F"), "detach")
         # Malformed input fails CLOSED with a reason (before the fix each of these silently allowed): a
         # tool_input that is missing, null, or not an object; a run_in_background that is not a real
         # boolean (the string "true" is never read as foreground); a foreground command that is not a

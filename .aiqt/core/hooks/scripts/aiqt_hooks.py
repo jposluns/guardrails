@@ -584,6 +584,83 @@ def _target_class(target, t_opaque):
     return "file-real"
 
 
+# Single-character ANSI-C escapes bash decodes inside $'...' (its ansicstr table, not echo -e's).
+_ANSI_C_SIMPLE_ESCAPES = {
+    "a": "\x07", "b": "\x08", "e": "\x1b", "E": "\x1b", "f": "\x0c", "n": "\n", "r": "\r", "t": "\t",
+    "v": "\x0b", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+# Numeric ANSI-C escapes: the leading character and the most digits bash reads after it (\NNN octal takes the
+# first digit itself plus two more; \xHH two hex digits; \uHHHH four; \UHHHHHHHH eight).
+_ANSI_C_NUMERIC_ESCAPES = {"x": (16, 2), "u": (16, 4), "U": (16, 8)}
+_OCTAL_DIGITS = "01234567"
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+
+def _decode_ansi_c_fragment(command, start, n):
+    """Decode the body of an ANSI-C $'...' quote whose content begins at index `start` (just past the "$'").
+    Returns (text, next_i), next_i just past the closing quote, or None when the quote never closes or holds
+    an escape this decoder cannot reproduce EXACTLY as bash does. The closing quote is the first "'" not
+    consumed by a backslash escape, as bash's parser finds it. Decoded exactly: the single-character escapes
+    (\\a \\b \\e \\E \\f \\n \\r \\t \\v \\\\ \\' \\" \\?), octal \\N to \\NNN (the value taken modulo 256),
+    hex \\xH or \\xHH, \\uH to \\uHHHH and \\UH to \\UHHHHHHHH, the control form \\cX for a printable ASCII X
+    other than a backslash (\\c? is DEL), a \\x, \\u, \\U, or \\c with no digit or character after it (kept
+    literally, backslash included), and an unrecognised escape of a printable ASCII character (kept with its
+    backslash, \\q stays \\q). NOT decoded (None, the caller's fail-closed path): any escape whose value is
+    NUL (bash cuts the string there) or 0x80 and above (a raw byte, or a character whose bytes depend on the
+    locale), a backslash-newline, \\c followed by a backslash or a character outside printable ASCII, and an
+    escape of a non-ASCII character. Raw characters between the quotes are kept as they are. A decoded 0x01 or
+    0x7f is returned, but _parse_heredoc_delim rejects every quoted delimiter that carries one."""
+    out = []
+    k = start
+    while k < n:
+        c = command[k]
+        if c == "'":
+            return "".join(out), k + 1
+        if c != "\\":
+            out.append(c)
+            k += 1
+            continue
+        if k + 1 >= n:
+            return None
+        e = command[k + 1]
+        k += 2
+        if e in _ANSI_C_SIMPLE_ESCAPES:
+            out.append(_ANSI_C_SIMPLE_ESCAPES[e])
+            continue
+        if e in _OCTAL_DIGITS:
+            m = 0
+            while m < 2 and k + m < n and command[k + m] in _OCTAL_DIGITS:
+                m += 1
+            value = int(e + command[k:k + m], 8) & 0xFF
+            k += m
+        elif e in _ANSI_C_NUMERIC_ESCAPES:
+            base, most = _ANSI_C_NUMERIC_ESCAPES[e]
+            m = 0
+            while m < most and k + m < n and command[k + m] in _HEX_DIGITS:
+                m += 1
+            if m == 0:
+                out.append("\\" + e)  # no digit follows: bash keeps the escape literally
+                continue
+            value = int(command[k:k + m], base)
+            k += m
+        elif e == "c":
+            if k < n and command[k] == "'":
+                out.append("\\c")  # \c at the end of the quote: bash keeps it literally
+                continue
+            if k >= n or command[k] == "\\" or not "!" <= command[k] <= "~":
+                return None
+            value = 0x7F if command[k] == "?" else ord(command[k].upper()) & 0x1F
+            k += 1
+        elif "!" <= e <= "~":
+            out.append("\\" + e)  # an unrecognised escape: bash keeps the backslash and the character
+            continue
+        else:
+            return None  # a backslash-newline, or an escape of a blank, control, or non-ASCII character
+        if value == 0 or value >= 0x80:
+            return None
+        out.append(chr(value))
+    return None
+
+
 def _parse_heredoc_delim(command, at, n):
     """ROUND-2 FINDING 17. Parse a heredoc delimiter spec starting immediately after '<<' (index `at`).
     Returns (quoted, delim, strip_tabs, next_i) or None when it cannot be parsed (so the caller keeps the
@@ -650,19 +727,17 @@ def _parse_heredoc_delim(command, at, n):
             # bash ANSI-C-expands the word, so <<$'EOF' resolves to the LITERAL delimiter EOF, and its body
             # is literal (quoted). Treating '$' as an ordinary char (the pre-round-6 bug) built the delimiter
             # "$EOF", which never matched the real EOF line, so the lexer SWALLOWED every following executable
-            # line as heredoc body and hid a later --no-verify commit / lossy discard. We resolve only the
-            # ESCAPE-FREE content to its literal; a backslash inside the ANSI-C body is a form this parser does
-            # not fully decode, so it returns None (the FAIL-CLOSED backstop: the caller then raises/scans the
-            # remainder as still-executable rather than swallowing it under a guessed delimiter).
+            # line as heredoc body and hid a later --no-verify commit / lossy discard. The escapes bash
+            # decodes the same way in every locale are decoded (_decode_ansi_c_fragment), so <<$'E\x4fF'
+            # resolves to EOF; an escape it does not decode exactly returns None (the FAIL-CLOSED backstop:
+            # the caller then raises/scans the remainder as still-executable rather than swallowing it
+            # under a guessed delimiter).
             quoted = True
-            k = command.find("'", j + 2)
-            if k < 0:
-                return None
-            frag = command[j + 2:k]
-            if "\\" in frag:
-                return None  # an ANSI-C escape we do not decode -> fail closed (scan the remainder)
-            delim_chars.append(frag)
-            j = k + 1
+            decoded = _decode_ansi_c_fragment(command, j + 2, n)
+            if decoded is None:
+                return None  # an ANSI-C escape we do not decode exactly -> fail closed (scan the remainder)
+            delim_chars.append(decoded[0])
+            j = decoded[1]
             continue
         if c == "$" and j + 1 < n and command[j + 1] == '"':
             # $"..." locale translation as (part of) a heredoc delimiter word: bash quote-removal yields the
@@ -688,7 +763,13 @@ def _parse_heredoc_delim(command, at, n):
         j += 1
     if not started:
         return None
-    return (quoted, "".join(delim_chars), strip_tabs, j)
+    delim = "".join(delim_chars)
+    if quoted and ("\x01" in delim or "\x7f" in delim):
+        # bash marks quoted text internally with the bytes 0x01 and 0x7f, so a QUOTED delimiter carrying one
+        # (written raw or produced by an ANSI-C escape) is not the line bash compares against: <<'E<0x01>F'
+        # ends at a line E<0x01><0x01>F, and a 0x7f matches no line this parser can predict. Fail closed.
+        return None
+    return (quoted, delim, strip_tabs, j)
 
 
 def _read_heredoc_body_line(command, i, n, joined):
@@ -9846,25 +9927,25 @@ def _orch_scan_heredoc_bodies(command, i, n, pending, bash_word_starts):
 
 
 def _orch_foreground_scan(command, bash_word_starts):
-    """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an
-    executable, unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a
-    single or double quote, "unterminated" when it ends with a here-document still awaiting its
-    terminator line, None otherwise. A HERE-DOCUMENT BODY IS DATA: a `<<`/`<<-` operator queues its
-    delimiter (_parse_heredoc_delim resolves quoted, partially quoted, ANSI-C, and locale delimiter
-    words), and after the next unquoted newline the body lines up to the terminator line are consumed
-    with no quote balancing and no `&` detection; several here-documents on one line consume their
-    bodies in operator order. For an UNQUOTED delimiter the body's `$(...)`/backtick substitution spans
-    (which bash still runs) are re-scanned as code and `$((...))` arithmetic inside the body is skipped
-    (_orch_scan_body_substitutions). A `$((...))` arithmetic expansion and a `((...))` arithmetic
-    command in the command itself are likewise skipped as non-detach (their `&` is bitwise-AND and a
-    `<<` inside them is a left shift); a `$((` that no `))` closes falls back to the plain character
-    scan (over-deny, never a silent allow). A `$(...)` opened INSIDE DOUBLE QUOTES is skipped
-    structurally to its closing paren (_orch_cmdsub_end): its content stays the disclosed false-allow
-    residual (1), and quotes inside it (above all a here-document body in the double-quoted
-    commit-message form) no longer shift the outer quote state. bash_word_starts selects where a `#`
-    opens a comment: False keeps the historical rule (after any str.isspace() character), True uses
-    bash's rule (_ORCH_BASH_WORD_BREAKS). The guard runs BOTH and denies when either reports, so the
-    bash rule can only ADD denies."""
+    """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
+    unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or
+    double quote, "unterminated" when it ends with a here-document still awaiting its terminator line,
+    None otherwise. A HERE-DOCUMENT BODY IS DATA: a `<<`/`<<-` operator queues its delimiter
+    (_parse_heredoc_delim resolves quoted, partially quoted, ANSI-C, and locale delimiter words; a word it
+    cannot resolve exactly leaves the `<<` unrecognised, so what follows is scanned as code, the deny
+    direction), and after the next unquoted newline the body lines up to the terminator line are consumed
+    with no quote balancing and no `&` detection; several here-documents on one line consume their bodies
+    in operator order. For an UNQUOTED delimiter the body's `$(...)`/backtick substitution spans (which
+    bash still runs) are re-scanned as code and `$((...))` arithmetic inside the body is skipped
+    (_orch_scan_body_substitutions). A `$((...))` arithmetic expansion and a `((...))` arithmetic command
+    in the command itself are likewise skipped as non-detach (their `&` is bitwise-AND and a `<<` inside
+    them is a left shift); a `$((` that no `))` closes falls back to the plain character scan (over-deny,
+    never a silent allow). A `$(...)` opened INSIDE DOUBLE QUOTES is skipped structurally to its closing
+    paren (_orch_cmdsub_end): its content stays the disclosed false-allow residual (1), and quotes inside
+    it (above all a here-document body in the double-quoted commit-message form) no longer shift the outer
+    quote state. bash_word_starts selects where a `#` opens a comment: False keeps the historical rule
+    (after any str.isspace() character), True uses bash's rule (_ORCH_BASH_WORD_BREAKS). The guard runs
+    BOTH and denies when either reports, so the bash rule can only ADD denies."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
     word_start = True  # the next unquoted char begins a word (start of string, or after a word break)
@@ -10044,6 +10125,15 @@ def _orch_foreground_detach(command):
     TOWARD DENY with its own reason: bash would still be reading input, so the scan cannot see what
     follows the body.
 
+    DELIMITER WORDS THE PARSER CANNOT RESOLVE EXACTLY (a disclosed over-refusal, deny direction): an
+    ANSI-C `$'...'` delimiter is decoded as bash decodes it (the single-character escapes, octal `\\NNN`,
+    `\\xHH`, `\\uHHHH`, `\\UHHHHHHHH`, and `\\cX`), so `cat <<$'E\\x4fF'` ends at the line `EOF`. A
+    delimiter word holding an escape with no exact, locale-independent decoding (a NUL, a value of 0x80 or
+    above, a backslash-newline, `\\c` before a backslash or a non-printable character, an escaped
+    non-ASCII character), and a quoted delimiter carrying the byte 0x01 or 0x7f (which bash rewrites
+    internally), is NOT read as a here-document: the `<<` is left unrecognised and the lines after it are
+    scanned as code, so a safe body there can still be DENIED (never a silent allow).
+
     A SCAN THAT ENDS INSIDE A QUOTE FAILS TOWARD DENY: a scan that ends still inside an unbalanced single
     or double quote cannot prove that a later `&` is quoted rather than an operator (an unbalanced quote,
     or a construct this scan does not model such as ANSI-C `$'...'` or locale `$"..."` quoting, can leave
@@ -10160,23 +10250,26 @@ def _orch_json_kind(value):
 
 
 _ORCH_REQUIRE_REGISTRY_ENV = "AIQT_ORCH_REQUIRE_REGISTRY"
+_ORCH_REQUIRE_REGISTRY_OFF_VALUES = ("", "0", "false", "no", "off")
 
 
 def _orch_registry_required():
     """True when the adopter opted this session into REGISTRY-REQUIRED mode: the environment variable
     AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit off value ("", "0", "false", "no", "off",
-    case-insensitive; unset is off). Under it, an ABSENT orchestration registry DENIES in-scope Bash
-    calls instead of leaving orch_truncation_guard inert; the default (variable unset) is unchanged. An
-    environment variable, not a pack config key, because every pack config surface
+    case-insensitive in ASCII letters only; unset is off). The value is compared EXACTLY as set, with
+    nothing stripped, so an off word with any added character (a space, tab, newline, or no-break space
+    around it) is not an off value and reads as ON. Under it, an ABSENT orchestration registry DENIES
+    in-scope Bash calls instead of leaving orch_truncation_guard inert; the default (variable unset) is
+    unchanged. An environment variable, not a pack config key, because every pack config surface
     (.aiqt/orchestration.local.json, .aiqt/orchestration.json, .aiqt/gensrc.json) is a per-repo file
     located by the same cwd-anchored lookup whose EMPTY result this mode exists to fail closed on, so a
     file-based key can never speak exactly when it is needed; the hook execution environment is the one
-    channel independent of that lookup. A garbled value reads as ON, the deny-safe direction for an
-    explicitly configured strict mode."""
+    channel independent of that lookup. A garbled or padded value reads as ON, the deny-safe direction
+    for an explicitly configured strict mode."""
     value = os.environ.get(_ORCH_REQUIRE_REGISTRY_ENV)
     if value is None:
         return False
-    return value.strip().lower() not in ("", "0", "false", "no", "off")
+    return not (value.isascii() and value.lower() in _ORCH_REQUIRE_REGISTRY_OFF_VALUES)
 
 
 def orch_truncation_guard(data):
@@ -10217,7 +10310,8 @@ def orch_truncation_guard(data):
     pre-scope checks below, while a chain or toplevel directory whose registry entry is present,
     unreadable, or invalid keeps it active. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
-    off value ('', '0', 'false', 'no', 'off', case-insensitive), an ABSENT registry DENIES instead of
+    off value ('', '0', 'false', 'no', 'off', ASCII case-insensitive, matched exactly with nothing
+    stripped, so a padded off word reads as ON), an ABSENT registry DENIES instead of
     leaving the guard inert (_orch_registry_required). PRE-SCOPE DENIES, checked BEFORE the
     registry scope and so in every session, orchestrated or not: a tool_name that is missing, null, empty,
     not a string, or carrying a NUL or any other control character; a cwd that is missing, null, empty, or
